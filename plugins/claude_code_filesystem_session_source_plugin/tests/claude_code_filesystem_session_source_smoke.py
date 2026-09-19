@@ -504,8 +504,16 @@ def test_read_events_stops_at_partial_trailing_line() -> None:
 
 
 class _QualificationLedger:
-    def __init__(self, *, registered: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        root_uri: str,
+        registered: bool = True,
+        events_persisted: int = 4,
+    ) -> None:
         self.registered = registered
+        self.root_uri = root_uri
+        self.events_persisted = events_persisted
         self.polled_source_id: str | None = None
 
     def list_sources(self) -> dict[str, object]:
@@ -515,12 +523,13 @@ class _QualificationLedger:
                 "source_kind": "claude_code_local",
                 "source_id": "src-claude-fixture",
                 "enabled": True,
+                "root_uri": self.root_uri,
             })
         return {"sources": rows}
 
     def poll_source(self, source_id: str) -> dict[str, int]:
         self.polled_source_id = source_id
-        return {"events_persisted": 4}
+        return {"events_persisted": self.events_persisted}
 
     def list_sessions(self, **kwargs: object) -> dict[str, object]:
         return {"sessions": [{"session_id": "les-claude-fixture"}]}
@@ -538,26 +547,61 @@ class _QualificationOrchestrator:
 
 
 def test_qualify_is_source_local_and_content_blind() -> None:
-    ledger = _QualificationLedger()
-    plugin = ClaudeCodeFilesystemSessionSourcePlugin()
-    plugin.orchestrator_ref = _QualificationOrchestrator(ledger)  # type: ignore[assignment]
-    result = plugin.qualify({}, {})
-    _check(result["action_status"] == "completed", "qualify completes for fixture source")
-    _check(ledger.polled_source_id == "src-claude-fixture", "qualify polls its registered source")
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "fixture-session.jsonl").write_text("fixture only\n", encoding="utf-8")
+        ledger = _QualificationLedger(root_uri=tmp)
+        plugin = ClaudeCodeFilesystemSessionSourcePlugin()
+        plugin.orchestrator_ref = _QualificationOrchestrator(ledger)  # type: ignore[assignment]
+        result = plugin.qualify({}, {})
+        _check(result["action_status"] == "completed", "qualify completes for fixture source")
+        _check(ledger.polled_source_id == "src-claude-fixture", "qualify polls its registered source")
+        _check(
+            result["data"] == {
+                "source_registered": True,
+                "source_kind": "claude_code_local",
+                "backfill_count": 4,
+                "sample_content_retrieved": True,
+            },
+            "qualify returns the bounded proof shape without sample payload",
+        )
+
+
+def test_qualify_allows_absent_registered_root() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _QualificationLedger(
+            root_uri=str(Path(tmp) / "never-created"), events_persisted=0
+        )
+        plugin = ClaudeCodeFilesystemSessionSourcePlugin()
+        plugin.orchestrator_ref = _QualificationOrchestrator(ledger)  # type: ignore[assignment]
+        result = plugin.qualify({}, {})
+    _check(result["action_status"] == "completed", "qualify accepts an absent registered root")
+    _check(ledger.polled_source_id is None, "absent root bypasses the impossible backfill")
     _check(
         result["data"] == {
             "source_registered": True,
             "source_kind": "claude_code_local",
-            "backfill_count": 4,
-            "sample_content_retrieved": True,
+            "backfill_count": 0,
+            "sample_content_retrieved": False,
         },
-        "qualify returns the bounded proof shape without sample payload",
+        "absent root returns an honest empty proof",
     )
+
+
+def test_qualify_refuses_existing_empty_root() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = _QualificationLedger(root_uri=tmp, events_persisted=0)
+        plugin = ClaudeCodeFilesystemSessionSourcePlugin()
+        plugin.orchestrator_ref = _QualificationOrchestrator(ledger)  # type: ignore[assignment]
+        result = plugin.qualify({}, {})
+    _check(result["action_status"] == "failed", "qualify refuses an existing empty root")
+    _check(ledger.polled_source_id == "src-claude-fixture", "existing root still runs backfill")
 
 
 def test_qualify_refuses_unregistered_source() -> None:
     plugin = ClaudeCodeFilesystemSessionSourcePlugin()
-    plugin.orchestrator_ref = _QualificationOrchestrator(_QualificationLedger(registered=False))  # type: ignore[assignment]
+    plugin.orchestrator_ref = _QualificationOrchestrator(  # type: ignore[assignment]
+        _QualificationLedger(root_uri="/unused", registered=False)
+    )
     result = plugin.qualify({}, {})
     _check(result["action_status"] == "failed", "qualify fails without a registered source")
     _check(result["data"] == {}, "failed qualification does not fabricate proof fields")
@@ -586,6 +630,8 @@ def main() -> int:
     test_read_events_resumes_from_offset()
     test_read_events_stops_at_partial_trailing_line()
     test_qualify_is_source_local_and_content_blind()
+    test_qualify_allows_absent_registered_root()
+    test_qualify_refuses_existing_empty_root()
     test_qualify_refuses_unregistered_source()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:

@@ -28,6 +28,15 @@ coordinator decisions, rejected race losers, and deduplicated supervision
 notices. Human plans and task lists are projections for readability; they are
 never the control-plane truth.
 
+**Standing retirement handoff convention:** every dispatch brief to a spawned
+lane must instruct the worker, as its final action once it determines there is
+no further work on its assigned unit, to report that fact to its spawning seat
+via `peer_send_by_name` to the dispatching role (or in its final report if
+synchronous) and state that it is ready to be retired. The spawning seat then
+calls `retire_session`. This is a standing dispatch requirement, not a
+per-dispatch judgment call to remember; terminating live sessions remains a
+seat-native action.
+
 ## 1. Failure boundary
 
 The managed contract closes five distinct gaps:

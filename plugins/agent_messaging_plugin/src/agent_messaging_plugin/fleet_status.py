@@ -38,7 +38,16 @@ FLEET_STATUS_SCOPE_ALL: Final = "all"
 FLEET_STATUS_SCOPES: Final = frozenset({FLEET_STATUS_SCOPE_LANES, FLEET_STATUS_SCOPE_ALL})
 FLEET_STATUS_MAX_SESSIONS: Final = 250
 FLEET_STATUS_MAX_OWED_MESSAGES: Final = 100
-_FLEET_READ_CEILING: Final = 1_000
+# These are complete-set reads, not display windows: fleet_status must classify
+# every active session and every armed dependency before applying its separate
+# 250-session rendering bound. State-interface counts measured 2026-09-15:
+# 1,017 active managed sessions, 999 active sessions without report_by, and
+# one armed dependency. 10,000 leaves about 10x headroom for the two current
+# managed-session populations and lets dependencies grow with the active fleet
+# without borrowing the sibling full-ledger walk's 1,000,000-row assumption.
+_ACTIVE_SESSION_READ_CEILING: Final = 10_000
+_NO_CONTRACT_SESSION_READ_CEILING: Final = 10_000
+_ARMED_DEPENDENCY_READ_CEILING: Final = 10_000
 _ACTIVE_LIFECYCLE_STATES: Final = (
     LIFECYCLE_SPAWNING,
     LIFECYCLE_LIVE,
@@ -119,8 +128,11 @@ def _active_sessions(state: StateManagementInterface) -> list[dict[str, Any]]:
             namespace=AGENT_ROLE_BINDING_NAMESPACE,
             table=TABLE_MANAGED_SESSION,
             filters={"lifecycle_state": list(_ACTIVE_LIFECYCLE_STATES)},
-            ceiling=_FLEET_READ_CEILING,
-            reason="fleet_status reads the active managed-session population only",
+            ceiling=_ACTIVE_SESSION_READ_CEILING,
+            reason=(
+                "fleet_status reads the complete active managed-session population "
+                "(1,017 rows measured 2026-09-15; 10,000-row ceiling leaves about 10x headroom)"
+            ),
         )
     ]
 
@@ -136,8 +148,11 @@ def _no_contract_sessions(state: StateManagementInterface) -> list[dict[str, Any
                 "lifecycle_state": list(_ACTIVE_LIFECYCLE_STATES),
                 "report_by": {"op": "is_null"},
             },
-            ceiling=_FLEET_READ_CEILING,
-            reason="fleet_status counts contract-less active registrations separately",
+            ceiling=_NO_CONTRACT_SESSION_READ_CEILING,
+            reason=(
+                "fleet_status reads the complete contract-less active managed-session population "
+                "(999 rows measured 2026-09-15; 10,000-row ceiling leaves about 10x headroom)"
+            ),
         )
     ]
 
@@ -149,8 +164,11 @@ def _armed_dependencies(state: StateManagementInterface) -> dict[str, list[dict[
         namespace=AGENT_ROLE_BINDING_NAMESPACE,
         table=TABLE_SESSION_DEPENDENCY,
         filters={"fired_at": {"op": "is_null"}},
-        ceiling=_FLEET_READ_CEILING,
-        reason="fleet_status reads the bounded set of armed session dependencies",
+        ceiling=_ARMED_DEPENDENCY_READ_CEILING,
+        reason=(
+            "fleet_status reads the complete armed-dependency set "
+            "(1 row measured 2026-09-15; 10,000 rows accommodate dependency growth with the active fleet)"
+        ),
     ):
         waiter = str(row.get("waiter_instance_id") or "")
         if waiter:

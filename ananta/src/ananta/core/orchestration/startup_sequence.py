@@ -1697,8 +1697,6 @@ def _auto_register_declared_pulling_sources(service: Any) -> None:
     """
     from ananta.interfaces.llm_session_source_interface import PullingSourceMixin
     from ananta.llm.session_ledger.types import IngestMode
-    from ananta.services.session_ledger_service.enforcement import LedgerAuthorizationError
-
     # Defensive double-guard vs register_source's own idempotency (Coordinator Q1
     # ruling 2026-05-31): skip a source_kind whose row already exists.
     existing_kinds = {row.source_kind for row in service._repository.list_sources(  # noqa: SLF001
@@ -1714,22 +1712,12 @@ def _auto_register_declared_pulling_sources(service: Any) -> None:
         plugin = service.registry.get_by_kind(descriptor.source_kind)
         if plugin is None or not isinstance(plugin, PullingSourceMixin):
             continue
-        try:
-            result = service.register_source(
-                source_kind=descriptor.source_kind.value,
-                root_uri=descriptor.default_pulling_root_uri,
-                account_label=None,
-                config_json=None,
-            )
-        except LedgerAuthorizationError as exc:
-            logger.info(
-                "skipped ledger auto-register kind=%s root_uri=%s — denied by the "
-                "secure-default authz gate; opt in via ledger_allowed_roots: %s",
-                descriptor.source_kind.value,
-                descriptor.default_pulling_root_uri,
-                exc,
-            )
-            continue
+        result = service._register_source_internal(  # noqa: SLF001
+            source_kind=descriptor.source_kind.value,
+            root_uri=descriptor.default_pulling_root_uri,
+            account_label=None,
+            config_json=None,
+        )
         logger.info(
             "auto-registered ledger source kind=%s source_id=%s root_uri=%s outcome=%s",
             descriptor.source_kind.value,

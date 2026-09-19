@@ -338,10 +338,17 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:3c11ed6160768640de96b3d60feebff4fe78386d2e4c4fdd4df075da15dd7801"
+        "flow_contract_digest": "sha256:5a46321f248b5a0dbeda2b2ff233e032c5ee1145a658b446254274cade7e2603"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": [],
+      "answer_value_migrations": [
+        {
+          "decision_id": "session_sources",
+          "from_value": "claude_local",
+          "to_value": "claude_code_local"
+        }
+      ],
       "operation_statuses_to_reset": [
         "install_postgresql"
       ]
@@ -355,10 +362,17 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:3c11ed6160768640de96b3d60feebff4fe78386d2e4c4fdd4df075da15dd7801"
+        "flow_contract_digest": "sha256:5a46321f248b5a0dbeda2b2ff233e032c5ee1145a658b446254274cade7e2603"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": [],
+      "answer_value_migrations": [
+        {
+          "decision_id": "session_sources",
+          "from_value": "claude_local",
+          "to_value": "claude_code_local"
+        }
+      ],
       "operation_statuses_to_reset": [
         "install_postgresql"
       ]
@@ -375,10 +389,17 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:3c11ed6160768640de96b3d60feebff4fe78386d2e4c4fdd4df075da15dd7801"
+        "flow_contract_digest": "sha256:5a46321f248b5a0dbeda2b2ff233e032c5ee1145a658b446254274cade7e2603"
       },
       "stage_probe_mappings": [],
-      "first_use_inactive_probe_migrations": []
+      "first_use_inactive_probe_migrations": [],
+      "answer_value_migrations": [
+        {
+          "decision_id": "session_sources",
+          "from_value": "claude_local",
+          "to_value": "claude_code_local"
+        }
+      ]
     },
     {
       "migration_id": "macos-lm-studio-provisioning-to-pgvector-package-from-2b9eb957-v1",
@@ -392,10 +413,17 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:3c11ed6160768640de96b3d60feebff4fe78386d2e4c4fdd4df075da15dd7801"
+        "flow_contract_digest": "sha256:5a46321f248b5a0dbeda2b2ff233e032c5ee1145a658b446254274cade7e2603"
       },
       "stage_probe_mappings": [],
-      "first_use_inactive_probe_migrations": []
+      "first_use_inactive_probe_migrations": [],
+      "answer_value_migrations": [
+        {
+          "decision_id": "session_sources",
+          "from_value": "claude_local",
+          "to_value": "claude_code_local"
+        }
+      ]
     },
     {
       "migration_id": "macos-lm-studio-provisioning-to-pgvector-package-from-73af1c9d-v1",
@@ -409,10 +437,17 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:3c11ed6160768640de96b3d60feebff4fe78386d2e4c4fdd4df075da15dd7801"
+        "flow_contract_digest": "sha256:5a46321f248b5a0dbeda2b2ff233e032c5ee1145a658b446254274cade7e2603"
       },
       "stage_probe_mappings": [],
-      "first_use_inactive_probe_migrations": []
+      "first_use_inactive_probe_migrations": [],
+      "answer_value_migrations": [
+        {
+          "decision_id": "session_sources",
+          "from_value": "claude_local",
+          "to_value": "claude_code_local"
+        }
+      ]
     },
     {
       "migration_id": "macos-lm-studio-provisioning-to-ram-preflight-from-73af1c9d-v1",

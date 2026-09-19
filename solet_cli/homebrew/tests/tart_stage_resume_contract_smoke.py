@@ -58,6 +58,24 @@ def _origin() -> dict[str, object]:
         "seed_commit": "d" * 40,
         "seed_tree_hash": "e" * 40,
         "seed_profile": "fixture",
+        "seed_channel_id": "stable",
+        "seed_provenance": {
+            "schema_version": 1,
+            "provenance_sha256": "f" * 64,
+            "seed_id": "123e4567-e89b-12d3-a456-426614174000",
+            "origin_id": "123e4567-e89b-12d3-a456-426614174001",
+            "manifest_sha256": "0" * 64,
+            "bundle_name": "fixture",
+            "platform": "local",
+            "source_commit": "d" * 40,
+            "source_date": "2026-09-15T00:00:00+00:00",
+        },
+        "existing_install_contract": {
+            "flow_id": "existing-install",
+            "flow_schema_version": 1,
+            "bundle_digest": f"sha256:{'1' * 64}",
+        },
+        "allowed_repository_migrations": [],
     }
 
 
@@ -76,6 +94,18 @@ def main() -> int:
     _check(
         {key for key in origin if origin[key] != guest[key]} == {"manager_url"},
         "transport rewrite changes only manager_url",
+    )
+    missing_key = dict(origin)
+    del missing_key["seed_channel_id"]
+    _reject(
+        lambda: guest_metadata(missing_key, "solet-0.1.0.tar.gz"),
+        "canonical metadata missing a required key is refused",
+    )
+    extra_key = dict(origin)
+    extra_key["unexpected"] = "metadata"
+    _reject(
+        lambda: guest_metadata(extra_key, "solet-0.1.0.tar.gz"),
+        "canonical metadata with an extra key is refused",
     )
     _reject(lambda: selected_adapters("homebrew,lm_studio"), "combined selector is refused")
     release = _origin()

@@ -50,6 +50,7 @@ class Solet < Formula
       "plugins/github_midwife_plugin/knowledge_base/setup_journal.schema.json",
       "plugins/github_midwife_plugin/knowledge_base/setup_adapter_envelope.schema.json",
       "plugins/github_midwife_plugin/knowledge_base/permissions_manifest.json",
+      "plugins/github_midwife_plugin/knowledge_base/existing_install_flow.json",
       "plugins/github_midwife_plugin/knowledge_base/existing_install_flow.schema.json",
     ]
     # Homebrew's build sandbox forbids reading the tap checkout while a Formula

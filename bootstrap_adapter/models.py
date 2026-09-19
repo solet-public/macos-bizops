@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,6 +12,7 @@ from pathlib import Path
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Which = Callable[[str], str | None]
 Clock = Callable[[], datetime]
+Sleep = Callable[[float], None]
 
 SUPPORTED_POSTGRES_MAJOR = 17
 PROBE_TIMEOUT_SECONDS = 10
@@ -36,6 +38,7 @@ class AdapterRuntime:
     name: str
     target: Path
     base_python: str | None = None
+    sleep: Sleep = time.sleep
 
 
 @dataclass(frozen=True)

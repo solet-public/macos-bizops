@@ -12,10 +12,12 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(_ROOT / "solet_cli" / "src"), str(_ROOT / "solet_setup_contracts" / "src")]
 
 from solet_manager.maintenance_inventory import (  # noqa: E402
+    parse_maintenance_inventory_bytes,
     read_maintenance_inventory,
 )
+from solet_manager.manager_cli import build_parser  # noqa: E402
 from solet_manager.models import SCHEMA_VERSION  # noqa: E402
-from solet_manager.seed_lock_parser import parse_seed_lock  # noqa: E402
+from solet_manager.seed_lock_parser import parse_seed_lock, parse_seed_lock_bytes  # noqa: E402
 from solet_setup_contracts.provenance_v1 import (  # noqa: E402
     ProvenanceV1Error,
     parse_provenance_v1,
@@ -99,10 +101,17 @@ def main() -> int:
             encoding="utf-8",
         )
         assert parse_seed_lock(lock).channel_id == "stable"
+        assert parse_seed_lock_bytes(lock.read_bytes()).channel_id == "stable"
         registry = root / "instances.json"
         registry.write_text(json.dumps({"schema_version": 1, "instances": {}}), encoding="utf-8")
         projections = read_maintenance_inventory(registry)
         assert projections == () and SCHEMA_VERSION == 1
+        assert parse_maintenance_inventory_bytes(registry.read_bytes()) == ()
+    parser = build_parser()
+    inspect = parser.parse_args(["inspect", "--target", "/tmp/solet", "--channel", "stable"])
+    assert inspect.command == "inspect"
+    command_names = {action.dest for action in parser._actions}
+    assert not command_names & {"create", "import", "update", "doctor"}
     print("existing_solet_contract_foundation_smoke OK")
     return 0
 

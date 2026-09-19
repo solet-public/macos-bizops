@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import sys
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +14,9 @@ from typing import Literal, cast
 
 from .answer_validation import validate_normalized_answers
 from .contract_reconciliation_rules import (
+    AnswerValueMigration,
     FirstUseInactiveProbeMigration,
+    parse_answer_value_migrations,
     parse_first_use_inactive_probe_migrations,
 )
 from .contract_reconciliation_validation import (
@@ -36,6 +39,11 @@ _DIGESTED_CONTRACT_FILENAMES = (
 _CONTRACT_FILENAMES = (
     *_DIGESTED_CONTRACT_FILENAMES,
     PERMISSIONS_MANIFEST_FILENAME,
+)
+_TRANSITION_BUNDLE_FILENAMES = (
+    "existing_install_flow.json",
+    "existing_install_flow.schema.json",
+    "setup_adapter_envelope.schema.json",
 )
 _RECONCILIATION_MANIFEST = "released_metadata/contract_reconciliation_manifest.json"
 _RECONCILIATION_MANIFEST_KEYS = frozenset({"schema_version", "migrations"})
@@ -60,8 +68,10 @@ __all__ = [
     "StartupReadinessBudget",
     "active_decision_ids",
     "contract_digest",
+    "contract_digest_from_bytes",
     "contract_digested_filenames",
     "contract_filenames",
+    "transition_bundle_filenames",
     "discover_contract_directory",
     "load_reconciliation_destination_bundle",
     "startup_readiness_budget",
@@ -103,6 +113,7 @@ class ContractReconciliation:
     stage_probe_mappings: tuple[StageProbeMapping, ...]
     operation_statuses_to_reset: tuple[str, ...] = ()
     first_use_inactive_probe_migrations: tuple[FirstUseInactiveProbeMigration, ...] = ()
+    answer_value_migrations: tuple[AnswerValueMigration, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +198,7 @@ def _parse_reconciliation(value: JsonValue) -> ContractReconciliation:
     operation_statuses_to_reset = parse_operation_statuses_to_reset(
         entry["operation_statuses_to_reset"]
     )
+    answer_value_migrations = parse_answer_value_migrations(entry["answer_value_migrations"])
     return ContractReconciliation(
         migration_id=migration_id,
         flow_id=source[0],
@@ -196,6 +208,7 @@ def _parse_reconciliation(value: JsonValue) -> ContractReconciliation:
         stage_probe_mappings=parsed_mappings,
         operation_statuses_to_reset=operation_statuses_to_reset,
         first_use_inactive_probe_migrations=parsed_first_use_migrations,
+        answer_value_migrations=answer_value_migrations,
     )
 
 
@@ -546,18 +559,47 @@ def target_contract_directory(target: Path) -> Path:
 
 
 def contract_digest(root: Path) -> str:
-    digest = hashlib.sha256()
-    for name in sorted(_DIGESTED_CONTRACT_FILENAMES):
+    """Digest the create-flow contract files materialised under ``root``."""
+    files: dict[str, bytes] = {}
+    for name in _DIGESTED_CONTRACT_FILENAMES:
         path = root / name
         try:
-            content = path.read_bytes()
+            files[name] = path.read_bytes()
         except OSError as exc:
             raise ContractError(f"contract {path} cannot be hashed: {exc}") from exc
+    return contract_digest_from_bytes(files)
+
+
+def contract_digest_from_bytes(files: Mapping[str, bytes]) -> str:
+    """Digest a closed set of contract files by name and bytes.
+
+    The encoding is ``name NUL bytes NUL`` in sorted filename order, exactly
+    what :func:`contract_digest` has always produced for a directory, so a
+    bundle read from Git blobs and a bundle read from a directory digest
+    identically.  The caller decides which closed filename set is in play;
+    this function never adds or drops a member.
+    """
+    if not files:
+        raise ContractError("contract digest requires at least one file")
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        if not name or "/" in name:
+            raise ContractError(f"contract filename is not a bare name: {name!r}")
         digest.update(name.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(content)
+        digest.update(files[name])
         digest.update(b"\0")
     return f"sha256:{digest.hexdigest()}"
+
+
+def transition_bundle_filenames() -> tuple[str, ...]:
+    """Return the closed existing-install transition bundle file set.
+
+    Distinct from the create bundle: it never includes ``macos_setup_flow.json``
+    and shares only the wire-envelope schema with it.
+    """
+
+    return _TRANSITION_BUNDLE_FILENAMES
 
 
 def _load_object(path: Path) -> dict[str, JsonValue]:

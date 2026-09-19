@@ -78,7 +78,21 @@ class SeedLockFields:
 
 
 def parse_seed_lock(path: Path) -> SeedLockFields:
-    raw = _read_lock(path)
+    try:
+        raw_bytes = path.read_bytes()
+    except OSError as exc:
+        raise SourceError(f"seed lock is unreadable or invalid at {path}: {exc}") from exc
+    return parse_seed_lock_bytes(raw_bytes)
+
+
+def parse_seed_lock_bytes(raw_bytes: bytes) -> SeedLockFields:
+    """Parse one closed seed-lock document already obtained by a caller.
+
+    This is deliberately the byte-only half of :func:`parse_seed_lock`: callers
+    which need tracked descriptor reads can retain ownership of that read rather
+    than re-opening a path through the compatibility API.
+    """
+    raw = _parse_lock_bytes(raw_bytes)
     schema_version = raw.get("schema_version")
     if schema_version == 3:
         _validate_key_set(raw, _V3_REQUIRED_KEYS, 3)
@@ -129,11 +143,11 @@ def parse_seed_lock(path: Path) -> SeedLockFields:
     )
 
 
-def _read_lock(path: Path) -> dict[str, object]:
+def _parse_lock_bytes(raw_bytes: bytes) -> dict[str, object]:
     try:
-        raw: object = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise SourceError(f"seed lock is unreadable or invalid at {path}: {exc}") from exc
+        raw: object = json.loads(raw_bytes.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise SourceError(f"seed lock is unreadable or invalid: {exc}") from exc
     if not isinstance(raw, dict):
         raise SourceError("seed lock must contain one JSON object")
     mapping = cast(dict[object, object], raw)
@@ -267,9 +281,7 @@ def _closed(raw: dict[str, object], expected: frozenset[str], label: str) -> Non
     if frozenset(raw) != expected:
         missing = sorted(expected - set(raw))
         unknown = sorted(set(raw) - expected)
-        raise SourceError(
-            f"seed lock {label} fields differ; missing={missing}, unknown={unknown}"
-        )
+        raise SourceError(f"seed lock {label} fields differ; missing={missing}, unknown={unknown}")
 
 
 def _canonical_uuid(value: str, label: str) -> None:

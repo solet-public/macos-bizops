@@ -5,6 +5,7 @@ from __future__ import annotations
 import enum
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,10 @@ REQUIRED_DISTRIBUTIONS: tuple[tuple[str, str], ...] = (
     ("github_midwife_plugin", "plugins/github_midwife_plugin"),
     ("agent_messaging_plugin", "plugins/agent_messaging_plugin"),
 )
+Closure = tuple[tuple[str, str], ...]
+EXISTING_DEPENDENCIES_REF = "existing::dependencies.reconcile"
+_DECLARED_RELATIVE = re.compile(r"^(plugins/[a-z][a-z0-9_]*|ananta|solet_setup_contracts)$")
+_DECLARED_DISTRIBUTION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 class ClosureState(enum.Enum):
@@ -40,8 +45,40 @@ class ClosureState(enum.Enum):
     PRESENT_CLOSED = "present_closed"
 
 
-def _closure_probe_script() -> str:
-    distributions = [name for name, _relative in REQUIRED_DISTRIBUTIONS]
+def declared_closure(request: Request) -> Closure:
+    """The closure this request declares: the fixed set for the create flow, the Manager's list for existing-install.
+
+    The existing-install route's ``declared_closure`` public input is a sorted
+    list of ``<distribution>=<relative path>`` rows the Manager computed from
+    the fixed set, the preserved plugin roster and the release's declared
+    additions (existing-install design section 4.1).  It must contain the fixed
+    set: the adapter never installs less than the birth closure.
+    """
+    if request["operation_ref"] != EXISTING_DEPENDENCIES_REF:
+        return REQUIRED_DISTRIBUTIONS
+    raw = request["public_inputs"].get("declared_closure")
+    if not isinstance(raw, list) or not raw:
+        raise AdapterError("existing-install dependency reconcile requires a declared_closure list")
+    rows = [_closure_row(item) for item in raw]
+    declared = {relative for _, relative in rows}
+    if any(relative not in declared for _, relative in REQUIRED_DISTRIBUTIONS):
+        raise AdapterError("declared_closure omits a required seed distribution")
+    if len(declared) != len(rows):
+        raise AdapterError("declared_closure repeats a relative path")
+    return tuple(rows)
+
+
+def _closure_row(item: object) -> tuple[str, str]:
+    if not isinstance(item, str) or "=" not in item:
+        raise AdapterError("declared_closure rows must be <distribution>=<relative path>")
+    distribution, _, relative = item.partition("=")
+    if _DECLARED_DISTRIBUTION.fullmatch(distribution) is None or _DECLARED_RELATIVE.fullmatch(relative) is None:
+        raise AdapterError(f"declared_closure row is outside the closed grammar: {item!r}")
+    return distribution, relative
+
+
+def _closure_probe_script(closure: Closure = REQUIRED_DISTRIBUTIONS) -> str:
+    distributions = [name for name, _relative in closure]
     return f"""
 import importlib.metadata as metadata
 import importlib.util
@@ -137,10 +174,10 @@ def _version_state(runner: Runner, venv_python: Path) -> tuple[ClosureState | No
     return None, completed.stdout.strip().startswith("3.13.")
 
 
-def _closure_payload(runner: Runner, venv_python: Path) -> dict[str, object] | None:
+def _closure_payload(runner: Runner, venv_python: Path, closure: Closure = REQUIRED_DISTRIBUTIONS) -> dict[str, object] | None:
     completed = _run_probe(
         runner,
-        [str(venv_python), "-I", "-c", _closure_probe_script()],
+        [str(venv_python), "-I", "-c", _closure_probe_script(closure)],
     )
     if completed is None or completed.returncode != 0:
         return None
@@ -151,11 +188,11 @@ def _closure_payload(runner: Runner, venv_python: Path) -> dict[str, object] | N
     return parsed if isinstance(parsed, dict) else None
 
 
-def _package_closure_matches(payload: dict[str, object], target: Path) -> bool:
+def _package_closure_matches(payload: dict[str, object], target: Path, closure: Closure = REQUIRED_DISTRIBUTIONS) -> bool:
     packages = payload.get("packages")
     if not isinstance(packages, dict):
         return False
-    for distribution, relative in REQUIRED_DISTRIBUTIONS:
+    for distribution, relative in closure:
         package = packages.get(distribution)
         if not isinstance(package, dict) or not isinstance(package.get("version"), str):
             return False
@@ -164,17 +201,17 @@ def _package_closure_matches(payload: dict[str, object], target: Path) -> bool:
     return True
 
 
-def _missing_seed_distributions(payload: dict[str, object] | None, target: Path) -> tuple[str, ...]:
+def _missing_seed_distributions(payload: dict[str, object] | None, target: Path, closure: Closure = REQUIRED_DISTRIBUTIONS) -> tuple[str, ...]:
     """Return only editable distributions whose installed identity is not compliant."""
 
     if payload is None or not isinstance(payload.get("packages"), dict):
-        return tuple(relative for _distribution, relative in REQUIRED_DISTRIBUTIONS)
+        return tuple(relative for _distribution, relative in closure)
     packages = payload.get("packages")
     if not isinstance(packages, dict):
-        return tuple(relative for _distribution, relative in REQUIRED_DISTRIBUTIONS)
+        return tuple(relative for _distribution, relative in closure)
     return tuple(
         relative
-        for distribution, relative in REQUIRED_DISTRIBUTIONS
+        for distribution, relative in closure
         if not isinstance(packages.get(distribution), dict)
         or not _editable_root_matches(packages[distribution].get("direct_url"), target / relative)
     )
@@ -192,6 +229,7 @@ def _private_cli_works(runner: Runner, private_solet: Path) -> bool:
 def probe_dependency_closure(
     target: Path,
     runner: Runner,
+    closure: Closure = REQUIRED_DISTRIBUTIONS,
 ) -> tuple[ClosureState, dict[str, bool]]:
     venv_dir = target / ".venv"
     venv_python = venv_dir / "bin/python3"
@@ -210,13 +248,13 @@ def probe_dependency_closure(
     terminal, facts["python_313"] = _version_state(runner, venv_python)
     if terminal is not None:
         return terminal, facts
-    payload = _closure_payload(runner, venv_python)
+    payload = _closure_payload(runner, venv_python, closure)
     if payload is None:
         return ClosureState.INCOMPLETE, facts
     facts["pip"] = payload.get("pip") is True
     facts["build_backend"] = payload.get("build_backend") is True
     facts["wheel"] = payload.get("wheel") is True
-    facts["package_closure"] = _package_closure_matches(payload, target)
+    facts["package_closure"] = _package_closure_matches(payload, target, closure)
     facts["private_solet"] = _private_cli_works(runner, venv_dir / "bin/solet-bridge")
     closed = all(value is True for key, value in facts.items() if key != "python_exists")
     return (ClosureState.PRESENT_CLOSED if closed else ClosureState.INCOMPLETE), facts
@@ -264,7 +302,7 @@ def _run_required(runtime: AdapterRuntime, command: list[str], label: str) -> No
 
 
 def _repair_venv_if_needed(
-    runtime: AdapterRuntime, state: ClosureState, facts: dict[str, bool], venv_dir: Path
+    runtime: AdapterRuntime, state: ClosureState, facts: dict[str, bool], venv_dir: Path, closure: Closure = REQUIRED_DISTRIBUTIONS
 ) -> tuple[ClosureState, dict[str, bool]]:
     if state not in {ClosureState.ABSENT, ClosureState.INTERPRETER_DANGLING} and facts["python_313"]:
         return state, facts
@@ -273,7 +311,7 @@ def _repair_venv_if_needed(
     if venv_dir.exists():
         venv_command.append("--upgrade")
     _run_required(runtime, [*venv_command, str(venv_dir)], "venv construction")
-    return probe_dependency_closure(runtime.target, runtime.run)
+    return probe_dependency_closure(runtime.target, runtime.run, closure)
 
 
 def _repair_build_backend_if_needed(runtime: AdapterRuntime, facts: dict[str, bool], venv_python: Path) -> None:
@@ -287,11 +325,11 @@ def _repair_build_backend_if_needed(runtime: AdapterRuntime, facts: dict[str, bo
 
 
 def _repair_seed_packages_if_needed(
-    runtime: AdapterRuntime, facts: dict[str, bool], venv_python: Path
+    runtime: AdapterRuntime, facts: dict[str, bool], venv_python: Path, closure: Closure = REQUIRED_DISTRIBUTIONS
 ) -> None:
-    missing = _missing_seed_distributions(_closure_payload(runtime.run, venv_python), runtime.target)
+    missing = _missing_seed_distributions(_closure_payload(runtime.run, venv_python, closure), runtime.target, closure)
     if not facts["private_solet"] and not missing:
-        missing = tuple(relative for _distribution, relative in REQUIRED_DISTRIBUTIONS)
+        missing = tuple(relative for _distribution, relative in closure)
     for relative in missing:
         package_dir = runtime.target / relative
         if not package_dir.is_dir():
@@ -311,15 +349,15 @@ def _repair_seed_packages_if_needed(
         )
 
 
-def apply_dependency_closure(runtime: AdapterRuntime) -> None:
+def apply_dependency_closure(runtime: AdapterRuntime, closure: Closure = REQUIRED_DISTRIBUTIONS) -> None:
     venv_dir = runtime.target / ".venv"
     venv_python = venv_dir / "bin/python3"
-    state, facts = probe_dependency_closure(runtime.target, runtime.run)
+    state, facts = probe_dependency_closure(runtime.target, runtime.run, closure)
     if state is ClosureState.PRESENT_CLOSED:
         return
-    _state, facts = _repair_venv_if_needed(runtime, state, facts, venv_dir)
+    _state, facts = _repair_venv_if_needed(runtime, state, facts, venv_dir, closure)
     _repair_build_backend_if_needed(runtime, facts, venv_python)
-    _repair_seed_packages_if_needed(runtime, facts, venv_python)
+    _repair_seed_packages_if_needed(runtime, facts, venv_python, closure)
 
 
 def _closure_evidence(
@@ -341,10 +379,51 @@ def _closure_evidence(
     ]
 
 
+def _declared_actions(runtime: AdapterRuntime, state: ClosureState, facts: dict[str, bool], closure: Closure, venv_python: Path) -> list[dict[str, Any]]:
+    """Existing-install planned actions: exactly the missing declared pieces, or one venv rebuild (section 4.2)."""
+    if state in {ClosureState.ABSENT, ClosureState.INTERPRETER_DANGLING} or not facts["python_313"]:
+        return [planned_action("rebuild_venv", "Rebuild the instance virtual environment with the long-lived Python 3.13", "environment_rebuild", "$TARGET/.venv", state.value)]
+    actions: list[dict[str, Any]] = []
+    if not all(facts[name] for name in ("pip", "build_backend", "wheel")):
+        actions.append(planned_action("pip.install_build_backend", "Install pip, setuptools, and wheel in the instance environment", "package_install", "$TARGET/.venv", "build_backend_incomplete"))
+    for relative in _missing_seed_distributions(_closure_payload(runtime.run, venv_python, closure), runtime.target, closure):
+        # ``pip.install_editable.<relative>`` (dots: the closed planned-action id
+        # grammar admits no colon); the exact path is the action's target.
+        actions.append(planned_action("pip.install_editable." + relative.replace("/", "."), f"Editable-install {relative} into the instance environment", "package_install", f"$TARGET/{relative}", "seed_package_closure_incomplete"))
+    if not facts["private_solet"] and not actions:
+        actions.append(planned_action("pip.install_editable.plugins.agent_messaging_plugin", "Reinstall the messaging plugin so the private bridge CLI works", "package_install", "$TARGET/plugins/agent_messaging_plugin", "private_cli_missing"))
+    return actions
+
+
+def _existing_probe_result(request: Request, runtime: AdapterRuntime, state: ClosureState, facts: dict[str, bool], closure: Closure, evidence_items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Existing-install probe: a not-yet-verified closure is ``pending``, never ``blocked`` (section 4.3).
+
+    Only a formula-keg venv is a real refusal; a missing piece or a dangling
+    interpreter is repairable and the executor reapplies a retry-safe
+    operation on ``pending``.
+    """
+    if not facts["formula_keg_free"]:
+        return result(request, status="blocked", error_kind="instance_formula_keg_detected", retry_safe=False, evidence_items=evidence_items, repair="Rebuild the instance environment outside the manager formula keg.")
+    if request["probe_purpose"] in EMPTY_ACTION_PURPOSES:
+        return result(request, status="pending", evidence_items=evidence_items, repair="Reapply the declared dependency closure.")
+    return result(
+        request,
+        status="pending",
+        planned_actions=_declared_actions(runtime, state, facts, closure, runtime.target / ".venv/bin/python3"),
+        evidence_items=evidence_items,
+        repair="Approve exactly the missing declared pieces.",
+    )
+
+
 def dependency_closure_route(request: Request, runtime: AdapterRuntime) -> dict[str, Any]:
+    try:
+        closure = declared_closure(request)
+    except AdapterError as exc:
+        return result(request, status="blocked", error_kind="adapter_protocol_error", retry_safe=False, repair=f"{exc}. Send the exact declared closure the Manager computed.")
+    existing = request["operation_ref"] == EXISTING_DEPENDENCIES_REF
     if request["phase"] == "apply":
         try:
-            apply_dependency_closure(runtime)
+            apply_dependency_closure(runtime, closure)
         except AdapterError as exc:
             return result(
                 request,
@@ -356,10 +435,12 @@ def dependency_closure_route(request: Request, runtime: AdapterRuntime) -> dict[
                 ),
             )
         return result(request, status="applied")
-    state, facts = probe_dependency_closure(runtime.target, runtime.run)
+    state, facts = probe_dependency_closure(runtime.target, runtime.run, closure)
     evidence_items = _closure_evidence(runtime, facts)
     if state is ClosureState.PRESENT_CLOSED:
         return result(request, status="verified", evidence_items=evidence_items)
+    if existing:
+        return _existing_probe_result(request, runtime, state, facts, closure, evidence_items)
     error_kind = "instance_interpreter_dangling" if state is ClosureState.INTERPRETER_DANGLING else "dependency_closure_incomplete"
     if request["probe_purpose"] in EMPTY_ACTION_PURPOSES:
         return result(

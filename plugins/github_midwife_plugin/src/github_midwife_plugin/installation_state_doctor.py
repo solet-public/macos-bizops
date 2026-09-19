@@ -38,11 +38,11 @@ from .setup_adapter_runtime import CommandOutcome, Runtime, read_json_object
 # that keeps the two honest lives in ``flow_precondition_wiring_smoke``.
 _SESSION_SOURCE_OPERATION_REFS = {
     "codex_local": "hydration::sessions.register_codex_filesystem",
-    "claude_local": "hydration::sessions.register_claude_filesystem",
+    "claude_code_local": "hydration::sessions.register_claude_filesystem",
 }
 _QUALIFIED_SOURCE_KINDS = {
     "codex_local": "codex_local",
-    "claude_local": "claude_code_local",
+    "claude_code_local": "claude_code_local",
 }
 _KNOWLEDGE_READINESS_POLL_INITIAL_SECONDS = 0.5
 _KNOWLEDGE_READINESS_POLL_MAX_SECONDS = 5.0

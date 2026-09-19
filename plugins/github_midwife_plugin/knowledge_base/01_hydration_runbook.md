@@ -16,6 +16,8 @@ Run this ladder after genesis completes and the newborn solet boots, when the us
 
 Hydration is deliberately NOT genesis code. The files this ladder writes belong to the user's side of the genesis boundary, just like optional client registration does: the agent performs them with its own tools, in conversation, under the user's approval.
 
+Updating an existing install is not a hydration concern and not a manual `git pull`: install the Manager (`brew install solet-public/tap/solet`), then `solet-manager import <name> --target <clone> --channel stable` once, and `solet-manager update <name> --dry-run` / `--yes` for every release after that — the Manager preserves the files this runbook writes and discloses them in its preview. The procedure, the refusal vocabulary, and the steps that remain manual are in `05_seed_update_runbook.md`.
+
 ## Three fixed rules
 
 These rules are operator requirements, not tunable defaults. Every step below is shaped by them.
@@ -189,6 +191,8 @@ instead — a restated count is a future stale arity.
 | `feedback_skill_SKILL.md.template` | `~/.claude/skills/feedback/SKILL.md` | 0644 |
 | `claude_session_overlay.json.template` | `<clone>/client/claude-session-overlay.json` | 0644 |
 | `user_claude_md_section.template` | `~/.claude/CLAUDE.md` (create-or-merge, one marker-delimited section) | 0644 |
+| `zshrc_block.template` | the body of the `~/.zshrc` managed block (rendered in code by the shell-integration operation under the versioned `# BEGIN SOLET <name> v<digest8>` marker; not a whole-file render) | 0644 |
+| `launchagent.plist.template` | `~/Library/LaunchAgents/local.solet.<name>.plist` (rendered in code by the autostart step, with a `rendered-from` stamp; not an agent-driven render) | 0644 |
 | ⚙ `zshrc.template` | the user's startup file — **CONDITIONAL: only on an accepted shell-integration offer** (Step 2); additive integration is preferred and whole-file replacement is the fallback, rendered with `{{BACKUP_PATH}}` | 0644 |
 | ⚙ `fleet_functions.zsh.template` | `<clone>/client/<name>-fleet.zsh` — **CONDITIONAL: only on an accepted Step 4a git-safety offer**; sourced from the user's startup file | 0644 |
 

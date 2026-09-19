@@ -40,7 +40,7 @@ An item with no declared System Settings pane or denial behavior says so explici
 
 - WHAT: Claude Code session files
 - WHY: Read only the user-approved Claude projects, history, and tasks roots for ingestion.
-- WHEN: When `session_sources` contains `claude_local`.
+- WHEN: When `session_sources` contains `claude_code_local`.
 - WHAT DENIAL DOES: disable_capability
 - SYSTEM SETTINGS PANE: Privacy & Security > Files and Folders
 - GRANT ACTOR: user

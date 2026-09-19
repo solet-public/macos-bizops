@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol, cast
 
 from .adapter_validation import boolean, bounded_integer, optional_int, validate_reason
-from .errors import StateError
+from .errors import OperationAttemptMismatch, StateError
 from .journal_migrations import (
     CURRENT_JOURNAL_VERSION,
     JOURNAL_BOUNDARY_KEYS,
@@ -19,6 +19,7 @@ from .journal_migrations import (
 )
 from .journal_rollup import StageProbeStatuses, derive_stage_statuses, roll_up_transaction
 from .models import CheckpointStatus, JsonValue, TransactionStatus
+from .operation_attempt_validation import validate_operation_attempt_coverage
 from .release_lock import SeedLock
 
 TRANSACTION_KEYS = JOURNAL_KEYS
@@ -54,17 +55,40 @@ class ParsedJournal:
 
 
 class JournalTransaction(Protocol):
-    answers_fingerprint: str
-    operation_stages: dict[str, str]
-    operation_statuses: dict[str, CheckpointStatus]
-    operation_attempts: tuple[dict[str, JsonValue], ...]
-    stage_probe_statuses: StageProbeStatuses
-    probe_activations: dict[str, dict[str, str]]
-    stage_probe_attempts: tuple[dict[str, JsonValue], ...]
-    stages: dict[str, CheckpointStatus]
-    completion: dict[str, CheckpointStatus]
-    result_kind: str | None
-    status: TransactionStatus
+    """Read-only fields used to validate a decoded journal."""
+
+    @property
+    def answers_fingerprint(self) -> str: ...
+
+    @property
+    def operation_stages(self) -> dict[str, str]: ...
+
+    @property
+    def operation_statuses(self) -> dict[str, CheckpointStatus]: ...
+
+    @property
+    def operation_attempts(self) -> tuple[dict[str, JsonValue], ...]: ...
+
+    @property
+    def stage_probe_statuses(self) -> StageProbeStatuses: ...
+
+    @property
+    def probe_activations(self) -> dict[str, dict[str, str]]: ...
+
+    @property
+    def stage_probe_attempts(self) -> tuple[dict[str, JsonValue], ...]: ...
+
+    @property
+    def stages(self) -> dict[str, CheckpointStatus]: ...
+
+    @property
+    def completion(self) -> dict[str, CheckpointStatus]: ...
+
+    @property
+    def result_kind(self) -> str | None: ...
+
+    @property
+    def status(self) -> TransactionStatus: ...
 
 
 def parse_transaction_fields(raw: dict[str, JsonValue]) -> ParsedJournal:
@@ -133,14 +157,18 @@ def validate_transaction_state(
     transaction: JournalTransaction,
     *,
     canonical_answers_fingerprint: str,
-) -> None:
+    allow_operation_attempt_mismatch: bool = False,
+) -> OperationAttemptMismatch | None:
     _validate_transaction_links(transaction, canonical_answers_fingerprint)
-    validate_operation_attempts(transaction)
+    mismatch = validate_operation_attempts(transaction)
     latest = validate_stage_attempts(transaction.stage_probe_attempts)
     _validate_stage_attempt_coverage(
         transaction.stage_probe_statuses, transaction.probe_activations, latest
     )
     _validate_derived_state(transaction)
+    if mismatch is not None and not allow_operation_attempt_mismatch:
+        raise mismatch
+    return mismatch
 
 
 def _validate_transaction_links(
@@ -156,7 +184,9 @@ def _validate_transaction_links(
     _validate_probe_activations(transaction.stage_probe_statuses, transaction.probe_activations)
 
 
-def validate_operation_attempts(transaction: JournalTransaction) -> None:
+def validate_operation_attempts(
+    transaction: JournalTransaction,
+) -> OperationAttemptMismatch | None:
     latest: dict[str, dict[str, JsonValue]] = {}
     for attempt in transaction.operation_attempts:
         operation_id, stage_id, status = _operation_attempt_identity(attempt)
@@ -171,66 +201,7 @@ def validate_operation_attempts(transaction: JournalTransaction) -> None:
         validate_attempt(attempt, operation_id, stage_id, status)
         if operation_id in transaction.operation_statuses:
             latest[operation_id] = attempt
-    _validate_operation_attempt_coverage(transaction, latest)
-
-
-def _validate_operation_attempt_coverage(
-    transaction: JournalTransaction,
-    latest: dict[str, dict[str, JsonValue]],
-) -> None:
-    statuses = transaction.operation_statuses
-    disagreements = [
-        (operation_id, attempt)
-        for operation_id, attempt in latest.items()
-        if attempt.get("checkpoint_status") != statuses[operation_id].value
-    ]
-    if disagreements and not _is_unrecorded_operation_transition(transaction, disagreements):
-        operation_id, _attempt = disagreements[0]
-        raise StateError(f"operation status disagrees with latest attempt: {operation_id!r}")
-    no_attempt = {CheckpointStatus.PENDING, CheckpointStatus.NOT_APPLICABLE}
-    for operation_id, current in statuses.items():
-        if current not in no_attempt and operation_id not in latest:
-            raise StateError(f"operation status lacks an attempt record: {operation_id!r}")
-
-
-def _is_unrecorded_operation_transition(
-    transaction: JournalTransaction,
-    disagreements: list[tuple[str, dict[str, JsonValue]]],
-) -> bool:
-    """Recognize exact executor transitions that deliberately precede an attempt."""
-
-    if _is_contract_reconciliation_reset(transaction, disagreements):
-        return True
-    if len(disagreements) != 1:
-        return False
-    operation_id, latest = disagreements[0]
-    current = transaction.operation_statuses[operation_id]
-    if latest.get("phase") != "pre_probe":
-        return False
-    if current is CheckpointStatus.AWAITING_USER:
-        return transaction.result_kind == "probe_drift"
-    return (
-        current is CheckpointStatus.APPLYING
-        and transaction.result_kind is None
-        and latest.get("checkpoint_status") == CheckpointStatus.AWAITING_USER.value
-    )
-
-
-def _is_contract_reconciliation_reset(
-    transaction: JournalTransaction,
-    disagreements: list[tuple[str, dict[str, JsonValue]]],
-) -> bool:
-    """Permit only reconciliation's declared verified-to-pending invalidation."""
-
-    marker = transaction.result_kind
-    if not isinstance(marker, str) or not marker.startswith("contract_reconciliation_reset:"):
-        return False
-    migration_id = marker.removeprefix("contract_reconciliation_reset:")
-    return bool(migration_id) and all(
-        transaction.operation_statuses[operation_id] is CheckpointStatus.PENDING
-        and attempt.get("checkpoint_status") == CheckpointStatus.VERIFIED.value
-        for operation_id, attempt in disagreements
-    )
+    return validate_operation_attempt_coverage(transaction, latest)
 
 
 def _operation_attempt_identity(

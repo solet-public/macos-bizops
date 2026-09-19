@@ -595,7 +595,7 @@ def _check_lifecycle_contract(validator: Draft7Validator, flow: dict[str, Any]) 
             "consumer_probe_purposes": ["stage_exit", "completion"],
             "consumer_probe_refs": ["embedding_request_succeeds"],
             "downstream_reservations": {
-                "governed_process_call_seconds": 5
+                "governed_process_call_seconds": 30
             },
         },
         str(readiness),

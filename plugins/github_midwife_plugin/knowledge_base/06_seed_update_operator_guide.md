@@ -8,7 +8,14 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:client-deployment, consumer_profile:both
 
-Embedding Description: Plain-language, no-jargon walkthrough for the solet's OWNER to bring an already-running solet up to date with a newer published seed release, written to be followed directly at a terminal rather than requiring a coding agent to drive every step — when a pulled update needs a dependency install, when it needs generated files (AGENTS.md, CLAUDE.md, shell integration, Claude Code hooks) re-rendered and why that specific step needs a coding agent's help even though the rest does not, verifying the user-scope CLAUDE.md instruction section is actually installed rather than assumed, configuring a business-connector export/workspace root on an already-updated solet so record reads don't fail loud, the Claude Code plugin cache-refresh step people skip because everything looks like it worked without it, a verification checklist including confirming a newly-live plugin's knowledge is actually searchable plus behavioral read/override/refusal checks for connectors only verifiable on the owner's own machine (Marketo, Zuora), and a closing note on shaping newly-authored joseki cards now that connector reads never return record values inline. Companion to `05_seed_update_runbook.md`, which is written to the coding agent performing the same update and carries the full technical detail and measurement history this guide deliberately leaves out.
+Embedding Description: Plain-language, no-jargon walkthrough for the solet's OWNER to bring an already-running solet up to date with a newer published seed release using the Solet Manager at a terminal — `brew upgrade` to get the update, `solet-manager doctor <name>` as the go/no-go before and after, `solet-manager update <name> --dry-run` to read what will change (it lists the component it will install, the files on your machine it will preserve, and refuses with the exact file names when it will not proceed — never force anything), then `--yes` with the fingerprint from the preview, which restarts and waits itself and tells you when it is verified; what the three exit codes mean and `solet-manager reconcile <name> --dry-run` when an update stops part way; the few things still done by hand (your own project's `AGENTS.md`/`CLAUDE.md`, shell integration and Claude Code hooks re-rendered by a coding agent, the first-time business-connector export/workspace root answer, quitting Claude Code before a rename migration, and the read/override/refusal checks for Marketo and Zuora that are only verifiable on your machine); and a closing note on shaping newly-authored joseki cards now that connector reads never return record values inline. Companion to `05_seed_update_runbook.md`, which is written to the coding agent performing the same update and carries the full technical detail and the legacy manual procedure this guide deliberately leaves out.
+
+> **Status (2026-09-19, existing-solet import/update Step 7):** this guide
+> is the Manager path. If your solet was never imported into the Manager,
+> do that once first (the "Before you start" section says how); the manual
+> `git pull` procedure this guide used to describe is kept only in the
+> agent-facing runbook, as recovery for a checkout the Manager will not
+> import.
 
 ## When to use this guide
 
@@ -31,70 +38,86 @@ you'd rather do it.
 
 ## Before you start
 
-- Make sure your solet is currently running: run `<name> health` in a
-  terminal (replace `<name>` with your solet's name throughout this
-  guide) and confirm you get a healthy response, not an error.
+- You need the Solet Manager installed: `brew install
+  solet-public/tap/solet`. If your solet was set up before the Manager
+  existed, enroll it once (replace `<name>` with your solet's name and
+  `<folder>` with the folder it lives in, throughout this guide):
+
+  ```bash
+  solet-manager import <name> --target <folder> --channel stable --dry-run
+  solet-manager import <name> --target <folder> --channel stable --yes --approval-fingerprint <the fingerprint the dry-run printed>
+  ```
+
+  The dry-run shows what it found and changes nothing; the second command
+  records your solet with the Manager and does not touch your solet's
+  files. You do this once, ever.
+- Then run `solet-manager doctor <name>`. **"verified" means go.** Anything
+  else: read the first line of the report — it names the one thing that
+  needs attention and what to do about it — and sort that out before
+  updating.
 - You'll need a terminal window and about 10 minutes, most of which is
   waiting.
 
 ## Step 1 — get the update
 
-In a terminal, go to the folder where your solet lives and run:
-
 ```bash
-git pull --ff-only
+brew upgrade solet-public/tap/solet
+solet-manager update <name> --dry-run
 ```
 
-**If this succeeds:** continue to Step 2.
+The Manager learns about new releases from its own Homebrew package, so
+the upgrade comes first. The second command is a preview: it changes
+nothing, and prints exactly what the update would do — which release it
+will move your solet to, which of the files on your machine it will
+preserve untouched (your generated `AGENTS.md`/`CLAUDE.md`, the
+`knowledge_bases` links, your `profile` folder — these are listed as
+preserved, not as problems), and any component it will install.
 
-**If it refuses** with a message about not being able to fast-forward:
-stop here and get in touch with whoever gave you this guide. This means
-something unusual has happened to your local copy and needs a look before
-continuing — don't try to force it through.
+**If it says `preview_ready`:** continue to Step 2. It also prints an
+approval fingerprint — you'll pass that back in the next command, which is
+how the Manager knows you approved *this* preview and not some other.
 
-You may also notice files like `AGENTS.md`, `CLAUDE.md`, or a `client/`
-folder showing up as changed or untracked if you check `git status` — that
-is normal and harmless; those are files generated for your own machine and
-the update never touches them directly.
+**If it says "already current":** there is nothing to do; you are done.
 
-## Step 2 — install any new dependencies (only if you were told to)
+**If it refuses:** the report names the reason and the exact files. Do not
+force anything. The most common reasons: a file the release changes that
+you also changed locally (the report tells you how to keep your version by
+hand), or something staged in git that you or an agent left behind. Fix the
+named thing, or ask for help with the report in hand, then run the preview
+again.
 
-Most updates need nothing here — skip straight to Step 3. Do this step only
-if whoever gave you this guide specifically said the update adds a new
-component or changes what your solet depends on:
-
-```bash
-cd <your solet's folder>
-.venv/bin/python -m pip install --no-build-isolation -e plugins/<the named component>
-```
-
-It's safe to run even if you're not sure it's needed — running it again on
-something already installed does nothing harmful.
-
-## Step 3 — restart and wait
+## Step 2 — apply the update
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/local.solet.<name>.plist
-launchctl load ~/Library/LaunchAgents/local.solet.<name>.plist
+solet-manager update <name> --yes --approval-fingerprint <fingerprint from Step 1>
 ```
 
-Then wait about 30–60 seconds before doing anything else. Your solet
-is reloading in the background during this time, and using it too soon can
-cause errors that look scarier than they are. When in doubt, wait a bit
-longer.
+This performs the first half — bringing the new release's files onto your
+computer — and then stops and prints a second preview for the second half:
+installing any component the release needs, running any migration, and
+restarting your solet. Read it, then approve it the same way:
 
-*If you'd rather avoid even that brief downtime:* some solets support a
-zero-downtime update path instead of the restart above. If you have a
-coding agent handy, you can ask it to check and use that path for you
-instead of the commands shown here — otherwise the restart above is always
-safe and is what most operators use.
+```bash
+solet-manager update <name> --dry-run
+solet-manager update <name> --yes --approval-fingerprint <the runtime fingerprint it printed>
+```
 
-## Step 4 — refresh your generated files (only if you were told to)
+The Manager restarts your solet, waits for it to be healthy, checks it
+over, and tells you when it is verified. You do not need to wait a fixed
+time, restart anything yourself, or refresh the Claude Code plugin by hand
+— that copy is refreshed as part of this step. If the release includes a
+rename migration and the preview says you must **quit Claude Code first**,
+do that and run the command again; the Manager never closes a program for
+you.
+
+## Step 3 — refresh your generated files (only if you were told to)
 
 Some updates change more than your solet's own code — they also change
 files that live on *your* side: your project's `AGENTS.md`/`CLAUDE.md`,
-your shell setup, or your Claude Code hooks. A restart alone does not
-regenerate those; they only update if someone re-runs the setup steps that
+your shell setup, or your Claude Code hooks. The update refreshes the
+three of these it owns (your solet's LaunchAgent, the block in your
+`~/.zshrc`, and the section in your `~/.claude/CLAUDE.md`) and preserves
+the rest; those only update if someone re-runs the setup steps that
 originally created them, and that work needs a coding agent's help (it
 isn't a plain command you can type — the agent has to compare your current
 files against what changed and merge carefully, not overwrite blindly).
@@ -106,39 +129,23 @@ hydration runbook" (add "and step 4a too" if you use named multi-session
 roles). Let the agent walk you through it — it will show you what's
 changing before it touches anything.
 
-**Make sure this explicitly includes the instruction section in your
-user-scope `~/.claude/CLAUDE.md`** — this is the one place your coding
-agent actually reads its operating instructions from day to day, so if an
-update changes those instructions and this file doesn't get refreshed, the
-update effectively never reached your agent even though everything else
-went fine. This isn't automatic — there is no installer that does it for
-you, so it only happens when you (or your agent) explicitly re-run this
-step. Verify it's actually there rather than assuming — name your own
-solet specifically, not just any solet's section, since this
-file can hold more than one if you use more than one solet:
+To confirm the instruction section in your user-scope `~/.claude/CLAUDE.md`
+— the one place your coding agent actually reads its operating
+instructions from day to day — is present, run `solet-manager doctor
+<name>` and look for `user_claude_md_section` under the *files* section:
+"verified" means your solet's own section is installed. Anything else means
+it was never installed or got lost — ask your agent to render and install
+it now, before continuing.
 
-```bash
-grep -c "BEGIN SOLET <name> v1" ~/.claude/CLAUDE.md
-```
-
-A count of 1 means your section is present. Zero, or the file doesn't
-exist yet, means it was never installed or got lost — ask your agent to
-render and install it now, the same way, before continuing. (A count
-above 1 would mean something merged wrong — re-runs are supposed to
-replace your section in place, not duplicate it — flag that to whoever
-gave you this guide rather than the file.)
-
-Do this before Step 5 below. Refreshing the plugin without also doing this
-step would leave these other files out of date even though the plugin
-itself is current.
-
-## Step 4a — configure the export/workspace root (only if you were told to)
+## Step 3a — configure the export/workspace root (only if you were told to)
 
 Some updates change what your solet requires before it will read from
 business systems (Jira, Salesforce, and similar) — specifically, requiring
 a folder on your computer where results are allowed to be saved, so records
-never land directly in a conversation. Skip this step unless whoever gave
-you this guide said this update adds or changes that requirement.
+never land directly in a conversation. If you have already answered this
+once, the update carries your answer to any newly installed connector by
+itself. Skip this step unless whoever gave you this guide said this update
+adds that requirement for the first time.
 
 If it does: tell your coding agent where you keep the folders you work in
 day to day (the parent folder, not any single project — something like
@@ -148,46 +155,18 @@ agent will validate the folder and confirm what it did — if it refuses
 your answer, that's expected behavior protecting your solet's own
 files, not an error to work around; give it a different folder instead.
 
-## Step 5 — refresh the Claude Code plugin (don't skip this)
-
-This is the step people miss, because everything *looks* like it worked
-without it. Pulling the update and restarting brings new files onto your
-computer, but a small companion tool your solet uses inside Claude
-Code — called a **plugin** — keeps running its own separate, older copy
-until you explicitly tell it to refresh. Skipping this step means you keep
-running old behavior with no warning that anything is out of date.
-
-**5a. Find your plugin's marketplace name** (a name that was generated
-automatically when your solet was first set up):
+## Step 4 — confirm everything actually updated
 
 ```bash
-cat ~/.claude/plugins/known_marketplaces.json
+solet-manager doctor <name>
 ```
 
-Look for an entry whose `path` points at your solet's folder. The
-name of that entry (not `claude-plugins-official`, which is unrelated) is
-your marketplace name — you'll use it in the next command.
-
-**5b. Refresh the plugin**, replacing `<marketplace-name>` with the name
-you just found. Type `command claude`, not just `claude` — if your terminal
-has a shortcut set up for `claude` that adds extra options, typing it plain
-can make these specific commands fail to parse correctly, and `command`
-sidesteps that safely either way:
-
-```bash
-command claude plugin uninstall coordination-hooks@<marketplace-name> --scope local
-command claude plugin install coordination-hooks@<marketplace-name> --scope local
-```
-
-You should see a confirmation message after each command. If either one
-reports an error instead, stop and get in touch with whoever gave you this
-guide rather than continuing.
-
-## Step 6 — confirm everything actually updated
-
-Open a **brand new** Claude Code window (closing and reopening an existing
-one is not enough — it needs to be a fresh start) inside your solet's
-folder, and run:
+Exit code 0 and "verified" means the update is complete: your solet is
+running the new release, the Claude Code plugin copy is current (the
+*coding-agent* section says `plugin_cache_current: verified`), and any
+knowledge the release removed is gone from search. Then open a **brand
+new** Claude Code window (closing and reopening an existing one is not
+enough — it needs to be a fresh start) inside your solet's folder, and run:
 
 ```bash
 <name> health
@@ -233,16 +212,30 @@ connector.
 
 ## If something goes wrong
 
-- **Step 1 refused to pull:** don't force it. Ask for help.
-- **Right after Step 3's restart, `<name> health` briefly errors with
+Every Manager command ends one of three ways, and the number it exits with
+tells you which:
+
+- **0** — it did what it said. Carry on.
+- **3** — it stopped before touching anything and needs you: the report's
+  first line names the reason and the files. A refused preview is this
+  kind. Fix the named thing or ask for help; nothing is half-done.
+- **1** — a check found something wrong with your solet on evidence (the
+  report names the check). Ask for help with the report in hand.
+
+If an update stopped part way (the doctor says an update is still open, or
+`update` says one is), run `solet-manager reconcile <name> --dry-run`: it
+tells you the one next step — continue, or set the stopped update aside —
+and changes nothing until you approve it the same way as an update. If it
+answers "no active update", nothing is stuck.
+
+- **Right after the restart, `<name> health` briefly errors with
   something mentioning "no active color":** this is a known transient
   state — wait about 10 more seconds and try again before assuming
-  something broke.
-- **Step 5's commands errored:** don't skip ahead. Ask for help — running
-  Step 6 afterward won't tell you anything useful if Step 5 didn't
-  actually succeed.
-- **Everything ran without errors, but something still seems off:** re-run
-  Step 5 exactly as written. It's always safe to repeat.
+  something broke; the doctor shows it as "service offline" while it
+  heals.
+- **Everything ran without errors, but something still seems off:** run
+  `solet-manager doctor <name>` again. It's always safe to repeat and never
+  changes your solet.
 
 ## Questions
 
@@ -278,12 +271,14 @@ If you already start extra agent sessions from this solet (or want to
 start), this update is the one that makes that practical rather than
 manual. Two things matter for you specifically:
 
-**Don't skip Step 5 above this time.** A small companion tool (the
+**Check the plugin copy actually refreshed.** A small companion tool (the
 `coordination-hooks` plugin) got a real update in this release, including
 a fix to a background helper that used to be able to wait forever without
-telling anyone. Step 5's refresh commands are what actually pick that up —
-if you skip it thinking "it probably updated with everything else," it
-did not; that's exactly the trap Step 5 exists to catch.
+telling anyone. Claude Code keeps its own separate copy of that tool, and
+at the time this release shipped the refresh was a manual command people
+skipped thinking "it probably updated with everything else" — it did not.
+Today the Manager refreshes that copy as part of Step 2, and Step 4's
+doctor shows `plugin_cache_current: verified` when it did.
 
 **A new "operating manual" now ships with your solet** for anyone
 running more than one session of it at once — how to hand off work between
@@ -335,11 +330,11 @@ full list of what changed, in more detail than this guide covers.
 ## Reference
 
 - `05_seed_update_runbook.md` — the same update procedure written to a
-  coding agent, with the full technical detail (why each stale-copy check
-  works, the measured plugin-cache behavior, and the verb-level detail
-  behind Step 4's hydration re-render) that this guide leaves out on
-  purpose.
-- `01_hydration_runbook.md` — the first-time setup steps Step 4 above
+  coding agent, with the full technical detail (the exact refusal
+  vocabulary, which Manager operation owns each former manual step, the
+  measured plugin-cache behavior, and the legacy manual procedure kept as
+  recovery) that this guide leaves out on purpose.
+- `01_hydration_runbook.md` — the first-time setup steps Step 3 above
   re-runs selectively.
 - `RELEASE_NOTES.md` at the repo root — the full changelog for every
   release, including the ones summarized above.

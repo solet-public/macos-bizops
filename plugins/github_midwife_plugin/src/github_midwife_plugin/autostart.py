@@ -54,11 +54,16 @@ Python install can leave `pyexpat` ABI-mismatched against the system
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape
+
+_TEMPLATE_REF = "plugins/github_midwife_plugin/knowledge_base/hydration_templates/launchagent.plist.template"
+_TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "knowledge_base" / "hydration_templates" / "launchagent.plist.template"
+_STAMP = "<!-- rendered-from: {TEMPLATE_REF}@{TEMPLATE_DIGEST} -->"
 
 _LABEL_PREFIX = "local.solet"
 # PATH written into the plist's EnvironmentVariables (§39.2, reported and
@@ -277,38 +282,16 @@ class SimpleAutostartRenderer:
             raise AutostartError(f"launchctl {args[0]} failed: {result.stderr.strip()}")
 
     def _render_plist(self) -> bytes:
-        interpreter = str(self.clone_root / ".venv" / "bin" / "python3")
-        profile_dir = str(self.clone_root / "profile")
-        body = (
-            '<?xml version="1.0" encoding="UTF-8"?>\n'
-            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
-            '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-            '<plist version="1.0">\n'
-            '<dict>\n'
-            f'  <key>Label</key>\n  <string>{_xml_escape(self.label)}</string>\n'
-            '  <key>ProgramArguments</key>\n  <array>\n'
-            f'    <string>{_xml_escape(interpreter)}</string>\n'
-            '    <string>-m</string>\n'
-            '    <string>ananta.cli</string>\n'
-            '    <string>--app-home</string>\n'
-            f'    <string>{_xml_escape(profile_dir)}</string>\n'
-            '  </array>\n'
-            f'  <key>WorkingDirectory</key>\n  <string>{_xml_escape(str(self.runtime_dir))}</string>\n'
-            '  <key>EnvironmentVariables</key>\n  <dict>\n'
-            f'    <key>SOLET_NAME</key>\n    <string>{_xml_escape(self.solet_name)}</string>\n'
-            # §39.2: without this key the daemon gets launchd's bare PATH and
-            # cannot see Homebrew binaries (tmux) even when installed. See
-            # _PATH_ENV for why it is a fixed literal.
-            f'    <key>PATH</key>\n    <string>{_xml_escape(_PATH_ENV)}</string>\n'
-            '  </dict>\n'
-            '  <key>RunAtLoad</key>\n  <true/>\n'
-            '  <key>KeepAlive</key>\n  <dict>\n'
-            '    <key>SuccessfulExit</key>\n    <false/>\n'
-            '  </dict>\n'
-            '</dict>\n'
-            '</plist>\n'
-        )
-        return body.encode("utf-8")
+        """The stamped render of the shipped ``launchagent.plist.template`` for this instance.
+
+        The template is the byte-for-byte layout this method used to hand-build
+        (every field below stays load-bearing on the boot path); rendering it
+        from the shipped template is what lets a later release identify a
+        genesis-written plist by its ``rendered-from`` stamp instead of
+        guessing (existing-install design section 6.1).  Values are
+        XML-escaped before literal substitution.
+        """
+        return render_launchagent_plist(self.solet_name, self.clone_root, self.home_dir, template_text=None, stamp=None, stamped=True)
 
     def _classify_install_prior(self, observed: _ObservedState) -> str:
         if not observed.plist_exists and not observed.launchctl_knows:
@@ -338,9 +321,49 @@ class SimpleAutostartRenderer:
         return "installed_not_loaded"
 
 
+def render_launchagent_plist(
+    solet_name: str,
+    clone_root: Path,
+    home_dir: Path,
+    *,
+    template_text: str | None,
+    stamp: str | None,
+    stamped: bool = True,
+) -> bytes:
+    """Render the LaunchAgent plist from the shipped template with XML-escaped values.
+
+    ``template_text`` defaults to the installed template; ``stamp`` defaults to
+    the ``rendered-from`` line for that template's digest and is inserted as
+    the second line (after the XML declaration).  ``stamped=False`` renders the
+    exact legacy, unstamped bytes so an existing-install adapter can recognise a
+    plist genesis wrote before stamping existed.
+    """
+    text = _TEMPLATE_PATH.read_text(encoding="utf-8") if template_text is None else template_text
+    digest = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+    runtime_dir = home_dir / ".ananta" / "runtime" / solet_name
+    values = {
+        "{{SOLET_NAME}}": _xml_escape(solet_name),
+        "{{CLONE_DIR}}": _xml_escape(str(clone_root)),
+        "{{RUNTIME_DIR}}": _xml_escape(str(runtime_dir)),
+        "{{PATH_ENV}}": _xml_escape(_PATH_ENV),
+    }
+    rendered = text
+    for token, value in values.items():
+        rendered = rendered.replace(token, value)
+    if "{{" in rendered:
+        raise AutostartError("launchagent.plist.template carries an unresolved token")
+    if not stamped:
+        return rendered.encode("utf-8")
+    line = _STAMP.replace("{TEMPLATE_REF}", _TEMPLATE_REF).replace("{TEMPLATE_DIGEST}", digest) if stamp is None else stamp
+    lines = rendered.split("\n")
+    lines.insert(1, line)
+    return "\n".join(lines).encode("utf-8")
+
+
 __all__ = [
     "AutostartError",
     "AutostartResult",
     "LaunchctlObservationError",
     "SimpleAutostartRenderer",
+    "render_launchagent_plist",
 ]

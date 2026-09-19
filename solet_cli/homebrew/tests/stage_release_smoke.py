@@ -49,7 +49,7 @@ from solet_setup_contracts.selected_source_record import (  # noqa: E402
 )
 
 _CONTRACT_ARCHIVE_ROOT = "plugins/github_midwife_plugin/knowledge_base"
-_FORMULA_ONLY_CONTRACT_EXTENSIONS = frozenset({"existing_install_flow.schema.json"})
+_FORMULA_ONLY_CONTRACT_EXTENSIONS = frozenset({"existing_install_flow.json", "existing_install_flow.schema.json"})
 _CONTRACT_SOURCE = _REPOSITORY_ROOT / _CONTRACT_ARCHIVE_ROOT
 _CANONICAL_SEED_REPOSITORY = "https://github.com/solet-public/macos-bizops.git"
 _CANONICAL_SEED_PROFILE = "macos-bizops"
@@ -125,9 +125,8 @@ def _build_seed_fixture(root: Path) -> tuple[Path, Path, str]:
     contracts.mkdir(parents=True)
     for name in contract_filenames():
         (contracts / name).write_bytes((_CONTRACT_SOURCE / name).read_bytes())
-    (contracts / "existing_install_flow.schema.json").write_bytes(
-        (_CONTRACT_SOURCE / "existing_install_flow.schema.json").read_bytes()
-    )
+    for name in _FORMULA_ONLY_CONTRACT_EXTENSIONS:
+        (contracts / name).write_bytes((_CONTRACT_SOURCE / name).read_bytes())
     (checkout / "PROVENANCE.json").write_text(
         json.dumps(
             {

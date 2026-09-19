@@ -7,7 +7,8 @@ import hashlib
 import json
 import stat
 import uuid
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .answer_validation import validate_normalized_answers
@@ -138,6 +139,7 @@ class ContractReconciliationManager:
             destination_bundle,
             self._manifest_path,
         )
+        transaction = _migrate_answer_values(transaction, reconciliation)
         _validate_destination_answers(transaction, destination_bundle)
         reconciled_transaction = reconcile_contract_stage_probe_state(
             destination_bundle,
@@ -418,6 +420,43 @@ def _validate_destination_answers(
                 "Declare an answer migration or a new decision for the destination contract; do not treat the journal as corrupt."
             ),
         ) from exc
+
+
+def _migrate_answer_values(
+    transaction: Transaction,
+    reconciliation: ContractReconciliation,
+) -> Transaction:
+    """Apply only the answer rewrites declared by the selected bridge."""
+
+    if not reconciliation.answer_value_migrations:
+        return transaction
+    answers = deepcopy(transaction.answers)
+    decisions = answers.get("decisions")
+    if not isinstance(decisions, dict):
+        return transaction
+    changed = False
+    for migration in reconciliation.answer_value_migrations:
+        selected = decisions.get(migration.decision_id)
+        if isinstance(selected, str):
+            if selected == migration.from_value:
+                decisions[migration.decision_id] = migration.to_value
+                changed = True
+            continue
+        if not isinstance(selected, list):
+            continue
+        migrated = [
+            migration.to_value if item == migration.from_value else item
+            for item in selected
+        ]
+        if migrated != selected:
+            decisions[migration.decision_id] = migrated
+            changed = True
+    if not changed:
+        return transaction
+    migrated = transaction.with_answers(answers)
+    # The approval fingerprint includes replacement bytes; as with the other
+    # reconciliation transitions, a lock-time re-preview must be stable.
+    return replace(migrated, updated_at=transaction.updated_at)
 
 
 def _validate_destination_answer_schema_requirements(

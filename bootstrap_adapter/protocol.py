@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .homebrew import CommandOutcome
 from .models import (
     PROBE_TIMEOUT_SECONDS,
     AdapterError,
@@ -26,6 +27,17 @@ Request = dict[str, Any]
 Result = dict[str, Any]
 Executor = Callable[[object], Result]
 
+CREATE_FLOW_ID = "macos.repository_setup"
+EXISTING_INSTALL_FLOW_ID = "existing-install"
+EXISTING_INSTALL_REF_PREFIX = "existing::"
+#: Closed two-member flow set with the operation-ref cross-check (existing-
+#: install design section 3.3, held identically on all three validators).
+#: The value says whether the flow's callables carry the ``existing::``
+#: vocabulary.  Never an open string.
+FLOW_OPERATION_PAIRING: dict[str, bool] = {
+    CREATE_FLOW_ID: False,
+    EXISTING_INSTALL_FLOW_ID: True,
+}
 REQUEST_KEYS = {
     "protocol_version",
     "kind",
@@ -115,8 +127,11 @@ def _validate_name_and_target(request: Request) -> None:
 def _validate_flow_identity(request: Request) -> None:
     revision = request["flow_source_revision"]
     answers = request["answers_fingerprint"]
-    if request["flow_id"] != "macos.repository_setup":
+    flow_id = request["flow_id"]
+    if not isinstance(flow_id, str) or flow_id not in FLOW_OPERATION_PAIRING:
         raise AdapterRequestError("flow_id is invalid")
+    if str(request["operation_ref"]).startswith(EXISTING_INSTALL_REF_PREFIX) != FLOW_OPERATION_PAIRING[flow_id]:
+        raise AdapterRequestError("operation_ref vocabulary does not match flow_id")
     if not isinstance(revision, str) or _REVISION.fullmatch(revision) is None:
         raise AdapterRequestError("flow_source_revision is invalid")
     if not isinstance(answers, str) or _FINGERPRINT.fullmatch(answers) is None:
@@ -169,6 +184,28 @@ def _validate_phase(request: Request) -> None:
         raise AdapterRequestError("apply request requires null purpose and dry_run false")
     if not isinstance(approval, str) or _FINGERPRINT.fullmatch(approval) is None:
         raise AdapterRequestError("apply request requires a well-formed approval fingerprint")
+
+
+_LM_STUDIO_PUBLIC_INPUTS = frozenset({"embeddings_implementation", "inference_implementation", "lm_studio_base_url"})
+
+
+def validate_route_inputs(request: Request, *, lm_studio_operation_ids: frozenset[str], existing_ref: str) -> None:
+    """Refuse public inputs outside each route's closed registry.
+
+    The existing-install dependency route (``existing_ref``) accepts exactly
+    ``declared_closure``; the create-flow routes keep their per-operation sets.
+    """
+    inputs = request["public_inputs"]
+    if request["operation_ref"] == existing_ref:
+        allowed: set[str] = {"declared_closure"}
+    elif request["operation_id"] in lm_studio_operation_ids:
+        allowed = set(_LM_STUDIO_PUBLIC_INPUTS)
+    else:
+        allowed = {"solet_name"} if request["operation_id"] == "configure_postgresql" else set()
+    if set(inputs) - allowed:
+        raise AdapterRequestError("operation public_inputs are outside the closed registry")
+    if "solet_name" in inputs and inputs["solet_name"] != request["name"]:
+        raise AdapterRequestError("solet_name public input differs from request identity")
 
 
 def validate_request(raw: object) -> Request:
@@ -257,6 +294,49 @@ def result(
     }
 
 
+def command_failure_result(
+    request: Mapping[str, Any],
+    *,
+    error_kind: str,
+    evidence_items: Sequence[dict[str, Any]],
+    repair: str,
+    outcome: CommandOutcome,
+) -> Result:
+    """Render a required-command receipt without falling back to default fields."""
+
+    reason = (
+        None
+        if outcome.returncode == 0 and not outcome.timed_out
+        else {
+            "outcome_class": "timeout" if outcome.timed_out else "nonzero_exit",
+            "exit_code": outcome.returncode,
+            "duration_ms": outcome.duration_ms,
+            "timed_out": outcome.timed_out,
+            "stdout_bytes": len(outcome.stdout.encode()),
+            "stderr_bytes": len(outcome.stderr.encode()),
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+        }
+    )
+    failed = result(
+        request,
+        status="failed",
+        error_kind=error_kind,
+        retry_safe=True,
+        evidence_items=evidence_items,
+        repair=repair,
+        duration_ms=outcome.duration_ms,
+        reason=reason,
+    )
+    failed.update(
+        exit_code=outcome.returncode,
+        timed_out=outcome.timed_out,
+        stdout=outcome.stdout,
+        stderr=outcome.stderr,
+    )
+    return failed
+
+
 def protocol_error_result(raw: object, message: str) -> Result:
     if not isinstance(raw, dict):
         raise AdapterRequestError(message)
@@ -319,6 +399,10 @@ _HOMEBREW_CANDIDATES = (
     "/opt/homebrew/bin/brew",
     "/usr/local/bin/brew",
 )
+_HOMEBREW_BIN_DIRECTORIES = (
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+)
 
 
 def _brew_candidate_works(runtime: AdapterRuntime, candidate: str) -> bool:
@@ -333,6 +417,19 @@ def resolve_brew_executable(runtime: AdapterRuntime) -> str | None:
     candidates = (runtime.which("brew"), *_HOMEBREW_CANDIDATES)
     for candidate in dict.fromkeys(item for item in candidates if item is not None):
         if _brew_candidate_works(runtime, candidate):
+            return candidate
+    return None
+
+
+def resolve_executable(runtime: AdapterRuntime, executable_name: str) -> str | None:
+    """Resolve an executable through PATH, then standard Homebrew bin directories."""
+
+    candidates = (
+        runtime.which(executable_name),
+        *(runtime.which(f"{directory}/{executable_name}") for directory in _HOMEBREW_BIN_DIRECTORIES),
+    )
+    for candidate in candidates:
+        if candidate is not None and Path(candidate).is_absolute():
             return candidate
     return None
 

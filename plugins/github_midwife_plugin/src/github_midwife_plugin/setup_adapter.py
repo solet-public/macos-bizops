@@ -7,6 +7,8 @@ import sys
 from collections.abc import Callable
 from typing import TextIO
 
+from .existing_install_operations import EXISTING_ALLOWED_PUBLIC_INPUTS
+from .existing_install_operations import operation_handlers as existing_operation_handlers
 from .installation_doctor import READINESS_PUBLIC_INPUT_KEYS, probe_handlers
 from .lm_studio_provisioning import PUBLIC_INPUT_KEYS as LM_STUDIO_PUBLIC_INPUT_KEYS
 from .lm_studio_provisioning import operation_handlers as lm_studio_operations
@@ -33,6 +35,9 @@ _IDENTITY_INPUT_REFS = {
 }
 _ALLOWED_PUBLIC_INPUTS: dict[str, frozenset[str]] = {
     **dict.fromkeys((*lm_studio_operations(), *lm_studio_probes()), LM_STUDIO_PUBLIC_INPUT_KEYS),
+    # The existing-install flow's closed handler rows (design section 3.2); the
+    # create flow never reaches them and they never reach a genesis handler.
+    **EXISTING_ALLOWED_PUBLIC_INPUTS,
     "hydration::shell.install": frozenset({"git_controller_name"}),
     "service_interface::embedding_service.get_embedding_dimension": (
         READINESS_PUBLIC_INPUT_KEYS
@@ -93,10 +98,17 @@ def dispatch_request(request: AdapterRequest, runtime: Runtime) -> JsonObject:
     input_error = _validate_operation_inputs(request)
     if input_error is not None:
         return input_error
-    operation = operation_handlers().get(request.operation_ref)
-    handler = operation
-    if request.phase == "probe":
-        handler = operation or probe_handlers().get(request.operation_ref)
+    if request.operation_ref.startswith("existing::"):
+        # The existing-install vocabulary dispatches through its own closed
+        # table and never touches the create registries (design section 3.2),
+        # so an existing-install request loads none of the create flow's
+        # doctor or platform imports.
+        handler = existing_operation_handlers().get(request.operation_ref)
+    else:
+        operation = operation_handlers().get(request.operation_ref)
+        handler = operation
+        if request.phase == "probe":
+            handler = operation or probe_handlers().get(request.operation_ref)
     if handler is not None:
         try:
             return handler(request, runtime)

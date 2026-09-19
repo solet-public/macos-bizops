@@ -26,6 +26,15 @@ _SECRET_KEY = re.compile(
     r"(?:password|passwd|secret|token|api[_-]?key|private[_-]?key|credential)",
     re.IGNORECASE,
 )
+CREATE_FLOW_ID = "macos.repository_setup"
+EXISTING_INSTALL_FLOW_ID = "existing-install"
+EXISTING_INSTALL_REF_PREFIX = "existing::"
+#: Closed two-member flow set; the value says whether the flow's callables
+#: carry the ``existing::`` vocabulary.  Never an open string.
+FLOW_OPERATION_PAIRING: dict[str, bool] = {
+    CREATE_FLOW_ID: False,
+    EXISTING_INSTALL_FLOW_ID: True,
+}
 _REQUEST_KEYS = {
     "protocol_version",
     "kind",
@@ -87,6 +96,9 @@ class AdapterRequest:
     dry_run: bool
     timeout_seconds: int
     public_inputs: JsonObject
+    # Last, with the create default, so every existing positional construction
+    # keeps its meaning; the existing-install flow sets it explicitly.
+    flow_id: str = CREATE_FLOW_ID
 
     @classmethod
     def from_json(cls, raw_text: str) -> AdapterRequest:
@@ -125,6 +137,7 @@ class AdapterRequest:
             dry_run=cast(bool, raw["dry_run"]),
             timeout_seconds=cast(int, raw["timeout_seconds"]),
             public_inputs=_as_json_object(public_inputs),
+            flow_id=cast(str, raw["flow_id"]),
         )
 
     @staticmethod
@@ -170,10 +183,27 @@ def _validate_request_provenance(raw: dict[str, object]) -> None:
     target = Path(target_text)
     if not target.is_absolute():
         raise AdapterInputError("target must be absolute")
-    if raw["flow_id"] != "macos.repository_setup":
-        raise AdapterInputError("flow_id is invalid")
+    _validate_flow_pairing(raw)
     if _REVISION.fullmatch(_required_string(raw, "flow_source_revision")) is None:
         raise AdapterInputError("flow_source_revision is invalid")
+
+
+def _validate_flow_pairing(raw: dict[str, object]) -> None:
+    """Closed two-member flow set with the operation-ref cross-check (design section 3.3).
+
+    The create flow may only address create-vocabulary callables and the
+    existing-install flow may only address ``existing::`` callables.  Any
+    other flow id, or either flow paired with the other's vocabulary, is an
+    ``AdapterInputError`` (exit 2) before dispatch, exactly as before.  The
+    Manager's ``adapter_protocol`` and the bootstrap adapter's ``protocol``
+    carry the same table; a smoke proves all three agree.
+    """
+    flow_id = raw["flow_id"]
+    if not isinstance(flow_id, str) or flow_id not in FLOW_OPERATION_PAIRING:
+        raise AdapterInputError("flow_id is invalid")
+    operation_ref = _required_string(raw, "operation_ref")
+    if operation_ref.startswith(EXISTING_INSTALL_REF_PREFIX) != FLOW_OPERATION_PAIRING[flow_id]:
+        raise AdapterInputError("operation_ref vocabulary does not match flow_id")
 
 
 def _validate_request_fingerprints(raw: dict[str, object]) -> None:
@@ -348,6 +378,10 @@ def public_string(request: AdapterRequest, key: str) -> str | None:
 
 
 __all__ = [
+    "CREATE_FLOW_ID",
+    "EXISTING_INSTALL_FLOW_ID",
+    "EXISTING_INSTALL_REF_PREFIX",
+    "FLOW_OPERATION_PAIRING",
     "AdapterInputError",
     "AdapterRequest",
     "JsonObject",

@@ -67,3 +67,8 @@ solet_cli/tests/discovered_decision_scenarios.py  # legacy: 2026-09-03 W2-1
 # This lane's D1 delta did not introduce or worsen the C-grade MI. Proper remediation:
 # extract that selection family into a dedicated module in a separately reviewed unit.
 solet_cli/src/solet_manager/plan_builder.py  # legacy: 2026-09-03 W2-1
+
+# Added 2026-09-17 under rul_11fcd2ec-d5ef-4504-80f9-f79c4bfab5a7;
+# iss_a2bba79e-ae59-4e68-b363-2133b4f585db tracks complexity reduction.
+quality_gates/macos_bizops_identity_gate.py  # owner: rul_11fcd2ec-d5ef-4504-80f9-f79c4bfab5a7 reason: iss_1f9be587-7543-4eeb-b199-44d9403f9ecb tracked debt expires: 2026-12-17
+quality_gates/tests/macos_bizops_identity_gate_smoke.py  # owner: rul_11fcd2ec-d5ef-4504-80f9-f79c4bfab5a7 reason: iss_1f9be587-7543-4eeb-b199-44d9403f9ecb tracked debt expires: 2026-12-17

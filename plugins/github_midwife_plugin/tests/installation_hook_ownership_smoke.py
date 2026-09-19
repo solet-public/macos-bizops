@@ -73,6 +73,28 @@ def _env(receipt: Path, solet: str | None = None) -> dict[str, str]:
     }
 
 
+# Every identity-bearing variable the shipped hooks read (coordination_owner's
+# _managed() set, the heartbeat's marker/instance/wake-CLI vars, wake_waiter's
+# transport var) sits under one of these prefixes. The subprocess legs below
+# must start from a base with NONE of them: this smoke runs inside real fleet
+# workers (the r43 born-clone gate), whose own launch exports the full set --
+# measured 2026-09-19, an ambient AGENT_CONTEXT_GAUGE_REPORTER_PATH pointing at
+# the worker's real checkout redirected _selected_root() away from the fixture
+# receipt and the hook correctly refused ("selected root is not recorded in
+# receipt"), so no stamp was written and owner_stamps[0] raised IndexError.
+# Stripping by prefix, not by name, keeps the next new identity variable from
+# reopening the same hole.
+_IDENTITY_ENV_PREFIXES = ("AGENT_", "SOLET_", "FLEET_")
+
+
+def _hermetic_environ() -> dict[str, str]:
+    """``os.environ`` with every ambient fleet-identity variable removed."""
+    return {
+        key: value for key, value in os.environ.items()
+        if not key.startswith(_IDENTITY_ENV_PREFIXES)
+    }
+
+
 class _ProbeRuntime:
     def __init__(self, home: Path, selector: str) -> None:
         self.home = home
@@ -222,7 +244,7 @@ def main() -> int:
         bridge.write_text("#!/bin/sh\nprintf '%s\\n' '{\"result\": {\"success\": true}}'\n", encoding="utf-8")
         bridge.chmod(0o755)
         marker = root / "markers"
-        env = os.environ | _env(receipt) | {
+        env = _hermetic_environ() | _env(receipt) | {
             "AGENT_HEARTBEAT_MARKER_DIR": str(marker),
             "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
         }
@@ -251,7 +273,7 @@ def main() -> int:
         watcher = fake_bin / "watcher"
         watcher.write_text(f"#!/bin/sh\ntouch {watcher_called}\n", encoding="utf-8")
         watcher.chmod(0o755)
-        partial_env = os.environ | {
+        partial_env = _hermetic_environ() | {
             "AGENT_SESSION_ID": "partial-session",
             "AGENT_WAKE_CLI": str(watcher),
             "FLEET_TRANSPORT": "watch",

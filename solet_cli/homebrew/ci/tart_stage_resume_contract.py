@@ -31,6 +31,10 @@ _METADATA_KEYS = frozenset(
         "seed_commit",
         "seed_tree_hash",
         "seed_profile",
+        "seed_channel_id",
+        "seed_provenance",
+        "existing_install_contract",
+        "allowed_repository_migrations",
     }
 )
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")

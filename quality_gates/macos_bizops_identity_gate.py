@@ -214,6 +214,8 @@ f8721c9a94ab0e80a1e3eef2895eaf94225638b9ccbc1cabd798b56b957635ac
 # working-tree scope onto the base and reproduces exactly what staging will
 # show:  quality_gates/candidate_tree.py --scope-file <paths> --rename-file
 # <empty> --run-identity-gate
+# 2026-09-17: two self-path references from tracked debt lines under
+# rul_11fcd2ec-d5ef-4504-80f9-f79c4bfab5a7, not identity carriers.
 _NEGATIVE_LINE_ANCHORS: frozenset[str] = frozenset(
     """\
 04d9c55118bf4d05f56fea80e342b4a38ec7577f04fbdb962d1e120c63206fbf 0970d75540f30fb0c3465e6e81a4b523ee7246c78e8e5d881b3ed245f923aea4 0d7ffbf20386408b821d12f3500a410f2b74e47d58f2ac2637edd68e663c0116 12c4cf0ee3a19e4e0f07adeb35718a853cca46d18f0cf9d59dcf6ad1d9f9b353 1643a53c710f1d677beae38d81c6faec9353aaf46d53f03d7670de97608edcd3 17ca293d9799c97355e079e72d93d0716cdefba78fb159e54771e2b56de5ed5f 2a1ec7939dae525abcb41a3d0f742167dabbf3ae98f491f7b17e4a1bacbe0647 52a648d067f50c05fde91107280118bf24339e33c707a56c60a951cef37e4444 79dc587e25081639ab6545f53fa0e3d9e8c7d4555d610ecbf32eebefe440da8d 8269b5cc69592a373210d50aeb40e8225dd9450af36d84ee3ee90b1f232f41d0
@@ -222,6 +224,7 @@ cc20d5c4de436973665467c3b529443a46cb96a794c9961578f7788a5ca41a67 d3c1133895a58f1
 903d6aa30acbddd685739aa03ef45f6afef9a1c0f964992833570c36352b19ca 9e20ff0656d72222916456cab08302c2ff020df03938f523a52c7d3ba687ac96 b268d148968998a891bbf120c756451680d57d3fc070d55a65544d80dfbc6ffd b0c3536edef73c8cf12d5a7946268240db31d6ac3d831f99c10791cb145c5ea6 d1f3d3f9eb073a52d4f20e13e66e69b2f75fe4236c37fbb8370373f6f12a6f99 2d1c0fd911701ec9c8de397ed1e76a4651ce263c0e4b0ac03fc479870572563b 9abe2b4ea7719701096c329aa7bc9eceed407765b0771b95fc3a3d76e6cf91c4 e05ebb66e6136aba414bf69122a332ea68253e4d2152cdbaf8360c680800ab41
 631e6703d283972fbc82879e9e6f8624781ca7c09d425429f543edf572899909 7c63f7758db563e7b5b1c5a39f350a7381502338ee9617ae57b17033471485e8
 0d36d0a0038a227558630e25113288b034adbbc327f41a20c8581169e271165e efc64c2fe6621e54f7d47d744c58ef025ae3d1a86b6f3553a0c74151f61d4e71 d440090e167e6a4ddae7699d54097e4d530c61fd720113122992e312b2fa5358
+f82bf6a8d635f75b5991903365cca0f4a79de666d581ccacc44084558709a6b1 5df86ce9def78a7fe06563c59edd21e03f146376661c8598aee776e2d3d10bb4
 """.split()
 ) - frozenset(
     {
@@ -845,7 +848,9 @@ def scan_paths(repo_root: Path, paths: tuple[str, ...]) -> tuple[Occurrence, ...
         try:
             source = path.read_text(encoding="utf-8")
             lines = source.splitlines()
-        except (OSError, UnicodeError) as exc:
+        except UnicodeDecodeError:  # Binary fixtures have no textual census tokens.
+            continue
+        except OSError as exc:
             raise RuntimeError(f"census manifest path is unreadable: {relpath}: {exc}") from exc
         logical_contexts = _logical_contexts(relpath, lines)
         for index, line in enumerate(lines):

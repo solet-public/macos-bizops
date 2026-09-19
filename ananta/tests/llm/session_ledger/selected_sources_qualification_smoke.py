@@ -61,6 +61,24 @@ def _record(*, target: Path) -> SelectedSourceRecord:
     )
 
 
+class _ClaudeCodeLocalLedger:
+    """Minimal ledger double for the persisted selected-source round trip."""
+
+    def __init__(self) -> None:
+        self.queried_source_kinds: list[str] = []
+
+    def list_sources(self) -> dict[str, object]:
+        return {"sources": [{"source_id": "src_claude", "source_kind": "claude_code_local"}]}
+
+    def census(self) -> dict[str, object]:
+        return {"sources": [{"source_kind": "claude_code_local", "session_count": 1}]}
+
+    def list_events_by_source_window(self, *, source_kind: str, limit: int) -> dict[str, object]:
+        self.queried_source_kinds.append(source_kind)
+        _check(limit == 1, "qualification uses one bounded registry retrieval")
+        return {"events": [{"id": "evt_claude"}]}
+
+
 def _manager_transaction_load_failure(
     *,
     target: Path,
@@ -120,7 +138,7 @@ def test_selected_and_declined_sources_are_separate() -> None:
                 "retrieval_ok": True,
             },
             {
-                "source": "claude_local",
+                "source": "claude_code_local",
                 "selected": False,
                 "consented": False,
                 "registered": False,
@@ -206,11 +224,11 @@ def test_manager_transaction_loader_is_schema_validated() -> None:
             "public_inputs": {},
             "decisions": {
                 "setup_profile": "macos-bizops",
-                "session_sources": ["codex_local"],
+                "session_sources": ["claude_code_local"],
             },
             "consents": {
-                "codex_session_ingestion_consent": True,
-                "claude_session_ingestion_consent": False,
+                "codex_session_ingestion_consent": False,
+                "claude_session_ingestion_consent": True,
             },
             "resolution_evidence": [],
         }
@@ -239,6 +257,38 @@ def test_manager_transaction_loader_is_schema_validated() -> None:
             transaction_path = ManagerPaths.resolve().transaction_path("newborn")
             write_transaction(transaction_path, transaction)
             loaded = load_selected_source_record(target=target, name="newborn")
+            ledger = _ClaudeCodeLocalLedger()
+            qualified = SessionLedgerService.qualify_selected_sources(
+                cast(SessionLedgerService, ledger),
+                target=str(target),
+                name="newborn",
+                answers_fingerprint=transaction.answers_fingerprint,
+            )
+            _check(
+                ledger.queried_source_kinds == ["claude_code_local"],
+                "persisted Claude decision probes the registered Claude Code source kind",
+            )
+            _check(
+                qualified["sources"] == [
+                    {
+                        "source": "codex_local",
+                        "selected": False,
+                        "consented": False,
+                        "registered": False,
+                        "backfill_count": 0,
+                        "retrieval_ok": False,
+                    },
+                    {
+                        "source": "claude_code_local",
+                        "selected": True,
+                        "consented": True,
+                        "registered": True,
+                        "backfill_count": 1,
+                        "retrieval_ok": True,
+                    },
+                ],
+                "persisted Claude decision round-trips through the registered source lookup",
+            )
             legacy = _legacy_v1_transaction_document(transaction)
             _check(
                 "probe_activations" not in legacy,
@@ -333,7 +383,7 @@ def main() -> int:
     test_selected_and_declined_sources_are_separate()
     test_fingerprint_mismatch_withholds_selection_claims()
     test_manager_transaction_loader_is_schema_validated()
-    print("selected_sources_qualification_smoke: 43 checks passed")
+    print("selected_sources_qualification_smoke: passed")
     return 0
 
 

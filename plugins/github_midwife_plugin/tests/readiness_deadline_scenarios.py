@@ -561,7 +561,7 @@ def _authority_controls(root: Path, target: Path) -> dict[str, JsonValue]:
     _replace_first_timeout_maximum(adapter_schema)
     adapter_schema_path.write_text(json.dumps(adapter_schema), encoding="utf-8")
     unrelated_bundle = ContractBundle.load(source_revision="a" * 40, directory=unrelated)
-    assert startup_readiness_budget(unrelated_bundle).effective_wait_seconds == 115
+    assert startup_readiness_budget(unrelated_bundle).effective_wait_seconds == 90
 
     invalid_errors: list[str] = []
     mutations = (
@@ -592,8 +592,8 @@ def _authority_controls(root: Path, target: Path) -> dict[str, JsonValue]:
     assert all("executor_contracts.start_command" in error for error in invalid_errors)
     return {
         "changed_parent_seconds": 140,
-        "changed_wait_seconds": 135,
-        "unrelated_timeout_wait_seconds": 115,
+        "changed_wait_seconds": 110,
+        "unrelated_timeout_wait_seconds": 90,
         "invalid_cases": len(invalid_errors),
     }
 

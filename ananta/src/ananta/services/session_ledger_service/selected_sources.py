@@ -34,7 +34,7 @@ class SelectedSourceRecordError(RuntimeError):
 
 _SOURCE_SPECS = (
     ("codex_local", "codex_session_ingestion_consent", "codex_local"),
-    ("claude_local", "claude_session_ingestion_consent", "claude_code_local"),
+    ("claude_code_local", "claude_session_ingestion_consent", "claude_code_local"),
 )
 
 

@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import IO
 
+from solet_setup_contracts import canonical_sha256
+
 from .errors import StateError
 from .models import JsonValue
 from .private_json import load_json_object
@@ -23,6 +25,8 @@ __all__ = [
     "ensure_private_directory",
     "instance_lock",
     "load_json_object",
+    "read_exact_json",
+    "write_content_addressed_json",
 ]
 
 
@@ -76,9 +80,23 @@ def atomic_replace_bytes(path: Path, value: bytes, *, mode: int) -> None:
 
 
 def ensure_private_directory(path: Path) -> None:
-    """Create a user-owned 0700 directory and refuse unsafe existing state."""
+    """Create a user-owned 0700 directory and refuse unsafe existing state.
 
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    Every MISSING ancestor is created 0700 too: ``mkdir(parents=True)`` applies
+    ``mode`` to the leaf only and gives intermediate directories the umask
+    default, so on a cold host the first ``import --yes`` used to create
+    ``state/locks`` at 0700 under a 0755 ``state`` and then refuse its own
+    inventory write as "broader than 0700" (Step 7, CH-3 measured).  Existing
+    ancestors are never re-moded.
+    """
+
+    missing: list[Path] = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o700, exist_ok=True)
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
         raise StateError(f"state directory is not a real directory: {path}")
@@ -114,6 +132,25 @@ def atomic_write_json(path: Path, value: dict[str, JsonValue]) -> None:
         except OSError:
             pass
         raise
+
+
+def read_exact_json(path: Path, expected: dict[str, JsonValue]) -> None:
+    """Prove a private Manager state file contains exactly the expected value."""
+    if load_json_object(path) != expected:
+        raise StateError(f"manager state does not match expected bytes: {path}")
+
+
+def write_content_addressed_json(path: Path, value: dict[str, JsonValue], digest: str) -> None:
+    """Write immutable Manager cache bytes, refusing an existing mismatch."""
+    if not digest.startswith("sha256:") or canonical_sha256(value) != digest:
+        raise StateError("content-addressed cache digest is invalid")
+    existing = load_json_object(path, missing_ok=True)
+    if existing is not None:
+        if existing != value:
+            raise StateError("content-addressed cache entry differs from requested bytes")
+        return
+    atomic_write_json(path, value)
+    read_exact_json(path, value)
 
 
 @contextmanager

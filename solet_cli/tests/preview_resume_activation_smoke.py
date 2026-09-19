@@ -5,8 +5,10 @@ from __future__ import annotations
 import sys
 import tempfile
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -16,10 +18,11 @@ from solet_manager.contracts import ContractBundle  # noqa: E402
 from solet_manager.errors import StateError  # noqa: E402
 from solet_manager.flow import initial_probe_activations, initial_stage_probe_statuses  # noqa: E402
 from solet_manager.journal_migrations import activation_site_key  # noqa: E402
-from solet_manager.models import CheckpointStatus, JsonValue  # noqa: E402
+from solet_manager.models import CheckpointStatus, CommandResult, ExitCode, JsonValue  # noqa: E402
 from solet_manager.paths import ManagerPaths  # noqa: E402
+from solet_manager.registry import InstanceRegistry  # noqa: E402
 from solet_manager.release_lock import SeedLock  # noqa: E402
-from solet_manager.transaction import Transaction, write_transaction  # noqa: E402
+from solet_manager.transaction import Transaction, canonical_sha256, write_transaction  # noqa: E402
 
 _CONTRACTS = (
     Path(__file__).resolve().parents[2]
@@ -203,12 +206,96 @@ def _assert_tampered_probe_map_stays_corrupt(
         raise AssertionError("tampered stage-probe map must fail parse as corrupt_state")
 
 
+def _resume_transaction_with_matching_identity(
+    bundle: ContractBundle,
+    *,
+    target: Path,
+) -> tuple[CreateConfig, Transaction]:
+    transaction = _transaction(bundle, target=target)
+    config = CreateConfig(
+        name=transaction.name,
+        target=target,
+        autostart=True,
+    )
+    return config, replace(
+        transaction,
+        input_fingerprint=canonical_sha256(config.to_identity_dict()),
+    )
+
+
+def _assert_absent_target_resume_renders_permission_preflight(
+    bundle: ContractBundle,
+    root: Path,
+) -> None:
+    target = root / "Solets" / "absent-resume"
+    config, transaction = _resume_transaction_with_matching_identity(bundle, target=target)
+    paths = ManagerPaths.resolve(explicit_home=root / "manager", home=root)
+    with (
+        patch.object(preview_engine.ContractBundle, "load", return_value=bundle) as load,
+        patch("solet_manager.permission_preflight.display_session_attached", return_value=False),
+    ):
+        preview = preview_engine._resume_preview(  # pyright: ignore[reportPrivateUsage]
+            paths=paths,
+            registry=InstanceRegistry(paths.registry_path),
+            config=config,
+            transaction=transaction,
+            selections={},
+            decision_source="flag",
+            sources={},
+        )
+    preflight = preview.data.get("permission_preflight")
+    assert isinstance(preflight, dict) and isinstance(preflight.get("items"), list)
+    assert load.call_args is not None
+    assert load.call_args.kwargs == {
+        "source_revision": transaction.flow_source_revision,
+        "expected_digest": transaction.flow_contract_digest,
+        "resume_compatibility": True,
+    }
+
+
+def _assert_target_exists_resume_keeps_target_contract_source(
+    bundle: ContractBundle,
+    root: Path,
+) -> None:
+    target = root / "Solets" / "target-exists-resume"
+    target_contracts = target / "plugins" / "github_midwife_plugin" / "knowledge_base"
+    target_contracts.mkdir(parents=True)
+    for source in _CONTRACTS.iterdir():
+        if source.is_file():
+            (target_contracts / source.name).write_bytes(source.read_bytes())
+    config, transaction = _resume_transaction_with_matching_identity(bundle, target=target)
+    paths = ManagerPaths.resolve(explicit_home=root / "manager", home=root)
+    expected = CommandResult(
+        kind="fixture",
+        status="preview_ready",
+        message="fixture",
+        exit_code=ExitCode.OK,
+    )
+    with patch.object(preview_engine, "setup_preview", return_value=expected) as setup:
+        preview = preview_engine._resume_preview(  # pyright: ignore[reportPrivateUsage]
+            paths=paths,
+            registry=InstanceRegistry(paths.registry_path),
+            config=config,
+            transaction=transaction,
+            selections={},
+            decision_source="flag",
+            sources={},
+        )
+    assert preview is expected
+    assert setup.call_args is not None
+    resumed_bundle = setup.call_args.kwargs["bundle"]
+    assert isinstance(resumed_bundle, ContractBundle)
+    assert resumed_bundle.directory == target_contracts.resolve()
+
+
 def main() -> int:
     bundle = ContractBundle.load(source_revision="a" * 40, directory=_CONTRACTS)
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         _assert_activation_drift_reconciles(bundle, root)
         _assert_tampered_probe_map_stays_corrupt(bundle, root)
+        _assert_absent_target_resume_renders_permission_preflight(bundle, root)
+        _assert_target_exists_resume_keeps_target_contract_source(bundle, root)
     print("preview_resume_activation_smoke OK")
     return 0
 

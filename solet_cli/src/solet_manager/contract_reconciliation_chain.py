@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .contract_reconciliation_rules import AnswerValueMigration
 from .contracts import ContractReconciliation, StageProbeMapping
 from .errors import StateConflictError
 from .transaction import Transaction
@@ -116,22 +117,28 @@ def compose_reconciliation_chain(
         raise StateConflictError(
             "chained reconciliation with first-use probe migrations requires a direct declaration"
         )
-    mappings, reset_ids = _compose_chain_data(chain)
+    mappings, reset_ids, answer_migrations = _compose_chain_data(chain)
     _validate_unique_destinations(mappings)
-    return _build_composed_reconciliation(chain, mappings, reset_ids)
+    return _build_composed_reconciliation(chain, mappings, reset_ids, answer_migrations)
 
 
 def _compose_chain_data(
     chain: tuple[ContractReconciliation, ...],
-) -> tuple[dict[tuple[str, str, str], tuple[str, str, str]], list[str]]:
+) -> tuple[
+    dict[tuple[str, str, str], tuple[str, str, str]],
+    list[str],
+    tuple[AnswerValueMigration, ...],
+]:
     mappings: dict[tuple[str, str, str], tuple[str, str, str]] = {}
     reset_ids: list[str] = []
+    answer_migrations: list[AnswerValueMigration] = []
     for item in chain:
         mappings = compose_stage_probe_mappings(mappings, item.stage_probe_mappings)
         for operation_id in item.operation_statuses_to_reset:
             if operation_id not in reset_ids:
                 reset_ids.append(operation_id)
-    return mappings, reset_ids
+        answer_migrations.extend(item.answer_value_migrations)
+    return mappings, reset_ids, tuple(answer_migrations)
 
 
 def _validate_unique_destinations(
@@ -145,6 +152,7 @@ def _build_composed_reconciliation(
     chain: tuple[ContractReconciliation, ...],
     mappings: dict[tuple[str, str, str], tuple[str, str, str]],
     reset_ids: list[str],
+    answer_migrations: tuple[AnswerValueMigration, ...],
 ) -> ContractReconciliation:
     first = chain[0]
     last = chain[-1]
@@ -160,6 +168,7 @@ def _build_composed_reconciliation(
             if source != destination
         ),
         operation_statuses_to_reset=tuple(reset_ids),
+        answer_value_migrations=answer_migrations,
     )
 
 

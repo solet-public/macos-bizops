@@ -1,4 +1,4 @@
-"""Closed parsing for first-use inactive probe reconciliation rules."""
+"""Closed parsing for specialized reconciliation rules."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ _CITATION_KEYS = frozenset(
     {"manifest_entry_id", "source_digest", "destination_digest"}
 )
 _IDENTITY_KEYS = frozenset({"stage_id", "boundary", "probe_id"})
+_ANSWER_MIGRATION_KEYS = frozenset({"decision_id", "from_value", "to_value"})
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,41 @@ class FirstUseInactiveProbeMigration:
     manifest_entry_id: str
     source_digest: str
     destination_digest: str
+
+
+@dataclass(frozen=True)
+class AnswerValueMigration:
+    """One explicit normalized-decision value rewrite at a contract boundary."""
+
+    decision_id: str
+    from_value: str
+    to_value: str
+
+
+def parse_answer_value_migrations(value: JsonValue) -> tuple[AnswerValueMigration, ...]:
+    """Parse an unambiguous set of persisted-answer rewrites."""
+
+    if not isinstance(value, list):
+        raise ContractError("contract reconciliation answer migrations must be an array")
+    migrations = tuple(_parse_answer_value_migration(item) for item in value)
+    if len({(item.decision_id, item.from_value) for item in migrations}) != len(migrations):
+        raise ContractError("contract reconciliation answer migrations must be unique")
+    return migrations
+
+
+def _parse_answer_value_migration(value: JsonValue) -> AnswerValueMigration:
+    if not isinstance(value, dict) or frozenset(value) != _ANSWER_MIGRATION_KEYS:
+        raise ContractError("contract reconciliation answer migration rule is invalid")
+    decision_id = _required_string(value, "decision_id", "answer migration decision")
+    from_value = _required_string(value, "from_value", "answer migration source value")
+    to_value = _required_string(value, "to_value", "answer migration destination value")
+    if from_value == to_value:
+        raise ContractError("contract reconciliation answer migration must change its value")
+    return AnswerValueMigration(
+        decision_id=decision_id,
+        from_value=from_value,
+        to_value=to_value,
+    )
 
 
 def parse_first_use_inactive_probe_migrations(

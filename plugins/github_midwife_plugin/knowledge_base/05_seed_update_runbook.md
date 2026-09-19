@@ -8,7 +8,16 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:client-deployment, consumer_profile:both
 
-Embedding Description: Agent-facing runbook for applying a newer seed release to an ALREADY-LIVE seed-born solet without losing its state — how an adopter learns a new re-mint was published in the first place (subscribing to the seed repository's GitHub releases, Watch → Custom → Releases, rather than polling or waiting to be told) and why that subscription must be re-pointed at the new repository when the seed moves homes or it goes silently stale, why a fast-forward git pull from the same seed repo is the default update path and teardown-plus-re-birth is only the fallback, the exact sequence (health probe, pull --ff-only, restart preferring apply_manifest's zero-downtime blue-green swap over a bare LaunchAgent restart when a router is present, startup quiescence wait, automatic knowledge-base re-ingest for changed files), when the virtual environment needs attention (editable installs make pulled code live at restart; only NEW plugins or changed dependencies need a pip step), configuring the business-connector export/workspace root on an already-hydrated install when a release adds or extends connector containment (the one-time gap an existing clone never closes on its own), re-running the changed hydration steps afterward — including adding a release-added plugin to the clone's profile manifest and running its hydration guidance so it actually activates — the four stale copies a restart alone never refreshes (the installed Claude Code plugin's version-keyed CACHE copy, an already-open MCP bridge subprocess, an armed watcher, and knowledge-base chunks indexed from files the release removed — a deletion-only KB change is invisible to the startup staleness check and needs an explicit knowledge-service re-install with a negative-search verification) with the verifiable diff-based refresh check for the plugin cache, the one-time `git remote set-url` re-point when the seed repository moves to a new home (taken after the pull, verified with a fetch, rolled back to the old URL if the new one is unreachable), the solet rename migration's post-apply sequence (backfilling a pre-June LaunchAgent plist's missing StandardOutPath/StandardErrorPath log redirection as a stopgap versus re-running the autostart install verb as the durable fix, renaming the HOMUNCULUS_* environment keys inside `~/.claude.json`'s MCP server entries and why that step refuses outright while any Claude Code process is still running, and running `--scan-stale`'s report-only sweep for surviving old-name references split into historical/leave-alone, live-process-state/relaunch-to-fix, and fixable/safe-to-edit-directly categories with the memory-fact filename-plus-frontmatter-plus-backlink triple that a blind rename would break), and the verification checklist including the watcher role-claim ground truth.
+Embedding Description: Agent-facing runbook for applying a newer seed release to an ALREADY-LIVE seed-born solet without losing its state, now led by the Solet Manager path — install the Manager from its Homebrew tap, classify the clone with `solet-manager inspect`, enroll it once with `solet-manager import`, then for every release run `solet-manager update --dry-run` to read the preview (which lists the genesis-written files and untracked genesis paths it will preserve, the exact fast-forward, the dependency, migration, hydration and lifecycle operations it will perform) and `--yes --approval-fingerprint` to apply it through the final doctor and promotion, with `solet-manager doctor` as the read-only oracle and `solet-manager reconcile` as the one answer to a terminal update — including the exact refusal vocabulary (`history_diverged`, `tracked_overlap_present`, `staged_changes_present`, `tracked_shape_changed`, `executed_code_modified`, `git_metadata_present`, `host_requirement_missing`, `source_identity_unproven`) and what each exit code means, the six steps that stay manual and why (the target `AGENTS.md`/`CLAUDE.md` hydration block and launchers, the first-time export-root answer, quitting Claude Code before the rename migration can rewrite `~/.claude.json`, relaunching open clients and re-arming watchers, adding a release-added plugin to the profile manifest, connector three-read and feedback-item checks), how an adopter learns a new re-mint exists (the formula upgrade plus the GitHub release subscription, re-pointed when the seed moves homes), and the legacy manual procedure retained verbatim as recovery for clones the Manager classifies as not importable (diverged history, development checkout) or for an instance the operator chooses to repair by hand.
+
+> **Status (2026-09-19, existing-solet import/update Step 7):** the Manager
+> path (Part A) is the update procedure. The manual procedure this document
+> used to lead with is retained verbatim as Part C, **legacy recovery**: it
+> applies only to a clone `solet-manager inspect` classifies as not
+> `allowed_after_import` (`diverged_seed_history`, `development_checkout`),
+> or to a `needs_attention` instance the operator chooses to repair by hand.
+> Part B names the steps no Manager surface owns yet and why. Part D is the
+> release history, narrative only.
 
 ## When to use this runbook
 
@@ -19,10 +28,12 @@ newer seed release has been published. Do not use it for first-time setup
 
 ## How you learn a new release exists
 
-Everything below assumes you already know a re-mint was published. Nothing
-above this line tells you when to come back — this section is that step,
-and it belongs before the update sequence because every other step in this
-runbook is unreachable until this one fires.
+The Manager learns about releases through its own formula: `brew upgrade
+solet-public/tap/solet` installs the seed lock naming the new release, and
+`solet-manager update <name> --dry-run` then reports the candidate as
+`available` (the doctor's section 16, `installed_descriptor_release`, says
+the same thing from the read-only side). The GitHub subscription remains
+the human notification channel that tells you to run that upgrade at all:
 
 **Subscribe to the seed repository's releases on GitHub**: **Watch → Custom
 → Releases** at the repository this clone was born from, not the default
@@ -31,29 +42,182 @@ runbook is unreachable until this one fires.
 the trigger for this runbook. Do not wait to be told by a human, and do not
 poll the repository by hand — the subscription is the mechanism.
 
-**If this update includes Step 2a below (the seed repository moved to a new
-home), re-subscribe at the new repository as part of that same step, not as
-an afterthought.** A subscription still pointed at the old repository goes
-silent the moment the move takes effect — no error, no missed-notification
-signal, just nothing arriving again. That is a worse failure than never
-subscribing at all, because it looks identical to "no new releases have
-shipped" from where you sit. Watch the new repository in the same sitting
-you re-point `origin`, not later.
+**When the seed repository moves to a new home, re-subscribe at the new
+repository in the same sitting.** A subscription still pointed at the old
+repository goes silent the moment the move takes effect — no error, no
+missed-notification signal, just nothing arriving again. That is a worse
+failure than never subscribing at all, because it looks identical to "no new
+releases have shipped" from where you sit. The Manager performs the
+`origin` re-point itself, as a fingerprinted canonical-channel action, only
+when the new release's descriptor declares the old URL in
+`allowed_repository_migrations`; the subscription it cannot move for you.
 
-## The one decision: pull-update or re-birth
+## The one decision: Manager path or re-birth
 
-**Pull-update is the default.** Seed releases are append-only: a re-mint adds
-a commit to the SAME seed repository the clone was born from, fast-forward
-only, never rewriting history. The clone's `origin` remote already points
-there, so `git pull` brings the new code while everything the solet has
-become — its database, memories, knowledge, credentials, LaunchAgents —
-stays untouched.
+**The Manager path is the default.** Seed releases are append-only: a
+re-mint adds a commit to the SAME seed repository the clone was born from,
+fast-forward only, never rewriting history. `solet-manager inspect --target
+<clone> --channel stable` classifies the clone; every real clone born by
+genesis or `solet create` classifies as `local_changes_present` with
+`allowed_after_import`, and its reason codes (`tracked_changes`,
+`untracked_paths`) name the local state the preview will weigh, not a
+problem. `solet-manager update <name> --dry-run` is the actual gate:
+`preview_ready`, or an exact reason with the paths it applies to.
 
 **Re-birth is the fallback, not the routine.** Choose teardown plus re-birth
-only when the clone's history has diverged from the seed repo (the pull below
-refuses), the release notes explicitly require a fresh birth, or the operator
-wants a clean-slate instance. Re-birth resets accumulated state; say that
-plainly to the operator before choosing it.
+only when `inspect` answers `diverged_seed_history` or
+`development_checkout`, the release notes explicitly require a fresh birth,
+or the operator wants a clean-slate instance. Re-birth resets accumulated
+state; say that plainly to the operator before choosing it. A refusal from
+`update --dry-run` is not a re-birth signal: it names a repair.
+
+## Part A — the Manager path
+
+One block of six commands. Every command is target-read-only except
+`import --yes` (Manager state only; no target byte) and `update --yes`
+(the journaled operations the preview listed, nothing else).
+
+```bash
+brew install solet-public/tap/solet                       # once; brew upgrade for every later release
+solet-manager inspect --target <clone> --channel stable   # classify; exit 3 attention_required is the normal answer for a real clone
+solet-manager import <name> --target <clone> --channel stable --dry-run
+solet-manager import <name> --target <clone> --channel stable --yes --approval-fingerprint <fingerprint from the dry-run>
+solet-manager doctor <name>                               # exit 0 verified means the enrollment is sound
+solet-manager update <name> --dry-run                     # the source preview: exact fast-forward, preserved local state
+solet-manager update <name> --yes --approval-fingerprint <fingerprint>            # source stage: fetch, fast-forward exact candidate
+solet-manager update <name> --dry-run                     # the runtime preview: dependencies, migrations, hydration, lifecycle
+solet-manager update <name> --yes --approval-fingerprint <runtime fingerprint>    # runtime stage through the final doctor and promotion
+solet-manager doctor <name>                               # exit 0 verified: the update is over
+```
+
+The update is over only when the journal reads `promoted` and the
+inventory row is `verified`; `update --yes` continues past the runtime
+stages through the final doctor and promotion in the same invocation, and
+tells you the readiness result itself — there is no separate "restart and
+wait".
+
+**What the preview discloses, and what it refuses.** The `local_state`
+group of the source preview lists three things a real clone always carries:
+*preserved local modifications* (the genesis rewrite of
+`root_manifest.yaml`, the hydration blocks in `AGENTS.md`/`CLAUDE.md`,
+`NOTICE` — unstaged, content-only edits to tracked files the candidate does
+not touch), *committed local state* (the untracked `.gitignore`, `.solet/`,
+`knowledge_bases/*` symlinks, `client/` — paths the update commits to leave
+byte-identical, verified after every operation), and the *preserved
+surface* (`profile/**`, disclosed with kind, mode and size, never digested,
+never committed). None of these is a refusal. The preview refuses only:
+
+| Reason (`data.topology.reasons`, exit 3) | Meaning | Repair |
+|---|---|---|
+| `history_diverged` | the clone's HEAD is not an ancestor of the candidate | re-birth, or Part C if the operator wants to hand-merge |
+| `tracked_overlap_present` | the candidate changes a file this installation modified locally | keep your lines by hand: `git diff <baseline>..<candidate> -- <path>`, then preview again; the Manager never overwrites, stashes or resets a local change |
+| `staged_changes_present` | something is in the index | `git restore --staged <paths>` is the operator's call; the Manager never runs it |
+| `tracked_shape_changed` | a tracked path was deleted, retyped, mode-changed or symlinked | restore it to a content-only edit of the shipped regular file |
+| `executed_code_modified` | an edit under `bootstrap.py`, `bootstrap_adapter/`, an editable-installed distribution or a roster plugin | restore it; the Manager will not execute a modified target |
+| `git_metadata_present` | `.gitattributes`/`.gitmodules` anywhere, or an edited tracked root `.gitignore` | remove it; it changes how the fast-forward writes files |
+| `preserved_surface_in_transition` | the candidate ships something under `profile/` | seed-side regression; file feedback, do not repair the clone |
+| `source_identity_unproven` | `origin` names a URL the descriptor does not declare as an allowed migration | Part C, Step 2a (manual re-point) |
+| `host_requirement_missing` / `host_requirement_unknown` | the host lacks Python 3.13 (`data.host` names the row) | `brew install python@3.13`, then preview again |
+
+**Exit codes.** `0` — `preview_ready`, `imported`, `source_advanced`,
+`promoted`, `verified`: proceed. `3` — `awaiting_user`/`attention_required`/
+`incomplete`: read `data.topology.reasons` (preview), `data.classification`
+(inspect) or the first `failed`/`missing`/`unknown` row (doctor); nothing
+was written to the target. The doctor also answers `3` with
+`managed_identity_drift` when the clone's HEAD is not where the Manager left
+it, with the full report still rendered. `1` — a required doctor check
+failed on evidence (the row names the reason). `2` — the target is not a
+Solet checkout at all (`target_identity_invalid`, an identity substituted
+under the enrolled path): stop and ask. A terminal update (`blocked`, `failed`) has one named answer:
+`solet-manager reconcile <name> --dry-run` plans the successor, `--yes
+--approval-fingerprint` mints it, `--abandon --yes` abandons or retires
+before the fast-forward, `--release-pointer --yes` releases a stale pointer.
+`reconcile` after a promotion answers `no_active_update` (exit 3): that is
+the healthy state, not an error.
+
+**What each stage owns** (the manual steps of Part C, by owner):
+
+- Step 1 probe → `solet-manager doctor <name>` (enrolled) or `inspect` (not
+  yet): sections 2 (topology and local state), 9 (service), 16 (release
+  availability). "Hydration-generated files showing as modified is normal"
+  becomes: the Manager lists them as preserved local modifications and the
+  untracked genesis files as committed local state, and refuses only the
+  table above.
+- Step 2 pull → `update --dry-run`, review, `--yes`: the exact candidate
+  fast-forward; `history_diverged` and `tracked_overlap_present` are the
+  refusals, with paths.
+- Step 2a re-point origin → performed as a fingerprinted canonical-channel
+  action only when the descriptor's `allowed_repository_migrations`
+  declares the old URL; otherwise `source_identity_unproven`, and Part C's
+  manual block is the recovery.
+- Step 3 venv → `dependencies_reconcile` probes the closure and installs
+  exactly the missing declared pieces; the runtime preview lists them.
+- Step 3a rename migration → `migration_solet_rename` (a `backup_required`
+  migration; pass `--backup-checkpoint`), which also backfills the plist
+  log redirection through `autostart_reconcile` and rewrites the
+  `HOMUNCULUS_*` keys in `~/.claude.json` when no Claude Code process is
+  running — while one runs it returns `blocked coding_agent_running` with
+  "Quit Claude Code, then re-run --yes".
+- Step 4 restart and wait → `lifecycle.cutover` (router present) or
+  `lifecycle.restart_single_color`; readiness is `bridge_health_healthy`
+  within the bundle's budget. A release the old preflight cannot install is
+  expressed by the candidate bundle declaring `single_color_required`; you
+  no longer need to know that exception.
+- Step 4a export root → `migration_export_root_containment` propagates an
+  already-configured root to newly installed connectors (first-time answer:
+  Part B).
+- Step 5 hydration re-run → `hydration_reconcile` for the three declared
+  managed artifacts: the instance LaunchAgent plist, the `~/.zshrc` block,
+  the `~/.claude/CLAUDE.md` section (the rest: Part B).
+- Step 6.1 plugin cache → `plugin_cache_refresh` (diff-based;
+  `plugin_cache_current` in doctor section 11).
+- Step 6.4 KB re-install → `runtime.knowledge_reinstall` for every
+  `knowledge_removals` entry, then `knowledge_negative_search_<kb>` is a
+  required row of the final doctor.
+- Step 7 verify → the final doctor inside `update --yes` and `solet-manager
+  doctor <name>` afterwards. The router `no_active_color` race described in
+  Part C reads as `service_offline` in the doctor's section 9 while it
+  heals; re-probe.
+
+## Part B — manual steps that remain
+
+Each of these stays manual because no Manager surface owns it; the reason
+is given with the step so the next release can close it deliberately.
+
+1. **Target-root `AGENTS.md`/`CLAUDE.md` hydration block, `client/bin/*`
+   launchers, `~/.claude/settings.json` hooks, the rename/feedback skills,
+   fleet functions.** Not declared managed artifacts in the shipped bundle;
+   `hydration_reconcile` owns only the three it declares. Re-run Part C
+   Step 5 for these, by hand (seed-side artifact declarations are follow-up
+   D7).
+2. **The first-time export/workspace root answer** (Part C Step 4a). No CLI
+   carrier for the answer exists; `migration_export_root_containment`
+   blocks with `export_root_ambiguous` or `none` and that text, and
+   propagates once a root is configured.
+3. **Quitting Claude Code before `migration_solet_rename` can rewrite
+   `~/.claude.json`.** The Manager never kills a process; doctor section 11
+   `stale_target_processes` names the pid. The `--scan-stale` review of Part
+   C Step 3a is report-only and also stays yours.
+4. **Relaunching open clients and re-arming watchers** (Part C Steps 6.2 and
+   6.3). Same principle: the doctor names them (`relaunch_client_session`,
+   `rearm_watcher`); you perform them.
+5. **Adding a release-added plugin to the clone's profile manifest** (the
+   genesis-written `manifest.yaml` under the profile's `config` directory).
+   Everything under `profile/` is the preserved-never surface; the Manager
+   discloses it and never writes it. Part C Step 5's paragraph on activation
+   applies.
+6. **Marketo/Zuora three-read connector checks and reconciling your open
+   feedback items against the release notes.** Connector behaviour and
+   upstream feedback are not Manager checks.
+
+## Part C — legacy recovery: the manual procedure
+
+> **Status:** this procedure is retained verbatim as recovery. It applies
+> only to a clone `solet-manager inspect` classifies as not
+> `allowed_after_import` (`diverged_seed_history`, `development_checkout`),
+> or to a `needs_attention` instance the operator chooses to repair by hand.
+> For every other clone, Part A performs each step below with a journaled
+> postcondition; the step-by-owner list in Part A says which operation.
 
 ## Step 1 — probe before touching anything
 
@@ -580,6 +744,12 @@ LaunchAgent alone either way.
   AFTER Step 6's re-install — before it, a hit is the expected stale-copy
   signal, not evidence the update failed.
 
+## Part D — release history
+
+The sections below are narrative: what each release changed and why, kept
+as history. They are not executable support — Part A's preview lists what
+an update will do to this installation, and the doctor verifies it did.
+
 ## What changed in this release — worker hooks now also fire as plugin hooks (`coordination-hooks` 0.8.0, 2026-08-24 update)
 
 Closes seed feedback #40 (§51.1): a spawned worker on a host whose managed
@@ -1054,8 +1224,7 @@ solet ingests and embeds," for what happens to results once they do reach a sess
 - `plugins/github_midwife_plugin/knowledge_base/06_seed_update_operator_guide.md`
   — the same procedure written directly to the solet's owner, for
   running the update at a terminal without a coding agent driving every
-  step. Points back here for Step 5's hydration re-render, which does need
-  an agent.
+  step. Points back here for Part B's manual steps, which do need an agent.
 - `plugins/github_midwife_plugin/knowledge_base/01_hydration_runbook.md` —
   the hydration steps this runbook re-runs selectively after an update.
 - `plugins/github_midwife_plugin/knowledge_base/07_upstream_feedback_runbook.md`
@@ -1063,11 +1232,15 @@ solet ingests and embeds," for what happens to results once they do reach a sess
   confirm a fix landed. Rewritten in this release to the issue-form model; it
   is also where the "subscribe to releases" instruction lives, which is how you
   learn a future update exists at all now that the seed has moved.
+- `solet_cli/homebrew/README.md` — the Manager's Homebrew payload, the seed
+  lock the formula installs (how `update --dry-run` knows a release exists),
+  and the lifecycle acceptance that measures Part A on a cold host.
 - `plugins/seed_factory_plugin/knowledge_base/02_seed_publish_runbook.md` —
-  why re-mints are append-only fast-forward commits (the property Step 2
-  relies on).
+  why re-mints are append-only fast-forward commits (the property the
+  exact-candidate fast-forward and Part C Step 2 rely on).
 - `plugins/github_midwife_plugin/src/github_midwife_plugin/venv_provision.py`
-  — the editable-install provisioner (the property Step 3 relies on).
+  — the editable-install provisioner (the property `dependencies_reconcile`
+  and Part C Step 3 rely on).
 - `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/.claude-plugin/plugin.json`
   — the `version` field Step 6's open question is about.
 - `code.claude.com/docs/en/plugin-marketplaces` — vendor documentation for the

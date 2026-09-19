@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .models import JsonValue
-from .seed_lock_parser import parse_seed_lock
+from .seed_lock_parser import SeedLockFields, parse_seed_lock
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,11 @@ class SeedLock:
 def load_seed_lock(path: Path) -> SeedLock:
     """Parse one closed seed-lock schema and reject moving references."""
 
-    fields = parse_seed_lock(path)
+    return seed_lock_from_fields(parse_seed_lock(path))
+
+
+def seed_lock_from_fields(fields: SeedLockFields) -> SeedLock:
+    """Construct a lock from already validated, byte-derived fields."""
     return SeedLock(
         fields.repository,
         fields.release_tag,

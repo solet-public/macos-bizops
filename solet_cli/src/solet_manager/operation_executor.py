@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .adapters import AdapterRegistry, OperationResult, invoke_adapter, resolve_long_lived_python
 from .completion_verifier import rebind_completion_probes, run_completion_probes
 from .config import CreateConfig
 from .contracts import ContractBundle
-from .errors import StateConflictError
+from .errors import OperationAttemptMismatch, StateConflictError
 from .flow import (
     PlannedOperation,
     SetupPlan,
@@ -43,6 +43,14 @@ class OperationOutcome:
 
     transaction: Transaction
     terminal_result: CommandResult | None
+
+
+@dataclass(frozen=True)
+class OperationAttemptReconciliation:
+    """One probe-backed resolution of an interrupted apply-state record."""
+
+    transaction: Transaction
+    probe: OperationResult
 
 
 def run_operations(
@@ -301,6 +309,113 @@ def _invoke_operation_probe(
         transaction.answers,
         request,
         invoke_adapter(registry, runner=operation.runner, request=request),
+    )
+
+
+def reconcile_interrupted_operation_attempt(
+    *,
+    bundle: ContractBundle,
+    operation: PlannedOperation,
+    transaction: Transaction,
+    mismatch: OperationAttemptMismatch,
+    registry: AdapterRegistry,
+    paths: ManagerPaths | None,
+) -> OperationAttemptReconciliation:
+    """Re-probe the sole safe crash window without weakening journal validation.
+
+    ``paths=None`` is the preview form: it returns an in-memory journal only.
+    Execution supplies ``paths`` while holding the instance lock, making the
+    new attempt and recovered status one normal atomic journal write.
+    """
+
+    _require_reconcilable_operation_attempt(
+        bundle=bundle,
+        operation=operation,
+        transaction=transaction,
+        mismatch=mismatch,
+    )
+    attempt = next_attempt(transaction, operation.operation_id)
+    probe = _invoke_operation_probe(
+        bundle=bundle,
+        operation=operation,
+        transaction=transaction,
+        registry=registry,
+        purpose="pre_apply",
+        attempt=attempt,
+    )
+    if probe.checkpoint_status is not CheckpointStatus.VERIFIED and probe.repair is None:
+        probe = replace(
+            probe,
+            repair=(
+                "Re-run the approved operation after resolving the declared "
+                "pre-apply probe result."
+            ),
+        )
+    updated = transaction.with_operation_status(
+        operation.operation_id,
+        probe.checkpoint_status,
+        attempt=attempt_record(
+            probe,
+            stage_id=operation.stage_id,
+            phase="pre_probe",
+            attempt=attempt,
+            owner_operation_id=operation.operation_id,
+        ),
+    )
+    if paths is not None:
+        write_transaction(paths.transaction_path(updated.name), updated)
+    return OperationAttemptReconciliation(updated, probe)
+
+
+def _require_reconcilable_operation_attempt(
+    *,
+    bundle: ContractBundle,
+    operation: PlannedOperation,
+    transaction: Transaction,
+    mismatch: OperationAttemptMismatch,
+) -> None:
+    definition = bundle.operations.get(operation.operation_id)
+    idempotency = None if definition is None else definition.get("idempotency")
+    if (
+        not _is_pinned_probe_then_apply_operation(
+            bundle,
+            operation,
+            transaction,
+            idempotency,
+        )
+        or not _is_retry_safe_pre_probe_mismatch(operation, mismatch)
+    ):
+        raise mismatch
+
+
+def _is_pinned_probe_then_apply_operation(
+    bundle: ContractBundle,
+    operation: PlannedOperation,
+    transaction: Transaction,
+    idempotency: JsonValue | None,
+) -> bool:
+    return (
+        transaction.flow_contract_digest == bundle.contract_digest
+        and isinstance(idempotency, dict)
+        and idempotency.get("mode") == "probe_then_apply"
+        and bool(operation.precondition_probe_ids)
+    )
+
+
+def _is_retry_safe_pre_probe_mismatch(
+    operation: PlannedOperation,
+    mismatch: OperationAttemptMismatch,
+) -> bool:
+    return (
+        mismatch.operation == operation.operation_id
+        and mismatch.current is CheckpointStatus.APPLYING
+        and mismatch.latest.get("phase") == "pre_probe"
+        and mismatch.latest.get("checkpoint_status")
+        in {
+            CheckpointStatus.PENDING.value,
+            CheckpointStatus.AWAITING_USER.value,
+        }
+        and mismatch.latest.get("retry_safe") is True
     )
 
 

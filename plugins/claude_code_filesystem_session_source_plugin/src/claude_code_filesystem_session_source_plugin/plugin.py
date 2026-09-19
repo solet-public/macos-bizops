@@ -185,6 +185,7 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
             source_kind=IngestSourceKind.CLAUDE_CODE_LOCAL,
             vendor=SourceVendor.CLAUDE_CODE,
             supported_modes=(IngestMode.PULLING,),
+            default_pulling_root_uri="~/.claude/projects",
         )
 
     def normalize(self, raw: RawSessionEvent) -> NormalizedSessionEvent:
@@ -634,7 +635,14 @@ def _parse_cursor_int(
 
 def _qualify_source(*, ledger: Any, source_kind: str) -> dict[str, object]:
     """Run one source-local, bounded retrieval proof without exposing content."""
-    source_id = _require_registered_source_id(ledger, source_kind)
+    source_id, root_uri = _require_registered_source(ledger, source_kind)
+    if not root_uri_to_path(root_uri).exists():
+        return {
+            "source_registered": True,
+            "source_kind": source_kind,
+            "backfill_count": 0,
+            "sample_content_retrieved": False,
+        }
     backfill_count = _run_nonempty_backfill(ledger, source_id, source_kind)
     _require_retrievable_content(ledger, source_kind)
     return {
@@ -645,15 +653,21 @@ def _qualify_source(*, ledger: Any, source_kind: str) -> dict[str, object]:
     }
 
 
-def _require_registered_source_id(ledger: Any, source_kind: str) -> str:
+def _require_registered_source(ledger: Any, source_kind: str) -> tuple[str, str]:
     listed = ledger.list_sources()
     sources = listed.get("sources") if isinstance(listed, dict) else None
     if not isinstance(sources, list):
         raise RuntimeError("session_ledger_service.list_sources returned no sources list")
-    source_id = _registered_source_id(sources, source_kind)
-    if source_id is None:
+    source = _registered_source(sources, source_kind)
+    if source is None:
         raise RuntimeError(f"no enabled registered source for {source_kind!r}")
-    return source_id
+    source_id = source.get("source_id")
+    root_uri = source.get("root_uri")
+    if not isinstance(source_id, str) or not source_id:
+        raise RuntimeError(f"registered source for {source_kind!r} has no source id")
+    if not isinstance(root_uri, str) or not root_uri:
+        raise RuntimeError(f"registered source for {source_kind!r} has no filesystem root URI")
+    return source_id, root_uri
 
 
 def _run_nonempty_backfill(ledger: Any, source_id: str, source_kind: str) -> int:
@@ -678,13 +692,14 @@ def _require_retrievable_content(ledger: Any, source_kind: str) -> None:
         raise RuntimeError(f"source {source_kind!r} yielded no retrievable content")
 
 
-def _registered_source_id(sources: list[object], source_kind: str) -> str | None:
+def _registered_source(
+    sources: list[object], source_kind: str
+) -> dict[str, object] | None:
     for source in sources:
         if not isinstance(source, dict) or source.get("source_kind") != source_kind:
             continue
-        source_id = source.get("source_id")
-        if isinstance(source_id, str) and source_id and source.get("enabled") is True:
-            return source_id
+        if source.get("enabled") is True:
+            return source
     return None
 
 

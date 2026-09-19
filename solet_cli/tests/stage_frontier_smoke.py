@@ -1082,7 +1082,7 @@ def main() -> int:
             "embeddings_implementation": "lm_studio",
             "embedding_model": "fixture-embedding",
             "coding_agents": ["codex", "claude_code"],
-            "session_sources": ["codex_local", "claude_local"],
+            "session_sources": ["codex_local", "claude_code_local"],
             "execution_topology": "solo",
         }
         _raises(

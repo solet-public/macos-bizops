@@ -6,9 +6,30 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .managed_render import (
+    TEMPLATE_ROOT_REF,
+    append_block,
+    block_text,
+    find_blocks,
+    marker_lines,
+    replace_block,
+    template_digest,
+)
 from .setup_adapter_contract import AdapterRequest, JsonObject, planned_action, result
 from .setup_adapter_runtime import Runtime
 from .setup_operations import _TEMPLATES, _verified, read_file
+
+_ZSHRC_BLOCK_TEMPLATE = "zshrc_block.template"
+_ZSHRC_MARKER_BEGIN = "# BEGIN SOLET {NAME} v{TEMPLATE_DIGEST8}"
+_ZSHRC_MARKER_END = "# END SOLET {NAME}"
+_STAMP = "# rendered-from: {TEMPLATE_REF}@{TEMPLATE_DIGEST}"
+_STAMPED_SHELL_TEMPLATES = (
+    "solet.zsh.template",
+    "claude_launcher.template",
+    "codex_launcher.template",
+    "launch.template",
+    "fleet_functions.zsh.template",
+)
 
 
 def shell(request: AdapterRequest, runtime: Runtime) -> JsonObject:
@@ -140,6 +161,8 @@ def _rendered_files(request: AdapterRequest) -> dict[Path, tuple[str, int]]:
                 content = "\n".join(
                     line for line in content.splitlines() if "GIT_CONTROLLER_NAME=" not in line
                 ) + "\n"
+            if template_name in _STAMPED_SHELL_TEMPLATES:
+                content = _stamped(content, template_name)
         rendered[destination] = (content, mode)
     for runner_file in ("CLAUDE.md", "AGENTS.md"):
         destination = request.target / runner_file
@@ -195,24 +218,37 @@ def _merge_agent_block(existing: str, managed: str) -> str:
     return existing.rstrip() + separator + block + "\n"
 
 
-def _zshrc_block(request: AdapterRequest) -> str:
-    shell_path = _zsh_quote(str(request.target / "client" / f"{request.name}.zsh"))
-    return (
-        f"# BEGIN SOLET {request.name}\n"
-        f"[ -f {shell_path} ] && source {shell_path}\n"
-        f"# END SOLET {request.name}\n"
+def _stamped(content: str, template_name: str) -> str:
+    """Insert the ``rendered-from`` stamp after the shebang (or at the top) of a shell render."""
+    stamp = _STAMP.replace("{TEMPLATE_REF}", f"{TEMPLATE_ROOT_REF}/{template_name}").replace(
+        "{TEMPLATE_DIGEST}", template_digest(_TEMPLATES / template_name)
     )
+    lines = content.split("\n")
+    lines.insert(1 if lines and lines[0].startswith("#!") else 0, stamp)
+    return "\n".join(lines)
+
+
+def _zshrc_block(request: AdapterRequest) -> str:
+    """The versioned managed block: ``# BEGIN SOLET <name> v<digest8>`` … ``# END SOLET <name>``.
+
+    The body renders from ``zshrc_block.template`` so its digest is what the
+    marker carries; the body is byte-identical to the block genesis wrote
+    before versioning, which is what lets an existing-install update recognise
+    a legacy unversioned block as its own previous render.
+    """
+    template = _TEMPLATES / _ZSHRC_BLOCK_TEMPLATE
+    shell_path = _zsh_quote(str(request.target / "client" / f"{request.name}.zsh"))
+    body = template.read_text(encoding="utf-8").replace("{{SHELL_FILE_ZSH}}", shell_path)
+    begin, end = marker_lines(_ZSHRC_MARKER_BEGIN, _ZSHRC_MARKER_END, request.name, template_digest(template))
+    return block_text(begin, body, end)
 
 
 def _merge_block(existing: str, block: str, name: str) -> str:
-    begin = f"# BEGIN SOLET {name}"
-    end = f"# END SOLET {name}"
-    start = existing.find(begin)
-    finish = existing.find(end)
-    if start >= 0 and finish >= start:
-        return existing[:start] + block + existing[finish + len(end) :].lstrip("\n")
-    separator = "\n" if not existing or existing.endswith("\n") else "\n\n"
-    return existing + separator + block
+    """Replace this name's block in place (versioned or legacy marker) or append it once."""
+    blocks = find_blocks(existing, _ZSHRC_MARKER_BEGIN, _ZSHRC_MARKER_END, name)
+    if blocks:
+        return replace_block(existing, blocks[0], block)
+    return append_block(existing, block)
 
 
 def _backup_path(home: Path, name: str) -> Path:

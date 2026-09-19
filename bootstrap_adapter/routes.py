@@ -6,12 +6,13 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .dependency import dependency_closure_route
-from .homebrew import HomebrewInstallError, run_homebrew_install_required
+from .dependency import EXISTING_DEPENDENCIES_REF, dependency_closure_route
+from .homebrew import CommandExecutionError, run_homebrew_install_required
 from .lm_studio import lm_studio_route
 from .models import (
     FORMULA_KEG_MARKER,
@@ -22,6 +23,7 @@ from .models import (
     Clock,
     PostgresObservation,
     Runner,
+    Sleep,
     Which,
 )
 from .postgres import (
@@ -35,18 +37,21 @@ from .postgres import (
     psql_scalar,
     role_policy_evidence,
     role_policy_observation,
-    run_required,
     unsafe_policy_error,
 )
+from .postgres_install import apply_postgres_install_actions
 from .protocol import (
     Request,
+    command_failure_result,
     evidence,
     protocol_error_result,
     resolve_brew_executable,
+    resolve_executable,
     result,
     run_public,
     utc_now,
     validate_request,
+    validate_route_inputs,
 )
 
 _ROUTES: dict[str, tuple[str, str]] = {
@@ -93,9 +98,7 @@ _ROUTES: dict[str, tuple[str, str]] = {
 
 _MINIMUM_PHYSICAL_MEMORY_BYTES = 24_000_000_000
 _REPAIR_MAX_LENGTH = 2048
-_POSTGRES_CONFIGURATION_REPAIR_GUIDANCE = (
-    "Inspect the PostgreSQL policy and resume after repairing the failed action."
-)
+_POSTGRES_CONFIGURATION_REPAIR_GUIDANCE = "Inspect the PostgreSQL policy and resume after repairing the failed action."
 
 
 def _postgres_configuration_repair(error: AdapterError) -> str:
@@ -106,15 +109,11 @@ def _postgres_configuration_repair(error: AdapterError) -> str:
     if len(repair) <= _REPAIR_MAX_LENGTH:
         return repair
     marker = f"... [truncated, {len(repair)} chars total]"
-    available_context = _REPAIR_MAX_LENGTH - len(marker) - len(
-        _POSTGRES_CONFIGURATION_REPAIR_GUIDANCE
-    )
+    available_context = _REPAIR_MAX_LENGTH - len(marker) - len(_POSTGRES_CONFIGURATION_REPAIR_GUIDANCE)
     if available_context < 0:
         raise AdapterError("PostgreSQL repair guidance exceeds the envelope repair cap")
-    return (
-        f"{context[:available_context]}{marker}"
-        f"{_POSTGRES_CONFIGURATION_REPAIR_GUIDANCE}"
-    )
+    return f"{context[:available_context]}{marker}{_POSTGRES_CONFIGURATION_REPAIR_GUIDANCE}"
+
 
 _LM_STUDIO_OPERATION_IDS = frozenset(
     {
@@ -153,7 +152,15 @@ def _homebrew_failure_result(
 ) -> dict[str, Any]:
     """Retain Homebrew command evidence in the existing closed result fields."""
 
-    failed = result(
+    if isinstance(error, CommandExecutionError):
+        return command_failure_result(
+            request,
+            error_kind=error_kind,
+            evidence_items=evidence_items,
+            repair=repair,
+            outcome=error.outcome,
+        )
+    return result(
         request,
         status="failed",
         error_kind=error_kind,
@@ -161,10 +168,27 @@ def _homebrew_failure_result(
         evidence_items=evidence_items,
         repair=repair,
     )
-    if isinstance(error, HomebrewInstallError):
-        failed["stdout"] = error.stdout
-        failed["stderr"] = error.stderr
-    return failed
+
+
+def _postgres_install_apply_result(
+    request: Request,
+    runtime: AdapterRuntime,
+    evidence_items: list[dict[str, Any]],
+    failed_start: Any,
+) -> dict[str, Any]:
+    """Return either the proved apply result or the exact failed service receipt."""
+
+    if failed_start is None:
+        return result(request, status="applied", evidence_items=evidence_items)
+    evidence_items = postgres_evidence(runtime, failed_start.observation)
+    error_kind = "postgres_service_not_ready" if failed_start.outcome.returncode == 0 and not failed_start.outcome.timed_out else "postgres_service_start_failed"
+    return command_failure_result(
+        request,
+        error_kind=error_kind,
+        evidence_items=evidence_items,
+        repair="Inspect PostgreSQL service diagnostics and resume after it is listening.",
+        outcome=failed_start.outcome,
+    )
 
 
 def _selected_python(runtime: AdapterRuntime) -> str | None:
@@ -337,11 +361,7 @@ def _homebrew_probe_route(request: Request, runtime: AdapterRuntime) -> dict[str
             evidence_id="homebrew.available",
             kind="executable_resolution",
             status="verified" if present else "blocked",
-            summary=(
-                "Homebrew was resolved without running an installer."
-                if present
-                else "Homebrew could not be resolved without running an installer."
-            ),
+            summary=("Homebrew was resolved without running an installer." if present else "Homebrew could not be resolved without running an installer."),
             observed=brew,
             expected="absolute executable path",
             source=brew or "unresolved",
@@ -369,11 +389,7 @@ def _homebrew_install_route(request: Request, runtime: AdapterRuntime) -> dict[s
             evidence_id="homebrew.available",
             kind="executable_resolution",
             status="verified" if present else "awaiting_user",
-            summary=(
-                "Homebrew was resolved without running an installer."
-                if present
-                else "Homebrew could not be resolved without running an installer."
-            ),
+            summary=("Homebrew was resolved without running an installer." if present else "Homebrew could not be resolved without running an installer."),
             observed=brew,
             expected="absolute executable path",
             source=brew or "unresolved",
@@ -381,11 +397,7 @@ def _homebrew_install_route(request: Request, runtime: AdapterRuntime) -> dict[s
     ]
     if present:
         return result(request, status="verified", evidence_items=evidence_items)
-    repair = (
-        "Install Homebrew from its reviewed official distribution path, then resume."
-        if request["phase"] == "probe"
-        else "Complete the reviewed Homebrew installation, then resume this operation."
-    )
+    repair = "Install Homebrew from its reviewed official distribution path, then resume." if request["phase"] == "probe" else "Complete the reviewed Homebrew installation, then resume this operation."
     return result(
         request,
         status="awaiting_user",
@@ -397,10 +409,47 @@ def _homebrew_install_route(request: Request, runtime: AdapterRuntime) -> dict[s
 
 
 def _resolved_tool(runtime: AdapterRuntime, executable_name: str) -> str | None:
-    candidate = runtime.which(executable_name)
-    if candidate is None or not Path(candidate).is_absolute():
-        return None
-    return candidate
+    return resolve_executable(runtime, executable_name)
+
+
+_CASK_LINK_RETRY_ATTEMPTS = 5
+_CASK_LINK_RETRY_DELAY_SECONDS = 0.5
+
+
+def _await_cask_executable(runtime: AdapterRuntime, executable_name: str) -> str | None:
+    """Cask installs can report success before the linked executable is
+    stat-visible to a freshly spawned process (measured live, 2026-09-18:
+    install_codex_cli's apply exits 0 with /opt/homebrew/bin/codex already a
+    valid, executable symlink, yet the very next post-apply probe -- a
+    separate subprocess invocation -- reports it unresolved; the identical
+    resolve_executable check succeeds moments later from a separate shell).
+    Retry resolution briefly rather than trusting the first post-install
+    check. Formula installs are not observed to race this way and are not
+    retried here -- only a caller passing kind='cask' hits this path."""
+    for attempt in range(_CASK_LINK_RETRY_ATTEMPTS):
+        executable = _resolved_tool(runtime, executable_name)
+        if executable is not None:
+            return executable
+        if attempt < _CASK_LINK_RETRY_ATTEMPTS - 1:
+            runtime.sleep(_CASK_LINK_RETRY_DELAY_SECONDS)
+    return None
+
+
+def _executable_resolution_evidence(
+    runtime: AdapterRuntime, executable_name: str, executable: str | None, summary: str
+) -> list[dict[str, Any]]:
+    return [
+        evidence(
+            runtime,
+            evidence_id=f"{executable_name}.available",
+            kind="executable_resolution",
+            status="verified" if executable is not None else "blocked",
+            summary=summary,
+            observed=executable,
+            expected="absolute executable path",
+            source=executable or "unresolved",
+        ),
+    ]
 
 
 def _coding_tool_route(request: Request, runtime: AdapterRuntime) -> dict[str, Any]:
@@ -408,18 +457,9 @@ def _coding_tool_route(request: Request, runtime: AdapterRuntime) -> dict[str, A
 
     executable_name, kind, package = _CODING_TOOL_ACQUISITIONS[request["operation_id"]]
     executable = _resolved_tool(runtime, executable_name)
-    evidence_items = [
-        evidence(
-            runtime,
-            evidence_id=f"{executable_name}.available",
-            kind="executable_resolution",
-            status="verified" if executable is not None else "blocked",
-            summary=f"The {executable_name} executable was resolved before Homebrew provisioning.",
-            observed=executable,
-            expected="absolute executable path",
-            source=executable or "unresolved",
-        ),
-    ]
+    evidence_items = _executable_resolution_evidence(
+        runtime, executable_name, executable, f"The {executable_name} executable was resolved before Homebrew provisioning."
+    )
     if executable is not None:
         return result(request, status="verified", evidence_items=evidence_items)
     brew = resolve_brew_executable(runtime)
@@ -466,28 +506,26 @@ def _coding_tool_route(request: Request, runtime: AdapterRuntime) -> dict[str, A
             repair=f"Inspect the Homebrew package state for {package} and resume.",
             error=exc,
         )
+    if kind == "cask":
+        executable = _await_cask_executable(runtime, executable_name)
+        evidence_items = _executable_resolution_evidence(
+            runtime, executable_name, executable, f"The {executable_name} executable was resolved after Homebrew cask installation."
+        )
     return result(request, status="applied", evidence_items=evidence_items)
 
 
 def _validate_route_inputs(request: Request) -> None:
-    inputs = request["public_inputs"]
-    if request["operation_id"] in _LM_STUDIO_OPERATION_IDS:
-        allowed = {
-            "embeddings_implementation",
-            "inference_implementation",
-            "lm_studio_base_url",
-        }
-    else:
-        allowed = {"solet_name"} if request["operation_id"] == "configure_postgresql" else set()
-    if set(inputs) - allowed:
-        raise AdapterRequestError("operation public_inputs are outside the closed registry")
-    if "solet_name" in inputs and inputs["solet_name"] != request["name"]:
-        raise AdapterRequestError("solet_name public input differs from request identity")
+    validate_route_inputs(request, lm_studio_operation_ids=_LM_STUDIO_OPERATION_IDS, existing_ref=EXISTING_DEPENDENCIES_REF)
 
 
 def _resolve_route(request: Request) -> tuple[str, str] | None:
+    reference = str(request["operation_ref"])
+    if reference == EXISTING_DEPENDENCIES_REF:
+        # Keyed by operation_ref: the bundle names the operation_id and the
+        # Manager sends it verbatim (existing-install design section 3.1).
+        return (reference, "operation")
     declared = _ROUTES.get(str(request["operation_id"]))
-    if declared is None or declared[0] != request["operation_ref"]:
+    if declared is None or declared[0] != reference:
         return None
     return declared
 
@@ -526,28 +564,8 @@ def _postgres_install_route(request: Request, runtime: AdapterRuntime) -> dict[s
             evidence_items=evidence_items,
             repair="Resolve Homebrew before applying the approved PostgreSQL actions.",
         )
-    commands = {
-        "postgres.install_homebrew_formula": (
-            [brew, "install", "postgresql@17"],
-            "PostgreSQL install",
-        ),
-        "postgres.start_homebrew_service": (
-            [brew, "services", "start", "postgresql@17"],
-            "PostgreSQL service start",
-        ),
-        "postgres.install_pgvector_formula": (
-            [brew, "install", "pgvector"],
-            "pgvector install",
-        ),
-    }
     try:
-        for item in actions:
-            action_id = str(item["id"])
-            command, label = commands[action_id]
-            if command[1:2] == ["install"]:
-                run_homebrew_install_required(runtime, brew, command[2], label)
-            else:
-                run_required(runtime, command, label)
+        failed_start = apply_postgres_install_actions(runtime, brew, actions)
     except AdapterError as exc:
         return _homebrew_failure_result(
             request,
@@ -556,7 +574,7 @@ def _postgres_install_route(request: Request, runtime: AdapterRuntime) -> dict[s
             repair="Inspect the Homebrew package state and resume after repairing it.",
             error=exc,
         )
-    return result(request, status="applied", evidence_items=evidence_items)
+    return _postgres_install_apply_result(request, runtime, evidence_items, failed_start)
 
 
 def _bind_homebrew_actions(actions: list[dict[str, Any]], brew: str) -> list[dict[str, Any]]:
@@ -735,6 +753,8 @@ _EXACT_OPERATION_ROUTES: dict[str, _ExactRoute] = {
 
 def _dispatch(request: Request, runtime: AdapterRuntime) -> dict[str, Any]:
     operation_id = request["operation_id"]
+    if request["operation_ref"] == EXISTING_DEPENDENCIES_REF:
+        return dependency_closure_route(request, runtime)
     if operation_id in _LM_STUDIO_OPERATION_IDS:
         return lm_studio_route(request, runtime)
     if operation_id in {"install_python_runtime", "python_version_valid"}:
@@ -759,6 +779,7 @@ def execute_adapter_request(
     which: Which = shutil.which,
     now: Clock = utc_now,
     base_python: str | None = None,
+    sleep: Sleep = time.sleep,
 ) -> dict[str, Any]:
     """Validate and execute exactly one frozen pre-venv adapter request."""
 
@@ -791,5 +812,6 @@ def execute_adapter_request(
         name=str(request["name"]),
         target=Path(str(request["target"])),
         base_python=base_python,
+        sleep=sleep,
     )
     return _dispatch(request, runtime)

@@ -31,7 +31,7 @@ from solet_manager.errors import StateConflictError
 from solet_manager.flow import initial_probe_activations
 from solet_manager.models import CheckpointStatus, JsonValue
 from solet_manager.paths import ManagerPaths
-from solet_manager.transaction import Transaction, canonical_sha256
+from solet_manager.transaction import Transaction, canonical_sha256, write_transaction
 
 _FIXTURES_ROOT = Path(__file__).parent / "fixtures"
 _ROOT = _FIXTURES_ROOT / "reconciliation_identity"
@@ -158,13 +158,15 @@ def _check_fresh_transaction_receives_activation_carrier(
     )
 
 
-def _check_stale_seed_transaction_is_refused(source: Transaction) -> None:
-    """A retained journal may resume only under its exact installed seed lock."""
+def _check_seed_lock_resume_identity(source: Transaction) -> None:
+    """Resume compares the identity persisted by the transaction journal."""
 
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         paths = ManagerPaths.resolve(explicit_home=root / "manager-home")
-        config = CreateConfig(name="stale-seed", target=root / "target", autostart=True)
+        paths.transactions_dir.mkdir(parents=True)
+        paths.transactions_dir.chmod(0o700)
+        config = CreateConfig(name="seed-lock-round-trip", target=root / "target", autostart=True)
         retained = replace(
             source,
             name=config.name,
@@ -173,13 +175,54 @@ def _check_stale_seed_transaction_is_refused(source: Transaction) -> None:
         )
         installed_seed = replace(
             retained.seed,
+            channel_id="production",
+            provenance={"seed_id": "seed-fixture", "source_date": "2026-09-17"},
+            existing_install_contract={"flow_id": retained.flow_id},
+            allowed_repository_migrations=(
+                {
+                    "from_repository": retained.seed.repository,
+                    "to_repository": retained.seed.repository,
+                },
+            ),
+        )
+        write_transaction(
+            paths.transaction_path(config.name),
+            replace(retained, seed=installed_seed),
+        )
+
+        with patch("solet_manager.create_execution.load_seed_lock", return_value=installed_seed):
+            resumed = _load_or_create_transaction(
+                paths=paths,
+                contract_directory=None,
+                seed_lock_path=root / "installed-seed.lock.json",
+                registry=MagicMock(),
+                config=config,
+                approved_fingerprint="sha256:" + "f" * 64,
+                selections={},
+                decision_source="flag",
+                sources={},
+            )
+
+        _check(
+            resumed.seed.identity_dict() == installed_seed.identity_dict(),
+            "journal round-trip resumes when installed seed matches persisted identity",
+        )
+        _check(
+            resumed.seed.channel_id is None
+            and resumed.seed.provenance is None
+            and resumed.seed.existing_install_contract is None
+            and resumed.seed.allowed_repository_migrations == (),
+            "journal round-trip omits non-identity seed-lock fields",
+        )
+
+        mismatched_seed = replace(
+            installed_seed,
             commit="f" * 40,
             tree_hash="e" * 40,
             archive_sha256="d" * 64,
         )
-        with (
-            patch("solet_manager.create_execution.load_transaction", return_value=retained),
-            patch("solet_manager.create_execution.load_seed_lock", return_value=installed_seed),
+        with patch(
+            "solet_manager.create_execution.load_seed_lock", return_value=mismatched_seed
         ):
             try:
                 _load_or_create_transaction(
@@ -199,7 +242,7 @@ def _check_stale_seed_transaction_is_refused(source: Transaction) -> None:
             else:
                 raise AssertionError("red: stale transaction silently resumed under new seed")
     _check(retained.seed.commit in message, "conflict names the retained transaction seed")
-    _check(installed_seed.commit in message, "conflict names the installed seed lock")
+    _check(mismatched_seed.commit in message, "conflict names the installed seed lock")
     _check(
         repair is not None and "cannot reuse" in repair,
         "conflict gives stale-transaction repair guidance",
@@ -225,7 +268,7 @@ def main() -> int:
         "fixture-3 lacks an in-plan verified operation to preserve",
     )
     _check_fresh_transaction_receives_activation_carrier(bundle, source)
-    _check_stale_seed_transaction_is_refused(source)
+    _check_seed_lock_resume_identity(source)
 
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)

@@ -143,6 +143,8 @@ def _run_launchagent_after_models_reconciliation_regression() -> None:
 
     with tempfile.TemporaryDirectory() as raw:
         manager, paths, source, destination, original = _r20_environment(
+            # R20 predates the canonical Claude Code source spelling; retain
+            # the recorded historical answer while exercising its migration.
             Path(raw), session_sources=["codex_local", "claude_local"]
         )
         _assert_r20_source_identity(original, source, destination)

@@ -87,6 +87,9 @@ def _build_seed_fixture(root: Path, checkout_name: str = "seed-checkout") -> Pat
     for relative_path in _CONTRACT_PATHS:
         (checkout / relative_path).write_text("{}\n", encoding="utf-8")
     (contracts / "existing_install_flow.schema.json").write_text("{}\n", encoding="utf-8")
+    (contracts / "existing_install_flow.json").write_text(
+        '{"flow_id": "existing-install", "schema_version": 1}\n', encoding="utf-8"
+    )
     (checkout / "PROVENANCE.json").write_text(
         json.dumps(
             {

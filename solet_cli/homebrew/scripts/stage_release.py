@@ -40,8 +40,21 @@ from pathlib import Path
 _GIT_TIMEOUT_S = 30
 
 _PAYLOAD_SOURCE_PATHS = ("LICENSE", "NOTICE", "solet_setup_contracts", "solet_cli")
+# Shipped inside the Manager payload as an acquisition aid only: the Manager
+# proves the transition bundle from the exact candidate commit, never from
+# its own packaged copy (existing-install design section 2.3).
 _FORMULA_ONLY_CONTRACT_PATHS = (
+    "plugins/github_midwife_plugin/knowledge_base/existing_install_flow.json",
     "plugins/github_midwife_plugin/knowledge_base/existing_install_flow.schema.json",
+)
+# The closed existing-install transition bundle (design section 2.3): digested
+# with the same filename/NUL/bytes/NUL discipline as the create bundle, over a
+# DISTINCT file set that never includes macos_setup_flow.json.  Its digest is
+# what seed-lock v3 binds as existing_install_contract.bundle_digest.
+_TRANSITION_BUNDLE_PATHS = (
+    "plugins/github_midwife_plugin/knowledge_base/existing_install_flow.json",
+    "plugins/github_midwife_plugin/knowledge_base/existing_install_flow.schema.json",
+    "plugins/github_midwife_plugin/knowledge_base/setup_adapter_envelope.schema.json",
 )
 _DIGESTED_CONTRACT_PATHS = (
     "plugins/github_midwife_plugin/knowledge_base/macos_setup_flow.json",
@@ -106,6 +119,7 @@ def main() -> int:
         seed_checkout=seed_checkout,
         seed_commit=seed_identity.commit,
     )
+    transition_digest = _require_transition_bundle(seed_checkout, seed_identity.commit)
     version = _read_manager_version(manager_checkout)
     asset_name = f"solet-{version}.tar.gz"
 
@@ -142,7 +156,7 @@ def main() -> int:
         "existing_install_contract": {
             "flow_id": "existing-install",
             "flow_schema_version": 1,
-            "bundle_digest": contract_digest,
+            "bundle_digest": transition_digest,
         },
         "allowed_repository_migrations": [],
     }
@@ -157,6 +171,7 @@ def main() -> int:
     print(f"rendered lock:    {output_root / 'solet_cli' / 'homebrew' / 'seed.lock.json'}")
     print(f"install mode:     {install_mode} ({manager_identity.commit})")
     print(f"setup contracts:  {contract_digest} (manager payload == seed artifact)")
+    print(f"transition bundle: {transition_digest} (seed artifact existing-install contract)")
     print("Nothing was pushed, tagged, released, or uploaded.")
     return 0
 
@@ -404,6 +419,34 @@ def _require_contract_pair(
             f"seed_commit={seed_commit}, seed_digest={seed_digest}"
         )
     return manager_digest
+
+
+def _require_transition_bundle(seed_checkout: Path, seed_commit: str) -> str:
+    """Digest the committed transition bundle and refuse a malformed or create-shaped one."""
+    files = {
+        Path(relative_path).name: _git_blob(seed_checkout, seed_commit, relative_path, "seed artifact")
+        for relative_path in _TRANSITION_BUNDLE_PATHS
+    }
+    try:
+        flow: object = json.loads(files["existing_install_flow.json"].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"seed artifact commit {seed_commit} has a malformed existing_install_flow.json: {exc}") from exc
+    if not isinstance(flow, dict) or flow.get("flow_id") != "existing-install" or flow.get("schema_version") != 1:
+        raise SystemExit("seed artifact existing_install_flow.json does not declare the existing-install flow v1")
+    digest = _digest_files(files)
+    if digest == _contract_digest_at_commit(seed_checkout, seed_commit, "seed artifact"):
+        raise SystemExit("transition bundle digest must differ from the create bundle digest")
+    return digest
+
+
+def _digest_files(files: dict[str, bytes]) -> str:
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(files[name])
+        digest.update(b"\0")
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _contract_digest_at_commit(

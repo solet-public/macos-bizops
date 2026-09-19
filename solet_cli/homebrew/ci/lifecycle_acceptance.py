@@ -218,7 +218,80 @@ def build_plan(inputs: Inputs) -> tuple[Phase, ...]:
                 ),
             ),
         ),
+        *_existing_install_phases(inputs),
     )
+
+
+def _existing_install_phases(inputs: Inputs) -> tuple[Phase, ...]:
+    """Step 7 design section 8.4: the two VM-only phases.
+
+    ``existing-install-import-update`` builds the section-3 real-style clone
+    from the SEED archive the formula's lock names (``real_style_fixture.py``,
+    never this checkout), imports it under keg N, upgrades the formula to N+1
+    between import and update, updates through the runtime stage, reinstalls,
+    and proves the pointer was released.  ``cold-host-degraded`` is the ONLY
+    place true host absence across a process boundary is measured (section 4.2):
+    ``python@3.13`` uninstalled (``host_python_313 missing``, ``update --dry-run``
+    ``host_requirement_missing``), then the service booted out (``service_offline``
+    unknowns; the section-7.3 single-colour refusal).  ``<reviewed>`` placeholders
+    are resolved from the preceding ``--dry-run`` JSON exactly as
+    ``_create_until_verified`` does; the canonical Manager name is
+    ``solet-manager`` (governing section 10), never a bare ``solet`` verb.
+    """
+    name = f"{inputs.instance_name}-import"
+    root = inputs.fixture_root / "existing-install"
+    clone = str(root / "target")
+    fixture_builder = str(Path(__file__).resolve().parent / "real_style_fixture.py")
+    stage_previous = (
+        "lifecycle-harness",
+        "stage-formula-byte-equal",
+        str(inputs.previous_formula),
+        "<tap-repository>/Formula/solet.rb",
+    )
+    stage_current = (
+        "lifecycle-harness",
+        "stage-formula-byte-equal",
+        str(inputs.current_formula),
+        "<tap-repository>/Formula/solet.rb",
+    )
+    return (
+        Phase(
+            "existing-install-import-update",
+            (
+                stage_previous,
+                ("brew", "install", "--build-from-source", inputs.formula),
+                ("python3", fixture_builder, "--root", str(root), "--name", name),
+                ("solet-manager", "inspect", "--target", clone, "--channel", "stable", "--json"),
+                ("solet-manager", "import", name, "--target", clone, "--channel", "stable", "--dry-run", "--json"),
+                ("solet-manager", "import", name, "--target", clone, "--channel", "stable", "--yes", "--approval-fingerprint", "<reviewed>", "--json"),
+                ("solet-manager", "doctor", name, "--json"),
+                stage_current,
+                ("brew", "upgrade", "--build-from-source", inputs.formula),
+                ("solet-manager", "update", name, "--dry-run", "--json"),
+                ("solet-manager", "update", name, "--yes", "--approval-fingerprint", "<reviewed>", "--json"),
+                ("solet-manager", "update", name, "--dry-run", "--json"),
+                ("solet-manager", "update", name, "--yes", "--approval-fingerprint", "<reviewed-runtime>", "--json"),
+                ("solet-manager", "doctor", name, "--json"),
+                ("brew", "reinstall", inputs.formula),
+                ("solet-manager", "doctor", name, "--json"),
+                ("solet-manager", "reconcile", name, "--dry-run", "--json"),
+            ),
+        ),
+        Phase(
+            "cold-host-degraded",
+            (
+                ("brew", "uninstall", "--ignore-dependencies", inputs.python_formula),
+                ("solet-manager", "doctor", name, "--json"),
+                ("solet-manager", "update", name, "--dry-run", "--json"),
+                ("brew", "install", inputs.python_formula),
+                ("launchctl", "bootout", f"gui/<uid>/local.solet.{name}"),
+                ("solet-manager", "doctor", name, "--json"),
+                ("solet-manager", "update", name, "--dry-run", "--json"),
+            ),
+        ),
+    )
+
+
 
 
 def execute(inputs: Inputs) -> None:
@@ -236,6 +309,8 @@ def execute(inputs: Inputs) -> None:
     _run_uninstall_reinstall(inputs, fixture, runner)
     _run_unmanaged_discovery(inputs, fixture, runner)
     _run_brewfile_and_testbot(inputs, fixture, tap_formula.parents[1], runner)
+    _run_existing_install_import_update(inputs, fixture, tap_formula, runner)
+    _run_cold_host_degraded(inputs, fixture, runner)
     print(f"Homebrew lifecycle acceptance PASSED; fixture retained at {fixture.root}")
 
 
@@ -472,6 +547,99 @@ def _run_brewfile_and_testbot(
         ],
         cwd=tap_repository,
     )
+
+
+def _run_existing_install_import_update(inputs: Inputs, fixture: Fixture, tap_formula: Path, runner: Runner) -> None:
+    """Section 8.4, phase ``existing-install-import-update`` on the disposable runner."""
+    name = f"{inputs.instance_name}-import"
+    root = inputs.fixture_root / "existing-install"
+    clone = root / "target"
+    stage_formula(inputs.previous_formula, tap_formula)
+    runner.run(["brew", "install", "--build-from-source", inputs.formula])
+    runner.run(["python3", str(Path(__file__).resolve().parent / "real_style_fixture.py"), "--root", str(root), "--name", name])
+    inspected = _manager_json(runner, ["inspect", "--target", str(clone), "--channel", "stable", "--json"], (3,))
+    _require(inspected, "existing_install_inspection", "attention_required")
+    preview = _manager_json(runner, ["import", name, "--target", str(clone), "--channel", "stable", "--dry-run", "--json"])
+    fingerprint = _fingerprint(preview, "approval_fingerprint")
+    imported = _manager_json(runner, ["import", name, "--target", str(clone), "--channel", "stable", "--yes", "--approval-fingerprint", fingerprint, "--json"])
+    _require(imported, "existing_install_import", "imported")
+    _manager_json(runner, ["doctor", name, "--json"], (0, 3))
+    stage_formula(inputs.current_formula, tap_formula)
+    runner.run(["brew", "upgrade", "--build-from-source", inputs.formula])
+    preview = _manager_json(runner, ["update", name, "--dry-run", "--json"])
+    _require(preview, "existing_install_update", "preview_ready")
+    advanced = _manager_json(runner, ["update", name, "--yes", "--approval-fingerprint", _fingerprint(preview, "approval_fingerprint"), "--json"])
+    _require(advanced, "existing_install_update", "source_advanced")
+    runtime = _manager_json(runner, ["update", name, "--dry-run", "--json"])
+    _require(runtime, "existing_install_update", "runtime_preview_ready")
+    promoted = _manager_json(runner, ["update", name, "--yes", "--approval-fingerprint", _fingerprint(runtime, "runtime_approval_fingerprint"), "--json"])
+    _require(promoted, "existing_install_update", "promoted")
+    verified = _manager_json(runner, ["doctor", name, "--json"])
+    _require(verified, "existing_install_doctor", "verified")
+    runner.run(["brew", "reinstall", inputs.formula])
+    verified = _manager_json(runner, ["doctor", name, "--json"])
+    _require(verified, "existing_install_doctor", "verified")
+    released = _manager_json(runner, ["reconcile", name, "--dry-run", "--json"], (3,))
+    if released.get("kind") != "existing_install_reconcile" or released.get("error_kind") != "no_active_update":
+        raise RuntimeError(f"reconcile after promotion did not report the released pointer: {released}")
+
+
+def _run_cold_host_degraded(inputs: Inputs, fixture: Fixture, runner: Runner) -> None:
+    """Section 8.4, phase ``cold-host-degraded``: the only measurement of true host absence across a process boundary."""
+    name = f"{inputs.instance_name}-import"
+    runner.run(["brew", "uninstall", "--ignore-dependencies", inputs.python_formula])
+    try:
+        degraded = _manager_json(runner, ["doctor", name, "--json"], (3,))
+        _require_check(degraded, "host_python_313", "missing")
+        refused = _manager_json(runner, ["update", name, "--dry-run", "--json"], (3,))
+        if refused.get("error_kind") != "host_requirement_missing":
+            raise RuntimeError(f"update --dry-run without host Python 3.13 did not refuse host_requirement_missing: {refused}")
+    finally:
+        runner.run(["brew", "install", inputs.python_formula])
+    runner.run(["launchctl", "bootout", f"gui/{os.getuid()}/local.solet.{name}"], allowed=(0, 3, 113))
+    offline = _manager_json(runner, ["doctor", name, "--json"], (3,))
+    _require_check(offline, "bridge_health", "unknown")
+    # After promotion the keg's lock names the installed release, so a zero-delta
+    # preview is `already_current` before any runtime plan is rendered; a lock
+    # naming a newer release reaches the section-7.3 single-colour observation
+    # and is refused `runtime_plan_blocked` with `service_offline_before_transition`.
+    refused = _manager_json(runner, ["update", name, "--dry-run", "--json"], (0, 3))
+    if refused.get("status") == "already_current":
+        return
+    data = refused.get("data")
+    lifecycle = cast(JsonObject, data).get("lifecycle") if isinstance(data, dict) else None
+    unproven = cast(JsonObject, lifecycle).get("unproven_reason") if isinstance(lifecycle, dict) else None
+    if refused.get("error_kind") != "runtime_plan_blocked" or unproven != "service_offline_before_transition":
+        raise RuntimeError(f"update --dry-run with the service offline neither reported already_current nor refused the single-colour transition: {refused}")
+
+
+def _manager_json(runner: Runner, arguments: list[str], allowed: tuple[int, ...] = (0,)) -> JsonObject:
+    return runner.json(["solet-manager", *arguments], allowed=allowed)
+
+
+def _require(result: JsonObject, kind: str, status: str) -> None:
+    if result.get("kind") != kind or result.get("status") != status:
+        raise RuntimeError(f"expected {kind} {status}, got {result.get('kind')} {result.get('status')} ({result.get('error_kind')})")
+
+
+def _require_check(result: JsonObject, check_id: str, status: str) -> None:
+    data = result.get("data")
+    sections = cast(list[JsonObject], cast(JsonObject, data).get("sections", [])) if isinstance(data, dict) else []
+    for section in sections:
+        for check in cast(list[JsonObject], section.get("checks", [])):
+            if check.get("check_id") == check_id:
+                if check.get("status") != status:
+                    raise RuntimeError(f"doctor check {check_id} is {check.get('status')}, expected {status}")
+                return
+    raise RuntimeError(f"doctor check {check_id} is absent")
+
+
+def _fingerprint(result: JsonObject, key: str) -> str:
+    data = result.get("data")
+    value = cast(JsonObject, data).get(key) if isinstance(data, dict) else None
+    if not isinstance(value, str):
+        raise RuntimeError(f"preview carries no {key}: {result}")
+    return value
 
 
 def _create_until_verified(inputs: Inputs, fixture: Fixture, runner: Runner) -> None:

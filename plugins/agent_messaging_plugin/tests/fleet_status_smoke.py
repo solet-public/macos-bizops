@@ -24,7 +24,12 @@ from _real_state_fake import RealShapeState  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
 from ananta.llm.agent_messaging.schema import TABLE_AGENT_ROLE_MESSAGE  # noqa: E402
 
-from agent_messaging_plugin.fleet_status import FLEET_STATUS_MAX_OWED_MESSAGES  # noqa: E402
+from agent_messaging_plugin.fleet_status import (  # noqa: E402
+    _ACTIVE_SESSION_READ_CEILING,
+    _ARMED_DEPENDENCY_READ_CEILING,
+    _NO_CONTRACT_SESSION_READ_CEILING,
+    FLEET_STATUS_MAX_OWED_MESSAGES,
+)
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
     TABLE_MANAGED_SESSION,
@@ -35,6 +40,7 @@ from agent_messaging_plugin.schema import (  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
+_OVER_OLD_FLEET_READ_CEILING = 1_001
 
 
 def _check(condition: object, label: str) -> None:
@@ -77,6 +83,36 @@ def _session(
     }
 
 
+def _write_bulk_read_ceiling_fixture(state: RealShapeState) -> None:
+    """Create more matching rows than the retired 1,000-row fleet ceiling."""
+    for index in range(_OVER_OLD_FLEET_READ_CEILING):
+        instance_id = f"agi-bulk-{index:04d}"
+        session_result = state.write_state(
+            AGENT_ROLE_BINDING_NAMESPACE,
+            {
+                "table": TABLE_MANAGED_SESSION,
+                "record": _session(instance_id, report_by=None, lane_id="zz-bulk"),
+            },
+        )
+        if session_result.get("action_status") != "completed":
+            raise AssertionError(f"bulk managed-session fixture write failed at {index}")
+        dependency_result = state.write_state(
+            AGENT_ROLE_BINDING_NAMESPACE,
+            {
+                "table": TABLE_SESSION_DEPENDENCY,
+                "record": {
+                    "id": f"sdp-bulk-{index:04d}",
+                    "waiter_instance_id": "agi-holding",
+                    "condition_kind": "session_terminal",
+                    "condition_ref": instance_id,
+                    "fired_at": None,
+                },
+            },
+        )
+        if dependency_result.get("action_status") != "completed":
+            raise AssertionError(f"bulk session-dependency fixture write failed at {index}")
+
+
 def _result(plugin: AgentMessagingPlugin) -> dict[str, Any]:
     result = plugin.fleet_status({"parameters": {"scope": "all"}}, {})
     _check(result.get("action_status") == "completed", "fleet_status transport returns success")
@@ -95,10 +131,10 @@ def _assert_classifications(sessions: dict[str, dict[str, Any]]) -> None:
     )
     _check(
         sessions["agi-holding"]["classification"] == "holding"
-        and sessions["agi-holding"]["holds"] == [
-            {"id": "sdp-armed-1", "kind": "session_terminal", "ref": "agi-prerequisite"},
-        ],
-        "MUTATION armed sdp row yields holding with its id/kind/ref citation",
+        and len(sessions["agi-holding"]["holds"]) == _OVER_OLD_FLEET_READ_CEILING + 1
+        and sessions["agi-holding"]["holds"][0]
+        == {"id": "sdp-armed-1", "kind": "session_terminal", "ref": "agi-prerequisite"},
+        "MUTATION >1,000 armed sdp rows yields every holding id/kind/ref citation",
     )
     _check(
         sessions["agi-stalled"]["classification"] == "STALLED",
@@ -117,8 +153,8 @@ def _assert_gauge_projection(result: dict[str, Any], sessions: dict[str, dict[st
         "MUTATION resolved gauge retains its measured token values",
     )
     _check(
-        result["unregistered"]["count"] == 1,
-        "the explicit report_by is-null read counts the contract-less row",
+        result["unregistered"]["count"] == _OVER_OLD_FLEET_READ_CEILING + 1,
+        "MUTATION >1,000 report_by is-null rows are counted completely",
     )
 
 
@@ -164,6 +200,7 @@ def test_fleet_status() -> None:
             "fired_at": None,
         },
     )
+    _write_bulk_read_ceiling_fixture(state)
     _write(
         state,
         AGENT_ROLE_BINDING_NAMESPACE,
@@ -241,6 +278,13 @@ def test_fleet_status() -> None:
 
     result = _result(_bare_plugin(cast("StateManagementInterface", state)))
     sessions = _by_id(result)
+    _check(
+        _ACTIVE_SESSION_READ_CEILING > _OVER_OLD_FLEET_READ_CEILING
+        and _NO_CONTRACT_SESSION_READ_CEILING > _OVER_OLD_FLEET_READ_CEILING
+        and _ARMED_DEPENDENCY_READ_CEILING > _OVER_OLD_FLEET_READ_CEILING
+        and result["class_counts"]["no-contract"] == _OVER_OLD_FLEET_READ_CEILING + 1,
+        "MUTATION >1,000 matching rows complete all three read-ceiling paths",
+    )
     _assert_classifications(sessions)
     _assert_gauge_projection(result, sessions)
     _assert_owed_messages(result, ordered_queries)

@@ -8,10 +8,12 @@ import os
 import re
 import stat
 import subprocess
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from .homebrew import CommandExecutionError, CommandOutcome
 from .models import (
     INSTALL_TIMEOUT_SECONDS,
     SUPPORTED_POSTGRES_MAJOR,
@@ -25,6 +27,9 @@ from .protocol import evidence, planned_action, resolve_brew_executable, run_pub
 _ADMIN_ROLE = getpass.getuser()
 _POSTGRES_BINARIES = ("psql", "pg_isready", "createuser", "createdb")
 _HOST_HBA_TYPES = frozenset(("host", "hostgssenc", "hostnogssenc", "hostnossl", "hostssl"))
+_COMMAND_OUTPUT_LIMIT = 16_384
+_POSTGRES_READY_TIMEOUT_SECONDS = 10
+_POSTGRES_READY_POLL_SECONDS = 0.1
 type HbaRecord = tuple[str, str, str, str | None, str]
 
 
@@ -165,6 +170,19 @@ def _postgres_ready(runtime: AdapterRuntime, pg_isready: str | None) -> bool:
     return completed is not None and completed.returncode == 0
 
 
+def wait_for_postgres_ready(runtime: AdapterRuntime) -> bool:
+    """Poll the existing readiness check for the bounded post-start window."""
+
+    pg_isready = postgres_binaries(runtime)["pg_isready"]
+    deadline = time.monotonic() + _POSTGRES_READY_TIMEOUT_SECONDS
+    while True:
+        if _postgres_ready(runtime, pg_isready):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_POSTGRES_READY_POLL_SECONDS)
+
+
 def _pgvector_available(runtime: AdapterRuntime, psql: str | None) -> bool | None:
     if psql is None:
         return None
@@ -252,9 +270,7 @@ def _active_hba_records(content: str) -> tuple[HbaRecord, ...]:
 
 
 def _recognized_trust_layout(records: Sequence[HbaRecord]) -> bool:
-    blanket_auth = [
-        record for record in records if record[1:3] == ("all", "all")
-    ]
+    blanket_auth = [record for record in records if record[1:3] == ("all", "all")]
     return bool(blanket_auth) and all(record[4] == "trust" for record in blanket_auth)
 
 
@@ -284,11 +300,7 @@ def _first_matching_hba_method(
             if record_type == "local":
                 return method
             continue
-        if (
-            record_type in {"host", connection_type}
-            and address is not None
-            and _hba_address_matches(record_address, address)
-        ):
+        if record_type in {"host", connection_type} and address is not None and _hba_address_matches(record_address, address):
             return method
     return None
 
@@ -305,11 +317,7 @@ def _effective_default_scram(records: Sequence[HbaRecord]) -> bool:
         ("hostgssenc", "::1"),
         ("hostnogssenc", "::1"),
     )
-    return all(
-        _first_matching_hba_method(records, connection_type=connection_type, address=address)
-        == "scram-sha-256"
-        for connection_type, address in required_connections
-    )
+    return all(_first_matching_hba_method(records, connection_type=connection_type, address=address) == "scram-sha-256" for connection_type, address in required_connections)
 
 
 def _inspect_pg_hba(path: Path | None) -> tuple[bool, bool, bool]:
@@ -684,7 +692,8 @@ def run_required(
     runtime: AdapterRuntime,
     command: list[str],
     label: str,
-) -> None:
+) -> CommandOutcome:
+    started = time.monotonic()
     try:
         completed = runtime.run(
             command,
@@ -692,12 +701,40 @@ def run_required(
             text=True,
             timeout=INSTALL_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AdapterError(f"{label} could not execute") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise CommandExecutionError(
+            f"{label} timed out",
+            outcome=CommandOutcome(
+                None,
+                True,
+                max(0, int((time.monotonic() - started) * 1000)),
+                "",
+                "",
+            ),
+        ) from exc
+    except OSError as exc:
+        raise CommandExecutionError(
+            f"{label} could not execute",
+            outcome=CommandOutcome(
+                None,
+                False,
+                max(0, int((time.monotonic() - started) * 1000)),
+                "",
+                "",
+            ),
+        ) from exc
+    outcome = CommandOutcome(
+        completed.returncode,
+        False,
+        max(0, int((time.monotonic() - started) * 1000)),
+        completed.stdout[:_COMMAND_OUTPUT_LIMIT],
+        completed.stderr[:_COMMAND_OUTPUT_LIMIT],
+    )
     if completed.returncode != 0:
         diagnostics = completed.stderr.strip() or completed.stdout.strip()
         detail = f": {diagnostics}" if diagnostics else ""
-        raise AdapterError(f"{label} failed (exit {completed.returncode}){detail}")
+        raise CommandExecutionError(f"{label} failed (exit {completed.returncode}){detail}", outcome=outcome)
+    return outcome
 
 
 def apply_postgres_configuration(

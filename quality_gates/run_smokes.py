@@ -234,6 +234,66 @@ _EXCLUSIVE_GROUPS: tuple[tuple[str, ...], ...] = (
         "plugins/macos_self_deployment_plugin/tests/cutover_failure_smoke.py",
         "plugins/macos_self_deployment_plugin/tests/rollback_release_smoke.py",
     ),
+    # The WS5 Step-7 real-style smokes each drive the Solet Manager end to end
+    # over a real ~4,000-file seed clone (real git, real genesis writers) many
+    # times per process: a cold-host matrix row, a tree row, or a crash/resume
+    # boundary is 5-15s of CPU-bound subprocess work, and a smoke holds 5-16 of
+    # them. They are registered as one contiguous block, so a pool runs every
+    # one of them at once: measured 2026-09-19, 12-wide with all 22 pooled,
+    # every one TIMEOUT at 120s (140-300s each); 3-wide, 25-100s; alone,
+    # 20-85s. The contended resource is this host's CPU and temp-volume
+    # bandwidth, which the whole battery shares, so this is not a fixed
+    # resource in the sense of the group above -- it is used here as the only
+    # mechanism the runner has for bounding heavy-smoke concurrency. Three
+    # chains for Step 7 (the matrix + tree + Homebrew rows, and the crash sweep
+    # in two halves) and two for the Step-6 sweeps registered just before them
+    # (the same class of work on a smaller fixture; measured in the same
+    # battery at 98-120s pooled against the Step-7 block, 60-80s alone), so at
+    # most five of them run concurrently with the light pool.
+    (
+        "solet_cli/tests/update_crash_sweep_smoke.py",
+        "solet_cli/tests/update_crash_sweep_writes_1_smoke.py",
+        "solet_cli/tests/update_crash_sweep_writes_2_smoke.py",
+        "solet_cli/tests/update_crash_sweep_writes_3_smoke.py",
+        "solet_cli/tests/update_crash_sweep_writes_4_smoke.py",
+        "solet_cli/tests/update_crash_sweep_writes_5_smoke.py",
+        "solet_cli/tests/update_crash_sweep_writes_6_smoke.py",
+        "solet_cli/tests/update_crash_sweep_applies_smoke.py",
+    ),
+    (
+        "solet_cli/tests/existing_install_router_failure_sweep_1_smoke.py",
+        "solet_cli/tests/existing_install_router_failure_sweep_2_smoke.py",
+        "solet_cli/tests/existing_install_router_failure_sweep_3_smoke.py",
+        "solet_cli/tests/existing_install_router_failure_sweep_4_smoke.py",
+    ),
+    (
+        "solet_cli/tests/cold_host_matrix_smoke.py",
+        "solet_cli/tests/cold_host_matrix_2_smoke.py",
+        "solet_cli/tests/cold_host_matrix_3_smoke.py",
+        "solet_cli/tests/cold_host_matrix_4_smoke.py",
+        "solet_cli/tests/real_style_tree_smoke.py",
+        "solet_cli/tests/real_style_tree_2_smoke.py",
+        "solet_cli/tests/real_style_tree_3_smoke.py",
+        "solet_cli/tests/real_style_tree_4_smoke.py",
+        "solet_cli/tests/real_style_tree_5_smoke.py",
+        "solet_cli/tests/real_style_tree_6_smoke.py",
+        "solet_cli/tests/homebrew_import_lifecycle_smoke.py",
+        "solet_cli/tests/homebrew_upgrade_persistence_smoke.py",
+        "solet_cli/tests/homebrew_real_style_smoke.py",
+    ),
+    (
+        "solet_cli/tests/real_style_sweep_writes_1_smoke.py",
+        "solet_cli/tests/real_style_sweep_writes_2_smoke.py",
+        "solet_cli/tests/real_style_sweep_writes_3_smoke.py",
+        "solet_cli/tests/real_style_sweep_writes_4_smoke.py",
+        "solet_cli/tests/real_style_sweep_applies_smoke.py",
+    ),
+    (
+        "solet_cli/tests/real_style_sweep_writes_5_smoke.py",
+        "solet_cli/tests/real_style_sweep_writes_6_smoke.py",
+        "solet_cli/tests/real_style_sweep_writes_7_smoke.py",
+        "solet_cli/tests/real_style_sweep_writes_8_smoke.py",
+    ),
 )
 
 _Verdict = Literal["passed", "skipped", "failed"]

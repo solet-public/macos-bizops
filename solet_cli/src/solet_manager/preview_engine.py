@@ -24,7 +24,12 @@ from .decision_discovery import (
     discover_and_qualify_decisions,
     eligible_discovered_decision_ids,
 )
-from .errors import ContractError, StateConflictError, StateError
+from .errors import (
+    ContractError,
+    OperationAttemptMismatch,
+    StateConflictError,
+    StateError,
+)
 from .flow import (
     SetupPlan,
     active_discovered_decision_ids,
@@ -41,6 +46,10 @@ from .flow import (
 )
 from .inference_probe_policy import advisory_inference_probe_result
 from .models import CheckpointStatus, CommandResult, ExitCode, JsonValue
+from .operation_reconciliation import (
+    load_transaction_for_operation_reconciliation,
+    reconcile_pinned_operation_attempt,
+)
 from .operation_records import next_attempt, operation_request
 from .paths import ManagerPaths
 from .permission_preflight import (
@@ -53,7 +62,6 @@ from .release_lock import SeedLock, load_seed_lock
 from .resume_rules import (
     assert_decision_revision_allowed,
     merge_decision_inputs,
-    render_recorded_decisions,
 )
 from .stage_boundaries import (
     BoundaryFailure,
@@ -65,7 +73,6 @@ from .transaction import (
     Transaction,
     assert_resume_identity,
     canonical_sha256,
-    load_transaction,
 )
 
 
@@ -105,7 +112,9 @@ def preview_create(
         decision_source,
         decision_sources,
     )
-    transaction = load_transaction(paths.transaction_path(config.name))
+    transaction, _mismatch = load_transaction_for_operation_reconciliation(
+        paths.transaction_path(config.name)
+    )
     if transaction is not None:
         return _resume_preview(
             paths=paths,
@@ -149,17 +158,40 @@ def _resume_preview(
         is_matching_resume=True,
     )
     if not config.target.exists():
+        bundle = ContractBundle.load(
+            source_revision=transaction.flow_source_revision,
+            expected_digest=transaction.flow_contract_digest,
+            resume_compatibility=True,
+        )
+        plan = build_setup_plan(
+            bundle=bundle,
+            config=config,
+            seed=transaction.seed,
+            journal_path=paths.transaction_path(config.name),
+            prospective_consents=False,
+            decision_selections=selections,
+            recorded_answers=transaction.answers,
+            decision_source=decision_source,
+            decision_sources=sources,
+        )
+        decisions = cast(dict[str, JsonValue], plan.answers["decisions"])
+        deferred = active_discovered_decision_ids(bundle, decisions)
+        unresolved_static = tuple(
+            decision_id
+            for decision_id in plan.unresolved_decisions
+            if decision_id not in deferred
+        )
         return acquisition_preview(
             config=config,
             seed=transaction.seed,
-            flow_id=transaction.flow_id,
-            flow_source_revision=transaction.flow_source_revision,
-            flow_contract_digest=transaction.flow_contract_digest,
-            deferred_decisions=(),
-            rendered_decisions=render_recorded_decisions(transaction.answers),
-            unresolved_decisions=(),
-            decision_prompts=[],
-            permission_preflight=None,
+            flow_id=bundle.flow_id,
+            flow_source_revision=bundle.source_revision,
+            flow_contract_digest=bundle.contract_digest,
+            deferred_decisions=deferred,
+            rendered_decisions=render_decisions(bundle, plan),
+            unresolved_decisions=unresolved_static,
+            decision_prompts=static_decision_prompts(bundle, plan),
+            permission_preflight=render_permission_preflight(bundle, plan, {}),
         )
     bundle = ContractBundle.load(
         source_revision=transaction.flow_source_revision,
@@ -387,7 +419,9 @@ def setup_preview(
     decision_source: str,
     decision_sources: dict[str, str] | None,
 ) -> CommandResult:
-    transaction = _load_setup_transaction(paths, config, bundle)
+    transaction, mismatch = _load_setup_transaction_for_operation_reconciliation(
+        paths, config, bundle
+    )
     initial = PreviewRound(
         transaction=transaction,
         answers=transaction.answers,
@@ -405,6 +439,16 @@ def setup_preview(
         target=config.target,
         base_python=resolve_long_lived_python(),
     )
+    if mismatch is not None:
+        transaction = reconcile_pinned_operation_attempt(
+            paths=paths,
+            config=config,
+            bundle=bundle,
+            transaction=transaction,
+            mismatch=mismatch,
+            registry=adapter_registry,
+            persist=False,
+        )
     evaluated = _converge_preview(
         paths=paths,
         config=config,
@@ -433,12 +477,29 @@ def setup_preview(
     )
 
 
-def _load_setup_transaction(
+def _load_setup_transaction(  # pyright: ignore[reportUnusedFunction]
     paths: ManagerPaths,
     config: CreateConfig,
     bundle: ContractBundle,
 ) -> Transaction:
-    transaction = load_transaction(paths.transaction_path(config.name))
+    """Load the ordinary strict preview transaction compatibility surface."""
+
+    transaction, _mismatch = _load_setup_transaction_for_operation_reconciliation(
+        paths, config, bundle
+    )
+    if _mismatch is not None:
+        raise _mismatch
+    return transaction
+
+
+def _load_setup_transaction_for_operation_reconciliation(
+    paths: ManagerPaths,
+    config: CreateConfig,
+    bundle: ContractBundle,
+) -> tuple[Transaction, OperationAttemptMismatch | None]:
+    transaction, mismatch = load_transaction_for_operation_reconciliation(
+        paths.transaction_path(config.name)
+    )
     if transaction is None:
         raise StateConflictError("materialized target lacks its manager transaction")
     try:
@@ -454,7 +515,7 @@ def _load_setup_transaction(
         transaction.answers,
     )
     validate_stage_probe_state(bundle, transaction, transaction.answers)
-    return transaction
+    return transaction, mismatch
 
 
 def _converge_preview(

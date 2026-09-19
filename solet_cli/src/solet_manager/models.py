@@ -47,6 +47,79 @@ class TransactionStatus(StrEnum):
     VERIFIED = "verified"
 
 
+class ManagementOrigin(StrEnum):
+    """Closed ownership vocabulary for the maintenance inventory."""
+
+    CREATE = "create"
+    IMPORT = "import"
+
+
+class ManagementState(StrEnum):
+    """Steady-state maintenance condition; active work is a separate axis."""
+
+    DIAGNOSTIC = "diagnostic"
+    VERIFIED = "verified"
+    NEEDS_ATTENTION = "needs_attention"
+
+
+class UpdateEligibilityState(StrEnum):
+    CURRENT = "current"
+    AVAILABLE = "available"
+    BLOCKED = "blocked"
+
+
+class MaintenanceOperationKind(StrEnum):
+    IMPORT = "import"
+    UPDATE = "update"
+    DOCTOR = "doctor"
+
+
+class DoctorContractKind(StrEnum):
+    """The three contracts ``solet-manager doctor`` can select (Step 6 design section 3.1)."""
+
+    CANDIDATE = "candidate"
+    VERIFIED = "verified"
+    DIAGNOSTIC = "diagnostic"
+
+
+class OperationType(StrEnum):
+    """Closed resume-rule type of one runtime operation (Step 6 design section 4.2).
+
+    Every declared row is classified from its closed fields at parse time and
+    every Manager-synthesised row is typed at synthesis; the executor dispatches
+    on this value and on nothing else.
+    """
+
+    CLOSURE_REPAIR = "closure_repair"  # T1
+    BACKED_UP_ARTIFACT = "backed_up_artifact"  # T2
+    MANUAL_TARGET_MIGRATION = "manual_target_migration"  # T3
+    MANUAL_ADDITIVE_PLATFORM_MIGRATION = "manual_additive_platform_migration"  # T3b
+    PROCESS_LIFECYCLE = "process_lifecycle"  # T4
+    READINESS = "readiness"  # T5
+    ADDITIVE_PLATFORM_MIGRATION = "additive_platform_migration"  # T6
+    FORWARD_ONLY_MIGRATION = "forward_only_migration"  # T7
+    KNOWLEDGE_REINSTALL = "knowledge_reinstall"  # T8
+    PLUGIN_CACHE_REFRESH = "plugin_cache_refresh"  # T9
+
+
+class MaintenanceOperationStatus(StrEnum):
+    PREPARED = "prepared"
+    BUNDLE_CACHED = "bundle_cached"
+    INVENTORY_PUBLISHED = "inventory_published"
+    VERIFIED = "verified"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+    ABANDONED = "abandoned"
+
+
+class MaintenanceStageStatus(StrEnum):
+    PENDING = "pending"
+    APPLYING = "applying"
+    VERIFIED = "verified"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
 @dataclass(frozen=True)
 class Evidence:
     """Non-secret structured observation returned by a probe or adapter."""
@@ -191,6 +264,303 @@ class InstanceRecord:
             expected_router_socket=_optional_string(value.get("expected_router_socket")),
             expected_router_port_range=_optional_string(value.get("expected_router_port_range")),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class FilesystemIdentity:
+    device: int
+    inode: int
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {"device": self.device, "inode": self.inode}
+
+
+@dataclass(frozen=True, slots=True)
+class TargetIdentity:
+    canonical_path: str
+    filesystem_identity: FilesystemIdentity
+    parent_filesystem_identity: FilesystemIdentity
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceIdentity:
+    service_cli_path: str
+    bridge_cli_path: str
+    named_launcher_path: str
+    named_launcher_target: str | None
+    profile_id: str | None
+    app_home: str | None
+    launchagent_label: str
+    router_label: str | None
+    router_socket: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelIdentity:
+    channel_id: str
+    descriptor_digest: str
+    canonical_repository: str
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedProvenanceIdentity:
+    condition: str
+    provenance_sha256: str | None
+    seed_id: str
+    origin_id: str
+    manifest_sha256: str
+    anchor_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseIdentity:
+    repository: str
+    commit: str
+    tree: str
+    tag: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ContractIdentities:
+    diagnostic_contract_digest: str
+    current_contract_digest: str | None
+    source_contract_digest: str | None
+    runtime_contract_digest: str | None
+    verified_contract_digest: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateEligibility:
+    state: UpdateEligibilityState
+    reason_codes: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveOperation:
+    kind: MaintenanceOperationKind
+    operation_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class InstanceInventoryRecordV2:
+    instance_id: str
+    name: str
+    target: TargetIdentity
+    management_origin: ManagementOrigin
+    management_state: ManagementState
+    update_eligibility: UpdateEligibility
+    service_identity: ServiceIdentity
+    channel: ChannelIdentity
+    observed_provenance: ObservedProvenanceIdentity
+    source_release: ReleaseIdentity
+    runtime_release: ReleaseIdentity | None
+    verified_release: ReleaseIdentity | None
+    contract_identities: ContractIdentities
+    inspection_bundle_digest: str
+    active_operation: ActiveOperation | None
+    last_verified_operation_id: str | None
+    created_at: str
+    updated_at: str
+    last_inspected_at: str
+    last_verified_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceOperationInput:
+    name: str
+    canonical_target: str
+    target_filesystem_identity: FilesystemIdentity
+    channel_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceCurrentIdentity:
+    provenance_seed_id: str
+    head_commit: str
+    head_tree: str
+    inspection_bundle_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceApproval:
+    fingerprint: str
+    recorded_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenancePreservationInventory:
+    non_touch_surfaces: tuple[str, ...]
+    target_byte_writes: int
+    manager_state_writes: int
+    manager_write_paths: tuple[str, ...]
+    secret_value_reads: int
+    secret_value_writes: int
+    database_reads: int
+    database_writes: int
+    target_process_executions: int
+    permission_prompts: int
+    invoked_vectors: tuple[tuple[str, ...], ...]
+    opened_resources: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceOperationAttempt:
+    attempt: int
+    stage_id: str
+    stage_key: str
+    status: MaintenanceStageStatus
+    started_at: str
+    finished_at: str | None
+    evidence: tuple[dict[str, JsonValue], ...]
+    error_kind: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceOperationResult:
+    kind: str
+    inventory_instance_id: str | None = None
+    reason_code: str | None = None
+    repair: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceOperation:
+    operation_id: str
+    instance_id: str
+    kind: MaintenanceOperationKind
+    idempotency_key: str
+    status: MaintenanceOperationStatus
+    input: MaintenanceOperationInput
+    current_identity: MaintenanceCurrentIdentity
+    candidate_identity: None
+    contract_digests: dict[str, str | None]
+    approval: MaintenanceApproval
+    stage_statuses: dict[str, MaintenanceStageStatus]
+    attempts: tuple[MaintenanceOperationAttempt, ...]
+    evidence: tuple[dict[str, JsonValue], ...]
+    preservation_inventory: MaintenancePreservationInventory
+    rollback_class: str
+    result: MaintenanceOperationResult | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorRun:
+    """One appended run of the closed doctor journal (Step 6 design section 3.5)."""
+
+    doctor_operation_id: str
+    run: int
+    contract: DoctorContractKind
+    status: str
+    exit_code: ExitCode
+    evidence_digest: str
+    head_observed: str | None
+    sections: tuple[dict[str, JsonValue], ...]
+    counts: dict[str, JsonValue]
+    preservation: dict[str, JsonValue]
+    service_check_verified: bool
+
+
+# --- Step-5 runtime plan records (design sections 4-8) ---------------------
+
+
+@dataclass(frozen=True, slots=True)
+class DeclaredClosurePiece:
+    """One editable distribution the target environment must carry."""
+
+    distribution: str
+    relative_path: str
+    origin: str  # required | roster_plugin | release_addition
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeOperationPlan:
+    """One release-declared or Manager-synthesised runtime operation after probing."""
+
+    operation_id: str
+    operation_ref: str
+    runner: str
+    stage: str
+    mutation_class: str
+    rollback_class: str
+    retry_policy: str
+    idempotency_key: str
+    applies: bool
+    postcondition_now: str
+    planned_actions: tuple[str, ...]
+    planned_targets: tuple[str, ...]
+    public_inputs: dict[str, JsonValue]
+    requires_confirmation: bool
+    backup_checkpoint_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedArtifactState:
+    """The probed three-way state of one declared managed artifact (section 6.2)."""
+
+    artifact_id: str
+    kind: str
+    destination: str
+    state: str
+    action: str
+    stamped_digest: str | None
+    template_digest: str
+    expected_sha256: str | None
+    conflict: str | None
+    operation_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleObservation:
+    """The lifecycle strategy the plan fixed and the observations that back it (section 7)."""
+
+    strategy: str
+    launch_topology: str | None
+    launchagent_label: str
+    plist_path: str
+    plist_expected_sha256: str | None
+    current_release_id: str | None
+    adapter_module_sha256: str | None
+    adapter_module_replaced: bool
+    verification_modules: tuple[str, ...]
+    readiness_budget_seconds: int
+    cutover_fingerprint: str | None
+    zero_downtime_rollback: bool
+    attestation: dict[str, JsonValue] | None
+    cutover_probe_receipt: dict[str, JsonValue] | None
+    unproven_reason: str | None
+    #: Step 7 section 7.3: the single-colour service observation (``loaded``, ``pid``, ``health``) taken
+    #: before the strategy was fixed; ``None`` for a router cutover.
+    pre_transition: dict[str, JsonValue] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimePlan:
+    """The closed, probed runtime plan the second approval binds (section 8)."""
+
+    operation_id: str
+    instance_id: str
+    source_commit: str
+    source_tree: str
+    source_tag: str | None
+    runtime_release_commit: str | None
+    runtime_contract_digest: str | None
+    declared_closure: tuple[DeclaredClosurePiece, ...]
+    operations: tuple[RuntimeOperationPlan, ...]
+    managed_artifacts: tuple[ManagedArtifactState, ...]
+    lifecycle: LifecycleObservation
+    forward_only_boundary: str | None
+    ignore_sources_digest: str | None
+    target_process_executions: int
+    blocked: tuple[tuple[str, str], ...]
+    fingerprint: str | None
+    operator_selections: dict[str, JsonValue]
+    knowledge_removed_articles: tuple[tuple[str, str, str], ...] = ()
+
+    @property
+    def actionable(self) -> bool:
+        return not self.blocked and self.lifecycle.unproven_reason is None
 
 
 def _optional_string(value: JsonValue) -> str | None:

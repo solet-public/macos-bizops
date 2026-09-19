@@ -24,7 +24,7 @@ from solet_manager.create import _normalize_apply_result  # noqa: E402
 from solet_manager.errors import AdapterProtocolError  # noqa: E402
 from solet_manager.models import CheckpointStatus  # noqa: E402
 
-from bootstrap_adapter.routes import execute_adapter_request  # noqa: E402
+from bootstrap_adapter.routes import _CASK_LINK_RETRY_ATTEMPTS, execute_adapter_request  # noqa: E402
 
 _CHECKS = 0
 _SCRIPT = r"""
@@ -218,10 +218,7 @@ def _check_python_bootstrap_transport(
     ):
         preview = invoke_adapter(registry, runner="bootstrap", request=python_request)
         _check(
-            preview.checkpoint_status is CheckpointStatus.PENDING
-            and preview.error_kind is None
-            and [item.id for item in preview.planned_actions]
-            == ["python.install_homebrew_formula"],
+            preview.checkpoint_status is CheckpointStatus.PENDING and preview.error_kind is None and [item.id for item in preview.planned_actions] == ["python.install_homebrew_formula"],
             "no-Python bootstrap probe presents the reviewed Homebrew action instead of adapter_missing",
         )
         _check(
@@ -311,14 +308,10 @@ def _check_coding_tool_pre_venv_transport(base: OperationRequest) -> None:
         adapter_module = target / "plugins/github_midwife_plugin/src/github_midwife_plugin/setup_adapter.py"
         adapter_module.parent.mkdir(parents=True)
         adapter_module.write_text("# target hydration adapter fixture\n")
-        requests = [
-            replace(base, operation_id=operation_id, operation_ref=operation_ref, public_inputs={})
-            for operation_id, operation_ref, _executable, _kind, _package in specifications
-        ]
+        requests = [replace(base, operation_id=operation_id, operation_ref=operation_ref, public_inputs={}) for operation_id, operation_ref, _executable, _kind, _package in specifications]
         legacy = [invoke_adapter(AdapterRegistry(target=target), runner="hydration", request=request) for request in requests]
         _check(
-            [(request.operation_id, result.checkpoint_status.value, result.error_kind) for request, result in zip(requests, legacy, strict=True)]
-            == [("install_codex_cli", "blocked", "adapter_missing"), ("install_claude_cli", "blocked", "adapter_missing"), ("install_node", "blocked", "adapter_missing")],
+            [(request.operation_id, result.checkpoint_status.value, result.error_kind) for request, result in zip(requests, legacy, strict=True)] == [("install_codex_cli", "blocked", "adapter_missing"), ("install_claude_cli", "blocked", "adapter_missing"), ("install_node", "blocked", "adapter_missing")],
             "pre-fix fresh-target hydration is exactly the reported three blocked adapter_missing rows",
         )
         _check(
@@ -340,9 +333,36 @@ def _coding_tool_absent_runner(command: list[str], **_kwargs: object) -> subproc
     raise AssertionError(f"unexpected absent coding-tool command: {command!r}")
 
 
+def _check_coding_tool_homebrew_path_fallback(
+    requests: list[OperationRequest],
+    specifications: tuple[tuple[str, str, str, str, str], ...],
+) -> None:
+    for homebrew_bin in ("/opt/homebrew/bin", "/usr/local/bin"):
+        for request, (_operation_id, _operation_ref, executable, _kind, _package) in zip(requests, specifications, strict=True):
+            resolved_path = f"{homebrew_bin}/{executable}"
+
+            def restricted_path_which(
+                name: str,
+                *,
+                resolved_path: str = resolved_path,
+            ) -> str | None:
+                return resolved_path if name == resolved_path else None
+
+            resolved = execute_adapter_request(
+                replace(request, probe_purpose="post_apply").to_dict(),
+                runner=_coding_tool_absent_runner,
+                which=restricted_path_which,
+            )
+            _check(
+                resolved["checkpoint_status"] == "verified" and resolved["evidence"][0]["observed"] == resolved_path,
+                f"restricted PATH resolves {executable} through {homebrew_bin} after install",
+            )
+
+
 def _check_coding_tool_bootstrap_results(requests: list[OperationRequest], specifications: tuple[tuple[str, str, str, str, str], ...]) -> None:
     absent = [execute_adapter_request(request.to_dict(), runner=_coding_tool_absent_runner, which=_coding_tool_brew) for request in requests]
     _check(all(result["checkpoint_status"] == "pending" for result in absent), "post-fix fresh-target preview reaches pending rather than adapter_missing for all three")
+    _check_coding_tool_homebrew_path_fallback(requests, specifications)
     for request, (_operation_id, _operation_ref, executable, kind, package) in zip(requests, specifications, strict=True):
         calls: list[list[str]] = []
 
@@ -377,11 +397,103 @@ def _check_coding_tool_bootstrap_results(requests: list[OperationRequest], speci
                 return subprocess.CompletedProcess(command, 0, "", "")
             raise AssertionError(f"unexpected coding-tool apply command: {command!r}")
 
-        applied = execute_adapter_request(replace(request, phase="apply", probe_purpose=None, approval_fingerprint="sha256:" + "c" * 64, dry_run=False).to_dict(), runner=apply_runner, which=_coding_tool_brew)
+        applied = execute_adapter_request(replace(request, phase="apply", probe_purpose=None, approval_fingerprint="sha256:" + "c" * 64, dry_run=False).to_dict(), runner=apply_runner, which=_coding_tool_brew, sleep=_no_op_sleep)
         _check(
             applied["checkpoint_status"] == "applied" and calls[-3:] == [["/fixture/brew", "--version"], ["/fixture/brew", "install", "--dry-run", *package_args], ["/fixture/brew", "install", *package_args]],
             f"absent {executable} applies only its exact reviewed Homebrew package action",
         )
+    _check_coding_tool_cask_apply_retry(requests, specifications)
+
+
+def _no_op_sleep(_seconds: float) -> None:
+    pass
+
+
+def _cask_apply_runner(
+    command: list[str],
+    *,
+    kind: str,
+    package: str,
+    package_args: list[str],
+    **_kwargs: object,
+) -> subprocess.CompletedProcess[str]:
+    if command == ["/fixture/brew", "--version"]:
+        return subprocess.CompletedProcess(command, 0, "Homebrew 4.4.0\n", "")
+    if command == ["/fixture/brew", "install", "--dry-run", *package_args]:
+        return subprocess.CompletedProcess(command, 0, f"Would install 1 {kind}:\n{package}\n", "")
+    if command == ["/fixture/brew", "install", *package_args]:
+        return subprocess.CompletedProcess(command, 0, "", "")
+    raise AssertionError(f"unexpected coding-tool apply command: {command!r}")
+
+
+def _check_cask_apply_retry_succeeds(apply_request: dict[str, object], executable: str, kind: str, apply_runner: object) -> None:
+    sleeps: list[float] = []
+    calls_before_resolved = 2
+    which_calls = 0
+
+    def eventually_resolves(name: str) -> str | None:
+        nonlocal which_calls
+        if name == "brew":
+            return "/fixture/brew"
+        if name != executable:
+            return None
+        which_calls += 1
+        return f"/fixture/{executable}" if which_calls > calls_before_resolved else None
+
+    applied = execute_adapter_request(apply_request, runner=apply_runner, which=eventually_resolves, sleep=sleeps.append)
+    if kind == "cask":
+        _check(
+            applied["checkpoint_status"] == "applied" and applied["evidence"][0]["status"] == "verified" and applied["evidence"][0]["observed"] == f"/fixture/{executable}",
+            f"cask {executable} apply retries resolution until the linked executable is stat-visible",
+        )
+        # -1: the route's own pre-apply resolution check consumes the first which() call.
+        _check(len(sleeps) == calls_before_resolved - 1, f"cask {executable} apply stops retrying as soon as resolution succeeds")
+    else:
+        _check(
+            applied["checkpoint_status"] == "applied" and not sleeps,
+            f"formula {executable} apply never retries resolution -- only kind='cask' hits the new path",
+        )
+
+
+def _check_cask_apply_retry_exhausts(apply_request: dict[str, object], executable: str, kind: str, apply_runner: object) -> None:
+    exhausted_sleeps: list[float] = []
+    exhausted = execute_adapter_request(
+        apply_request,
+        runner=apply_runner,
+        which=lambda name: "/fixture/brew" if name == "brew" else None,
+        sleep=exhausted_sleeps.append,
+    )
+    if kind == "cask":
+        _check(
+            exhausted["checkpoint_status"] == "applied" and exhausted["evidence"][0]["status"] == "blocked" and len(exhausted_sleeps) == _CASK_LINK_RETRY_ATTEMPTS - 1,
+            f"cask {executable} apply retry is bounded and still reports blocked evidence when the executable never resolves",
+        )
+    else:
+        _check(not exhausted_sleeps, f"formula {executable} apply retry stays unbounded-irrelevant -- it never enters the retry loop")
+
+
+def _check_coding_tool_cask_apply_retry(
+    requests: list[OperationRequest],
+    specifications: tuple[tuple[str, str, str, str, str], ...],
+) -> None:
+    """A cask apply retries resolution briefly before trusting an unresolved check (iss_9d12ff3f)."""
+
+    for request, (_operation_id, _operation_ref, executable, kind, package) in zip(requests, specifications, strict=True):
+        package_args = ["--cask", package] if kind == "cask" else [package]
+
+        def apply_runner(
+            command: list[str],
+            *,
+            kind: str = kind,
+            package: str = package,
+            package_args: list[str] = package_args,
+            **_kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            return _cask_apply_runner(command, kind=kind, package=package, package_args=package_args)
+
+        apply_request = replace(request, phase="apply", probe_purpose=None, approval_fingerprint="sha256:" + "c" * 64, dry_run=False).to_dict()
+        _check_cask_apply_retry_succeeds(apply_request, executable, kind, apply_runner)
+        _check_cask_apply_retry_exhausts(apply_request, executable, kind, apply_runner)
 
 
 def main() -> int:
@@ -521,13 +633,9 @@ def main() -> int:
                 ),
             )
         )
-        apply_missing = _normalize_apply_result(
-            invoke_adapter(registry, runner="unknown", request=apply_request)
-        )
+        apply_missing = _normalize_apply_result(invoke_adapter(registry, runner="unknown", request=apply_request))
         _check(
-            apply_exit.error_kind == "adapter_exit_error"
-            and apply_timeout.error_kind == "adapter_timeout"
-            and apply_missing.error_kind == "adapter_missing",
+            apply_exit.error_kind == "adapter_exit_error" and apply_timeout.error_kind == "adapter_timeout" and apply_missing.error_kind == "adapter_missing",
             "apply transport exit, timeout, and missing errors remain stable",
         )
         _raises(

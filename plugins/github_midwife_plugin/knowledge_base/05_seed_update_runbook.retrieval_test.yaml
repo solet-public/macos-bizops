@@ -8,6 +8,12 @@ consumer_profile: both
 
 target_queries:
   - "update a live solet from a newer seed release"
+  - "solet-manager inspect import update doctor sequence for an existing clone"
+  - "update preview refused tracked_overlap_present how do I keep my local change"
+  - "which seed update steps still have to be done by hand with the manager"
+  - "local_changes_present allowed_after_import what does the classification mean"
+  - "solet-manager update dry-run preserved local modifications committed local state"
+  - "manual git pull recovery for a diverged seed history clone"
   - "seed update runbook git pull fast forward re-mint"
   - "do I need to rebuild the venv after pulling a seed update"
   - "apply a new seed version without losing solet state"

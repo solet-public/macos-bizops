@@ -695,7 +695,22 @@ def _command_outcome_state_controls() -> None:
 
 
 def _missing_cli_probe_controls() -> None:
-    with patch.dict(os.environ, {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, clear=True):
+    """PATH restriction alone no longer proves a CLI absent: resolve_executable's
+    Homebrew-bin fallback checks fixed absolute paths regardless of PATH (by
+    design, iss_e1d5285b), so a real dev host with codex/claude genuinely
+    installed there would find them anyway. Redirect the fallback directories
+    to guaranteed-nonexistent paths so this stays a true "genuinely absent"
+    simulation independent of the host's actual installs."""
+    with (
+        patch.dict(os.environ, {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, clear=True),
+        patch(
+            "github_midwife_plugin.setup_adapter_runtime._HOMEBREW_BIN_DIRECTORIES",
+            (
+                "/private/tmp/setup-adapter-runtime-regression/nonexistent-brew-bin-a",
+                "/private/tmp/setup-adapter-runtime-regression/nonexistent-brew-bin-b",
+            ),
+        ),
+    ):
         claude = dispatch_request(_cli_probe_request("claude"), SystemRuntime())
         codex = dispatch_request(_cli_probe_request("codex"), SystemRuntime())
     for cli, response in (("claude", claude), ("codex", codex)):

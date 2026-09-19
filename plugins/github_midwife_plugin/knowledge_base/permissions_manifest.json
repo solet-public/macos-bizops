@@ -72,12 +72,12 @@
         "required_when": {
           "decision_ref": "session_sources",
           "operator": "contains",
-          "value": "claude_local"
+          "value": "claude_code_local"
         }
       },
       "system_settings_pane": "Privacy & Security > Files and Folders",
       "what": "Claude Code session files",
-      "when": "When `session_sources` contains `claude_local`.",
+      "when": "When `session_sources` contains `claude_code_local`.",
       "why": "Read only the user-approved Claude projects, history, and tasks roots for ingestion."
     },
     {

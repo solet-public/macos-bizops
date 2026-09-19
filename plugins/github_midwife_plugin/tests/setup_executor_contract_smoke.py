@@ -92,7 +92,7 @@ def main() -> int:
                 "consumer_probe_purposes": ["stage_exit", "completion"],
                 "consumer_probe_refs": ["embedding_request_succeeds"],
                 "downstream_reservations": {
-                    "governed_process_call_seconds": 5
+                    "governed_process_call_seconds": 30
                 },
             },
             "postcondition_probe_refs": ["router_ready", "peer_identity_valid"],

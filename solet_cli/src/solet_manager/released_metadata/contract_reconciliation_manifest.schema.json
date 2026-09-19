@@ -262,6 +262,227 @@
               "operation_statuses_to_reset"
             ],
             "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "answer_value_migrations": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "decision_id": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "from_value": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "to_value": {
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "decision_id",
+                    "from_value",
+                    "to_value"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "destination": {
+                "$ref": "#/$defs/destination_identity"
+              },
+              "first_use_inactive_probe_migrations": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "citation": {
+                      "$ref": "#/$defs/first_use_migration_citation"
+                    },
+                    "destination": {
+                      "$ref": "#/$defs/stage_probe"
+                    },
+                    "evidence_disposition": {
+                      "const": "preserve"
+                    },
+                    "migration_reason": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "resulting_status": {
+                      "const": "not_applicable"
+                    },
+                    "rule_id": {
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "rule_id",
+                    "destination",
+                    "resulting_status",
+                    "migration_reason",
+                    "evidence_disposition",
+                    "citation"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "migration_id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/$defs/source_identity"
+              },
+              "stage_probe_mappings": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "destination": {
+                      "$ref": "#/$defs/stage_probe"
+                    },
+                    "source": {
+                      "$ref": "#/$defs/stage_probe"
+                    }
+                  },
+                  "required": [
+                    "source",
+                    "destination"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "migration_id",
+              "source",
+              "destination",
+              "stage_probe_mappings",
+              "first_use_inactive_probe_migrations",
+              "answer_value_migrations"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "answer_value_migrations": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "decision_id": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "from_value": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "to_value": {
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "decision_id",
+                    "from_value",
+                    "to_value"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "destination": {
+                "$ref": "#/$defs/destination_identity"
+              },
+              "first_use_inactive_probe_migrations": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "citation": {
+                      "$ref": "#/$defs/first_use_migration_citation"
+                    },
+                    "destination": {
+                      "$ref": "#/$defs/stage_probe"
+                    },
+                    "evidence_disposition": {
+                      "const": "preserve"
+                    },
+                    "migration_reason": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "resulting_status": {
+                      "const": "not_applicable"
+                    },
+                    "rule_id": {
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "rule_id",
+                    "destination",
+                    "resulting_status",
+                    "migration_reason",
+                    "evidence_disposition",
+                    "citation"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "migration_id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "operation_statuses_to_reset": {
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": "array",
+                "uniqueItems": true
+              },
+              "source": {
+                "$ref": "#/$defs/source_identity"
+              },
+              "stage_probe_mappings": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "destination": {
+                      "$ref": "#/$defs/stage_probe"
+                    },
+                    "source": {
+                      "$ref": "#/$defs/stage_probe"
+                    }
+                  },
+                  "required": [
+                    "source",
+                    "destination"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "migration_id",
+              "source",
+              "destination",
+              "stage_probe_mappings",
+              "first_use_inactive_probe_migrations",
+              "operation_statuses_to_reset",
+              "answer_value_migrations"
+            ],
+            "type": "object"
           }
         ]
       },

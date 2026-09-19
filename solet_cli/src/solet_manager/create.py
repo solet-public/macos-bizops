@@ -34,7 +34,11 @@ class CreateManager:
         self.paths = paths
         self.contract_directory = contract_directory
         self.seed_lock_path = seed_lock_path
-        self.registry = InstanceRegistry(paths.registry_path)
+        self.registry = InstanceRegistry(
+            paths.registry_path,
+            maintenance_inventory_path=paths.maintenance_inventory_path,
+            registry_lock_path=paths.registry_lock_path,
+        )
 
     def preview(
         self,

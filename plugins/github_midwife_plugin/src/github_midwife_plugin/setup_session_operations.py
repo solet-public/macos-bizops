@@ -3,21 +3,62 @@
 from __future__ import annotations
 
 import json
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
+from ananta.llm.session_ledger.root_uri import canonicalize_root_uri_for_storage
+
 from .installation_state_doctor import partition_session_roots, session_retrieval
 from .setup_adapter_contract import AdapterRequest, JsonObject, JsonValue, planned_action, result
-from .setup_adapter_runtime import Runtime, read_json_object
+from .setup_adapter_runtime import CommandOutcome, Runtime, read_json_object
 from .setup_operations import (
     _SESSION_ROOTS,
     _blocked,
     _failed_outcome,
     _kickstart,
+    _solet_success_payload,
     solet_call,
     solet_call_succeeded,
-    solet_data_string,
 )
+
+# Measured on a real guest (2026-09-19): a `launchctl kickstart -k` restart
+# returns immediately, but the actual solet child needs ~29s to cold-start
+# Python, establish its Postgres pool, and register with the blue-green
+# router before `solet-bridge health` reports healthy. 60s keeps a >2x margin.
+_KICKSTART_HEALTH_BUDGET_SECONDS = 60
+_KICKSTART_HEALTH_POLL_INTERVAL_SECONDS = 1.0
+
+
+def _wait_for_kickstart_health(
+    request: AdapterRequest,
+    runtime: Runtime,
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Poll the restarted target's bridge health until it answers or the budget lapses."""
+
+    deadline = monotonic() + _KICKSTART_HEALTH_BUDGET_SECONDS
+    while True:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return False
+        outcome = runtime.run(
+            (str(request.target / ".venv/bin/solet-bridge"), "health"),
+            timeout_seconds=max(1, min(10, int(remaining) + 1)),
+            cwd=request.target,
+            extra_env={"SOLET_NAME": request.name},
+        )
+        if outcome.ok:
+            try:
+                healthy = json.loads(outcome.stdout).get("status") == "healthy"
+            except (json.JSONDecodeError, AttributeError):
+                healthy = False
+            if healthy:
+                return True
+        sleep(_KICKSTART_HEALTH_POLL_INTERVAL_SECONDS)
 
 
 def session_source(request: AdapterRequest, runtime: Runtime) -> JsonObject:
@@ -93,18 +134,27 @@ def _apply_session_source(
     started = _kickstart(request, runtime)
     if not started.ok:
         return _failed_outcome(request, started, "session_source_restart_failed")
-    source_ids: list[str] = []
-    for source_kind, root in absolute_rows:
-        registered = solet_call(
+    if not _wait_for_kickstart_health(request, runtime):
+        return result(
             request,
-            runtime,
-            "service_interface::session_ledger_service::register_source",
-            {"source_kind": source_kind, "root_uri": str(root)},
+            status="failed",
+            error_kind="session_source_restart_not_ready",
+            retry_safe=True,
+            repair=(
+                "The restarted target did not report healthy within "
+                f"{_KICKSTART_HEALTH_BUDGET_SECONDS}s. Retry setup once the platform "
+                "LaunchAgent has finished starting."
+            ),
         )
-        source_id = solet_data_string(registered, "source_id")
-        if source_id is None:
-            return _failed_outcome(request, registered, "session_source_register_failed")
-        source_ids.append(source_id)
+    listed = solet_call(
+        request,
+        runtime,
+        "service_interface::session_ledger_service::list_sources",
+        {},
+    )
+    source_ids = _registered_source_ids(listed, absolute_rows)
+    if source_ids is None:
+        return _failed_outcome(request, listed, "session_source_register_failed")
     for source_id in source_ids:
         backfill = solet_call(
             request,
@@ -115,3 +165,52 @@ def _apply_session_source(
         if not solet_call_succeeded(backfill):
             return _failed_outcome(request, backfill, "session_backfill_failed")
     return result(request, status="applied", retry_safe=True)
+
+
+def _registered_source_ids(
+    outcome: CommandOutcome,
+    absolute_rows: list[tuple[str, Path]],
+) -> list[str] | None:
+    """Read back enabled boot-registered sources before polling them.
+
+    Setup writes the allow-list and restarts the target; boot then registers the
+    declared pulling sources through the trusted internal seam.  The setup
+    adapter is an external bridge caller, so it must verify those rows rather
+    than re-invoking the authorization-gated public registration verb.
+    """
+    payload = _solet_success_payload(outcome)
+    if payload is None:
+        return None
+    sources = payload.get("sources")
+    if not isinstance(sources, list):
+        return None
+    source_ids: dict[tuple[str, str], str] = {}
+    expected = [
+        (source_kind, canonicalize_root_uri_for_storage(str(root)))
+        for source_kind, root in absolute_rows
+    ]
+    for source in sources:
+        entry = _source_entry_id(source)
+        if entry is None:
+            continue
+        key, source_id = entry
+        if key in expected and key not in source_ids:
+            source_ids[key] = source_id
+    if len(source_ids) != len(expected):
+        return None
+    return [source_ids[key] for key in expected]
+
+
+def _source_entry_id(source: object) -> tuple[tuple[str, str], str] | None:
+    if not isinstance(source, dict):
+        return None
+    source_kind = source.get("source_kind")
+    root_uri = source.get("root_uri")
+    source_id = source.get("source_id")
+    if not isinstance(source_kind, str) or not isinstance(root_uri, str):
+        return None
+    if not isinstance(source_id, str) or not source_id:
+        return None
+    if source.get("enabled") is not True:
+        return None
+    return (source_kind, root_uri), source_id

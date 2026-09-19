@@ -591,7 +591,7 @@ class SessionLedgerQualificationAPI(ABC):
                 "sources": ParameterMetadata(
                     type=ParameterType.LIST,
                     description=(
-                        "At most codex_local and claude_local rows: selected, consented, "
+                        "At most codex_local and claude_code_local rows: selected, consented, "
                         "registered, backfill_count, retrieval_ok. Empty when answers are untrusted."
                     ),
                 ),

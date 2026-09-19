@@ -113,6 +113,31 @@ lifecycle, real Python version transition, and cold-machine install/create/
 resume/doctor flow. The disposable runner retains its isolated fixture as
 evidence.
 
+Two phases follow BrewTestBot and are the only place the existing-install
+path is measured across a real process boundary and a real host (Step 7 of the
+existing-install design; `solet_cli/tests/homebrew_*_smoke.py` cover the same
+sequence in-process against a fake keg). `existing-install-import-update`
+installs the previous Formula, builds a real-style clone with
+`solet_cli/homebrew/ci/real_style_fixture.py` — `git clone` of the repository
+the installed seed lock (the formula writes it under the keg's libexec share
+directory) names at its `commit` (tree hash verified), then the seed's own genesis writers and the `solet create` shell
+shape, so the clone carries a newborn's tracked and untracked local state —
+and drives it with the canonical Manager name: `solet-manager inspect`,
+`import --dry-run`, `import --yes`, `doctor`, then the Formula upgrade to the
+current release, `update --dry-run`/`--yes` through the source stage and again
+through the runtime stage to `promoted`, `doctor`, `brew reinstall`, `doctor`,
+and `reconcile --dry-run` (which must answer `no_active_update`, proving the
+pointer was released). `cold-host-degraded` then uninstalls `python@3.13`
+(`doctor` reports `host_python_313 missing`; `update --dry-run` refuses
+`host_requirement_missing`), restores it, and boots the instance's LaunchAgent
+out (`doctor` reports the service rows `unknown service_offline`; a zero-delta
+`update --dry-run` is `already_current`, and one with a newer release is
+refused before the single-colour transition). `<reviewed>` placeholders are
+resolved from the preceding `--dry-run` JSON exactly as `create` is. The
+fixture builder imports `solet_cli/tests/_step7_support.py` by path, so the
+harness checkout must carry `solet_cli/tests/`; the clone's bytes come from the
+seed archive, never from that checkout.
+
 The included enterprise Brewfile demonstrates formula-scoped trust without
 granting whole-tap trust. The harness records no claim of cross-architecture
 coverage; CI must supply Apple Silicon and Intel macOS evidence separately.

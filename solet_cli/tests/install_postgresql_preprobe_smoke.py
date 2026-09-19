@@ -23,7 +23,10 @@ from solet_manager.adapters import OperationRequest, OperationResult  # noqa: E4
 from solet_manager.contracts import ContractBundle  # noqa: E402
 from solet_manager.models import CheckpointStatus  # noqa: E402
 
-from bootstrap_adapter.homebrew import run_homebrew_install_required  # noqa: E402
+from bootstrap_adapter.homebrew import (  # noqa: E402
+    _homebrew_plan_is_exact,
+    run_homebrew_install_required,
+)
 from bootstrap_adapter.models import AdapterRuntime  # noqa: E402
 
 _CONTRACTS = _ROOT / "plugins/github_midwife_plugin/knowledge_base"
@@ -42,6 +45,18 @@ _INSTALLED_WARNING = (
     "Warning: pgvector 0.8.6 is already installed and up-to-date.\n"
     "To reinstall 0.8.6, run:\n  brew reinstall pgvector\n"
 )
+_VERSIONED_POSTGRESQL_PLAN = """\
+==> Would install 1 formula:
+postgresql@17 17.11
+==> Downloading https://ghcr.io/v2/homebrew/core/postgresql/17/manifests/17.11
+Already downloaded: /Users/admin/Library/Caches/Homebrew/postgresql@17.json
+==> Would install 1 dependency for postgresql@17:
+krb5
+==> Would install 1 formula:
+postgresql@17 17.11
+==> Would install 1 dependency for postgresql@17:
+krb5
+"""
 type _Run = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -163,6 +178,60 @@ def _check_later_install_preserves_pgvector() -> None:
     )
 
 
+def _check_versioned_postgresql_dry_run_plan() -> None:
+    _check(
+        _homebrew_plan_is_exact(
+            _VERSIONED_POSTGRESQL_PLAN,
+            kind="formula",
+            package="postgresql@17",
+        ),
+        "versioned repeated PostgreSQL dry-run remains an exact reviewed plan",
+    )
+    _check(
+        not _homebrew_plan_is_exact(
+            _VERSIONED_POSTGRESQL_PLAN.replace("krb5\n", "krb5\nunapproved 1.0\n", 1),
+            kind="formula",
+            package="postgresql@17",
+        ),
+        "extra versioned package item is still refused",
+    )
+    _check(
+        not _homebrew_plan_is_exact(
+            _VERSIONED_POSTGRESQL_PLAN.replace(
+                "postgresql@17 17.11", "postgresql@17 17.11 unexpected", 1
+            ),
+            kind="formula",
+            package="postgresql@17",
+        ),
+        "malformed versioned package item is still refused",
+    )
+
+
+def _check_versioned_postgresql_dry_run_applies() -> None:
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(list(command))
+        if "--dry-run" in command:
+            return _completed(command, stdout=_VERSIONED_POSTGRESQL_PLAN)
+        return _completed(command)
+
+    run_homebrew_install_required(
+        _runtime(run),
+        "/fixture/brew",
+        "postgresql@17",
+        "PostgreSQL install",
+    )
+    _check(
+        commands
+        == [
+            ["/fixture/brew", "install", "--dry-run", "postgresql@17"],
+            ["/fixture/brew", "install", "postgresql@17"],
+        ],
+        "accepted versioned PostgreSQL dry-run reaches reviewed install",
+    )
+
+
 def _pre_probe_result(
     blocked_probe: str,
     observed: list[str],
@@ -249,7 +318,9 @@ def main() -> int:
     _check_already_installed_retry()
     _check_informational_nonzero_retry()
     _check_later_install_preserves_pgvector()
-    print("install_postgresql_preprobe_smoke: 12/12 checks passed")
+    _check_versioned_postgresql_dry_run_plan()
+    _check_versioned_postgresql_dry_run_applies()
+    print("install_postgresql_preprobe_smoke: 16/16 checks passed")
     return 0
 
 

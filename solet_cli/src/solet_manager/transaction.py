@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Self, cast
+from typing import cast
 
 from solet_setup_contracts import canonical_sha256
 
@@ -19,12 +18,17 @@ from .journal_rollup import (
 )
 from .journal_validation import (
     JournalTransaction,
+    ParsedJournal,
     parse_transaction_fields,
     validate_attempt,
     validate_stage_probe_attempt,
     validate_transaction_state,
 )
-from .models import CheckpointStatus, JsonValue, TransactionStatus
+from .models import (
+    CheckpointStatus,
+    JsonValue,
+    TransactionStatus,
+)
 from .release_lock import SeedLock
 from .state_io import atomic_write_json, load_json_object
 
@@ -32,17 +36,32 @@ __all__ = [
     "StageProbeStatuses",
     "Transaction",
     "assert_resume_identity",
+    "append_maintenance_attempt",
     "canonical_sha256",
+    "create_import_maintenance_operation",
     "load_transaction",
+    "maintenance_evidence",
+    "parse_maintenance_operation_bytes",
+    "read_maintenance_operation",
     "roll_up_transaction",
+    "transition_maintenance_operation",
     "target_install_state_projection",
     "utc_now",
     "write_transaction",
+    "write_maintenance_operation",
 ]
 
 
-def utc_now() -> str:
-    return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+from .maintenance_journal import (
+    append_maintenance_attempt,
+    create_import_maintenance_operation,
+    maintenance_evidence,
+    parse_maintenance_operation_bytes,
+    read_maintenance_operation,
+    transition_maintenance_operation,
+    utc_now,
+    write_maintenance_operation,
+)
 
 
 @dataclass(frozen=True)
@@ -420,36 +439,9 @@ class Transaction:
         }
 
     @classmethod
-    def from_dict(cls, raw: dict[str, JsonValue]) -> Self:
+    def from_dict(cls, raw: dict[str, JsonValue]) -> Transaction:
         parsed = parse_transaction_fields(raw)
-        transaction = cls(
-            operation_id=parsed.operation_id,
-            name=parsed.name,
-            target=parsed.target,
-            input_fingerprint=parsed.input_fingerprint,
-            answers=parsed.answers,
-            answers_fingerprint=parsed.answers_fingerprint,
-            approval_fingerprint=parsed.approval_fingerprint,
-            approval_recorded_at=parsed.approval_recorded_at,
-            seed=parsed.seed,
-            flow_id=parsed.flow_id,
-            flow_source_revision=parsed.flow_source_revision,
-            flow_contract_digest=parsed.flow_contract_digest,
-            status=parsed.status,
-            stages=parsed.stages,
-            stage_probe_statuses=parsed.stage_probe_statuses,
-            probe_activations=parsed.probe_activations,
-            stage_probe_attempts=parsed.stage_probe_attempts,
-            operation_stages=parsed.operation_stages,
-            operation_statuses=parsed.operation_statuses,
-            operation_attempts=parsed.operation_attempts,
-            evidence=parsed.evidence,
-            completion=parsed.completion,
-            result_kind=parsed.result_kind,
-            created_at=parsed.created_at,
-            updated_at=parsed.updated_at,
-            journal_version=CURRENT_JOURNAL_VERSION,
-        )
+        transaction = _transaction_from_parsed(parsed)
         validate_transaction_state(
             cast(JournalTransaction, transaction),
             canonical_answers_fingerprint=canonical_sha256(transaction.answers),
@@ -618,6 +610,32 @@ def target_install_state_projection(transaction: Transaction) -> dict[str, JsonV
     }
 
 
+def _transaction_from_parsed(parsed: ParsedJournal) -> Transaction:
+    return Transaction(
+        operation_id=parsed.operation_id,
+        name=parsed.name, target=parsed.target,
+        input_fingerprint=parsed.input_fingerprint, answers=parsed.answers,
+        answers_fingerprint=parsed.answers_fingerprint, approval_fingerprint=parsed.approval_fingerprint,
+        approval_recorded_at=parsed.approval_recorded_at, seed=parsed.seed,
+        flow_id=parsed.flow_id, flow_source_revision=parsed.flow_source_revision,
+        flow_contract_digest=parsed.flow_contract_digest,
+        status=parsed.status,
+        stages=parsed.stages,
+        stage_probe_statuses=parsed.stage_probe_statuses,
+        probe_activations=parsed.probe_activations,
+        stage_probe_attempts=parsed.stage_probe_attempts,
+        operation_stages=parsed.operation_stages,
+        operation_statuses=parsed.operation_statuses,
+        operation_attempts=parsed.operation_attempts,
+        evidence=parsed.evidence,
+        completion=parsed.completion,
+        result_kind=parsed.result_kind,
+        created_at=parsed.created_at,
+        updated_at=parsed.updated_at,
+        journal_version=CURRENT_JOURNAL_VERSION,
+    )
+
+
 def assert_resume_identity(
     existing: Transaction,
     *,
@@ -632,5 +650,5 @@ def assert_resume_identity(
     if existing.input_fingerprint != input_fingerprint:
         raise StateConflictError(
             "requested inputs differ from the retained transaction",
-            repair=("Resume with the original inputs or inspect and explicitly abandon the transaction later."),
+            repair=("Resume with the original inputs or inspect the transaction before another lifecycle step."),
         )

@@ -225,9 +225,34 @@ def _uid() -> int:
     return os.getuid()
 
 
+_CASK_LINK_RETRY_ATTEMPTS = 5
+_CASK_LINK_RETRY_DELAY_SECONDS = 0.5
+
+
+def _resolve_cli_post_apply(runtime: Runtime, cli: str) -> str | None:
+    """Retry resolution on a post-apply verification of a just-installed cask.
+
+    Both codex and claude ship as Homebrew casks; their post-apply probe can
+    run before the linked executable is stat-visible to this freshly spawned
+    process (measured live, iss_9d12ff3f/iss_e1d5285b) even though the cask
+    genuinely installed. A pre-install probe (the tool legitimately absent)
+    never reaches this path -- only probe_purpose == 'post_apply' does."""
+    for attempt in range(_CASK_LINK_RETRY_ATTEMPTS):
+        executable = resolve_executable(runtime, cli)
+        if executable is not None:
+            return executable
+        if attempt < _CASK_LINK_RETRY_ATTEMPTS - 1:
+            time.sleep(_CASK_LINK_RETRY_DELAY_SECONDS)
+    return None
+
+
 def _cli_available(request: AdapterRequest, runtime: Runtime) -> JsonObject:
     cli = "claude" if "claude" in request.operation_ref else "codex"
-    executable = resolve_executable(runtime, cli)
+    executable = (
+        _resolve_cli_post_apply(runtime, cli)
+        if request.probe_purpose == "post_apply"
+        else resolve_executable(runtime, cli)
+    )
     if executable is None:
         return _boolean_probe(
             request,

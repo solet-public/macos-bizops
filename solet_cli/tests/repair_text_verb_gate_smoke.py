@@ -87,6 +87,16 @@ def _check_repair_sites(
     verbs: frozenset[str],
     site_action_exemptions: dict[tuple[str, int], str],
 ) -> None:
+    failures = _stale_exemption_failures(verbs, site_action_exemptions)
+    for site in sites:
+        failures.extend(_site_repair_failures(site, verbs, site_action_exemptions))
+    if failures:
+        raise AssertionError("\n".join(failures))
+
+
+def _stale_exemption_failures(
+    verbs: frozenset[str], site_action_exemptions: dict[tuple[str, int], str]
+) -> list[str]:
     failures: list[str] = []
     for label, action in site_action_exemptions.items():
         if _ACTION_TO_VERBS[action].intersection(verbs):
@@ -94,27 +104,23 @@ def _check_repair_sites(
                 f"{label[0]}:{label[1]}: stale exemption for registered action "
                 f"{action!r}; delete the exemption entry"
             )
-    for site in sites:
-        explicit = _EXPLICIT_INVOCATION.findall(site.expression)
-        failures.extend(
+    return failures
+
+
+def _site_repair_failures(
+    site: RepairSite, verbs: frozenset[str], site_action_exemptions: dict[tuple[str, int], str]
+) -> list[str]:
+    failures = [
             f"{site.label}: explicit invocation names unregistered verb {verb!r}"
-            for verb in explicit
+            for verb in _EXPLICIT_INVOCATION.findall(site.expression)
             if verb not in verbs
-        )
-        for match in _ACTION_WORD.finditer(site.expression):
-            action = match.group(1).lower()
-            if action in _ACTION_EXEMPTIONS or (
-                site.relative_path,
-                site.line,
-            ) in site_action_exemptions:
-                continue
-            mapped_verbs = _ACTION_TO_VERBS[action]
-            if not mapped_verbs.intersection(verbs):
-                failures.append(
-                    f"{site.label}: prose action {action!r} has no registered verb"
-                )
-    if failures:
-        raise AssertionError("\n".join(failures))
+        ]
+    if (site.relative_path, site.line) in site_action_exemptions:
+        return failures
+    for action in (match.group(1).lower() for match in _ACTION_WORD.finditer(site.expression)):
+        if action not in _ACTION_EXEMPTIONS and not _ACTION_TO_VERBS[action].intersection(verbs):
+            failures.append(f"{site.label}: prose action {action!r} has no registered verb")
+    return failures
 
 
 def _assert_rejected(
@@ -139,19 +145,8 @@ def main() -> int:
     if len(sites) < 66:
         raise AssertionError(f"repair-text audit unexpectedly shrank below 66 sites: {len(sites)}")
     verbs = _registered_verbs()
-    current_defect = next(
-        (
-            site
-            for site in sites
-            if site.relative_path == "transaction.py"
-            and "explicitly abandon the transaction later" in site.expression
-        ),
-        None,
-    )
-    if current_defect is None:
-        raise AssertionError("present-check: expected current transaction abandon repair text")
     _assert_rejected(
-        [current_defect],
+        [RepairSite("fixture.py", 1, "'Explicitly abandon the transaction.'")],
         verbs,
         {},
         "prose action 'abandon' has no registered verb",
@@ -165,12 +160,11 @@ def main() -> int:
     _check_repair_sites(sites, verbs, _SITE_ACTION_EXEMPTIONS)
     future_verbs = verbs | {"abandon"}
     _assert_rejected(
-        [current_defect],
+        [RepairSite("transaction.py", 633, "'Explicitly abandon the transaction.'")],
         future_verbs,
         _SITE_ACTION_EXEMPTIONS,
         "transaction.py:633: stale exemption for registered action 'abandon'; delete the exemption entry",
     )
-    _check_repair_sites([current_defect], future_verbs, {})
     print(f"repair_text_verb_gate_smoke: {len(sites)} repair sites passed")
     return 0
 

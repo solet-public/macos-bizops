@@ -55,10 +55,15 @@ _RENDER_TOKENS = {
     # hydration edit rather than a token value, so it is checked separately
     # below rather than modelled as a second fixture value here.
     "{{GIT_CONTROLLER_NAME}}": "Git-Controller",
+    # Existing-install managed-artifact templates (design section 6.1).
+    "{{SHELL_FILE_ZSH}}": "'/Users/example/Workspace/iris/client/iris.zsh'",
+    "{{RUNTIME_DIR}}": "/Users/example/.ananta/runtime/iris",
+    "{{PATH_ENV}}": "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
 }
 
 _ZSH_SHAPED = {
     "zshrc.template",
+    "zshrc_block.template",
     "solet.zsh.template",
     "claude_launcher.template",
     "codex_launcher.template",

@@ -14,6 +14,9 @@ _ROOT = Path(__file__).resolve().parents[3]
 _SRC = _ROOT / "plugins/github_midwife_plugin/src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+_ANANTA_SRC = _ROOT / "ananta/src"
+if str(_ANANTA_SRC) not in sys.path:
+    sys.path.insert(0, str(_ANANTA_SRC))
 _MANAGER_SRC = _ROOT / "solet_cli/src"
 if str(_MANAGER_SRC) not in sys.path:
     sys.path.insert(0, str(_MANAGER_SRC))
@@ -139,7 +142,11 @@ def _check_conditional_wiring(flow: dict[str, Any]) -> None:
         probes["codex_session_roots_readable"].get("required_when")
         == {"decision_ref": "session_sources", "operator": "contains", "value": "codex_local"}
         and probes["claude_session_roots_readable"].get("required_when")
-        == {"decision_ref": "session_sources", "operator": "contains", "value": "claude_local"},
+        == {
+            "decision_ref": "session_sources",
+            "operator": "contains",
+            "value": "claude_code_local",
+        },
         "red: remove a session-root required_when condition",
     )
     salesforce = probes["salesforce_cli_available"]
@@ -404,7 +411,8 @@ def _check_empty_history_exit_predicate(runtime: FakeRuntime) -> None:
     for relative in (".codex/sessions", ".claude/projects"):
         _rmtree(runtime.home / relative)
     _check(
-        _sources_with_absent_roots(runtime) == frozenset({"codex_local", "claude_local"}),
+        _sources_with_absent_roots(runtime)
+        == frozenset({"codex_local", "claude_code_local"}),
         "red: claim a root is present when it does not exist",
     )
 

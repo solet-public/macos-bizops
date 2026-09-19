@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .errors import InstanceUnmanagedError, StateConflictError, StateError
-from .models import SCHEMA_VERSION, InstanceRecord, JsonValue
-from .state_io import atomic_write_json, load_json_object
+from .errors import InstanceUnmanagedError, RegistryUniquenessError, StateConflictError, StateError
+from .maintenance_inventory import read_maintenance_inventory_v2
+from .models import SCHEMA_VERSION, InstanceInventoryRecordV2, InstanceRecord, JsonValue
+from .state_io import atomic_write_json, instance_lock, load_json_object
 
 _REGISTRY_KEYS = frozenset({"schema_version", "instances"})
 _INSTANCE_KEYS = frozenset(
@@ -42,11 +43,110 @@ _LEGACY_INSTANCE_KEYS = _INSTANCE_KEYS - {
 _FORMULA_PATH_MARKERS = ("/Cellar/solet/", "/homebrew/Cellar/solet/")
 
 
-class InstanceRegistry:
-    """Closed registry persisted as one atomic private JSON object."""
+def require_unique_identity(
+    indexes: dict[str, dict[object, str]],
+    *,
+    requested: dict[str, object],
+) -> None:
+    """Fail closed on any of the five Manager registry identity collisions."""
+    for key_name in ("name", "target", "filesystem_identity", "launchagent_label", "named_launcher_path"):
+        value = requested[key_name]
+        incumbent = indexes.get(key_name, {}).get(value)
+        if incumbent is not None:
+            error = RegistryUniquenessError(
+                f"registry uniqueness collision on {key_name}: {value!r} (held by {incumbent})"
+            )
+            error.key_name = key_name
+            error.requested_value = value
+            error.incumbent_identity = incumbent
+            raise error
+
+
+@dataclass(frozen=True)
+class RegistryIdentityKeys:
+    name: str
+    target: str
+    filesystem_identity: tuple[int, int] | None
+    launchagent_label: str
+    named_launcher_path: str
+
+
+@dataclass(frozen=True)
+class CombinedRegistrySnapshot:
+    v1_records: tuple[InstanceRecord, ...]
+    v2_records: tuple[InstanceInventoryRecordV2, ...]
+    indexes: dict[str, dict[object, str]]
+
+
+class MaintenanceInventoryRegistry:
+    """Read-only v2 inventory facade used by cross-registry collision checks."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
+
+    def list(self) -> tuple[InstanceInventoryRecordV2, ...]:
+        return read_maintenance_inventory_v2(self.path)
+
+
+def build_combined_registry_snapshot(
+    v1_records: tuple[InstanceRecord, ...], v2_records: tuple[InstanceInventoryRecordV2, ...]
+) -> CombinedRegistrySnapshot:
+    indexes: dict[str, dict[object, str]] = {key: {} for key in ("name", "target", "filesystem_identity", "launchagent_label", "named_launcher_path")}
+    for record in v1_records:
+        _insert_identity(indexes, _v1_identity_keys(record), record.name)
+    for record in v2_records:
+        target = record.target
+        _insert_identity(indexes, RegistryIdentityKeys(record.name, target.canonical_path, (target.filesystem_identity.device, target.filesystem_identity.inode), record.service_identity.launchagent_label, record.service_identity.named_launcher_path), record.instance_id)
+    return CombinedRegistrySnapshot(v1_records, v2_records, indexes)
+
+
+def find_managed_instance(snapshot: CombinedRegistrySnapshot, name: str) -> object | None:
+    identity = snapshot.indexes["name"].get(name)
+    if identity is None:
+        return None
+    return next((record for record in (*snapshot.v1_records, *snapshot.v2_records) if record.name == name), None)
+
+
+def _insert_identity(indexes: dict[str, dict[object, str]], keys: RegistryIdentityKeys, identity: str) -> None:
+    for key, value in (("name", keys.name), ("target", keys.target), ("filesystem_identity", keys.filesystem_identity), ("launchagent_label", keys.launchagent_label), ("named_launcher_path", keys.named_launcher_path)):
+        if value is not None:
+            if value in indexes[key]:
+                raise RegistryUniquenessError(f"duplicate persisted {key}: {value!r}")
+            indexes[key][value] = identity
+
+
+def _v1_identity_keys(record: InstanceRecord) -> RegistryIdentityKeys:
+    """Project only comparison keys from v1 without altering its persisted bytes."""
+    target = Path(record.target).resolve(strict=False)
+    filesystem_identity: tuple[int, int] | None = None
+    try:
+        info = target.stat()
+    except OSError:
+        pass
+    else:
+        filesystem_identity = (info.st_dev, info.st_ino)
+    return RegistryIdentityKeys(
+        record.name,
+        str(target),
+        filesystem_identity,
+        f"local.solet.{record.name}",
+        str(Path(record.launcher).resolve(strict=False)),
+    )
+
+
+class InstanceRegistry:
+    """Closed registry persisted as one atomic private JSON object."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        maintenance_inventory_path: Path | None = None,
+        registry_lock_path: Path | None = None,
+    ) -> None:
+        self.path = path
+        self.maintenance_inventory_path = maintenance_inventory_path
+        self.registry_lock_path = registry_lock_path
 
     def list(self) -> tuple[InstanceRecord, ...]:
         return tuple(sorted(self._read().values(), key=lambda item: item.name))
@@ -66,6 +166,13 @@ class InstanceRegistry:
         raise StateConflictError(f"managed instance {name!r} does not exist")
 
     def add(self, record: InstanceRecord) -> None:
+        if self.registry_lock_path is None:
+            self._add(record)
+            return
+        with instance_lock(self.registry_lock_path, create=True):
+            self._add(record)
+
+    def _add(self, record: InstanceRecord) -> None:
         _reject_formula_paths(record)
         _validate_lifecycle_record(record)
         records = self._read()
@@ -78,6 +185,11 @@ class InstanceRegistry:
             raise StateConflictError(f"registry already contains a different record for {record.name!r}")
         if existing == record:
             return
+        if self.maintenance_inventory_path is not None:
+            snapshot = build_combined_registry_snapshot(
+                tuple(records.values()), MaintenanceInventoryRegistry(self.maintenance_inventory_path).list()
+            )
+            require_unique_identity(snapshot.indexes, requested={"name": record.name, "target": record.target, "filesystem_identity": None, "launchagent_label": f"local.solet.{record.name}", "named_launcher_path": record.launcher})
         records[record.name] = record
         self._write(records)
 

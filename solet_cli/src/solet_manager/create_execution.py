@@ -26,11 +26,12 @@ from .flow import (
     initial_stage_probe_statuses,
     reconcile_stage_probe_activation,
 )
+from .journal_validation import validate_transaction_state
 from .models import CheckpointStatus, CommandResult, ExitCode, InstanceRecord, JsonValue
-from .operation_executor import (
-    approval_stale_preview,
-    run_operations,
-    stage_remediation_preview,
+from .operation_executor import approval_stale_preview, run_operations, stage_remediation_preview
+from .operation_reconciliation import (
+    load_transaction_for_operation_reconciliation,
+    reconcile_pinned_operation_attempt,
 )
 from .operation_records import actions_by_operation
 from .paths import ManagerPaths
@@ -159,6 +160,7 @@ def _execute_locked_create(
         selections=selections,
         decision_source=decision_source,
         sources=sources,
+        allow_operation_attempt_mismatch=True,
     )
     if not config.target.exists():
         return _materialize_target(paths, config, transaction)
@@ -168,6 +170,24 @@ def _execute_locked_create(
         expected_digest=transaction.flow_contract_digest,
         resume_compatibility=True,
     )
+    mismatch = validate_transaction_state(
+        transaction,
+        canonical_answers_fingerprint=canonical_sha256(transaction.answers),
+        allow_operation_attempt_mismatch=True,
+    )
+    if mismatch is not None:
+        transaction = reconcile_pinned_operation_attempt(
+            paths=paths,
+            config=config,
+            bundle=bundle,
+            transaction=transaction,
+            mismatch=mismatch,
+            registry=AdapterRegistry(
+                target=config.target,
+                base_python=resolve_long_lived_python(),
+            ),
+            persist=True,
+        )
     approved_frontier = _approved_frontier(locked_preview)
     if stage_limit is not None and approved_frontier != (stage_limit,):
         raise StateConflictError(
@@ -249,9 +269,15 @@ def _load_or_create_transaction(
     selections: dict[str, JsonValue],
     decision_source: str,
     sources: dict[str, str],
+    allow_operation_attempt_mismatch: bool = False,
 ) -> Transaction:
     input_fingerprint = canonical_sha256(config.to_identity_dict())
-    transaction = load_transaction(paths.transaction_path(config.name))
+    if allow_operation_attempt_mismatch:
+        transaction, _mismatch = load_transaction_for_operation_reconciliation(
+            paths.transaction_path(config.name)
+        )
+    else:
+        transaction = load_transaction(paths.transaction_path(config.name))
     if transaction is not None:
         assert_resume_identity(
             transaction,
@@ -260,7 +286,7 @@ def _load_or_create_transaction(
             input_fingerprint=input_fingerprint,
         )
         installed_seed = load_seed_lock(seed_lock_path)
-        if transaction.seed != installed_seed:
+        if transaction.seed.identity_dict() != installed_seed.identity_dict():
             raise StateConflictError(
                 "retained transaction seed does not match the installed seed lock: "
                 f"transaction={_seed_label(transaction.seed)}; "

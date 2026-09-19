@@ -116,14 +116,34 @@ class Runtime(Protocol):
     def atomic_write(self, path: Path, content: str, *, mode: int) -> None: ...
 
 
-def resolve_executable(runtime: Runtime, name: str) -> str | None:
-    """Resolve one approved executable through the platform-owned lookup tool."""
+_HOMEBREW_BIN_DIRECTORIES = ("/opt/homebrew/bin", "/usr/local/bin")
 
-    outcome = runtime.run(("/usr/bin/which", name), timeout_seconds=5)
+
+def _which(runtime: Runtime, target: str) -> str | None:
+    outcome = runtime.run(("/usr/bin/which", target), timeout_seconds=5)
     candidate = outcome.stdout.strip()
     if not outcome.ok or "\n" in candidate or not candidate or not Path(candidate).is_absolute():
         return None
     return candidate
+
+
+def resolve_executable(runtime: Runtime, name: str) -> str | None:
+    """Resolve one approved executable through the platform-owned lookup tool.
+
+    Falls back to the standard Homebrew bin directories when a bare lookup
+    fails, mirroring bootstrap_adapter.protocol.resolve_executable -- this
+    runtime's PATH is restricted the same way the pre-venv bootstrap
+    adapter's is, so a Homebrew-installed executable absent from PATH would
+    otherwise be misreported as unresolved even when it genuinely installed."""
+
+    direct = _which(runtime, name)
+    if direct is not None:
+        return direct
+    for directory in _HOMEBREW_BIN_DIRECTORIES:
+        candidate = _which(runtime, f"{directory}/{name}")
+        if candidate is not None:
+            return candidate
+    return None
 
 
 class SystemRuntime:

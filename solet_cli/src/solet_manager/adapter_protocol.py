@@ -29,6 +29,17 @@ from .errors import AdapterProtocolError
 from .models import CheckpointStatus, JsonValue
 
 PROTOCOL_VERSION = 1
+CREATE_FLOW_ID = "macos.repository_setup"
+EXISTING_INSTALL_FLOW_ID = "existing-install"
+EXISTING_INSTALL_REF_PREFIX = "existing::"
+# Closed two-member flow set (design section 3.3, review D2).  The value says
+# whether the flow's callables carry the ``existing::`` vocabulary; the seed's
+# ``setup_adapter_contract`` and the bootstrap adapter's ``protocol`` hold the
+# same table and a smoke proves all three agree.
+FLOW_OPERATION_PAIRING: dict[str, bool] = {
+    CREATE_FLOW_ID: False,
+    EXISTING_INSTALL_FLOW_ID: True,
+}
 _RESULT_KEYS = {
     "protocol_version",
     "kind",
@@ -133,9 +144,9 @@ def _validate_request_identity(request: OperationRequest) -> None:
 
 
 def _validate_request_numbers(request: OperationRequest) -> None:
-    valid_flow = request.flow_id == "macos.repository_setup"
+    _validate_flow_pairing(request.flow_id, request.operation_ref)
     valid_revision = re.fullmatch(r"[0-9a-f]{40}", request.flow_source_revision)
-    if not valid_flow or valid_revision is None:
+    if valid_revision is None:
         raise AdapterProtocolError("flow identity is invalid")
     if FINGERPRINT_PATTERN.fullmatch(request.answers_fingerprint) is None:
         raise AdapterProtocolError("answers_fingerprint is invalid")
@@ -146,6 +157,20 @@ def _validate_request_numbers(request: OperationRequest) -> None:
         raise AdapterProtocolError("attempt must be a positive integer")
     if not 1 <= request.timeout_seconds <= 900:
         raise AdapterProtocolError("timeout_seconds is outside the closed bound")
+
+
+def _validate_flow_pairing(flow_id: str, operation_ref: str) -> None:
+    """Enforce the closed two-member flow set with its operation-ref cross-check.
+
+    The create flow may only address create-vocabulary callables and the
+    existing-install flow may only address ``existing::`` callables.  This is
+    a closed pairing table, never an open string: a third flow id, or either
+    flow paired with the other's vocabulary, is a protocol refusal.
+    """
+    if flow_id not in FLOW_OPERATION_PAIRING:
+        raise AdapterProtocolError("flow identity is invalid")
+    if (operation_ref.startswith(EXISTING_INSTALL_REF_PREFIX)) != (flow_id == EXISTING_INSTALL_FLOW_ID):
+        raise AdapterProtocolError("operation_ref vocabulary does not match flow identity")
 
 
 def _validate_request_inputs(request: OperationRequest) -> None:

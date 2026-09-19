@@ -67,6 +67,15 @@ profile/data/
 profile/credentials/
 profile/documents
 
+# Genesis-rendered, per-install hydration output (launchers, shell file,
+# session overlay, coding-agent marketplace catalogues). Untracked AND
+# ignored, so a Manager-driven update can refresh them without dirtying the
+# tracked tree; this genesis template is the only shipped ignore authority
+# (the sealed seed ships no .gitignore) and reaches newborns at birth only.
+client/
+.claude-plugin/
+.agents/plugins/
+
 # Secrets — never commit
 profile/config/vault/
 **/passphrase

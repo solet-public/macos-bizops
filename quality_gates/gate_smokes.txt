@@ -4757,6 +4757,28 @@ plugins/openai_embeddings_plugin/tests/startup_qualification_smoke.py
 # not shipped: solet_cli/tests/contract_reconciliation_schema_smoke.py requires solet_cli/tools/generate_contract_reconciliation_manifest_schema.py; **/tools/ is a pruned operator-tooling class (generator_tooling)
 # not shipped: solet_cli/tests/contract_reconciliation_smoke.py requires repository history for its pinned fixture Git objects; a born clone is a git-archive extract with no .git (repository_hygiene)
 # not shipped: ananta/tests/llm/session_ledger/codex_cloud_backfill_smoke.py requires plugins/codex_cloud_session_source_plugin/src/codex_cloud_session_source_plugin; that plugin is in no capability bundle (unshipped_plugin_subject)
+# not shipped: solet_cli/tests/cold_host_matrix_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/cold_host_matrix_2_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/cold_host_matrix_3_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/cold_host_matrix_4_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/homebrew_import_lifecycle_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/homebrew_real_style_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/homebrew_upgrade_persistence_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/real_style_tree_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/real_style_tree_2_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/real_style_tree_3_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/real_style_tree_4_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/real_style_tree_5_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/real_style_tree_6_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/real_style_sweep_writes_1_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/real_style_sweep_writes_2_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/real_style_sweep_writes_3_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/real_style_sweep_writes_4_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/real_style_sweep_writes_5_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/real_style_sweep_writes_6_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/real_style_sweep_writes_7_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/real_style_sweep_writes_8_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/real_style_sweep_applies_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
 
 # LM Studio provisioning, singleton login and passive diagnostics
 plugins/github_midwife_plugin/tests/lm_studio_provisioning_smoke.py
@@ -4771,3 +4793,95 @@ plugins/agent_messaging_plugin/tests/operator_codex_launcher_smoke.py
 
 # Landing-wave.v1 read-only composition, global staged equality, and one-sweep receipt.
 quality_gates/tests/landing_wave_smoke.py
+
+# Existing-Solet Step-4 candidate-cache identity and receipt boundary.
+solet_cli/tests/update_candidate_acquisition_smoke.py
+
+# Existing-Solet Step-4 pure probe parsers and candidate/local collision matrix (ignored-file clobber class).
+solet_cli/tests/update_topology_collision_smoke.py
+
+# Existing-Solet Step-4 closed v2 update journal: status graph, immutable attempt prefix, read-back.
+solet_cli/tests/update_journal_smoke.py
+
+# Existing-Solet Step-4 inventory compare-and-swap: active update pointer and N+1 source axis.
+solet_cli/tests/update_inventory_publication_smoke.py
+
+# Existing-Solet Step-4 `solet-manager update` argument contract and closed error/exit projection.
+solet_cli/tests/update_cli_smoke.py
+
+# Existing-Solet Step-4 end-to-end: preview, hostile-config refusal, ignored-file collision, exact fast-forward, crash resume, blocked journal.
+solet_cli/tests/update_execution_smoke.py
+
+# WS5 Step 5 (existing-install runtime transition, iss_dcacc061 / chg_c053dce9):
+# transition bundle + closed registry + the three D2 flow validators (offline);
+# the Manager-produced reconciliation envelope against the seed's exact wire
+# table (offline); operation-scoped backup and the exact restore handler
+# (offline); the end-to-end single-colour runtime transition with crash/resume,
+# partial-hydration rollback, D1 destination rules and the fail-on-call
+# database spy (real Git fixture, fake launchd/bridge seams, offline); the
+# router cutover path through the seed's real reconciliation validator
+# (offline); the seed-side existing:: handlers including every row of the
+# three-way managed-artifact table (offline).
+solet_cli/tests/existing_install_bundle_smoke.py
+solet_cli/tests/reconciliation_request_smoke.py
+solet_cli/tests/managed_artifact_backup_smoke.py
+solet_cli/tests/update_runtime_execution_smoke.py
+solet_cli/tests/existing_install_router_cutover_smoke.py
+plugins/github_midwife_plugin/tests/existing_install_operations_smoke.py
+
+# WS5 Step 6 (existing-install doctor/resume/promotion, iss_4851c5c8 / chg_54bfee65):
+# closed v4 update journal (abandoned/doctor/promoting/promoted statuses, recovers,
+# source_mode, retirement, per-row operation_type, v3 upgrade) (offline); the
+# durable transition/descriptor contract copies written at Step-4 apply, backfilled
+# on resume, tamper-refused (real Git fixture, offline); the dual-contract doctor:
+# state-only three-way selection, sixteen sections, A6 exit closure, W1/W2 write
+# set, human/JSON parity (offline); promotion CAS crash points, doctor-incomplete
+# rerun, the zero-delta verify-mode path and fingerprint non-interchangeability
+# (offline); reconcile/doctor argument contracts, abandon/retire at every
+# pre-fast-forward boundary, pointer release, no "Step-6" placeholder in src
+# (offline); the runtime fault fixtures F-RT-1/3/4/5/6/7/8 (offline); the named
+# boundary fixtures F-B-*, F-M-*, F-HO-*, F-RB-1 around the single-colour
+# reference run (offline); the systematic crash sweep (F-CR-1/2) over EVERY write
+# boundary (six exact slices) and EVERY apply boundary of that run, ~45-70s each
+# (offline); F-RT-2, the router candidate failure under both sweep modes, in four
+# exact slices, ~50-65s each (offline; both re-sliced at Step 7, whose per-operation
+# local-state observation added ~30% to every crash/resume run).
+solet_cli/tests/update_journal_v4_smoke.py
+solet_cli/tests/existing_install_contract_copy_smoke.py
+solet_cli/tests/existing_install_doctor_smoke.py
+solet_cli/tests/update_promotion_smoke.py
+solet_cli/tests/update_reconcile_cli_smoke.py
+solet_cli/tests/existing_install_runtime_faults_smoke.py
+solet_cli/tests/update_crash_sweep_smoke.py
+solet_cli/tests/update_crash_sweep_writes_1_smoke.py
+solet_cli/tests/update_crash_sweep_writes_2_smoke.py
+solet_cli/tests/update_crash_sweep_writes_3_smoke.py
+solet_cli/tests/update_crash_sweep_writes_4_smoke.py
+solet_cli/tests/update_crash_sweep_writes_5_smoke.py
+solet_cli/tests/update_crash_sweep_writes_6_smoke.py
+solet_cli/tests/update_crash_sweep_applies_smoke.py
+solet_cli/tests/existing_install_router_failure_sweep_1_smoke.py
+solet_cli/tests/existing_install_router_failure_sweep_2_smoke.py
+solet_cli/tests/existing_install_router_failure_sweep_3_smoke.py
+solet_cli/tests/existing_install_router_failure_sweep_4_smoke.py
+
+# WS5 Step 7 (existing-install real-clone admission and local-state commitment,
+# iss_92419f62 / chg_1407a0bc): the classifier admits Class T (unstaged disjoint
+# content-only tracked edits) and Class U (untracked non-colliding paths) as
+# `local_changes_present`, frozen over the 91,080-shape enumeration (12 -> 0
+# regressions, 18 class moves) (offline); topology local-state reasons, the
+# commitment, executed-code roots, git-metadata and shape-change detection, the
+# B7 knowledge_bases/ service-write allowance (offline); the v5 update journal
+# (local_state baseline/current/revisions, v4 upgrade) (offline); the cold-host
+# matrix CH-1..48 over a REAL-STYLE fixture (a seed_factory assemble() tree,
+# real genesis writers, real git, an opaque HOME and host) in eleven slices of
+# ~30-70s (offline; the seed and sealed source are cached per host and commit); the Step-6 crash sweep re-run over the real-style
+# reference run, every write boundary in eight slices and every apply boundary,
+# ~75-100s each (offline); the Homebrew unit slices HB-1..9 -- a FakeKeg (real
+# wheel in a venv --without-pip) driven as a fresh subprocess: import, doctor,
+# update, crash/resume across pids, keg upgrade/reinstall/uninstall persistence,
+# the real-style tree out-of-process (offline; the VM phases
+# existing-install-import-update and cold-host-degraded in lifecycle_acceptance.py
+# are the release lane's, not registered here).
+solet_cli/tests/existing_install_classification_coverage_smoke.py
+solet_cli/tests/update_topology_local_state_smoke.py

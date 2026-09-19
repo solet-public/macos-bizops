@@ -28,8 +28,11 @@ __all__ = [
     "CutoverReceiptStore",
     "CutoverRuntimeObservation",
     "CutoverTerms",
+    "OperationCutoverReceipt",
     "SnapshotReceipt",
+    "load_operation_cutover_receipt",
     "new_reconciliation_id",
+    "terminal_receipt_digest",
 ]
 
 type CutoverStage = Literal[
@@ -353,6 +356,41 @@ def new_reconciliation_id() -> str:
     """Mint an opaque per-attempt identifier without deriving it from a target name."""
 
     return f"rec_{uuid.uuid4().hex}"
+
+
+@dataclass(frozen=True, slots=True)
+class OperationCutoverReceipt:
+    """One terminal cutover receipt keyed by the update operation that produced it (design section 7.2)."""
+
+    operation_id: str
+    reconciliation_id: str
+    receipt_path: str
+    receipt_sha256: str
+    terminal_status: str
+
+
+def terminal_receipt_digest(target: Path, reconciliation_id: str) -> str | None:
+    """Digest of the seed-written terminal receipt for ``reconciliation_id``, or ``None`` when absent."""
+    path = target / "profile" / "data" / "reconciliations" / "adapter" / "receipts" / f"{reconciliation_id}.json"
+    if not reconciliation_id.startswith("rec_") or not path.is_file():
+        return None
+    return f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+
+
+def load_operation_cutover_receipt(target: Path, operation_id: str, reconciliation_id: str) -> OperationCutoverReceipt:
+    """Read one terminal receipt and bind it to its update operation; refuses a malformed receipt."""
+    path = target / "profile" / "data" / "reconciliations" / "adapter" / "receipts" / f"{reconciliation_id}.json"
+    raw = _load_json(path)
+    terminal = raw.get("terminal")
+    if raw.get("kind") != "cutover_terminal_receipt" or raw.get("reconciliation_id") != reconciliation_id or not isinstance(terminal, dict):
+        raise StateError(f"cutover receipt {path} does not match the terminal receipt shape")
+    status = terminal.get("status")
+    if not isinstance(status, str) or status not in _TERMINAL_STATUSES:
+        raise StateError(f"cutover receipt {path} carries an unknown terminal status")
+    digest = terminal_receipt_digest(target, reconciliation_id)
+    if digest is None:
+        raise StateError(f"cutover receipt {path} vanished during read")
+    return OperationCutoverReceipt(operation_id, reconciliation_id, str(path), digest, status)
 
 
 def _event(

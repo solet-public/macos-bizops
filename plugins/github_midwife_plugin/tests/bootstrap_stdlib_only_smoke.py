@@ -214,6 +214,7 @@ def _check_bootstrap_is_stdlib_only() -> None:
         "homebrew.py",
         "lm_studio.py",
         "postgres.py",
+        "postgres_install.py",
         "routes.py",
     }
     _check(
@@ -265,9 +266,7 @@ def _check_ast_scan_catches_a_real_third_party_import(root: Path) -> None:
     )
 
 
-def _fake_completed(
-    returncode: int, stdout: str = "", stderr: str = ""
-) -> subprocess.CompletedProcess[str]:
+def _fake_completed(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
@@ -421,9 +420,7 @@ def _quietly(fn: Any, *args: Any, **kwargs: Any) -> Any:
         return fn(*args, **kwargs)
 
 
-def _run_steps_isolated(
-    module: ModuleType, ctx: Any, *, brew_present: bool = True
-) -> list[dict[str, Any]]:
+def _run_steps_isolated(module: ModuleType, ctx: Any, *, brew_present: bool = True) -> list[dict[str, Any]]:
     """Drive the step sequence with the HOST fully isolated, and its echo contained.
 
     Two things this closes, both of which leaked the ambient machine into a smoke
@@ -510,8 +507,7 @@ def _check_homebrew_absent_stops_immediately(root: Path) -> None:
 
     _check(
         "Homebrew absence stops the sequence at step 1 -- no later step attempted",
-        [s["step_name"] for s in steps] == ["homebrew"]
-        and steps[0]["status"] == "needs_user_action",
+        [s["step_name"] for s in steps] == ["homebrew"] and steps[0]["status"] == "needs_user_action",
         f"got {steps!r}",
     )
 
@@ -557,10 +553,7 @@ def _check_keg_only_postgres_matches_adapter(root: Path) -> None:
     )
     _check(
         "keg-only PostgreSQL 17 is healthy in both Layer 0 and the adapter",
-        layer_zero_state is module.PostgresState.RUNNING_HEALTHY_COMPATIBLE
-        and adapter.psql_present
-        and adapter.major == 17
-        and adapter.ready,
+        layer_zero_state is module.PostgresState.RUNNING_HEALTHY_COMPATIBLE and adapter.psql_present and adapter.major == 17 and adapter.ready,
         f"layer_zero=({layer_zero_state.value!r}, {layer_zero_detail!r}) adapter={adapter!r}",
     )
     expected_bin = str(fake_prefix / "bin")
@@ -636,9 +629,7 @@ def _check_hard_failure_is_caught_not_raised(root: Path) -> None:
     (target / ".venv" / "pyvenv.cfg").unlink()
     (target / ".venv").rmdir()
 
-    def _fake_run_venv_creation_fails(
-        cmd: list[str], **_kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
+    def _fake_run_venv_creation_fails(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         if "venv" in cmd:
             return _fake_completed(1, stdout="simulated venv creation failure")
         return _make_all_healthy_fake_run(fake_prefix)(cmd)
@@ -684,9 +675,7 @@ def _check_role_creation_failure_names_homebrew_convention(root: Path) -> None:
     module = _load_bootstrap_module()
     target, fake_prefix = _make_fixture_tree(root)
 
-    def _fake_run_role_absent_createuser_fails(
-        cmd: list[str], **_kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
+    def _fake_run_role_absent_createuser_fails(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         joined = " ".join(cmd)
         if "pg_roles" in joined or "pg_database" in joined:
             return _fake_completed(0, stdout="")  # role/db ABSENT -> createuser is attempted
@@ -714,9 +703,7 @@ def _check_role_creation_failure_names_homebrew_convention(root: Path) -> None:
             f"{str(exc)!r} did not name resolved admin role {getpass.getuser()!r}",
         )
     else:
-        raise SmokeFailureError(
-            "role-creation-failure-diagnostic: ensure_role_and_db did not raise"
-        )
+        raise SmokeFailureError("role-creation-failure-diagnostic: ensure_role_and_db did not raise")
 
 
 def _check_handoff_failure_surfaces_stderr_fatal_text(root: Path) -> None:
@@ -732,9 +719,7 @@ def _check_handoff_failure_surfaces_stderr_fatal_text(root: Path) -> None:
     target, fake_prefix = _make_fixture_tree(root)
     sentinel = "FATAL: genesis failed: sentinel failure"
 
-    def _fake_run_handoff_fails(
-        cmd: list[str], **_kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
+    def _fake_run_handoff_fails(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         if "github_midwife_plugin.genesis" in cmd:
             return _fake_completed(1, stdout="", stderr=sentinel)
         return _make_all_healthy_fake_run(fake_prefix)(cmd)
@@ -754,9 +739,7 @@ def _check_handoff_failure_surfaces_stderr_fatal_text(root: Path) -> None:
             str(exc),
         )
     else:
-        raise SmokeFailureError(
-            "handoff-failure-surfaces-stderr-fatal-text: handoff() did not raise"
-        )
+        raise SmokeFailureError("handoff-failure-surfaces-stderr-fatal-text: handoff() did not raise")
 
 
 def _completed_bootstrap_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -829,9 +812,7 @@ def _escape_cases(module: ModuleType, safe_hba: Path, unrecognized_hba: Path) ->
 
     def layout_retry(context: Any) -> dict[str, Any]:
         safe_hba.write_text(
-            "local all all trust\n"
-            "host all all 127.0.0.1/32 trust\n"
-            "host all all ::1/128 trust\n",
+            "local all all trust\nhost all all 127.0.0.1/32 trust\nhost all all ::1/128 trust\n",
             encoding="utf-8",
         )
         with patch.object(module, "_postgres_command", return_value=["psql"]):
@@ -894,10 +875,7 @@ def _check_escape_case(
     )
     _check(
         f"{step_name} writes the typed failure record and its cause",
-        len(failed_steps) == 2
-        and failed_steps[-1].get("step_name") == step_name
-        and failed_steps[-1].get("status") == "failed"
-        and expected_error in str(failed_steps[-1].get("error")),
+        len(failed_steps) == 2 and failed_steps[-1].get("step_name") == step_name and failed_steps[-1].get("status") == "failed" and expected_error in str(failed_steps[-1].get("error")),
         f"got {failed_steps!r}",
     )
     _check_layout_remediation(expected_error, failed_steps[-1])
@@ -907,9 +885,7 @@ def _check_escape_case(
     )
     _check(
         f"{step_name} rerun probes completed work, skips it, and reattempts the failed step",
-        events == ["prior", "failure", "prior", "retry", "later"]
-        and rerun_steps[0].get("status") == "skipped"
-        and [step["step_name"] for step in rerun_steps] == ["prior", step_name, "later"],
+        events == ["prior", "failure", "prior", "retry", "later"] and rerun_steps[0].get("status") == "skipped" and [step["step_name"] for step in rerun_steps] == ["prior", step_name, "later"],
         f"events={events!r} steps={rerun_steps!r}",
     )
 
@@ -920,9 +896,7 @@ def _check_layout_remediation(expected_error: str, failed_step: dict[str, Any]) 
     error = str(failed_step.get("error"))
     _check(
         "unrecognized pg_hba.conf refusal names its remediation and preserves fail-closed behavior",
-        "inspect the file" in error
-        and "extend the recognizer or edit it manually" in error
-        and "will not auto-write" in error,
+        "inspect the file" in error and "extend the recognizer or edit it manually" in error and "will not auto-write" in error,
         f"got {failed_step!r}",
     )
 
@@ -1000,11 +974,7 @@ def _check_venv_seed_preinstalls_build_backend(root: Path) -> None:
     in that order.
     """
     recorded = _record_venv_seed_commands(root)
-    backend_idx = [
-        i
-        for i, c in enumerate(recorded)
-        if "install" in c and c[-3:] == ["pip", "setuptools", "wheel"]
-    ]
+    backend_idx = [i for i, c in enumerate(recorded) if "install" in c and c[-3:] == ["pip", "setuptools", "wheel"]]
     editable_idx = [i for i, c in enumerate(recorded) if "--no-build-isolation" in c]
     venv_idx = [i for i, c in enumerate(recorded) if c[1:3] == ["-m", "venv"]]
 
@@ -1103,9 +1073,7 @@ def _check_role_db_inconsistent_state_needs_user_action(root: Path) -> None:
     module = _load_bootstrap_module()
     target, fake_prefix = _make_fixture_tree(root)
 
-    def _fake_run_role_present_db_absent(
-        cmd: list[str], **_kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
+    def _fake_run_role_present_db_absent(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         joined = " ".join(cmd)
         if "pg_roles" in joined:
             return _fake_completed(0, stdout="1")
@@ -1200,9 +1168,7 @@ def _check_reconciled_db_missing_vector_extension_applies_d12(root: Path) -> Non
     target, fake_prefix = _make_fixture_tree(root)
     recorded: list[list[str]] = []
 
-    def _recording_run(
-        cmd: list[str], _sink: list[list[str]] = recorded, **_kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
+    def _recording_run(cmd: list[str], _sink: list[list[str]] = recorded, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         _sink.append(cmd)
         return _make_all_healthy_fake_run(fake_prefix, vector_installed=False)(cmd)
 
@@ -1218,9 +1184,7 @@ def _check_reconciled_db_missing_vector_extension_applies_d12(root: Path) -> Non
         step.get("status") == "completed",
         f"got {step!r}",
     )
-    creates = [
-        c for c in recorded if any("CREATE EXTENSION IF NOT EXISTS vector" in part for part in c)
-    ]
+    creates = [c for c in recorded if any("CREATE EXTENSION IF NOT EXISTS vector" in part for part in c)]
     _check(
         "the D12 CREATE EXTENSION is executed against this solet's own database",
         len(creates) == 1 and any(module._DATABASE in part for part in creates[0]),  # noqa: SLF001
@@ -1244,9 +1208,7 @@ def _check_absent_role_db_create_path_activates_vector_extension(root: Path) -> 
     target, fake_prefix = _make_fixture_tree(root)
     recorded: list[list[str]] = []
 
-    def _recording_run(
-        cmd: list[str], _sink: list[list[str]] = recorded, **_kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
+    def _recording_run(cmd: list[str], _sink: list[list[str]] = recorded, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         _sink.append(cmd)
         joined = " ".join(cmd)
         if "pg_roles" in joined or "pg_database" in joined:
@@ -1265,18 +1227,14 @@ def _check_absent_role_db_create_path_activates_vector_extension(root: Path) -> 
         step.get("status") == "completed",
         f"got {step!r}",
     )
-    creates = [
-        c for c in recorded if any("CREATE EXTENSION IF NOT EXISTS vector" in part for part in c)
-    ]
+    creates = [c for c in recorded if any("CREATE EXTENSION IF NOT EXISTS vector" in part for part in c)]
     _check(
         "the D12 CREATE EXTENSION is part of the fresh-create sequence",
         len(creates) == 1 and any(module._DATABASE in part for part in creates[0]),  # noqa: SLF001
         f"recorded psql/create commands: {recorded!r}",
     )
     create_idx = next(i for i, c in enumerate(recorded) if Path(c[0]).name == "createdb")
-    extension_idx = next(
-        i for i, c in enumerate(recorded) if "CREATE EXTENSION IF NOT EXISTS vector" in " ".join(c)
-    )
+    extension_idx = next(i for i, c in enumerate(recorded) if "CREATE EXTENSION IF NOT EXISTS vector" in " ".join(c))
     _check(
         "CREATE EXTENSION runs AFTER createdb (the database must exist first)",
         extension_idx > create_idx,
@@ -1300,9 +1258,7 @@ def _check_fully_healthy_role_db_skips_with_revoke_verified(root: Path) -> None:
     step = _quietly(module.ensure_role_and_db, ctx)
     _check(
         "fully-healthy role_and_db (incl. verified revoke and vector extension) reports skipped",
-        step.get("status") == "skipped"
-        and "revoke" in str(step.get("state", ""))
-        and "vector" in str(step.get("state", "")),
+        step.get("status") == "skipped" and "revoke" in str(step.get("state", "")) and "vector" in str(step.get("state", "")),
         f"got {step!r}",
     )
 

@@ -114,6 +114,7 @@ class ClaudeCodeTasksSessionSourcePlugin(
             source_kind=IngestSourceKind.CLAUDE_CODE_TASKS,
             vendor=SourceVendor.CLAUDE_CODE,
             supported_modes=(IngestMode.PULLING,),
+            default_pulling_root_uri="~/.claude/tasks",
         )
 
     def normalize(self, raw: RawSessionEvent) -> NormalizedSessionEvent:

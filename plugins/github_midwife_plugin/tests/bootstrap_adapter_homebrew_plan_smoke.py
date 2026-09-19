@@ -17,11 +17,7 @@ _ROOT = Path(__file__).resolve().parents[3]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-_SCHEMA = json.loads(
-    (
-        _ROOT / "plugins/github_midwife_plugin/knowledge_base/setup_adapter_envelope.schema.json"
-    ).read_text()
-)
+_SCHEMA = json.loads((_ROOT / "plugins/github_midwife_plugin/knowledge_base/setup_adapter_envelope.schema.json").read_text())
 
 from bootstrap_adapter.homebrew import _homebrew_plan_is_exact
 from bootstrap_adapter.models import AdapterRuntime, PostgresObservation, RolePolicyObservation
@@ -98,17 +94,13 @@ def _apply_failure_runtime(stdout: str, stderr: str) -> AdapterRuntime:
 def _check_failure_envelopes() -> None:
     stdout = "Homebrew stdout marker\n"
     stderr = "Homebrew stderr marker\n"
-    failed_coding_tool = _coding_tool_route(
-        _request("install_codex_cli"), _runtime(stdout, stderr, 1)
-    )
+    failed_coding_tool = _coding_tool_route(_request("install_codex_cli"), _runtime(stdout, stderr, 1))
     _check(
         failed_coding_tool["stdout"] == stdout and failed_coding_tool["stderr"] == stderr,
         "coding-tool failure preserves exact captured Homebrew streams",
     )
 
-    failed_apply = _coding_tool_route(
-        _request("install_codex_cli"), _apply_failure_runtime(stdout, stderr)
-    )
+    failed_apply = _coding_tool_route(_request("install_codex_cli"), _apply_failure_runtime(stdout, stderr))
     _check(
         failed_apply["stdout"] == stdout and failed_apply["stderr"] == stderr,
         "coding-tool apply failure preserves exact captured Homebrew streams",
@@ -116,9 +108,7 @@ def _check_failure_envelopes() -> None:
 
     observation = PostgresObservation(True, "/fixture/brew", False, False, None, False, None)
     with patch("bootstrap_adapter.routes.postgres_observation", return_value=observation):
-        failed_postgres = _postgres_install_route(
-            _request("install_postgresql"), _runtime(stdout, stderr, 1)
-        )
+        failed_postgres = _postgres_install_route(_request("install_postgresql"), _runtime(stdout, stderr, 1))
     _check(
         failed_postgres["stdout"] == stdout and failed_postgres["stderr"] == stderr,
         "PostgreSQL Homebrew failure preserves exact captured streams",
@@ -157,12 +147,17 @@ def _check_fresh_postgres_plans_pgvector_before_apply() -> None:
         target=Path("/fixture"),
     )
     fresh = PostgresObservation(True, "/fixture/brew", False, False, None, False, None)
+    refreshed = PostgresObservation(True, "/fixture/brew", True, True, 17, True, False)
     preview_request = _request("install_postgresql")
     preview_request["phase"] = "probe"
-    with patch(
-        "bootstrap_adapter.routes.postgres_observation",
-        return_value=fresh,
-    ) as observe:
+    with (
+        patch(
+            "bootstrap_adapter.routes.postgres_observation",
+            return_value=fresh,
+        ) as observe,
+        patch("bootstrap_adapter.postgres_install.postgres_observation", return_value=refreshed) as refresh_observe,
+        patch("bootstrap_adapter.postgres_install.wait_for_postgres_ready", return_value=True),
+    ):
         preview = _postgres_install_route(preview_request, runtime)
         applied = _postgres_install_route(_request("install_postgresql"), runtime)
 
@@ -180,8 +175,8 @@ def _check_fresh_postgres_plans_pgvector_before_apply() -> None:
         "fresh PostgreSQL install applies successfully",
     )
     _check(
-        observe.call_count == 2,
-        "preview and apply each observe PostgreSQL once without post-start expansion",
+        observe.call_count == 2 and refresh_observe.call_count == 1,
+        "service start re-observes PostgreSQL before readiness-dependent work",
     )
     _check(
         commands
@@ -193,6 +188,89 @@ def _check_fresh_postgres_plans_pgvector_before_apply() -> None:
             ["/fixture/brew", "install", "pgvector"],
         ],
         "PostgreSQL apply executes the pgvector package action disclosed in its approved plan",
+    )
+
+
+def _check_postgres_service_readiness_outcomes() -> None:
+    """Cover every service command/readiness outcome without a live daemon."""
+
+    ready = PostgresObservation(True, "/fixture/brew", True, True, 17, True, True)
+    down = PostgresObservation(True, "/fixture/brew", True, True, 17, False, None)
+
+    no_op_calls: list[list[str]] = []
+
+    def no_op_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        no_op_calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    no_op_runtime = AdapterRuntime(
+        run=no_op_run,
+        which=lambda name: "/fixture/brew" if name == "brew" else None,
+        now=lambda: datetime(2026, 9, 6, tzinfo=UTC),
+        name="fixture",
+        target=Path("/fixture"),
+    )
+    with patch("bootstrap_adapter.routes.postgres_observation", return_value=ready):
+        no_op = _postgres_install_route(_request("install_postgresql"), no_op_runtime)
+    _check(
+        no_op["checkpoint_status"] == "applied" and not no_op_calls,
+        "package-present and service-ready PostgreSQL is an apply no-op",
+    )
+
+    def service_runtime(returncode: int, stdout: str = "", stderr: str = "") -> AdapterRuntime:
+        def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+
+        return AdapterRuntime(
+            run=run,
+            which=lambda name: "/fixture/brew" if name == "brew" else None,
+            now=lambda: datetime(2026, 9, 6, tzinfo=UTC),
+            name="fixture",
+            target=Path("/fixture"),
+        )
+
+    with (
+        patch("bootstrap_adapter.routes.postgres_observation", return_value=down),
+        patch("bootstrap_adapter.postgres_install.postgres_observation", return_value=ready),
+        patch("bootstrap_adapter.postgres_install.wait_for_postgres_ready", return_value=True),
+    ):
+        started = _postgres_install_route(_request("install_postgresql"), service_runtime(0))
+    _check(
+        started["checkpoint_status"] == "applied",
+        "a stopped service becomes ready after its successful start command",
+    )
+
+    with (
+        patch("bootstrap_adapter.routes.postgres_observation", return_value=down),
+        patch("bootstrap_adapter.postgres_install.postgres_observation", return_value=ready),
+        patch("bootstrap_adapter.postgres_install.wait_for_postgres_ready", return_value=True),
+    ):
+        already_running = _postgres_install_route(_request("install_postgresql"), service_runtime(3, stderr="already running\n"))
+    _check(
+        already_running["checkpoint_status"] == "applied",
+        "a nonzero service start is accepted only after fresh readiness proof",
+    )
+
+    with (
+        patch("bootstrap_adapter.routes.postgres_observation", return_value=down),
+        patch("bootstrap_adapter.postgres_install.postgres_observation", return_value=down),
+        patch("bootstrap_adapter.postgres_install.wait_for_postgres_ready", return_value=False),
+    ):
+        not_ready = _postgres_install_route(_request("install_postgresql"), service_runtime(0, stdout="start accepted\n"))
+    _check(
+        not_ready["error_kind"] == "postgres_service_not_ready" and not_ready["exit_code"] == 0 and not_ready["duration_ms"] >= 0 and not_ready["stdout"] == "start accepted\n",
+        "zero-exit service start that remains down is reported as not ready with its receipt",
+    )
+
+    with (
+        patch("bootstrap_adapter.routes.postgres_observation", return_value=down),
+        patch("bootstrap_adapter.postgres_install.postgres_observation", return_value=down),
+        patch("bootstrap_adapter.postgres_install.wait_for_postgres_ready", return_value=False),
+    ):
+        failed = _postgres_install_route(_request("install_postgresql"), service_runtime(7, "service stdout\n", "service stderr\n"))
+    _check(
+        failed["error_kind"] == "postgres_service_start_failed" and failed["exit_code"] == 7 and failed["stdout"] == "service stdout\n" and failed["stderr"] == "service stderr\n" and failed["reason"] is not None,
+        "nonzero service start that remains down preserves real failure diagnostics",
     )
 
 
@@ -233,8 +311,7 @@ def _check_postgres_configuration_failure_keeps_psql_diagnostics() -> None:
             failed = _postgres_configure_route(_request("configure_postgresql"), runtime)
 
         _check(
-            failed["checkpoint_status"] == "failed"
-            and failed["error_kind"] == "postgres_configuration_failed",
+            failed["checkpoint_status"] == "failed" and failed["error_kind"] == "postgres_configuration_failed",
             f"failing PostgreSQL configuration returns its canonical {stream} failure envelope",
         )
         _check(
@@ -306,8 +383,7 @@ def main() -> int:
     )
     _check(
         not _homebrew_plan_is_exact(
-            "==> Would install 1 formula:\npostgresql@17\n"
-            "==> Would install 1 dependency for unrelated:\nkrb5\n",
+            "==> Would install 1 formula:\npostgresql@17\n==> Would install 1 dependency for unrelated:\nkrb5\n",
             kind="formula",
             package="postgresql@17",
         ),
@@ -315,8 +391,7 @@ def main() -> int:
     )
     _check(
         not _homebrew_plan_is_exact(
-            "==> Would install 1 formula:\npostgresql@17\n"
-            "==> Would install 1 dependency for postgresql@17:\nkrb5\ngssapi\n",
+            "==> Would install 1 formula:\npostgresql@17\n==> Would install 1 dependency for postgresql@17:\nkrb5\ngssapi\n",
             kind="formula",
             package="postgresql@17",
         ),
@@ -332,6 +407,7 @@ def main() -> int:
     )
     _check_failure_envelopes()
     _check_fresh_postgres_plans_pgvector_before_apply()
+    _check_postgres_service_readiness_outcomes()
     _check_postgres_configuration_failure_keeps_psql_diagnostics()
     print("bootstrap_adapter_homebrew_plan_smoke OK")
     return 0

@@ -27,7 +27,7 @@
           "embedding_request_succeeds"
         ],
         "downstream_reservations": {
-          "governed_process_call_seconds": 5
+          "governed_process_call_seconds": 30
         }
       },
       "postcondition_probe_refs": [
@@ -1106,7 +1106,7 @@
               "codex_session_retrieval_valid"
             ]
           },
-          "claude_local": {
+          "claude_code_local": {
             "label": "Claude Code local sessions",
             "description": "Index the approved Claude projects, history, and tasks roots without moving or deleting them.",
             "availability": "supported",
@@ -2317,7 +2317,7 @@
       "required_when": {
         "decision_ref": "session_sources",
         "operator": "contains",
-        "value": "claude_local"
+        "value": "claude_code_local"
       },
       "grant_actor": "user",
       "system_settings_path": "Privacy & Security > Files and Folders",
@@ -3709,7 +3709,8 @@
         "postcondition_probe_refs": [
           "lm_studio_cli_available"
         ]
-      }
+      },
+      "apply_timeout_seconds": 900
     },
     "start_lm_studio_server": {
       "name": "Start lm studio server",
@@ -4474,7 +4475,7 @@
       "required_when": {
         "decision_ref": "session_sources",
         "operator": "contains",
-        "value": "claude_local"
+        "value": "claude_code_local"
       },
       "expectation": {
         "operator": "truthy"
@@ -4489,7 +4490,10 @@
       "level": "behavior",
       "expectation": {
         "operator": "truthy"
-      }
+      },
+      "remediation_operation_refs": [
+        "register_codex_session_source"
+      ]
     },
     "claude_session_retrieval_valid": {
       "name": "Claude session retrieval is valid",
@@ -4500,7 +4504,10 @@
       "level": "behavior",
       "expectation": {
         "operator": "truthy"
-      }
+      },
+      "remediation_operation_refs": [
+        "register_claude_session_source"
+      ]
     },
     "session_sources_retrievable": {
       "name": "Selected session sources are retrievable",

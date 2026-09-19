@@ -15,6 +15,7 @@ _RECONCILIATION_ENTRY_KEYS = frozenset(
         "stage_probe_mappings",
         "first_use_inactive_probe_migrations",
         "operation_statuses_to_reset",
+        "answer_value_migrations",
     }
 )
 
@@ -22,11 +23,12 @@ _RECONCILIATION_ENTRY_KEYS = frozenset(
 def reconciliation_entry(value: JsonValue) -> dict[str, JsonValue]:
     """Normalize one closed-schema reconciliation entry, including legacy defaults."""
 
-    if not isinstance(value, dict) or frozenset(value) - {"operation_statuses_to_reset"} != (
-        _RECONCILIATION_ENTRY_KEYS - {"operation_statuses_to_reset"}
+    optional = {"operation_statuses_to_reset", "answer_value_migrations"}
+    if not isinstance(value, dict) or frozenset(value) - optional != (
+        _RECONCILIATION_ENTRY_KEYS - optional
     ):
         raise ContractError("contract reconciliation entry does not match closed v1 schema")
-    return {"operation_statuses_to_reset": [], **value}
+    return {"operation_statuses_to_reset": [], "answer_value_migrations": [], **value}
 
 
 def parse_operation_statuses_to_reset(value: JsonValue) -> tuple[str, ...]:

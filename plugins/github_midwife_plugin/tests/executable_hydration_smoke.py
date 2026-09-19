@@ -7,7 +7,6 @@ explicit public responses for each probe.
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import queue
@@ -37,6 +36,10 @@ from executable_hydration_plugin_list_support import (  # noqa: E402
     run_public_evidence_shape_regression,
     run_receipt_surface_shape_regression,
     run_session_retrieval_envelope,
+)
+from executable_hydration_session_source_support import (  # noqa: E402
+    run_router_and_qualification_regressions,
+    run_session_source_boot_registration_regression,
 )
 from executable_hydration_structured_output_cap_support import (  # noqa: E402
     run_knowledge_output_cap,
@@ -485,6 +488,8 @@ def _operation_counterexamples(target: Path, runtime: FakeRuntime) -> None:
     )
 
     runtime.responses[("/usr/bin/which", "tmux")] = CommandOutcome(1, False, 1, "", "")
+    runtime.responses[("/usr/bin/which", "/opt/homebrew/bin/tmux")] = CommandOutcome(1, False, 1, "", "")
+    runtime.responses[("/usr/bin/which", "/usr/local/bin/tmux")] = CommandOutcome(1, False, 1, "", "")
     timed_out_apply = AdapterRequest.from_dict(
         _raw_request(
             target,
@@ -793,6 +798,8 @@ def _coding_agent_cli_preconditions(target: Path) -> None:
     ):
         runtime = FakeRuntime(target / f"missing-{cli}")
         runtime.responses[("/usr/bin/which", cli)] = CommandOutcome(1, False, 2, "", "")
+        runtime.responses[("/usr/bin/which", f"/opt/homebrew/bin/{cli}")] = CommandOutcome(1, False, 2, "", "")
+        runtime.responses[("/usr/bin/which", f"/usr/local/bin/{cli}")] = CommandOutcome(1, False, 2, "", "")
         preview = _request(target, operation_id=operation_id, operation_ref=operation_ref)
         preview_result = operation_handlers()[operation_ref](preview, runtime)
         _check(preview_result["checkpoint_status"] == "blocked", f"missing {cli} preview blocks")
@@ -843,6 +850,8 @@ def _coding_agent_cli_preconditions(target: Path) -> None:
 
     aggregate_runtime = FakeRuntime(target / "missing-aggregate")
     aggregate_runtime.responses[("/usr/bin/which", "codex")] = CommandOutcome(1, False, 2, "", "")
+    aggregate_runtime.responses[("/usr/bin/which", "/opt/homebrew/bin/codex")] = CommandOutcome(1, False, 2, "", "")
+    aggregate_runtime.responses[("/usr/bin/which", "/usr/local/bin/codex")] = CommandOutcome(1, False, 2, "", "")
     aggregate = _request(
         target,
         operation_id="coding_agent_plugins",
@@ -1262,452 +1271,18 @@ def _adapter_and_doctor_red_boundary(target: Path, runtime: FakeRuntime) -> None
     )
 
     _launchagent_crash_loop_regression(target, runtime, dispatch_request)
-
-    router_manifest = target / "profile/config/manifest.yaml"
-    router_manifest.parent.mkdir(parents=True, exist_ok=True)
-    router_manifest.write_text(
-        "profile_name: fixture\nplugins:\n- macos_self_deployment_plugin\n",
-        encoding="utf-8",
-    )
-    router = _request(
-        target,
-        operation_id="router_ready",
-        operation_ref="service_interface::local_self_deployment_service.swap_status",
-        probe_purpose="completion",
-    )
-    router_command = (
-        str(target / ".venv/bin/solet-bridge"),
-        "call",
-        "service_interface::local_self_deployment_service::swap_status",
-        "{}",
-    )
-
-    def router_result(status: JsonObject, *, nested: bool = False) -> JsonObject:
-        result_payload: JsonObject = {
-            "success": True,
-            "action_status": "completed",
-        }
-        if nested:
-            result_payload["data"] = {"router_status": status}
-        else:
-            result_payload["router_status"] = status
-        runtime.responses[router_command] = CommandOutcome(
-            0,
-            False,
-            1,
-            json.dumps({"result": result_payload}),
-            "",
-        )
-        return dispatch_request(router, runtime)
-
-    canonical_instance = "solet-blue-deadbeef"
-    canonical_status: JsonObject = {
-        "active_color": "blue",
-        "active_instance_id": canonical_instance,
-        "colors": [
-            {
-                "color": "blue",
-                "instance_id": canonical_instance,
-                "status": "active",
-            }
-        ],
-    }
-    canonical_router = router_result(canonical_status)
-    _check(
-        canonical_router["checkpoint_status"] == "verified", "canonical router identity verifies"
-    )
-    _check(
-        canonical_router["evidence"][0]["observed"] == canonical_instance,
-        "router evidence records the observed canonical instance id",
-    )
-    _router_transport_regression(router, runtime, router_command, router_result, dispatch_request)
-    nested_router = router_result(canonical_status, nested=True)
-    _check(
-        nested_router["checkpoint_status"] == "blocked",
-        "nested router envelope blocks instead of being accepted as flat",
-    )
-
-    substring_router = router_result(
-        {
-            "active_color": "blue",
-            "active_instance_id": "other-iris-solet-blue-deadbeef",
-            "colors": [
-                {
-                    "color": "blue",
-                    "instance_id": "other-iris-solet-blue-deadbeef",
-                    "status": "active",
-                }
-            ],
-        }
-    )
-    _check(
-        substring_router["checkpoint_status"] != "verified",
-        "target-name substring in router identity is non-green",
-    )
-
-    color_mismatch_router = router_result(
-        {
-            "active_color": "blue",
-            "active_instance_id": "solet-green-deadbeef",
-            "colors": [
-                {
-                    "color": "blue",
-                    "instance_id": "solet-green-deadbeef",
-                    "status": "active",
-                }
-            ],
-        }
-    )
-    _check(
-        color_mismatch_router["checkpoint_status"] != "verified",
-        "router active color and instance id mismatch is non-green",
-    )
-
-    duplicate_router = router_result(
-        {
-            "active_color": "blue",
-            "active_instance_id": canonical_instance,
-            "colors": [
-                {"color": "blue", "instance_id": canonical_instance, "status": "active"},
-                {"color": "green", "instance_id": "solet-green-cafebabe", "status": "active"},
-            ],
-        }
-    )
-    _check(
-        duplicate_router["checkpoint_status"] != "verified",
-        "duplicate active router rows are non-green",
-    )
-
-    malformed_router = router_result(
-        {
-            "active_color": "blue",
-            "active_instance_id": "solet-blue-nothex",
-            "colors": [{"color": "blue", "instance_id": "solet-blue-nothex", "status": "active"}],
-        }
-    )
-    _check(
-        malformed_router["checkpoint_status"] != "verified",
-        "malformed router identity is non-green",
-    )
-
-    unbounded_router = router_result(
-        {
-            "active_color": "blue",
-            "active_instance_id": "x" * 4096,
-            "colors": [{"color": "blue", "instance_id": "x" * 4096, "status": "active"}],
-        }
-    )
-    _check(
-        unbounded_router["evidence"][0]["observed"] is None,
-        "unbounded malformed router identity is omitted from evidence",
-    )
-
-    malformed_extra_row = router_result(
-        {
-            "active_color": "blue",
-            "active_instance_id": canonical_instance,
-            "colors": [
-                {"color": "blue", "instance_id": canonical_instance, "status": "active"},
-                {"color": "purple", "instance_id": "solet-purple-cafebabe", "status": "inactive"},
-            ],
-        }
-    )
-    _check(
-        malformed_extra_row["checkpoint_status"] != "verified",
-        "malformed extra router roster row is non-green",
-    )
-
-    codex_launcher = target / "client/bin/codex-iris"
-    codex_launcher.parent.mkdir(parents=True, exist_ok=True)
-    codex_launcher.write_text(
-        'export SOLET_NAME="iris"\nexport AGENT_SESSION_ID="fixture"\n',
-        encoding="utf-8",
-    )
-    named_launcher = runtime.home / ".local/bin/iris"
-    _check(named_launcher.is_symlink(), "shared fixture retains the named bridge launcher")
-    _check(
-        named_launcher.resolve(strict=True) == target / ".venv/bin/solet-bridge",
-        "shared fixture named launcher remains target-bound",
-    )
-    peer = _request(
-        target,
-        operation_id="peer_identity_valid",
-        operation_ref="plugin::agent_messaging_plugin.peer_identity",
-        probe_purpose="completion",
-        public_inputs={"selected_coding_agents": ["codex"]},
-    )
-    peer_command = (
-        str(target / ".venv/bin/solet-bridge"),
-        "call",
-        "plugin::agent_messaging_plugin::peer_identity",
-        "{}",
-    )
-    runtime.responses[peer_command] = CommandOutcome(
-        0,
-        False,
-        1,
-        json.dumps(
-            {
-                "result": {
-                    "success": True,
-                    "data": {
-                        "caller_identity_available": False,
-                        "registered_bridge": False,
-                        "bridge_identity": "unavailable",
-                    },
-                }
-            }
-        ),
-        "",
-    )
-    _check(
-        dispatch_request(peer, runtime)["checkpoint_status"] == "verified",
-        "one-shot bridge response with healthy selected Codex launcher verifies",
-    )
-    codex_launcher.write_text('export SOLET_NAME="iris"\n', encoding="utf-8")
-    _check(
-        dispatch_request(peer, runtime)["checkpoint_status"] != "verified",
-        "missing selected Codex launcher session marker is non-green",
-    )
-    codex_launcher.write_text(
-        'export SOLET_NAME="iris"\nexport AGENT_SESSION_ID="fixture"\n',
-        encoding="utf-8",
-    )
-    named_launcher.unlink()
-    wrong_bridge = target / "other/.venv/bin/solet-bridge"
-    wrong_bridge.parent.mkdir(parents=True, exist_ok=True)
-    wrong_bridge.touch()
-    named_launcher.symlink_to(wrong_bridge)
-    _check(
-        dispatch_request(peer, runtime)["checkpoint_status"] != "verified",
-        "named CLI symlink resolving outside the target is non-green",
-    )
-    named_launcher.unlink()
-    named_launcher.symlink_to(target / ".venv/bin/solet-bridge")
-    runtime.responses[peer_command] = CommandOutcome(1, False, 1, "", "bridge unavailable")
-    _check(
-        dispatch_request(peer, runtime)["checkpoint_status"] != "verified",
-        "failed bridge call is non-green even with healthy launcher artifacts",
-    )
-    runtime.responses[peer_command] = CommandOutcome(
-        0,
-        False,
-        1,
-        json.dumps(
-            {
-                "result": {
-                    "success": True,
-                    "data": {
-                        "caller_identity_available": True,
-                        "registered_bridge": True,
-                        "bridge_identity": 1,
-                    },
-                }
-            }
-        ),
-        "",
-    )
-    _check(
-        dispatch_request(peer, runtime)["checkpoint_status"] != "verified",
-        "malformed peer identity is non-green",
-    )
-
-    kb = _request(
-        target,
-        operation_id="knowledge_retrieval_succeeds",
-        operation_ref="service_interface::knowledge_service.search",
-        probe_purpose="completion",
-    )
-    runtime.responses[
-        (
-            str(target / ".venv/bin/solet-bridge"),
-            "call",
-            "service_interface::knowledge_service::search",
-            '{"query":"session start orientation","top_k":1}',
-        )
-    ] = CommandOutcome(0, False, 1, '{"result":{"data":{"count":0,"results":[]}}}', "")
-    failed_kb = dispatch_request(kb, runtime)
-    _check(
-        failed_kb["checkpoint_status"] != "verified",
-        "green process with empty KB retrieval is non-green",
-    )
-    run_knowledge_readiness_poll(
-        target, runtime, request=_request, check=_check, command_outcome=CommandOutcome
-    )
-    run_knowledge_output_cap(
+    run_router_and_qualification_regressions(
         target,
         runtime,
         request=_request,
         check=_check,
         command_outcome=CommandOutcome,
+        dispatch_request=dispatch_request,
+        run_once=run_once,
+        raw_request=_raw_request,
+        run_knowledge_readiness_poll=run_knowledge_readiness_poll,
+        run_knowledge_output_cap=run_knowledge_output_cap,
         structured_output_limit=_STRUCTURED_OUTPUT_LIMIT,
-    )
-
-    journal = _request(
-        target,
-        operation_id="install_state_projection_matches",
-        operation_ref="setup::journal.install_state_projection_matches",
-        probe_purpose="completion",
-    )
-    _check(
-        dispatch_request(journal, runtime)["checkpoint_status"] != "verified",
-        "missing install-state projection is non-green",
-    )
-    journal_path = target / ".solet/install-state.json"
-    journal_path.parent.mkdir(parents=True, exist_ok=True)
-    journal_path.write_text(
-        json.dumps(
-            {
-                "name": "iris",
-                "target": str(target),
-                "flow_id": "macos.repository_setup",
-                "flow_source_revision": "a" * 40,
-                "answers_fingerprint": "sha256:" + "b" * 64,
-            }
-        ),
-        encoding="utf-8",
-    )
-    _check(
-        dispatch_request(journal, runtime)["checkpoint_status"] == "verified",
-        "atomic install-state projection verifies its manager identity",
-    )
-    journal_path.write_text(
-        journal_path.read_text(encoding="utf-8").replace("b" * 64, "c" * 64),
-        encoding="utf-8",
-    )
-    _check(
-        dispatch_request(journal, runtime)["checkpoint_status"] != "verified",
-        "install-state projection fingerprint drift remains non-green",
-    )
-
-    malformed_stdout = io.StringIO()
-    malformed_stderr = io.StringIO()
-    malformed_code = run_once(
-        io.StringIO('{"secret":"must-not-echo"'),
-        malformed_stdout,
-        malformed_stderr,
-        runtime=runtime,
-    )
-    _check(malformed_code == 2, "malformed adapter input exits with protocol error")
-    _check(malformed_stdout.getvalue() == "", "malformed adapter emits no result fragment")
-    _check(
-        "must-not-echo" not in malformed_stderr.getvalue(),
-        "malformed input is not reflected to diagnostics",
-    )
-
-    valid_stdout = io.StringIO()
-    valid_stderr = io.StringIO()
-    valid_code = run_once(
-        io.StringIO(json.dumps(_raw_request(target, operation_ref="setup::unknown.operation"))),
-        valid_stdout,
-        valid_stderr,
-        runtime=runtime,
-    )
-    valid_output = json.loads(valid_stdout.getvalue())
-    _check(valid_code == 0 and valid_stderr.getvalue() == "", "valid adapter I/O is closed")
-    _check(valid_output["error_kind"] == "adapter_missing", "adapter output is parseable JSON")
-
-
-def _session_source_response_shapes(target: Path) -> None:
-    """Accept one unambiguous bridge result shape and reject a mixed one.
-
-    Session-ledger registration returns a bare service object on the current
-    bridge route, while other verbs retain the conventional ``data`` envelope.
-    The hydration apply path needs the ``source_id`` from either form, but must
-    not choose between contradictory copies in a mixed response.
-    """
-
-    request = AdapterRequest.from_dict(
-        _raw_request(
-            target,
-            operation_id="register_codex_sessions",
-            operation_ref="hydration::sessions.register_codex_filesystem",
-            phase="apply",
-            purpose=None,
-        )
-    )
-    bridge = str(target / ".venv/bin/solet-bridge")
-
-    def registration_command(root: Path) -> tuple[str, ...]:
-        return (
-            bridge,
-            "call",
-            "service_interface::session_ledger_service::register_source",
-            json.dumps(
-                {"source_kind": "codex_local", "root_uri": str(root)},
-                separators=(",", ":"),
-            ),
-        )
-
-    def poll_command(source_id: str) -> tuple[str, ...]:
-        return (
-            bridge,
-            "call",
-            "service_interface::session_ledger_service::poll_source",
-            json.dumps({"source_id": source_id}, separators=(",", ":")),
-        )
-
-    def completed(payload: JsonObject) -> CommandOutcome:
-        return CommandOutcome(0, False, 1, json.dumps({"result": payload}), "")
-
-    for label, payload, source_id in (
-        (
-            "nested",
-            {
-                "success": True,
-                "action_status": "completed",
-                "actions": [],
-                "error": None,
-                "data": {"source_id": "source-nested"},
-            },
-            "source-nested",
-        ),
-        (
-            "flat",
-            {
-                "success": True,
-                "action_status": "completed",
-                "actions": [],
-                "error": None,
-                "source_id": "source-flat",
-                "outcome": "registered",
-            },
-            "source-flat",
-        ),
-    ):
-        runtime = FakeRuntime(target.parent / f"session-source-{label}")
-        runtime.responses[registration_command(runtime.home / ".codex/sessions")] = completed(
-            payload
-        )
-        runtime.responses[poll_command(source_id)] = completed(
-            {
-                "success": True,
-                "action_status": "completed",
-                "actions": [],
-                "error": None,
-            }
-        )
-        applied = operation_handlers()[request.operation_ref](request, runtime)
-        _check(
-            applied["checkpoint_status"] == "applied",
-            f"{label} registration envelope preserves its source id",
-        )
-
-    mixed_runtime = FakeRuntime(target.parent / "session-source-mixed")
-    mixed_runtime.responses[registration_command(mixed_runtime.home / ".codex/sessions")] = completed(
-        {
-            "success": True,
-            "action_status": "completed",
-            "actions": [],
-            "error": None,
-            "data": {"source_id": "source-nested"},
-            "source_id": "source-flat",
-        }
-    )
-    mixed = operation_handlers()[request.operation_ref](request, mixed_runtime)
-    _check(
-        mixed["error_kind"] == "session_source_register_failed",
-        "mixed registration envelope fails closed instead of choosing a source id",
     )
 
 
@@ -1765,42 +1340,6 @@ def _launchagent_crash_loop_regression(
     )
 
 
-def _router_transport_regression(
-    router: AdapterRequest,
-    runtime: FakeRuntime,
-    command: tuple[str, ...],
-    router_result: Callable[[JsonObject], JsonObject],
-    dispatch_request: Callable[[AdapterRequest, FakeRuntime], JsonObject],
-) -> None:
-    null_binding = router_result({"active_color": None, "active_instance_id": None, "colors": []})
-    _check(
-        null_binding["error_kind"] == "router_identity_failed"
-        and null_binding["evidence"][0]["observed"] is None,
-        "reachable router with a null active binding remains an identity failure",
-    )
-    management_unreachable = router_result({"error": "router socket unavailable"})
-    _check(
-        management_unreachable["error_kind"] == "router_mgmt_unreachable"
-        and management_unreachable["evidence"][0]["observed"] == "router_mgmt_unreachable",
-        "platform-reported router management failure is distinct from an identity fault",
-    )
-    runtime.responses[command] = CommandOutcome(1, False, 1, "", "connection refused")
-    unreachable = dispatch_request(router, runtime)
-    _check(
-        unreachable["error_kind"] == "router_unreachable"
-        and unreachable["evidence"][0]["observed"] == "router_unreachable"
-        and unreachable["error_kind"] != null_binding["error_kind"],
-        "unreachable router is distinct from a null active binding",
-    )
-    runtime.responses[command] = CommandOutcome(0, False, 1, "HTTP/1.1 503 Service Unavailable", "")
-    unavailable = dispatch_request(router, runtime)
-    _check(
-        unavailable["error_kind"] == "router_transport_503"
-        and unavailable["evidence"][0]["observed"] == "router_transport_503",
-        "router public-port 503 is distinct from a null active binding",
-    )
-
-
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="executable-hydration-") as temporary:
         root = Path(temporary)
@@ -1817,7 +1356,15 @@ def main() -> int:
         runtime = FakeRuntime(root)
         _protocol_counterexamples(target)
         _operation_counterexamples(target, runtime)
-        _session_source_response_shapes(target)
+        run_session_source_boot_registration_regression(
+            target,
+            fake_runtime=FakeRuntime,
+            adapter_request=AdapterRequest,
+            raw_request=_raw_request,
+            operation_handlers=operation_handlers,
+            command_outcome=CommandOutcome,
+            check=_check,
+        )
         _shell_and_hook_counterexamples(target, runtime)
         run_plugin_list_output_cap(
             target,
