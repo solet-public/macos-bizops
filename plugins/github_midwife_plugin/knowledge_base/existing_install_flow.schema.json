@@ -24,6 +24,12 @@
       "items": {"$ref": "#/definitions/supported_predecessor"}
     },
     "source_operation": {"$ref": "#/definitions/source_operation"},
+    "host_profiles": {
+      "type": "object",
+      "description": "Measured host classes the release gates pieces on (sw_vers + uname), the one place their thresholds live. Read by the Manager for closure additions and by the seed's plugin-transition handler.",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_.-]{1,127}$"},
+      "additionalProperties": {"$ref": "#/definitions/host_profile"}
+    },
     "runtime_operations": {
       "type": "array",
       "items": {"$ref": "#/definitions/runtime_operation"}
@@ -55,6 +61,7 @@
         "existing::dependencies.reconcile",
         "existing::migration.solet_rename",
         "existing::migration.export_root_containment",
+        "existing::migration.plugin_transition",
         "existing::hydration.reconcile",
         "existing::autostart.reconcile",
         "existing::runtime.platform_migration",
@@ -64,6 +71,7 @@
     "supported_predecessor": {
       "type": "object",
       "additionalProperties": false,
+      "description": "A predecessor identity the existing-install flow recognises. A row with a non-null legacy_anchor_id may be an inert reserved anchor rather than a currently-known real seed: iss_3272e5f6 verified (2026-09-28) that the 'stable-pre-manager-seed-v1' row's commit/tree/provenance_sha256/seed_id/origin_id/manifest_sha256 are byte-for-byte the deterministic output of solet_cli/tests/existing_install_inspection_contract_smoke.py::_create_released_anchor_target's synthetic PROVENANCE.json fixture (reproduced independently against the same git author/committer dates and message), not a real commit ever pushed to https://github.com/solet-public/macos-bizops.git (absent from every branch, tag and ref there as of that date). It is kept exactly as the paired smoke expects, because it can never match a real clone (no real macos-bizops history reaches that commit) and no replacement value is known; retire it once a real pre-Manager predecessor is identified, or when PRE_MANAGER_SEED coverage is redesigned to not depend on a fixed commit.",
       "required": [
         "repository",
         "commit",
@@ -239,7 +247,17 @@
       "required": ["distribution", "relative_path"],
       "properties": {
         "distribution": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
-        "relative_path": {"type": "string", "pattern": "^(plugins/[a-z][a-z0-9_]*|ananta|solet_setup_contracts)$"}
+        "relative_path": {"type": "string", "pattern": "^(plugins/[a-z][a-z0-9_]*|ananta|solet_setup_contracts)$"},
+        "requires_host": {"type": "string", "description": "A host_profiles name; the piece applies only on a host the Manager measures as meeting it.", "pattern": "^[a-z][a-z0-9_.-]{1,127}$"}
+      }
+    },
+    "host_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["macos_major_min", "machine"],
+      "properties": {
+        "macos_major_min": {"type": "integer", "minimum": 11, "maximum": 99},
+        "machine": {"enum": ["arm64", "x86_64"]}
       }
     },
     "dependency_closure": {
@@ -247,7 +265,7 @@
       "additionalProperties": false,
       "required": ["additions", "removals"],
       "properties": {
-        "additions": {"type": "array", "items": {"$ref": "#/definitions/dependency_piece"}},
+        "additions": {"type": "array", "description": "Pieces the release adds to every closure. One flow ships to every bundle, so a plugins/<name> addition applies only where the candidate release ships that plugin.", "items": {"$ref": "#/definitions/dependency_piece"}},
         "removals": {"type": "array", "items": {"$ref": "#/definitions/dependency_piece"}}
       }
     },

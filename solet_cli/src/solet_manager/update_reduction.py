@@ -19,6 +19,7 @@ from subprocess import CompletedProcess
 from .errors import SourceError, UpdateBlockedError
 from .executed_code import RosterUnreadableError, executed_code_roots
 from .existing_install_inspection import ExistingInstallInspectionResult, InspectionStatus
+from .installer_pins import installer_pinned_paths
 from .local_state import ObservedLocalState, observe_local_state
 from .models import InstanceInventoryRecordV2
 from .paths import ManagerPaths, update_candidate_cache
@@ -49,6 +50,8 @@ class Reduction:
     collisions: tuple[CollisionRow, ...]
     local_state: ObservedLocalState | None
     blocked_paths: dict[str, list[str]]
+    #: iss_f1d8cfc2: the tracked modifications proved to be exactly the installer's interpreter pin (Class T).
+    installer_pins: tuple[str, ...] = ()
 
 
 def reduce_update(
@@ -61,6 +64,8 @@ def reduce_update(
     *,
     git: GitRead,
     run_git: GitRun,
+    cache_git: GitRead,
+    cache_run_git: GitRun,
 ) -> Reduction:
     """Section 6.3: topology reasons, identity/origin reasons, history proof against the candidate cache, then the local-state reduction."""
     facts = baseline.facts
@@ -76,30 +81,33 @@ def reduce_update(
     collisions: tuple[CollisionRow, ...] = ()
     local_state: ObservedLocalState | None = None
     blocked: dict[str, list[str]] = {}
+    pins: tuple[str, ...] = ()
     if "already_current" not in reasons or source_mode == "verify":
         cache = update_candidate_cache(paths, candidate.descriptor_digest).repository
         # A baseline the channel repository has never seen is divergent history, not an error (Step 6, n5).
-        if _object_exists(run_git, cache, release.commit) and is_ancestor(run_git, cache, release.commit, candidate.fields.commit):
-            collisions, local_state, blocked = _local_state_reduction(git, cache, record, candidate, baseline, entries)
+        # The target and the bare candidate cache are pinned differently (iss_836499b3 R2-1), hence two readers.
+        if _object_exists(cache_run_git, cache, release.commit) and is_ancestor(cache_run_git, cache, release.commit, candidate.fields.commit):
+            collisions, local_state, blocked, pins = _local_state_reduction(git, cache_git, cache, record, candidate, baseline, entries)
         else:
             reasons.add("history_diverged")
     reasons.update(row.reason for row in collisions)
     reasons.update(blocked)
-    return Reduction(tuple(sorted(reasons)), collisions, local_state, blocked)
+    return Reduction(tuple(sorted(reasons)), collisions, local_state, blocked, pins)
 
 
 def _local_state_reduction(
     git: GitRead,
+    cache_git: GitRead,
     cache: Path,
     record: InstanceInventoryRecordV2,
     candidate: UpdateCandidate,
     baseline: ExistingInstallInspectionResult,
     entries: tuple[tuple[str, str, str], ...],
-) -> tuple[tuple[CollisionRow, ...], ObservedLocalState, dict[str, list[str]]]:
-    """Section 6.3: the exact transition set, the landed collision proof, the Step 7 reasons, and the commitment."""
+) -> tuple[tuple[CollisionRow, ...], ObservedLocalState, dict[str, list[str]], tuple[str, ...]]:
+    """Section 6.3: the exact transition set, the landed collision proof, the Step 7 reasons, the commitment, and the installer pins."""
     target = Path(record.target.canonical_path)
     transition = parse_transition_paths(
-        git(
+        cache_git(
             cache,
             ("diff-tree", "-r", "-z", "--no-renames", "--name-status", record.source_release.commit, candidate.fields.commit),
             "candidate transition set is unreadable",
@@ -112,12 +120,13 @@ def _local_state_reduction(
         roots = executed_code_roots(target, candidate)
     except RosterUnreadableError as exc:
         raise UpdateBlockedError("profile_manifest_unreadable", f"the executed-code roots cannot be derived: {exc}", repair="Restore profile/config/manifest.yaml, then preview again.") from exc
-    blocked = {reason: list(paths) for reason, paths in local_state_reasons(baseline.facts, transition, roots, case_insensitive=case_insensitive)}
+    pins = installer_pinned_paths(target, baseline.facts, lambda spec: git(target, ("cat-file", "blob", spec), "committed hook manifest is unreadable"))
+    blocked = {reason: list(paths) for reason, paths in local_state_reasons(baseline.facts, transition, roots, case_insensitive=case_insensitive, installer_pins=pins)}
     for reason in ("staged_changes_present", "tracked_shape_changed", "git_metadata_present"):
         paths = _fact_reason_paths(baseline, reason)
         if paths:
             blocked[reason] = paths
-    return collisions, observe_local_state(target, baseline.facts), blocked
+    return collisions, observe_local_state(target, baseline.facts), blocked, pins
 
 
 def _fact_reason_paths(baseline: ExistingInstallInspectionResult, reason: str) -> list[str]:

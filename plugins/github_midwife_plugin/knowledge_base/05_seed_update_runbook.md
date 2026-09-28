@@ -77,6 +77,63 @@ One block of six commands. Every command is target-read-only except
 `import --yes` (Manager state only; no target byte) and `update --yes`
 (the journaled operations the preview listed, nothing else).
 
+**A solet `solet create` installed skips `inspect` and `import`.** The
+Manager proves it against its own create record (the v1 registry row and
+the create transaction): the checkout must be at the exact
+recorded commit with its committed `PROVENANCE.json`, from the channel's
+repository, profile and `origin_id`. The create transaction must show the
+install over, not verified: every install stage final and every completion
+check answered. A create whose completion checks stayed `blocked` or
+`failed` (every r46–r48 install, whose `coreai_embedding_request_succeeds`,
+`knowledge_retrieval_succeeds` and `plugin_roster_matches_plan` never
+passed) is eligible; the dry-run's `enrollment` block names those checks
+under `create_transaction`, and the update's final doctor runs its own
+checks against the new release. A create still in flight (an install stage
+not final, a completion check never run) refuses `operation_in_progress`
+with the repair `Resume with: solet create <name>`, and `import` refuses it
+the same way at `--dry-run` and at `--yes`. A current `solet create` enrolls the
+instance itself (`maintenance_enrollment` in its result). One created by an
+earlier Manager (r46–r48) has no v2 row yet, so `update <name> --dry-run`
+renders the update from the would-be row plus an `enrollment` block
+(`status: planned`) and binds it into the fingerprint, and `update --yes`
+enrolls and continues in the same command. A failed proof is
+`create_origin_identity_unproven` (with the failed checks) or
+`managed_identity_drift`: a repair, never a reason to import or re-birth.
+`import` below is for a plain-clone solet the Manager did not create.
+
+The proof is of content, not of the directory: the create record keeps
+the target path but no inode, so any byte-identical checkout at that path
+proves the same. The path itself is closed. `solet create` records a
+resolved path, so the recorded target must still be a real directory at
+exactly that path; a symbolic link at or above it (to a moved checkout
+or to another copy) is `managed_identity_drift`, never followed. Put the
+checkout back at the recorded path. An operator `--target` that reaches
+the real directory through a link is fine; the recorded path is what is
+inspected. An enrollment interrupted before it finished (a crash inside
+`update --yes` or `solet create`) resumes: `update <name> --dry-run` shows
+`enrollment.status: resume` with the same fingerprint, and `--yes` finishes
+it and continues. If the Manager was upgraded in between, the same solet
+proves again under the new channel, so the dry-run shows
+`enrollment.status: supersede`, names the stale operation
+(`superseded_operation_id`) and prints a new fingerprint. The old
+fingerprint is refused. `--yes` with the new one records the stale
+operation `abandoned`, enrolls under its successor and continues, all in
+the same command. `solet create`'s `maintenance_enrollment_failed` repair
+names the exact `import` commands and `update --dry-run` then `--yes`;
+each finishes it.
+
+Every Manager Git command against the checkout (`inspect`, `import`,
+`update`, the doctor) runs with fsmonitor, hooks, replace refs, external
+diff and system/global Git config disabled. It is pinned to the checkout
+itself (`GIT_DIR`, `GIT_WORK_TREE`), so the checkout's own config cannot
+move where the Manager reads or writes. A checkout whose own
+`.git/config` configures code that Git would run (a clean/smudge filter,
+a textconv or diff/merge driver, fsmonitor, `core.hooksPath`, an include,
+and similar), or that redirects its work tree (`core.worktree`, or
+`core.bare` set to true), is refused, never executed. `inspect`, `import`
+and `update` all refuse with `git_execution_surface_unsafe` and the
+repair: remove that configuration from the checkout, then retry.
+
 ```bash
 brew install solet-public/tap/solet                       # once; brew upgrade for every later release
 solet-manager inspect --target <clone> --channel stable   # classify; exit 3 attention_required is the normal answer for a real clone
@@ -100,20 +157,33 @@ wait".
 group of the source preview lists three things a real clone always carries:
 *preserved local modifications* (the genesis rewrite of
 `root_manifest.yaml`, the hydration blocks in `AGENTS.md`/`CLAUDE.md`,
-`NOTICE` — unstaged, content-only edits to tracked files the candidate does
-not touch), *committed local state* (the untracked `.gitignore`, `.solet/`,
+`NOTICE`, and the installer's interpreter pin in the two coordination-hook
+manifests `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks/hooks.json`
+and `plugins/github_midwife_plugin/codex_plugin/coordination-hooks/hooks/hooks.json`
+— unstaged, content-only edits to tracked files the candidate does not
+touch), *committed local state* (the untracked `.gitignore`, `.solet/`,
 `knowledge_bases/*` symlinks, `client/` — paths the update commits to leave
 byte-identical, verified after every operation), and the *preserved
 surface* (`profile/**`, disclosed with kind, mode and size, never digested,
-never committed). None of these is a refusal. The preview refuses only:
+never committed). None of these is a refusal.
+
+The two hook manifests sit under a roster plugin, an executed-code root, so
+the Manager admits them only as the installer wrote them: every bare
+`python3` hook command bound to `<target>/.venv/bin/python3` and nothing
+else, re-derived byte-for-byte from the committed file (`local_state.installer_pins`
+lists them). Never restore these files to the shipped `python3`: the
+coordination hooks need the pin, and the fast-forward carries the pinned
+bytes onto the new release. Any further edit to either file, or a pin to a
+different interpreter path, is refused as `executed_code_modified`, the same
+as a hand edit elsewhere under a roster plugin. The preview refuses only:
 
 | Reason (`data.topology.reasons`, exit 3) | Meaning | Repair |
 |---|---|---|
 | `history_diverged` | the clone's HEAD is not an ancestor of the candidate | re-birth, or Part C if the operator wants to hand-merge |
-| `tracked_overlap_present` | the candidate changes a file this installation modified locally | keep your lines by hand: `git diff <baseline>..<candidate> -- <path>`, then preview again; the Manager never overwrites, stashes or resets a local change |
+| `tracked_overlap_present` | the candidate changes a file this installation modified locally | keep your lines by hand: `git diff <baseline>..<candidate> -- <path>`, then preview again; the Manager never overwrites, stashes or resets a local change. If the named file is a pinned coordination-hook manifest (listed in `local_state.installer_pins`), do not edit or restore it: upgrade the Manager (`brew upgrade solet`) and preview again — carrying the pin across a changed manifest is a Manager capability (`iss_c1a7df20`) |
 | `staged_changes_present` | something is in the index | `git restore --staged <paths>` is the operator's call; the Manager never runs it |
 | `tracked_shape_changed` | a tracked path was deleted, retyped, mode-changed or symlinked | restore it to a content-only edit of the shipped regular file |
-| `executed_code_modified` | an edit under `bootstrap.py`, `bootstrap_adapter/`, an editable-installed distribution or a roster plugin | restore it; the Manager will not execute a modified target |
+| `executed_code_modified` | an edit under `bootstrap.py`, `bootstrap_adapter/`, an editable-installed distribution or a roster plugin, other than the installer's own interpreter pin | `git diff -- <path>` in the clone shows the local edit: undo only that edit (keep the installer's interpreter pin in a hook manifest) or move the change out of the tree, then preview again; the Manager will not execute a modified target |
 | `git_metadata_present` | `.gitattributes`/`.gitmodules` anywhere, or an edited tracked root `.gitignore` | remove it; it changes how the fast-forward writes files |
 | `preserved_surface_in_transition` | the candidate ships something under `profile/` | seed-side regression; file feedback, do not repair the clone |
 | `source_identity_unproven` | `origin` names a URL the descriptor does not declare as an allowed migration | Part C, Step 2a (manual re-point) |
@@ -166,6 +236,11 @@ the healthy state, not an error.
 - Step 4a export root → `migration_export_root_containment` propagates an
   already-configured root to newly installed connectors (first-time answer:
   Part B).
+- Plugin transitions (r52, iss_6d26db73) → `migration_plugin_transition`
+  applies the release's declared plugin replacements
+  (`plugins/github_midwife_plugin/knowledge_base/plugin_transitions.json`) to a solet whose profile still
+  carries the predecessor plugin. See "Plugin transitions: LM Studio solets
+  move to the Apple-native stack" below.
 - Step 5 hydration re-run → `hydration_reconcile` for the three declared
   managed artifacts: the instance LaunchAgent plist, the `~/.zshrc` block,
   the `~/.claude/CLAUDE.md` section (the rest: Part B).
@@ -178,6 +253,70 @@ the healthy state, not an error.
   doctor <name>` afterwards. The router `no_active_color` race described in
   Part C reads as `service_offline` in the doctor's section 9 while it
   heals; re-probe.
+
+### Plugin transitions: LM Studio solets move to the Apple-native stack
+
+A release can declare that one plugin replaces another for a service; r52
+declares two, for solets born before the Apple-native stack (r46):
+
+| Transition | Profiles | From → to |
+|---|---|---|
+| `embedding_service.openai_to_coreai.v1` | macos-bizops, macos-free-solet, macos-samantha-solet | `openai_embeddings_plugin` (LM Studio) → `coreai_embeddings_plugin` |
+| `inference_service.lmstudio_to_apple.v1` | macos-bizops | `default_inference_plugin` (LM Studio) → `macos_inference_plugin` |
+
+The runtime preview's `migrations_pre` stage lists, per transition, the
+pinned Core AI asset download, the readiness proof, and the exact file
+writes (the new plugin config, the roster line in the profile's
+manifest.yaml, the binding in the profile's service_bindings.json).
+Each written file is backed up
+before the apply, like every `backup_required` migration.
+
+What the transition guarantees:
+
+- **Only where the host can run it.** Each replacement names a host profile
+  in the flow's `host_profiles` (`apple_embeddings` for Core AI, `apple_fm`
+  for Apple FM; both macOS 27 on arm64 in r52), measured with `sw_vers` and
+  `uname -m`. On a host below it (macOS 26 Tahoe), the release's closure
+  leaves that package out, the transition reports `host_unsupported`
+  (healthy, not pending), and the binding stays on LM Studio. Once the host
+  qualifies, the doctor row says the switch comes with the next release's
+  update (`update_at_next_release`).
+- **Ready before switched.** The replacement is proven first: the Core AI
+  asset is acquired and one real embedding must return 768 normalized
+  dimensions; Apple FM must import. Only then does the binding move.
+  Existing vectors are kept: nomic v1.5 on Core AI embeds the same space
+  LM Studio's nomic v1.5 did (measured, see the design record on
+  iss_6d26db73).
+- **Not ready is not a failure.** If the replacement is not ready (asset
+  download failed, readiness proof wrong or timed out, or the step's share
+  of the adapter timeout spent), nothing is written,
+  the old binding stays active, the row is journaled `deferred` with
+  `plugin_transition_pending`, and the update still promotes, but to
+  `needs_attention` rather than `verified`, with `data.deferred_operations`
+  naming the transition and its repair. Run `solet-manager update <name>`
+  again: it selects `verify` mode at the same release and retries only what
+  is still pending.
+- **Edited configuration is refused, not overwritten.** The embedding
+  transition matches the predecessor config exactly; the inference
+  transition matches on `base_url` only (setup chose the model). A solet
+  whose old config was edited reports `conflict`; the row defers with
+  `plugin_transition_conflict`, and the preview names the refusal. Restore
+  the shipped config or move the binding by hand.
+- **Everything else is preserved.** Extra plugins keep their roster place,
+  the old plugin's config file stays on disk (inert), and `profile/data` is
+  untouched. LM Studio and its models are left exactly as they were: no
+  path uninstalls LM Studio or deletes, moves or changes a model
+  (rul_ef0363a2). This solet simply stops using them for the transitioned
+  services.
+- **Interruptions resume.** Every intermediate write state boots (the new
+  plugin enters the roster before the binding moves). A resumed update
+  completes the transition, or reverts it to the predecessor bytes when the
+  replacement is no longer ready. A repeat apply is a byte-identical no-op,
+  and an already-Apple-native solet verifies with no plan.
+
+The final doctor reports the transitions as the advisory
+`plugin_transitions` row in the plugin-roster section. A pending transition
+never fails the doctor; the prior plugin stays active and runnable.
 
 ## Part B — manual steps that remain
 
@@ -749,6 +888,29 @@ LaunchAgent alone either way.
 The sections below are narrative: what each release changed and why, kept
 as history. They are not executable support — Part A's preview lists what
 an update will do to this installation, and the doctor verifies it did.
+
+## What changed in this release — LM Studio solets move to the Apple-native stack (r52)
+
+- **Plugin transitions.** `solet-manager update` now moves a pre-r46 solet
+  off LM Studio on macOS 27: embeddings to on-device Core AI, and summaries
+  to Apple Foundation Models on macos-bizops. On macOS 26 both stay on LM
+  Studio until the next release's update after the Mac reaches macOS 27. LM Studio and
+  its models are never removed or changed. See "Plugin transitions" in Part
+  A for the guarantees; a not-ready replacement defers to `needs_attention`
+  and the next `update` retries it.
+- **A verify-mode update now clears `needs_attention`.** Before r52, a
+  `verify`-mode update at the already-verified release promoted without
+  publishing, so a row once set to `needs_attention` stayed there; it now
+  lands `verified` when the final doctor passes.
+- **Embedding inputs fit the provider (iss_9166af93).** Core AI refuses any
+  input over 2048 tokens where LM Studio accepted an 8192-character window.
+  Every caller now splits to the provider's declared budget, and the
+  embedding service refuses (loudly, counted) anything that still arrives
+  over it. Once embeddings run on Core AI, the first ledger drain re-embeds
+  every event whose stored chunks differ from the new policy's, which covers
+  every event the old window embedded head-only or could not embed.
+- **Bootstrap closure repair** resolves the vendored `apple-fm-sdk` wheel
+  with the same `--find-links` rule genesis uses.
 
 ## What changed in this release — worker hooks now also fire as plugin hooks (`coordination-hooks` 0.8.0, 2026-08-24 update)
 

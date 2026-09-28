@@ -39,9 +39,22 @@ you'd rather do it.
 ## Before you start
 
 - You need the Solet Manager installed: `brew install
-  solet-public/tap/solet`. If your solet was set up before the Manager
-  existed, enroll it once (replace `<name>` with your solet's name and
-  `<folder>` with the folder it lives in, throughout this guide):
+  solet-public/tap/solet`. Replace `<name>` with your solet's name and
+  `<folder>` with the folder it lives in, throughout this guide.
+- **If you installed your solet with `solet create`** (the usual way),
+  there is nothing to enroll: go straight to Step 1. The first update
+  recognises the solet the Manager installed and enrolls it as part of the
+  same command; its preview says so in an `enrollment` section. If that
+  first update is interrupted, run it again: the preview shows
+  `enrollment: resume` with the same fingerprint, and `--yes` finishes it.
+  If you upgraded the Manager in between, the preview shows
+  `enrollment: supersede` and a new fingerprint instead; approve that one
+  with `--yes`.
+  The solet must still be in the folder it was created in, as a real
+  folder. A symbolic link left in its place is refused; move the folder
+  back.
+- **If your solet was set up without the Manager** (a plain clone, before
+  the Manager existed), enroll it once:
 
   ```bash
   solet-manager import <name> --target <folder> --channel stable --dry-run
@@ -54,7 +67,24 @@ you'd rather do it.
 - Then run `solet-manager doctor <name>`. **"verified" means go.** Anything
   else: read the first line of the report — it names the one thing that
   needs attention and what to do about it — and sort that out before
-  updating.
+  updating. A solet created by an earlier Manager that has not been updated
+  yet is reported as a create instance; check it with `solet doctor <name>`
+  instead. On a solet created before r49, `solet doctor` usually says
+  `blocked` on its knowledge-search and model checks
+  (`coreai_embedding_request_succeeds`, `knowledge_retrieval_succeeds`,
+  `plugin_roster_matches_plan`). That alone does not stop the update: its
+  preview lists those checks under `create_transaction`, and the update's
+  own final check runs them again on the new release. If they still fail
+  there, the update stops before it finishes, your solet is marked as
+  needing attention, and nothing is rolled back; follow the repair it
+  prints and run the same `--yes` command again
+  (`solet-manager reconcile <name> --dry-run` tells you the same). If the
+  preview refuses with `operation_in_progress`, the install itself never
+  finished; run `solet create <name>` to finish it first.
+- Once a solet has been updated, check it with `solet-manager doctor
+  <name>`. The older `solet status <name>` may keep showing `blocked`, and
+  `solet doctor <name>` may refuse with a contract error; neither changes
+  anything on your machine (iss_0a10e6db).
 - You'll need a terminal window and about 10 minutes, most of which is
   waiting.
 
@@ -70,8 +100,10 @@ the upgrade comes first. The second command is a preview: it changes
 nothing, and prints exactly what the update would do — which release it
 will move your solet to, which of the files on your machine it will
 preserve untouched (your generated `AGENTS.md`/`CLAUDE.md`, the
-`knowledge_bases` links, your `profile` folder — these are listed as
-preserved, not as problems), and any component it will install.
+`knowledge_bases` links, your `profile` folder, and the two Claude/Codex
+coordination-hook `hooks.json` files that setup pointed at your solet's own
+Python — these are listed as preserved, not as problems), and any component
+it will install.
 
 **If it says `preview_ready`:** continue to Step 2. It also prints an
 approval fingerprint — you'll pass that back in the next command, which is
@@ -84,7 +116,11 @@ force anything. The most common reasons: a file the release changes that
 you also changed locally (the report tells you how to keep your version by
 hand), or something staged in git that you or an agent left behind. Fix the
 named thing, or ask for help with the report in hand, then run the preview
-again.
+again. One exception: never "restore" a coordination-hook `hooks.json` file
+to fix a refusal. Setup deliberately points those hooks at your solet's own
+Python, and undoing that breaks them. If the report names one of them, it
+says what to do instead: usually `git diff -- <file>` to find an extra edit,
+or upgrading the Manager with `brew upgrade solet`.
 
 ## Step 2 — apply the update
 
@@ -264,6 +300,45 @@ If a card's real use doesn't cleanly match either — sometimes picking one
 thing, sometimes wanting the whole set — narrow the request itself (ask for
 specific fields, or a bounded range) rather than forcing one shape as a
 blanket rule.
+
+## What changed in this release — your solet stops needing LM Studio (r52)
+
+If your solet was set up before r46, it still uses LM Studio for embeddings
+(and, on macos-bizops, for summaries). On a Mac running macOS 27, this
+update moves it to Apple's on-device models:
+
+- **Embeddings move to Core AI.** Your existing memories and search results
+  are kept. Only very long past messages are re-indexed, once, in the
+  background, so they can be searched in full.
+- **Summaries move to Apple Foundation Models** on macos-bizops.
+- **LM Studio and its models are left exactly as they were.** The update
+  never uninstalls LM Studio and never deletes, moves or changes a model;
+  your solet simply stops using them for what moved.
+
+**On a Mac running macOS 26 (Tahoe), nothing moves.** The update still
+brings everything else in this release, and your solet keeps using LM
+Studio for both embeddings and summaries. Keep LM Studio installed and
+running. `solet-manager doctor` says so in plain words. Once the Mac is on
+macOS 27, the switch comes with the next release's update; updating again at
+the release your solet already runs changes nothing.
+
+A new macos-bizops solet created on macOS 26 does not use LM Studio. Setup
+runs Homebrew llama.cpp for its summaries and embeddings instead; the
+Homebrew install troubleshooting runbook's macOS 26 section describes it.
+
+(On the Samantha profile, summaries keep using LM Studio on any macOS, so
+keep LM Studio installed and running there too.)
+
+The update downloads the Core AI model files and checks them before
+switching anything. If that check cannot finish (for example, the download
+fails or the update runs out of time), nothing changes. Your solet keeps
+working exactly as before, the update finishes with a "needs attention"
+note, and running `solet-manager update <name>` again later completes the
+move.
+
+If you edited your LM Studio embedding settings by hand, the update will not
+overwrite them. It leaves that part as it is and says so; ask your agent to
+walk you through the choice.
 
 ## What changed in this release — you can now run a small fleet of sessions from this solet (2026-08-10 update)
 

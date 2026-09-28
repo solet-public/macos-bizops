@@ -2,6 +2,356 @@
 
 Newest release first. Earlier releases follow below the divider.
 
+## 2026-09-28 — r55: setup on macOS 26 waits for llama.cpp's first start
+
+**Solet Manager manager-v0.1.0-r55.** This is a full seed build for
+`solet-public/macos-bizops-daily`, with Manager artifacts in
+dwestgate/homebrew-tap-validate. A stable cut to `solet-public/macos-bizops`
+follows only after fresh installs on macOS 27 and on macOS 26 both reach their
+end state on this build.
+
+Changes since r54 (source `951bf476f`):
+
+- **Setup on macOS 26 no longer gives up on a freshly installed llama.cpp.**
+  After installing llama.cpp, setup confirms it runs by asking for its version.
+  The first run on a new Mac prepares the graphics backend and can take more
+  than 10 seconds, so r54 stopped there although llama.cpp was installed
+  correctly. The check now uses the full time setup allows it, minus a short
+  margin.
+
+Known limits:
+
+- Unchanged from r54.
+- The r55 fresh-install VM round on macOS 26 is pending at publication.
+
+## 2026-09-28 — r54: llama.cpp installs on a fresh macOS 26 Mac
+
+**Solet Manager manager-v0.1.0-r54.** This is a full seed build for
+`solet-public/macos-bizops-daily`, with Manager artifacts in
+dwestgate/homebrew-tap-validate. A stable cut to `solet-public/macos-bizops`
+follows only after fresh installs on macOS 27 and on macOS 26 both reach their
+end state on this build.
+
+Changes since r53 (source `f372783bf`):
+
+- **Setup on macOS 26 no longer stops at the llama.cpp install.** Homebrew's
+  llama.cpp now brings two libraries with it, libomp and ggml. Setup checks
+  every Homebrew install plan before it changes anything, and in r53 it
+  refused those two names as unreviewed. They are now reviewed for llama.cpp
+  only. Any other unexpected package in a plan is still refused before
+  anything is installed.
+
+Known limits:
+
+- Unchanged from r53: on macOS 26 embeddings use llama.cpp, since Core AI on
+  macOS 26 is not yet offered, and Intel Macs are not supported on that path.
+- Updating an existing solet is unchanged from r52.
+- The r54 fresh-install VM rounds are pending at publication.
+
+## 2026-09-28 — r53: new solets on macOS 26 (Tahoe) with llama.cpp
+
+**Solet Manager manager-v0.1.0-r53.** This is a full seed build for
+`solet-public/macos-bizops-daily`, with Manager artifacts in
+dwestgate/homebrew-tap-validate. A stable cut to `solet-public/macos-bizops`
+follows only after fresh installs on macOS 27 and on macOS 26 both reach their
+end state on this build.
+
+Changes since r52 (source `1e01df260`):
+
+- **A new solet now installs and sets up on macOS 26.** On a Mac below
+  macOS 27, setup offers llama.cpp instead of the Apple stack.
+  - llama.cpp is installed with Homebrew and runs as two local services on
+    127.0.0.1: one serves Qwen3-8B (Q4_K_M, about 5 GB) for summaries, and one
+    serves the same Nomic v1.5 embedding model LM Studio uses.
+  - Both models are pinned by revision, size and checksum. A missing model is
+    only a warning: setup finishes and the solet starts without it, the
+    download resumes on its own, and work that needs embeddings begins once
+    the embeddings model is served.
+  - On first boot the solet waits until its embeddings service is configured,
+    so it does not restart in a loop.
+- **Apple's Core AI and Foundation Models are offered only on macOS 27 or
+  later.** Setup reads the Mac's version, never guesses, and stops if it cannot
+  read it.
+- **Setup installs only the plugins for the choices you make.** Before, every
+  macos-bizops install added the macOS 27-only Apple packages, whatever was
+  chosen.
+- **Embedding requests stay within the model's input limit** (2048 tokens for
+  Nomic under llama.cpp).
+- **Publishing no longer depends on a leftover build cache.** The release check
+  installs the prebuilt Apple package that ships with the seed, as setup does.
+
+Known limits:
+
+- On macOS 26 this release uses llama.cpp for embeddings; Core AI on macOS 26
+  is not yet offered.
+- Intel Macs are not supported on the macOS 26 path.
+- Updating an existing solet is unchanged from r52: on macOS 27 it moves to the
+  Apple stack, and on macOS 26 it keeps LM Studio for embeddings and summaries.
+  Updating never uninstalls LM Studio or deletes a model.
+- The r53 fresh-install VM rounds are pending at publication.
+
+## 2026-09-28 — r52: existing LM Studio solets update to the Apple-native stack
+
+**Solet Manager manager-v0.1.0-r52.** This is a full seed build for
+`solet-public/macos-bizops-daily`, with Manager artifacts in
+dwestgate/homebrew-tap-validate. A stable cut to `solet-public/macos-bizops`
+follows only after an existing-solet update round on macOS 27 and one on
+macOS 26 (Tahoe) both reach their end state on this build.
+
+Changes since r51 (source `396702a4d`):
+
+- `solet-manager update` migrates a pre-r46 solet off LM Studio through the
+  new `existing::migration.plugin_transition` operation. On macOS 27,
+  embeddings move to `coreai_embeddings_plugin`, and on macos-bizops summaries
+  also move to `macos_inference_plugin` (Samantha keeps its LM Studio
+  summaries). The replacement is proven ready (the pinned Core AI asset
+  acquired, one real 768-dimension normalized embedding, Apple FM importable)
+  before any binding moves. Existing vectors are kept.
+- LM Studio and its models are left exactly as they were: no update, rollback,
+  repair or doctor path uninstalls LM Studio or deletes, moves or changes a
+  model. The solet simply stops using them for the services that moved.
+- On macOS 26 (Tahoe) the update applies and both services stay on LM Studio;
+  the doctor says why. Each switch is gated per capability by the release
+  flow's `host_profiles` (`apple_embeddings` and `apple_fm`, both macOS 27 in
+  r52), so no macOS 27-only package is installed there. A Mac that later
+  reaches macOS 27 switches with the next release's update; an update at the
+  release it already runs changes nothing.
+- The seeds ship `openai_embeddings_plugin` (and, on macos-bizops,
+  `default_inference_plugin`) as transition-retained code, so an LM Studio
+  solet keeps working embeddings and summaries at every step. They are never
+  on a fresh roster or installed on a fresh solet.
+- A replacement that is not ready, or whose readiness proof would outrun the
+  update step's time budget, defers instead of failing. The old binding
+  stays active, and the update promotes to `needs_attention` with
+  `plugin_transition_pending`. The next `solet-manager update` retries at the
+  same release. An edited predecessor config is refused
+  (`plugin_transition_conflict`), never overwritten. Extra plugins, old
+  config files and `profile/data` are preserved.
+- The final doctor gains the advisory `plugin_transitions` row.
+- Fix: a `verify`-mode update at the already-verified release now clears
+  `needs_attention` when the final doctor passes; it used to leave the row
+  stuck.
+- Fix (iss_9166af93): embedding inputs are sized to the provider's declared
+  token budget. Core AI refuses inputs over 2048 tokens, and about 10% of
+  4-8K-character ledger messages exceeded that inside the old 8192-character
+  window. Worse, the ledger drain halts at such an event, which stranded
+  every event after it. Ledger chunking and knowledge-base indexing now split
+  to the budget. The embedding service refuses, loudly and counted, any input
+  still over it. The first ledger drain under the new policy re-embeds every
+  event whose stored chunks differ from the new policy's, which covers every
+  event LM Studio embedded head-only. This applies once embeddings run on
+  Core AI; a solet still on LM Studio keeps its character windows.
+- Fix: the bootstrap closure repair installs the vendored `apple-fm-sdk`
+  wheel with genesis's `--find-links` rule.
+
+Known limits:
+
+- If an update is interrupted during the switch and the retry reports a
+  missing backup, run the `solet-manager reconcile` command it prints; your
+  solet keeps working embeddings and LM Studio is untouched meanwhile
+  (iss_a6704735).
+
+## 2026-09-28 — r51: existing solets can update again
+
+**Solet Manager manager-v0.1.0-r51.** This is a full seed build for
+`solet-public/macos-bizops-daily`, with Manager artifacts in
+dwestgate/homebrew-tap-validate. A stable cut to `solet-public/macos-bizops`
+follows only after a fresh macOS 27 install round and an existing-solet
+update round both reach their end state on this build.
+
+Requires macOS 27 on Apple-silicon hardware for a fresh install, as r50 does.
+
+Changes since r50 (source `ae8180ee7`):
+
+- **`solet-manager update` no longer refuses every existing solet.** During
+  install, the setup step pins both coordination-hook manifests (the
+  hooks.json files of the Claude and Codex coordination-hooks plugins) to the
+  solet's own Python. The update preview treated that pin as a local
+  code edit and stopped with `executed_code_modified`. Its repair message,
+  "restore it", would have undone the pin. The r50 update round measured
+  this refusal on a clean r46 install. Now:
+  - The Manager accepts a hook manifest only when its bytes are exactly
+    the installer's pin of the committed file for this solet. Any other
+    edit is still refused. The message now says to check it with
+    `git diff`, not to restore it.
+  - The pin is carried through the update unchanged, so the hooks never
+    point at a bare `python3`.
+  - `solet-manager doctor` no longer reports a pinned solet's code as
+    unverifiable.
+  - If a future release changes a pinned hook manifest, the update refuses
+    and asks you to upgrade the Manager first (`brew upgrade solet`).
+- **A new landing check keeps the shipped-test lists consistent.** The r50
+  publish first failed because a new test was listed as not shipped in one
+  place but not in the other two. That check used to run only when a
+  release was built; it now runs before every change lands.
+
+Known limits:
+
+- Solets that use LM Studio cannot yet move to the Apple-native stack by
+  updating. That migration, including macOS 26 (Tahoe) hosts, is planned for
+  r52. Updating never uninstalls LM Studio or deletes any downloaded model.
+- The r51 update and fresh-install VM rounds are pending at publication.
+
+## 2026-09-28 — r50: updates for solets whose install never fully verified
+
+**Solet Manager manager-v0.1.0-r50.** This is a full seed build for
+`solet-public/macos-bizops-daily`, with Manager artifacts in
+dwestgate/homebrew-tap-validate. A stable cut to `solet-public/macos-bizops`
+follows only after a fresh macOS 27 install round and an existing-solet
+update round both reach their end state on this build.
+
+Requires macOS 27 on Apple-silicon hardware, as r49 does.
+
+Changes since r49 (source `bad6e42e0`):
+
+- **Solets installed by r46–r48 can now actually be updated.** r49 taught
+  `solet-manager update` to recognize a solet the Manager created, but it
+  still refused to enroll one unless that solet's original `solet create`
+  had ended fully verified. On real r46–r48 installs it never did: the last
+  three checks of that install (`coreai_embedding_request_succeeds`,
+  `knowledge_retrieval_succeeds`, `plugin_roster_matches_plan`) failed
+  because of the embeddings defect that the update itself fixes. The r49
+  update round measured `operation_in_progress` ("create-origin transaction
+  remains nonterminal") on exactly that shape. Now:
+  - A solet whose install stages all finished, and whose only unverified
+    steps are those final checks, is eligible for `update` and `import`. The
+    dry run lists the unverified checks under
+    `enrollment.create_transaction`.
+  - The update's own final check re-runs them against the new release. If
+    they still fail, the update stops before promoting the new release, marks
+    the solet as needing attention, and rolls nothing back. Follow the
+    printed repair and run the same `--yes` command again.
+  - A solet whose install is still in progress refuses with
+    `operation_in_progress` and the repair `solet create <name>`. A solet
+    whose records disagree with its checkout refuses with
+    `managed_identity_drift`, even while in progress.
+  - `import --dry-run` and `import --yes` now apply the same rule, so a
+    preview that succeeds no longer fails at apply.
+- **The solet's action queue no longer stalls behind a long request.** A
+  direct request for the knowledge retrieval audit now runs in the
+  background and returns at once. An action abandoned by a stopped process
+  is now marked failed instead of being run again an hour later, and the
+  solet's health report names the action it is currently running.
+
+Known limits:
+
+- After an update, the older `solet status <name>` may keep showing
+  `blocked`, and `solet doctor <name>` may re-run the original install's
+  checks. Neither changes your solet. Check an updated solet with
+  `solet-manager doctor <name>`.
+- Solets that use LM Studio for embeddings or summaries cannot yet move to
+  the Apple-native stack by updating. The r49 notes planned that migration,
+  and the token-aware chunking and backfill for long session-ledger messages
+  on Core AI, for r50. Both move to r51.
+- The r50 update and fresh-install VM rounds are pending at publication.
+
+## 2026-09-28 — r49: Core AI readiness and updates for installed solets
+
+**Solet Manager manager-v0.1.0-r49.** This is a full seed build for
+`solet-public/macos-bizops-daily`, with Manager artifacts in
+dwestgate/homebrew-tap-validate. A stable cut to `solet-public/macos-bizops`
+follows only after a fresh macOS 27 install round and an existing-solet
+update round both reach their end state on this build.
+
+Requires macOS 27 on Apple-silicon hardware, as r48 does. If Apple
+Intelligence is off or its model is still downloading, the solet installs and
+runs, and summaries stay degraded until the model is available.
+
+Changes since r48 (source `07c4ded85`):
+
+- **A solet the Manager installed can now be updated with
+  `solet-manager update <name>` alone.** Before this, every solet created with
+  `solet create` was invisible to the update path: `update` refused it with
+  `instance_unmanaged` ("no v2 inventory record"), and `solet-manager import`
+  refused it as `source_identity_unproven`. The Manager proved a solet only
+  against the release it currently ships, never against the release it had
+  installed itself. This was measured in the r46, r47 and r48 update rounds.
+  Now:
+  - `solet create` enrolls the solet it creates for updates, as part of the
+    same approved install. Its result reports `maintenance_enrollment`.
+  - A solet created by an earlier Manager (r46–r48) needs no separate step.
+    `solet-manager update <name> --dry-run` proves it against the Manager's
+    own record of what it installed, shows an `enrollment` block, and binds
+    the enrollment into the approval fingerprint. `--yes` enrolls it and
+    continues the update in the same command. The dry run writes no Manager
+    state, and enrollment touches nothing in the solet's folder.
+  - An enrollment interrupted partway (a crash inside `update --yes` or
+    `solet create`) is finished by the next `update <name> --yes`. If the
+    Manager was upgraded in between, the dry run says the stale enrollment
+    will be superseded and prints a new fingerprint, and `--yes` with that
+    fingerprint enrolls afresh in the same command.
+  - The proof is strict. The checkout must still be at the exact commit the
+    Manager installed, with its committed provenance intact, from the same
+    seed repository, profile and origin as the channel the Manager serves.
+    Anything else is refused with the exact reason
+    (`create_origin_identity_unproven` or `managed_identity_drift`). A
+    symbolic link planted at the recorded path is refused, never followed.
+  - The Manager no longer runs code that a solet's own Git configuration asks
+    for. Every Git command it runs against a solet (`inspect`, `import`,
+    `update`, `doctor`) runs with fsmonitor, hooks, replace refs, external
+    diff and system/global Git config disabled, and is pinned to the solet's
+    own folder. A solet whose `.git/config` arms a filter, a diff or merge
+    driver or similar, or points its work tree elsewhere (`core.worktree`),
+    is refused with `git_execution_surface_unsafe`. It is not executed or
+    redirected.
+  - `solet-manager import` remains the one-time step for a solet set up by a
+    plain clone, without the Manager.
+- **A torn Core AI compiled-model cache no longer leaves the solet's
+  embeddings permanently broken.** An unclean stop (power loss, a kernel
+  panic, or a forced VM stop) can tear the cache Core AI reuses. Every later
+  load then returned non-normalized vectors or crashed with SIGTRAP, and
+  setup blocked at `plugin_roster_matches_plan` for good.
+  - Preparation now proves the cache in a separate process first. If that
+    child crashes or returns invalid vectors, the solet deletes only the
+    pinned model's cache entries, recompiles once and proves the cache again.
+    A second failure reports a clear error and does not retry.
+  - Solets that prepare at the same time repair the shared cache once.
+  - Only a crash counts as cache damage. A child that was killed (for
+    example by SIGKILL or SIGTERM) fails loudly and leaves the cache alone.
+    The purge never follows a symbolic link out of the cache directory.
+  - A healthy cache adds about 0.4 to 0.6 seconds to preparation.
+- **Apple Foundation Models being unavailable no longer blocks installation
+  or the plugin roster.** Summaries are non-essential.
+  - Setup's Apple model check now proceeds with a warning when Apple
+    Intelligence is off, the model is still downloading, or the reason is
+    unknown. The warning names the reason and what to do: enable Apple
+    Intelligence in System Settings, or let the model finish downloading.
+    Before, setup stopped with `apple_ai_unavailable`.
+  - Once running, the Apple FM plugin stays ready and degraded for those
+    reasons, and when the SDK is missing. `list_plugins` shows the reason as
+    a `warning`, and the doctor reports it as warning evidence. Summaries
+    recover on their own when the model becomes available.
+  - Setup still stops on an Apple-silicon Mac that is not eligible for Apple
+    Intelligence (unsupported hardware), when the availability probe itself
+    crashes, and when the model's context size is not the reviewed 8192
+    tokens.
+- The install doctor's `plugin_roster_unready` result now names each unready
+  plugin with its status and last error. Before, it showed two identical
+  plugin lists and a `blocked` verdict with no cause.
+- ACT-R memory's schedule installer is now reachable as
+  `service_interface::memory_service::ensure_schedules`. Its startup action
+  in the shipped profiles named a `plugin::` process key that a bound
+  service provider never registers, so it could not resolve. A new guard
+  checks that every shipped profile's starting actions resolve.
+- ACT-R memory and fleet-maintenance schedules are now installed after the
+  service manager is up, idempotently, and fail loudly. Before, they could
+  run before the scheduling service existed and silently install nothing.
+- The platform now carries a host disk-headroom guard, run on a schedule by
+  the scheduling service, that alerts before the host runs out of space.
+
+Known limits:
+
+- **A solet still running LM Studio (r45 or earlier) cannot yet be upgraded
+  to the Apple-native stack.** That upgrade, which swaps LM Studio embeddings
+  and inference for Core AI and Apple Foundation Models and keeps existing
+  vectors, is planned for r50.
+- On Core AI, a session-ledger message longer than the model's 2048-token
+  input limit is not embedded, so about one in ten very long messages is
+  missing from search. The message itself is kept. Token-aware chunking and
+  a backfill are planned for r50.
+- This build's fresh-install and existing-solet update results come from the
+  VM rounds that follow its publish. This entry claims neither.
+
 ## 2026-09-27 — r48: stable macos-bizops on the Apple-native stack
 
 **Solet Manager manager-v0.1.0-r48.** This is a full seed build, published

@@ -41,7 +41,8 @@ from .existing_install_adapters import (
     run_ps,
     run_security_metadata,
 )
-from .existing_install_bundle import STAGE_ORDER, ManagedArtifact, RuntimeOperation
+from .existing_install_bundle import STAGE_ORDER, DependencyPiece, ManagedArtifact, RuntimeOperation
+from .host_platform import HostPlatform, HostPlatformError, read_host_platform
 from .launch_topology import (
     SUPPORTED_TOPOLOGIES,
     derive_launch_topology,
@@ -60,6 +61,7 @@ from .models import (
     RuntimePlan,
 )
 from .reconciliation_request import ReconciliationOutcome, build_reconciliation_envelope
+from .target_git import GitLayout, run_target_git
 from .update_candidate import UpdateCandidate
 
 __all__ = [
@@ -90,6 +92,8 @@ REQUIRED_DISTRIBUTIONS: tuple[tuple[str, str], ...] = (
     ("github_midwife_plugin", "plugins/github_midwife_plugin"),
     ("agent_messaging_plugin", "plugins/agent_messaging_plugin"),
 )
+#: ``profile_config`` and ``plugin_roster_selection`` stay non-touch except for the exact files a
+#: release-declared plugin transition names in its planned actions (``declared_plugin_transitions``).
 STEP5_NON_TOUCH_SURFACES = (
     "credentials",
     "documents",
@@ -116,6 +120,7 @@ STEP5_MANAGED_SUB_SURFACES = (
     "knowledge_index_declared_removals",
     "coding_agent_plugin_cache",
     "instance_process_lifecycle",
+    "declared_plugin_transitions",
 )
 STEP5_CAPABILITIES = (
     "dependency_closure_repair",
@@ -128,16 +133,10 @@ STEP5_CAPABILITIES = (
     "post_runtime_platform_migration",
     "knowledge_reinstall",
     "plugin_cache_refresh",
+    "declared_plugin_transition",
 )
 ROUTER_PLUGIN = "macos_self_deployment_plugin"
 ADAPTER_MODULE_PATH = "plugins/github_midwife_plugin/src/github_midwife_plugin/setup_adapter.py"
-_GIT_ENV = {
-    "GIT_TERMINAL_PROMPT": "0",
-    "LC_ALL": "C",
-    "GIT_CONFIG_NOSYSTEM": "1",
-    "GIT_CONFIG_GLOBAL": "/dev/null",
-    "GIT_OPTIONAL_LOCKS": "0",
-}
 _PROBE_TIMEOUT_SECONDS = 300
 _ATTESTATION_KEYS = (
     "current_release_id",
@@ -195,6 +194,8 @@ class RuntimeSeams:
     #: fixture can measure "host Python absent" without deleting host binaries or environment tricks.
     resolve_base_python: BasePythonResolver = resolve_base_python
     which: WhichResolver = shutil.which
+    #: iss_6d26db73 / rul_385dac24: sw_vers + uname, measured only when a closure piece requires a host profile.
+    host_platform: Callable[[], HostPlatform] = read_host_platform
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +254,9 @@ class PlanContext:
     seams: RuntimeSeams
     probe_purpose: str = "preview"
     operator_selections: dict[str, JsonValue] = field(default_factory=lambda: {})
+    #: How ``cache_repository`` is pinned (iss_836499b3 R2-1): the update reads the Manager's bare candidate
+    #: cache; the standalone doctor reads the promoted target itself, whose history holds the candidate.
+    cache_layout: GitLayout = GitLayout.BARE
 
 
 def encode_facts(facts: dict[str, str | int | bool | None]) -> list[str]:
@@ -371,14 +375,14 @@ def knowledge_removed_articles(context: PlanContext) -> tuple[tuple[str, str, st
     baseline, candidate = context.baseline_commit, context.candidate.fields.commit
     if not removals or baseline == candidate:
         return ()
-    listing = _git(context.cache_repository, ("diff", "--diff-filter=D", "--name-only", "--no-renames", baseline, candidate), "candidate removal set is unreadable")
+    listing = _git(context.cache_repository, ("diff", "--diff-filter=D", "--name-only", "--no-renames", baseline, candidate), "candidate removal set is unreadable", layout=context.cache_layout)
     rows: list[tuple[str, str, str]] = []
     for path in sorted(line for line in listing.decode("utf-8", "strict").splitlines() if line.endswith(".md")):
         parts = path.split("/")
         knowledge_base = next((kb for kb in removals if kb in parts), None)
         if knowledge_base is None:
             continue
-        blob = _git(context.cache_repository, ("show", f"{baseline}:{path}"), "baseline article is unreadable")
+        blob = _git(context.cache_repository, ("show", f"{baseline}:{path}"), "baseline article is unreadable", layout=context.cache_layout)
         rows.append((knowledge_base, path, _article_title(blob, path)))
     return tuple(rows)
 
@@ -547,7 +551,6 @@ def public_inputs_for(
 
 def _declared_closure(context: PlanContext, blocked: list[tuple[str, str]]) -> tuple[DeclaredClosurePiece, ...]:
     """closure = REQUIRED ∪ (roster ∩ candidate plugins) ∪ additions (design section 4.1)."""
-    bundle = context.candidate.bundle
     target = Path(context.record.target.canonical_path)
     roster = _selected_plugins(target / "profile" / "config" / "manifest.yaml")
     candidate_plugins = _candidate_plugins(context)
@@ -560,9 +563,37 @@ def _declared_closure(context: PlanContext, blocked: list[tuple[str, str]]) -> t
             blocked.append(("closure", "roster_plugin_absent_in_candidate"))
             continue
         pieces.setdefault(relative, DeclaredClosurePiece(plugin, relative, "roster_plugin"))
-    for piece in bundle.closure_additions:
+    for piece in _release_additions(context, candidate_plugins, blocked):
         pieces.setdefault(piece.relative_path, DeclaredClosurePiece(piece.distribution, piece.relative_path, "release_addition"))
     return tuple(pieces[key] for key in sorted(pieces))
+
+
+def _release_additions(context: PlanContext, candidate_plugins: frozenset[str], blocked: list[tuple[str, str]]) -> list[DependencyPiece]:
+    """The release's additions that belong on THIS candidate and THIS host.
+
+    One flow ships to every bundle, so an addition naming a plugin this candidate
+    does not ship is another bundle's (iss_3e5a14f7).  An addition that requires a
+    host profile applies only on a host measured to meet it (rul_385dac24: a
+    macOS 26 host keeps its LM Studio closure and never installs Apple-only
+    packages); a host that cannot be measured blocks the plan instead of guessing.
+    """
+    bundle = context.candidate.bundle
+    selected: list[DependencyPiece] = []
+    platform: HostPlatform | None = None
+    for piece in bundle.closure_additions:
+        if piece.relative_path.startswith("plugins/") and piece.relative_path.removeprefix("plugins/") not in candidate_plugins:
+            continue
+        if piece.requires_host is not None:
+            if platform is None:
+                try:
+                    platform = context.seams.host_platform()
+                except HostPlatformError:
+                    blocked.append(("host", "host_platform_unknown"))
+                    return selected
+            if not bundle.host_profile(piece.requires_host).admits(platform):
+                continue
+        selected.append(piece)
+    return selected
 
 
 def _selected_plugins(path: Path) -> tuple[str, ...]:
@@ -593,12 +624,12 @@ def _selected_plugins(path: Path) -> tuple[str, ...]:
 
 
 def _candidate_plugins(context: PlanContext) -> frozenset[str]:
-    listing = _git(context.cache_repository, ("ls-tree", "--name-only", f"{context.candidate.fields.commit}:plugins"), "candidate plugin tree is unreadable")
+    listing = _git(context.cache_repository, ("ls-tree", "--name-only", f"{context.candidate.fields.commit}:plugins"), "candidate plugin tree is unreadable", layout=context.cache_layout)
     return frozenset(line.strip() for line in listing.decode("utf-8", "strict").splitlines() if line.strip())
 
 
 def _candidate_tree_paths(context: PlanContext) -> frozenset[str]:
-    listing = _git(context.cache_repository, ("ls-tree", "-r", "--name-only", context.candidate.fields.commit), "candidate tree is unreadable")
+    listing = _git(context.cache_repository, ("ls-tree", "-r", "--name-only", context.candidate.fields.commit), "candidate tree is unreadable", layout=context.cache_layout)
     return frozenset(line for line in listing.decode("utf-8", "strict").splitlines() if line)
 
 
@@ -937,12 +968,12 @@ def cutover_terms(
 
 def adapter_module_identity(context: PlanContext) -> tuple[str, bool]:
     """Blob digest of the setup adapter at the candidate and whether the transition touched it."""
-    blob = _git(context.cache_repository, ("show", f"{context.candidate.fields.commit}:{ADAPTER_MODULE_PATH}"), "candidate adapter module is unreadable")
+    blob = _git(context.cache_repository, ("show", f"{context.candidate.fields.commit}:{ADAPTER_MODULE_PATH}"), "candidate adapter module is unreadable", layout=context.cache_layout)
     digest = f"sha256:{hashlib.sha256(blob).hexdigest()}"
     baseline = context.baseline_commit
     if baseline == context.candidate.fields.commit:
         return digest, False
-    completed = _run_git(context.cache_repository, ("diff-tree", "-r", "--name-only", "--no-renames", baseline, context.candidate.fields.commit))
+    completed = _run_git(context.cache_repository, ("diff-tree", "-r", "--name-only", "--no-renames", baseline, context.candidate.fields.commit), layout=context.cache_layout)
     if completed.returncode != 0:
         return digest, True
     touched = set(completed.stdout.decode("utf-8", "replace").splitlines())
@@ -960,20 +991,14 @@ def _cutover_files(context: PlanContext) -> tuple[dict[str, JsonValue], ...]:
     return tuple(rows)
 
 
-def _run_git(cwd: Path, args: tuple[str, ...]) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(  # noqa: S603
-        ("git", "-c", "core.fsmonitor=false", *args),
-        cwd=cwd,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        check=False,
-        timeout=600,
-        env=dict(_GIT_ENV),
-    )
+def _run_git(cwd: Path, args: tuple[str, ...], *, layout: GitLayout = GitLayout.WORKTREE) -> subprocess.CompletedProcess[bytes]:
+    """One closed read-only vector through the shared hardened, pinned Git surface (iss_836499b3 B1, R2-1)."""
+    return run_target_git(args, cwd=cwd, layout=layout)
 
 
-def _git(cwd: Path, args: tuple[str, ...], error: str) -> bytes:
-    completed = _run_git(cwd, args)
+def _git(cache_repository: Path, args: tuple[str, ...], error: str, *, layout: GitLayout) -> bytes:
+    """A read of the candidate's history, pinned as ``PlanContext.cache_layout`` says."""
+    completed = _run_git(cache_repository, args, layout=layout)
     if completed.returncode:
         raise SourceError(f"{error}: {completed.stderr.decode('utf-8', 'replace').strip()}")
     return completed.stdout

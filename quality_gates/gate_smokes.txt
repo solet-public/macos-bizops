@@ -2656,6 +2656,23 @@ plugins/actr_memory_plugin/tests/actr_memory_export_import_root_gate_smoke.py
 plugins/actr_memory_plugin/tests/actr_memory_tags_param_schema_parity_smoke.py
 plugins/actr_memory_plugin/tests/config_binding_order_smoke.py
 
+# setup_schedules real-wrapper regression (2026-09-27, iss_2250e07c) — the
+# scheduling_service call convention (params=/state=) mismatched the real
+# SchedulingService keyword-only signature since the initial commit, a
+# TypeError swallowed by setup_schedules' broad except with the plugin still
+# reporting ready. See setup_schedules_real_scheduling_service_smoke.py for
+# why the existing setup_schedules_canonical_smoke.py fixture (excluded from
+# gates, iss_fb75bf89) never caught it.
+plugins/actr_memory_plugin/tests/setup_schedules_real_scheduling_service_smoke.py
+
+# starting_actions registry resolution (iss_49a3820a, 2026-09-27): batch #18
+# wired plugin::actr_memory_plugin::ensure_schedules as a boot starting action,
+# but a bound ServiceProvider's plugin:: namespace is skipped at registry build,
+# so the key never resolved live. Drives the REAL ServiceInterfaceScanner and
+# PluginProcessScanner, and guards every starting_actions process_key in
+# initialization/profiles/*.yaml and every shipped profile template. Offline.
+ananta/tests/core/process_registry/starting_actions_registry_resolution_smoke.py
+
 # Memory-store read discipline (2026-08-15) — regression pin for the green-boot
 # death on the read_state row cap: whole-table readers (get_all_memories /
 # get_all_memorizations) must carry the unbounded=True opt-in, id-filtered
@@ -4951,6 +4968,14 @@ ananta/tests/session_ledger_service/backfill_first_last_event_at_repair_smoke.py
 # confirmation are exercised only with recording fakes; no live sweep call.
 plugins/platform_health_plugin/tests/sweep_smoke.py
 
+# platform_health host-disk guard (iss_a5adbc1c): the cron's real fire path
+# (process scanner + KB overlay + ActionExecutor + ActionFactory, with an EDGE
+# control), whole-tree gate C5.1 on the literal cron target with a retargeted
+# control, and the plugin lifecycle on the real EventOrchestrator startup order
+# (ready before scheduling_service exists). Injected disk reader and recording
+# fakes only; no live scheduler call and no disk fill.
+plugins/platform_health_plugin/tests/host_disk_guard_smoke.py
+
 # io-interface shadow-doc retirement (2026-09-04): disabled service-interface
 # process JSONs must remain absent; teaching surfaces must resolve the active IO
 # namespace before invoking plugin::<namespace>::post_message. Offline static smoke.
@@ -5021,6 +5046,7 @@ plugins/macos_self_deployment_plugin/tests/dry_run_default_safety_smoke.py
 # A configured but not-yet-running LM Studio leaves the inference plugin
 # explicitly unready, retries at a bounded rate, and never crashes platform
 # boot. Offline provider fake; no network.
+plugins/default_inference_plugin/tests/boot_optional_dependency_smoke.py
 
 # Cold first-boot knowledge hydration must not delay the runtime action poller
 # or router-registration deadline. Event fixture; no wall-clock sleep.
@@ -5033,6 +5059,7 @@ ananta/tests/core/plugins/startup_failure_lifecycle_shutdown_smoke.py
 # r38 C2: embedding configuration registers without contacting LM Studio;
 # qualification begins only once the router activates the process and stays
 # visibly pending while the local server is unavailable.
+plugins/openai_embeddings_plugin/tests/startup_qualification_smoke.py
 
 # Apple wave 44 D2 (iss_3aa20e42): CoreAI embeddings native (1,768) finite
 # unit-norm contract, runtime readiness/fallback contract, and wheel resource
@@ -5046,6 +5073,13 @@ plugins/coreai_embeddings_plugin/tests/wheel_resources_smoke.py
 # plugin invalidated with nothing to re-prepare it. Offline; fakes the
 # runtime at the model boundary.
 plugins/coreai_embeddings_plugin/tests/boot_order_readiness_smoke.py
+
+# r49, iss_453f69d5 / iss_2eefe356: a torn Core AI compiled cache (truncated
+# bnns.ir -> child SIGTRAP, corrupted -> invalid output) recovers to ready
+# after one purge of the pinned model's entries; a healthy cache is not
+# purged; a persistent failure is loud after exactly one rebuild. Offline;
+# scratch HOME and cache root, fake canary child. Never touches a host cache.
+plugins/coreai_embeddings_plugin/tests/cache_canary_smoke.py
 
 # Apple wave 44 D2 (iss_3aa20e42): macOS Foundation Models provider typed
 # unavailable warnings, plugin contract, and provider isolation. Offline SDK
@@ -5114,10 +5148,19 @@ plugins/macos_inference_plugin/tests/provider_isolation_smoke.py
 # not shipped: solet_cli/tests/real_style_sweep_writes_7_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
 # not shipped: solet_cli/tests/real_style_sweep_writes_8_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
 # not shipped: solet_cli/tests/real_style_sweep_applies_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/create_origin_update_path_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/create_origin_supersede_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/target_git_hardening_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; it imports create_origin_update_path_smoke, whose fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/create_origin_blocked_create_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; it imports create_origin_update_path_smoke, whose fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/hook_interpreter_pin_update_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; it imports create_origin_update_path_smoke, whose fixture builder _step7_support imports the seed factory, which is in no capability bundle (fixture_build_tooling)
+# not shipped: quality_gates/tests/smoke_contract_lint_gate_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; it calls checkout_only_consistency_violations directly to prove the repo-level contract-lint gate, which is in no capability bundle (fixture_build_tooling)
 # not shipped: ananta/tests/core/orchestration/selected_inference_startup_smoke.py requires plugins/macos_inference_plugin/src/macos_inference_plugin; absent from macos_free_minimal and macos_samantha, which ship default_inference_plugin instead (iss_76ae2d4d, cross_bundle_transition)
 # not shipped: ananta/tests/core/orchestration/selected_inference_legacy_startup_smoke.py requires plugins/default_inference_plugin/src/default_inference_plugin beside plugins/macos_inference_plugin; no capability bundle ships both inference plugins (cross_bundle_transition)
 # not shipped: plugins/macos_inference_plugin/tests/legacy_plugin_coexistence_smoke.py requires plugins/default_inference_plugin/src/default_inference_plugin beside plugins/macos_inference_plugin; no capability bundle ships both inference plugins (cross_bundle_transition)
 # not shipped: plugins/github_midwife_plugin/tests/profile_install_vendor_find_links_smoke.py requires repository history (its RED fixture reads one pinned pre-fix commit's blob via `git show`); a born clone is a git-archive extract with no .git (repository_hygiene)
+# not shipped: plugins/github_midwife_plugin/tests/plugin_transition_smoke.py requires plugins/macos_inference_plugin/src/macos_inference_plugin/resources/default_config.json; absent from macos_free_minimal and macos_samantha; its fixture copies that file from the repository into every target (cross_bundle_transition)
+# not shipped: solet_cli/tests/update_plugin_transition_deferral_smoke.py requires plugins/macos_inference_plugin/src/macos_inference_plugin/resources/default_config.json; absent from macos_free_minimal and macos_samantha; its fixture copies that file from the repository into every target (cross_bundle_transition)
+# not shipped: solet_cli/tests/update_transition_bundle_candidates_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builds each bundle's candidate from seed_resolver, and the seed factory is in no capability bundle (fixture_build_tooling)
 
 # LM Studio provisioning, singleton login and passive diagnostics
 plugins/github_midwife_plugin/tests/lm_studio_provisioning_smoke.py
@@ -5169,6 +5212,15 @@ solet_cli/tests/managed_artifact_backup_smoke.py
 solet_cli/tests/update_runtime_execution_smoke.py
 solet_cli/tests/existing_install_router_cutover_smoke.py
 plugins/github_midwife_plugin/tests/existing_install_operations_smoke.py
+
+# Every shipped contract/flow JSON or YAML under plugins/*/knowledge_base/ and
+# solet_cli/src/solet_manager/released_metadata/ scanned for a placeholder
+# leaf value (repeated-hex-char run, the 123e4567 example UUID family, an
+# all-zero/all-f hex run, a bare TODO/FIXME/XXX/CHANGEME/PLACEHOLDER/EXAMPLE
+# token), with a narrow evidence-cited allowlist for the one verified,
+# deliberately-synthetic exception (iss_3272e5f6). A self-test proves the
+# scanner actually detects an injected, unallowlisted violation.
+solet_cli/tests/shipped_predecessor_identity_smoke.py
 
 # WS5 Step 6 (existing-install doctor/resume/promotion, iss_4851c5c8 / chg_54bfee65):
 # closed v4 update journal (abandoned/doctor/promoting/promoted statuses, recovers,
@@ -5323,3 +5375,61 @@ plugins/github_midwife_plugin/tests/apple_native_fresh_profile_smoke.py
 plugins/github_midwife_plugin/tests/apple_setup_flow_smoke.py
 plugins/github_midwife_plugin/tests/asset_root_materialize_smoke.py
 plugins/github_midwife_plugin/tests/apple_coreai_acquisition_smoke.py
+
+# 2026-09-28 action-path stall fix (iss_30fb08fd, iss_6069cf22, iss_e0648481):
+# fail_action_event accept/refuse paths + evidence-row safety; SIGUSR1 stack
+# dump file, in-flight action fields on the liveness snapshot, SLOW_ACTION log.
+# (The direct-verb receipt and fail-not-requeue reaper are covered by the
+# already-registered audit_retrieval_corpus_cron_smoke and
+# oversized_payload_guard_smoke.)
+ananta/tests/core/actions/action_event_resolution_smoke.py
+ananta/tests/core/actions/action_path_diagnosability_smoke.py
+# r49, iss_4b22fdeb / iss_7f4ce644: real list_plugins rows (ready, degraded
+# with a warning, error with last_error, uninitialized) through the real roster
+# doctor parser; degraded is ready and its warning survives. Offline.
+plugins/github_midwife_plugin/tests/plugin_roster_readiness_seam_smoke.py
+
+# r49, iss_9b396043: setup's Apple model check proceeds with a warning naming
+# the reason and user action for APPLE_INTELLIGENCE_NOT_ENABLED, MODEL_NOT_READY
+# and UNKNOWN on physical and VM hosts; physical DEVICE_NOT_ELIGIBLE, a probe
+# exception and a context other than 8192 still block. Offline; SDK faked.
+plugins/github_midwife_plugin/tests/apple_model_availability_warning_smoke.py
+# iss_836499b3: a Manager-created Solet updates through `solet-manager update` alone (create enrolls
+# itself; update enrolls an r46-r48 instance inline; refusals kept).
+# iss_836499b3 review B1 / iss_6a8d03a3: no hostile target hook, replace ref, fsmonitor, filter or diff
+# driver runs under inspect, import or update (raw-git controls prove each surface is live).
+# iss_836499b3 review R2-2: an enrollment interrupted before it finished, then a Manager upgrade, is
+# superseded and finished by `update --yes` (and by the printed `import` repair), never a raw error.
+# iss_6d26db73 (r52): an LM Studio solet's plugin transition to the Apple-native stack -- preview, apply,
+# preserved operator edits, interruption and repeat; the update defers a not-ready transition, promotes
+# needs_attention and retries it (crash legs at every boundary). iss_9166af93: embedding inputs split to the
+# provider's token budget, never truncated; the chunking-policy backfill re-embeds refused and head-only events.
+ananta/tests/llm/session_ledger/embedding_token_budget_smoke.py
+# rul_ffd59e37 / rul_ef0363a2 / rul_c11cf191: per bundle, against candidates pruned as assembly prunes -- LM Studio
+# and Apple-native predecessors update; macOS 26 keeps LM Studio for embeddings and summaries (rul_5cc2910c); a host
+# that later reaches macOS 27 switches at the next release; an interrupted switch
+# is put back; a fresh solet never gets the transition-retained plugins; LM Studio and its models stay byte-identical.
+# iss_fcbfabb7: a create blocked only at completion (the r46-r48 embeddings checks) updates and
+# promotes; one predicate gates update and import at preview and apply; installs in flight and identity
+# mismatches still refuse; the predicate is proven over every checkpoint assignment.
+# iss_f1d8cfc2: the installer's own coordination-hook interpreter pin (r46 guest shape, real transform) previews,
+# applies, promotes and stays pinned on the new tree, and the doctor admits it; an extra edit, another interpreter
+# or a symlinked alias still refuse executed_code_modified; a candidate changing a pinned manifest refuses with
+# "upgrade the Manager" (iss_c1a7df20); landing guard: either hooks.json changing fails until iss_c1a7df20 lands.
+# iss_59385149: the repo-level shipped-smoke checkout-only contract lint gate goes RED on a marker
+# without a contract entry, a contract entry without a manifest exclude, and a contract entry without
+# a marker; reproduces the exact three-file state that broke r50's publish (master 87796aab4); GREEN
+# on the real repo's own contract; and the gate CLI itself exits 0 clean over the real repo.
+
+# 2026-09-28 fresh macOS 26 (Tahoe) create on llama.cpp (iss_3a2a74ea, rul_c11cf191): the Manager
+# binds fresh embeddings/summaries choices to r52's host profiles (26.x, 27.x, unmeasurable, recorded
+# answers never re-judged); the llama.cpp service plan, plugin binding and loopback config; a missing
+# model is a warning (rul_18bd93a3); the macOS 26 install closure reaches no macOS 27-only wheel; and
+# openai_embeddings_plugin declares the llama.cpp budget through TokenBudget counted by /tokenize.
+# All offline: fixture host readings, an in-memory launchd, an in-process HTTP transport.
+solet_cli/tests/fresh_tahoe_host_gate_smoke.py
+plugins/github_midwife_plugin/tests/llama_cpp_service_plan_smoke.py
+plugins/github_midwife_plugin/tests/llama_cpp_missing_model_warning_smoke.py
+plugins/github_midwife_plugin/tests/llama_cpp_server_probe_budget_smoke.py
+plugins/github_midwife_plugin/tests/tahoe_closure_no_macos27_wheel_smoke.py
+plugins/openai_embeddings_plugin/tests/llama_cpp_token_budget_smoke.py

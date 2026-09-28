@@ -6,13 +6,21 @@ import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
+from .cache_canary import CacheCanary, CanaryReport
 from .contracts import EmbeddingError, ErrorCode
 from .native import NativeModel
 from .tokenization import NomicTokenizer
 
+if TYPE_CHECKING:
+    from .assets import InstalledAsset
+
 T = TypeVar("T")
+#: The oldest macOS this runtime serves on. 27 for now (rul_5cc2910c): Core AI Nomic has only been run on 27, so a
+#: macOS 26 update keeps LM Studio; lowering it after the macOS 26 measurement (iss_c6abab0d) is a data change here
+#: and in the release flow's host_profiles.apple_embeddings.macos_major_min, pinned equal by embedding_token_budget_smoke.
+MIN_MACOS_MAJOR = 27
 
 
 class EmbeddingRuntime:
@@ -28,6 +36,8 @@ class EmbeddingRuntime:
         self._tokenizer: NomicTokenizer | None = None
         self._closed = False
         self._failed = False
+        self.canary = CacheCanary(asset_root, preference)
+        self._canary_report: CanaryReport | None = None
 
     def _call(self, operation: Callable[[], T]) -> T:
         with self._lock:
@@ -42,25 +52,48 @@ class EmbeddingRuntime:
                 raise EmbeddingError(ErrorCode.UNAVAILABLE, "Core AI operation exceeded 120 seconds") from exc
 
     def prepare(self) -> None:
-        """Verify local assets and prove one real inference before readiness."""
+        """Verify assets, prove the compiled cache out of process, then load in process."""
+        self._call(self._prepare_with_canary)
+
+    def prepare_in_process(self) -> None:
+        """Canary child entry: the same proof, never spawning a further canary."""
         self._call(self._prepare)
 
+    def _prepare_with_canary(self) -> None:
+        asset = self._verified_asset()
+        self._canary_report = self.canary.ensure_healthy()
+        self._load(asset)
+
     def _prepare(self) -> None:
+        self._load(self._verified_asset())
+
+    def _verified_asset(self) -> "InstalledAsset":
         from .assets import AssetCorruptError, AssetMissingError, verify_installed_asset
 
-        if platform.system() != "Darwin" or platform.mac_ver()[0].split(".")[0] != "27":
-            raise EmbeddingError(ErrorCode.UNAVAILABLE, "Core AI embeddings require macOS 27")
+        if platform.system() != "Darwin" or int(platform.mac_ver()[0].split(".")[0] or "0") < MIN_MACOS_MAJOR:
+            raise EmbeddingError(ErrorCode.UNAVAILABLE, f"Core AI embeddings require macOS {MIN_MACOS_MAJOR} or later")
         try:
-            asset = verify_installed_asset(self.asset_root)
+            return verify_installed_asset(self.asset_root)
         except AssetMissingError as exc:
             raise EmbeddingError(ErrorCode.ASSET_MISSING, str(exc)) from exc
         except AssetCorruptError as exc:
             raise EmbeddingError(ErrorCode.ASSET_CORRUPT, str(exc)) from exc
+
+    def _load(self, asset: "InstalledAsset") -> None:
         self._tokenizer = NomicTokenizer(asset.tokenizer_path)
         self._runner = asyncio.Runner()
         self._native = NativeModel()
         self._runner.run(self._native.load(asset.model_path, self.preference))
         self._runner.run(self._native.embed(self._tokenizer.encode("readiness probe")))
+
+    def count_tokens(self, text: str) -> int:
+        """The prepared tokenizer's count for one input, on the owner thread."""
+        return self._call(lambda: self._count(text))
+
+    def _count(self, text: str) -> int:
+        if self._tokenizer is None:
+            raise EmbeddingError(ErrorCode.UNAVAILABLE, "Runtime has not been prepared")
+        return self._tokenizer.count(text)
 
     def generate(self, texts: list[str]) -> list[list[float]]:
         """Validate all token lengths before producing any batch output."""
@@ -74,9 +107,11 @@ class EmbeddingRuntime:
 
     def diagnostics(self) -> dict[str, object]:
         """Distinguish configured preference from measured execution evidence."""
+        canary = {"cache_canary": self._canary_report.as_dict()} if self._canary_report else {}
         if self._native is None:
-            return {"compute_preference": self.preference, "observed_compute_unit": "unknown"}
+            return {"compute_preference": self.preference, "observed_compute_unit": "unknown", **canary}
         return {
+            **canary,
             "compute_preference": self.preference,
             "selected_compute_preference": self._native.compute_preference,
             "observed_compute_unit": self._native.observed_compute_unit,
