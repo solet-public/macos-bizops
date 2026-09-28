@@ -125,14 +125,14 @@
     {
       "provider": "openai",
       "runtime": "codex",
-      "model": "gpt-5.3-codex-spark",
+      "model": "gpt-5.3-codex",
       "effort": "unmeasured",
       "action": "identity_declaration",
       "boot_prefix": {"estimate_tokens": null, "estimator": "unavailable", "sample_count": 0, "uncertainty": "no direct fleet calibration; model identity is declared for dispatch policy only", "measurement_population": []},
       "rehydration_prefix": {"estimate_tokens": null, "estimator": "unavailable", "sample_count": 0, "uncertainty": "no direct fleet calibration; model identity is declared for dispatch policy only", "measurement_population": []},
       "action_prefix": {"estimate_tokens": null, "estimator": "unavailable", "sample_count": 0, "uncertainty": "no action-cost measurement; do not treat the identity declaration as a measured cost", "measurement_population": []},
-      "measured_at": "2026-09-06T00:20:00+00:00",
-      "applicability_limits": "identity declaration for fix-kind dispatch policy only; the cited snapshot has no API or Codex-credit price and Spark context/action-cost calibration remains follow-on work",
+      "measured_at": "2026-09-19T23:44:41+00:00",
+      "applicability_limits": "identity declaration for fix-kind dispatch policy only; corrected 2026-09-19 from the non-existent 'gpt-5.3-codex-spark' (iss_78f35257) to the real 'gpt-5.3-codex'; no API or Codex-credit price and context/action-cost calibration remains follow-on work",
       "cache_read_multiplier": null,
       "cache_write_multiplier": null,
       "priced": false

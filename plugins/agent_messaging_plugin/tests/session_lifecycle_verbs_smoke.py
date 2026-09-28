@@ -18,7 +18,6 @@ Run:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import subprocess
@@ -170,8 +169,13 @@ def _prepared_project_req(
     state: StateManagementInterface,
     **overrides: object,
 ) -> SpawnSessionRequest:
-    """Mint the server-side preparing row required by project spawn tests."""
+    """Mint the server-side preparing row required by project spawn tests.
+
+    The row is written as already past its register-Unit step (design
+    unt_57725090): these tests exercise spawn, not the mint.
+    """
     req = _spawn_req(role_class=ROLE_CLASS_PROJECT, **overrides)
+    req = replace(req, unit_id=req.unit_id or "unt_lifecycle-fixture")
     dispatch_id = f"mdp-test-{time.time_ns()}"
     state.write_state(
         AGENT_ROLE_BINDING_NAMESPACE,
@@ -195,7 +199,7 @@ def _prepared_project_req(
                 "model": req.model,
                 "effort": req.effort,
                 "report_by_seconds": req.report_by_seconds,
-                "ttl_seconds": req.ttl_seconds,
+
                 "allowed_hosts": [str(req.host or "headless")],
                 "allowed_tools": list(req.allowed_tools),
                 "permission_mode": req.permission_mode,
@@ -208,6 +212,8 @@ def _prepared_project_req(
                 "spawned_by_role": req.spawned_by_role,
                 "spawned_by_instance_id": req.spawned_by_instance_id,
                 "directed_by": req.directed_by,
+                "unit_id": req.unit_id,
+                "next_required_action": "spawn_current_attempt",
             },
         },
     )
@@ -315,18 +321,33 @@ def test_model_dispatch_policy_refusals_and_allowances() -> None:
         missing = exc.code
     _check(missing == "dispatch_kind_required", "omitted dispatch_kind refuses")
 
-    # claude-opus-5 and claude-fable-5-1 became allowed `fix` pairs under
-    # rul_14c0cefb; claude-sonnet-5 keeps this negative control pointed at a
-    # claude model the policy still refuses, so the refusal path stays covered.
-    refused = None
+    # dispatch_kind is provenance only; a profiled cross-vendor pair must not
+    # be refused before the selector's cost/capability decision can run.
+    unfiltered = None
     try:
         spawn_session(
             state,
-            _spawn_req(dispatch_kind="fix", agent_runtime="claude_code", model="claude-sonnet-5"),
+            _spawn_req(dispatch_kind="fix", agent_runtime="codex", model="gpt-6-astra"),
         )
     except VerbError as exc:
-        refused = exc.code
-    _check(refused == "dispatch_policy_violation", "fix with claude-sonnet-5 refuses")
+        unfiltered = exc.code
+    _check(unfiltered != "dispatch_policy_violation", "fix does not restore a pair allowlist")
+
+    scoped = None
+    try:
+        spawn_session(
+            state,
+            _spawn_req(
+                dispatch_kind="infrastructure", agent_runtime="claude_code", model="claude-sonnet-5",
+                scope_tags=("state_schema",),
+            ),
+        )
+    except VerbError as exc:
+        scoped = exc.code
+    _check(
+        scoped != "capability_floor_violation",
+        "state_schema scope tag does not impose the retired model floor",
+    )
 
     allowed = None
     try:
@@ -352,27 +373,21 @@ def test_model_dispatch_policy_refusals_and_allowances() -> None:
         _check(bool(fixed.get("agent_instance_id")), "fix with gpt-5.6-terra passes")
 
         original_policy_path = model_dispatch_policy._POLICY_PATH  # noqa: SLF001 -- policy fixture
-        policy_source = json.loads(original_policy_path.read_text(encoding="utf-8"))
-        policy_source["budget_vendor_override"]["active"] = False
         with tempfile.TemporaryDirectory() as raw:
             fixture_policy_path = Path(raw) / "policy.json"
-            fixture_policy_path.write_text(json.dumps(policy_source), encoding="utf-8")
+            fixture_policy_path.write_text(original_policy_path.read_text(encoding="utf-8"), encoding="utf-8")
             try:
                 model_dispatch_policy._POLICY_PATH = fixture_policy_path  # type: ignore[misc]  # noqa: SLF001
-                same_vendor = None
-                try:
-                    spawn_session(
-                        state,
-                        _spawn_req(
-                            host=_TEST_HOST, lane_id="policy-review-same-inactive", dispatch_kind="review",
-                            agent_runtime="codex", model="gpt-5.6-terra", reviewed_report_vendor="codex",
-                        ),
-                    )
-                except VerbError as exc:
-                    same_vendor = exc.code
+                same_vendor_inactive_override = spawn_session(
+                    state,
+                    _spawn_req(
+                        host=_TEST_HOST, lane_id="policy-review-same-inactive", dispatch_kind="review",
+                        agent_runtime="codex", model="gpt-5.6-terra", reviewed_report_vendor="codex",
+                    ),
+                )
                 _check(
-                    same_vendor == "dispatch_policy_violation",
-                    "inactive override keeps review by report author vendor refused",
+                    bool(same_vendor_inactive_override.get("agent_instance_id")),
+                    "review by report author vendor is accepted without a pairing override",
                 )
             finally:
                 model_dispatch_policy._POLICY_PATH = original_policy_path  # type: ignore[misc]  # noqa: SLF001
@@ -386,7 +401,7 @@ def test_model_dispatch_policy_refusals_and_allowances() -> None:
         )
         _check(
             bool(same_vendor.get("agent_instance_id")),
-            "active ruling-scoped override permits review by report author vendor",
+            "review by report author vendor is accepted without pair authority",
         )
 
         review = spawn_session(

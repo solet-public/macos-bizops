@@ -42,6 +42,7 @@ provenance lives in ``managed_session.spawned_by_instance_id`` /
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -201,7 +202,6 @@ class ManagedSessionSpec:
     model: str = ""
     effort: str = ""
     report_by_seconds: int = 0
-    ttl_seconds: int = 0
     directed_by: str = ""
     provisioning_mode: str = "worktree"
     # The resolved source checkout used at spawn.  Retire reads this row, not
@@ -211,6 +211,14 @@ class ManagedSessionSpec:
     dispatch_kind: str = ""
     reviewed_report_vendor: str = ""
     pair_id: str = ""
+    # Capability-floor audit trail (iss_63d91ca9): the caller's declared
+    # scope_tags and every floor spawn_session actually applied (declared or
+    # brief-detected), so "which floor governed this spawn's model" is a
+    # ledger read, never a reconstruction from a commit trailer.
+    scope_tags: tuple[str, ...] = ()
+    capability_floors: list[dict[str, str]] = dataclasses.field(default_factory=list)
+    difficulty_score: float = 0.0
+    selection_receipt: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 def insert_managed_session(
@@ -259,6 +267,10 @@ def insert_managed_session(
         "dispatch_kind": spec.dispatch_kind,
         "reviewed_report_vendor": spec.reviewed_report_vendor,
         "pair_id": spec.pair_id,
+        "scope_tags": list(spec.scope_tags),
+        "capability_floors": list(spec.capability_floors),
+        "difficulty_score": spec.difficulty_score,
+        "selection_receipt": dict(spec.selection_receipt),
     }
     # Always persisted (even 0) — the WINDOW LENGTH itself, distinct from
     # "report_by" (the computed deadline below). This is what lets
@@ -283,8 +295,6 @@ def insert_managed_session(
         record["report_by"] = (
             datetime.now(UTC) + timedelta(seconds=effective_report_by_seconds)
         ).isoformat()
-    if spec.ttl_seconds:
-        record["expires_at"] = (datetime.now(UTC) + timedelta(seconds=spec.ttl_seconds)).isoformat()
     require_completed(
         state.write_state(
             AGENT_ROLE_BINDING_NAMESPACE,
@@ -1097,7 +1107,6 @@ _REQUIRED_DISPATCH_SPEC_TEXT = (
     "uptake_due_at",
     "report_by",
     "watchdog_due_at",
-    "expires_at",
 )
 
 
@@ -1112,10 +1121,10 @@ def _validate_required_dispatch_spec(spec: Any) -> None:
     completion_obligations(spec.completion_contract)
     if not spec.allowed_hosts:
         raise _dispatch_error("allowed_hosts_required", "allowed_hosts is required.")
-    if spec.report_by_seconds < 0 or spec.ttl_seconds < 0:
+    if spec.report_by_seconds < 0:
         raise _dispatch_error(
             "spawn_window_invalid",
-            "Spawn report/TTL windows cannot be negative.",
+            "Spawn report windows cannot be negative.",
         )
 
 
@@ -1156,21 +1165,12 @@ def _validate_dispatch_brief(spec: Any) -> tuple[Path, str]:
 def _validate_dispatch_deadlines(spec: Any, now: datetime) -> None:
     deadlines = {
         field: _dispatch_deadline({field: getattr(spec, field)}, field)
-        for field in ("uptake_due_at", "report_by", "watchdog_due_at", "expires_at")
+        for field in ("uptake_due_at", "report_by", "watchdog_due_at")
     }
     if any(value <= now for value in deadlines.values()):
         raise _dispatch_error(
             "deadline_not_future",
             "Every dispatch deadline must be future.",
-        )
-    if deadlines["expires_at"] <= max(
-        deadlines["uptake_due_at"],
-        deadlines["report_by"],
-        deadlines["watchdog_due_at"],
-    ):
-        raise _dispatch_error(
-            "ttl_not_last",
-            "expires_at must follow all supervision deadlines.",
         )
 
 
@@ -1192,12 +1192,6 @@ def _dispatch_deadline(row: Mapping[str, Any], field: str) -> datetime:
     from .managed_dispatch import _parse_persisted_utc  # noqa: PLC0415
 
     return _parse_persisted_utc(row[field], field)
-
-
-def _ttl_dispatch_condition(row: Mapping[str, Any], now: datetime) -> _SupervisionCondition | None:
-    if now >= _dispatch_deadline(row, "expires_at"):
-        return "ttl_expired", "decide_expiry", str(row["spawned_by_role"])
-    return None
 
 
 def _failed_start_dispatch_condition(
@@ -1313,7 +1307,6 @@ def _milestone_dispatch_condition(
 
 
 _DISPATCH_CONDITION_DETECTORS = (
-    _ttl_dispatch_condition,
     _failed_start_dispatch_condition,
     _unknown_liveness_dispatch_condition,
     _blocker_dispatch_condition,
@@ -1343,7 +1336,7 @@ def _managed_dispatch_conditions(
         if condition is None:
             continue
         conditions.append(condition)
-        if condition[0] in {"ttl_expired", "failed_start_decision_required"}:
+        if condition[0] == "failed_start_decision_required":
             return (condition,)
     return tuple(conditions)
 
@@ -1393,18 +1386,7 @@ def _apply_dispatch_supervision_condition(
         event_id = f"supervision:{name}:{int(row['version'])}"
     notice_emitted = _find_event(state, str(row["dispatch_id"]), event_id) is None
     current = dict(row)
-    if name == "ttl_expired":
-        current = _update_dispatch(
-            state,
-            row,
-            {
-                "state": "expired",
-                "terminal_reason": "ttl_expired",
-                "next_required_action": "decide_retry_or_cancel",
-                "responsible_role": owner,
-            },
-        )
-    elif name == "watchdog_overdue":
+    if name == "watchdog_overdue":
         current = _update_dispatch(
             state,
             row,
@@ -1425,7 +1407,7 @@ def _apply_dispatch_supervision_condition(
             actor_instance_id="",
             prior_version=(
                 int(current["version"]) - 1
-                if name in {"ttl_expired", "watchdog_overdue"}
+                if name == "watchdog_overdue"
                 else int(current["version"])
             ),
             observed_at=clock,

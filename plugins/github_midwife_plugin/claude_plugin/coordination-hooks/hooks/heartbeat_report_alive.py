@@ -65,6 +65,7 @@ if sys.version_info < (3, 11):  # noqa: UP036 -- see above; ruff assumes
     raise SystemExit(0)
 
 
+import hashlib
 import json
 import os
 import subprocess
@@ -89,6 +90,8 @@ _THROTTLE_SECONDS = 180.0
 
 _REPORT_ALIVE_PROCESS_KEY = "plugin::agent_messaging_plugin::report_alive"
 _WAKE_CLI_ENV = "AGENT_WAKE_CLI"
+_WORKTREE_SNAPSHOT_FILE = "worktree-resync.json"
+_WORKTREE_SNAPSHOT_VERSION = 1
 
 
 def _warn(message: str) -> None:
@@ -126,6 +129,125 @@ def _touch_marker(marker_path: Path) -> None:
 
 def _failure_path(marker_path: Path) -> Path:
     return marker_path.with_suffix(".failures.json")
+
+
+def _worktree_snapshot_path(identity_dir: Path) -> Path:
+    """Return the receipt-qualified baseline for the invoking worktree."""
+    return identity_dir / _WORKTREE_SNAPSHOT_FILE
+
+
+def _git_output(args: list[str], cwd: Path) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        raise RuntimeError(f"git {' '.join(args)} failed: {detail[:200]}")
+    return result.stdout
+
+
+def _capture_worktree_snapshot(cwd: Path) -> dict[str, object]:
+    """Measure the current worktree without trusting the session's model."""
+    repository_root = _git_output(["rev-parse", "--show-toplevel"], cwd).strip()
+    head = _git_output(["rev-parse", "HEAD"], cwd).strip()
+    porcelain = _git_output(
+        ["status", "--porcelain=v1", "--untracked-files=all", "-z"], cwd,
+    )
+    if not repository_root or not head:
+        raise RuntimeError("git returned an empty repository root or HEAD")
+    return {
+        "version": _WORKTREE_SNAPSHOT_VERSION,
+        "repository_root": repository_root,
+        "head": head,
+        "dirty": bool(porcelain),
+        "status_fingerprint": hashlib.sha256(porcelain.encode()).hexdigest(),
+    }
+
+
+def _worktree_snapshot_error(value: object) -> str | None:
+    if not isinstance(value, dict):
+        return "prior worktree snapshot is not an object"
+    if value.get("version") != _WORKTREE_SNAPSHOT_VERSION:
+        return f"prior worktree snapshot has unsupported version {value.get('version')!r}"
+    if not all(isinstance(value.get(key), str) for key in ("repository_root", "head", "status_fingerprint")):
+        return "prior worktree snapshot has invalid repository identity or status fingerprint"
+    if not isinstance(value.get("dirty"), bool):
+        return "prior worktree snapshot has invalid dirty flag"
+    return None
+
+
+def _load_worktree_snapshot(path: Path) -> tuple[dict[str, object] | None, str | None]:
+    try:
+        value = json.loads(path.read_text())
+    except FileNotFoundError:
+        return None, None
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"cannot read prior worktree snapshot: {exc}"
+    snapshot_error = _worktree_snapshot_error(value)
+    if snapshot_error is not None:
+        return None, snapshot_error
+    return value, None
+
+
+def _write_worktree_snapshot(path: Path, snapshot: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(snapshot, sort_keys=True))
+
+
+def _worktree_resync_fault(snapshot_path: Path, cwd: Path) -> str | None:
+    """Return a loud fault when tracked WIP vanished without a HEAD move.
+
+    Ordinary edits may change a dirty fingerprint between tool calls, and a
+    legitimate commit changes HEAD. The dangerous shape observed in 794 is
+    narrower: a prior dirty worktree becomes clean while its HEAD is unchanged.
+    Keep the old snapshot on that fault so every later tool completion repeats
+    the independent disk attestation until an operator investigates it.
+    """
+    previous, read_fault = _load_worktree_snapshot(snapshot_path)
+    if read_fault is not None:
+        return f"WORKTREE ATTESTATION FAULT: {read_fault}"
+    try:
+        current = _capture_worktree_snapshot(cwd)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        return f"WORKTREE ATTESTATION FAULT: {exc}"
+    if previous is not None:
+        same_repository = previous["repository_root"] == current["repository_root"]
+        same_head = previous["head"] == current["head"]
+        vanished_wip = previous["dirty"] is True and current["dirty"] is False
+        if same_repository and same_head and vanished_wip:
+            return (
+                "WORKTREE RESYNC MISMATCH: the prior heartbeat observed dirty WIP, "
+                "but disk is now clean with the same HEAD; stop relying on session "
+                "memory and re-read the worktree before reporting progress."
+            )
+    try:
+        _write_worktree_snapshot(snapshot_path, current)
+    except OSError as exc:
+        return f"WORKTREE ATTESTATION FAULT: cannot write current snapshot: {exc}"
+    return None
+
+
+def _record_worktree_resync_fault(identity_dir: Path, failure_path: Path) -> bool:
+    resync_fault = _worktree_resync_fault(_worktree_snapshot_path(identity_dir), Path.cwd())
+    if resync_fault is None:
+        return False
+    _warn(resync_fault)
+    _record_failure(failure_path, resync_fault)
+    return True
+
+
+def _complete_heartbeat(marker_path: Path, failure_path: Path, keep_failure: bool) -> None:
+    try:
+        _touch_marker(marker_path)
+        if not keep_failure:
+            failure_path.unlink(missing_ok=True)
+    except OSError as exc:
+        _warn(f"failed to write marker file: {exc}")
 
 
 def _pending_failures(path: Path) -> dict[str, object]:
@@ -290,16 +412,14 @@ def main() -> int:
         return 0
 
     marker_path = _marker_path(identity_dir, agent_instance_id)
-    if _throttled(marker_path):
+    failure_path = _failure_path(marker_path)
+    has_resync_fault = _record_worktree_resync_fault(identity_dir, failure_path)
+
+    if not has_resync_fault and _throttled(marker_path):
         return 0
 
-    failure_path = _failure_path(marker_path)
     if _call_report_alive(agent_instance_id, failure_path):
-        try:
-            _touch_marker(marker_path)
-            failure_path.unlink(missing_ok=True)
-        except OSError as exc:
-            _warn(f"failed to write marker file: {exc}")
+        _complete_heartbeat(marker_path, failure_path, keep_failure=has_resync_fault)
 
     return 0
 

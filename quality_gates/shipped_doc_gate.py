@@ -59,6 +59,13 @@ thing that runs, before any factory import: no manifest, no seed to mint, no
 shipped-doc obligation, and the gate prints a named skip and exits 0. That is a
 DECLARED absence, printed every run, never a silent pass.
 
+CHECKOUT-ROOT INSTRUCTIONS. The root ``AGENTS.md`` and ``CLAUDE.md`` files are
+not part of a seed profile, but they govern every contributor in this checkout.
+After the shipped-surface measurement, this gate resolves their backticked
+path citations against the actual checkout census (excluding Git bookkeeping).
+That is a checkout-scope leg, not a claim that either file is shipped in a
+capability bundle.
+
 EXIT CODES. 0 clean (or not applicable), 2 non-allowlisted findings, 64 usage
 error, 70 the gate raised and produced no verdict. Blocking is deliberately 2
 rather than the 1 that ``sql_access_gate.py`` uses: this gate is wired into
@@ -98,6 +105,7 @@ _MANIFEST_RELPATH: Final[str] = f"{_FACTORY_KB}/seed_manifest.yaml"
 _BUNDLES_RELPATH: Final[str] = f"{_FACTORY_KB}/capability_bundles.yaml"
 _DEFAULT_ALLOWLIST_RELPATH: Final[str] = "quality_gates/cited_path_gate_allowlist.txt"
 _DEFAULT_BASELINE_RELPATH: Final[str] = "quality_gates/shipped_doc_baseline.txt"
+_ROOT_INSTRUCTION_RELPATHS: Final[tuple[str, str]] = ("AGENTS.md", "CLAUDE.md")
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -194,8 +202,49 @@ def _print_classified_identity(lines: Sequence[str]) -> None:
         print(f"    {line}")
 
 
+def _checkout_census(repo_root: Path) -> frozenset[str]:
+    """All present checkout files, excluding Git's private bookkeeping.
+
+    Root instruction files govern this checkout rather than a capability bundle,
+    so their citations must resolve against the checkout's actual content surface
+    instead of any one profile's shipped surface.
+    """
+    return frozenset(
+        path.relative_to(repo_root).as_posix()
+        for path in repo_root.rglob("*")
+        if path.is_file() and ".git" not in path.relative_to(repo_root).parts
+    )
+
+
+def _root_instruction_findings(repo_root: Path) -> list[str]:
+    """Citation findings in the checkout-root instruction pair.
+
+    This intentionally reuses the cited-path grammar. It is a checkout-scope
+    leg, not a claim that these two documents are present in every assembled
+    capability bundle.
+    """
+    from seed_factory_plugin import cited_path_gate
+
+    census = _checkout_census(repo_root)
+    findings = []
+    for relpath in _ROOT_INSTRUCTION_RELPATHS:
+        path = repo_root / relpath
+        if not path.is_file():
+            raise RuntimeError(f"root instruction file missing: {path}")
+        findings.extend(
+            cited_path_gate.find_findings_in_text(
+                path.read_text(encoding="utf-8"),
+                citing_file=relpath,
+                census=census,
+            )
+        )
+    blocking, _ = cited_path_gate.partition_findings(tuple(findings), frozenset())
+    return [f"{finding.check_id} {finding.key}" for finding in blocking]
+
+
 def _verdict(
     report: LintReport, declared: dict[str, frozenset[ToleratedSubject]],
+    root_instruction_findings: Sequence[str],
 ) -> int:
     """Print the measurement, then the blocking policy's answer to it."""
     print(f"📊 shipped_doc_gate — {len(report.profiles)} profile(s), "
@@ -216,11 +265,12 @@ def _verdict(
         ("reserved-identity matches in shipped files", identity),
         ("folded identity classification anchor drift", report.identity_anchor_violations),
         ("tolerated-debt baseline drift", drift),
+        ("cited-path findings in root instruction docs", root_instruction_findings),
     ):
         if lines:
             _print_findings(header, lines)
 
-    if citations or identity or report.identity_anchor_violations or drift:
+    if any((citations, identity, report.identity_anchor_violations, drift, root_instruction_findings)):
         return EXIT_BLOCKING
     print("✅ shipped_doc_gate: no blocking findings; tolerated debt at declared baseline")
     return EXIT_OK
@@ -256,11 +306,12 @@ def run(argv: Sequence[str]) -> int:
             profiles=args.profile or None,
         )
         declared = shipped_doc_lint.load_tolerated_baseline(baseline_path)
+        root_instruction_findings = _root_instruction_findings(repo_root)
     except (OSError, RuntimeError) as exc:
         print(f"🛑 GATE CRASH: shipped_doc_gate produced NO VERDICT — {type(exc).__name__}: {exc}")
         return EXIT_GATE_CRASH
 
-    return _verdict(report, declared)
+    return _verdict(report, declared, root_instruction_findings)
 
 
 def main() -> int:

@@ -589,6 +589,99 @@ def _check_delivery_order() -> int:
     return 12
 
 
+def _check_gate_script_resolves_from_candidate_not_invoking_checkout() -> int:
+    """NEGATIVE regression (iss_ec0db9c7 / iss_77fe09ad).
+
+    ``--run-identity-gate`` must run the identity-gate SCRIPT from the
+    materialized candidate's own copy, never from whatever happens to sit on
+    disk at ``--repo-root`` — the invoking checkout is routinely a stale or
+    behind-master lane worktree whose on-disk gate code predates the very fix
+    a review is trying to verify.
+
+    A stale stub sits at exactly the on-disk path the old bug read the gate
+    script from; the committed base_ref carries a DIFFERENT stub at the same
+    relative path. This is a real end-to-end run of the actual, current
+    ``candidate_tree.py`` CLI as a subprocess — the same way a reviewer
+    invokes it — so it exercises the real subprocess-command construction,
+    not a mock of it. If the wrong-tree defect ever recurs, the stale stub's
+    sentinel comes back in the output instead of the candidate's.
+    """
+
+    identity_gate_name = "macos_" + "bizops_identity_gate.py"
+    identity_gate_relpath = f"quality_gates/{identity_gate_name}"
+    candidate_sentinel = f"CANDIDATE_TREE_GATE_RAN_{os.urandom(4).hex()}"
+    stale_sentinel = f"STALE_INVOKING_CHECKOUT_GATE_RAN_{os.urandom(4).hex()}"
+
+    with TemporaryDirectory() as temporary:
+        repo = Path(temporary).resolve()
+        _git(repo, "init", "-q")
+        _write(repo, "quality_gates/__init__.py", "")
+        _write(repo, identity_gate_relpath, f'print("{candidate_sentinel}")\n')
+        _write(repo, "scope.txt", "candidate content\n")
+        _git(repo, "add", "-A")
+        subprocess.run(
+            (
+                "git",
+                "-c",
+                "user.name=Candidate Smoke",
+                "-c",
+                "user.email=candidate@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ),
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+        base_ref = subprocess.run(
+            ("git", "rev-parse", "HEAD"),
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        # The stale on-disk copy: exactly where the OLD bug ran the gate
+        # from. Left uncommitted, the way a lane worktree's own dirty or
+        # behind-master gate copy differs from the base_ref it is building a
+        # candidate against.
+        _write(repo, identity_gate_relpath, f'print("{stale_sentinel}")\n')
+
+        scope_file = repo / "scope-list.txt"
+        scope_file.write_text("scope.txt\n", encoding="utf-8")
+        rename_file = repo / "renames.txt"
+        rename_file.write_text("", encoding="utf-8")
+
+        result = subprocess.run(
+            (
+                sys.executable,
+                str(_REPO_ROOT / "quality_gates" / "candidate_tree.py"),
+                "--repo-root",
+                str(repo),
+                "--base-ref",
+                base_ref,
+                "--scope-file",
+                str(scope_file),
+                "--rename-file",
+                str(rename_file),
+                "--run-identity-gate",
+            ),
+            cwd=repo,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        combined = result.stdout + result.stderr
+        assert stale_sentinel not in combined, (
+            "wrong-tree regression: the invoking checkout's stale gate script "
+            f"ran instead of the candidate's own copy\n{combined}"
+        )
+        assert candidate_sentinel in combined, combined
+        assert result.returncode == 0, (result.returncode, combined)
+    return 1
+
+
 def main() -> int:
     check_count = _check_overlay_and_isolation()
     check_count += _check_explicit_manifest_evaluation()
@@ -604,6 +697,7 @@ def main() -> int:
     check_count += _check_staged_snapshot()
     check_count += _check_frozen_entry_composition()
     check_count += _check_nested_identity_candidate()
+    check_count += _check_gate_script_resolves_from_candidate_not_invoking_checkout()
     check_count += _check_delivery_order()
     print(f"candidate_tree_smoke OK: {check_count} checks passed")
     return 0

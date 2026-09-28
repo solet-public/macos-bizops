@@ -36,6 +36,11 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Final
 
+from macos_self_deployment_plugin.constants import (
+    FINISHER_ESCALATION_NEEDS_INTERVENTION,
+    FINISHER_ESCALATION_SIGKILL_AFTER_GRACE,
+)
+
 PENDING_FINISHER_SUFFIX: Final[str] = ".pending_finisher.json"
 _TMP_SUFFIX: Final[str] = ".tmp"
 
@@ -44,6 +49,11 @@ _KEY_PRIOR_INSTANCE_ID: Final[str] = "prior_instance_id"
 _KEY_PRIOR_COLOR: Final[str] = "prior_color"
 _KEY_CANDIDATE_RELEASE_ID: Final[str] = "candidate_release_id"
 _KEY_PRIOR_START_TOKEN: Final[str] = "prior_start_token"
+_KEY_ESCALATION: Final[str] = "escalation"
+
+_ESCALATION_VALUES: Final[frozenset[str]] = frozenset(
+    {FINISHER_ESCALATION_SIGKILL_AFTER_GRACE, FINISHER_ESCALATION_NEEDS_INTERVENTION},
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +72,22 @@ class PendingFinisher:
     PID-reuse guard the router's pid-less bindings cannot provide (B2·3).
     ``None`` when the write-time probe could not run (the prior is then treated
     as un-verifiable and never signalled — fail-safe).
+
+    ``escalation`` is what the finisher may do when the prior ignores SIGTERM
+    past the grace window: ``FINISHER_ESCALATION_SIGKILL_AFTER_GRACE`` (the
+    ordinary service-driven ladder) or ``FINISHER_ESCALATION_NEEDS_INTERVENTION``
+    (a swap that entered through the reconciliation/``cutover_release``
+    channel, where signal 9 is forbidden — iss_8d1ec833). The executor sets it
+    from the swap's reconciliation provenance at write time, so the finisher
+    — which runs in a DIFFERENT process (the new colour) and may be a
+    different release — reads the policy from the record rather than
+    re-deriving it.
+
+    A record written by a release that predates this field carries no
+    ``escalation`` key; it is read as ``sigkill_after_grace`` because that is
+    the only ladder such a writer could have entered with. This is a
+    cross-release data contract (the prior colour writes, the next colour
+    reads), not a compatibility shim.
     """
 
     prior_pid: int
@@ -69,6 +95,15 @@ class PendingFinisher:
     prior_color: str
     candidate_release_id: str
     prior_start_token: str | None
+    escalation: str = FINISHER_ESCALATION_SIGKILL_AFTER_GRACE
+
+    def __post_init__(self) -> None:
+        if self.escalation not in _ESCALATION_VALUES:
+            msg = (
+                f"PendingFinisher.escalation must be one of "
+                f"{sorted(_ESCALATION_VALUES)}, got {self.escalation!r}"
+            )
+            raise ValueError(msg)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -77,6 +112,7 @@ class PendingFinisher:
             _KEY_PRIOR_COLOR: self.prior_color,
             _KEY_CANDIDATE_RELEASE_ID: self.candidate_release_id,
             _KEY_PRIOR_START_TOKEN: self.prior_start_token,
+            _KEY_ESCALATION: self.escalation,
         }
 
     @classmethod
@@ -86,12 +122,15 @@ class PendingFinisher:
         color = data[_KEY_PRIOR_COLOR]
         candidate_release_id = data[_KEY_CANDIDATE_RELEASE_ID]
         start_token = data.get(_KEY_PRIOR_START_TOKEN)
+        escalation = data.get(_KEY_ESCALATION, FINISHER_ESCALATION_SIGKILL_AFTER_GRACE)
         if (
             not isinstance(pid, int)
             or not isinstance(instance_id, str)
             or not isinstance(color, str)
             or not isinstance(candidate_release_id, str)
             or not (start_token is None or isinstance(start_token, str))
+            or not isinstance(escalation, str)
+            or escalation not in _ESCALATION_VALUES
         ):
             msg = f"malformed pending-finisher record: {data!r}"
             raise ValueError(msg)
@@ -101,6 +140,7 @@ class PendingFinisher:
             prior_color=color,
             candidate_release_id=candidate_release_id,
             prior_start_token=start_token,
+            escalation=escalation,
         )
 
 

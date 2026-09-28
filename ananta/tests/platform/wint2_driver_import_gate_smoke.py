@@ -260,8 +260,14 @@ def _case_allowlist_parse_malformed_skipped() -> None:
     print("\nCase 18: malformed allowlist lines are skipped with WARN")
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tmp:
         tmp.write("# comment\n")
-        tmp.write("D1.1::some/file.py::*\n")  # valid
-        tmp.write("malformed_no_separators\n")  # invalid; skipped
+        tmp.write(
+            "D1.1::some/file.py::*  # owner: smoke reason: test fixture "
+            "expires: 2099-01-01\n",
+        )
+        tmp.write(
+            "malformed_no_separators  # owner: smoke reason: malformed key "
+            "expires: 2099-01-01\n",
+        )
         tmp.write("\n")  # blank line
         tmp_path = tmp.name
     try:

@@ -11,7 +11,13 @@ Sandbox discipline (per `[[sandbox_mutating_smokes]]`):
   - smoke solet name 'bgsmoke' → label `local.solet.bgsmoke.router` /
     unit `local.solet.bgsmoke.router.service`. Distinct from any real install.
   - plist/unit written to a tmp dir (not LaunchAgents/systemd user dir).
-  - socket placed in a tmp runtime dir (not ~/.ananta/runtime/).
+  - socket AND port-discovery files placed in a tmp runtime dir (not
+    ~/.ananta/runtime/) via ``--runtime-dir``. iss_6e8c204c: the port files
+    used to bypass the overrides and land in the REAL runtime dir, so this
+    smoke now also proves it — ``case_isolation`` snapshots the real runtime
+    dir before the run and fails if the run adds, rewrites or removes any
+    ``bgsmoke`` entry there, and fails if a port file lands outside the
+    smoke's tmp root (same shape as ``RecordedLaneWorktreeFixture.contains``).
   - non-canonical public_port (free high port) so no collision with a
     a real solet's router on 8100.
   - try/finally guarantees uninstall fires even on mid-flight failure,
@@ -37,6 +43,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
 
 from macos_self_deployment_plugin.blue_green_router.service_install import (  # noqa: E402
+    RUNTIME_DIR,
     launchd_label,
     systemd_unit_name,
 )
@@ -88,6 +95,7 @@ def _run_install(
     unit_path: Path,
     socket_path: Path,
     log_dir: Path,
+    runtime_dir: Path,
     public_port: int,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -100,6 +108,7 @@ def _run_install(
             "--unit-path", str(unit_path),
             "--socket-path", str(socket_path),
             "--log-dir", str(log_dir),
+            "--runtime-dir", str(runtime_dir),
         ],
         capture_output=True,
         text=True,
@@ -112,6 +121,7 @@ def _run_uninstall(
     plist_path: Path,
     unit_path: Path,
     socket_path: Path,
+    runtime_dir: Path,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -121,6 +131,7 @@ def _run_uninstall(
             "--plist-path", str(plist_path),
             "--unit-path", str(unit_path),
             "--socket-path", str(socket_path),
+            "--runtime-dir", str(runtime_dir),
         ],
         capture_output=True,
         text=True,
@@ -151,12 +162,13 @@ def _case_install_clean(
     unit_path: Path,
     socket_path: Path,
     log_dir: Path,
+    runtime_dir: Path,
     public_port: int,
 ) -> bool:
     print("\n[case_install_clean] fresh install on empty state")
     proc = _run_install(
-        plist_path=plist_path, unit_path=unit_path,
-        socket_path=socket_path, log_dir=log_dir, public_port=public_port,
+        plist_path=plist_path, unit_path=unit_path, socket_path=socket_path,
+        log_dir=log_dir, runtime_dir=runtime_dir, public_port=public_port,
     )
     ok_install = proc.returncode == 0
     if not _stamp("install exit 0", ok_install, f"stderr={proc.stderr!r}"):
@@ -182,12 +194,13 @@ def _case_install_idempotent(
     unit_path: Path,
     socket_path: Path,
     log_dir: Path,
+    runtime_dir: Path,
     public_port: int,
 ) -> bool:
     print("\n[case_install_idempotent] re-run install on already-loaded state")
     proc = _run_install(
-        plist_path=plist_path, unit_path=unit_path,
-        socket_path=socket_path, log_dir=log_dir, public_port=public_port,
+        plist_path=plist_path, unit_path=unit_path, socket_path=socket_path,
+        log_dir=log_dir, runtime_dir=runtime_dir, public_port=public_port,
     )
     ok_reinstall = proc.returncode == 0
     _stamp(
@@ -205,10 +218,12 @@ def _case_uninstall_clean(
     plist_path: Path,
     unit_path: Path,
     socket_path: Path,
+    runtime_dir: Path,
 ) -> bool:
     print("\n[case_uninstall_clean] uninstall after install")
     proc = _run_uninstall(
         plist_path=plist_path, unit_path=unit_path, socket_path=socket_path,
+        runtime_dir=runtime_dir,
     )
     ok_uninstall = proc.returncode == 0
     _stamp(
@@ -224,7 +239,10 @@ def _case_uninstall_clean(
     _stamp("socket cleaned up", ok_socket_gone, str(socket_path))
     ok_plist_gone = not plist_path.exists() and not unit_path.exists()
     _stamp("plist/unit file removed", ok_plist_gone)
-    return ok_uninstall and ok_socket_gone and ok_plist_gone
+    leftover = [str(f) for f in _port_files(runtime_dir) if f.exists()]
+    ok_ports_gone = not leftover
+    _stamp("port-discovery files removed from tmp runtime dir", ok_ports_gone, ", ".join(leftover))
+    return ok_uninstall and ok_socket_gone and ok_plist_gone and ok_ports_gone
 
 
 def _case_uninstall_idempotent(
@@ -232,10 +250,12 @@ def _case_uninstall_idempotent(
     plist_path: Path,
     unit_path: Path,
     socket_path: Path,
+    runtime_dir: Path,
 ) -> bool:
     print("\n[case_uninstall_idempotent] re-run uninstall on empty state")
     proc = _run_uninstall(
         plist_path=plist_path, unit_path=unit_path, socket_path=socket_path,
+        runtime_dir=runtime_dir,
     )
     ok_reuninstall = proc.returncode == 0
     _stamp(
@@ -246,12 +266,113 @@ def _case_uninstall_idempotent(
     return ok_reuninstall
 
 
+def _check_daemon_module_identity() -> bool:
+    """Fail by name when ``-m …router`` would run a tree without ``--runtime-dir``.
+
+    install_router stamps ``sys.executable`` into the plist, and launchd runs
+    ``-m macos_self_deployment_plugin.blue_green_router.router`` through it —
+    so the daemon is whatever tree that interpreter's *installed* package
+    resolves to, not the file next to this smoke. From a lane worktree whose
+    ``.venv`` is a symlink to another checkout's venv, that is the OTHER
+    checkout's ``router.py``; if it predates ``--runtime-dir`` the daemon dies
+    on argparse and the only visible symptom downstream is "socket never
+    appeared". Name the trap up front (iss_6e8c204c review, 2026-09-20).
+    """
+    module = "macos_self_deployment_plugin.blue_green_router.router"
+    probe = subprocess.run(
+        [sys.executable, "-c", f"import {module} as r; print(r.__file__)"],
+        capture_output=True, text=True, check=False,
+    )
+    resolved = probe.stdout.strip()
+    if probe.returncode != 0 or not resolved:
+        return _stamp("daemon module resolves", False, probe.stderr.strip()[-300:])
+    knows_flag = "--runtime-dir" in Path(resolved).read_text(encoding="utf-8")
+    return _stamp(
+        "daemon module knows --runtime-dir",
+        knows_flag,
+        f"{sys.executable} -m {module} -> {resolved}",
+    )
+
+
+def _port_files(runtime_dir: Path) -> tuple[Path, Path]:
+    return (
+        runtime_dir / f"{SMOKE_SOLET_NAME}.router.port",
+        runtime_dir / f"{SMOKE_SOLET_NAME}.bridge.port",
+    )
+
+
+def _within(path: Path, root: Path) -> bool:
+    """Return whether ``path`` resolves under ``root`` (escape check)."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _real_runtime_snapshot() -> dict[str, int]:
+    """``{name: mtime_ns}`` for every ``bgsmoke*`` entry in the REAL runtime dir.
+
+    The smoke may not add, rewrite or remove anything here. Pre-existing
+    residue from a pre-fix run is reported but left untouched — deleting it
+    would itself be an out-of-sandbox write.
+    """
+    if not RUNTIME_DIR.is_dir():
+        return {}
+    return {
+        entry.name: entry.stat().st_mtime_ns
+        for entry in sorted(RUNTIME_DIR.iterdir())
+        if entry.name.startswith(SMOKE_SOLET_NAME)
+    }
+
+
+def _case_isolation(
+    *,
+    tmpdir: Path,
+    runtime_dir: Path,
+    public_port: int,
+    baseline: dict[str, int],
+) -> bool:
+    """Port files landed inside the tmp root; the real runtime dir is untouched."""
+    print("\n[case_isolation] no write outside the smoke's tmp root (iss_6e8c204c)")
+    ok = True
+    for port_file in _port_files(runtime_dir):
+        present = port_file.exists()
+        ok &= _stamp(f"{port_file.name} written to tmp runtime dir", present, str(port_file))
+        if not present:
+            continue
+        content = port_file.read_text(encoding="utf-8")
+        ok &= _stamp(
+            f"{port_file.name} content == public_port",
+            content == str(public_port),
+            f"file={content!r} expected={public_port}",
+        )
+        ok &= _stamp(
+            f"{port_file.name} resolves under tmp root",
+            _within(port_file, tmpdir),
+            f"{port_file} vs {tmpdir}",
+        )
+    now = _real_runtime_snapshot()
+    ok &= _stamp(
+        f"real runtime dir {RUNTIME_DIR} unchanged for {SMOKE_SOLET_NAME}*",
+        now == baseline,
+        f"before={sorted(baseline)} after={sorted(now)}",
+    )
+    return ok
+
+
 def main() -> int:
     import platform
 
     if platform.system() not in ("Darwin", "Linux"):
         print(f"smoke skip: unsupported platform {platform.system()}")
         return 0
+
+    print("\n[precondition] daemon module identity")
+    if not _check_daemon_module_identity():
+        print("\ninstall_smoke: precondition failed — run under an interpreter whose "
+              "installed package is the tree under test")
+        return 1
 
     _belt_and_suspenders_bootout()
     tmpdir = Path(tempfile.mkdtemp(prefix="bg-install-smoke-"))
@@ -267,28 +388,40 @@ def main() -> int:
     unit_path = unit_dir / systemd_unit_name(SMOKE_SOLET_NAME)
     socket_path = runtime_dir / f"{SMOKE_SOLET_NAME}.router.sock"
     public_port = _pick_free_port()
+    baseline = _real_runtime_snapshot()
 
     print(
         f"install_smoke: tmp={tmpdir} port={public_port} "
         f"label={launchd_label(SMOKE_SOLET_NAME)} "
         f"unit={systemd_unit_name(SMOKE_SOLET_NAME)}"
     )
+    if baseline:
+        print(
+            f"install_smoke: pre-existing {SMOKE_SOLET_NAME}* residue in "
+            f"{RUNTIME_DIR} (left untouched): {sorted(baseline)}"
+        )
 
     results: list[tuple[str, bool]] = []
     try:
         results.append(("install_clean", _case_install_clean(
-            plist_path=plist_path, unit_path=unit_path,
-            socket_path=socket_path, log_dir=log_dir, public_port=public_port,
+            plist_path=plist_path, unit_path=unit_path, socket_path=socket_path,
+            log_dir=log_dir, runtime_dir=runtime_dir, public_port=public_port,
         )))
         results.append(("install_idempotent", _case_install_idempotent(
-            plist_path=plist_path, unit_path=unit_path,
-            socket_path=socket_path, log_dir=log_dir, public_port=public_port,
+            plist_path=plist_path, unit_path=unit_path, socket_path=socket_path,
+            log_dir=log_dir, runtime_dir=runtime_dir, public_port=public_port,
+        )))
+        results.append(("isolation", _case_isolation(
+            tmpdir=tmpdir, runtime_dir=runtime_dir, public_port=public_port,
+            baseline=baseline,
         )))
         results.append(("uninstall_clean", _case_uninstall_clean(
             plist_path=plist_path, unit_path=unit_path, socket_path=socket_path,
+            runtime_dir=runtime_dir,
         )))
         results.append(("uninstall_idempotent", _case_uninstall_idempotent(
             plist_path=plist_path, unit_path=unit_path, socket_path=socket_path,
+            runtime_dir=runtime_dir,
         )))
     finally:
         # Defense in depth: even if assertions failed mid-flight, ensure
@@ -296,8 +429,14 @@ def main() -> int:
         # operator's machine.
         _run_uninstall(
             plist_path=plist_path, unit_path=unit_path, socket_path=socket_path,
+            runtime_dir=runtime_dir,
         )
         _belt_and_suspenders_bootout()
+    results.append(("isolation_after_uninstall", _stamp(
+        f"real runtime dir {RUNTIME_DIR} still unchanged for {SMOKE_SOLET_NAME}* after uninstall",
+        _real_runtime_snapshot() == baseline,
+        f"before={sorted(baseline)} after={sorted(_real_runtime_snapshot())}",
+    )))
 
     print("\nsummary")
     passed = sum(1 for _, ok in results if ok)

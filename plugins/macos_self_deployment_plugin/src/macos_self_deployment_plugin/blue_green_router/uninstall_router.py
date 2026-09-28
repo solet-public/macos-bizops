@@ -12,6 +12,8 @@ Path overrides (smoke harness only):
     --plist-path <PATH>
     --unit-path <PATH>
     --socket-path <PATH>
+    --runtime-dir <PATH>     where install_router wrote the port-discovery
+                             files (default ~/.ananta/runtime; iss_6e8c204c)
 """
 
 from __future__ import annotations
@@ -31,10 +33,9 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from macos_self_deployment_plugin.blue_green_router.service_install import (  # noqa: E402
+    RUNTIME_DIR,
     InstallError,
-    default_bridge_port_path,
     default_launchd_plist_path,
-    default_router_port_path,
     default_socket_path,
     default_systemd_unit_path,
     launchd_label,
@@ -46,14 +47,16 @@ SOCKET_CLEANUP_DEADLINE_SECONDS: float = 5.0
 SOCKET_CLEANUP_POLL_INTERVAL_SECONDS: float = 0.1
 
 
-def _remove_router_port_files(solet_name: str) -> None:
+def _remove_router_port_files(solet_name: str, runtime_dir: Path) -> None:
     """Remove both router-owned port-discovery files written by install_router.
 
-    Missing files are no-op successes.
+    ``runtime_dir`` is the same dir install_router wrote into (``--runtime-dir``
+    or the real one), so a sandboxed smoke's uninstall never reaches the
+    operator's real files. Missing files are no-op successes.
     """
     for port_file in (
-        default_router_port_path(solet_name),
-        default_bridge_port_path(solet_name),
+        runtime_dir / f"{solet_name}.router.port",
+        runtime_dir / f"{solet_name}.bridge.port",
     ):
         port_file.unlink(missing_ok=True)
 
@@ -78,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         socket_path = args.socket_path or default_socket_path(args.solet_name)
         _verify_socket_gone(socket_path)
-        _remove_router_port_files(args.solet_name)
+        _remove_router_port_files(args.solet_name, args.runtime_dir or RUNTIME_DIR)
     except InstallError as exc:
         print(f"uninstall_router: {exc}", file=sys.stderr)
         return 1
@@ -109,6 +112,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--socket-path", type=Path, default=None,
         help="Override default ~/.ananta/runtime/<name>.router.sock (smoke only).",
+    )
+    parser.add_argument(
+        "--runtime-dir", type=Path, default=None,
+        help=(
+            "Override default ~/.ananta/runtime, where install_router wrote "
+            "the port-discovery files (smoke only)."
+        ),
     )
     return parser.parse_args(argv)
 

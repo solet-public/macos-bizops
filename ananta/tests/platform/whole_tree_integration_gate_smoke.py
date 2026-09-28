@@ -31,6 +31,10 @@ Cases:
      `service_bindings.json` derives them from the shipped profile template
      genesis uses; with no provenance to say which profile, the gate exits 2
      (harness error) instead of silently scanning against an empty map.
+ 17. C6.1 git-awareness (iss_ce45713b) — an undeclared root entry that Git
+     does not track is reported, not blocking; the same entry staged or
+     committed blocks exactly as before, and so does every unknown entry
+     when no Git directory exists to ask.
 
 Project policy: no pytest. Exits 0 on success, 1 on first failure.
 """
@@ -313,12 +317,13 @@ def _case_allowlist_file_round_trip() -> None:
     print("\nCase 12: Allowlist file parses and round-trips correctly")
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "allow.txt"
+        _tag = "  # owner: smoke-fixture reason: tracked test debt expires: 2099-01-01\n"
         path.write_text(
             "# comment\n"
             "\n"
-            "C1.5::svc::method\n"
-            "C2.4::plugin::*\n"
-            "C3.1::a/b/c.py::plugin::x::y\n"
+            "C1.5::svc::method" + _tag +
+            "C2.4::plugin::*" + _tag +
+            "C3.1::a/b/c.py::plugin::x::y" + _tag
         )
         loaded = load_allowlist(path)
         _check(len(loaded.entries) == 3,
@@ -360,6 +365,72 @@ def _case_negative_fixture_marker() -> None:
            "_is_test_path True for ananta/tests/…")
     _check(not _is_test_path(Path("plugins/x/src/x/y.py")),
            "_is_test_path False for a src/ path")
+
+
+_C6_MANIFEST = """\
+schema_version: 1
+solet_name: smokebot
+universal:
+  files: [root_manifest.yaml]
+  directories: []
+platform_managed:
+  directories: [.git]
+sanctioned: []
+overrides: []
+diagnostic:
+  report_categories: [unknown_root_entries]
+  ignore_patterns: []
+"""
+
+
+def _fixture_git(root: Path, *arguments: str) -> None:
+    import os
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(
+        GIT_AUTHOR_NAME="smoke", GIT_AUTHOR_EMAIL="smoke@example.invalid",
+        GIT_COMMITTER_NAME="smoke", GIT_COMMITTER_EMAIL="smoke@example.invalid",
+    )
+    subprocess.run(("git", *arguments), cwd=root, env=env, check=True, capture_output=True)
+
+
+def _case_c6_1_untracked_root_entry_does_not_block() -> None:
+    """iss_ce45713b: C6.1 blocks on drift the repository CARRIES, never on a
+    neighbouring lane's untracked scratch file — and the discriminator is that
+    the SAME entry, once tracked, blocks exactly as before."""
+    print("\nCase 17: C6.1 — untracked root entry reported, not blocking; tracked one blocks")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        (root / "root_manifest.yaml").write_text(_C6_MANIFEST)
+        _fixture_git(root, "init", "-q")
+        _fixture_git(root, "add", "-A")
+        _fixture_git(root, "commit", "-qm", "base")
+        _check(wint.check_root_manifest_drift(root) == [],
+               "declared-only tree yields no C6 findings")
+
+        (root / "HANDOVER_NOTE.md").write_text("another lane's note\n")
+        findings = wint.check_root_manifest_drift(root)
+        _check(findings == [],
+               f"untracked root entry yields no blocking finding (got {findings})")
+
+        _fixture_git(root, "add", "HANDOVER_NOTE.md")
+        findings = wint.check_root_manifest_drift(root)
+        _check([(f.check_id, f.scope_qualifier, f.specifier) for f in findings]
+               == [("C6.1", "root", "HANDOVER_NOTE.md")],
+               f"the same entry, staged, is C6.1::root::HANDOVER_NOTE.md (got {findings})")
+
+        _fixture_git(root, "commit", "-qm", "undeclared root entry")
+        findings = wint.check_root_manifest_drift(root)
+        _check([(f.check_id, f.scope_qualifier, f.specifier) for f in findings]
+               == [("C6.1", "root", "HANDOVER_NOTE.md")],
+               f"the same entry, committed, is still C6.1 (got {findings})")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        (root / "root_manifest.yaml").write_text(_C6_MANIFEST)
+        (root / "HANDOVER_NOTE.md").write_text("no git here at all\n")
+        findings = wint.check_root_manifest_drift(root)
+        _check([(f.check_id, f.specifier) for f in findings] == [("C6.1", "HANDOVER_NOTE.md")],
+               f"with no git directory every unknown entry still blocks (got {findings})")
 
 
 def _case_e2e_live_gate_clean() -> None:
@@ -518,6 +589,7 @@ def main() -> int:
     _case_negative_fixture_marker()
     _case_c3_executable_context_only()
     _case_bindings_fail_loud()
+    _case_c6_1_untracked_root_entry_does_not_block()
     _case_e2e_live_gate_clean()
 
     print("\n" + "-" * 60)

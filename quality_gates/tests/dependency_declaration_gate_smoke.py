@@ -174,7 +174,11 @@ def _check_allowlist_suppresses_tracked_debt_but_not_new_violations() -> None:
         root = Path(raw)
         _write_package(root, source="import packaging\n")
         allowlist_path = root / "allowlist.txt"
-        allowlist_path.write_text("fixture_package::packaging\n", encoding="utf-8")
+        allowlist_path.write_text(
+            "fixture_package::packaging"
+            "  # owner: smoke-fixture reason: tracked test debt expires: 2099-01-01\n",
+            encoding="utf-8",
+        )
         exit_code = run_gate(["--repo-root", str(root), "--allowlist", str(allowlist_path)])
     _check(exit_code == 0, "an allowlisted missing dependency does not fail the gate")
 
@@ -182,7 +186,11 @@ def _check_allowlist_suppresses_tracked_debt_but_not_new_violations() -> None:
         root = Path(raw)
         _write_package(root, source="import packaging\nimport requests\n")
         allowlist_path = root / "allowlist.txt"
-        allowlist_path.write_text("fixture_package::packaging\n", encoding="utf-8")
+        allowlist_path.write_text(
+            "fixture_package::packaging"
+            "  # owner: smoke-fixture reason: tracked test debt expires: 2099-01-01\n",
+            encoding="utf-8",
+        )
         exit_code = run_gate(["--repo-root", str(root), "--allowlist", str(allowlist_path)])
     _check(
         exit_code == 2,

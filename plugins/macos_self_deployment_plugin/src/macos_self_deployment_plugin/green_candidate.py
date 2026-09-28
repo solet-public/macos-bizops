@@ -2,7 +2,8 @@
 
 A swap spawns a green CANDIDATE process and drives it against the
 local-blue-green router across its lifecycle: wait for it to register +
-accept connections, tear it down (SIGKILL + unregister), and — when a
+accept connections, tear it down (bounded SIGTERM + unregister — never
+SIGKILL, see :meth:`GreenCandidate.terminate_bounded`), and — when a
 post-``activate`` durable swap (cutover OR rollback) fails — compensate by
 rolling the router back to the prior color and conditionally tearing the
 candidate down (§4.7 F2), returning a typed :class:`CompensationOutcome`.
@@ -21,10 +22,15 @@ from __future__ import annotations
 import http.client
 import logging
 import os
+import signal
 import time
 from dataclasses import dataclass
 from enum import StrEnum
 
+from macos_self_deployment_plugin import process_identity
+from macos_self_deployment_plugin.constants import (
+    DEFAULT_PRIOR_TERM_POLL_INTERVAL_SECONDS,
+)
 from macos_self_deployment_plugin.router_client import (
     RouterClient,
     RouterClientError,
@@ -41,16 +47,57 @@ class CompensationOutcome:
     ``reason_code``:
 
     - ``restored=True`` — the router rollback to the prior color CONFIRMED and
-      the candidate was killed + unregistered, so the pre-swap pair is restored.
-      The caller returns ``FAILED`` (system coherent, retryable).
-    - ``restored=False`` — the router rollback did NOT take (RPC error / refusal
-      / drain expired), so the candidate is LEFT ALIVE (the router may still
-      route to it; killing it would route live traffic to a dead color). The
-      caller returns ``NEEDS_INTERVENTION`` (a human must act).
+      the candidate exited on SIGTERM (or was already gone) + was unregistered,
+      so the pre-swap pair is restored. The caller returns ``FAILED`` (system
+      coherent, retryable).
+    - ``restored=False`` — EITHER the router rollback did NOT take (RPC error /
+      refusal / drain expired), so the candidate is LEFT ALIVE (the router may
+      still route to it; killing it would route live traffic to a dead color);
+      OR the rollback DID take but the candidate ignored SIGTERM for the whole
+      grace window and is still alive (``no_sigkill_reachable_from_this_channel``
+      forbids escalating). The two carry distinct messages; both send the
+      caller to ``NEEDS_INTERVENTION`` (a human must act).
     """
 
     restored: bool
     message: str
+
+
+class CandidateTeardown(StrEnum):
+    """How :meth:`GreenCandidate.terminate_bounded` left the candidate.
+
+    The candidate teardown is a bounded SIGTERM and nothing more: this channel
+    never escalates to SIGKILL (adjudication D1 property
+    ``no_sigkill_reachable_from_this_channel``, iss_8d1ec833). Every value is
+    therefore a statement about what was OBSERVED, not about what was forced:
+
+    * ``TERMINATED`` — SIGTERM was delivered and the child exited (zombie
+      reaped) inside the grace window.
+    * ``ALREADY_GONE`` — no signal was sent: the child had already exited, or
+      the pid no longer carries the start-time token captured at spawn (pid
+      reused by an unrelated process — never signal it).
+    * ``SIGNAL_DENIED`` — ``SIGTERM`` raised ``PermissionError``; the child's
+      state is unknown and nothing further was attempted.
+    * ``TIMED_OUT`` — SIGTERM was delivered and the grace window expired with
+      the child STILL ALIVE. No second signal is ever sent; the caller must
+      surface ``NEEDS_INTERVENTION`` naming the pid + token.
+    """
+
+    TERMINATED = "terminated"
+    ALREADY_GONE = "already_gone"
+    SIGNAL_DENIED = "signal_denied"
+    TIMED_OUT = "timed_out"
+
+    @property
+    def candidate_gone(self) -> bool:
+        """True iff the candidate is confirmed exited (terminated / already gone).
+
+        ``TIMED_OUT`` and ``SIGNAL_DENIED`` both leave a possibly-live
+        candidate with no further signal available in this channel; callers
+        branch on this rather than on the specific value so neither can be
+        mistaken for a clean teardown.
+        """
+        return self in (CandidateTeardown.TERMINATED, CandidateTeardown.ALREADY_GONE)
 
 
 class CandidateReadiness(StrEnum):
@@ -72,36 +119,12 @@ class CandidateReadiness(StrEnum):
 def _child_exited(pid: int) -> bool:
     """Whether the spawned candidate has exited — zombies included.
 
-    ``os.kill(pid, 0)`` on its own quietly gets this wrong. A child that has
-    died but not yet been reaped is a ZOMBIE: it still occupies the process
-    table, so the signal probe succeeds and the corpse reads as perfectly
-    healthy. That is precisely the state the 2026-08-31 spawn hang left behind
-    and a liveness check that cannot see it would be a check in name only.
-    ``waitpid`` with ``WNOHANG`` is what tells a zombie from a live process, and
-    it reaps the corpse as a side effect.
-
-    The order of the two probes is load-bearing:
-
-    * The signal probe runs FIRST so a child already reaped by someone else
-      reads as gone. ``subprocess`` opportunistically reaps garbage-collected
-      ``Popen`` handles whenever any other subprocess is created anywhere in
-      this process, and the swap path deliberately discards its handle — so
-      "reaped by another thread" is a real, reachable state, not a theoretical one.
-    * ``ChildProcessError`` from ``waitpid`` while the pid still exists is left
-      deliberately as ALIVE. That pid is not ours to judge, and a false "died"
-      verdict would abort a perfectly healthy swap — the strictly worse error.
+    Thin name kept for this module's callers and smokes; the zombie-aware
+    probe itself lives in :func:`process_identity.process_exited` so the
+    heartbeat backstop's post-SIGTERM verification uses the identical
+    definition of "exited".
     """
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        return False
-    try:
-        reaped, _status = os.waitpid(pid, os.WNOHANG)
-    except ChildProcessError:
-        return False
-    return reaped == pid
+    return process_identity.process_exited(pid)
 
 
 def _probe_port_reachable(port: int, timeout_seconds: float = 0.5) -> bool:
@@ -195,12 +218,57 @@ class GreenCandidate:
                 # Registered but port not (yet) reachable — keep polling.
         return False
 
-    def kill(self, pid: int) -> None:
-        """SIGKILL the spawned child; swallow OSError on already-dead processes."""
+    def terminate_bounded(
+        self, pid: int, *, start_token: str | None, grace_seconds: float,
+    ) -> CandidateTeardown:
+        """SIGTERM the spawned child and wait — bounded — for it to exit.
+
+        Replaces the former ``kill`` (``os.kill(pid, 9)``). The poll loop
+        mirrors the finisher's ``_signal_and_wait`` shape; what it deliberately
+        does NOT mirror is that method's SIGKILL escalation on grace overrun:
+        a candidate that ignores SIGTERM is reported as
+        :attr:`CandidateTeardown.TIMED_OUT` and left for a human, because this
+        channel must never reach signal 9.
+
+        ``start_token`` is the child's start-time identity captured by the
+        executor right after spawn (:func:`process_identity.start_token`). The
+        live token is re-read here and the signal is REFUSED on a mismatch —
+        the same PID-reuse guard the finisher applies to the prior
+        (``_signal_verified_prior``): a recycled pid is somebody else's process.
+        """
+        if _child_exited(pid):
+            return CandidateTeardown.ALREADY_GONE
+        live_token = process_identity.start_token(pid)
+        if live_token is None:
+            return CandidateTeardown.ALREADY_GONE
+        if live_token != start_token:
+            self._logger.warning(
+                "refusing to SIGTERM pid=%d: live start token %r differs from "
+                "the spawn-time token %r (pid reused); candidate treated as gone",
+                pid, live_token, start_token,
+            )
+            return CandidateTeardown.ALREADY_GONE
         try:
-            os.kill(pid, 9)
-        except (ProcessLookupError, PermissionError) as exc:
-            self._logger.warning("could not SIGKILL pid=%d: %s", pid, exc)
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return CandidateTeardown.ALREADY_GONE
+        except PermissionError as exc:
+            self._logger.error("SIGTERM denied on candidate pid=%d: %s", pid, exc)
+            return CandidateTeardown.SIGNAL_DENIED
+        deadline = time.monotonic() + grace_seconds
+        while True:
+            if _child_exited(pid):
+                return CandidateTeardown.TERMINATED
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(DEFAULT_PRIOR_TERM_POLL_INTERVAL_SECONDS, remaining))
+        self._logger.critical(
+            "candidate pid=%d (start token %r) is STILL ALIVE %.1fs after SIGTERM; "
+            "this channel never escalates to SIGKILL — manual intervention required",
+            pid, start_token, grace_seconds,
+        )
+        return CandidateTeardown.TIMED_OUT
 
     def unregister(self, instance_id: str) -> None:
         """Unregister ``instance_id`` from the router; swallow RPC errors."""
@@ -231,7 +299,8 @@ class GreenCandidate:
         return True
 
     def compensate_failed_swap(
-        self, *, prior_color: str, prior_instance_id: str, instance_id: str, pid: int, exc: Exception,
+        self, *, prior_color: str, prior_instance_id: str, instance_id: str,
+        pid: int, start_token: str | None, grace_seconds: float, exc: Exception,
     ) -> CompensationOutcome:
         """§4.7 post-activate swap-failure compensation; return a typed outcome.
 
@@ -243,13 +312,19 @@ class GreenCandidate:
         raise), so ``current``/``previous`` are already unchanged; this restores
         the *routing* side to match.
 
-        F2 — the candidate kill is GATED on a CONFIRMED router rollback:
+        F2 — the candidate teardown is GATED on a CONFIRMED router rollback:
 
         - if ``rollback(prior_color)`` confirms, the prior color is
-          authoritative again, so the candidate must not serve — SIGKILL +
-          unregister it and return ``restored=True`` (the caller returns FAILED
-          without enqueuing ``complete_swap``, so the prior process is never
-          SIGTERM'd);
+          authoritative again, so the candidate must not serve — bounded
+          SIGTERM (:meth:`terminate_bounded`, never SIGKILL) + unregister it
+          and return ``restored=True`` (the caller returns FAILED without
+          enqueuing ``complete_swap``, so the prior process is never
+          SIGTERM'd). If the candidate ignores SIGTERM past ``grace_seconds``
+          it is unregistered anyway (the router must not route to it) and the
+          outcome is ``restored=False`` with a message saying the router WAS
+          rolled back but the candidate is still alive — distinct from the
+          rollback-did-not-take message below — so the caller escalates to
+          NEEDS_INTERVENTION without a second signal;
         - if the rollback does NOT take (RPC error or the router refuses /
           drain window expired), the router may STILL route to the candidate.
           Killing it then would route live traffic to a DEAD color — so leave
@@ -278,15 +353,31 @@ class GreenCandidate:
                     f"intervention required: {exc}"
                 ),
             )
-        self.kill(pid)
+        teardown = self.terminate_bounded(
+            pid, start_token=start_token, grace_seconds=grace_seconds,
+        )
         self.unregister(instance_id)
+        if not teardown.candidate_gone:
+            return CompensationOutcome(
+                restored=False,
+                message=(
+                    f"durable swap failed after activate; router WAS rolled back "
+                    f"to {prior_color} and candidate instance={instance_id} was "
+                    f"unregistered, but candidate pid={pid} "
+                    f"(start_token={start_token!r}) is not confirmed gone "
+                    f"(teardown={teardown.value}, grace={grace_seconds}s) — this "
+                    f"channel never escalates to SIGKILL; manual intervention "
+                    f"required: {exc}"
+                ),
+            )
         return CompensationOutcome(
             restored=True,
             message=(
                 f"durable swap failed after activate; prior color {prior_color} "
-                f"restored, candidate killed (current/previous unchanged): {exc}"
+                f"restored, candidate teardown={teardown.value} "
+                f"(current/previous unchanged): {exc}"
             ),
         )
 
 
-__all__ = ["CompensationOutcome", "GreenCandidate"]
+__all__ = ["CandidateTeardown", "CompensationOutcome", "GreenCandidate"]

@@ -28,6 +28,16 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 
+_REPO_IMPORT_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_IMPORT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_IMPORT_ROOT))
+
+from quality_gates.source_root import (  # noqa: E402
+    SourceRootError,
+    gate_script_path,
+    resolve_source_root,
+)
+
 
 class CandidateTreeError(RuntimeError):
     """Base class for actionable candidate-tree failures."""
@@ -922,18 +932,26 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"{summary} files={len(candidate.paths)}"
             )
+            # The gate SCRIPT must come from the candidate's own materialized
+            # copy, never from wherever this process happens to be invoked —
+            # the invoking checkout can be a stale or behind-master worktree
+            # whose on-disk gate code predates the very fix under review
+            # (iss_ec0db9c7 / iss_77fe09ad). `candidate.root` already holds a
+            # full copy of the base-ref tree, so it is always the right root.
             gate_name = "macos_" + "bizops_identity_gate.py"
+            source_root = resolve_source_root(candidate.root)
+            script = gate_script_path(source_root, f"quality_gates/{gate_name}")
             command = (
                 sys.executable,
-                str(args.repo_root.resolve() / "quality_gates" / gate_name),
+                str(script),
                 "--repo-root",
                 str(candidate.root),
                 "--candidate-manifest",
                 str(candidate.manifest),
             )
-            result = subprocess.run(command, cwd=args.repo_root.resolve(), check=False)
+            result = subprocess.run(command, cwd=source_root, check=False)
             return result.returncode
-    except CandidateTreeError as exc:
+    except (CandidateTreeError, SourceRootError) as exc:
         print(f"candidate_tree CRASH: {exc}", file=sys.stderr)
         return 70
 

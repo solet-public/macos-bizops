@@ -76,6 +76,12 @@ from typing import Final
 import yaml
 from packaging.requirements import InvalidRequirement, Requirement
 
+_REPO_IMPORT_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_IMPORT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_IMPORT_ROOT))
+
+from quality_gates.allowlist_schema import load_allowlist as _load_tagged_allowlist  # noqa: E402
+
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 BUNDLES_PATH: Final[Path] = (
     REPO_ROOT
@@ -346,17 +352,19 @@ def collect_findings() -> list[Finding]:
 
 
 def load_allowlist(path: Path) -> set[tuple[str, str]]:
-    """Parse a category-keyed allowlist into ``{(check_id, key), ...}``."""
-    if not path.is_file():
-        raise GateError(f"allowlist not found: {path}")
+    """Parse a category-keyed allowlist into ``{(check_id, key), ...}``.
+
+    Mandatory owner/reason/expires schema (D-3-structural, iss_23fa51b5).
+    """
+    try:
+        keys = _load_tagged_allowlist(path)
+    except FileNotFoundError as exc:
+        raise GateError(str(exc)) from exc
     entries: set[tuple[str, str]] = set()
-    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw.split("#", 1)[0].strip()
-        if not line:
-            continue
-        parts = line.split(None, 1)
+    for key in keys:
+        parts = key.split(None, 1)
         if len(parts) != 2:
-            raise GateError(f"{path}:{number}: expected '<check_id> <bundle>::<subject>'")
+            raise GateError(f"{path}: expected '<check_id> <bundle>::<subject>', got {key!r}")
         entries.add((parts[0], parts[1].strip()))
     return entries
 

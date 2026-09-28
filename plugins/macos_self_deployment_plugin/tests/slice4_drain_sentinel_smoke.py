@@ -93,8 +93,8 @@ def _scenario_sentinel_held_around_signal_and_unregister() -> None:
             sentinel = drain_sentinel.sentinel_path("smoketest")
             observations: dict[str, bool] = {}
 
-            def fake_signal(pid: int) -> str:
-                del pid
+            def fake_signal(pid: int, *, escalation: str) -> str:
+                del pid, escalation
                 observations["sentinel_during_signal"] = sentinel.exists()
                 return "prior_terminated_cleanly"
 

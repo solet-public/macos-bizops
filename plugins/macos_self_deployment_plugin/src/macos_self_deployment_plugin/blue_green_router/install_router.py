@@ -33,6 +33,13 @@ Path overrides (smoke harness only):
     --unit-path <PATH>       Override default ~/.config/systemd/user/local.solet.<name>.router.service
     --socket-path <PATH>     Override default ~/.ananta/runtime/<name>.router.sock
     --log-dir <PATH>         Override default ~/.ananta/logs
+    --runtime-dir <PATH>     Override default ~/.ananta/runtime (port-discovery
+                             files + the router daemon's WorkingDirectory)
+
+Every host path the installer writes is reachable through one of these
+overrides; a smoke that sets all of them touches nothing outside its own
+tmp root (iss_6e8c204c closed the port-discovery files, which previously
+bypassed the overrides and landed in the REAL runtime dir).
 """
 
 from __future__ import annotations
@@ -102,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         socket_path = args.socket_path or default_socket_path(args.solet_name)
         _verify_router_up(socket_path)
-        _write_router_port_files(args.solet_name, args.public_port)
+        _write_router_port_files(args.solet_name, args.public_port, _runtime_dir(args))
     except InstallError as exc:
         print(f"install_router: {exc}", file=sys.stderr)
         return 1
@@ -133,10 +140,24 @@ def _find_free_router_port() -> int:
     )
 
 
-def _write_router_port_files(solet_name: str, port: int) -> tuple[Path, Path]:
+def _runtime_dir(args: argparse.Namespace) -> Path:
+    """The runtime dir this install targets: ``--runtime-dir`` or the real one.
+
+    Resolved in exactly one place so every runtime-dir write in this
+    module (port-discovery files, the daemon's WorkingDirectory) honours
+    the smoke override; a second ``RUNTIME_DIR`` reference here is the
+    sandbox escape iss_6e8c204c was.
+    """
+    return args.runtime_dir or RUNTIME_DIR
+
+
+def _write_router_port_files(
+    solet_name: str, port: int, runtime_dir: Path,
+) -> tuple[Path, Path]:
     """Write the router's chosen public port to both discovery files.
 
-    Two files in ``~/.ananta/runtime/`` receive the same port value:
+    Two files in ``runtime_dir`` (``~/.ananta/runtime/`` for a real
+    install) receive the same port value:
 
     * ``<name>.router.port`` — read by ``port_manager.py`` so this solet's
       allocation bands skip the router's port. Kept as a distinct file
@@ -150,7 +171,6 @@ def _write_router_port_files(solet_name: str, port: int) -> tuple[Path, Path]:
     are decoupled from canonical-file ownership (per-color sibling files
     continue to be written by solet children until Slice 3 retires them).
     """
-    runtime_dir = Path.home() / ".ananta" / "runtime"
     runtime_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     router_port_file = runtime_dir / f"{solet_name}.router.port"
     router_port_file.write_text(str(port))
@@ -196,6 +216,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--log-dir", type=Path, default=None,
         help="Override default ~/.ananta/logs (smoke only).",
     )
+    parser.add_argument(
+        "--runtime-dir", type=Path, default=None,
+        help=(
+            "Override default ~/.ananta/runtime for the port-discovery files "
+            "and the router daemon's WorkingDirectory (smoke only)."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -210,7 +237,12 @@ def _build_context(args: argparse.Namespace) -> dict[str, str]:
         # relative-path write under a code tree would pollute it. The runtime
         # dir is the canonical out-of-tree home (also where the router's
         # socket + port files live), created in ``_ensure_dirs``.
-        "WORKING_DIR": str(RUNTIME_DIR),
+        "WORKING_DIR": str(_runtime_dir(args)),
+        # Also handed to the daemon as ``--runtime-dir``: it self-writes the
+        # port-discovery files at bind time and on every watchdog tick, under
+        # the REAL ``HOME`` of launchd/systemd, so the installer's own
+        # override has to travel into the service definition (iss_6e8c204c).
+        "RUNTIME_DIR": str(_runtime_dir(args)),
         "SOLET_NAME": args.solet_name,
         "PUBLIC_PORT": str(args.public_port),
         "SOCKET_PATH": str(socket_path),
@@ -218,21 +250,23 @@ def _build_context(args: argparse.Namespace) -> dict[str, str]:
     }
 
 
-def _ensure_dirs(plist_or_unit_path: Path, socket_path: Path, log_dir: Path) -> None:
+def _ensure_dirs(
+    plist_or_unit_path: Path, socket_path: Path, log_dir: Path, runtime_dir: Path,
+) -> None:
     plist_or_unit_path.parent.mkdir(parents=True, exist_ok=True)
     socket_path.parent.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
     # The router daemon's WorkingDirectory (§5 CWD hygiene). Canonically the
     # same dir as socket_path.parent, but created explicitly so a smoke that
     # overrides --socket-path elsewhere still has a valid out-of-tree CWD.
-    RUNTIME_DIR.mkdir(parents=True, mode=0o700, exist_ok=True)
+    runtime_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
 
 
 def _install_launchd(args: argparse.Namespace) -> None:
     plist_path = args.plist_path or default_launchd_plist_path(args.solet_name)
     socket_path = args.socket_path or default_socket_path(args.solet_name)
     log_dir = args.log_dir or LOG_DIR
-    _ensure_dirs(plist_path, socket_path, log_dir)
+    _ensure_dirs(plist_path, socket_path, log_dir, _runtime_dir(args))
     context = _build_context(args)
     plist_path.write_text(render_template(LAUNCHD_TEMPLATE_NAME, context), encoding="utf-8")
     label = launchd_label(args.solet_name)
@@ -270,7 +304,7 @@ def _install_systemd(args: argparse.Namespace) -> None:
     unit_path = args.unit_path or default_systemd_unit_path(args.solet_name)
     socket_path = args.socket_path or default_socket_path(args.solet_name)
     log_dir = args.log_dir or LOG_DIR
-    _ensure_dirs(unit_path, socket_path, log_dir)
+    _ensure_dirs(unit_path, socket_path, log_dir, _runtime_dir(args))
     context = _build_context(args)
     unit_path.write_text(render_template(SYSTEMD_TEMPLATE_NAME, context), encoding="utf-8")
     unit_name = systemd_unit_name(args.solet_name)

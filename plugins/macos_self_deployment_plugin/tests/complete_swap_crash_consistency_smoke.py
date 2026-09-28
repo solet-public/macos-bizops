@@ -48,6 +48,9 @@ sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 
 from ananta.interfaces.lifecycle_result_types import RestartStatus  # noqa: E402
 from macos_self_deployment_plugin import process_identity  # noqa: E402
+from macos_self_deployment_plugin.constants import (  # noqa: E402
+    FINISHER_ESCALATION_NEEDS_INTERVENTION,
+)
 from macos_self_deployment_plugin.heartbeat_lifecycle import (  # noqa: E402
     _CONVERGED_OUTCOMES,
     RECONCILE_SKIPPED_NOT_ACTIVE,
@@ -471,8 +474,9 @@ def test_executor_writes_record_before_swap(tmp: Path) -> None:
         symlink_swap=lambda _c: SwapResult(current=_CANDIDATE_REL, previous="rel-old"),
         prior_color="blue", self_instance_id="example-blue-1", instance_id="example-green-2",
         prior_pid=prior_pid, prior_start_token=prior_start_token,
-        pid=999, reason="b2-smoke", expected_etag="etag",
+        pid=999, start_token=None, reason="b2-smoke", expected_etag="etag",
         compensation_codes=("confirmed", "unconfirmed"),
+        finisher_escalation=FINISHER_ESCALATION_NEEDS_INTERVENTION,
     )
     _check(isinstance(swap, SwapResult), "successful swap returned a SwapResult")
     record = read_pending_finisher(path)
@@ -483,6 +487,10 @@ def test_executor_writes_record_before_swap(tmp: Path) -> None:
     _check(
         record.prior_start_token == prior_start_token,
         "record carries the supplied start-time token (B2·3)",
+    )
+    _check(
+        record.escalation == FINISHER_ESCALATION_NEEDS_INTERVENTION,
+        "record carries the executor's finisher escalation policy (iss_8d1ec833)",
     )
 
 

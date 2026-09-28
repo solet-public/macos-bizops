@@ -18,6 +18,7 @@ from .doctor_inference_qualification import (
 from .doctor_lm_studio_census import collect_lm_studio_advisories
 from .doctor_plugin_version_skew_census import collect_plugin_version_skew_advisories
 from .doctor_postgres_pin_census import collect_postgres_pin_advisories
+from .doctor_release_identity_census import collect_release_identity_advisories
 from .doctor_residue_census import collect_residue_advisories
 from .doctor_router_identity_census import collect_router_identity_advisories
 from .doctor_secret_exposure_census import collect_secret_exposure_advisories
@@ -74,6 +75,7 @@ class InstallationDoctor:
         advisories.extend(collect_residue_advisories(record))
         advisories.extend(collect_blue_green_advisories(record))
         advisories.extend(collect_seed_integrity_advisories(record, transaction))
+        advisories.extend(collect_release_identity_advisories(record, transaction))
         advisories.extend(collect_secret_exposure_advisories(record))
         advisories.extend(collect_genesis_marker_advisories(record))
         advisories.extend(collect_postgres_pin_advisories(record))

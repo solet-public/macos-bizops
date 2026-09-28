@@ -49,7 +49,9 @@ Scope (Cycle 1, structural mode only — no live solet needed):
           D-W-INT-C6-RUNMODE). Loads <repo_root>/root_manifest.yaml +
           delegates to ananta.core.root_manifest.classify_root_entries;
           BLOCKING findings on unknown/missing-universal/sunset-overdue/
-          schema-violation. No-op when manifest absent.
+          schema-violation. No-op when manifest absent. An unknown root
+          entry that Git's index does not track (a lane's scratch file)
+          is reported on stderr, not a finding (iss_ce45713b).
 
 C4.* (IAM-resource-coupled cross-check) is DEFERRED to Cycle 2 per
 operator-approved 2026-06-07 dispatch — needs live registry + bindings
@@ -96,10 +98,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from ananta.core.services.service_interface_decorator import (  # noqa: E402
     is_service_interface_process_enabled,
 )
+
+from quality_gates.allowlist_schema import load_allowlist as _load_tagged_allowlist  # noqa: E402
 
 
 def _rel(path: Path) -> str:
@@ -226,17 +232,16 @@ class Allowlist:
 
 
 def load_allowlist(path: Path) -> Allowlist:
+    """Mandatory owner/reason/expires schema (D-3-structural, iss_23fa51b5)."""
+
     if not path.exists():
         return Allowlist()
     entries: set[AllowlistEntry] = set()
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.split("#", 1)[0].strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split("::", 2)
+    for key in _load_tagged_allowlist(path):
+        parts = key.split("::", 2)
         if len(parts) < 3:
             print(
-                f"WARN: malformed allowlist line (need <check>::<scope>::<spec>): {line!r}",
+                f"WARN: malformed allowlist line (need <check>::<scope>::<spec>): {key!r}",
                 file=sys.stderr,
             )
             continue
@@ -1038,7 +1043,10 @@ def check_root_manifest_drift(repo_root: Path) -> list[Finding]:
     are BLOCKING by default; INFO-only surfaces (C6.3 missing sanctioned,
     cleanup-overdue) are emitted by the dedicated pre-commit consumer at
     ``ananta.core.root_manifest.pre_commit`` and the diagnostic consumer
-    at ``ananta.core.root_manifest.diagnostic``, NOT by this gate.
+    at ``ananta.core.root_manifest.diagnostic``, NOT by this gate.  The one
+    C6.1 surface this gate reports without blocking is an undeclared root
+    entry that Git's index does not track (iss_ce45713b): see
+    :attr:`Classification.tracked_unknown_entries`.
     """
     from ananta.core.root_manifest import MANIFEST_FILENAME, classify_root_entries
 
@@ -1059,12 +1067,23 @@ def check_root_manifest_drift(repo_root: Path) -> list[Finding]:
         # the classification's other fields are empty in that branch.
         return findings
 
-    for name in classification.unknown_entries:
+    # C6.1 blocks on what the repository CARRIES.  An undeclared root entry
+    # that Git's index does not know — a lane's scratch note, a handover
+    # file — is not this landing's drift, or any landing's (iss_ce45713b):
+    # it is reported, never blocking.  When no index could be consulted the
+    # untracked set is empty and every unknown entry blocks, as before.
+    for name in classification.tracked_unknown_entries:
         findings.append(Finding(
             check_id="C6.1", scope_qualifier="root", specifier=name,
             message="root entry not declared in root_manifest.yaml",
             file_path=str(repo_root / name),
         ))
+    if classification.untracked_entries:
+        print(
+            "INFO: C6.1::root — undeclared root entries untracked by git, "
+            f"not blocking: {', '.join(classification.untracked_entries)}",
+            file=sys.stderr,
+        )
     for name in classification.missing_universal:
         findings.append(Finding(
             check_id="C6.2", scope_qualifier="universal", specifier=name,

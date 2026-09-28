@@ -79,3 +79,22 @@ solet_cli/tests/discovered_decision_scenarios.py::_future_model_carrier_scenario
 # reversible if overruled. Remediation contract: extract per-guard-clause
 # helpers; removal is the burn-down unit.
 solet_cli/src/solet_manager/release_observer.py::validate  # owner: fleet-coordinator-seat reason: iss_d2f03248 pre-existing debt surfaced by R35 assembly expires: 2026-12-15
+
+# Surfaced 2026-09-20 (lane-fix-gates-b-ungated-surfaces-20260920, unt_26776365)
+# widening `_PER_FILE_GATE_TOP_LEVEL` to close iss_f99ef8c2/577, iss_7e4169ea/632,
+# iss_17bb31c5/707, iss_2456a716/777: solet_cli/src and solet_cli/tests were
+# previously outside every per-file and whole-tree gate surface, so this is the
+# tree's first-ever coherence-gate measurement of them, not debt this lane
+# introduced. All three below are CC C(11), read independently before listing:
+# `_migrate_answer_values` is a sequential decision-by-decision rewrite loop
+# with two isinstance-dispatch branches (str vs list answer values);
+# `_check_real_and_synthetic_bootstrap` and `_assert_fingerprint_binding` are
+# straight-line smokes, a sequence of independent `_check`/`raise AssertionError`
+# assertions with no shared branching logic -- complexity from assertion COUNT,
+# not from entangled control flow. Recorded as an open decision on this unit,
+# disclosed to the fleet-coordinator seat and Git-Controller in the landing
+# report, reversible if overruled. Remediation contract: extract-method (migration.py) / split into
+# per-assertion helpers (the two smokes); removal is the burn-down unit.
+solet_cli/src/solet_manager/contract_reconciliation.py::_migrate_answer_values  # owner: fleet-coordinator-seat reason: gates-cluster-b-ungated-surfaces (chg_f24592a5) pre-existing debt surfaced by scope widening expires: 2026-12-20
+solet_cli/tests/journal_migration_smoke.py::_check_real_and_synthetic_bootstrap  # owner: fleet-coordinator-seat reason: gates-cluster-b-ungated-surfaces (chg_f24592a5) pre-existing debt surfaced by scope widening expires: 2026-12-20
+solet_cli/tests/permission_preflight_smoke.py::_assert_fingerprint_binding  # owner: fleet-coordinator-seat reason: gates-cluster-b-ungated-surfaces (chg_f24592a5) pre-existing debt surfaced by scope widening expires: 2026-12-20

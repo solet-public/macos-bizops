@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 
 class UsageEconomicsProfileValidationError(ValueError):
@@ -114,6 +114,7 @@ class FlatRateQuotaProfile:
 
 
 type UsageEconomicsProfile = MeteredApiProfile | FlatRateQuotaProfile
+QuotaStatus = Literal["available", "exhausted", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -383,12 +384,52 @@ def load_usage_economics_profile_catalog(
     return UsageEconomicsProfileCatalog(profiles=profiles)
 
 
+def quota_status_for_pair(
+    catalog: UsageEconomicsProfileCatalog,
+    *,
+    runtime: str,
+    model: str,
+) -> QuotaStatus:
+    """Return the fail-closed quota state for one selectable runtime/model pair."""
+    plans = [
+        profile
+        for profile in catalog.profiles
+        if isinstance(profile, FlatRateQuotaProfile) and runtime in profile.included_runtimes
+    ]
+    return _plan_quota_status(plans, runtime=runtime, model=model)
+
+
+def _plan_quota_status(
+    plans: list[FlatRateQuotaProfile], *, runtime: str, model: str,
+) -> QuotaStatus:
+    if not plans:
+        return "available"
+    if len(plans) != 1:
+        return "unknown"
+    return _pool_quota_status(plans[0].allowance_pools, runtime=runtime, model=model)
+
+
+def _pool_quota_status(
+    pools: tuple[AllowancePool, ...], *, runtime: str, model: str,
+) -> QuotaStatus:
+    applicable = [pool for pool in pools if pool.applies(runtime=runtime, model=model)]
+    if not applicable:
+        return "unknown"
+    if any(pool.reading_status != "current" or pool.remaining is None for pool in applicable):
+        return "unknown"
+    if any((remaining := pool.remaining) is not None and remaining <= 0 for pool in applicable):
+        return "exhausted"
+    return "available"
+
+
 __all__ = [
     "AllowancePool",
     "FlatRateQuotaProfile",
     "MeteredApiProfile",
+    "QuotaStatus",
     "UsageEconomicsProfile",
     "UsageEconomicsProfileCatalog",
     "UsageEconomicsProfileValidationError",
     "load_usage_economics_profile_catalog",
+    "quota_status_for_pair",
 ]

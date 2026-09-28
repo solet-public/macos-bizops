@@ -27,13 +27,19 @@ from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 
-from ananta.core.root_manifest import (
+# Smokes run directly from a disposable worktree, whose active virtualenv can
+# still be editable-installed against another checkout.  Test this worktree's
+# sources, including in the subprocesses that exercise the consumer modules.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
+
+from ananta.core.root_manifest import (  # noqa: E402
     MANIFEST_FILENAME,
     classify_root_entries,
     load_manifest,
 )
-from ananta.core.root_manifest.diagnostic import emit_startup_diagnostic
-from ananta.core.root_manifest.types import ENV_EXTRA_IGNORE_PATTERNS
+from ananta.core.root_manifest.diagnostic import emit_startup_diagnostic  # noqa: E402
+from ananta.core.root_manifest.types import ENV_EXTRA_IGNORE_PATTERNS  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fixture builders
@@ -125,6 +131,7 @@ def _run_pre_commit(root: Path) -> tuple[int, str]:
     """Invoke ``python -m ananta.core.root_manifest.pre_commit`` with cwd=root."""
     env = os.environ.copy()
     env.pop(ENV_EXTRA_IGNORE_PATTERNS, None)
+    env["PYTHONPATH"] = str(REPO_ROOT / "ananta" / "src")
     result = subprocess.run(
         [sys.executable, "-m", "ananta.core.root_manifest.pre_commit"],
         cwd=str(root), env=env, capture_output=True, text=True, check=False,
@@ -271,6 +278,100 @@ def case_sunset_enforcement_date_string() -> None:
 
 
 # ---------------------------------------------------------------------------
+# §7.8 — Git-awareness: untracked vs tracked-but-undeclared (iss_ce45713b)
+# ---------------------------------------------------------------------------
+
+def _git(root: Path, *arguments: str) -> None:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(
+        GIT_AUTHOR_NAME="smoke", GIT_AUTHOR_EMAIL="smoke@example.invalid",
+        GIT_COMMITTER_NAME="smoke", GIT_COMMITTER_EMAIL="smoke@example.invalid",
+    )
+    subprocess.run(("git", *arguments), cwd=str(root), env=env,
+                   check=True, capture_output=True)
+
+
+def case_git_awareness_untracked_vs_tracked() -> None:
+    # (a) No Git at all: no index is consulted and every unknown entry is
+    # tracked_unknown — exactly the pure filesystem scan this grew from.
+    with fixture_root() as root:
+        (root / "scratch.md").write_text("lane note\n")
+        classification = classify_root_entries(root / MANIFEST_FILENAME, root)
+        _assert(not classification.git_index_consulted,
+                "a bare directory must report git_index_consulted=False")
+        _assert(classification.untracked_entries == (),
+                f"without git nothing is classed untracked; got {classification.untracked_entries}")
+        _assert(classification.tracked_unknown_entries == ("scratch.md",),
+                f"without git every unknown is tracked_unknown; got "
+                f"{classification.tracked_unknown_entries}")
+
+    with fixture_root() as root:
+        _git(root, "init", "-q")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-qm", "base")
+
+        # (b) An UNTRACKED root file — a lane's scratch note — is unknown but
+        # untracked: has_blocking_violations still holds (pre-commit and the
+        # preflight probe keep their strictness) while tracked_unknown is empty.
+        (root / "scratch.md").write_text("lane note\n")
+        classification = classify_root_entries(root / MANIFEST_FILENAME, root)
+        _assert(classification.git_index_consulted, "a git root must consult the index")
+        _assert(classification.unknown_entries == ("scratch.md",),
+                f"unknown_entries unchanged in meaning; got {classification.unknown_entries}")
+        _assert(classification.untracked_entries == ("scratch.md",),
+                f"the scratch note must be classed untracked; got "
+                f"{classification.untracked_entries}")
+        _assert(classification.tracked_unknown_entries == (),
+                f"an untracked note is not tracked_unknown; got "
+                f"{classification.tracked_unknown_entries}")
+        _assert(classification.has_blocking_violations,
+                "has_blocking_violations must be UNCHANGED by git-awareness")
+        code, stderr = _run_pre_commit(root)
+        _assert(code != 0 and "untracked by git" in stderr,
+                f"pre-commit still blocks and the report names the untracked "
+                f"section; got code={code} stderr={stderr!r}")
+
+        # (c) The DISCRIMINATOR: the same undeclared entry, STAGED (the index
+        # is the boundary, so a file added for this very commit is tracked)
+        # and then committed, is real root-manifest drift and stays
+        # tracked_unknown at both points.
+        _git(root, "add", "scratch.md")
+        classification = classify_root_entries(root / MANIFEST_FILENAME, root)
+        _assert(classification.untracked_entries == (),
+                f"a staged entry is tracked; got untracked {classification.untracked_entries}")
+        _assert(classification.tracked_unknown_entries == ("scratch.md",),
+                f"a staged undeclared entry must stay tracked_unknown; got "
+                f"{classification.tracked_unknown_entries}")
+        _git(root, "commit", "-qm", "undeclared root entry")
+        classification = classify_root_entries(root / MANIFEST_FILENAME, root)
+        _assert(classification.tracked_unknown_entries == ("scratch.md",),
+                f"a committed undeclared entry must stay tracked_unknown; got "
+                f"{classification.tracked_unknown_entries}")
+
+        # (d) A directory whose only contents are untracked is untracked; one
+        # with a single tracked file inside is tracked.
+        (root / "scratch_dir").mkdir()
+        (root / "scratch_dir" / "note.txt").write_text("x\n")
+        (root / "real_dir").mkdir()
+        (root / "real_dir" / "kept.txt").write_text("x\n")
+        _git(root, "add", "real_dir/kept.txt")
+        classification = classify_root_entries(root / MANIFEST_FILENAME, root)
+        _assert(classification.untracked_entries == ("scratch_dir",),
+                f"only the all-untracked directory is untracked; got "
+                f"{classification.untracked_entries}")
+        _assert(classification.tracked_unknown_entries == ("real_dir", "scratch.md"),
+                f"got {classification.tracked_unknown_entries}")
+
+        # (e) A NESTED directory inside the repo is not the git top level:
+        # no index is consulted for it rather than borrowing the parent's.
+        nested = root / "ananta"
+        (nested / MANIFEST_FILENAME).write_text(_BASE_MANIFEST.lstrip())
+        classification = classify_root_entries(nested / MANIFEST_FILENAME, nested)
+        _assert(not classification.git_index_consulted,
+                "a nested directory must not borrow its parent repo's index")
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -282,6 +383,8 @@ CASES = [
     ("§7.5 override missing field fails schema", case_override_missing_field_fails_schema),
     ("§7.6 schema validation fail blocks strict layers", case_schema_validation_fail_blocks_strict_layers),
     ("§7.7 sunset enforcement date-string", case_sunset_enforcement_date_string),
+    ("§7.8 git-awareness: untracked vs tracked-but-undeclared",
+     case_git_awareness_untracked_vs_tracked),
 ]
 
 

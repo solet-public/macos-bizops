@@ -21,6 +21,7 @@ after a cutover), never per heartbeat tick.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from typing import Final
 
@@ -52,4 +53,45 @@ def start_token(pid: int) -> str | None:
     return token
 
 
-__all__ = ["start_token"]
+def process_exited(pid: int) -> bool:
+    """Whether ``pid`` has exited — zombies included.
+
+    ``os.kill(pid, 0)`` on its own quietly gets this wrong. A child that has
+    died but not yet been reaped is a ZOMBIE: it still occupies the process
+    table, so the signal probe succeeds and the corpse reads as perfectly
+    healthy. That is precisely the state the 2026-08-31 spawn hang left behind
+    and a liveness check that cannot see it would be a check in name only.
+    ``waitpid`` with ``WNOHANG`` is what tells a zombie from a live process, and
+    it reaps the corpse as a side effect.
+
+    The order of the two probes is load-bearing:
+
+    * The signal probe runs FIRST so a process already reaped by someone else
+      reads as gone. ``subprocess`` opportunistically reaps garbage-collected
+      ``Popen`` handles whenever any other subprocess is created anywhere in
+      this process, and the swap path deliberately discards its handle — so
+      "reaped by another thread" is a real, reachable state, not a theoretical one.
+    * ``ChildProcessError`` from ``waitpid`` while the pid still exists is left
+      deliberately as ALIVE. That pid is not ours to judge (the finisher's prior
+      is our PARENT, not our child — launchd reaps it, and the signal probe
+      above is what observes that), and a false "died" verdict would abort a
+      perfectly healthy swap — the strictly worse error.
+
+    Shared by the swap candidate teardown (``green_candidate``) and the
+    heartbeat backstop's post-SIGTERM verification (``heartbeat_lifecycle``)
+    so the two cannot drift on what "exited" means.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    try:
+        reaped, _status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        return False
+    return reaped == pid
+
+
+__all__ = ["process_exited", "start_token"]

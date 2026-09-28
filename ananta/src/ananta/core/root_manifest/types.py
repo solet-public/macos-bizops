@@ -55,11 +55,30 @@ class Classification:
     repo_root: Path
     solet_name: str | None
     unknown_entries: tuple[str, ...] = field(default_factory=tuple)
+    untracked_entries: tuple[str, ...] = field(default_factory=tuple)
+    git_index_consulted: bool = False
     missing_universal: tuple[str, ...] = field(default_factory=tuple)
     missing_sanctioned: tuple[str, ...] = field(default_factory=tuple)
     sunset_overdue: tuple[SunsetOverdue, ...] = field(default_factory=tuple)
     cleanup_overdue: tuple[str, ...] = field(default_factory=tuple)
     schema_validation_error: str | None = None
+
+    @property
+    def tracked_unknown_entries(self) -> tuple[str, ...]:
+        """C6.1 entries the repository actually CARRIES (iss_ce45713b).
+
+        ``unknown_entries`` is every undeclared root entry the filesystem
+        scan found.  ``untracked_entries`` is the subset that Git's index
+        does not cover at all — a lane's scratch note, a handover file
+        written thirty seconds ago — which is only known when
+        ``git_index_consulted`` is true.  A landing-time consumer blocks on
+        this difference: the manifest polices what the repository holds,
+        not what happens to be lying beside it.  With no Git index to ask,
+        the two sets are identical and the check is exactly as strict as
+        the pure filesystem scan it grew from.
+        """
+        untracked = set(self.untracked_entries)
+        return tuple(name for name in self.unknown_entries if name not in untracked)
 
     @property
     def has_blocking_violations(self) -> bool:

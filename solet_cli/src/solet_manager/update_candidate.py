@@ -5,14 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
 from .contracts import transition_bundle_filenames
 from .errors import ContractError, SourceError, TransitionContractMismatchError
 from .existing_install_bundle import TransitionBundle, parse_transition_bundle, transition_bundle_digest
+from .models import JsonValue
 from .paths import ManagerPaths, update_candidate_cache
+from .release_identity_gate import require_manager_seed_pairing
 from .seed_lock_parser import SeedLockFields, parse_seed_lock_bytes
 from .state_io import atomic_write_json, ensure_private_directory
 
@@ -35,6 +37,9 @@ class UpdateCandidate:
     bundle: TransitionBundle
     bundle_files: dict[str, bytes]
     cache_status: str = "reused"
+    #: The §7.3 manager<->seed pairing verdict measured at selection, disclosed
+    #: on the preview; a refusing verdict never reaches here (it raises).
+    release_identity: dict[str, JsonValue] = field(default_factory=dict[str, JsonValue])
 
     @property
     def candidate_ref(self) -> str:
@@ -58,6 +63,11 @@ def acquire_update_candidate(
     fields = parse_seed_lock_bytes(descriptor_bytes)
     if fields.channel_id is None or fields.release_tag is None or fields.existing_install_contract is None:
         raise SourceError("update candidate requires an exact seed-lock v3 descriptor")
+    # Design §7.3: the candidate's seed half must pair with the installed
+    # manager half BEFORE any cache or network work -- a skewed pair is
+    # refused here, a recorded skew reason or an unpairable (non-keg) manager
+    # is carried on the candidate and disclosed by the preview.
+    pairing = require_manager_seed_pairing(fields)
     digest = "sha256:" + hashlib.sha256(descriptor_bytes).hexdigest()
     cache = update_candidate_cache(paths, digest)
     receipt_path, repository = cache.receipt, cache.repository
@@ -65,7 +75,7 @@ def acquire_update_candidate(
         receipt_digest = _read_receipt(receipt_path, digest, fields)
         _verify_cached_objects(repository, digest, fields)
         bundle, files = read_transition_bundle(repository, fields)
-        return UpdateCandidate(digest, fields, receipt_digest, bundle, files, "reused")
+        return UpdateCandidate(digest, fields, receipt_digest, bundle, files, "reused", pairing)
     ensure_private_directory(repository.parent)
     if repository.exists():
         raise SourceError("candidate cache repository lacks its immutable receipt")
@@ -85,7 +95,7 @@ def acquire_update_candidate(
     receipt = {"descriptor_digest": digest, "commit": commit, "tree": tree, "repository": fields.repository, "tag": fields.release_tag}
     receipt_digest = "sha256:" + hashlib.sha256(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     atomic_write_json(receipt_path, {**receipt, "receipt_digest": receipt_digest})
-    return UpdateCandidate(digest, fields, receipt_digest, bundle, files, "acquired")
+    return UpdateCandidate(digest, fields, receipt_digest, bundle, files, "acquired", pairing)
 
 
 def read_transition_bundle(repository: Path, fields: SeedLockFields) -> tuple[TransitionBundle, dict[str, bytes]]:

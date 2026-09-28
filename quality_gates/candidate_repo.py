@@ -198,6 +198,46 @@ def _assert_physical(path: Path, *, label: str) -> Path:
     return resolved
 
 
+# Control files a Git process leaves in the shared directory only WHILE it
+# works, and which a copy must therefore never carry (iss_f99ee944).  Every
+# name is a fact about the shared repository's in-flight operation, not about
+# its content: a copied `index.lock` (~2MB measured during a live commit) makes
+# the candidate's own `read-tree` stop on a lock nothing will ever release,
+# a copied `HEAD.lock`/`refs/**.lock` does the same to `symbolic-ref`, and a
+# copied `MERGE_HEAD` turns the candidate's next commit into a MERGE with a
+# second parent it never reviewed.  Enumerated as a class, not at the one site
+# the ladder hit.
+_TRANSIENT_GITDIR_SUFFIX = ".lock"
+_TRANSIENT_GITDIR_TOP_LEVEL = frozenset({
+    "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "MERGE_RR", "MERGE_AUTOSTASH",
+    "AUTO_MERGE", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "SQUASH_MSG",
+    "BISECT_LOG", "BISECT_START", "BISECT_TERMS", "BISECT_EXPECT", "BISECT_RUN",
+    "BISECT_ANCESTORS_OK", "BISECT_NAMES",
+    "sequencer", "rebase-merge", "rebase-apply",
+    "gc.pid",
+})
+_TRANSIENT_OBJECTS_PREFIX = "tmp_"
+
+
+def is_transient_gitdir_entry(relative_directory: Path, name: str) -> bool:
+    """Whether ``name`` inside ``relative_directory`` of a Git directory is
+    in-flight control state that a candidate copy must skip.
+
+    ``relative_directory`` is the entry's parent relative to the Git directory
+    (``Path(".")`` at the top level).  Lock files are transient at ANY depth;
+    the in-progress-operation markers only mean that at the top level; under
+    ``objects/`` only the ``tmp_*`` spellings Git uses for a half-written
+    loose object or pack are transient.
+    """
+
+    if name.endswith(_TRANSIENT_GITDIR_SUFFIX):
+        return True
+    parts = relative_directory.parts
+    if not parts:
+        return name in _TRANSIENT_GITDIR_TOP_LEVEL
+    return parts[0] == "objects" and name.startswith(_TRANSIENT_OBJECTS_PREFIX)
+
+
 def provision_private_git(
     repo_root: Path, candidate: CandidateTree, *, base_ref: str, scope: tuple[str, ...]
 ) -> Path:
@@ -215,13 +255,37 @@ def provision_private_git(
     # holds a `gitdir` pointer naming a path OUTSIDE the candidate, which is
     # the same escape this function already refuses for alternates and
     # core.worktree.  A candidate drives its own tree through GIT_DIR and
-    # GIT_WORK_TREE and never consults them.
-    def _skip_worktree_admin(directory: str, names: list[str]) -> set[str]:
-        if Path(directory) != source_git_dir:
-            return set()
-        return {name for name in names if name == "worktrees"}
+    # GIT_WORK_TREE and never consults them.  Transient control files are
+    # left behind for a different reason: they describe an operation IN
+    # FLIGHT in the shared repository (a Git-Controller commit racing this
+    # materialization), and copying one gives the candidate a lock or a merge
+    # state nothing inside it will ever release.  The shared files themselves
+    # are never touched — skipping the copy is the whole fix.
+    skipped_transient: list[str] = []
 
-    shutil.copytree(source_git_dir, git_dir, symlinks=True, ignore=_skip_worktree_admin)
+    def _skip_admin_and_transient(directory: str, names: list[str]) -> set[str]:
+        relative_directory = Path(directory).relative_to(source_git_dir)
+        skipped = {
+            name for name in names
+            if is_transient_gitdir_entry(relative_directory, name)
+        }
+        skipped_transient.extend(
+            str(relative_directory / name) for name in sorted(skipped)
+        )
+        if not relative_directory.parts:
+            skipped |= {name for name in names if name == "worktrees"}
+        return skipped
+
+    shutil.copytree(
+        source_git_dir, git_dir, symlinks=True, ignore=_skip_admin_and_transient
+    )
+    if skipped_transient:
+        print(
+            "candidate_repo: shared Git directory is mid-operation; "
+            f"{len(skipped_transient)} transient control file(s) not copied "
+            f"into the candidate: {', '.join(skipped_transient)}",
+            file=sys.stderr,
+        )
 
     inherited_index = git_dir / "index"
     if inherited_index.exists():
@@ -272,18 +336,67 @@ def provision_private_git(
         )
 
     # The copy carries the COMMON directory's HEAD, which in a linked worktree
-    # belongs to the main checkout, so it is re-pointed at this tree's own.
-    head_kind, head_value = _head_pointer(repo_root)
-    if head_kind == "ref":
-        candidate_git("symbolic-ref", "HEAD", head_value)
+    # belongs to the main checkout, so it is re-pointed at this tree's own —
+    # UNLESS the tree's own HEAD is not what the candidate's content was built
+    # from. `materialize_candidate_tree` reads its blobs from `base_ref`, not
+    # from `repo_root`'s current HEAD, and the two commonly differ (the
+    # re-homed-candidate-at-master rule builds from a `base_ref` ahead of a
+    # behind-master lane worktree's own HEAD). Re-applying the source HEAD in
+    # that case mislabels the candidate: `git diff --cached` against that HEAD
+    # would see the whole base-gap as staged, and a verifier checking
+    # `HEAD == base_ref` fails on a tree that is actually correct
+    # (iss_bd0f7e17). The candidate's HEAD must describe the content it
+    # actually holds.
+    source_head_kind, source_head_value = _head_pointer(repo_root)
+    source_head_commit = _git(repo_root, "rev-parse", "HEAD").decode().strip()
+    base_commit = _git(repo_root, "rev-parse", f"{base_ref}^{{commit}}").decode().strip()
+    if base_commit == source_head_commit:
+        if source_head_kind == "ref":
+            candidate_git("symbolic-ref", "HEAD", source_head_value)
+        else:
+            candidate_git("update-ref", "--no-deref", "HEAD", source_head_value)
     else:
-        candidate_git("update-ref", "--no-deref", "HEAD", head_value)
+        candidate_git("update-ref", "--no-deref", "HEAD", base_commit)
+        _write_provenance(
+            candidate,
+            source_head_kind=source_head_kind,
+            source_head_value=source_head_value,
+            base_ref=base_ref,
+            base_commit=base_commit,
+        )
 
     # Delete-then-rebuild: the index now describes the base, and adding exactly
     # the scope lands it on the content the worktree already carries.
     candidate_git("read-tree", base_ref)
     candidate_git("add", "--", *scope)
     return git_dir
+
+
+def _write_provenance(
+    candidate: CandidateTree,
+    *,
+    source_head_kind: str,
+    source_head_value: str,
+    base_ref: str,
+    base_commit: str,
+) -> None:
+    """Record the source tree's own HEAD beside a detached-at-base_ref candidate.
+
+    The candidate's Git HEAD is deliberately `base_ref`, not the source
+    worktree's branch, once the two diverge — see `provision_private_git`.
+    This sibling file (outside `candidate.root`, so it is never itself
+    candidate content or part of the manifest) keeps the source branch
+    discoverable for anyone auditing the candidate afterward.
+    """
+
+    provenance = candidate.manifest.parent / "candidate-provenance.txt"
+    provenance.write_text(
+        f"source_head_kind={source_head_kind}\n"
+        f"source_head_value={source_head_value}\n"
+        f"base_ref={base_ref}\n"
+        f"base_commit={base_commit}\n",
+        encoding="utf-8",
+    )
 
 
 def _site_packages(venv: Path) -> Path:
@@ -370,6 +483,23 @@ def _venv_source_root(shared_venv: Path, repo_root: Path) -> Path:
     return owner
 
 
+def _validate_editable_pointers(payload: str, candidate_root: Path, entry_name: str) -> None:
+    """Require every non-blank editable-pth line to be a contained absolute path."""
+    candidate_resolved = candidate_root.resolve()
+    for pointer in payload.splitlines():
+        if not pointer.strip():
+            continue
+        if not Path(pointer).is_absolute():
+            raise CandidateRepoError(
+                f"editable pointer {pointer!r} is not an absolute path in {entry_name}"
+            )
+        if not Path(pointer).resolve().is_relative_to(candidate_resolved):
+            raise CandidateRepoError(
+                f"editable pointer {pointer!r} does not resolve inside the candidate root "
+                f"{candidate_root}: {entry_name}"
+            )
+
+
 def _install_site_packages(
     shared: Path, candidate: Path, source_root: Path, candidate_root: Path
 ) -> int:
@@ -392,20 +522,7 @@ def _install_site_packages(
             continue
         if entry.suffix == ".pth" and entry.name.startswith("__editable__"):
             payload = _rehome(entry.read_text(encoding="utf-8"), source_root, candidate_root)
-            candidate_resolved = candidate_root.resolve()
-            escaping = next(
-                (
-                    pointer
-                    for pointer in payload.splitlines()
-                    if not Path(pointer).resolve().is_relative_to(candidate_resolved)
-                ),
-                None,
-            )
-            if escaping is not None:
-                raise CandidateRepoError(
-                    f"editable pointer {escaping!r} does not resolve inside the candidate root "
-                    f"{candidate_root}: {entry.name}"
-                )
+            _validate_editable_pointers(payload, candidate_root, entry.name)
             destination.write_text(payload, encoding="utf-8")
             rehomed += 1
             continue

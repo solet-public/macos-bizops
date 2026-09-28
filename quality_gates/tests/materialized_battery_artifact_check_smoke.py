@@ -21,11 +21,11 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
-_GATE_DIR = Path(__file__).resolve().parent.parent
-if str(_GATE_DIR) not in sys.path:
-    sys.path.insert(0, str(_GATE_DIR))
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-import materialized_battery_artifact_check as gte13  # noqa: E402
+from quality_gates.lib import materialized_battery_artifact_discriminator as gte13  # noqa: E402
 
 _FAILURES: list[str] = []
 
@@ -241,7 +241,7 @@ def test_main_usage_error_is_64() -> None:
     print("main() maps an argparse usage error to exit 64")
     old_argv = sys.argv
     try:
-        sys.argv = ["materialized_battery_artifact_check.py"]  # missing required args
+        sys.argv = ["materialized_battery_artifact_discriminator.py"]  # missing args
         rc = gte13.main()
     finally:
         sys.argv = old_argv

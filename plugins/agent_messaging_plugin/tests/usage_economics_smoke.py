@@ -28,7 +28,7 @@ from agent_messaging_plugin.usage_economics import (  # noqa: E402
     load_usage_economics_profile_catalog,
 )
 
-AS_OF = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+AS_OF = datetime(2026, 9, 22, 12, 0, tzinfo=UTC)
 
 
 def _action(

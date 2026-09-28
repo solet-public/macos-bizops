@@ -144,6 +144,24 @@ DEFAULT_ROUTER_REQUEST_TIMEOUT_SECONDS: Final[float] = 5.0
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS: Final[float] = 10.0
 DEFAULT_PRIOR_TERM_GRACE_SECONDS: Final[float] = 10.0
 DEFAULT_PRIOR_TERM_POLL_INTERVAL_SECONDS: Final[float] = 0.2
+
+# Post-cutover finisher escalation policy, carried on the durable
+# ``PendingFinisher`` record (iss_8d1ec833, adjudication D1 property
+# ``no_sigkill_reachable_from_this_channel``). An ordinary service-driven swap
+# keeps today's ladder: SIGTERM, grace, then SIGKILL. A swap that entered
+# through the reconciliation/``cutover_release`` channel must never reach
+# signal 9, so on grace overrun its finisher stops, keeps the record and
+# surfaces ``prior_sigterm_timeout_needs_intervention`` instead.
+FINISHER_ESCALATION_SIGKILL_AFTER_GRACE: Final[str] = "sigkill_after_grace"
+FINISHER_ESCALATION_NEEDS_INTERVENTION: Final[str] = "needs_intervention"
+# The heartbeat backstop's per-tick bounded wait for the prior to exit after
+# its SIGTERM. Deliberately much shorter than DEFAULT_PRIOR_TERM_GRACE_SECONDS:
+# the backstop runs ON the heartbeat thread every DEFAULT_HEARTBEAT_INTERVAL
+# tick and retries a still-alive prior on the next tick (SIGTERM again, never
+# SIGKILL), so the per-tick wait only needs to cover a prior that honours
+# SIGTERM (milliseconds) while keeping the heartbeat cadence inside the
+# router's 30s liveness window even with a prior that ignores it.
+DEFAULT_BACKSTOP_TERM_VERIFY_SECONDS: Final[float] = 2.0
 # prepare_for_readiness bounded wait for the router socket. The router is a
 # SEPARATE KeepAlive LaunchAgent that comes up independently of the solet; at a fresh
 # BIRTH both agents load ~simultaneously (RunAtLoad), so the main boot can reach
@@ -370,6 +388,13 @@ class RestartReasonCode(StrEnum):
     # could not complete its clear/restore, so the durable ``current``/
     # ``previous`` pair MAY be incoherent.
     COMPENSATION_INCOMPLETE = "compensation_incomplete"
+    # The rejected candidate (readiness failure, activate error/refusal) was
+    # SIGTERM'd and unregistered but is NOT confirmed gone: it ignored SIGTERM
+    # for the whole grace window (or the signal was denied). This channel never
+    # escalates to SIGKILL (``no_sigkill_reachable_from_this_channel``,
+    # iss_8d1ec833), so the message names pid + instance_id + start_token for
+    # the operator and no second signal is ever sent.
+    CANDIDATE_TERMINATE_TIMEOUT = "candidate_terminate_timeout"
 
 
 def is_valid_color(token: str) -> bool:

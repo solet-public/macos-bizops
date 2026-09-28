@@ -36,15 +36,19 @@ from typing import Protocol
 
 from ananta.interfaces.lifecycle_result_types import RestartResult, RestartStatus
 
+from macos_self_deployment_plugin import process_identity
 from macos_self_deployment_plugin.constants import (
     COMPLETE_SWAP_PROCESS_KEY,
     DEFAULT_POST_ACTIVATE_GRACE_SECONDS,
+    DEFAULT_PRIOR_TERM_GRACE_SECONDS,
+    FINISHER_ESCALATION_SIGKILL_AFTER_GRACE,
     FLOW_ID_PREFIX,
     STATUS_QUEUED,
     RestartReasonCode,
 )
 from macos_self_deployment_plugin.green_candidate import (
     CandidateReadiness,
+    CandidateTeardown,
     GreenCandidate,
 )
 from macos_self_deployment_plugin.pending_finisher import (
@@ -188,6 +192,50 @@ def build_failed_result(
     )
 
 
+def isolate_rejected_candidate(
+    candidate: GreenCandidate, *, pid: int, start_token: str | None,
+    instance_id: str, grace_seconds: float,
+) -> CandidateTeardown:
+    """Bounded SIGTERM + unregister of a rejected candidate (never SIGKILL).
+
+    The one teardown every post-spawn failure leg shares (D-1.7,
+    iss_351345f7): a candidate the router refused, or that never became
+    ready, is signalled once, waited for, and unregistered whatever the
+    signal's outcome, so it can neither linger in the registry nor be
+    SIGKILL'd (iss_8d1ec833).
+    """
+    teardown = candidate.terminate_bounded(
+        pid, start_token=start_token, grace_seconds=grace_seconds,
+    )
+    candidate.unregister(instance_id)
+    return teardown
+
+
+def build_candidate_still_alive_result(
+    *, teardown: CandidateTeardown, next_color: str, next_instance_id: str,
+    pid: int, start_token: str | None, grace_seconds: float, leg: str,
+    reason: str, expected_etag: str, logger: logging.Logger,
+) -> RestartResult:
+    """NEEDS_INTERVENTION for a candidate that outlived its SIGTERM grace.
+
+    No second signal is sent — ``no_sigkill_reachable_from_this_channel``
+    (iss_8d1ec833). The message names everything an operator needs to verify
+    the process before acting on it by hand.
+    """
+    return build_failed_result(
+        status=RestartStatus.NEEDS_INTERVENTION,
+        reason_code=RestartReasonCode.CANDIDATE_TERMINATE_TIMEOUT,
+        message=(
+            f"next color {next_color} rejected on the {leg} leg; candidate "
+            f"pid={pid} instance_id={next_instance_id} start_token={start_token!r} "
+            f"was SIGTERM'd and unregistered but is not confirmed gone "
+            f"(teardown={teardown.value}, grace={grace_seconds}s) — this channel "
+            f"never escalates to SIGKILL; manual intervention required."
+        ),
+        reason=reason, expected_etag=expected_etag, logger=logger,
+    )
+
+
 class SwapExecutor:
     """Drives the spawn → wait → activate → symlink-swap → quiesce → enqueue
     spine shared by forward cutover and durable rollback.
@@ -213,6 +261,7 @@ class SwapExecutor:
         ready_timeout_seconds: int,
         ready_poll_interval_seconds: float,
         post_activate_grace_seconds: float = DEFAULT_POST_ACTIVATE_GRACE_SECONDS,
+        candidate_term_grace_seconds: float = DEFAULT_PRIOR_TERM_GRACE_SECONDS,
     ) -> None:
         self._router = router_client
         self._action_factory = action_factory
@@ -228,6 +277,11 @@ class SwapExecutor:
         self._logger = logger
         self._ready_timeout = ready_timeout_seconds
         self._post_activate_grace = post_activate_grace_seconds
+        # How long a rejected candidate gets to exit after SIGTERM before the
+        # swap surfaces NEEDS_INTERVENTION. There is no escalation past it:
+        # this channel never sends SIGKILL (iss_8d1ec833). Same budget the
+        # finisher grants the prior; smokes shrink it.
+        self._candidate_term_grace = candidate_term_grace_seconds
         self._candidate = GreenCandidate(
             router_client=router_client,
             logger=logger,
@@ -253,6 +307,7 @@ class SwapExecutor:
         spawn_failure: tuple[RestartStatus, str],
         register_failure: tuple[RestartStatus, str],
         compensation_codes: tuple[str, str],
+        finisher_escalation: str = FINISHER_ESCALATION_SIGKILL_AFTER_GRACE,
     ) -> RestartResult:
         """Spawn ``candidate`` as ``next_color``, activate it, swap symlinks,
         quiesce, and enqueue ``complete_swap``; return the typed result.
@@ -270,7 +325,13 @@ class SwapExecutor:
         the (confirmed_code, unconfirmed_code) pair for a post-activate swap
         failure: ``confirmed_code`` pairs with FAILED when the router rollback
         is confirmed (pre-swap pair restored), ``unconfirmed_code`` with
-        NEEDS_INTERVENTION when it is not (candidate LEFT ALIVE).
+        NEEDS_INTERVENTION when it is not (candidate LEFT ALIVE, or SIGTERM'd
+        but still alive at grace expiry — never SIGKILL'd).
+        ``finisher_escalation`` is written onto the durable pending-finisher
+        record (see :class:`PendingFinisher`): the reconciliation channel
+        passes ``needs_intervention`` so the finisher never SIGKILLs the prior.
+        Every post-spawn failure leg tears the candidate down through
+        :func:`isolate_rejected_candidate` (bounded SIGTERM + unregister).
         """
         next_instance_id = _mint_instance_id(next_color)
         spawned = self._spawn_or_fail(
@@ -281,19 +342,33 @@ class SwapExecutor:
         if isinstance(spawned, RestartResult):
             return spawned
         spawned_pid = spawned
+        # Identity captured the instant we own the pid, so every later teardown
+        # can refuse to signal a recycled pid (mirrors the finisher's
+        # ``_signal_verified_prior`` guard on the prior).
+        spawned_start_token = process_identity.start_token(spawned_pid)
 
         readiness = self._candidate.wait_until_registered(
             next_instance_id, pid=spawned_pid,
         )
         if readiness is not CandidateReadiness.REGISTERED:
-            # Kill AND unregister: a registered-but-unhealthy candidate (it
+            # Terminate AND unregister: a registered-but-unhealthy candidate (it
             # passed register but failed the TCP health probe) is in the router's
-            # registry, so killing it without unregistering leaves a stale
+            # registry, so tearing it down without unregistering leaves a stale
             # binding (heartbeat GC self-heals it, but we clean up eagerly).
             # unregister is idempotent — a no-op when the child never registered.
-            # kill is idempotent too — a no-op on an already-dead candidate.
-            self._candidate.kill(spawned_pid)
-            self._candidate.unregister(next_instance_id)
+            # terminate_bounded is idempotent too — ALREADY_GONE on a dead child.
+            teardown = isolate_rejected_candidate(
+                self._candidate, pid=spawned_pid, start_token=spawned_start_token,
+                instance_id=next_instance_id, grace_seconds=self._candidate_term_grace,
+            )
+            if not teardown.candidate_gone:
+                return build_candidate_still_alive_result(
+                    teardown=teardown, next_color=next_color,
+                    next_instance_id=next_instance_id, pid=spawned_pid,
+                    start_token=spawned_start_token, leg="readiness",
+                    grace_seconds=self._candidate_term_grace, reason=reason,
+                    expected_etag=expected_etag, logger=self._logger,
+                )
             if readiness is CandidateReadiness.EXITED:
                 # The candidate DIED rather than merely being slow. The severity
                 # is the same class as never having spawned at all — retryable
@@ -318,15 +393,16 @@ class SwapExecutor:
                 status=register_failure[0], reason_code=register_failure[1],
                 message=(
                     f"next color {next_color} pid={spawned_pid} did not register "
-                    f"with router within {self._ready_timeout}s; SIGKILL + "
-                    f"unregister issued."
+                    f"with router within {self._ready_timeout}s; SIGTERM "
+                    f"(teardown={teardown.value}) + unregister issued."
                 ),
                 reason=reason, expected_etag=expected_etag, logger=self._logger,
             )
 
         activate_result = self._activate_or_fail(
             next_color=next_color, next_instance_id=next_instance_id,
-            pid=spawned_pid, reason=reason, expected_etag=expected_etag,
+            pid=spawned_pid, start_token=spawned_start_token,
+            reason=reason, expected_etag=expected_etag,
         )
         if isinstance(activate_result, RestartResult):
             return activate_result
@@ -337,8 +413,10 @@ class SwapExecutor:
             prior_pid=prior_pid,
             prior_start_token=prior_start_token,
             instance_id=next_instance_id, pid=spawned_pid,
+            start_token=spawned_start_token,
             reason=reason, expected_etag=expected_etag,
             compensation_codes=compensation_codes,
+            finisher_escalation=finisher_escalation,
         )
         if isinstance(swap, RestartResult):
             return swap
@@ -387,40 +465,55 @@ class SwapExecutor:
 
     def _activate_or_fail(
         self, *, next_color: str, next_instance_id: str, pid: int,
-        reason: str, expected_etag: str,
+        start_token: str | None, reason: str, expected_etag: str,
     ) -> dict[str, object] | RestartResult:
+        """``router.activate`` the candidate; on RPC error or refusal, isolate it
+        (D-1.7: the router refuses only a REGISTERED instance, so both legs
+        must unregister, exactly like the readiness leg)."""
         try:
             activate_result = self._router.activate(next_color, next_instance_id)
         except RouterClientError as exc:
-            self._candidate.kill(pid)
-            return build_failed_result(
-                status=RestartStatus.FAILED, reason_code=RestartReasonCode.ACTIVATE_REFUSED,
-                message=f"router activate({next_color}) failed: {exc}",
-                reason=reason, expected_etag=expected_etag, logger=self._logger,
+            failure_detail = f"router activate({next_color}) failed: {exc}"
+        else:
+            if activate_result.get("activated"):
+                self._logger.info(
+                    "activated next color=%s previous_color=%s drain_window=%ss",
+                    next_color,
+                    activate_result.get("previous_color"),
+                    activate_result.get("drain_window_seconds"),
+                )
+                return activate_result
+            failure_detail = (
+                f"router refused activate({next_color}, {next_instance_id}): "
+                f"{activate_result.get('reason', 'unknown')}"
             )
-        if not activate_result.get("activated"):
-            self._candidate.kill(pid)
-            return build_failed_result(
-                status=RestartStatus.FAILED, reason_code=RestartReasonCode.ACTIVATE_REFUSED,
-                message=(
-                    f"router refused activate({next_color}, {next_instance_id}): "
-                    f"{activate_result.get('reason', 'unknown')}"
-                ),
-                reason=reason, expected_etag=expected_etag, logger=self._logger,
-            )
-        self._logger.info(
-            "activated next color=%s previous_color=%s drain_window=%ss",
-            next_color,
-            activate_result.get("previous_color"),
-            activate_result.get("drain_window_seconds"),
+        teardown = isolate_rejected_candidate(
+            self._candidate, pid=pid, start_token=start_token,
+            instance_id=next_instance_id, grace_seconds=self._candidate_term_grace,
         )
-        return activate_result
+        if not teardown.candidate_gone:
+            return build_candidate_still_alive_result(
+                teardown=teardown, next_color=next_color,
+                next_instance_id=next_instance_id, pid=pid,
+                start_token=start_token, leg=f"activate ({failure_detail})",
+                grace_seconds=self._candidate_term_grace, reason=reason,
+                expected_etag=expected_etag, logger=self._logger,
+            )
+        return build_failed_result(
+            status=RestartStatus.FAILED, reason_code=RestartReasonCode.ACTIVATE_REFUSED,
+            message=(
+                f"{failure_detail}; candidate SIGTERM (teardown={teardown.value}) "
+                f"+ unregister issued."
+            ),
+            reason=reason, expected_etag=expected_etag, logger=self._logger,
+        )
 
     def _swap_or_compensate(
         self, *, candidate: CandidatePaths, symlink_swap: SymlinkSwapFn,
         prior_color: str, self_instance_id: str, prior_pid: int,
         prior_start_token: str | None, instance_id: str, pid: int,
-        reason: str, expected_etag: str, compensation_codes: tuple[str, str],
+        start_token: str | None, reason: str, expected_etag: str,
+        compensation_codes: tuple[str, str], finisher_escalation: str,
     ) -> SwapResult | RestartResult:
         """Run the durable symlink swap; on failure compensate + return the
         typed failure (FAILED if compensation restored the pre-swap pair,
@@ -456,6 +549,7 @@ class SwapExecutor:
                 prior_color=prior_color,
                 candidate_release_id=candidate.release_id,
                 prior_start_token=prior_start_token,
+                escalation=finisher_escalation,
             ),
         )
         try:
@@ -471,12 +565,16 @@ class SwapExecutor:
                 prior_instance_id=self_instance_id,
                 instance_id=instance_id,
                 pid=pid,
+                start_token=start_token,
+                grace_seconds=self._candidate_term_grace,
                 exc=exc,
             )
             confirmed_code, unconfirmed_code = compensation_codes
             # F2-iv: a CONFIRMED router rollback restored the pre-swap pair →
             # FAILED (retryable). An UNCONFIRMED rollback left the candidate
             # ALIVE / the durable pair possibly incoherent → NEEDS_INTERVENTION.
+            # A confirmed rollback whose candidate then ignored SIGTERM is the
+            # same ``restored=False`` leg (distinct message, never SIGKILL).
             status, reason_code = (
                 (RestartStatus.FAILED, confirmed_code)
                 if outcome.restored
@@ -637,6 +735,8 @@ __all__ = [
     "SwapExecutor",
     "SymlinkSwapFn",
     "TargetLocalUnavailableActionFactory",
+    "build_candidate_still_alive_result",
     "build_failed_result",
+    "isolate_rejected_candidate",
     "target_local_unavailable_session",
 ]

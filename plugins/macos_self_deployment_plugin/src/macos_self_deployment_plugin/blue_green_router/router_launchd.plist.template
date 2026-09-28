@@ -16,6 +16,8 @@
         <string>${PUBLIC_PORT}</string>
         <string>--socket-path</string>
         <string>${SOCKET_PATH}</string>
+        <string>--runtime-dir</string>
+        <string>${RUNTIME_DIR}</string>
     </array>
     <key>WorkingDirectory</key>
     <string>${WORKING_DIR}</string>

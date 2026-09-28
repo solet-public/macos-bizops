@@ -42,6 +42,7 @@ if str(_GATE_DIR) not in sys.path:
     sys.path.insert(0, str(_GATE_DIR))
 
 import code_quality_check as cqc  # noqa: E402
+import gate_scope  # noqa: E402
 import god_class_check  # noqa: E402
 import radon_cc_check  # noqa: E402
 import radon_mi_check  # noqa: E402
@@ -226,15 +227,52 @@ def test_tracked_filter_is_load_bearing_without_the_name_prune() -> None:
     original = cqc.BUNDLED_VENV_PREFIX
     with _scratch_repo() as root:
         try:
+            # Both name prunes off: the aggregate's own rglob prune and the
+            # one `gate_scope.repo_files` applies (iss_c795a79b). Disabling
+            # only one would let the other stand in for the ignore filter.
             cqc.BUNDLED_VENV_PREFIX = "\0never-matches"
+            gate_scope.BUNDLED_VENV_PREFIX = "\0never-matches"
             mutated = cqc._per_file_gate_paths(root)
         finally:
             cqc.BUNDLED_VENV_PREFIX = original
+            gate_scope.BUNDLED_VENV_PREFIX = original
         leaked = [
             p for p in mutated
             if f"{original}_" in str(p) or f"/{original}/" in str(p)
         ]
         check("no vendored venv files leak through", leaked == [])
+
+
+def test_repo_files_prunes_bundled_venv_by_name_like_its_sibling() -> None:
+    """iss_c795a79b: `repo_files` applies the same bundled-venv name prune as
+    `repo_python_files`, so a venv file the ignore filter admits (force-added,
+    or under an un-ignored venv directory) is out of scope for both.
+
+    Before the fix `repo_python_files` dropped such a file and `repo_files`
+    kept it: the aggregate's own rglob prune hid the disagreement, but any
+    consumer intersecting against `repo_files` alone saw vendored code.
+    """
+    print("repo_files applies the bundled-venv name prune its sibling applies")
+    with _scratch_repo() as root:
+        forced = root / "quality_gates" / ".venv_fixture" / "lib" / "force_tracked.py"
+        forced.write_text("def v() -> None:\n    pass\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "-f", str(forced.relative_to(root))], cwd=str(root),
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+        raw = subprocess.run(
+            ["git", "ls-files", "--cached", "--", "quality_gates"], cwd=str(root),
+            check=True, capture_output=True, text=True, timeout=60,
+        ).stdout
+        check("control: the ignore filter alone ADMITS the force-tracked venv file",
+              ".venv_fixture/lib/force_tracked.py" in raw)
+        sibling = gate_scope.repo_python_files(root / "quality_gates")
+        check("repo_python_files prunes the force-tracked venv file",
+              forced.resolve() not in {p.resolve() for p in sibling})
+        whole = gate_scope.repo_files(root)
+        check("repo_files prunes the same file", forced.resolve() not in whole)
+        check("repo_files still holds the tracked module",
+              (root / "quality_gates" / "tracked_module.py").resolve() in whole)
 
 
 def test_wrappers_expand_directories_to_in_repo_files() -> None:
@@ -287,6 +325,7 @@ def main() -> int:
         test_crash_supersedes_violations,
         test_aggregate_scope_is_in_repo_only,
         test_tracked_filter_is_load_bearing_without_the_name_prune,
+        test_repo_files_prunes_bundled_venv_by_name_like_its_sibling,
         test_wrappers_expand_directories_to_in_repo_files,
         test_wrappers_expose_the_crash_contract,
     ):

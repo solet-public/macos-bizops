@@ -46,8 +46,10 @@ from typing import Any, Final
 
 from macos_self_deployment_plugin import process_identity
 from macos_self_deployment_plugin.constants import (
+    DEFAULT_BACKSTOP_TERM_VERIFY_SECONDS,
     DEFAULT_BRIDGE_PORT_POLL_INTERVAL_SECONDS,
     DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+    DEFAULT_PRIOR_TERM_POLL_INTERVAL_SECONDS,
     DEFAULT_REGISTRATION_POLL_INTERVAL_SECONDS,
     DEFAULT_TRANSIENT_STATE_BUDGET_SECONDS,
     FAILED_REGISTRATION_BOUNDED_WINDOW_EXPIRED,
@@ -563,8 +565,11 @@ def reconcile_pending_finisher(
       innocent process.
     * identity verified (live token matches) → ``TERMINATED_ORPHAN``:
       SIGTERM + unregister, regardless of whether the prior's router drain entry
-      has expired. ``terminate`` returning ``False`` (a transient can't-signal)
-      yields ``TERMINATE_FAILED`` and leaves the record to retry.
+      has expired. ``terminate`` returning ``False`` (a transient can't-signal,
+      OR — production wrapper — the prior still alive when the bounded
+      post-SIGTERM verification expires) yields ``TERMINATE_FAILED`` and leaves
+      the record to retry on the next tick. The backstop never escalates past
+      SIGTERM (``no_sigkill_reachable_from_this_channel``, iss_8d1ec833).
     """
     if record.prior_instance_id == self_instance_id:
         return RECONCILE_SKIPPED_SELF
@@ -625,6 +630,12 @@ def _run_pending_finisher_backstop(
         return
 
     def _terminate(pid: int) -> bool:
+        # ``True`` means the prior is VERIFIED gone, not merely signalled: a
+        # prior that ignores SIGTERM must not let TERMINATED_ORPHAN clear the
+        # record out from under it. The wait is bounded per tick
+        # (DEFAULT_BACKSTOP_TERM_VERIFY_SECONDS) because this runs on the
+        # heartbeat thread; a still-alive prior comes back as TERMINATE_FAILED
+        # with the record kept and is SIGTERM'd again next tick — never SIGKILL.
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -635,7 +646,21 @@ def _run_pending_finisher_backstop(
                 PLUGIN_NAME, pid, exc,
             )
             return False
-        return True
+        deadline = time.monotonic() + DEFAULT_BACKSTOP_TERM_VERIFY_SECONDS
+        while True:
+            if process_identity.process_exited(pid):
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(DEFAULT_PRIOR_TERM_POLL_INTERVAL_SECONDS, remaining))
+        logger.warning(
+            "%s: pending-finisher backstop TERMINATE_TIMEOUT: prior pid=%d still "
+            "alive %.1fs after SIGTERM; record kept, no escalation (never SIGKILL); "
+            "will retry next tick",
+            PLUGIN_NAME, pid, DEFAULT_BACKSTOP_TERM_VERIFY_SECONDS,
+        )
+        return False
 
     def _unregister(instance_id: str) -> None:
         try:

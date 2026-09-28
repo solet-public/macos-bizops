@@ -66,6 +66,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+_REPO_IMPORT_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_IMPORT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_IMPORT_ROOT))
+
+from quality_gates.allowlist_schema import load_allowlist as _load_tagged_allowlist  # noqa: E402
+
 _MIN_CONST = "EMBEDDING_DESCRIPTION_MIN_LENGTH"
 _MAX_CONST = "EMBEDDING_DESCRIPTION_MAX_LENGTH"
 _VALIDATOR_REL = Path(
@@ -135,22 +141,14 @@ def _iter_process_json(roots: list[Path]) -> list[Path]:
 
 
 def _load_allowlist(path: Path) -> frozenset[tuple[str, str]]:
-    if not path.is_file():
-        raise FileNotFoundError(f"allowlist not found: {path}")
+    """Mandatory owner/reason/expires schema (D-3-structural, iss_23fa51b5)."""
+
     entries: set[tuple[str, str]] = set()
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
+    for key in _load_tagged_allowlist(path):
+        if "::" not in key:
+            print(f"WARN: malformed allowlist line ignored: {key!r}", file=sys.stderr)
             continue
-        # Trailing `# ...` annotations are part of the register's readability
-        # (each entry records its measured length); they are not part of the key.
-        line = line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        if "::" not in line:
-            print(f"WARN: malformed allowlist line ignored: {line!r}", file=sys.stderr)
-            continue
-        file_part, _, key_part = line.partition("::")
+        file_part, _, key_part = key.partition("::")
         entries.add((file_part.strip(), key_part.strip()))
     return frozenset(entries)
 

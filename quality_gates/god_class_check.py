@@ -78,6 +78,12 @@ from gate_scope import (
     repo_python_files,
 )
 
+_REPO_IMPORT_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_IMPORT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_IMPORT_ROOT))
+
+from quality_gates.allowlist_schema import load_allowlist as _load_tagged_allowlist  # noqa: E402
+
 _module_path_cache: dict[str, Path | None] = {}
 _abstract_name_cache: dict[Path, frozenset[str]] = {}
 
@@ -423,19 +429,16 @@ def _load_allowlist(path: Path) -> frozenset[tuple[str, str]]:
     report — the gate stays honest about known debt — but they do NOT
     contribute to the exit-2 verdict. Removing an entry from this list
     is the unit of remediation progress.
+
+    Mandatory owner/reason/expires schema (D-3-structural, iss_23fa51b5).
     """
-    if not path.exists():
-        raise FileNotFoundError(f"allowlist file not found: {path}")
     entries: set[tuple[str, str]] = set()
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.split("#", 1)[0].strip()
-        if not line or line.startswith("#"):
-            continue
-        entry_path, separator, class_name = line.rpartition("::")
+    for key in _load_tagged_allowlist(path):
+        entry_path, separator, class_name = key.rpartition("::")
         if not separator or not entry_path or not class_name:
             raise ValueError(
                 "malformed god-class allowlist entry "
-                f"(need <repo-relative-path>::<class-name>): {raw_line!r}"
+                f"(need <repo-relative-path>::<class-name>): {key!r}"
             )
         entries.add((entry_path, class_name))
     return frozenset(entries)

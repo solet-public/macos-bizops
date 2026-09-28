@@ -215,6 +215,33 @@ LANE_CHARTER_ID_PREFIX = "lch"
 TABLE_HELD_AUTHORIZATION = "held_authorization"
 HELD_AUTHORIZATION_ID_PREFIX = "hau"
 
+# Model capability catalog (iss_48ea8171, 2026-09-19 operator directive):
+# the durable, refreshed model x effort -> {capability score, real USD
+# cost-per-task} table behind cost-aware dispatch. Three tables: raw
+# per-source observations (append-only evidence), the reconciled cell a
+# consumer is allowed to read, and one row per refresh run. A cell is
+# served ONLY while `acceptance = accepted` and inside its staleness
+# window; everything else is refused, never quietly served old.
+TABLE_MODEL_CAPABILITY_OBSERVATION = "model_capability_observation"
+MODEL_CAPABILITY_OBSERVATION_ID_PREFIX = "mco"
+TABLE_MODEL_CAPABILITY_CELL = "model_capability_cell"
+MODEL_CAPABILITY_CELL_ID_PREFIX = "mcc"
+TABLE_MODEL_CAPABILITY_REFRESH_RUN = "model_capability_refresh_run"
+MODEL_CAPABILITY_REFRESH_RUN_ID_PREFIX = "mcr"
+
+CELL_ACCEPTANCE_ACCEPTED = "accepted"
+CELL_ACCEPTANCE_PENDING_CROSSCHECK = "pending_crosscheck"
+CELL_ACCEPTANCE_CROSSCHECK_CONFLICT = "crosscheck_conflict"
+CELL_ACCEPTANCE_WITHDRAWN = "withdrawn"
+CELL_ACCEPTANCES: frozenset[str] = frozenset(
+    {
+        CELL_ACCEPTANCE_ACCEPTED,
+        CELL_ACCEPTANCE_PENDING_CROSSCHECK,
+        CELL_ACCEPTANCE_CROSSCHECK_CONFLICT,
+        CELL_ACCEPTANCE_WITHDRAWN,
+    }
+)
+
 # ``session_claude_mapping.capture_source`` domain (ruling 2(c)) — carries
 # the SessionStart hook's own ``source`` field through (the rotation story:
 # a ``hook:clear`` row explains a new UUID on a surviving worker) vs
@@ -766,7 +793,7 @@ def get_managed_session_schema() -> TableSchema:
         table_name=TABLE_MANAGED_SESSION,
         description=(
             "Session lifecycle ledger — identity, lineage, dispatch config, "
-            "host, contract (report-or-die + TTL), and the current-state "
+            "host, independent report contract, and the current-state "
             "lifecycle_state projection (AMEND 2b; full history in "
             "session_transition)."
         ),
@@ -838,7 +865,7 @@ def get_managed_session_schema() -> TableSchema:
             ),
             "dispatch_kind": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description="Required model-dispatch policy kind: diagnose | design | review | fix | infrastructure.",
+                description="Required nonblank unit-kind provenance text; register phase names include design, review, implement, test, and fix. The value does not choose a model pair.",
             ),
             "reviewed_report_vendor": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -847,6 +874,29 @@ def get_managed_session_schema() -> TableSchema:
             "pair_id": ColumnDefinition(
                 type=ColumnType.TEXT,
                 description="For diagnose/design only: cross-vendor producer pair identity.",
+            ),
+            "scope_tags": ColumnDefinition(
+                type=ColumnType.JSON,
+                description=(
+                    "Caller-declared work scope tags (e.g. [\"state_schema\"]) "
+                    "preserved as provenance; the state_schema model floor is retired (rul_0c6ec7c7)."
+                ),
+            ),
+            "capability_floors": ColumnDefinition(
+                type=ColumnType.JSON,
+                description=(
+                    "Every capability floor spawn_session applied to this spawn's model: "
+                    "[{tag, source (declared | brief_marker), detail}]. The audit answer to "
+                    "'which floor governed this model', as a ledger read (iss_63d91ca9)."
+                ),
+            ),
+            "difficulty_score": ColumnDefinition(
+                type=ColumnType.REAL,
+                description="Required numeric difficulty score replayed by the dispatch-tier selector.",
+            ),
+            "selection_receipt": ColumnDefinition(
+                type=ColumnType.JSON,
+                description="Exact selector receipt proving the stored spawn tuple was the cheapest clearing answer.",
             ),
             "effort": ColumnDefinition(
                 type=ColumnType.TEXT, description="Dispatch effort override.",
@@ -984,7 +1034,7 @@ def get_managed_session_schema() -> TableSchema:
             ),
             "expires_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
-                description="TTL from spawn_session's ttl_seconds, if any.",
+                description="Retired session lifetime storage; retained for legacy reconciliation only.",
             ),
             "lifecycle_state": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -1080,6 +1130,7 @@ def get_managed_session_schema() -> TableSchema:
             # before dispatch — indexed so the guard costs one index probe
             # rather than a fleet scan on every spawn.
             IndexDefinition(name="idx_managed_session_local_name", columns=["local_name"]),
+            IndexDefinition(name="idx_managed_session_unit", columns=["unit_id"]),
         ],
     )
 
@@ -1094,11 +1145,16 @@ def get_managed_dispatch_schema() -> TableSchema:
         "work_class": "Work authority classification.",
         "budget_line": "Budget attribution key.",
         "brief_ref": "Exact immutable brief path.",
-        "unit_id": "Optional project-solet work-unit identity resolvable by the spawned lane.",
+        "unit_id": "Register unit identity ensured before spawn.",
         "repository_root": (
             "Optional absolute Git checkout selected for the lane; retained in the immutable "
             "dispatch contract for retries."
         ),
+        # Nullable: rows that predate the register Unit mint (unt_57725090)
+        # carry NULL, which the mint code reads as empty.
+        "unit_mint_state": "How unit_id was ensured: minted, adopted, or verified; empty before.",
+        "unit_mint_key": "Register unit_key pinned at prepare (or the verified Unit's own key).",
+        "unit_repository_id": "Register repository resolved from the lane root, never cwd.",
         "brief_sha256": "SHA-256 of the exact brief bytes.",
         "expected_path": "Exact expected completion artifact.",
         "completion_contract_sha256": "Digest of the structured completion contract.",
@@ -1186,6 +1242,64 @@ def get_managed_dispatch_schema() -> TableSchema:
                 not_null=True,
                 description="Exact host tool allowlist bound before spawn.",
             ),
+            "scope_tags": ColumnDefinition(
+                type=ColumnType.JSON,
+                description=(
+                    "Declared work scope tags carried in the immutable contract so a "
+                    "retry cannot drop provenance, including state_schema (rul_0c6ec7c7)."
+                ),
+            ),
+            # Defaults on the three receipt columns exist for rows that predate
+            # the receipt-enforcement mechanism (iss_1505248c): the deploy
+            # schema preflight refuses a new NOT NULL column with no default as
+            # rollback-unsafe. A legacy row reads exactly like a dispatch that
+            # entered through a non-enforcing path — enforced=False is what
+            # makes ``_selection_fields_from_dispatch`` skip replay and the
+            # retry mismatch check, and 0.0 / {} are the same unset values
+            # that path already persists. {} also fails
+            # ``verify_selection_receipt`` closed (missing required keys), so
+            # a legacy receipt can never be misread as a validated one.
+            "difficulty_score": ColumnDefinition(
+                type=ColumnType.REAL,
+                not_null=True,
+                default=0.0,
+                description=(
+                    "Immutable difficulty score that the spawn receipt must prove. 0.0 is "
+                    "the unset value for a non-enforced or pre-enforcement row; the score is "
+                    "only meaningful when selection_receipt_enforced is true."
+                ),
+            ),
+            "unit_mint_receipt": ColumnDefinition(
+                type=ColumnType.JSON,
+                description="Verbatim psolet receipt for a minted Unit, or the adoption readback.",
+            ),
+            "unit_mint_request": ColumnDefinition(
+                type=ColumnType.JSON,
+                description=(
+                    "Immutable mint inputs pinned at prepare (expected repository_id, "
+                    "addresses, reference basis) so a retry mints exactly the same Unit."
+                ),
+            ),
+            "selection_receipt": ColumnDefinition(
+                type=ColumnType.JSON,
+                not_null=True,
+                default="{}",
+                description=(
+                    "Immutable selector receipt replayed before every dispatch attempt. {} "
+                    "for a non-enforced or pre-enforcement row; an empty receipt never "
+                    "passes verify_selection_receipt."
+                ),
+            ),
+            "selection_receipt_enforced": ColumnDefinition(
+                type=ColumnType.BOOLEAN,
+                not_null=True,
+                default=False,
+                description=(
+                    "Whether this dispatch entered through a public receipt-enforcing path. "
+                    "False for rows that predate enforcement: the receipt is not applicable, "
+                    "not refused."
+                ),
+            ),
             "allow_askuserquestion": ColumnDefinition(
                 type=ColumnType.BOOLEAN,
                 not_null=True,
@@ -1203,8 +1317,10 @@ def get_managed_dispatch_schema() -> TableSchema:
             ),
             "ttl_seconds": ColumnDefinition(
                 type=ColumnType.INTEGER,
-                not_null=True,
-                description="Attempt-level TTL window passed to the host lifecycle.",
+                description=(
+                    "Retired attempt lifetime storage; retained nullable for legacy "
+                    "reconciliation. Current writers omit this value."
+                ),
             ),
             "attempt_number": ColumnDefinition(
                 type=ColumnType.INTEGER,
@@ -1259,8 +1375,9 @@ def get_managed_dispatch_schema() -> TableSchema:
     ):
         columns[name] = ColumnDefinition(
             type=ColumnType.DATETIME,
-            not_null=name in {"uptake_due_at", "report_by", "watchdog_due_at", "expires_at"},
-            description=f"Managed-dispatch timestamp: {name}.",
+            not_null=name in {"uptake_due_at", "report_by", "watchdog_due_at"},
+            description=("Retired lifetime timestamp; legacy reconciliation only."
+                         if name == "expires_at" else f"Managed-dispatch timestamp: {name}."),
         )
     for name in (
         "uptake_due_at_window_seconds",
@@ -1270,8 +1387,10 @@ def get_managed_dispatch_schema() -> TableSchema:
     ):
         columns[name] = ColumnDefinition(
             type=ColumnType.INTEGER,
-            not_null=True,
-            description=f"Immutable retry window derived at prepare: {name}.",
+            not_null=name != "expires_at_window_seconds",
+            description=("Retired lifetime window; legacy reconciliation only."
+                         if name == "expires_at_window_seconds"
+                         else f"Immutable retry window derived at prepare: {name}."),
         )
     return TableSchema(
         table_name=TABLE_MANAGED_DISPATCH,
@@ -1288,6 +1407,8 @@ def get_managed_dispatch_schema() -> TableSchema:
                 name="idx_managed_dispatch_current",
                 columns=["current_agent_instance_id"],
             ),
+            # "Which dispatches ever carried this Unit" is a lookup (s4.8).
+            IndexDefinition(name="idx_managed_dispatch_unit", columns=["unit_id"]),
         ],
     )
 
@@ -2616,6 +2737,130 @@ def get_held_authorization_schema() -> TableSchema:
     )
 
 
+def _text_column(description: str, *, not_null: bool = True) -> ColumnDefinition:
+    return ColumnDefinition(type=ColumnType.TEXT, not_null=not_null, description=description)
+
+
+def _real_column(description: str) -> ColumnDefinition:
+    return ColumnDefinition(type=ColumnType.REAL, not_null=False, description=description)
+
+
+def _cell_identity_columns() -> dict[str, ColumnDefinition]:
+    """(provider, runtime, model, effort) — the key every catalog table shares."""
+    return {
+        "provider": _text_column("Vendor: anthropic | openai."),
+        "runtime": _text_column("Agent runtime as model_profiles/ names it: claude_code | codex."),
+        "model": _text_column("Canonical model id as model_dispatch_policy.v1.json names it."),
+        "effort": _text_column(
+            "Effort tier: non_reasoning | none | low | medium | high | xhigh | max. "
+            "non_reasoning where the model has no dial."
+        ),
+    }
+
+
+def get_model_capability_observation_schema() -> TableSchema:
+    """`model_capability_observation` — append-only raw fetches (iss_48ea8171 §3.1).
+
+    One row per (source, metric, cell) per refresh run, never updated. The
+    `fetch_method` column is the re-runnable recipe verbatim, because the
+    2026-09-19 reconciliation showed three fetches of the same number
+    disagreeing; a number without its fetch is not evidence.
+    """
+    return TableSchema(
+        table_name=TABLE_MODEL_CAPABILITY_OBSERVATION,
+        description="Raw per-source model capability and price observations; append-only evidence.",
+        id_prefix=MODEL_CAPABILITY_OBSERVATION_ID_PREFIX,
+        columns={
+            "refresh_run_id": _text_column("The model_capability_refresh_run this fetch belongs to."),
+            "source_id": _text_column(
+                "artificial_analysis_api | artificial_analysis_leaderboard_html | "
+                "openai_model_docs | anthropic_pricing_page | seed_table."
+            ),
+            "fetch_method": _text_column("Verbatim recipe: URL, method, non-secret headers, parser id and version."),
+            "fetched_at": _text_column("ISO-8601 UTC timestamp of the fetch."),
+            **_cell_identity_columns(),
+            "metric": _text_column(
+                "intelligence_index | cost_per_task_usd | input_per_mtok | output_per_mtok | "
+                "cached_input_per_mtok | effort_supported | default_effort."
+            ),
+            "value_number": _real_column("The numeric reading, for numeric metrics."),
+            "value_text": _text_column("The textual reading (effort lists, default effort).", not_null=False),
+            "raw_excerpt": _text_column("At most 512 characters of source around the number.", not_null=False),
+            "fetch_status": _text_column("ok | http_error | parse_error | not_listed."),
+        },
+        indexes=[
+            IndexDefinition(name="idx_model_capability_observation_run", columns=["refresh_run_id"]),
+            IndexDefinition(name="idx_model_capability_observation_cell", columns=["runtime", "model", "effort"]),
+        ],
+    )
+
+
+def get_model_capability_cell_schema() -> TableSchema:
+    """`model_capability_cell` — the served, reconciled table (iss_48ea8171 §3.2).
+
+    Unique on (runtime, model, effort); updated in place by reconciliation
+    only, history lives in the observation table. `acceptance` and
+    `measured_at` together decide whether a consumer may read the cell.
+    """
+    return TableSchema(
+        table_name=TABLE_MODEL_CAPABILITY_CELL,
+        description="Reconciled model x effort capability score and real USD cost-per-task, served to dispatch.",
+        id_prefix=MODEL_CAPABILITY_CELL_ID_PREFIX,
+        columns={
+            **_cell_identity_columns(),
+            "capability_score": _real_column("Artificial Analysis Intelligence Index, 0-100."),
+            "cost_per_task_usd": _real_column("Artificial Analysis cost-per-task in USD at this effort."),
+            "relative_cost_multiplier": _real_column("cost_per_task_usd over the cheapest accepted cell; derived at reconcile time."),
+            "currency": _text_column("Always USD today; a column so it is never assumed."),
+            "effort_supported": ColumnDefinition(
+                type=ColumnType.BOOLEAN, not_null=True,
+                description="Whether the vendor documentation lists this effort for this model.",
+            ),
+            "measured_at": _text_column("fetched_at of the newest agreeing observation; null until any.", not_null=False),
+            "accepted_at": _text_column("When the current values passed cross-check; null until then.", not_null=False),
+            "acceptance": _text_column("accepted | pending_crosscheck | crosscheck_conflict | withdrawn."),
+            "agreeing_observation_ids": ColumnDefinition(
+                type=ColumnType.JSON, not_null=True,
+                description="The observation ids that agreed; [] while pending.",
+            ),
+            "disagreement_note": _text_column("Which sources said what, when in conflict.", not_null=False),
+            "staleness_window_hours": ColumnDefinition(
+                type=ColumnType.INTEGER, not_null=True,
+                description="Window copied from the run config so a consumer refuses without re-reading config.",
+            ),
+            "last_refresh_run_id": _text_column("The run that last touched this cell."),
+        },
+        indexes=[
+            IndexDefinition(name="idx_model_capability_cell_key", columns=["runtime", "model", "effort"], unique=True),
+            IndexDefinition(name="idx_model_capability_cell_acceptance", columns=["acceptance"]),
+        ],
+    )
+
+
+def get_model_capability_refresh_run_schema() -> TableSchema:
+    """`model_capability_refresh_run` — one row per refresh fire (iss_48ea8171 §3.3)."""
+    return TableSchema(
+        table_name=TABLE_MODEL_CAPABILITY_REFRESH_RUN,
+        description="One model-capability refresh run: trigger, status, per-source outcome and cell counts.",
+        id_prefix=MODEL_CAPABILITY_REFRESH_RUN_ID_PREFIX,
+        columns={
+            "started_at": _text_column("ISO-8601 UTC start."),
+            "finished_at": _text_column("ISO-8601 UTC finish; null while running.", not_null=False),
+            "trigger": _text_column("cron | manual | policy_change | seed."),
+            "status": _text_column("running | completed | failed."),
+            "sources_ok": ColumnDefinition(type=ColumnType.JSON, not_null=True, description="Source ids that fetched cleanly."),
+            "sources_failed": ColumnDefinition(type=ColumnType.JSON, not_null=True, description="Source ids that failed, with reason."),
+            "cells_accepted": ColumnDefinition(type=ColumnType.INTEGER, not_null=True, description="Cells accepted by this run."),
+            "cells_conflicted": ColumnDefinition(type=ColumnType.INTEGER, not_null=True, description="Cells left in crosscheck_conflict."),
+            "cells_unchanged": ColumnDefinition(type=ColumnType.INTEGER, not_null=True, description="Cells whose values did not move."),
+            "note": _text_column("Free-text outcome, e.g. why a run failed.", not_null=False),
+        },
+        indexes=[
+            IndexDefinition(name="idx_model_capability_refresh_run_started", columns=["started_at"]),
+        ],
+    )
+
+
 def get_session_lifecycle_schema_definition() -> SchemaDefinition:
     """Wrap the D1 L0 schema deltas (§3.2-3.4 + the AMEND-4b cardinality row)
     for ``get_schema_definitions``. Same namespace as the rest of this plugin's
@@ -2624,7 +2869,7 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
     D1 is land-able alone)."""
     return SchemaDefinition(
         namespace=AGENT_ROLE_BINDING_NAMESPACE,
-        version="1.10.0",
+        version="1.12.0",
         description=(
             "Fleet session-management Phase B, D1 — L0 schema deltas. "
             "+1.1.0: session_context_status (maintenance-verbs M1). "
@@ -2638,7 +2883,10 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
             "C, the honesty field). +1.9.0: managed_session.lane_repo_root and "
             "managed_dispatch.repository_root retain the foreign lane checkout root. "
             "+1.10.0: append-only deployment-native Phase-A fleet-liveness and "
-            "Phase-B per-workstream progress records."
+            "Phase-B per-workstream progress records. +1.11.0: model capability "
+            "catalog (observation, cell, refresh_run) for cost-aware dispatch. "
+            "+1.12.0: nullable legacy managed-dispatch TTL storage for the F1 "
+            "blue/green compatibility bridge; current writers remain unchanged."
         ),
         tables={
             TABLE_SESSION_ROLE_CLAIM: get_session_role_claim_schema(),
@@ -2660,6 +2908,9 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
             TABLE_GAUGE_CANARY_TAMPER: get_gauge_canary_tamper_schema(),
             TABLE_FLEET_LIVENESS_RUN: get_fleet_liveness_run_schema(),
             TABLE_FLEET_PROGRESS_RUN: get_fleet_progress_run_schema(),
+            TABLE_MODEL_CAPABILITY_OBSERVATION: get_model_capability_observation_schema(),
+            TABLE_MODEL_CAPABILITY_CELL: get_model_capability_cell_schema(),
+            TABLE_MODEL_CAPABILITY_REFRESH_RUN: get_model_capability_refresh_run_schema(),
         },
     )
 
@@ -2690,6 +2941,14 @@ __all__ = [
     "LIFECYCLE_TERMINATED",
     "LIFECYCLE_TRANSITIONS",
     "MANAGED_SESSION_ID_PREFIX",
+    "MODEL_CAPABILITY_CELL_ID_PREFIX",
+    "MODEL_CAPABILITY_OBSERVATION_ID_PREFIX",
+    "MODEL_CAPABILITY_REFRESH_RUN_ID_PREFIX",
+    "CELL_ACCEPTANCES",
+    "CELL_ACCEPTANCE_ACCEPTED",
+    "CELL_ACCEPTANCE_CROSSCHECK_CONFLICT",
+    "CELL_ACCEPTANCE_PENDING_CROSSCHECK",
+    "CELL_ACCEPTANCE_WITHDRAWN",
     "MANAGED_DISPATCH_EVENT_ID_PREFIX",
     "MANAGED_DISPATCH_ID_PREFIX",
     "NOTICE_DELIVERY_APPENDED",
@@ -2717,6 +2976,9 @@ __all__ = [
     "TABLE_GAUGE_NOTICE_RECORD",
     "TABLE_FLEET_LIVENESS_RUN",
     "TABLE_FLEET_PROGRESS_RUN",
+    "TABLE_MODEL_CAPABILITY_CELL",
+    "TABLE_MODEL_CAPABILITY_OBSERVATION",
+    "TABLE_MODEL_CAPABILITY_REFRESH_RUN",
     "TABLE_HELD_AUTHORIZATION",
     "TABLE_INBOX_CONSUMPTION_STATUS",
     "TABLE_LANE_CHARTER",
@@ -2739,6 +3001,9 @@ __all__ = [
     "get_gauge_notice_record_schema",
     "get_fleet_liveness_run_schema",
     "get_fleet_progress_run_schema",
+    "get_model_capability_cell_schema",
+    "get_model_capability_observation_schema",
+    "get_model_capability_refresh_run_schema",
     "get_held_authorization_schema",
     "get_lane_charter_schema",
     "get_managed_session_schema",

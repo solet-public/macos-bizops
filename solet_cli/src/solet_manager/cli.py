@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .adapter_reconciliation import AdapterReconciliationManager
+from .attest import AttestRequest, run_attest
 from .cli_commands import (
     parse_decisions as _parse_decisions,
 )
@@ -114,6 +115,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor.add_argument("name")
     doctor.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    attest = commands.add_parser(
+        "attest",
+        help="Write installation_attestation.json: real hashes of the installed manager, "
+        "seed checkout, running process and host, compared to the release manifest.",
+    )
+    attest.add_argument("name", nargs="?", help="One managed instance; default: every registered instance.")
+    attest.add_argument("--against", help="A release_manifest.json path, or a manager release tag.")
+    attest.add_argument(
+        "--release-repository",
+        help="OWNER/REPO holding the manager releases; required when --against names a tag.",
+    )
+    attest.add_argument("--output", type=Path, help="Where to write the attestation (default: manager state).")
+    attest.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     inspect = commands.add_parser(
         "inspect",
         help="Passively inspect a seed-built target by filesystem path.",
@@ -180,11 +194,8 @@ def run(argv: Sequence[str] | None = None) -> CommandResult:
         return LifecycleManager(paths).status(args.name, candidate_target=candidate)
     if args.command == "start":
         return LifecycleManager(paths).start(args.name)
-    if args.command == "doctor":
-        return InstallationDoctor(
-            paths=paths,
-            contract_directory=args.contract_dir,
-        ).run(args.name)
+    if args.command in {"doctor", "attest"}:
+        return _run_diagnostic_command(args, paths)
     if args.command == "repair":
         return RollbackRepairExecutor(paths).run(
             args.failure_record,
@@ -195,6 +206,17 @@ def run(argv: Sequence[str] | None = None) -> CommandResult:
     if args.command == "create":
         return run_create_command(args, paths, CreateManager)
     raise AssertionError(f"unhandled command: {args.command}")
+
+
+def _run_diagnostic_command(args: argparse.Namespace, paths: ManagerPaths) -> CommandResult:
+    if args.command == "doctor":
+        return InstallationDoctor(
+            paths=paths,
+            contract_directory=args.contract_dir,
+        ).run(args.name)
+    return run_attest(
+        AttestRequest(paths, args.name, args.against, args.release_repository, args.output)
+    )
 
 
 def _run_reconcile_contract(args: argparse.Namespace, paths: ManagerPaths) -> CommandResult:

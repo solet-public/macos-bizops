@@ -69,12 +69,24 @@ def _run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _build_seed_fixture(root: Path, checkout_name: str = "seed-checkout") -> Path:
+    """Two commits, deliberately (mirrors `stage_release_smoke.py`'s own
+    fixture): the first ("manager content") carries everything the manager
+    side needs; PROVENANCE.json, added in the second ("seed release", tagged
+    here), declares that first commit's hash as its own `source_commit` --
+    the only way to satisfy `_require_same_source_revision` without being
+    self-referential (a commit's hash cannot appear as plaintext inside its
+    own tree). The checkout is left detached back at the first commit so
+    `${{ github.sha }}` (this checkout's HEAD, substituted below) resolves
+    to it, matching what PROVENANCE.json declares.
+    """
     checkout = root / checkout_name
     checkout.mkdir()
     for name in ("LICENSE", "NOTICE"):
         (checkout / name).write_bytes((_REPOSITORY / name).read_bytes())
     (checkout / "solet_cli" / "homebrew").mkdir(parents=True)
     (checkout / "solet_cli" / "pyproject.toml").write_text('[project]\nname = "solet-cli"\nversion = "0.1.0"\n', encoding="utf-8")
+    (checkout / "solet_cli" / "src" / "solet_manager").mkdir(parents=True)
+    (checkout / "solet_cli" / "src" / "solet_manager" / "models.py").write_text('MANAGER_VERSION = "0.1.0"\n', encoding="utf-8")
     (checkout / "solet_cli" / "src.marker").write_text("manager source\n", encoding="utf-8")
     (checkout / "solet_cli" / "homebrew" / "seed.lock.json.template").write_text("{}\n", encoding="utf-8")
     (checkout / "solet_setup_contracts").mkdir()
@@ -90,13 +102,18 @@ def _build_seed_fixture(root: Path, checkout_name: str = "seed-checkout") -> Pat
     (contracts / "existing_install_flow.json").write_text(
         '{"flow_id": "existing-install", "schema_version": 1}\n', encoding="utf-8"
     )
+    _run_git(checkout, "init", "-q")
+    _run_git(checkout, "add", "-A")
+    _run_git(checkout, "commit", "-q", "-m", "manager content")
+    manager_commit = _run_git(checkout, "rev-parse", "HEAD").stdout.strip()
+
     (checkout / "PROVENANCE.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
                 "seed_id": "123e4567-e89b-12d3-a456-426614174000",
                 "origin_id": "123e4567-e89b-12d3-a456-426614174001",
-                "source_commit": "a" * 40,
+                "source_commit": manager_commit,
                 "manifest_sha256": "b" * 64,
                 "bundle": {"name": "macos-bizops", "platform": "local"},
                 "source_date": "2026-09-15T00:00:00+00:00",
@@ -110,10 +127,10 @@ def _build_seed_fixture(root: Path, checkout_name: str = "seed-checkout") -> Pat
         + "\n",
         encoding="utf-8",
     )
-    _run_git(checkout, "init", "-q")
-    _run_git(checkout, "add", "-A")
-    _run_git(checkout, "commit", "-q", "-m", "seed fixture")
+    _run_git(checkout, "add", "PROVENANCE.json")
+    _run_git(checkout, "commit", "-q", "-m", "seed release")
     _run_git(checkout, "tag", _RELEASE_TAG)
+    _run_git(checkout, "checkout", "-q", manager_commit)
     return checkout
 
 

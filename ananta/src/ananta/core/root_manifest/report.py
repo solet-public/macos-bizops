@@ -15,6 +15,9 @@ def format_report(classification: Classification, *, severity: str) -> str:
     _append_schema_section(lines, classification.schema_validation_error)
     _append_named_section(lines, "Unknown entries (not declared in manifest):",
                           classification.unknown_entries)
+    _append_named_section(lines, "  of which untracked by git (no index entry; the "
+                          "W-INT landing gate reports these without blocking):",
+                          classification.untracked_entries)
     _append_named_section(lines, "Missing universal entries (declared but not present in tree):",
                           classification.missing_universal)
     _append_named_section(lines, "Sanctioned entries declared but absent (INFO):",

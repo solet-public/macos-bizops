@@ -50,6 +50,12 @@ from gate_scope import (
 )
 from radon.metrics import mi_rank, mi_visit
 
+_REPO_IMPORT_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_IMPORT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_IMPORT_ROOT))
+
+from quality_gates.allowlist_schema import load_allowlist as _load_tagged_allowlist  # noqa: E402
+
 
 def _has_platform_process_decorator(
     method: ast.FunctionDef | ast.AsyncFunctionDef,
@@ -151,7 +157,8 @@ def _expand_targets(raw_paths: list[str]) -> list[Path]:
 
 
 def _load_allowlist(path: Path) -> frozenset[str]:
-    """Read a file-path allowlist file (one path per line; `#` comments).
+    """Read a file-path allowlist file under the mandatory owner/reason/expires
+    schema (D-3-structural, iss_23fa51b5).
 
     Paths are matched as POSIX-string suffixes against the candidate
     file's resolved path — entries can be repo-relative
@@ -162,15 +169,7 @@ def _load_allowlist(path: Path) -> frozenset[str]:
     shipped tree). Allowlisted findings are still printed in
     the report but do NOT contribute to the exit-2 verdict.
     """
-    if not path.exists():
-        raise FileNotFoundError(f"allowlist file not found: {path}")
-    paths: set[str] = set()
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.split("#", 1)[0].strip()
-        if not line or line.startswith("#"):
-            continue
-        paths.add(line)
-    return frozenset(paths)
+    return frozenset(_load_tagged_allowlist(path))
 
 
 def _path_is_allowlisted(path: Path, allowlist: frozenset[str]) -> bool:

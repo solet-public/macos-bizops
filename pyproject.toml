@@ -54,6 +54,13 @@ extend-exclude = [
 ]
 force-exclude = true
 
+# ⚠️  IMPORTANT: `ruff check <path>` without `--config` silently discovers
+# plugin-local pyproject.toml files instead of this root config, applying
+# weak defaults instead of the explicit select = [...] below. Always use
+# quality_gates/ruff_repo.sh (which pins the repo's interpreter and config)
+# for ad hoc ruff checks, regardless of cwd or file path.
+# See iss_d2d0cda4.
+
 [tool.ruff.lint]
 select = [
     "E",   # pycodestyle errors
@@ -151,6 +158,7 @@ extraPaths = [
     "plugins/discord_plugin/src",
     "plugins/external_postgres_plugin/src",
     "plugins/external_app_client_plugin/src",
+    "plugins/fleet_maintenance_plugin/src",
     "plugins/g_suite_plugin/src",
     "plugins/generative_composition_plugin/src",
     "plugins/github_midwife_plugin/src",
@@ -189,7 +197,7 @@ extraPaths = [
     "plugins/zuora_plugin/src",
 ]
 
-include = ["ananta/src", "plugins", "initialization/src", "quality_gates"]
+include = ["ananta/src", "plugins", "initialization/src", "quality_gates", "bootstrap_adapter"]
 exclude = [
     "**/tests",
     # RULING (reviewing seat, 2026-08-08):

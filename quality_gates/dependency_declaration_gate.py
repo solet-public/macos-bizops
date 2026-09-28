@@ -67,6 +67,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+_REPO_IMPORT_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_IMPORT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_IMPORT_ROOT))
+
+from quality_gates.allowlist_schema import load_allowlist as _load_tagged_allowlist  # noqa: E402
+
 _PACKAGE_NAME = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 _SKIP_DIRS = frozenset({"__pycache__", ".git", ".mypy_cache", ".pytest_cache"})
 _STDLIB_IMPORT_ROOTS = frozenset(name.lower() for name in sys.stdlib_module_names)
@@ -297,26 +303,18 @@ def _has_optional_capability_marker(source_lines: list[str], line: int) -> bool:
 def _load_allowlist(path: Path) -> frozenset[tuple[str, str]]:
     """Read a `<package>::<import_root>` allowlist file.
 
-    Per-line format: ``<package>::<import_root>  # trailing note``, blank
-    lines and full-line ``#`` comments ignored. The key is content-anchored
-    (package + import root), not line number, so it survives the source
-    moving around while the package is still missing the same declaration.
-    A trailing ``# ...`` note (e.g. ``# migrate-with: <wave>``) is stripped
-    before the ``::`` split, matching ``sql_access_gate.py``'s convention.
+    The key is content-anchored (package + import root), not line number,
+    so it survives the source moving around while the package is still
+    missing the same declaration. Mandatory owner/reason/expires schema
+    (D-3-structural, iss_23fa51b5).
     """
 
-    if not path.exists():
-        raise FileNotFoundError(f"allowlist file not found: {path}")
     entries: set[tuple[str, str]] = set()
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
+    for key in _load_tagged_allowlist(path):
+        if "::" not in key:
+            print(f"WARN: malformed allowlist line (missing '::'): {key!r}", file=sys.stderr)
             continue
-        body, _, _note = line.partition("#")
-        if "::" not in body:
-            print(f"WARN: malformed allowlist line (missing '::'): {line!r}", file=sys.stderr)
-            continue
-        package_part, root_part = body.split("::", 1)
+        package_part, root_part = key.split("::", 1)
         entries.add((package_part.strip(), root_part.strip()))
     return frozenset(entries)
 

@@ -63,7 +63,9 @@ def _check_undeclared_license_blocks() -> None:
             exit_code = gate.main([])
             allowlist_path = root / "allowlist.txt"
             allowlist_path.write_text(
-                "B0 fixture_bundle::missing_license_plugin\n", encoding="utf-8"
+                "B0 fixture_bundle::missing_license_plugin"
+                "  # owner: smoke-fixture reason: tracked test debt expires: 2099-01-01\n",
+                encoding="utf-8",
             )
             allowlisted_exit_code = gate.main(["--allowlist", str(allowlist_path)])
 

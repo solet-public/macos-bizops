@@ -101,7 +101,7 @@ def _resolve_default_cwd() -> Path:
     working directory has no guaranteed relationship to the checkout at all
     (observed live: a deployed colour's cwd was ``~/.ananta/runtime``, a pure
     state/spool directory with no ``.mcp.json`` or source in it). Mirrors
-    ``seed_factory_plugin.assemble._resolve_default_repo_root`` /
+    ``seed_factory_plugin.assemble.resolve_default_repo_root`` /
     ``macos_self_deployment_plugin``'s ``_resolve_project_root_for_autostart``
     -- same validated pattern, duplicated rather than cross-imported (adapted
     binding, shared contract, not a plugin-to-plugin dependency, same

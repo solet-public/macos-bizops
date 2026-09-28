@@ -24,6 +24,7 @@ Exit codes:
       blocking structural gate: god_class_check / radon_cc_check /
       radon_mi_check / whole_tree_integration_gate /
       service_interface_ast_check / return_shape_gate / bundle_license_gate;
+      flow_probe_registry_gate;
       the summary
       line names the specific failing gate(s))
 
@@ -66,6 +67,8 @@ _RADON_MI_CHECK = _QUALITY_GATES_DIR / "radon_mi_check.py"
 _RADON_MI_ALLOWLIST = _QUALITY_GATES_DIR / "radon_mi_allowlist.txt"
 _W_INT_CHECK = _QUALITY_GATES_DIR / "whole_tree_integration_gate.py"
 _W_INT_ALLOWLIST = _QUALITY_GATES_DIR / "whole_tree_integration_gate_allowlist.txt"
+_FLOW_PROBE_REGISTRY_CHECK = _QUALITY_GATES_DIR / "flow_probe_registry_gate.py"
+_FLOW_PROBE_REGISTRY_ALLOWLIST = _QUALITY_GATES_DIR / "flow_probe_registry_gate_allowlist.txt"
 _W_WINT2_CHECK = _QUALITY_GATES_DIR / "wint2_driver_import_check.py"
 _W_WINT2_ALLOWLIST = _QUALITY_GATES_DIR / "wint2_driver_import_allowlist.txt"
 _W_WINT2_VAULT_KEY_CHECK = _QUALITY_GATES_DIR / "wint2_vault_key_declaration_check.py"
@@ -82,6 +85,8 @@ _EMBEDDING_BOUND_ALLOWLIST = (
 )
 _BUNDLE_LICENSE_CHECK = _QUALITY_GATES_DIR / "bundle_license_gate.py"
 _BUNDLE_LICENSE_ALLOWLIST = _QUALITY_GATES_DIR / "bundle_license_allowlist.txt"
+_SCHEMA_INIT_CHECK = _QUALITY_GATES_DIR / "schema_init_gate.py"
+_SCHEMA_INIT_ALLOWLIST = _QUALITY_GATES_DIR / "schema_init_allowlist.txt"
 
 # Exit codes returned by the three wrapper scripts (see each script's
 # docstring): 0 = clean (or every finding allowlisted), 2 = one or more
@@ -143,7 +148,31 @@ _PER_FILE_GATE_TOP_LEVEL = (
     Path("initialization/__init__.py"), Path("initialization/profile_loader.py"),
     Path("initialization/tests"), Path("initialization/src"),
     Path("plugins/github_midwife_plugin/coordination_hooks_common"),
+    Path("solet_cli/src"), Path("solet_cli/tests"), Path("bootstrap_adapter"),
 )
+# `solet_cli/src`, `solet_cli/tests`, `bootstrap_adapter` added 2026-09-20
+# (lane-fix-gates-b-ungated-surfaces-20260920, unt_26776365, closing
+# iss_f99ef8c2/577, iss_7e4169ea/632, iss_17bb31c5/707, iss_2456a716/777,
+# iss_e252fc48/702, iss_e9990877/990016): both were confirmed ungated top-level
+# code surfaces — `is_per_file_gate_scoped_path` returned False for every
+# changed file in two separate live landings (unt_e5120eb0, unt_52f2dadb),
+# producing a vacuous clean instead of a real scoped result. `solet_cli/tools`
+# and `solet_cli/homebrew/{scripts,ci}` are deliberately NOT included here —
+# no filed issue names them, and `solet_cli/tools` is already documented
+# operator-tooling (`quality_gates/gate_smokes.txt`'s `generator_tooling`
+# not-shipped class). COUPLED SURFACE per the note above this table: this
+# entry, `_check_ruff`'s two hardcoded path strings, and the git-controller-commit
+# SKILL.md Step 1 SCOPE regex all changed together in this same commit for
+# all three paths. `[tool.pyright] include` in `pyproject.toml` gained ONLY
+# `bootstrap_adapter` (fully clean) in that same commit — NOT `solet_cli/src`
+# or `solet_cli/tests`: `solet_cli/src/solet_manager/stage_boundaries.py`
+# carries two pyright findings that a live smoke proved are not dead code (see
+# the SKILL.md coupling note for the full account), so solet_cli's whole-tree
+# pyright coverage is a disclosed, deferred follow-up, not part of this
+# widening. The per-file SCOPE (this table + the SKILL.md regex, used by
+# Git-Controller's Step 3 with explicit file args, which bypasses `include`
+# entirely) still covers solet_cli/src and solet_cli/tests for pyright on any
+# landing that actually touches them.
 # `initialization/tests` re-added 2026-08-09 alongside the
 # `profile_loader_smoke.py::main` CC(18) fix (radon_cc B(10) or better
 # throughout the file) — see
@@ -478,6 +507,17 @@ _W_INT_GATE = _GateSpec(
 )
 _W_INT_WRAPPER_BLOCKING = 1  # gate uses 1 (mirrors design doc), not 2
 
+# Setup-flow probes are executable claims: every reference must resolve through
+# the source-owned bootstrap, target-local, or platform-registry surface. This
+# gate walks those sources directly and uses 1 for a blocking finding.
+_FLOW_PROBE_REGISTRY_GATE = _GateSpec(
+    name="flow_probe_registry",
+    description="setup-flow probe registry",
+    script=_FLOW_PROBE_REGISTRY_CHECK,
+    allowlist=_FLOW_PROBE_REGISTRY_ALLOWLIST,
+)
+_FLOW_PROBE_REGISTRY_WRAPPER_BLOCKING = 1
+
 # Service-interface AST gate. Tree-walking (no scope-path argv splicing) —
 # walks every ananta/src/ananta/services/*/interfaces/public.py and every
 # ananta/knowledge_base/processes/<provider>/*.json on each invocation.
@@ -586,6 +626,26 @@ _BUNDLE_LICENSE_GATE = _GateSpec(
     allowlist=_BUNDLE_LICENSE_ALLOWLIST,
 )
 _BUNDLE_LICENSE_WRAPPER_BLOCKING = 1
+
+# Schema-init gate (iss_63d91ca9 member 2, 2026-09-20). Tree-walking and
+# BEHAVIORAL: it boots the platform's own initialize_schemas path -- core
+# schemas, every plugin's get_schema_definitions() instantiated as startup
+# does, the real SchemaManager/SchemaStandardizer -- in a child interpreter
+# whose import roots are proven to be THIS tree, with only the database write
+# recorded. It exists because a landed ColumnDefinition that redeclared a
+# platform-protected field passed every static gate here and then crashed
+# every blue-green candidate boot (iss_2bc76075, repeated as iss_5f91287d).
+# Deliberately BLOCKING from registration: a schema that cannot initialize is
+# a startup crash, not a style finding, and by fleet-steward ruling (2026-09-20)
+# a live boot-crash is never allowlisted -- the gate reddening the tree until
+# the fix lands is the correct verdict. Exit codes follow the canonical
+# _WRAPPER_OK / _WRAPPER_BLOCKING pattern; 70 is a child crash (not a verdict).
+_SCHEMA_INIT_GATE = _GateSpec(
+    name="schema_init",
+    description="schema-init boot (initialize_schemas against this tree)",
+    script=_SCHEMA_INIT_CHECK,
+    allowlist=_SCHEMA_INIT_ALLOWLIST,
+)
 
 
 def _scope_roots(project_root: Path) -> list[Path]:
@@ -875,6 +935,40 @@ def _check_whole_tree_integration_gate(project_root: Path, venv_python: Path,
     )
 
 
+def _check_flow_probe_registry_gate(
+    project_root: Path, venv_python: Path, results: _CheckResults,
+) -> bool:
+    """Run the setup-flow probe resolver gate against the live repository."""
+    artifacts = _resolve_gate_artifacts(project_root, _FLOW_PROBE_REGISTRY_GATE)
+    if artifacts is None:
+        return True
+    script, allowlist = artifacts
+
+    print(
+        f"\n📊 {_FLOW_PROBE_REGISTRY_GATE.description.title()} "
+        f"Gate ({_FLOW_PROBE_REGISTRY_GATE.name})...",
+    )
+    argv = [str(venv_python), str(script), "--allowlist", str(allowlist)]
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        print(f"❌ BLOCKING: {_FLOW_PROBE_REGISTRY_GATE.name} gate timed out after 180s")
+        return True
+    except FileNotFoundError as exc:
+        print(f"❌ BLOCKING: {_FLOW_PROBE_REGISTRY_GATE.name} gate cannot invoke: {exc}")
+        return True
+
+    return _interpret_tree_gate_result(
+        _FLOW_PROBE_REGISTRY_GATE,
+        result,
+        venv_python,
+        script,
+        allowlist,
+        results,
+        blocking_code=_FLOW_PROBE_REGISTRY_WRAPPER_BLOCKING,
+    )
+
+
 def _check_service_interface_ast_gate(project_root: Path, venv_python: Path,
                                       results: _CheckResults) -> bool:
     """Run the service-interface AST gate. True iff non-allowlisted findings.
@@ -997,6 +1091,38 @@ def _check_bundle_license_gate(project_root: Path, venv_python: Path,
         allowlist,
         results,
         blocking_code=_BUNDLE_LICENSE_WRAPPER_BLOCKING,
+    )
+
+
+def _check_schema_init_gate(project_root: Path, venv_python: Path,
+                            results: _CheckResults) -> bool:
+    """Run the schema-init boot gate. True iff non-allowlisted findings.
+
+    Behavioral, tree-walking gate: no scope-path argv splicing, because a
+    change to a shared table builder can break a schema declared elsewhere
+    and the whole-tree boot is cheap. SOLET_NAME is passed through when the
+    caller exported it (the standing gate habit); the gate discloses when it
+    had to supply its own, since several plugins refuse to import without one.
+    """
+    artifacts = _resolve_gate_artifacts(project_root, _SCHEMA_INIT_GATE)
+    if artifacts is None:
+        return True
+    script, allowlist = artifacts
+
+    print(f"\n📊 {_SCHEMA_INIT_GATE.description.title()} Gate ({_SCHEMA_INIT_GATE.name})...")
+    argv = [str(venv_python), str(script), "--repo-root", str(project_root),
+            "--allowlist", str(allowlist)]
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        print(f"❌ BLOCKING: {_SCHEMA_INIT_GATE.name} gate timed out after 300s")
+        return True
+    except FileNotFoundError as exc:
+        print(f"❌ BLOCKING: {_SCHEMA_INIT_GATE.name} gate cannot invoke: {exc}")
+        return True
+
+    return _interpret_tree_gate_result(
+        _SCHEMA_INIT_GATE, result, venv_python, script, allowlist, results,
     )
 
 
@@ -1229,12 +1355,14 @@ def _report_pyright_errors(output: str, error_count: int) -> None:
 def _run_blocking_gates(
     project_root: Path, venv_python: Path, results: _CheckResults,
 ) -> None:
-    """Run the six whole-tree blocking gates + the two warn-only gates into
+    """Run the seven whole-tree blocking gates + the two warn-only gates into
     `results`. Split out of `main()` purely to keep its own branch count
     (and cyclomatic complexity) down -- no behavior change, same calls in
     the same order."""
     if _check_whole_tree_integration_gate(project_root, venv_python, results):
         results.failed_blocking_gates.append(_W_INT_GATE.name)
+    if _check_flow_probe_registry_gate(project_root, venv_python, results):
+        results.failed_blocking_gates.append(_FLOW_PROBE_REGISTRY_GATE.name)
     if _check_service_interface_ast_gate(project_root, venv_python, results):
         results.failed_blocking_gates.append(_SI_AST_GATE.name)
     if _check_return_shape_gate(project_root, venv_python, results):
@@ -1245,6 +1373,8 @@ def _run_blocking_gates(
         results.failed_blocking_gates.append(_SHIPPED_DOC_GATE.name)
     if _check_bundle_license_gate(project_root, venv_python, results):
         results.failed_blocking_gates.append(_BUNDLE_LICENSE_GATE.name)
+    if _check_schema_init_gate(project_root, venv_python, results):
+        results.failed_blocking_gates.append(_SCHEMA_INIT_GATE.name)
     # W-INT Cycle 2 driver-import gate runs in WARN mode per master plan
     # §1.7 — emits findings but never blocks. Mode flip at W-WINT2-FINAL.
     _check_wint2_driver_import_gate(project_root, venv_python)
@@ -1341,7 +1471,7 @@ def _check_ruff(project_root: Path, venv_python: Path) -> bool:
             "checks the config target before invoking ruff at all, not after. Pull an "
             "update that ships this file (born-clone-gate-toolchain fix).",
         )
-    ruff_cmd = f"cd {project_root} && {venv_python} -m ruff check ananta/src ananta/tests plugins initialization/src quality_gates --config pyproject.toml 2>&1"
+    ruff_cmd = f"cd {project_root} && {venv_python} -m ruff check ananta/src ananta/tests plugins initialization/src quality_gates solet_cli/src solet_cli/tests bootstrap_adapter --config pyproject.toml 2>&1"
     success, output = run_command(ruff_cmd, "Running ruff linter")
 
     if success:
@@ -1361,19 +1491,26 @@ def _check_ruff(project_root: Path, venv_python: Path) -> bool:
         print(f"   {line}")
     if len(lint_lines) > 10:
         print(f"   ... and {len(lint_lines) - 10} more")
-    print("\n💡 Run: ruff check ananta/src ananta/tests plugins initialization/src quality_gates --config pyproject.toml --fix")
+    print("\n💡 Run: ruff check ananta/src ananta/tests plugins initialization/src quality_gates solet_cli/src solet_cli/tests bootstrap_adapter --config pyproject.toml --fix")
     return True
 
 
-def _check_syntax(project_root: Path) -> list[str]:
-    """Validate Python syntax across the tree; return list of error strings."""
+def _check_syntax(project_root: Path, venv_python: Path) -> list[str]:
+    """Validate Python syntax across the tree; return list of error strings.
+
+    Compiles under `venv_python` -- the same already-resolved validated
+    interpreter every other checker in this module uses -- never a bare
+    `python3` resolved through the caller's ambient PATH, which would make
+    this verdict a property of the caller's shell rather than of the code.
+    GTE-A4.
+    """
     print("\n📊 Python Syntax Validation...")
     syntax_errors: list[str] = []
     for py_file in project_root.glob("**/*.py"):
         if ".venv" in str(py_file) or "venv" in str(py_file):
             continue
         result = subprocess.run(
-            ["python3", "-m", "py_compile", str(py_file)],
+            [str(venv_python), "-m", "py_compile", str(py_file)],
             capture_output=True,
             text=True,
         )
@@ -1473,7 +1610,7 @@ def main() -> int:
     )
     _run_blocking_gates(project_root, venv_python, results)
 
-    if _check_syntax(project_root):
+    if _check_syntax(project_root, venv_python):
         return 4
 
     _check_debuggers(project_root)

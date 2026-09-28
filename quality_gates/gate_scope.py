@@ -89,6 +89,11 @@ def _git_ls_files(pathspec: Path, cwd: Path) -> list[str]:
     return [entry for entry in result.stdout.split("\0") if entry]
 
 
+def _under_bundled_venv(path: Path) -> bool:
+    """True when any path component is a bundled-venv directory (name check)."""
+    return any(part.startswith(BUNDLED_VENV_PREFIX) for part in path.parts)
+
+
 def repo_python_files(directory: Path) -> list[Path]:
     """Every in-repo `.py` file under `directory`, ignored trees excluded.
 
@@ -102,7 +107,7 @@ def repo_python_files(directory: Path) -> list[Path]:
         if not rel.endswith(".py"):
             continue
         path = resolved / rel
-        if any(part.startswith(BUNDLED_VENV_PREFIX) for part in path.parts):
+        if _under_bundled_venv(path):
             continue
         files.append(path)
     return sorted(files)
@@ -114,8 +119,17 @@ def repo_files(repo_root: Path) -> frozenset[Path]:
     The aggregate intersects its declared quality-surface roots with this set,
     rather than replacing them: the roots encode the operator's ruling about
     what is in scope, and this encodes what is ours rather than vendored.
+
+    Applies the same bundled-venv name prune as `repo_python_files`, so the two
+    scope functions agree on what "ours" means (iss_c795a79b): before 2026-09-20
+    only the per-directory expansion pruned by name and this whole-checkout set
+    relied on the ignore filter alone.
     """
     return frozenset(
-        (repo_root / rel).resolve()
-        for rel in _git_ls_files(repo_root, cwd=repo_root)
+        path
+        for path in (
+            (repo_root / rel).resolve()
+            for rel in _git_ls_files(repo_root, cwd=repo_root)
+        )
+        if not _under_bundled_venv(path)
     )

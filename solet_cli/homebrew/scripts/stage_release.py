@@ -3,10 +3,15 @@
 Builds the deterministic manager-payload archive (the public-distribution
 ``LICENSE`` and ``NOTICE``, ``solet_cli/``, and the birth-spine setup
 contracts), computes its checksum, resolves the seed's own git identity at the
-given ref, records the manager source identity, writes ``release_metadata.json``,
-and then calls the existing
-``render_release_payload.py`` to produce the real ``Formula/solet.rb`` and
-``solet_cli/homebrew/seed.lock.json``.
+given ref, records the manager source identity, writes ``release_metadata.json``
+and a draft ``release_manifest.json`` (schema v1 per the `publish_release`
+design §7.1 — seed and manager sections only; the remaining sections are
+finalised by later stages of that verb, out of this script's job), and then
+calls the existing ``render_release_payload.py`` to produce the real
+``Formula/solet.rb`` and ``solet_cli/homebrew/seed.lock.json`` -- the Formula
+also installs this same draft into the keg as
+``share/solet/release_manifest.json``, which is what lets the consumption-side
+pairing gate (``solet_manager.release_identity_gate``) read it (iss_18c47206).
 
 Deliberately does not touch git, GitHub, or any credential: it reads a
 worktree that has already been checked out (by the workflow, or by hand for
@@ -21,11 +26,18 @@ being self-referential. The Formula template embeds the same rendered lock
 fields and writes them inside Homebrew's build sandbox, rather than reading
 the tap checkout or the downloaded payload. This keeps the checksum binding
 non-circular without crossing the sandbox boundary.
+
+``stage()`` is the importable entry point the `publish_release` verb calls
+in-process (sealed repo as ``seed_checkout``, minting checkout at
+``source_ref`` as ``manager_checkout``); ``main()`` is a thin CLI wrapper
+over it. ``stage()`` re-validates its own inputs rather than trusting a
+caller, since it is a public function, not just an argparse target.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import gzip
 import hashlib
 import io
@@ -76,12 +88,37 @@ _SEED_REPOSITORY = re.compile(
     r"^https://github\.com/[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?"
     r"/[A-Za-z0-9_.-]{1,100}\.git$"
 )
+# Release-label discriminator ("r<NN>"): folded into the asset filename so two
+# releases of the same manager version never share a name (closes
+# iss_ba7f7103 together with the version-agreement check below).
+_RELEASE_LABEL = re.compile(r"^r[0-9]+$")
+_MANAGER_MODELS_RELATIVE_PATH = Path("solet_cli") / "src" / "solet_manager" / "models.py"
+_RELEASE_MANIFEST_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
 class _GitIdentity:
     commit: str
     tree_hash: str
+
+
+@dataclass(frozen=True)
+class StageResult:
+    """Everything a caller (the CLI, or `publish_release` in-process) needs
+    back from a completed stage."""
+
+    output_root: Path
+    payload_path: Path
+    payload_sha256: str
+    metadata_path: Path
+    manifest_path: Path
+    manifest: dict[str, object]
+    formula_path: Path
+    lock_path: Path
+    install_mode: str
+    manager_commit: str
+    contract_digest: str
+    transition_digest: str
 
 
 def main() -> int:
@@ -99,20 +136,82 @@ def main() -> int:
         raise SystemExit("--manager-checkout is required unless --lock-only is used")
     manager_checkout = args.manager_checkout.resolve()
     output_root = _output_root(args.output_root, seed_checkout, manager_checkout)
-    manager_repository = (
-        None if args.dev_mode else _require_manager_repository(args.manager_repository)
+
+    result = stage(
+        seed_checkout=seed_checkout,
+        release_tag=args.release_tag,
+        seed_repository=args.seed_repository,
+        seed_profile=args.seed_profile,
+        seed_channel_id=args.seed_channel_id,
+        manager_checkout=manager_checkout,
+        manager_ref=args.manager_ref,
+        manager_source_repository=args.manager_source_repository,
+        manager_repository=args.manager_repository,
+        manager_release_tag=args.manager_release_tag,
+        formula_revision=args.formula_revision,
+        dev_mode=args.dev_mode,
+        output_root=output_root,
+        release_label=args.release_label,
+        allow_manager_seed_skew=args.allow_manager_seed_skew,
     )
-    manager_release_tag = (
-        None if args.dev_mode else _require_manager_release_tag(args.manager_release_tag)
+
+    print(f"payload archive:  {result.payload_path} ({result.payload_sha256})")
+    print(f"release metadata: {result.metadata_path}")
+    print(f"release manifest: {result.manifest_path}")
+    print(f"rendered formula: {result.formula_path}")
+    print(f"rendered lock:    {result.lock_path}")
+    print(f"install mode:     {result.install_mode} ({result.manager_commit})")
+    print(f"setup contracts:  {result.contract_digest} (manager payload == seed artifact)")
+    print(f"transition bundle: {result.transition_digest} (seed artifact existing-install)")
+    print("Nothing was pushed, tagged, released, or uploaded.")
+    return 0
+
+
+def stage(
+    *,
+    seed_checkout: Path,
+    release_tag: str,
+    seed_repository: str,
+    seed_profile: str,
+    seed_channel_id: str,
+    manager_checkout: Path,
+    manager_ref: str | None,
+    manager_source_repository: str | None,
+    manager_repository: str | None,
+    manager_release_tag: str | None,
+    formula_revision: int,
+    dev_mode: bool,
+    output_root: Path,
+    release_label: str | None = None,
+    allow_manager_seed_skew: str | None = None,
+) -> StageResult:
+    """Stage a manager payload + seed lock pair (design §5.4 stage 5).
+
+    Called by the CLI (thin wrapper, see `main()`) and, in-process, by the
+    `publish_release` verb with the sealed repo as `seed_checkout` and the
+    minting checkout at `source_ref` as `manager_checkout`. Re-validates every
+    input itself: a public function must not trust its caller's argparse
+    already having done so.
+    """
+    _require_tag(release_tag)
+    _require_seed_repository(seed_repository)
+    _require_profile(seed_profile)
+    manager_repository_value = None if dev_mode else _require_manager_repository(manager_repository)
+    manager_release_tag_value = (
+        None if dev_mode else _require_manager_release_tag(manager_release_tag)
     )
-    manager_ref = _require_manager_ref(args.manager_ref)
-    manager_source_repository = _require_manager_source_repository(args.manager_source_repository)
+    manager_ref_value = _require_manager_ref(manager_ref)
+    manager_source_repository_value = _require_manager_source_repository(manager_source_repository)
+    if release_label is not None:
+        _require_release_label(release_label)
     _require_paths_present(manager_checkout)
-    seed_identity = _resolve_identity(seed_checkout, args.release_tag, "seed release tag")
+    seed_identity = _resolve_identity(seed_checkout, release_tag, "seed release tag")
     seed_provenance = _seed_provenance_at_commit(seed_checkout, seed_identity.commit)
-    manager_identity = _resolve_identity(manager_checkout, manager_ref, "manager ref")
-    _require_manager_checkout_pinned(manager_checkout, manager_identity, manager_ref)
+    manager_identity = _resolve_identity(manager_checkout, manager_ref_value, "manager ref")
+    _require_manager_checkout_pinned(manager_checkout, manager_identity, manager_ref_value)
     _require_manager_checkout_clean(manager_checkout)
+    version = _read_manager_version(manager_checkout)
+    _require_manager_version_agreement(manager_checkout, version)
     contract_digest = _require_contract_pair(
         manager_checkout=manager_checkout,
         manager_commit=manager_identity.commit,
@@ -120,38 +219,48 @@ def main() -> int:
         seed_commit=seed_identity.commit,
     )
     transition_digest = _require_transition_bundle(seed_checkout, seed_identity.commit)
-    version = _read_manager_version(manager_checkout)
-    asset_name = f"solet-{version}.tar.gz"
+    _require_same_source_revision(
+        manager_source_commit=manager_identity.commit,
+        seed_provenance_source_commit=seed_provenance["source_commit"],
+        allow_manager_seed_skew=allow_manager_seed_skew,
+    )
+    asset_name = (
+        f"solet-{version}.tar.gz"
+        if release_label is None
+        else f"solet-{version}-{release_label}.tar.gz"
+    )
 
     payload_dir = output_root / "payload"
     payload_dir.mkdir(parents=True, exist_ok=True)
     payload_path = payload_dir / asset_name
-    payload_sha256 = _build_payload_archive(manager_checkout, manager_identity.commit, payload_path)
+    payload_sha256, file_digests = _build_payload_archive(
+        manager_checkout, manager_identity.commit, payload_path
+    )
 
-    install_mode = "dev" if args.dev_mode else "release"
+    install_mode = "dev" if dev_mode else "release"
     manager_url = (
         payload_path.as_uri()
-        if args.dev_mode
+        if dev_mode
         else (
-            f"https://github.com/{_owner_repo(_require_value(manager_repository))}/releases/download/"
-            f"{_require_value(manager_release_tag)}/{asset_name}"
+            f"https://github.com/{_owner_repo(_require_value(manager_repository_value))}/releases/download/"
+            f"{_require_value(manager_release_tag_value)}/{asset_name}"
         )
     )
     metadata = {
-        "formula_revision": args.formula_revision,
+        "formula_revision": formula_revision,
         "install_mode": install_mode,
         "manager_url": manager_url,
-        "manager_source_repository": manager_source_repository,
-        "manager_source_ref": manager_ref,
+        "manager_source_repository": manager_source_repository_value,
+        "manager_source_ref": manager_ref_value,
         "manager_source_commit": manager_identity.commit,
         "manager_source_tree_hash": manager_identity.tree_hash,
         "release_archive_sha256": payload_sha256,
-        "seed_repository": args.seed_repository,
-        "seed_release_tag": args.release_tag,
+        "seed_repository": seed_repository,
+        "seed_release_tag": release_tag,
         "seed_commit": seed_identity.commit,
         "seed_tree_hash": seed_identity.tree_hash,
-        "seed_profile": args.seed_profile,
-        "seed_channel_id": args.seed_channel_id,
+        "seed_profile": seed_profile,
+        "seed_channel_id": seed_channel_id,
         "seed_provenance": seed_provenance,
         "existing_install_contract": {
             "flow_id": "existing-install",
@@ -163,17 +272,47 @@ def main() -> int:
     metadata_path = output_root / "release_metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
-    _render(metadata_path, output_root)
+    manifest = _build_release_manifest_draft(
+        release_label=release_label,
+        manager_release_tag=manager_release_tag_value,
+        seed_repository=seed_repository,
+        seed_release_tag=release_tag,
+        seed_identity=seed_identity,
+        seed_profile=seed_profile,
+        seed_channel_id=seed_channel_id,
+        seed_provenance=seed_provenance,
+        manager_source_repository=manager_source_repository_value,
+        manager_identity=manager_identity,
+        version=version,
+        asset_name=asset_name,
+        manager_url=manager_url,
+        payload_sha256=payload_sha256,
+        file_digests=file_digests,
+        contract_digest=contract_digest,
+        transition_digest=transition_digest,
+        allow_manager_seed_skew=allow_manager_seed_skew,
+    )
+    manifest_path = output_root / "release_manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
-    print(f"payload archive:  {payload_path} ({payload_sha256})")
-    print(f"release metadata: {metadata_path}")
-    print(f"rendered formula: {output_root / 'Formula' / 'solet.rb'}")
-    print(f"rendered lock:    {output_root / 'solet_cli' / 'homebrew' / 'seed.lock.json'}")
-    print(f"install mode:     {install_mode} ({manager_identity.commit})")
-    print(f"setup contracts:  {contract_digest} (manager payload == seed artifact)")
-    print(f"transition bundle: {transition_digest} (seed artifact existing-install contract)")
-    print("Nothing was pushed, tagged, released, or uploaded.")
-    return 0
+    _render(metadata_path, manifest_path, output_root)
+
+    return StageResult(
+        output_root=output_root,
+        payload_path=payload_path,
+        payload_sha256=payload_sha256,
+        metadata_path=metadata_path,
+        manifest_path=manifest_path,
+        manifest=manifest,
+        formula_path=output_root / "Formula" / "solet.rb",
+        lock_path=output_root / "solet_cli" / "homebrew" / "seed.lock.json",
+        install_mode=install_mode,
+        manager_commit=manager_identity.commit,
+        contract_digest=contract_digest,
+        transition_digest=transition_digest,
+    )
 
 
 def _emit_lock_only(checkout: Path, output_root: Path, args: argparse.Namespace) -> int:
@@ -256,6 +395,22 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="non-empty path outside the seed and manager source trees",
     )
+    parser.add_argument(
+        "--release-label",
+        help=(
+            "release discriminator 'r<NN>' folded into the payload asset filename "
+            "(solet-<version>-<label>.tar.gz) so two releases never share a name; "
+            "omit only for a legacy caller that still expects the undiscriminated name"
+        ),
+    )
+    parser.add_argument(
+        "--allow-manager-seed-skew",
+        metavar="REASON",
+        help=(
+            "explicit override recorded on the release manifest: stage anyway when "
+            "the manager source commit and the seed's PROVENANCE.source_commit differ"
+        ),
+    )
     return parser
 
 
@@ -281,6 +436,69 @@ def _require_manager_source_repository(repository: str | None) -> str:
     if repository is None or _SEED_REPOSITORY.fullmatch(repository) is None:
         raise SystemExit("--manager-source-repository must be an explicit GitHub HTTPS .git URL")
     return repository
+
+
+def _require_release_label(label: str) -> None:
+    if _RELEASE_LABEL.fullmatch(label) is None:
+        raise SystemExit(f"--release-label has an invalid shape (expected 'r<NN>'): {label!r}")
+
+
+def _read_manager_declared_version(checkout: Path) -> str:
+    """Parse `MANAGER_VERSION` out of `solet_manager/models.py`'s source via
+    `ast`, never by importing the package — this script stays free of any
+    runtime dependency on `solet-manager`/`ananta`."""
+    models_path = checkout / _MANAGER_MODELS_RELATIVE_PATH
+    try:
+        source = models_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(f"cannot read {models_path} to verify MANAGER_VERSION: {exc}") from exc
+    tree = ast.parse(source, filename=str(models_path))
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "MANAGER_VERSION"
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            return node.value.value
+    raise SystemExit(f"{models_path} has no module-level MANAGER_VERSION string constant")
+
+
+def _require_manager_version_agreement(checkout: Path, pyproject_version: str) -> None:
+    """Refuse a manager checkout where the declared runtime version
+    (`solet_manager.models.MANAGER_VERSION`) and the packaged version
+    (`solet_cli/pyproject.toml`'s `[project].version`) have drifted apart —
+    closes iss_ba7f7103 at the point of use."""
+    declared = _read_manager_declared_version(checkout)
+    if declared != pyproject_version:
+        raise SystemExit(
+            "manager version disagreement: solet_manager.models.MANAGER_VERSION "
+            f"{declared!r} != solet_cli/pyproject.toml [project].version {pyproject_version!r} "
+            "(iss_ba7f7103 — the two must move together)"
+        )
+
+
+def _require_same_source_revision(
+    *,
+    manager_source_commit: str,
+    seed_provenance_source_commit: object,
+    allow_manager_seed_skew: str | None,
+) -> None:
+    """Refuse to pair a manager payload with a seed minted from a different
+    source commit — closes iss_da99a951. The only way past it is an explicit,
+    recorded `--allow-manager-seed-skew <reason>`."""
+    if manager_source_commit == seed_provenance_source_commit:
+        return
+    if allow_manager_seed_skew:
+        return
+    raise SystemExit(
+        "manager/seed revision skew: manager source commit "
+        f"{manager_source_commit!r} != seed PROVENANCE.source_commit "
+        f"{seed_provenance_source_commit!r}; pass --allow-manager-seed-skew <reason> "
+        "to record an explicit override"
+    )
 
 
 def _require_manager_release_tag(tag: str | None) -> str:
@@ -507,8 +725,12 @@ def _read_manager_version(checkout: Path) -> str:
     return version
 
 
-def _build_payload_archive(checkout: Path, commit: str, destination: Path) -> str:
-    """Deterministic tar.gz of the payload paths at the resolved commit.
+def _build_payload_archive(
+    checkout: Path, commit: str, destination: Path
+) -> tuple[str, dict[str, str]]:
+    """Deterministic tar.gz of the payload paths at the resolved commit, plus
+    a per-file sha256 digest of every member (release manifest §7.1
+    `manager.file_digests`).
 
     Uses ``git archive`` (content addressed by the commit, no local-clock
     mtimes) piped through gzip with no embedded timestamp, so re-running
@@ -531,9 +753,93 @@ def _build_payload_archive(checkout: Path, commit: str, destination: Path) -> st
         timeout=_GIT_TIMEOUT_S,
     ).stdout
     _refuse_excluded_member(tar_bytes)
+    file_digests = _payload_file_digests(tar_bytes)
     compressed = _gzip_no_timestamp(tar_bytes)
     destination.write_bytes(compressed)
-    return hashlib.sha256(compressed).hexdigest()
+    return hashlib.sha256(compressed).hexdigest(), file_digests
+
+
+def _payload_file_digests(tar_bytes: bytes) -> dict[str, str]:
+    digests: dict[str, str] = {}
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as archive:
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                raise SystemExit(
+                    f"payload archive member {member.name} could not be read for digesting"
+                )
+            digests[member.name] = f"sha256:{hashlib.sha256(extracted.read()).hexdigest()}"
+    return digests
+
+
+def _build_release_manifest_draft(
+    *,
+    release_label: str | None,
+    manager_release_tag: str | None,
+    seed_repository: str,
+    seed_release_tag: str,
+    seed_identity: _GitIdentity,
+    seed_profile: str,
+    seed_channel_id: str,
+    seed_provenance: dict[str, object],
+    manager_source_repository: str,
+    manager_identity: _GitIdentity,
+    version: str,
+    asset_name: str,
+    manager_url: str,
+    payload_sha256: str,
+    file_digests: dict[str, str],
+    contract_digest: str,
+    transition_digest: str,
+    allow_manager_seed_skew: str | None,
+) -> dict[str, object]:
+    """Stage-5 partial draft of `release_manifest.json` (schema v1, design
+    §7.1): the `seed` and `manager` sections this stage can populate. Every
+    section a LATER stage of `publish_release` contributes — `components`,
+    `bundle_verdict`, `guest_validation`, `tap`, `surface_digests`,
+    `produced_by`, `factory_signature` — is null until that stage finalises
+    it (§5.4 stage 13); this script never runs those stages."""
+    return {
+        "schema_version": _RELEASE_MANIFEST_SCHEMA_VERSION,
+        "release_label": release_label,
+        "manager_release_tag": manager_release_tag,
+        "seed": {
+            "repository": seed_repository,
+            "release_tag": seed_release_tag,
+            "commit": seed_identity.commit,
+            "tree_hash": seed_identity.tree_hash,
+            "seed_id": seed_provenance["seed_id"],
+            "manifest_sha256": seed_provenance["manifest_sha256"],
+            "source_commit": seed_provenance["source_commit"],
+            "profile": seed_profile,
+            "channel_id": seed_channel_id,
+            "provenance": seed_provenance,
+        },
+        "components": None,
+        "bundle_verdict": None,
+        "guest_validation": None,
+        "manager": {
+            "source_repository": manager_source_repository,
+            "source_commit": manager_identity.commit,
+            "source_tree_hash": manager_identity.tree_hash,
+            "version": version,
+            "payload_asset": {
+                "name": asset_name,
+                "url": manager_url,
+                "sha256": f"sha256:{payload_sha256}",
+            },
+            "file_digests": file_digests,
+            "contract_digest": contract_digest,
+            "transition_bundle_digest": transition_digest,
+            "allow_manager_seed_skew": allow_manager_seed_skew,
+        },
+        "tap": None,
+        "surface_digests": None,
+        "produced_by": None,
+        "factory_signature": None,
+    }
 
 
 def _refuse_excluded_member(tar_bytes: bytes) -> None:
@@ -566,7 +872,7 @@ def _git(checkout: Path, *args: str) -> str:
     return result.stdout
 
 
-def _render(metadata_path: Path, output_root: Path) -> None:
+def _render(metadata_path: Path, manifest_path: Path, output_root: Path) -> None:
     renderer = Path(__file__).resolve().parent / "render_release_payload.py"
     subprocess.run(
         [
@@ -574,6 +880,8 @@ def _render(metadata_path: Path, output_root: Path) -> None:
             str(renderer),
             "--metadata",
             str(metadata_path),
+            "--manifest",
+            str(manifest_path),
             "--output-root",
             str(output_root),
         ],

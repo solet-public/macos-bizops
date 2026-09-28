@@ -73,6 +73,8 @@ def _preview_data(probe: UpdateProbe, paths: ManagerPaths) -> dict[str, JsonValu
             "identity_status": facts.identity_status.value,
         },
         "candidate": _candidate_dict(candidate),
+        # Design §7.3: the pairing verdict is disclosed like `host`, never fingerprinted.
+        "release_identity": dict(candidate.release_identity),
         "candidate_cache": {
             "status": candidate.cache_status,
             "descriptor_digest": candidate.descriptor_digest,

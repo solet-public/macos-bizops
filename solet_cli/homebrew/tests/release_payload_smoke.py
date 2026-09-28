@@ -2,20 +2,26 @@
 
 The installability checks are host-dependent by design (see the README):
 they require `brew` and the Formula-declared `python@3.13`, but touch no
-network — no PyPI index, no fetch of the Formula's own pinned
-`setuptools`/`wheel` resources. This file only proves the Formula's *text*
-(pinned resources declared with sha256, installed before the
-build_isolation:false manager step) and a local RED control (setuptools is
-absent from a clean venv unless something provisions it). The network half
-of that proof — fetching the pinned wheels, verifying them against their
-declared checksums, and confirming they actually make the venv importable
-with user site-packages excluded — lives in
+network — no PyPI index, no live fetch of the Formula's own pinned
+`setuptools`/`wheel`/`packaging` resources (those are vendored locally
+under `fixtures/pinned_wheels/`, hash-verified against the Formula's own
+declared sha256 at run time — see `_install_pinned_build_resources`). This
+file proves the Formula's *text* (pinned resources declared with sha256,
+installed before the build_isolation:false manager step), a local RED
+control (setuptools is absent from a clean venv unless something
+provisions it), and a real, fully-offline GREEN install using those
+vendored resources — mirroring the Formula's own `venv.pip_install
+resources` step without depending on the host's ambient site-packages.
+Whether the Formula's declared URLs/checksums are themselves still correct
+against the real PyPI files (i.e. that the vendored copies are not stale)
+is proven separately, over the network, by
 `ci/resource_provisioning_acceptance.py`, gated like
-`ci/lifecycle_acceptance.py`, and is never registered as a gate smoke.
+`ci/lifecycle_acceptance.py`, and never registered as a gate smoke.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -23,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import cast
 
@@ -30,6 +37,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 _REPOSITORY = _ROOT.parents[1]
 _RENDERER = _ROOT / "scripts" / "render_release_payload.py"
 _EXAMPLE = _ROOT / "release_metadata.example.json"
+_EXAMPLE_MANIFEST = _ROOT / "release_manifest.example.json"
 _checks = 0
 
 sys.path.insert(0, str(_REPOSITORY / "solet_cli" / "src"))
@@ -47,6 +55,8 @@ def _check(condition: object, label: str) -> None:
 def _run_renderer(
     metadata_path: Path,
     output: Path,
+    *,
+    manifest_path: Path = _EXAMPLE_MANIFEST,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -54,6 +64,8 @@ def _run_renderer(
             str(_RENDERER),
             "--metadata",
             str(metadata_path),
+            "--manifest",
+            str(manifest_path),
             "--output-root",
             str(output),
         ],
@@ -113,6 +125,7 @@ def _check_formula_boundary(
     _check_formula_install_shape(formula, lock)
     _check_rendered_identity(formula, lock, metadata)
     _check_install_source_receipt(formula, metadata)
+    _check_release_manifest_receipt(formula)
     brewfile = (_ROOT / "ci" / "Brewfile.enterprise.example").read_text(encoding="utf-8")
     _check(
         'trusted: { formula: "solet" }' in brewfile and "trusted: true" not in brewfile,
@@ -155,7 +168,7 @@ def _check_formula_install_shape(formula: str, lock: dict[str, object]) -> None:
 
 
 def _check_install_source_receipt(formula: str, metadata: dict[str, object]) -> None:
-    marker = '(libexec/"share"/"solet"/"install-source.json").write <<~JSON\n'
+    marker = '(libexec/"share"/"solet"/"install-source.json").write <<~\'JSON\'\n'
     start = formula.find(marker)
     end = formula.find("    JSON\n", start + len(marker))
     _check(start != -1 and end != -1, "formula writes an installed source receipt")
@@ -173,8 +186,24 @@ def _check_install_source_receipt(formula: str, metadata: dict[str, object]) -> 
     )
 
 
+def _check_release_manifest_receipt(formula: str) -> None:
+    """iss_18c47206: the Formula must install the exact same stage-5 draft
+    manifest into the keg (`share/solet/release_manifest.json`) as was passed
+    to the renderer -- that installed copy is what the consumption-side
+    pairing gate (`solet_manager.release_identity_gate`) reads."""
+    marker = '(libexec/"share"/"solet"/"release_manifest.json").write <<~\'JSON\'\n'
+    start = formula.find(marker)
+    end = formula.find("    JSON\n", start + len(marker))
+    _check(start != -1 and end != -1, "formula writes a release manifest into the keg")
+    if start == -1 or end == -1:
+        return
+    embedded: object = json.loads(formula[start + len(marker) : end])
+    expected = json.loads(_EXAMPLE_MANIFEST.read_text(encoding="utf-8"))
+    _check(embedded == expected, "formula's embedded release manifest matches the staged draft byte-for-byte")
+
+
 def _check_seeds_symlink_shape(formula: str, lock: dict[str, object]) -> None:
-    lock_marker = '(libexec/"share"/"solet"/"seed.lock.json").write <<~JSON\n'
+    lock_marker = '(libexec/"share"/"solet"/"seed.lock.json").write <<~\'JSON\'\n'
     lock_at = formula.find(lock_marker)
     seeds_at = formula.find(
         'install_symlink Pathname(__dir__).parent/"solet_cli"/"homebrew"/"seeds" => "seeds"'
@@ -403,10 +432,100 @@ def _no_user_site_env() -> dict[str, str]:
     return environment
 
 
+def _run_with_contention_retry(
+    args: list[str],
+    *,
+    attempts: int = 3,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Retry a subprocess that touches the shared system Homebrew python@3.13
+    prefix (venv creation, pip install against it) under a bounded backoff.
+
+    Under quality_gates/run_smokes.py's own full-battery concurrency (up to
+    ``_DEFAULT_JOBS`` parallel smoke subprocesses), this call's two heaviest
+    steps have been observed to fail nondeterministically while passing
+    cleanly every time in isolation (iss_469b680c) -- real contention on a
+    genuinely shared host resource, not a defect in what is being asserted.
+    This retries only the transient subprocess step itself; every assertion
+    in this file still evaluates the final (successful or failed) result,
+    so a real, reproducible failure still fails loudly here.
+    """
+    last: subprocess.CompletedProcess[str] | None = None
+    for attempt in range(attempts):
+        last = subprocess.run(args, check=False, capture_output=True, text=True, env=env)
+        if last.returncode == 0:
+            return last
+        if attempt < attempts - 1:
+            time.sleep(1.5 * (attempt + 1))
+    assert last is not None  # attempts >= 1 guarantees at least one run
+    return last
+
+
+_PINNED_WHEELS_DIR = Path(__file__).resolve().parent / "fixtures" / "pinned_wheels"
+
+# Vendored copies of the exact wheels the Formula pins (matched to the
+# `resource "name" do ... end` blocks `_parse_pinned_resources` parses), so
+# `_check_no_index_formula_install` can provision them without the network —
+# each one is re-hashed against the Formula's OWN declared sha256 at run
+# time, so a stale vendored file (Formula pin bumped, fixture not updated)
+# fails loudly here rather than silently installing the wrong bytes.
+_PINNED_WHEEL_FILENAMES: dict[str, str] = {
+    "setuptools": "setuptools-84.0.0-py3-none-any.whl",
+    "wheel": "wheel-0.48.0-py3-none-any.whl",
+    "packaging": "packaging-26.2-py3-none-any.whl",
+}
+
+
+def _sha256_of(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _install_pinned_build_resources(
+    venv_python: Path, resources: dict[str, tuple[str, str]],
+) -> None:
+    """Provision the venv with the Formula's pinned setuptools/wheel/packaging,
+    from the vendored, hash-verified local wheels — mirrors what the real
+    Formula's own `install` method does (`venv.pip_install resources`,
+    solet_cli/homebrew/Formula/solet.rb.template) before the
+    `build_isolation: false` manager install below, so this offline smoke's
+    venv is provisioned the same way a real `brew install` provisions its
+    own (isolated, non-system-site) venv — not left to depend on whatever
+    the host machine's ambient site-packages happens to contain.
+    """
+    for name, wheel_filename in _PINNED_WHEEL_FILENAMES.items():
+        pinned_sha256 = resources[name][1]
+        wheel_path = _PINNED_WHEELS_DIR / wheel_filename
+        _check(wheel_path.is_file(), f"vendored wheel present for pinned resource {name!r}: {wheel_path}")
+        actual_sha256 = _sha256_of(wheel_path)
+        _check(
+            actual_sha256 == pinned_sha256,
+            f"vendored {wheel_filename} sha256 matches the Formula's pinned "
+            f"resource {name!r} (expected {pinned_sha256}, got {actual_sha256} — "
+            "the Formula's pin moved without the vendored fixture being updated)",
+        )
+    installed_resources = _run_with_contention_retry(
+        [
+            str(venv_python),
+            "-m",
+            "pip",
+            "install",
+            "--no-index",
+            "--find-links",
+            str(_PINNED_WHEELS_DIR),
+            "--no-deps",
+            *_PINNED_WHEEL_FILENAMES,
+        ],
+    )
+    _check(
+        installed_resources.returncode == 0,
+        f"pinned build resources (setuptools/wheel/packaging) install failed: {installed_resources.stderr}",
+    )
+
+
 def _check_no_index_formula_install(root: Path, formula: str) -> None:
     python = _homebrew_python()
     venv = root / "formula-venv"
-    created = subprocess.run(
+    created = _run_with_contention_retry(
         [
             str(python),
             "-m",
@@ -414,10 +533,7 @@ def _check_no_index_formula_install(root: Path, formula: str) -> None:
             "--system-site-packages",
             "--without-pip",
             str(venv),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
+        ]
     )
     _check(created.returncode == 0, f"Homebrew Python virtualenv failed: {created.stderr}")
     venv_python = venv / "bin" / "python3.13"
@@ -449,17 +565,25 @@ def _check_no_index_formula_install(root: Path, formula: str) -> None:
     )
     _assert_resources_declared_before_manager_install(formula)
 
-    # The GREEN half of this proof — fetching the pinned wheels, verifying
-    # their checksums, --no-index installing them, and re-checking the
-    # PYTHONNOUSERSITE=1 import — needs the network and therefore cannot be
-    # a gate-registered smoke (this file must pass fully offline). That half
-    # lives in ci/resource_provisioning_acceptance.py, gated the same way
-    # solet_cli/homebrew/ci/lifecycle_acceptance.py gates its own real,
-    # network-dependent run. The RED control above is what stays here.
+    # GREEN: provision the pinned setuptools/wheel/packaging from the
+    # vendored, hash-verified local wheels (see _install_pinned_build_resources)
+    # — mirrors the real Formula's own `venv.pip_install resources` step,
+    # offline, so build_isolation:false below has what it needs without
+    # depending on whatever the host's ambient site-packages happens to
+    # contain. This file still never fetches anything over the network —
+    # only ci/resource_provisioning_acceptance.py does that, to prove the
+    # Formula's declared URLs/checksums are themselves still correct
+    # against the real PyPI files (gated the same way
+    # solet_cli/homebrew/ci/lifecycle_acceptance.py gates its own
+    # network-dependent run). If that acceptance test ever re-pins these
+    # resources, the vendored wheels under fixtures/pinned_wheels/ and
+    # _PINNED_WHEEL_FILENAMES above need updating too — the sha256 check in
+    # _install_pinned_build_resources fails loudly if they drift apart.
+    _install_pinned_build_resources(venv_python, resources)
 
     environment = os.environ.copy()
     environment.update({"PIP_NO_INDEX": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1"})
-    installed = subprocess.run(
+    installed = _run_with_contention_retry(
         [
             str(venv_python),
             "-m",
@@ -473,9 +597,6 @@ def _check_no_index_formula_install(root: Path, formula: str) -> None:
             str(_REPOSITORY / "solet_setup_contracts"),
             str(_REPOSITORY / "solet_cli"),
         ],
-        check=False,
-        capture_output=True,
-        text=True,
         env=environment,
     )
     _check(installed.returncode == 0, f"no-index manager install failed: {installed.stderr}")

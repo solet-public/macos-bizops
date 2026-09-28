@@ -84,12 +84,20 @@ def _runtime_dir() -> Path:
     return Path.home() / ".ananta" / "runtime"
 
 
-def mgmt_socket_path(solet: str) -> Path:
-    return _runtime_dir() / f"{solet}.router.sock"
+def mgmt_socket_path(solet: str, runtime_dir: Path | None = None) -> Path:
+    return (runtime_dir or _runtime_dir()) / f"{solet}.router.sock"
 
 
-def _write_port_discovery_files(solet: str, port: int) -> None:
+def _write_port_discovery_files(
+    solet: str, port: int, runtime_dir: Path | None = None,
+) -> None:
     """Write ``<name>.router.port`` and ``<name>.bridge.port`` to runtime dir.
+
+    ``runtime_dir`` is the installer's ``--runtime-dir`` (threaded through
+    the service template); ``None`` is the real ``~/.ananta/runtime``. The
+    daemon runs under launchd/systemd with the REAL ``HOME``, so without
+    this parameter a sandboxed install smoke still left its port files in
+    the operator's runtime dir (iss_6e8c204c).
 
     Called once at router bind-time so the discovery files exist immediately
     after the public surface starts listening, independent of when
@@ -100,7 +108,7 @@ def _write_port_discovery_files(solet: str, port: int) -> None:
     a synchronous one-shot, so a still-binding router leaves the bridge
     pointer absent. Self-write here makes the router self-sufficient.
     """
-    runtime = _runtime_dir()
+    runtime = runtime_dir or _runtime_dir()
     runtime.mkdir(parents=True, mode=0o700, exist_ok=True)
     for name in (f"{solet}.router.port", f"{solet}.bridge.port"):
         path = runtime / name
@@ -571,6 +579,7 @@ async def _bridge_port_watchdog(
     public_port: int,
     *,
     interval: float = DEFAULT_BRIDGE_PORT_WATCHDOG_INTERVAL_SECONDS,
+    runtime_dir: Path | None = None,
 ) -> None:
     """Re-write ``<name>.router.port`` + ``<name>.bridge.port`` every tick.
 
@@ -595,7 +604,7 @@ async def _bridge_port_watchdog(
     while True:
         await asyncio.sleep(interval)
         try:
-            _write_port_discovery_files(solet, public_port)
+            _write_port_discovery_files(solet, public_port, runtime_dir)
         except OSError as exc:
             logger.warning(
                 "bridge-port-watchdog: re-write failed (will retry next tick): %s",
@@ -724,6 +733,7 @@ async def run_router(
     public_port: int = DEFAULT_PUBLIC_PORT,
     public_host: str = "127.0.0.1",
     socket_path: Path | None = None,
+    runtime_dir: Path | None = None,
     drain_window_seconds: int = DEFAULT_DRAIN_WINDOW_SECONDS,
     heartbeat_timeout_seconds: int = DEFAULT_HEARTBEAT_TIMEOUT_SECONDS,
     buffer_timeout: float = DEFAULT_BUFFER_TIMEOUT_SECONDS,
@@ -737,6 +747,9 @@ async def run_router(
     The `ready_event` is set after both surfaces are bound — useful
     for smoke harnesses that spawn the router in-process and need
     to wait for liveness before driving it.
+
+    ``runtime_dir`` overrides where the port-discovery files (and the
+    default mgmt socket) live; ``None`` is the real ``~/.ananta/runtime``.
 
     BLG-04: ``streamable_public_port`` is opt-in (``None`` = today's
     behaviour, no second listener). When set, the router — a single
@@ -753,7 +766,7 @@ async def run_router(
         drain_window_seconds=drain_window_seconds,
         heartbeat_timeout_seconds=heartbeat_timeout_seconds,
     )
-    sock = socket_path or mgmt_socket_path(solet)
+    sock = socket_path or mgmt_socket_path(solet, runtime_dir)
 
     async def _public_client(
         reader: asyncio.StreamReader,
@@ -799,7 +812,7 @@ async def run_router(
             streamable_public_port,
             solet,
         )
-    _write_port_discovery_files(solet, public_port)
+    _write_port_discovery_files(solet, public_port, runtime_dir)
     logger.info(
         "public: listening on %s:%d (solet=%s)",
         public_host,
@@ -817,6 +830,7 @@ async def run_router(
     bridge_port_task = asyncio.create_task(
         _bridge_port_watchdog(
             solet, public_port, interval=bridge_port_watchdog_interval,
+            runtime_dir=runtime_dir,
         ),
         name="bridge_port_watchdog",
     )
@@ -881,6 +895,14 @@ def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--runtime-dir", default=None,
+        help=(
+            "Override the runtime dir for the port-discovery files "
+            "(default ~/.ananta/runtime; install_router passes its own "
+            "--runtime-dir here so a sandboxed smoke never writes the real one)."
+        ),
+    )
+    parser.add_argument(
         "--drain-window-seconds", type=int, default=DEFAULT_DRAIN_WINDOW_SECONDS,
         help="Drain window for old colors after activate.",
     )
@@ -916,6 +938,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
 
     socket_path = Path(args.socket_path) if args.socket_path else None
+    runtime_dir = Path(args.runtime_dir) if args.runtime_dir else None
 
     async def _runner() -> None:
         ready = asyncio.Event()
@@ -932,6 +955,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 public_port=args.public_port,
                 public_host=args.public_host,
                 socket_path=socket_path,
+                runtime_dir=runtime_dir,
                 drain_window_seconds=args.drain_window_seconds,
                 buffer_timeout=args.buffer_timeout_seconds,
                 ready_event=ready,

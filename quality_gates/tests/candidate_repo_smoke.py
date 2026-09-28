@@ -345,6 +345,33 @@ def _check_candidate_venv_is_rehomed() -> int:
     return 9
 
 
+def _check_editable_pointer_lines_are_classified() -> int:
+    """Blank lines are harmless; executable pth lines are not path pointers."""
+    with TemporaryDirectory() as temporary:
+        workspace = Path(temporary).resolve()
+        shared = workspace / "shared"
+        candidate = workspace / "candidate"
+        source_root = workspace / "source"
+        candidate_root = workspace / "candidate-root"
+        for directory in (shared, candidate, source_root, candidate_root):
+            directory.mkdir()
+
+        pointer = shared / "__editable__.fixture.pth"
+        pointer.write_text(f"{source_root}\n\n", encoding="utf-8")
+        assert candidate_repo._install_site_packages(shared, candidate, source_root, candidate_root) == 1
+        assert (candidate / pointer.name).read_text(encoding="utf-8") == f"{candidate_root}\n\n"
+
+        executable = shared / "__editable__.executable.pth"
+        executable.write_text("import fixture_finder; fixture_finder.install()\n", encoding="utf-8")
+        try:
+            candidate_repo._install_site_packages(shared, candidate, source_root, candidate_root)
+            raise AssertionError("an executable editable-pth line was treated as a path pointer")
+        except candidate_repo.CandidateRepoError as exc:
+            assert "not an absolute path" in str(exc), str(exc)
+            assert "does not resolve inside" not in str(exc), str(exc)
+    return 4
+
+
 def _check_shared_repo_drift_is_fatal() -> int:
     before = candidate_repo.SharedRepoProof(
         head="a" * 40,
@@ -671,12 +698,215 @@ def _check_wave_candidate_never_rereads_source_overlay() -> int:
     return 3
 
 
+def _check_head_detaches_at_base_ref_when_worktree_diverges() -> int:
+    """NEGATIVE regression (iss_bd0f7e17).
+
+    ``provision_private_git`` must label the candidate's HEAD with
+    ``base_ref``, not the source worktree's own HEAD, whenever the two
+    commits differ — the re-homed-candidate-at-master shape where a lane
+    worktree is built against a ``base_ref`` ahead of its own current commit.
+    Getting this wrong makes ``git diff --cached`` see the whole base-gap as
+    staged (a superset of the reviewed scope) and fails any verifier that
+    checks ``HEAD == base_ref`` on a tree that is actually correct.
+    """
+
+    with TemporaryDirectory() as temporary:
+        workspace = Path(temporary).resolve()
+        repo = workspace / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "main")
+        _write(repo, _OVERLAY, "base overlay bytes\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "base")
+        base_ref = _git(repo, "rev-parse", "HEAD")
+
+        linked = workspace / "linked"
+        _git(repo, "worktree", "add", "-q", "-b", "lane/behind", str(linked), base_ref)
+        assert (linked / ".git").is_file(), "the fixture worktree is not a linked one"
+
+        # Master advances past the worktree's own HEAD after the worktree was
+        # created — the exact re-homed-candidate-at-master shape this fix
+        # targets: base_ref differs from the source worktree's current HEAD.
+        _write(repo, "master-only.txt", "master moved on\n")
+        _git(repo, "add", "master-only.txt")
+        _git(repo, "commit", "-qm", "master advances")
+        ahead_base_ref = _git(repo, "rev-parse", "HEAD")
+
+        _write(linked, _OVERLAY, "reviewed overlay bytes\n")
+        candidate, _after = candidate_repo.build(
+            linked,
+            workspace / "candidate",
+            (_OVERLAY,),
+            renames=(),
+            base_ref=ahead_base_ref,
+            with_git=True,
+        )
+
+        candidate_git_dir = candidate.root / ".git"
+        environment = {
+            **_fixture_env(),
+            "GIT_DIR": str(candidate_git_dir),
+            "GIT_WORK_TREE": str(candidate.root),
+        }
+        symbolic = subprocess.run(
+            ("git", "symbolic-ref", "--quiet", "HEAD"),
+            cwd=candidate.root,
+            env=environment,
+            check=False,
+            capture_output=True,
+        )
+        assert symbolic.returncode != 0, (
+            "candidate HEAD must be DETACHED at base_ref, not carry the "
+            f"source worktree's own branch: {symbolic.stdout!r}"
+        )
+        head_commit = subprocess.run(
+            ("git", "rev-parse", "HEAD"),
+            cwd=candidate.root,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head_commit == ahead_base_ref, (head_commit, ahead_base_ref)
+
+        staged = subprocess.run(
+            ("git", "diff", "--cached", "--name-only"),
+            cwd=candidate.root,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.split()
+        assert staged == [_OVERLAY], staged
+
+        provenance = (
+            candidate.manifest.parent / "candidate-provenance.txt"
+        ).read_text(encoding="utf-8")
+        assert "source_head_kind=ref" in provenance, provenance
+        assert "source_head_value=refs/heads/lane/behind" in provenance, provenance
+        assert f"base_commit={ahead_base_ref}" in provenance, provenance
+    return 5
+
+
+_LIVE_LOCKS = ("index.lock", "HEAD.lock", "refs/heads/main.lock", "config.lock")
+
+
+def _write_transient_git_controls(repo: Path, git_dir: Path, base_ref: str) -> None:
+    """Model the shared Git directory while a commit and merge are in flight."""
+    for name in _LIVE_LOCKS:
+        _write(repo, f".git/{name}", "held by another process\n")
+    (git_dir / "index.lock").write_bytes(b"\0" * 1_988_551)
+    _write(repo, ".git/MERGE_HEAD", f"{base_ref}\n")
+    _write(repo, ".git/MERGE_MSG", "Merge in flight\n")
+    (git_dir / "objects" / "tmp_obj_abc123").write_bytes(b"half-written")
+
+
+def _assert_candidate_omits_locks(candidate_git_dir: Path) -> None:
+    copied_locks = sorted(
+        str(path.relative_to(candidate_git_dir))
+        for path in candidate_git_dir.rglob("*.lock")
+    )
+    assert not copied_locks, f"the candidate inherited live lock files: {copied_locks}"
+
+
+def _assert_candidate_omits_operation_markers(candidate_git_dir: Path) -> None:
+    for name in ("MERGE_HEAD", "MERGE_MSG", "objects/tmp_obj_abc123"):
+        assert not (candidate_git_dir / name).exists(), (
+            f"the candidate inherited in-flight control state: {name}"
+        )
+
+
+def _assert_candidate_keeps_required_git_content(candidate_git_dir: Path) -> None:
+    """The discriminator: only transient state is skipped from the copy."""
+    for name in ("config", "HEAD", "refs/heads/main"):
+        assert (candidate_git_dir / name).exists(), f"the copy dropped {name}"
+    assert any((candidate_git_dir / "objects").iterdir()), "the copy dropped the objects"
+
+
+def _assert_shared_transient_controls_remain(shared_git_dir: Path) -> None:
+    """The repair copies around shared controls; it never releases them."""
+    for name in _LIVE_LOCKS:
+        assert (shared_git_dir / name).exists(), f"the shared {name} was removed"
+    assert (shared_git_dir / "MERGE_HEAD").exists(), "the shared MERGE_HEAD was removed"
+
+
+def _assert_candidate_can_commit(candidate_root: Path, candidate_git_dir: Path, base_ref: str) -> None:
+    """A copied merge marker must not turn the candidate commit into a merge."""
+    environment = {
+        **_fixture_env(),
+        "GIT_DIR": str(candidate_git_dir),
+        "GIT_WORK_TREE": str(candidate_root),
+    }
+    subprocess.run(
+        ("git", "commit", "-qm", "candidate commit"),
+        cwd=candidate_root,
+        env=environment,
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+    parents = subprocess.run(
+        ("git", "rev-list", "--parents", "-n", "1", "HEAD"),
+        cwd=candidate_root,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert len(parents) == 2, f"candidate commit is not a single-parent commit: {parents}"
+    assert parents[1] == base_ref, parents
+
+
+def _assert_transient_gitdir_classifier_boundaries() -> None:
+    """Check lock, operation-marker, and objects/tmp_* classifications."""
+    root = Path(".")
+    assert candidate_repo.is_transient_gitdir_entry(root, "index.lock")
+    assert candidate_repo.is_transient_gitdir_entry(Path("refs/heads"), "main.lock")
+    assert candidate_repo.is_transient_gitdir_entry(root, "MERGE_HEAD")
+    assert candidate_repo.is_transient_gitdir_entry(Path("objects/pack"), "tmp_pack_x")
+    assert not candidate_repo.is_transient_gitdir_entry(root, "index")
+    assert not candidate_repo.is_transient_gitdir_entry(root, "packed-refs")
+    assert not candidate_repo.is_transient_gitdir_entry(Path("objects/pack"), "pack-x.pack")
+    # Operation markers mean nothing below the top level (a ref could carry
+    # such a name); a `tmp_` prefix means nothing outside `objects/`.
+    assert not candidate_repo.is_transient_gitdir_entry(Path("refs/heads"), "MERGE_HEAD")
+    assert not candidate_repo.is_transient_gitdir_entry(Path("refs/heads"), "tmp_branch")
+
+
+def _check_transient_control_files_are_not_copied() -> int:
+    """NEGATIVE regression (iss_f99ee944) for shared in-flight Git state."""
+    with TemporaryDirectory() as temporary:
+        workspace = Path(temporary).resolve()
+        repo = workspace / "repo"
+        repo.mkdir()
+        base_ref = _build_fixture_repo(repo)
+        shared_git_dir = repo / ".git"
+        _write_transient_git_controls(repo, shared_git_dir, base_ref)
+        before = candidate_repo.measure_shared_repo(repo)
+
+        candidate, after = candidate_repo.build(
+            repo, workspace / "candidate", (_OVERLAY,), renames=(), base_ref=base_ref,
+            with_git=True,
+        )
+        assert before == after, "the fixture repository changed during the build"
+        candidate_git_dir = candidate.root / ".git"
+        _assert_candidate_omits_locks(candidate_git_dir)
+        _assert_candidate_omits_operation_markers(candidate_git_dir)
+        _assert_candidate_keeps_required_git_content(candidate_git_dir)
+        _assert_shared_transient_controls_remain(shared_git_dir)
+        _assert_candidate_can_commit(candidate.root, candidate_git_dir, base_ref)
+
+    _assert_transient_gitdir_classifier_boundaries()
+    return 14
+
+
 def main() -> int:
     check_count = _check_inherited_index_is_replaced()
     check_count += _check_linked_worktree_is_measurable()
     check_count += _check_index_free_git_dir_is_not_the_fix()
     check_count += _check_destination_must_be_physical()
     check_count += _check_candidate_venv_is_rehomed()
+    check_count += _check_editable_pointer_lines_are_classified()
     check_count += _check_candidate_venv_rehomes_from_a_worktree()
     check_count += _check_rehoming_respects_path_boundaries()
     check_count += _check_pointer_guard_can_still_fail()
@@ -685,6 +915,8 @@ def main() -> int:
     check_count += _check_provisioning_never_writes_the_shared_index()
     check_count += _check_wave_candidate_never_rereads_source_overlay()
     check_count += _check_shared_repo_drift_is_fatal()
+    check_count += _check_head_detaches_at_base_ref_when_worktree_diverges()
+    check_count += _check_transient_control_files_are_not_copied()
     print(f"candidate_repo_smoke OK: {check_count} checks passed")
     return 0
 

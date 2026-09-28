@@ -22,7 +22,10 @@ generic descendants. Malformed structured data falls back to the conservative
 text detector, preserving the pre-existing fail-closed boundary.
 
 Exact constants include strings, bytes, legal prefixes, and interpolation-free
-f-strings; supersets and interpolated values do not become exact identities.
+f-strings, and the statically composed forms the literal census folds --
+concatenation, ``str.join`` over constant sequences, percent formatting and
+``str.format`` with constant operands, in text or bytes (iss_271f81af);
+supersets and interpolated values do not become exact identities.
 
 AST node spans bind each source occurrence separately. Columns are compared as
 UTF-8 byte offsets because that is the coordinate system used by Python's AST.
@@ -79,6 +82,7 @@ from quality_gates.python_literal_census import (  # noqa: E402
     literal_string_value,
     newly_resolved_pattern_matches,
 )
+from quality_gates.source_root import assert_running_from_source_root  # noqa: E402
 
 CANONICAL = "macos-bizops"
 CANONICAL_REPOSITORY = "https://github.com/solet-public/macos-bizops.git"
@@ -192,10 +196,12 @@ f8721c9a94ab0e80a1e3eef2895eaf94225638b9ccbc1cabd798b56b957635ac
 # and same convention as the bare register line for that same smoke, already
 # anchored above.
 #
-# NOTE the self-path exemption this should have used is DEAD CODE -- referenced
-# only from this gate's smoke, never from the classifier -- so every self-path
-# reference falls through to UNCLASSIFIED. The class-fix is routed as its own
-# unit; these two anchors are the interim, reviewed answer.
+# NOTE the self-path exemption tuple this should have used was DEAD CODE --
+# referenced only from this gate's smoke, never from the classifier -- so every
+# self-path reference falls through to UNCLASSIFIED and is answered by an
+# anchor here instead. The tuple was deleted 2026-09-20 (iss_9c648e1e), along
+# with the two anchors that pinned its own two path-literal lines; the anchor
+# convention remains the reviewed answer for self-path references.
 #
 # Anchors hash the EXACT stripped line content, so rewording either line stales
 # them. Re-derive from this gate's own output if either changes. This comment is
@@ -216,15 +222,26 @@ f8721c9a94ab0e80a1e3eef2895eaf94225638b9ccbc1cabd798b56b957635ac
 # <empty> --run-identity-gate
 # 2026-09-17: two self-path references from tracked debt lines under
 # rul_11fcd2ec-d5ef-4504-80f9-f79c4bfab5a7, not identity carriers.
+# 2026-09-20: two anchors for chg_505884b2's reproduce_release/reissue smoke
+# fixtures (plugins/seed_factory_plugin/tests/reissue_smoke.py and
+# reproduce_release_smoke.py) -- each an identical build_stamp(...) call whose
+# bundle-name keyword argument literal is this gate's own canonical bundle
+# token, minting a throwaway PROVENANCE stamp for a local git fixture, never
+# a real seed. This comment is deliberately written WITHOUT the token, same
+# reason as the 2026-09-05 note above. Missed on the first gate run for the
+# same reason too: the census reads the stage-zero Git INDEX and these files
+# were still untracked in a lane worktree; verified with the candidate tree
+# per that same note.
 _NEGATIVE_LINE_ANCHORS: frozenset[str] = frozenset(
     """\
 04d9c55118bf4d05f56fea80e342b4a38ec7577f04fbdb962d1e120c63206fbf 0970d75540f30fb0c3465e6e81a4b523ee7246c78e8e5d881b3ed245f923aea4 0d7ffbf20386408b821d12f3500a410f2b74e47d58f2ac2637edd68e663c0116 12c4cf0ee3a19e4e0f07adeb35718a853cca46d18f0cf9d59dcf6ad1d9f9b353 1643a53c710f1d677beae38d81c6faec9353aaf46d53f03d7670de97608edcd3 17ca293d9799c97355e079e72d93d0716cdefba78fb159e54771e2b56de5ed5f 2a1ec7939dae525abcb41a3d0f742167dabbf3ae98f491f7b17e4a1bacbe0647 52a648d067f50c05fde91107280118bf24339e33c707a56c60a951cef37e4444 79dc587e25081639ab6545f53fa0e3d9e8c7d4555d610ecbf32eebefe440da8d 8269b5cc69592a373210d50aeb40e8225dd9450af36d84ee3ee90b1f232f41d0
-86593bf779142bcfa03ec6f2d503301df719f77ed9061eaa083621e3978396e0 86ccfa0a3ac29b5c40d1bc8d0445eb60213c588eb4f8986611253f5527c3831f 90f0bf26be29012f388d1be2a17296b59c48a48bc398cfab2acc97269c3c108f ab4ca3064ead1f576885c5d4d522515c692d9cf06fea38f4f6cdda271cfbb23c bc5e2894a8d0542891a460240c0dc32e4e15fd55bb825e2a710988307c190c84 22be7f7479f94f8b84242a19f880d28ac4b2b089de997c8deae2bd4deebcf841 bdae51f427601a8cf43e81c43cff548c1e5b2cfade4bedbdb284f2ab55088b2d 28d82afbe2aeeea73a82b6ccab49358108a67b513c8e63654ea0fc42d75de90e 8025e9bb49b6bc47850ea9ebca5acc563f02c78459da58a8b81f2a9a78bae160
-cc20d5c4de436973665467c3b529443a46cb96a794c9961578f7788a5ca41a67 d3c1133895a58f1404f1941f78c007d3cbbf46e75bdd41ea6206fbbca6c26dc8 e8e9f62f9cf3767ded863ddd8a1ca6c57f0808bf5cb7356dd4b1c0eb35b7abfa ea7004af20f9db0817b40f714aa1043174d3a042b831a8e7d724a64e03a3bc24 fd0e7aa4cc780b8613f365b41775171e7c2580183249766dd98ea5d5166c63a1 0cd95c9d8ae9a3ec2d770301e493d99ddaeb0773e001582f419cc75b8dc5cb8c 3e5151a4a13e812b90d1be7ed22b865f4840c39fe6b52a1eb72ed0c28b1dc34a 7442792113dd17a3abc59b8fcb5de91de8948f43118b6454ab47ccc2db879107 4e6ad84441964fa3f1b70a7155b3d5f8fb661b72d9d3cd20c7aae370ea44adc0 61e5a17a285062f14cbbc45aa05e96633b146622e1828725bf086687b8519083
+86593bf779142bcfa03ec6f2d503301df719f77ed9061eaa083621e3978396e0 86ccfa0a3ac29b5c40d1bc8d0445eb60213c588eb4f8986611253f5527c3831f 90f0bf26be29012f388d1be2a17296b59c48a48bc398cfab2acc97269c3c108f ab4ca3064ead1f576885c5d4d522515c692d9cf06fea38f4f6cdda271cfbb23c 22be7f7479f94f8b84242a19f880d28ac4b2b089de997c8deae2bd4deebcf841 bdae51f427601a8cf43e81c43cff548c1e5b2cfade4bedbdb284f2ab55088b2d 28d82afbe2aeeea73a82b6ccab49358108a67b513c8e63654ea0fc42d75de90e 8025e9bb49b6bc47850ea9ebca5acc563f02c78459da58a8b81f2a9a78bae160
+cc20d5c4de436973665467c3b529443a46cb96a794c9961578f7788a5ca41a67 e8e9f62f9cf3767ded863ddd8a1ca6c57f0808bf5cb7356dd4b1c0eb35b7abfa ea7004af20f9db0817b40f714aa1043174d3a042b831a8e7d724a64e03a3bc24 fd0e7aa4cc780b8613f365b41775171e7c2580183249766dd98ea5d5166c63a1 0cd95c9d8ae9a3ec2d770301e493d99ddaeb0773e001582f419cc75b8dc5cb8c 3e5151a4a13e812b90d1be7ed22b865f4840c39fe6b52a1eb72ed0c28b1dc34a 7442792113dd17a3abc59b8fcb5de91de8948f43118b6454ab47ccc2db879107 4e6ad84441964fa3f1b70a7155b3d5f8fb661b72d9d3cd20c7aae370ea44adc0 61e5a17a285062f14cbbc45aa05e96633b146622e1828725bf086687b8519083
 903d6aa30acbddd685739aa03ef45f6afef9a1c0f964992833570c36352b19ca 9e20ff0656d72222916456cab08302c2ff020df03938f523a52c7d3ba687ac96 b268d148968998a891bbf120c756451680d57d3fc070d55a65544d80dfbc6ffd b0c3536edef73c8cf12d5a7946268240db31d6ac3d831f99c10791cb145c5ea6 d1f3d3f9eb073a52d4f20e13e66e69b2f75fe4236c37fbb8370373f6f12a6f99 2d1c0fd911701ec9c8de397ed1e76a4651ce263c0e4b0ac03fc479870572563b 9abe2b4ea7719701096c329aa7bc9eceed407765b0771b95fc3a3d76e6cf91c4 e05ebb66e6136aba414bf69122a332ea68253e4d2152cdbaf8360c680800ab41
 631e6703d283972fbc82879e9e6f8624781ca7c09d425429f543edf572899909 7c63f7758db563e7b5b1c5a39f350a7381502338ee9617ae57b17033471485e8
 0d36d0a0038a227558630e25113288b034adbbc327f41a20c8581169e271165e efc64c2fe6621e54f7d47d744c58ef025ae3d1a86b6f3553a0c74151f61d4e71 d440090e167e6a4ddae7699d54097e4d530c61fd720113122992e312b2fa5358
 f82bf6a8d635f75b5991903365cca0f4a79de666d581ccacc44084558709a6b1 5df86ce9def78a7fe06563c59edd21e03f146376661c8598aee776e2d3d10bb4
+def12426a178a7ebcdc242c422cf7c743b0ada9c8734ee8895224a02bb4c59ad 0448986b0f75d672cd8f9fb6c5af85206afbdfc94f82fd7c3052916bcc811816
 """.split()
 ) - frozenset(
     {
@@ -263,12 +280,6 @@ fac38d845394d0789117836d36a5cdbb86a915ae917b3f9863f0b9cea591067d
 """.split()
 )
 
-_NEGATIVE_SELF_PATH_FIXTURES = (
-    "quality_gates/macos_bizops_identity_gate.py",
-    "quality_gates/tests/macos_bizops_identity_gate_smoke.py",
-)
-
-
 @dataclass(frozen=True)
 class Occurrence:
     path: str
@@ -292,7 +303,29 @@ class _LogicalContext:
     start_line: int
 
 
+def _tracked_regular_path(repo_root: Path, record: str) -> str | None:
+    """Decode one stage-zero regular file that still has worktree bytes."""
+    try:
+        metadata, relpath = record.split("\t", maxsplit=1)
+        mode, _object_id, stage = metadata.split()
+    except ValueError as exc:
+        raise RuntimeError(f"malformed git ls-files record: {record!r}") from exc
+    if stage != "0":
+        raise RuntimeError(f"unmerged index entry is not a complete tree: {relpath}")
+    if mode in {"100644", "100755"}:
+        return relpath if (repo_root / relpath).is_file() else None
+    if mode not in {"120000", "160000"}:
+        raise RuntimeError(f"unsupported tracked mode {mode} for {relpath}")
+    return None
+
+
 def _tracked_paths(repo_root: Path) -> tuple[str, ...]:
+    """Return regular index paths that are present in this candidate tree.
+
+    The index retains a deleted path until staging; it cannot be census input
+    because there are no candidate bytes to inspect. Symlinks remain excluded
+    by this gate's regular-text-file contract.
+    """
     result = subprocess.run(
         ["git", "ls-files", "--stage", "-z"],
         cwd=repo_root,
@@ -304,19 +337,12 @@ def _tracked_paths(repo_root: Path) -> tuple[str, ...]:
         raise RuntimeError(f"git ls-files failed: {result.stderr.strip()}")
     paths: set[str] = set()
     for record in (item for item in result.stdout.split("\0") if item):
-        try:
-            metadata, relpath = record.split("\t", maxsplit=1)
-            mode, _object_id, stage = metadata.split()
-        except ValueError as exc:
-            raise RuntimeError(f"malformed git ls-files record: {record!r}") from exc
-        if stage != "0":
-            raise RuntimeError(f"unmerged index entry is not a complete tree: {relpath}")
-        if mode in {"100644", "100755"}:
-            if relpath in paths:
-                raise RuntimeError(f"duplicate tracked regular path: {relpath}")
-            paths.add(relpath)
-        elif mode not in {"120000", "160000"}:
-            raise RuntimeError(f"unsupported tracked mode {mode} for {relpath}")
+        relpath = _tracked_regular_path(repo_root, record)
+        if relpath is None:
+            continue
+        if relpath in paths:
+            raise RuntimeError(f"duplicate tracked regular path: {relpath}")
+        paths.add(relpath)
     return tuple(sorted(paths))
 
 
@@ -1016,6 +1042,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     repo_root = args.repo_root.resolve()
     try:
+        # Self-defense half of the wrong-tree fix (iss_ec0db9c7/iss_77fe09ad):
+        # even a caller that builds its subprocess command correctly cannot
+        # protect this script from some OTHER caller invoking it directly
+        # from a stale checkout, so it refuses unless its own on-disk copy
+        # lives inside the very tree it was told to scan.
+        assert_running_from_source_root(Path(__file__), repo_root)
         occurrences, violations = evaluate_repository(
             repo_root,
             candidate_manifest=(

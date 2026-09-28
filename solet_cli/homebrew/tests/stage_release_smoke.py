@@ -14,6 +14,7 @@ import ast
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -43,11 +44,19 @@ from solet_manager.contracts import (  # noqa: E402
 from solet_manager.errors import ContractError  # noqa: E402
 from solet_manager.permission_preflight import render_permission_preflight  # noqa: E402
 from solet_manager.plan_builder import SetupPlan  # noqa: E402
+from solet_manager.release_identity_gate import pair_manager_and_seed  # noqa: E402
+from solet_manager.seed_lock_parser import parse_seed_lock_bytes  # noqa: E402
 from solet_setup_contracts.selected_source_record import (  # noqa: E402
     SelectedSourceTransaction,
     validate_target_contract_identity,
 )
 
+_PORTABLE_RUBY = Path("/opt/homebrew/Library/Homebrew/vendor/portable-ruby/current/bin/ruby")
+_HEREDOC_WRITE_CALL = re.compile(
+    r'\(libexec/"share"/"solet"/"(?P<name>[^"]+\.json)"\)\.write (?P<opener><<~\'?JSON\'?)\n'
+    r"(?P<body>.*?\n)    JSON\n",
+    re.DOTALL,
+)
 _CONTRACT_ARCHIVE_ROOT = "plugins/github_midwife_plugin/knowledge_base"
 _FORMULA_ONLY_CONTRACT_EXTENSIONS = frozenset({"existing_install_flow.json", "existing_install_flow.schema.json"})
 _CONTRACT_SOURCE = _REPOSITORY_ROOT / _CONTRACT_ARCHIVE_ROOT
@@ -102,8 +111,27 @@ def _run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _build_seed_fixture(root: Path) -> tuple[Path, Path, str]:
-    """A minimal committed tree carrying only what stage_release.py needs."""
+def _build_seed_fixture(
+    root: Path,
+    *,
+    provenance_source_commit: str | None = None,
+    manager_version: str = "0.1.0",
+) -> tuple[Path, Path, str]:
+    """A minimal committed tree carrying only what stage_release.py needs.
+
+    Two commits, deliberately: the first ("manager content") carries
+    everything the manager side needs and nothing else; PROVENANCE.json,
+    added in the second ("seed release", tagged here), declares that first
+    commit's hash as its own ``source_commit`` by default -- the only way to
+    make ``PROVENANCE.source_commit == the manager's resolved commit``
+    without being self-referential (a commit's hash cannot appear as
+    plaintext inside its own tree). This mirrors the real, cross-repository
+    relationship: in production the seed repo's PROVENANCE.json is committed
+    separately from, and after, the manager-source commit it names.
+
+    ``provenance_source_commit``, when given, overrides that default with an
+    explicit (deliberately mismatched, for the skew-refusal checks) value.
+    """
     checkout = root / "seed-checkout"
     checkout.mkdir()
     (checkout / "LICENSE").write_bytes(_FIXTURE_LICENSE)
@@ -111,6 +139,10 @@ def _build_seed_fixture(root: Path) -> tuple[Path, Path, str]:
     (checkout / "solet_cli" / "homebrew").mkdir(parents=True)
     (checkout / "solet_cli" / "pyproject.toml").write_text(
         '[project]\nname = "solet-cli"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    (checkout / "solet_cli" / "src" / "solet_manager").mkdir(parents=True)
+    (checkout / "solet_cli" / "src" / "solet_manager" / "models.py").write_text(
+        f'MANAGER_VERSION = "{manager_version}"\n', encoding="utf-8"
     )
     (checkout / "solet_cli" / "src.marker").write_text("manager source\n", encoding="utf-8")
     (checkout / "solet_cli" / "homebrew" / "seed.lock.json.template").write_text(
@@ -127,13 +159,29 @@ def _build_seed_fixture(root: Path) -> tuple[Path, Path, str]:
         (contracts / name).write_bytes((_CONTRACT_SOURCE / name).read_bytes())
     for name in _FORMULA_ONLY_CONTRACT_EXTENSIONS:
         (contracts / name).write_bytes((_CONTRACT_SOURCE / name).read_bytes())
+
+    _run_git(checkout, "init", "-q")
+    _run_git(checkout, "add", "-A")
+    _run_git(checkout, "commit", "-q", "-m", "manager content")
+    manager_ref = _run_git(checkout, "rev-parse", "HEAD").stdout.strip()
+    manager_checkout = root / "manager-checkout"
+    _run_git(
+        checkout,
+        "worktree",
+        "add",
+        "--detach",
+        "-q",
+        str(manager_checkout),
+        manager_ref,
+    )
+
     (checkout / "PROVENANCE.json").write_text(
         json.dumps(
             {
                 "schema_version": 1,
                 "seed_id": "123e4567-e89b-12d3-a456-426614174000",
                 "origin_id": "123e4567-e89b-12d3-a456-426614174001",
-                "source_commit": "a" * 40,
+                "source_commit": provenance_source_commit or manager_ref,
                 "manifest_sha256": "b" * 64,
                 "bundle": {"name": _CANONICAL_SEED_PROFILE, "platform": "local"},
                 "source_date": "2026-09-15T00:00:00+00:00",
@@ -147,22 +195,10 @@ def _build_seed_fixture(root: Path) -> tuple[Path, Path, str]:
         + "\n",
         encoding="utf-8",
     )
-
-    _run_git(checkout, "init", "-q")
-    _run_git(checkout, "add", "-A")
-    _run_git(checkout, "commit", "-q", "-m", "seed fixture")
+    _run_git(checkout, "add", "PROVENANCE.json")
+    _run_git(checkout, "commit", "-q", "-m", "seed release")
     _run_git(checkout, "tag", _RELEASE_TAG)
-    manager_ref = _run_git(checkout, "rev-parse", "HEAD").stdout.strip()
-    manager_checkout = root / "manager-checkout"
-    _run_git(
-        checkout,
-        "worktree",
-        "add",
-        "--detach",
-        "-q",
-        str(manager_checkout),
-        manager_ref,
-    )
+
     (checkout / "shared-head.marker").write_text("shared checkout moved\n", encoding="utf-8")
     _run_git(checkout, "add", "shared-head.marker")
     _run_git(checkout, "commit", "-q", "-m", "shared checkout moves after pin")
@@ -177,6 +213,9 @@ def _stage(
     output_root: Path,
     *,
     dev_mode: bool = False,
+    release_label: str | None = None,
+    allow_manager_seed_skew: str | None = None,
+    expect_success: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     arguments = [
         sys.executable,
@@ -209,6 +248,10 @@ def _stage(
                 _MANAGER_RELEASE_TAG,
             )
         )
+    if release_label is not None:
+        arguments.extend(("--release-label", release_label))
+    if allow_manager_seed_skew is not None:
+        arguments.extend(("--allow-manager-seed-skew", allow_manager_seed_skew))
     arguments.extend(("--output-root", str(output_root)))
     result = subprocess.run(
         arguments,
@@ -216,7 +259,8 @@ def _stage(
         capture_output=True,
         text=True,
     )
-    _check(result.returncode == 0, f"stage_release.py failed: {result.stderr}")
+    if expect_success:
+        _check(result.returncode == 0, f"stage_release.py failed: {result.stderr}")
     return result
 
 
@@ -665,6 +709,8 @@ def _check_staged_metadata_is_rerenderable(output_root: Path) -> None:
             str(_RENDERER),
             "--metadata",
             str(output_root / "release_metadata.json"),
+            "--manifest",
+            str(output_root / "release_manifest.json"),
             "--output-root",
             str(rerender_root),
         ],
@@ -682,7 +728,7 @@ def _check_staged_metadata_is_rerenderable(output_root: Path) -> None:
 
 
 def _install_source_receipt(formula: str) -> dict[str, object]:
-    marker = '(libexec/"share"/"solet"/"install-source.json").write <<~JSON\n'
+    marker = '(libexec/"share"/"solet"/"install-source.json").write <<~\'JSON\'\n'
     start = formula.find(marker)
     end = formula.find("    JSON\n", start + len(marker))
     _check(start != -1 and end != -1, "Formula embeds an install-source receipt")
@@ -692,6 +738,20 @@ def _install_source_receipt(formula: str) -> dict[str, object]:
     _check(isinstance(value, dict), "install-source receipt is a JSON object")
     if not isinstance(value, dict):
         raise AssertionError("install-source receipt is not an object")
+    return value
+
+
+def _release_manifest_receipt(formula: str) -> dict[str, object]:
+    marker = '(libexec/"share"/"solet"/"release_manifest.json").write <<~\'JSON\'\n'
+    start = formula.find(marker)
+    end = formula.find("    JSON\n", start + len(marker))
+    _check(start != -1 and end != -1, "Formula embeds the stage-5 release manifest")
+    if start == -1 or end == -1:
+        raise AssertionError("release manifest is absent from the Formula")
+    value: object = json.loads(formula[start + len(marker) : end])
+    _check(isinstance(value, dict), "embedded release manifest is a JSON object")
+    if not isinstance(value, dict):
+        raise AssertionError("embedded release manifest is not an object")
     return value
 
 
@@ -735,6 +795,8 @@ def _check_dev_mode_stage(
             str(_RENDERER),
             "--metadata",
             str(metadata_path),
+            "--manifest",
+            str(output / "release_manifest.json"),
             "--output-root",
             str(root / "dev-claimed-as-release"),
         ],
@@ -936,6 +998,349 @@ def _check_manager_checkout_must_be_clean(
     )
 
 
+def _read_release_manifest(output_root: Path) -> dict[str, object]:
+    return json.loads((output_root / "release_manifest.json").read_text(encoding="utf-8"))
+
+
+def _check_release_label_and_manifest(
+    checkout: Path,
+    manager_checkout: Path,
+    manager_ref: str,
+    root: Path,
+    expected_manager_commit: str,
+    expected_manager_tree: str,
+) -> None:
+    """The release-label discriminator folds into the asset filename, and the
+    draft release_manifest.json (design §7.1) carries the seed+manager
+    sections with real per-file digests -- everything stage 5 owns."""
+    output = root / "stage-labeled"
+    _stage(checkout, manager_checkout, manager_ref, output, release_label="r44")
+    archive = _payload_archive_path(output)
+    real_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+    _check(
+        archive.name == "solet-0.1.0-r44.tar.gz",
+        f"--release-label folds into the asset filename: got {archive.name}",
+    )
+    metadata = json.loads((output / "release_metadata.json").read_text(encoding="utf-8"))
+    _check(
+        metadata["manager_url"].endswith("/solet-0.1.0-r44.tar.gz"),
+        "manager_url carries the discriminated asset name",
+    )
+
+    manifest = _read_release_manifest(output)
+    formula = (output / "Formula" / "solet.rb").read_text(encoding="utf-8")
+    _check(
+        _release_manifest_receipt(formula) == manifest,
+        "iss_18c47206: the Formula installs into the keg the exact same stage-5 "
+        "draft manifest that was staged beside it",
+    )
+    _check(manifest["schema_version"] == 1, "release manifest declares schema_version 1")
+    _check(manifest["release_label"] == "r44", "release manifest carries the release label")
+    _check(
+        manifest["manager_release_tag"] == _MANAGER_RELEASE_TAG,
+        "release manifest carries the manager release tag",
+    )
+    for null_section in (
+        "components",
+        "bundle_verdict",
+        "guest_validation",
+        "tap",
+        "surface_digests",
+        "produced_by",
+        "factory_signature",
+    ):
+        _check(
+            manifest[null_section] is None,
+            f"stage-5 draft leaves {null_section} null (a later publish_release stage fills it)",
+        )
+
+    seed_section = manifest["seed"]
+    _check(
+        seed_section["source_commit"] == expected_manager_commit,
+        "seed.source_commit (from PROVENANCE.json) matches the paired manager commit "
+        "in this hermetically-paired fixture",
+    )
+    manager_section = manifest["manager"]
+    _check(
+        manager_section["source_commit"] == expected_manager_commit
+        and manager_section["source_tree_hash"] == expected_manager_tree,
+        "manager section carries the resolved manager identity",
+    )
+    _check(
+        manager_section["payload_asset"]
+        == {
+            "name": "solet-0.1.0-r44.tar.gz",
+            "url": metadata["manager_url"],
+            "sha256": f"sha256:{real_sha256}",
+        },
+        "manager.payload_asset uses the staged archive's prefixed digest identity",
+    )
+    _check(manager_section["allow_manager_seed_skew"] is None, "no skew override was requested")
+
+    file_digests = manager_section["file_digests"]
+    _check(
+        "solet_cli/src.marker" in file_digests
+        and file_digests["solet_cli/src.marker"].startswith("sha256:"),
+        "manager.file_digests carries a real per-file digest for an archived file",
+    )
+    with tarfile.open(archive, mode="r:gz") as tar:
+        marker_member = tar.extractfile("solet_cli/src.marker")
+        marker_bytes = marker_member.read() if marker_member is not None else None
+        regular_file_members = {member.name for member in tar.getmembers() if member.isfile()}
+    _check(
+        marker_bytes is not None
+        and file_digests["solet_cli/src.marker"] == f"sha256:{hashlib.sha256(marker_bytes).hexdigest()}",
+        "the recorded per-file digest is the archived member's real sha256",
+    )
+    _check(
+        set(file_digests) == regular_file_members,
+        "file_digests has exactly one entry per archived regular-file member, no more, no fewer",
+    )
+
+
+def _check_release_label_shape_refused(checkout: Path, manager_checkout: Path, manager_ref: str, root: Path) -> None:
+    result = _stage(
+        checkout,
+        manager_checkout,
+        manager_ref,
+        root / "stage-bad-label",
+        release_label="not-a-label",
+        expect_success=False,
+    )
+    _check(
+        result.returncode != 0
+        and "--release-label has an invalid shape" in result.stderr,
+        f"stage_release.py refuses a malformed --release-label: {result.stderr}",
+    )
+
+
+def _check_manager_version_disagreement_refused(root: Path) -> None:
+    fixture_root = root / "version-skew-fixture"
+    fixture_root.mkdir(parents=True)
+    checkout, manager_checkout, manager_ref = _build_seed_fixture(
+        fixture_root, manager_version="9.9.9"
+    )
+    result = _stage(
+        checkout,
+        manager_checkout,
+        manager_ref,
+        root / "stage-version-skew",
+        expect_success=False,
+    )
+    _check(
+        result.returncode != 0
+        and "manager version disagreement" in result.stderr
+        and "9.9.9" in result.stderr
+        and "0.1.0" in result.stderr,
+        f"stage_release.py refuses a MANAGER_VERSION/pyproject-version disagreement: {result.stderr}",
+    )
+
+
+def _ruby_binary() -> tuple[Path, str]:
+    """Homebrew's own portable Ruby (what actually runs a Formula's `install`
+    at `brew install` time) if present, else whatever `ruby` is on PATH.
+    Reviewer-verified interpreter for Finding 1 of the Opus review
+    (`reissue_manifest_in_keg_review.md`): an unquoted `<<~JSON` heredoc is
+    double-quote semantics, so Ruby re-escapes `\\`/`"`/newline and executes
+    `#{...}` in whatever free-text `allow_manager_seed_skew` reason a caller
+    of `--allow-manager-seed-skew` records -- json.loads-ing the raw
+    rendered-Formula text (as the other checks in this file legitimately do,
+    for shape) can never see that, because it skips the Ruby step entirely."""
+    if _PORTABLE_RUBY.is_file():
+        return _PORTABLE_RUBY, "Homebrew portable Ruby"
+    found = shutil.which("ruby")
+    if found is not None:
+        return Path(found), "system ruby on PATH"
+    print("SKIP  Ruby-heredoc delivery check: no Homebrew portable Ruby and no system ruby on PATH")
+    raise SystemExit(77)
+
+
+def _heredoc_bytes_via_ruby(formula: str, install_name: str, ruby: Path, work_dir: Path) -> bytes:
+    """The exact bytes Ruby writes for one `(...).write <<~...JSON` heredoc in
+    a rendered Formula, run through the real interpreter -- not a Python-side
+    slice-and-json.loads, which is blind to Ruby's own string processing."""
+    match = None
+    for candidate in _HEREDOC_WRITE_CALL.finditer(formula):
+        if candidate.group("name") == install_name:
+            match = candidate
+            break
+    _check(match is not None, f"formula writes {install_name!r} through a `.write <<~JSON` heredoc")
+    if match is None:
+        raise AssertionError(f"{install_name} heredoc call is absent")
+    script = work_dir / f"heredoc-{install_name}.rb"
+    script.write_text(f"print {match['opener']}\n{match['body']}JSON\n", encoding="utf-8")
+    result = subprocess.run([str(ruby), str(script)], check=False, capture_output=True)
+    _check(result.returncode == 0, f"Ruby evaluates the {install_name} heredoc: {result.stderr.decode(errors='replace')}")
+    return result.stdout
+
+
+def _check_heredocs_are_quoted(formula: str) -> None:
+    """Cheap, ruby-free floor for every JSON heredoc in the Formula (Finding 1,
+    'Class, not site'): the opener must be the non-interpolating `<<~'JSON'`,
+    never the bare `<<~JSON` an accidental revert would reintroduce."""
+    names = {match["name"] for match in _HEREDOC_WRITE_CALL.finditer(formula)}
+    _check(
+        names
+        == {
+            "seed.lock.json",
+            "existing_install_inspection_seed_lock_catalog.v1.json",
+            "install-source.json",
+            "release_manifest.json",
+        },
+        f"formula writes exactly the four expected JSON heredocs: {sorted(names)}",
+    )
+    for match in _HEREDOC_WRITE_CALL.finditer(formula):
+        _check(
+            match["opener"] == "<<~'JSON'",
+            f"{match['name']} heredoc opener is the non-interpolating quoted form, not {match['opener']!r}",
+        )
+
+
+def _check_release_manifest_heredoc_survives_ruby(root: Path) -> None:
+    """iss_18c47206, Finding 1: an adversarial `allow_manager_seed_skew` reason
+    (a quote, a backslash, a newline, and a Ruby interpolation attempt) must
+    round-trip byte-identically through Homebrew's own Ruby, and the gate
+    must still grade the keg `skew_allowed` from those Ruby-written bytes --
+    not from the pre-Ruby Python rendering."""
+    ruby, ruby_label = _ruby_binary()
+    print(f"  (using {ruby_label}: {ruby})")
+    adversarial_reason = 'reissue "r46" \\ line1\nline2 #{1+1}'
+    fixture_root = root / "heredoc-fixture"
+    fixture_root.mkdir(parents=True)
+    checkout, manager_checkout, manager_ref = _build_seed_fixture(
+        fixture_root, provenance_source_commit="f" * 40
+    )
+    adversarial_output = root / "stage-heredoc-adversarial"
+    _stage(
+        checkout,
+        manager_checkout,
+        manager_ref,
+        adversarial_output,
+        allow_manager_seed_skew=adversarial_reason,
+    )
+    formula = (adversarial_output / "Formula" / "solet.rb").read_text(encoding="utf-8")
+    _check_heredocs_are_quoted(formula)
+
+    work_dir = root / "heredoc-ruby"
+    work_dir.mkdir(parents=True)
+    manifest_bytes = _heredoc_bytes_via_ruby(formula, "release_manifest.json", ruby, work_dir)
+    parsed: object = json.loads(manifest_bytes)
+    _check(isinstance(parsed, dict), "Ruby writes valid, parseable JSON for the adversarial reason")
+    manager_section = parsed["manager"] if isinstance(parsed, dict) else {}
+    _check(
+        isinstance(manager_section, dict) and manager_section.get("allow_manager_seed_skew") == adversarial_reason,
+        "Ruby writes the adversarial reason byte-identically -- no re-escaping, no interpolation: "
+        f"got {manager_section.get('allow_manager_seed_skew')!r}",
+    )
+
+    receipt_bytes = _heredoc_bytes_via_ruby(formula, "install-source.json", ruby, work_dir)
+    share_dir = root / "keg-heredoc-adversarial" / "share" / "solet"
+    share_dir.mkdir(parents=True)
+    receipt_path = share_dir / "install-source.json"
+    receipt_path.write_bytes(receipt_bytes)
+    manifest_path = share_dir / "release_manifest.json"
+    manifest_path.write_bytes(manifest_bytes)
+    seed = parse_seed_lock_bytes((adversarial_output / "solet_cli" / "homebrew" / "seed.lock.json").read_bytes())
+    verdict = pair_manager_and_seed(seed, install_source_path=receipt_path, manifest_path=manifest_path)
+    _check(
+        verdict["verdict"] == "skew_allowed" and verdict["allow_manager_seed_skew"] == adversarial_reason,
+        f"the gate grades skew_allowed from the Ruby-written keg bytes, with the reason intact: {verdict}",
+    )
+
+
+def _write_keg_receipts(share_dir: Path, formula: str) -> tuple[Path, Path]:
+    """Materialize a Formula's embedded ``install-source.json`` and
+    ``release_manifest.json`` exactly as its real ``install`` method writes
+    them into a keg's ``share/solet/`` -- so the gate below reads the same
+    bytes a real ``brew install`` would produce, not a hand-typed fixture."""
+    share_dir.mkdir(parents=True, exist_ok=True)
+    receipt_path = share_dir / "install-source.json"
+    receipt_path.write_text(json.dumps(_install_source_receipt(formula)), encoding="utf-8")
+    manifest_path = share_dir / "release_manifest.json"
+    manifest_path.write_text(json.dumps(_release_manifest_receipt(formula)), encoding="utf-8")
+    return receipt_path, manifest_path
+
+
+def _check_manifest_reaches_consumption_gate(root: Path, output_a: Path, overridden_output: Path) -> None:
+    """iss_18c47206, proved end to end against REAL rendered kegs (not the
+    gate's own pure-function fixtures -- ``release_identity_gate_smoke.py``
+    already covers those): a regression that breaks the render/Formula
+    wiring, and not just the gate's own verdict logic, is caught here too.
+
+    (c) same-revision, unaffected; (a) a manager-only reissue's recorded
+    ``allow_manager_seed_skew`` reason now actually reaches the gate; (b) the
+    identical skew with no recorded reason still refuses, fail-closed."""
+    paired_formula = (output_a / "Formula" / "solet.rb").read_text(encoding="utf-8")
+    paired_seed = parse_seed_lock_bytes((output_a / "solet_cli" / "homebrew" / "seed.lock.json").read_bytes())
+    paired_receipt, paired_manifest = _write_keg_receipts(root / "keg-paired" / "share" / "solet", paired_formula)
+    paired = pair_manager_and_seed(paired_seed, install_source_path=paired_receipt, manifest_path=paired_manifest)
+    _check(
+        paired["verdict"] == "paired" and paired["reason"] is None,
+        f"(c) a same-revision release stays paired now that its keg carries a manifest too: {paired}",
+    )
+
+    skewed_formula = (overridden_output / "Formula" / "solet.rb").read_text(encoding="utf-8")
+    skewed_seed = parse_seed_lock_bytes((overridden_output / "solet_cli" / "homebrew" / "seed.lock.json").read_bytes())
+    skewed_receipt, skewed_manifest = _write_keg_receipts(root / "keg-skew-allowed" / "share" / "solet", skewed_formula)
+    allowed = pair_manager_and_seed(skewed_seed, install_source_path=skewed_receipt, manifest_path=skewed_manifest)
+    _check(
+        allowed["verdict"] == "skew_allowed"
+        and allowed["allow_manager_seed_skew"] == "smoke: intentionally mismatched fixture",
+        f"(a) a manager-only reissue's --allow-manager-seed-skew reason, now installed in the keg, reaches the gate: {allowed}",
+    )
+
+    silenced = json.loads(skewed_manifest.read_text(encoding="utf-8"))
+    silenced["manager"]["allow_manager_seed_skew"] = None
+    silenced_path = root / "keg-skew-silent" / "release_manifest.json"
+    silenced_path.parent.mkdir(parents=True)
+    silenced_path.write_text(json.dumps(silenced), encoding="utf-8")
+    refused = pair_manager_and_seed(skewed_seed, install_source_path=skewed_receipt, manifest_path=silenced_path)
+    _check(
+        refused["verdict"] == "skew" and refused["reason"] == "manager_seed_revision_skew",
+        f"(b) the identical skew with no recorded reason still refuses -- the gate stays fail-closed: {refused}",
+    )
+
+
+def _check_same_source_revision(root: Path, output_a: Path) -> None:
+    """iss_da99a951: a seed whose PROVENANCE.source_commit names a DIFFERENT
+    manager commit than the one actually being staged is refused, unless the
+    caller explicitly records an override."""
+    fixture_root = root / "revision-skew-fixture"
+    fixture_root.mkdir(parents=True)
+    checkout, manager_checkout, manager_ref = _build_seed_fixture(
+        fixture_root, provenance_source_commit="f" * 40
+    )
+    refused = _stage(
+        checkout,
+        manager_checkout,
+        manager_ref,
+        root / "stage-revision-skew",
+        expect_success=False,
+    )
+    _check(
+        refused.returncode != 0
+        and "manager/seed revision skew" in refused.stderr
+        and manager_ref in refused.stderr
+        and "f" * 40 in refused.stderr,
+        f"stage_release.py refuses a manager/seed source-commit mismatch: {refused.stderr}",
+    )
+
+    overridden_output = root / "stage-revision-skew-overridden"
+    _stage(
+        checkout,
+        manager_checkout,
+        manager_ref,
+        overridden_output,
+        allow_manager_seed_skew="smoke: intentionally mismatched fixture",
+    )
+    manifest = _read_release_manifest(overridden_output)
+    _check(
+        manifest["manager"]["allow_manager_seed_skew"] == "smoke: intentionally mismatched fixture",
+        "--allow-manager-seed-skew's reason is recorded on the release manifest",
+    )
+    _check_manifest_reaches_consumption_gate(root, output_a, overridden_output)
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -966,6 +1371,7 @@ def main() -> int:
         )
         archive_path = _payload_archive_path(output_a)
         formula = (output_a / "Formula" / "solet.rb").read_text(encoding="utf-8")
+        _check_heredocs_are_quoted(formula)
         real_sha256 = _check_archive(archive_path, metadata, formula)
         _check_contract_digest_implementation_parity(
             checkout,
@@ -981,6 +1387,13 @@ def main() -> int:
         _check_staged_metadata_is_rerenderable(output_a)
         _check_dev_mode_stage(checkout, manager_checkout, manager_ref, root)
         _check_archive_guard_rejects_pre_fix_omission()
+        _check_release_label_and_manifest(
+            checkout, manager_checkout, manager_ref, root, expected_manager_commit, expected_manager_tree
+        )
+        _check_release_label_shape_refused(checkout, manager_checkout, manager_ref, root)
+        _check_manager_version_disagreement_refused(root)
+        _check_same_source_revision(root, output_a)
+        _check_release_manifest_heredoc_survives_ruby(root)
 
         output_b = root / "stage-b"
         _stage(checkout, manager_checkout, manager_ref, output_b)

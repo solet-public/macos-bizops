@@ -96,6 +96,7 @@ from macos_self_deployment_plugin.constants import (
     ENV_SOLET_INSTANCE_ID,
     ENV_SOLET_NAME,
     ENV_SOLET_RELEASE_ID,
+    FINISHER_ESCALATION_NEEDS_INTERVENTION,
     PLUGIN_NAME,
     RESULT_TYPE_AUTOSTART_INSTALL,
     RESULT_TYPE_AUTOSTART_STATUS,
@@ -177,6 +178,26 @@ if TYPE_CHECKING:
 # the heartbeat backstop can retry (symmetry with the backstop's TERMINATE_FAILED
 # which likewise preserves the record).
 _PRIOR_SIGTERM_DENIED: Final[str] = "prior_sigterm_denied"
+# ``complete_swap`` step-status for a prior that ignored SIGTERM for the whole
+# grace window on a record whose ``escalation`` forbids SIGKILL (the
+# reconciliation / ``cutover_release`` channel — iss_8d1ec833, property
+# ``no_sigkill_reachable_from_this_channel``). The prior is still alive and
+# no further signal was sent; like ``_PRIOR_SIGTERM_DENIED`` the durable record
+# is KEPT so the backstop can re-verify, and the operator must act.
+_PRIOR_SIGTERM_TIMEOUT_NEEDS_INTERVENTION: Final[str] = (
+    "prior_sigterm_timeout_needs_intervention"
+)
+# The step-statuses on which ``complete_swap`` keeps the durable record: the
+# prior is possibly alive and this finisher can do nothing more about it.
+_PRIOR_RECORD_KEPT_STATUSES: Final[frozenset[str]] = frozenset(
+    {_PRIOR_SIGTERM_DENIED, _PRIOR_SIGTERM_TIMEOUT_NEEDS_INTERVENTION},
+)
+_PRIOR_RECORD_KEPT_STEP: Final[dict[str, str]] = {
+    _PRIOR_SIGTERM_DENIED: "pending_finisher_kept_sigterm_denied",
+    _PRIOR_SIGTERM_TIMEOUT_NEEDS_INTERVENTION: (
+        "pending_finisher_kept_sigterm_timeout_needs_intervention"
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -1275,12 +1296,13 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
                 signal_status = self._signal_verified_prior(record)
                 steps_completed.append(signal_status)
                 steps_completed.append(self._safe_unregister(record.prior_instance_id))
-                # Symmetry with the backstop's TERMINATE_FAILED: only a denied
-                # SIGTERM leaves the prior possibly-alive, so keep the record for
-                # the backstop to retry; every other status means the prior is
-                # gone / killed / pid-reused → safe to clear.
-                if signal_status == _PRIOR_SIGTERM_DENIED:
-                    steps_completed.append("pending_finisher_kept_sigterm_denied")
+                # Symmetry with the backstop's TERMINATE_FAILED / TERMINATE_TIMEOUT:
+                # a denied SIGTERM, or a SIGTERM the prior ignored on a record
+                # that forbids SIGKILL, leaves the prior possibly-alive, so keep
+                # the record for the backstop to re-verify; every other status
+                # means the prior is gone / killed / pid-reused → safe to clear.
+                if signal_status in _PRIOR_RECORD_KEPT_STATUSES:
+                    steps_completed.append(_PRIOR_RECORD_KEPT_STEP[signal_status])
                 else:
                     clear_pending_finisher(finisher_path)
                     steps_completed.append("pending_finisher_cleared")
@@ -1304,7 +1326,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
             return "prior_already_gone"
         if live_token != record.prior_start_token:
             return "prior_pid_reused_skip_sigterm"
-        return self._signal_and_wait(record.prior_pid)
+        return self._signal_and_wait(record.prior_pid, escalation=record.escalation)
 
     def swap_status(self) -> dict[str, Any]:
         """LocalSelfDeploymentServiceInterface impl — router.status() + local in-flight state."""
@@ -2276,10 +2298,16 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
             if hasattr(plugin, "set_active"):
                 yield plugin
 
-    def _signal_and_wait(self, pid: int) -> str:
-        """SIGTERM ``pid``; poll up to grace seconds; SIGKILL on overrun.
+    def _signal_and_wait(self, pid: int, *, escalation: str) -> str:
+        """SIGTERM ``pid``; poll up to grace seconds; then act per ``escalation``.
 
-        Returns a step-status string for the result envelope.
+        ``escalation`` is the durable record's policy
+        (:attr:`PendingFinisher.escalation`): ``sigkill_after_grace`` keeps the
+        ordinary service-driven ladder (SIGKILL on overrun);
+        ``needs_intervention`` — the reconciliation / ``cutover_release``
+        channel — returns ``prior_sigterm_timeout_needs_intervention`` on
+        overrun and sends NOTHING further (iss_8d1ec833). Returns a step-status
+        string for the result envelope.
         """
         try:
             os.kill(pid, signal.SIGTERM)
@@ -2290,10 +2318,21 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
             return _PRIOR_SIGTERM_DENIED
         deadline = time.monotonic() + DEFAULT_PRIOR_TERM_GRACE_SECONDS
         while time.monotonic() < deadline:
-            if not _pid_alive(pid):
+            # Zombie-aware (waitpid for our own children, kill -0 otherwise):
+            # a bare kill -0 reads an exited-but-unreaped prior as alive and
+            # would run the grace out on a corpse.
+            if process_identity.process_exited(pid):
                 return "prior_terminated_cleanly"
             time.sleep(DEFAULT_PRIOR_TERM_POLL_INTERVAL_SECONDS)
-        # Grace exhausted — escalate to SIGKILL.
+        if escalation == FINISHER_ESCALATION_NEEDS_INTERVENTION:
+            self.logger.critical(
+                "prior pid=%d is STILL ALIVE %.1fs after SIGTERM and this swap's "
+                "record forbids SIGKILL (escalation=%s); record kept, manual "
+                "intervention required",
+                pid, DEFAULT_PRIOR_TERM_GRACE_SECONDS, escalation,
+            )
+            return _PRIOR_SIGTERM_TIMEOUT_NEEDS_INTERVENTION
+        # Grace exhausted on the ordinary ladder — escalate to SIGKILL.
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -2349,14 +2388,3 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
             "timestamp": datetime.now(UTC).isoformat(),
         }
 
-
-def _pid_alive(pid: int) -> bool:
-    """Return True iff ``pid`` is alive (kill -0 probe)."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        # Permission denied → process exists but we can't signal it.
-        return True
-    return True

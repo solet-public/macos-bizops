@@ -2,7 +2,292 @@
 
 Newest release first. Earlier releases follow below the divider.
 
+## 2026-09-27 — r48: stable macos-bizops on the Apple-native stack
+
+**Solet Manager manager-v0.1.0-r48.** This is a full seed build, published
+twice from the same landed source commit: first to
+`solet-public/macos-bizops-daily`, with manager artifacts in
+dwestgate/homebrew-tap-validate; then, after a fresh macOS 27 VM round, as a
+fresh build to stable `solet-public/macos-bizops` — the first stable-channel
+cut since r43 (r44 through r47 published to `-daily` only) — with manager
+artifacts in solet-public/homebrew-tap, the public distribution route.
+
+Requires macOS 27 on Apple-silicon hardware with Apple Intelligence
+available. If Apple Intelligence is off or its model is still downloading,
+the solet installs and runs, and summaries stay degraded until it is
+available (warn-only, self-recovering). No other OS versions are supported.
+
+Changes since r46 (source `af39a9f45`):
+
+- Fresh macOS 27 genesis now builds `apple-fm-sdk` from its vendored wheel
+  instead of its sdist: `profile_install` resolves the vendored wheel first
+  via `--find-links`, avoiding a `SwiftToolingError` build failure that
+  otherwise required Xcode.
+- `coreai_embeddings_plugin` never became ready after a fresh boot:
+  `initialize()` invalidates the readiness `prepare_for_readiness()` set
+  during Phase-1 startup, and nothing re-prepared it. Both boot and a plugin
+  config reload now re-prepare readiness correctly.
+- `solet create`'s preview gate no longer deadlocks at the models stage. It
+  now attempts the Core AI asset acquisition instead of waiting on it, and a
+  blocked LaunchAgent install is excused when a runnable peer operation is
+  set up to clear that exact same block — closing a deadlock the Core AI
+  LaunchAgent deferral could trigger even though the prior
+  precondition-remediation excuse never covered it.
+- The Homebrew keg now ships its own rendered release manifest (previously a
+  build-time-only artifact), so a Manager-only reissue can read
+  `allow_manager_seed_skew` from an installed keg instead of finding nothing
+  there.
+- Seed assembly no longer fails closed on undeclared fixture dependencies:
+  `apple_setup_flow_smoke`'s dependency on the Core AI and Apple FM
+  per-plugin config files and `selected_inference_startup_smoke`'s
+  cross-bundle transition are now declared in the seed's shipped-smoke
+  contract.
+- Two service-interface verbs, `inference_service::qualify` and
+  `thinking_service::resume_thinking_completion`, declared required
+  arguments their own schema never supplied, so neither was reachable by any
+  real call path. Both are fixed, and a new class-wide AST check catches the
+  pattern going forward.
+- The session ledger's away-summary lookup is now a bounded read: an
+  unbounded scan over a conversation group's SYSTEM events could trip the
+  state service's row cap deterministically on a long-running session with a
+  large sibling event set. Periodic auto-summarize failures are now logged
+  visibly instead of retrying silently forever.
+- Homebrew existing-install inspection's seed-lock hash moves out of the
+  wheel-bundled catalog — which could never validly carry it, since that
+  hash is only known after the release's own seed lock is rendered — into a
+  separate release-rendered catalog file the installed keg ships.
+- Documentation correction (this entry's own change): the shipped
+  Apple-native profiles' actual default — Core AI Nomic embeddings, Apple
+  Foundation Models inference — is now what the hydration runbook, the
+  profile-templates KB article, and the seed README template describe. Each
+  previously stated or implied that LM Studio / `openai_embeddings_plugin`
+  was still the default, or that its models needed manual provisioning.
+
+Fresh-guest installation and the existing-install update path are separate
+post-publish operations. This release does not claim a fresh-guest install,
+an update of an existing solet, `solet doctor`, or E3 result.
+
+Known limits: the r45 and r46 limits remain — Core AI embeddings and Apple
+Foundation Models require macOS 27 on Apple Silicon; Apple Foundation Models
+also needs an Apple Intelligence-eligible host; choosing LM Studio embeddings
+is not supported in the shipped macOS profiles; an update of an existing
+solet has not been re-measured end to end on a clean guest; there is no
+automated supported manager-binary upgrade path; and there is no
+abandon/change decision command for a blocked transaction.
+
 ---
+
+## 2026-09-27 — r47: Manager reissue of the daily seed with install and update fixes
+
+**Solet Manager manager-v0.1.0-r47.** This is an automated publish_release
+Manager-only re-release (reissue of seed release
+release-2026-09-27-0a0388214130), with manager artifacts in
+dwestgate/homebrew-tap-validate, built from the landed source commit
+containing this entry. The solet-public/macos-bizops-daily seed is unchanged
+from r46: same seed release tag, same sealed commit, no new seed content.
+
+Changes since r46:
+
+- The Manager no longer carries a fixed existing-install seed-lock hash in its
+  wheel. That hash must match the release's own rendered seed lock, which
+  cannot be known when the Manager source is committed, so r46 carried a value
+  that matched no published lock and refused every existing-install update. The
+  hash now lives in a separate catalog file rendered with the release after the
+  seed lock is written and verified, and the Homebrew keg ships it under
+  share/solet/.
+- The Manager's existing-install inspection and import accept a Homebrew keg
+  whose installed wheel has no RECORD file. A Homebrew-poured keg omits
+  RECORD, so r46 refused inspection and import on a real install. The
+  ownership, symlink and write-bit checks still apply; a RECORD that is present
+  is still verified against the resource; more than one RECORD is still
+  refused.
+- `solet create` no longer deadlocks in preview at the models stage on
+  macOS 27: its preview gate now attempts the Core AI model acquisition instead
+  of waiting on it.
+
+Fresh-guest installation and the existing-install update path are separate
+post-publish operations. This release does not claim a fresh-guest install,
+an update of an existing solet, solet doctor, or E3 result.
+
+Known limits: the r46 limits remain. Core AI embeddings and Apple Foundation
+Models require macOS 27 on Apple Silicon; Apple Foundation Models also needs
+an Apple Intelligence-eligible host.
+
+---
+
+## 2026-09-27 — r46: Apple-native local inference on macOS 27
+
+**Solet Manager manager-v0.1.0-r46.** This is an automated publish_release cut
+to solet-public/macos-bizops-daily, with manager artifacts in
+dwestgate/homebrew-tap-validate, built from the landed source commit
+containing this entry.
+
+Changes since r45:
+
+- New `coreai_embeddings_plugin`: Nomic embed text v1.5, converted to Apple
+  Core AI, runs in the solet's own process on macOS 27, on the GPU with a CPU
+  fallback. It replaces the OpenAI-compatible local-server embeddings in the
+  macOS profiles, and setup now selects it by default. The model (about
+  277 MB) is downloaded by setup from a pinned release asset and verified
+  against its SHA-256 before use. A valid copy already installed is reused
+  without a download; a failed download or a corrupt installed copy stops
+  setup with repair text instead of continuing.
+- New `macos_inference_plugin`: Apple Foundation Models summaries on eligible
+  macOS 27 hosts. It replaces LM Studio as the local summary provider in the
+  macos-bizops profile. Planning and other frontier work stay with the frontier
+  session.
+- Setup does not start the solet's LaunchAgent until the pinned Core AI model
+  is verified. Until then the LaunchAgent install reports blocked with repair
+  text and Genesis records the deferral as a warning, never as a started
+  service.
+- Setup checks for macOS 27 on Apple Silicon when model setup begins, before
+  any Apple-native model is configured or downloaded.
+- Fresh macOS profiles materialize the model folder under the solet's own
+  data directory.
+- An intentionally vacant inference binding now starts as vacant instead of
+  failing startup; an explicit but broken binding still fails closed.
+
+Fresh-guest installation is a separate post-publish operation. This release
+does not claim a fresh-guest install, solet doctor, or E3 result.
+
+Known limits: Apple Foundation Models needs an Apple Intelligence-eligible
+host; on an ineligible Mac or virtual machine, summaries are unavailable and
+setup warns rather than fails. Core AI embeddings require macOS 27. Choosing
+LM Studio embeddings is not supported in the shipped macOS profiles in this
+release: they no longer carry the OpenAI-compatible embeddings plugin, and
+their LaunchAgent still waits for the Core AI model. The limits disclosed in
+r43 to r45 otherwise remain.
+
+---
+
+## 2026-09-25 — r45: doctor, LM Studio and messaging fixes
+
+**Solet Manager manager-v0.1.0-r45.** This is an automated publish_release cut
+to solet-public/macos-bizops-daily, with manager artifacts in
+dwestgate/homebrew-tap-validate, built from the landed source commit
+containing this entry.
+
+Changes since r44:
+
+- The Manager's doctor runtime identity check reads only the top-level
+  launchd job state and PID, so a healthy LaunchAgent whose venv Python
+  resolves through the Homebrew framework no longer fails, and nested
+  coalition blocks are no longer miscounted as duplicate job states. A job
+  that is waiting but still reports a PID still fails closed.
+- Manager contracts and LM Studio readiness are reconciled, and an LM Studio
+  model pull is judged by the daemon's observed state rather than the pull
+  command's own output.
+- The published r43 seed is recorded as the predecessor for existing-install
+  transitions.
+- Peer messaging routes no longer run on the solet's event loop, removing
+  multi-second stalls and the mass reconnects they caused.
+- A managed dispatch mints its work-register unit atomically.
+
+Fresh-guest installation is a separate post-publish operation. This release
+does not claim a fresh-guest install, solet doctor, or E3 result.
+
+Known limits: the r43 existing-install upgrade router fix is not in this
+release and follows in a later one. The limits disclosed in r43 and r44
+otherwise remain: an update of an existing Solet has not been re-measured end
+to end on a clean guest; there is no automated supported manager-binary
+upgrade path; and there is no abandon/change decision command for a blocked
+transaction.
+
+---
+
+## 2026-09-23 — r44: first automated release cut
+
+**Solet Manager `manager-v0.1.0-r44`.** This is the first automated
+`publish_release` cut to `solet-public/macos-bizops-daily`, with manager
+artifacts in `dwestgate/homebrew-tap-validate`, built from the landed source
+commit containing this entry.
+
+Fresh-guest installation is a separate post-publish operation. This release
+does not claim a fresh-guest install, `solet doctor`, or E3 result.
+
+The known limits disclosed in r43 remain unless later landed evidence proves
+otherwise: an update of an existing Solet has not been re-measured end to end
+on a clean guest; there is no automated supported manager-binary upgrade path;
+and there is no abandon/change decision command for a blocked transaction.
+
+---
+
+## 2026-09-19 — r43: existing-Solet import and update ships; ten install-blocker fixes
+
+**Solet Manager `manager-v0.1.0-r43`** (`solet 0.1.0_28`) is pinned to public
+seed release `release-2026-09-19-ef2ea8fce869` of `solet-public/macos-bizops`,
+built from source pin `ef2ea8fce86918234d3e4281050b64c7efcb3d8e`. It was
+validated end to end on a fresh 50 GB macOS guest: every required setup
+checkpoint completed, `solet doctor` verified 24/24 checks, and the
+target-local health probe reported healthy with the manager's own
+registration in agreement. The published seed's artifact-keyed born-clone
+gate passed cleanly (635 total, 620 passed, 15 environment-dependent skips,
+zero failures).
+
+### What is in it
+
+- **New: existing-Solet import and update.** The manager can now inspect,
+  classify, and import a pre-manager solet (one born from an earlier seed via
+  `bootstrap.py`, not created by `solet create`), and can update an
+  already-manager-created solet to a newer seed release in place. This spans
+  provenance verification, a v2 maintenance inventory, an atomic
+  Manager-only enrollment path, an `update` CLI with fast-forward apply,
+  update runtime and cutover with hardened adapter protocols, dual-contract
+  doctor/resume/promotion coverage, and a cold-host/real-style fixture matrix
+  plus Homebrew import/upgrade lifecycle smoke coverage. **What this release's
+  own clean-guest validation proves:** a fresh install completes cleanly
+  end-to-end (doctor 24/24, health probe healthy) on the exact shipped code.
+  **What it does not yet prove:** a real update-of-an-existing-solet has not
+  been exercised end-to-end on a clean guest by this release's own validation
+  ladder — the code path is extensively covered by unit and fixture-based
+  tests (cold-host and real-style scenarios, both landed under independent
+  review), but a live guest walk of install-then-update is a fast-follow, not
+  yet re-measured here. Until that re-measurement lands, treat the *Reinstalling
+  on a machine that had a solet* section below as still authoritative for what
+  to expect in practice.
+- **Ten install-blocker fixes**, each independently landed and gate-verified
+  during r41/r42's own validation attempts: SeedLock resume-identity
+  comparison; session-source naming migration; session-ledger boot-source
+  registration; postgres readiness classification; `corrupt_state`
+  out-of-band recovery reconciliation; identity-gate binary-file tolerance;
+  cask-executable PATH-restriction resolution (two separate rounds);
+  Homebrew dry-run version-item parsing; budget/timeout raises for
+  `install_lm_studio` and `embedding_request_succeeds`; and a resume/preview
+  permission preflight.
+- **Fleet/docs housekeeping** (retirement-handoff convention, fleet
+  liveness/progress joseki cards) — no functional effect on the install/update
+  surface, shipped as-is.
+
+### What is NOT in it, stated plainly
+
+- **A real update-of-an-existing-solet walk has not been re-measured on a
+  clean guest by this release.** See above — the code ships and is
+  extensively tested at the unit/fixture level, but this release's own
+  clean-guest ladder validated a fresh install only, per explicit discretion
+  not to hold a ready, green fresh-install publish on a supplementary check.
+  Follow the *Reinstalling on a machine that had a solet* section below until
+  that walk is published.
+- The previous release's outstanding limits still apply unless explicitly
+  fixed above: no automated supported manager upgrade path for the manager
+  binary itself, no abandon/change decision command for a blocked
+  transaction.
+
+Read the tap README first (https://github.com/solet-public/homebrew-tap) for
+the current install guide, known gaps, and reinstall guidance.
+
+## 2026-09-16 — r41: internal tooling only, retroactive disclosure
+
+**Solet Manager `manager-v0.1.0-r41`** (`solet 0.1.0_27`) was published to
+`solet-public/macos-bizops` and `solet-public/homebrew-tap` on 2026-09-16,
+built from source pin `5c5aec1965befd824b71ad66458ee70025c2d2a7` ("require
+explicit Project Solet register CLI"). This entry is added retroactively on
+2026-09-19, during the r43 cut, after r43's own predecessor-conflict check
+found this publish live on GitHub with no corresponding release note. r41's
+source commit is internal Project Solet register tooling with **no
+user-facing manager or install-surface change** — this is presumably why no
+customer-facing note was written for it at the time. Recorded here so the
+release history stays honest: every published round gets an entry, even one
+that changes nothing an operator would notice.
 
 ## 2026-09-15 — r40: diagnosable genesis recovery and persistent-autostart proof
 

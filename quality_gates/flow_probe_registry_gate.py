@@ -25,6 +25,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+_REPO_IMPORT_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_IMPORT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_IMPORT_ROOT))
+
+from quality_gates.allowlist_schema import load_allowlist as _load_tagged_allowlist  # noqa: E402
+
 _FLOW = Path("plugins/github_midwife_plugin/knowledge_base/macos_setup_flow.json")
 _BOOTSTRAP_ROUTES = Path("bootstrap_adapter/routes.py")
 _INSTALLATION_DOCTOR = Path("plugins/github_midwife_plugin/src/github_midwife_plugin/installation_doctor.py")
@@ -276,13 +282,9 @@ def _relayed_findings(probe_id: str, reference: str, generic: set[str], register
 
 
 def load_allowlist(path: Path) -> set[str]:
-    if not path.exists():
-        return set()
-    return {
-        line.split("#", 1)[0].strip()
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.split("#", 1)[0].strip()
-    }
+    """Mandatory owner/reason/expires schema (D-3-structural, iss_23fa51b5)."""
+
+    return set(_load_tagged_allowlist(path))
 
 
 def classify_live_schema(exit_code: int, output: str) -> str:

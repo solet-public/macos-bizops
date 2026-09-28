@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import subprocess
 from collections.abc import Iterable
 from datetime import date, datetime
 from importlib.resources import files
@@ -113,6 +114,42 @@ def _scan_root(
     return entries
 
 
+def _tracked_root_names(repo_root: Path) -> frozenset[str] | None:
+    """The first path component of every index entry, or ``None`` when
+    ``repo_root`` is not itself the top of a Git working tree.
+
+    The scan above has no notion of WHOSE file a root entry is or whether
+    it is even part of the repository (iss_ce45713b); this is the one Git
+    question it needs answered.  The index — not the committed tree — is
+    the boundary, so a file staged for this very commit already counts as
+    tracked, which is the same boundary a landing sees.  ``None`` (no Git,
+    a nested directory, a bare fixture) means no git-awareness at all, and
+    the caller records that fact rather than guessing.
+    """
+    try:
+        toplevel = subprocess.run(
+            ("git", "rev-parse", "--show-toplevel"),
+            cwd=repo_root, check=False, capture_output=True, text=True,
+        )
+    except OSError:
+        return None
+    if toplevel.returncode != 0:
+        return None
+    if Path(toplevel.stdout.strip()).resolve() != repo_root.resolve():
+        return None
+    listing = subprocess.run(
+        ("git", "ls-files", "-z"),
+        cwd=repo_root, check=False, capture_output=True,
+    )
+    if listing.returncode != 0:
+        return None
+    return frozenset(
+        record.split(b"/", 1)[0].decode("utf-8", errors="surrogateescape")
+        for record in listing.stdout.split(b"\0")
+        if record
+    )
+
+
 def _parse_iso_date(text: str) -> date | None:
     try:
         return datetime.strptime(text, "%Y-%m-%d").date()
@@ -196,6 +233,11 @@ def classify_root_entries(
     all_declared = declared_universal | declared_sanctioned | declared_overrides
 
     unknown = sorted(present - all_declared)
+    tracked_root_names = _tracked_root_names(repo_root)
+    untracked = (
+        [] if tracked_root_names is None
+        else [name for name in unknown if name not in tracked_root_names]
+    )
     missing_universal = sorted(declared_universal - present)
     missing_sanctioned = sorted(declared_sanctioned - present)
 
@@ -211,6 +253,8 @@ def classify_root_entries(
         repo_root=repo_root,
         solet_name=manifest.solet_name,
         unknown_entries=tuple(unknown),
+        untracked_entries=tuple(untracked),
+        git_index_consulted=tracked_root_names is not None,
         missing_universal=tuple(missing_universal),
         missing_sanctioned=tuple(missing_sanctioned),
         sunset_overdue=sanctioned_overdue + overrides_overdue,

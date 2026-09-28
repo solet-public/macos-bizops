@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -42,8 +43,14 @@ from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE
 from ananta.llm.agent_messaging.state_results import require_records  # noqa: E402
 
 import agent_messaging_plugin.session_lifecycle_verbs as lifecycle_verbs  # noqa: E402
+from agent_messaging_plugin.model_capability_store import load_seed_table, seed_catalog  # noqa: E402
+from agent_messaging_plugin.model_capability_verbs import select_dispatch_tier  # noqa: E402
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
-from agent_messaging_plugin.schema import TABLE_SESSION_TRANSITION  # noqa: E402
+from agent_messaging_plugin.schema import (  # noqa: E402
+    CELL_ACCEPTANCE_ACCEPTED,
+    TABLE_MODEL_CAPABILITY_CELL,
+    TABLE_SESSION_TRANSITION,
+)
 from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
     ManagedSessionSpec,
     insert_managed_session,
@@ -83,6 +90,67 @@ def _error_code(result: dict[str, Any]) -> str | None:
     return error.get("code") if isinstance(error, dict) else None
 
 
+def _selection_params(state: StateManagementInterface) -> dict[str, object]:
+    """Seed a fresh accepted catalog and produce the receipt public spawn requires."""
+    seed_catalog(state, seed=load_seed_table())
+    measured_at = datetime.now(UTC).isoformat()
+    for row in state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MODEL_CAPABILITY_CELL):
+        row.update(
+            acceptance=CELL_ACCEPTANCE_ACCEPTED,
+            accepted_at=measured_at,
+            measured_at=measured_at,
+            last_refresh_run_id="session-lifecycle-transport-fixture",
+        )
+    receipt = select_dispatch_tier(
+        state,
+        {"required_score": 38, "billing_objective": "metered_usd", "dispatch_kind": "infrastructure"},
+    )["selection_receipt"]
+    selected = receipt["selected"]
+    return {
+        "difficulty_score": receipt["required_score"],
+        "selection_receipt": receipt,
+        "agent_runtime": selected["runtime"],
+        "model": selected["model"],
+        "effort": selected["effort"],
+    }
+
+
+def test_phase_selector_transport() -> None:
+    state = cast("StateManagementInterface", RealShapeState())
+    _selection_params(state)
+    plugin = _bare_plugin(state)
+    selected = plugin.select_dispatch_tier(
+        _params(required_score=50, dispatch_kind="test", scope_tags=["state_schema"],
+                cost_tolerance=0),
+        _state_with_context(),
+    )
+    cell = selected.get("data", {}).get("selected", {})
+    _check(
+        selected.get("action_status") == "completed"
+        and (cell.get("runtime"), cell.get("model"), cell.get("effort"))
+        == ("codex", "gpt-6-astra", "medium"),
+        "public selector accepts test and selects Astra medium at score 50",
+    )
+    unknown = plugin.select_dispatch_tier(
+        _params(required_score=50, dispatch_kind="unknown-phase"),
+        _state_with_context(),
+    )
+    _check(
+        unknown.get("action_status") == "completed"
+        and unknown.get("data", {}).get("selected", {}).get("capability_score", 0) >= 50,
+        "public selector accepts open nonblank phase provenance",
+    )
+    blank = plugin.select_dispatch_tier(
+        _params(required_score=50, dispatch_kind=" "),
+        _state_with_context(),
+    )
+    _check(
+        blank.get("action_status") == "failed"
+        and _error_code(blank) == "dispatch_kind_required",
+        "public selector rejects blank phase provenance",
+    )
+
+
 def test_spawn_session_transport() -> None:
     state = cast("StateManagementInterface", RealShapeState())
     plugin = _bare_plugin(state)
@@ -99,10 +167,12 @@ def test_spawn_session_transport() -> None:
         f"right code (got {result!r})",
     )
 
+    selector_params = _selection_params(state)
     ok = plugin.spawn_session(
         _params(
             role_class="ephemeral", lane_id="lane-1", brief_ref="b", work_class="read_only",
             budget_line="b1", host="operator", dispatch_kind="infrastructure",
+            **selector_params,
         ),
         _state_with_context(),
     )
@@ -321,6 +391,7 @@ def main() -> int:
     lifecycle_verbs.remove_lane_worktree = lambda worktree: None  # type: ignore[assignment]  # noqa: SLF001
     try:
         test_spawn_session_transport()
+        test_phase_selector_transport()
         test_list_and_status_transport()
         test_terminate_retire_directed_by_transport()
         test_report_alive_transport()

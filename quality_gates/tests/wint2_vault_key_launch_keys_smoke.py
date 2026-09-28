@@ -456,7 +456,8 @@ def smoke_9_static_gate_positive_allowlist() -> None:
         del plugin_dir
         allowlist = tmp / "allowlist.txt"
         allowlist.write_text(
-            "D1.2::plugins/p_allow/src/p_allow/plugin.py::*\n",
+            "D1.2::plugins/p_allow/src/p_allow/plugin.py::*"
+            "  # owner: smoke-fixture reason: tracked test debt expires: 2099-01-01\n",
         )
         mod = _reload_gate_with_repo_root(tmp)
         al = mod.load_allowlist(allowlist)

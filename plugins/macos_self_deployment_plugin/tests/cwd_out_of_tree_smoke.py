@@ -122,6 +122,7 @@ def _router_context() -> dict[str, str]:
         "LAUNCHD_LABEL": service_install.launchd_label(_SOLET),
         "PYTHON_BIN": "/usr/bin/python3",
         "WORKING_DIR": str(runtime_dir),
+        "RUNTIME_DIR": str(runtime_dir),
         "SOLET_NAME": _SOLET,
         "PUBLIC_PORT": "8800",
         "SOCKET_PATH": str(service_install.default_socket_path(_SOLET)),
@@ -174,6 +175,7 @@ def test_install_router_build_context_wires_out_of_tree() -> None:
         public_port=8800,
         socket_path=None,
         log_dir=None,
+        runtime_dir=None,
     )
     context = install_router._build_context(args)  # noqa: SLF001
     _check(

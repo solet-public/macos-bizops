@@ -54,8 +54,10 @@ the same contention class already filed cross-lane as GTE-16/GTE-17 in the
 workbench backlog. Two escapes exist, each naming the specific resource
 it isolates: smokes that contend only with EACH OTHER share an
 ``_EXCLUSIVE_GROUPS`` chain (sequential on one worker, concurrent with the
-rest), and smokes whose resource the whole suite shares are named in
-``_SERIAL_ONLY`` and run one at a time BEFORE the pool starts, while no other
+rest), and smokes whose resource the whole suite shares are named in the
+tracked schedule ``quality_gates/serial_only_smokes.txt`` (the ONE serial-only
+source, shared with the born-clone publication gate since 2026-09-20,
+iss_f939bae7) and run one at a time BEFORE the pool starts, while no other
 smoke is running at all; their results are cached and printed at their true
 register slots during the ordered walk. Since 2026-09-04 (iss_0fb8f519), the
 serial-only phase additionally holds a per-user host-global advisory flock,
@@ -66,6 +68,17 @@ same host-global lock. The suite's result set is identical to a fully serial
 run either way. ``--jobs 1`` degenerates to one worker (plus the same
 host-serialized serial-only phase) for diagnosis of suspected
 concurrency-induced flakes.
+
+Contention signal (2026-09-20, gates-cluster-A5): a battery that ran while
+sharing the host with real fleet load can red or skip for reasons that have
+nothing to do with the candidate under test — see ``contention_signal.py``'s
+module docstring for the five issues this addresses. Every run now measures
+and prints ``contention_signal.BatteryContention`` (concurrent live batteries,
+liveness-verified, sampled before and after the suite; and how long this
+battery waited for the host serial-only lock), and a full-battery run records
+it on its own receipt (``contention`` key) so a later reader can tell "this
+red co-occurred with real host contention" from "this is a clean regression"
+without re-running anything.
 
 Exit codes:
   0 - every listed smoke passed (skips, if any, did not trip --fail-on-skip)
@@ -95,8 +108,26 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import IO, Literal
 
+# This file is dual-invoked: directly as a script (sys.path[0] is this
+# directory) and imported as `quality_gates.run_smokes` by
+# run_smokes_battery_containment_smoke.py (sys.path[0] is the repo root).
+# Inserting this file's own directory makes the flat sibling import below
+# resolve identically in both cases, matching code_quality_check.py's flat
+# `from gate_scope import ...` sibling-import style.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import contention_signal  # noqa: E402
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_DEFAULT_REGISTER = Path(__file__).resolve().parent / "gate_smokes.txt"
+# Overridable so an out-of-process regression fixture (contention_signal_smoke.py)
+# can make a small, disposable fixture register "the" full battery for receipt
+# purposes without touching the real gate_smokes.txt or the real candidate
+# tree -- the same isolation _HOST_SERIAL_LOCK_ENV and _BATTERY_RECEIPT_DIR_ENV
+# already give a subprocess-level test below.
+_DEFAULT_REGISTER_ENV = "RUN_SMOKES_DEFAULT_REGISTER_PATH"
+_DEFAULT_REGISTER = Path(
+    os.environ.get(_DEFAULT_REGISTER_ENV, str(Path(__file__).resolve().parent / "gate_smokes.txt"))
+)
+_DEFAULT_SERIAL_ONLY = Path(__file__).resolve().parent / "serial_only_smokes.txt"
 _DEFAULT_TIMEOUT = 120
 _HOST_SERIAL_LOCK_ENV = "RUN_SMOKES_HOST_SERIAL_LOCK_PATH"
 _HOST_SERIAL_LOCK_PATH = Path(
@@ -175,46 +206,18 @@ _SKIP_EXIT_CODE = 77
 _DEFAULT_JOBS = min(12, os.cpu_count() or 1)
 
 # Smokes that hold a HOST-EXCLUSIVE resource for their whole run and therefore
-# cannot share the host with ANY concurrently-running smoke. They are excluded
-# from the worker pool and run one at a time before it starts; this serial phase
-# is also host-serialized across separate batteries by _HOST_SERIAL_LOCK_PATH
-# (iss_0fb8f519), while the pooled phase remains cross-process concurrent. Each
-# entry names the specific resource measured, not a guess — the same contention
-# class is already filed cross-lane as GTE-16/GTE-17 in the workbench backlog;
-# when those land as per-run-unique resources, the corresponding entry can be
-# removed.
-_SERIAL_ONLY: tuple[str, ...] = (
-    # Shells out to REAL `pip install -e` / `pip uninstall` against the shared
-    # repo venv three times per run — rewrites the __editable__ .pth site
-    # configuration every pooled smoke's freshly-spawned interpreter would be
-    # reading mid-flight.
-    "ananta/tests/lifecycle_management_service/set_plugin_enabled_reenable_smoke.py",
-    # Real-tmux tier spawns an actual session under a FIXED name
-    # (agi-realtmux01) on the host-global tmux server, and the spawn
-    # backgrounds a live solet-bridge watch sidecar whose registration row is
-    # visible to any concurrently-running smoke that reads live fleet state.
-    # GTE-17's fix (transport=mcp, no sidecar) makes this poolable; until it
-    # lands this stays serial.
-    "plugins/agent_messaging_plugin/tests/tmux_adapter_smoke.py",
-    # Both exercise existing_solet_diagnostics' pinned static read, whose
-    # stability predicate re-stats EVERY ancestor directory of the fixture —
-    # including the shared macOS per-user temp root — and reports "artifact
-    # changed while it was inspected" when any concurrent process creates or
-    # deletes a temp entry there (measured: 3 such flips across 5 pooled
-    # batteries, zero serial). The contended resource is the host-shared
-    # temp directory's metadata, i.e. the whole suite; poolable only if the
-    # predicate stops spanning shared ancestors or the fixtures move off the
-    # shared temp root.
-    "solet_cli/tests/inspect_command_smoke.py",
-    "solet_cli/tests/existing_solet_diagnostic_smoke.py",
-)
-_SERIAL_ONLY_SET = frozenset(_SERIAL_ONLY)
+# cannot share the host with ANY concurrently-running smoke are listed, with
+# the specific resource each one measures, in serial_only_smokes.txt beside the
+# register (see _read_serial_only). They are excluded from the worker pool and
+# run one at a time before it starts; this serial phase is also host-serialized
+# across separate batteries by _HOST_SERIAL_LOCK_PATH (iss_0fb8f519), while the
+# pooled phase remains cross-process concurrent.
 
 # Smokes that conflict ONLY WITH EACH OTHER: every smoke in a group contends
 # for the same fixed resource that no smoke outside the group touches, so the
 # whole group is chained onto a single pool worker (sequential within the
-# group, concurrent with everything else). Cheaper than _SERIAL_ONLY, which
-# is reserved for resources the entire suite shares.
+# group, concurrent with everything else). Cheaper than the serial-only
+# schedule, which is reserved for resources the entire suite shares.
 _EXCLUSIVE_GROUPS: tuple[tuple[str, ...], ...] = (
     # The swap family shares two fixed resources no smoke outside it touches:
     # TCP ports 50001/50002 (_BLUE_TEST_PORT/_GREEN_TEST_PORT — bound by
@@ -247,9 +250,11 @@ _EXCLUSIVE_GROUPS: tuple[tuple[str, ...], ...] = (
     # mechanism the runner has for bounding heavy-smoke concurrency. Three
     # chains for Step 7 (the matrix + tree + Homebrew rows, and the crash sweep
     # in two halves) and two for the Step-6 sweeps registered just before them
-    # (the same class of work on a smaller fixture; measured in the same
-    # battery at 98-120s pooled against the Step-7 block, 60-80s alone), so at
-    # most five of them run concurrently with the light pool.
+    # (the same class of work on a smaller fixture), so at most five of them
+    # run concurrently with the light pool. The Step-6 sweep files hold at most
+    # five crash points each (about 33s typical, 45s worst standalone): the old
+    # 10-12-point slices ran 57-70s alone, and a transient external host-load
+    # spike pushed two of them past the 120s cap (iss_d1a9649b).
     (
         "solet_cli/tests/update_crash_sweep_smoke.py",
         "solet_cli/tests/update_crash_sweep_writes_1_smoke.py",
@@ -258,6 +263,12 @@ _EXCLUSIVE_GROUPS: tuple[tuple[str, ...], ...] = (
         "solet_cli/tests/update_crash_sweep_writes_4_smoke.py",
         "solet_cli/tests/update_crash_sweep_writes_5_smoke.py",
         "solet_cli/tests/update_crash_sweep_writes_6_smoke.py",
+        "solet_cli/tests/update_crash_sweep_writes_7_smoke.py",
+        "solet_cli/tests/update_crash_sweep_writes_8_smoke.py",
+        "solet_cli/tests/update_crash_sweep_writes_9_smoke.py",
+        "solet_cli/tests/update_crash_sweep_writes_10_smoke.py",
+        "solet_cli/tests/update_crash_sweep_writes_11_smoke.py",
+        "solet_cli/tests/update_crash_sweep_writes_12_smoke.py",
         "solet_cli/tests/update_crash_sweep_applies_smoke.py",
     ),
     (
@@ -265,6 +276,14 @@ _EXCLUSIVE_GROUPS: tuple[tuple[str, ...], ...] = (
         "solet_cli/tests/existing_install_router_failure_sweep_2_smoke.py",
         "solet_cli/tests/existing_install_router_failure_sweep_3_smoke.py",
         "solet_cli/tests/existing_install_router_failure_sweep_4_smoke.py",
+        "solet_cli/tests/existing_install_router_failure_sweep_5_smoke.py",
+        "solet_cli/tests/existing_install_router_failure_sweep_6_smoke.py",
+        "solet_cli/tests/existing_install_router_failure_sweep_7_smoke.py",
+        "solet_cli/tests/existing_install_router_failure_sweep_8_smoke.py",
+        "solet_cli/tests/existing_install_router_failure_sweep_9_smoke.py",
+        "solet_cli/tests/existing_install_router_failure_sweep_10_smoke.py",
+        "solet_cli/tests/existing_install_router_failure_sweep_applies_1_smoke.py",
+        "solet_cli/tests/existing_install_router_failure_sweep_applies_2_smoke.py",
     ),
     (
         "solet_cli/tests/cold_host_matrix_smoke.py",
@@ -312,11 +331,30 @@ def _utc_timestamp() -> str:
     return dt.datetime.now(tz=dt.UTC).isoformat(timespec="seconds")
 
 
+def _candidate_path_exists(path: Path) -> bool:
+    """Keep existing files and links; omit an unstaged deletion."""
+    return path.exists() or path.is_symlink()
+
+
+def _indexed_candidate_paths(root: Path, output: bytes) -> tuple[Path, ...]:
+    """Resolve existing index entries, excluding an unstaged deletion."""
+    return tuple(
+        path
+        for item in output.split(b"\0")
+        if item
+        for path in (root / item.decode("utf-8"),)
+        if _candidate_path_exists(path)
+    )
+
+
 def _candidate_paths_for_digest(root: Path) -> tuple[Path, ...]:
     """Return the source paths that define the candidate being executed.
 
     A materialized candidate with a private Git directory has an index whose
     paths already describe its frozen tree, including its reviewed overlay.
+    A working-tree deletion remains in that index until staging, but cannot be
+    candidate source; omit it while retaining symlinks for their own byte/link
+    validation below.
     A focused fixture or an intentionally Git-free candidate has no such
     index, so it falls back to a complete recursive census.  Generated venv
     and cache artifacts are excluded in both cases: they are runner byproducts,
@@ -329,11 +367,7 @@ def _candidate_paths_for_digest(root: Path) -> tuple[Path, ...]:
         capture_output=True,
     )
     if listed.returncode == 0:
-        indexed_paths = tuple(
-            root / item.decode("utf-8")
-            for item in listed.stdout.split(b"\0")
-            if item
-        )
+        indexed_paths = _indexed_candidate_paths(root, listed.stdout)
         if indexed_paths:
             return tuple(sorted(indexed_paths))
 
@@ -425,14 +459,18 @@ class _BatteryReceipt:
     """A held per-candidate lock plus the receipt it protects for one battery."""
 
     def __init__(self, path: Path, lock: IO[str], receipt: dict[str, object]) -> None:
-        self._path = path
+        self.path = path
         self._lock = lock
         self._receipt = receipt
+
+    def record_contention(self, contention: dict[str, object]) -> None:
+        """Attach this battery's contention snapshot; written out by ``finish``."""
+        self._receipt["contention"] = contention
 
     def finish(self, result: str) -> None:
         self._receipt["finished_at"] = _utc_timestamp()
         self._receipt["result"] = result
-        _write_receipt(self._path, self._receipt)
+        _write_receipt(self.path, self._receipt)
 
     def close(self) -> None:
         fcntl.flock(self._lock, fcntl.LOCK_UN)
@@ -478,6 +516,11 @@ def _acquire_battery_receipt(
         "campaign": campaign,
         "started_at": _utc_timestamp(),
         "result": "running",
+        # Recorded so a sibling battery's contention count (contention_signal
+        # .count_concurrent_live_batteries) can tell a genuinely live battery
+        # apart from one whose receipt says "running" only because it was
+        # hard-killed before reaching `finally: _close_receipt`.
+        "pid": os.getpid(),
     }
     if existing is not None:
         receipt["reauthorized_from"] = {
@@ -493,7 +536,7 @@ def _terminate_process_group(process_group: int) -> None:
     """Terminate a smoke session, escalating only if its descendants linger."""
     try:
         os.killpg(process_group, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
@@ -622,6 +665,36 @@ def _read_register(register: Path) -> list[str]:
     return entries
 
 
+def _read_serial_only(schedule: Path) -> frozenset[str]:
+    """Parse the serial-only schedule: register grammar, no duplicates.
+
+    Entries are not checked against the filesystem or the register here — a
+    focused ``--register`` run legitimately names none of them, and an entry
+    absent from the register being run is simply inert. The parity smoke
+    (``serial_only_schedule_parity_smoke.py``) holds every entry to the
+    canonical register, so a renamed smoke cannot silently fall out of the
+    serial phase.
+    """
+    if not schedule.exists():
+        raise FileNotFoundError(f"serial-only smoke schedule not found: {schedule}")
+    entries: dict[str, int] = {}
+    errors: list[str] = []
+    for number, raw in enumerate(schedule.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line in entries:
+            errors.append(
+                f"{schedule}:{number}: duplicate serial-only smoke path {line!r} "
+                f"(first listed at line {entries[line]})"
+            )
+            continue
+        entries[line] = number
+    if errors:
+        raise ValueError("invalid serial-only smoke schedule:\n" + "\n".join(errors))
+    return frozenset(entries)
+
+
 def _child_environment(python: Path) -> dict[str, str]:
     """Build the deliberate environment for one smoke subprocess.
 
@@ -729,7 +802,7 @@ def _parse_args() -> argparse.Namespace:
         default=_DEFAULT_JOBS,
         help=(
             "Worker-pool width for pool-eligible smokes (default: "
-            f"{_DEFAULT_JOBS} on this host). The _SERIAL_ONLY holders of "
+            f"{_DEFAULT_JOBS} on this host). The serial-only holders of "
             "host-exclusive resources always run one at a time before the "
             "pool starts, whatever this is set to; 1 runs everything "
             "serially."
@@ -751,7 +824,7 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         metavar="PATH",
         help=(
-            "Replace _SERIAL_ONLY for focused test/diagnostic runs; repeated "
+            "Replace the serial-only schedule for focused test/diagnostic runs; repeated "
             "once per repo-relative smoke path. The replacement still takes "
             "the host-global serial-phase lock."
         ),
@@ -812,13 +885,16 @@ def _schedule_units(pooled: list[str]) -> list[tuple[str, ...]]:
     return units
 
 
-def _acquire_host_serial_lock() -> IO[str]:
+def _acquire_host_serial_lock() -> tuple[IO[str], float]:
     """Acquire the host-wide advisory lock for one serial-only phase.
 
     Blocking flock alone would make a queued battery look hung. Retry with a
     non-blocking acquisition so the caller gets a durable stderr progress line
     every 30 seconds, while the kernel still releases the lock if its owner
-    exits unexpectedly.
+    exits unexpectedly. Returns the wait duration alongside the handle: this
+    is a direct, always-present measurement of contention for the resource
+    the ``_SERIAL_ONLY`` smokes share (iss_c35292ca/358, iss_dfca317c/357) —
+    see ``contention_signal``'s module docstring.
     """
     _HOST_SERIAL_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     handle = _HOST_SERIAL_LOCK_PATH.open("a+", encoding="utf-8")
@@ -831,7 +907,7 @@ def _acquire_host_serial_lock() -> IO[str]:
             handle.truncate()
             handle.write(f"pid={os.getpid()} cwd={Path.cwd()}\n")
             handle.flush()
-            return handle
+            return handle, time.monotonic() - waited_since
         except BlockingIOError:
             elapsed = time.monotonic() - waited_since
             if elapsed >= next_report:
@@ -850,16 +926,24 @@ def _run_serial_phase(
     serial_entries: list[str],
     timeout: int,
     supervisor: _SmokeProcessSupervisor,
-) -> dict[str, tuple[_Verdict, str, float]]:
-    """Run a nonempty serial phase while holding the per-user host lock."""
+) -> tuple[dict[str, tuple[_Verdict, str, float]], float]:
+    """Run a nonempty serial phase while holding the per-user host lock.
+
+    Returns the per-smoke results plus how long THIS battery waited to
+    acquire the lock — 0.0 when there was nothing to serialize, so a register
+    with no ``_SERIAL_ONLY`` member reports "did not contend for this
+    resource" rather than a zero that looks identical to an instant
+    acquisition.
+    """
     if not serial_entries:
-        return {}
-    handle = _acquire_host_serial_lock()
+        return {}, 0.0
+    handle, host_lock_wait_seconds = _acquire_host_serial_lock()
     try:
-        return {
+        results = {
             entry: _run_timed(python, entry, timeout, supervisor)
             for entry in serial_entries
         }
+        return results, host_lock_wait_seconds
     finally:
         fcntl.flock(handle, fcntl.LOCK_UN)
         handle.close()
@@ -871,10 +955,10 @@ def _run_suite(
     timeout: int,
     jobs: int,
     serial_only: frozenset[str],
-) -> tuple[list[str], list[str], list[str]]:
-    """Run every smoke in ``entries``; return ``(skipped, failures, missing)`` path lists.
+) -> tuple[list[str], list[str], list[str], float]:
+    """Run every smoke in ``entries``; return ``(skipped, failures, missing, host_lock_wait_seconds)``.
 
-    The ``_SERIAL_ONLY`` holders of host-exclusive resources run FIRST, one at
+    The ``serial_only`` holders of host-exclusive resources run FIRST, one at
     a time, before the pool exists — no other smoke is running during any of
     them — and their results are cached. That phase takes the per-user
     host-global lock; pool-eligible smokes then run without it on a bounded
@@ -882,6 +966,9 @@ def _run_suite(
     MISSING lines, cached serial results, and pooled results each appear at
     their true register slot, in the serial runner's exact per-smoke format —
     so neither completion order nor scheduling phase ever leaks into the output.
+    ``host_lock_wait_seconds`` is this battery's own wait to acquire that lock
+    (0.0 when the register has no ``_SERIAL_ONLY`` member) — half of the
+    contention signal ``main()`` records on the battery receipt.
     """
     skipped: list[str] = []
     failures: list[str] = []
@@ -894,7 +981,9 @@ def _run_suite(
     supervisor = _SmokeProcessSupervisor(
         _MAX_SMOKE_STARTS_PER_WINDOW, _SMOKE_START_WINDOW_SECONDS
     )
-    serial_results = _run_serial_phase(python, serial_entries, timeout, supervisor)
+    serial_results, host_lock_wait_seconds = _run_serial_phase(
+        python, serial_entries, timeout, supervisor
+    )
 
     def _run_unit(unit: tuple[str, ...]) -> list[tuple[_Verdict, str, float]]:
         return [_run_timed(python, entry, timeout, supervisor) for entry in unit]
@@ -908,7 +997,7 @@ def _run_suite(
         _walk_register(
             entries, present_set, serial_results, futures, skipped, failures, missing,
         )
-    return skipped, failures, missing
+    return skipped, failures, missing, host_lock_wait_seconds
 
 
 def _walk_register(
@@ -985,6 +1074,11 @@ def main() -> int:
     args = _parse_args()
     try:
         entries = _read_register(args.register)
+        serial_only = (
+            frozenset(args.serial_only_override)
+            if args.serial_only_override is not None
+            else _read_serial_only(_DEFAULT_SERIAL_ONLY)
+        )
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
@@ -1001,15 +1095,26 @@ def main() -> int:
     except BatteryReceiptError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    serial_only = (
-        frozenset(args.serial_only_override)
-        if args.serial_only_override is not None
-        else _SERIAL_ONLY_SET
+    receipt_dir = _receipt_directory()
+    exclude_path = receipt.path if receipt is not None else None
+    concurrent_at_start = contention_signal.count_concurrent_live_batteries(
+        receipt_dir, exclude_path=exclude_path
     )
     try:
-        skipped, failures, missing = _run_suite(
+        skipped, failures, missing, host_lock_wait_seconds = _run_suite(
             _venv_python(), entries, args.timeout, args.jobs, serial_only
         )
+        concurrent_at_finish = contention_signal.count_concurrent_live_batteries(
+            receipt_dir, exclude_path=exclude_path
+        )
+        contention = contention_signal.measure(
+            concurrent_live_batteries_start=concurrent_at_start,
+            concurrent_live_batteries_finish=concurrent_at_finish,
+            host_lock_wait_seconds=host_lock_wait_seconds,
+        )
+        print(contention.render())
+        if receipt is not None:
+            receipt.record_contention(contention.as_dict())
         result = _summarize(
             len(entries),
             skipped,

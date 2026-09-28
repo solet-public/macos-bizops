@@ -49,6 +49,8 @@ from macos_self_deployment_plugin.constants import (
     ENV_SOLET_COLOR,
     ENV_SOLET_INSTANCE_ID,
     ENV_SOLET_RELEASE_ID,
+    FINISHER_ESCALATION_NEEDS_INTERVENTION,
+    FINISHER_ESCALATION_SIGKILL_AFTER_GRACE,
     PLUGIN_NAME,
     STATUS_FAILED,
     STATUS_QUEUED,
@@ -533,6 +535,20 @@ def _provenance_kwargs(
     return {"reconciliation_provenance": reconciliation_provenance}
 
 
+def _finisher_escalation_for(reconciliation_provenance: dict[str, str] | None) -> str:
+    """The finisher's SIGTERM-overrun policy for this swap (iss_8d1ec833).
+
+    A reconciliation swap (``cutover_release`` / target-local entry — the
+    gated channel) must never reach signal 9, so its durable finisher record
+    says ``needs_intervention``; an ordinary deploy keeps today's ladder.
+    Provenance is the discriminator the executor already receives, so the
+    policy cannot drift from the channel it protects.
+    """
+    if reconciliation_provenance is None:
+        return FINISHER_ESCALATION_SIGKILL_AFTER_GRACE
+    return FINISHER_ESCALATION_NEEDS_INTERVENTION
+
+
 def _prior_identity(
     prior_pid: int | None,
     prior_start_token: str | None,
@@ -657,18 +673,19 @@ class SwapOrchestrator:
            ``previous``/``current`` symlinks (§4.7, immediately after a
            successful activate, before quiesce). On failure: roll the router
            back to the prior (still-draining) color; the candidate is
-           SIGKILLed + unregistered ONLY if that rollback is CONFIRMED — if
-           the rollback does NOT take (RPC error or refusal), the router may
-           still route to the candidate, so it is LEFT ALIVE with a distinct
-           'manual intervention required' status (never a dead-color route).
-           Either way return FAILED and do NOT enqueue complete_swap.
+           SIGTERM'd (bounded, never SIGKILL) + unregistered ONLY if that
+           rollback is CONFIRMED — if it does NOT take (RPC error/refusal)
+           the router may still route to the candidate, so it is LEFT ALIVE
+           with a distinct 'manual intervention required' status (never a
+           dead-color route). Either way do NOT enqueue complete_swap.
         8. Iterate set_active_targets → set_active(False) on each.
         9. Enqueue durable complete_swap action for green's poller.
         10. Return RestartResult(status=QUEUED, restart_action_id=<id>).
 
         Failure of any pre-activate step (1–5) leaves the prior color
-        untouched and routing-side unchanged; we SIGKILL a started-but-
-        not-registered child and return ``status=FAILED``.
+        untouched and routing-side unchanged; we SIGTERM (bounded, never
+        SIGKILL — iss_8d1ec833) + unregister a started-but-not-registered
+        child: ``FAILED``, or ``NEEDS_INTERVENTION`` past the grace window.
 
         ``dry_run`` short-circuits at step 0 and returns a
         ``status=QUEUED`` envelope with a synthetic restart_action_id
@@ -711,13 +728,9 @@ class SwapOrchestrator:
             prior_pid, prior_start_token,
         )
         result = self._executor.execute(
-            app_home=app_home,
-            candidate=candidate,
-            next_color=next_color,
-            reason=reason,
-            expected_etag=expected_etag,
-            self_instance_id=self_instance_id,
-            self_color=self_color,
+            app_home=app_home, candidate=candidate, next_color=next_color,
+            reason=reason, expected_etag=expected_etag,
+            self_instance_id=self_instance_id, self_color=self_color,
             prior_pid=resolved_prior_pid,
             prior_start_token=resolved_prior_start_token,
             poller_gate=poller_gate,
@@ -729,6 +742,7 @@ class SwapOrchestrator:
                 RestartReasonCode.CUTOVER_COMPENSATED,
                 RestartReasonCode.CUTOVER_ROUTER_ROLLBACK_FAILED,
             ),
+            finisher_escalation=_finisher_escalation_for(reconciliation_provenance),
         )
         if result.status is RestartStatus.QUEUED and plan.probe_evidence is not None:
             # Q5: the GREEN probe's evidence rides the QUEUED result so the

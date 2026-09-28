@@ -66,6 +66,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from quality_gates.allowlist_schema import load_allowlist as _load_tagged_allowlist  # noqa: E402
 
 CHECK_ID = "D1.1"
 
@@ -150,17 +154,16 @@ class Allowlist:
 
 
 def load_allowlist(path: Path) -> Allowlist:
+    """Load the mandatory owner/reason/expires tracked-debt register."""
+
     if not path.exists():
         return Allowlist()
     entries: set[AllowlistEntry] = set()
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.split("#", 1)[0].strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split("::", 2)
+    for key in _load_tagged_allowlist(path):
+        parts = key.split("::", 2)
         if len(parts) < 3:
             print(
-                f"WARN: malformed allowlist line (need <check>::<scope>::<spec>): {line!r}",
+                f"WARN: malformed allowlist line (need <check>::<scope>::<spec>): {key!r}",
                 file=sys.stderr,
             )
             continue

@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _real_state_fake import RealShapeState  # noqa: E402
 from _recorded_lane_worktree_fixture import RecordedLaneWorktreeFixture  # noqa: E402
+from _register_unit_double import RegisterUnitDouble  # noqa: E402
 from ananta.core.services.call_context import CallContext  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
     AGENT_ROLE_BINDING_NAMESPACE,
@@ -40,7 +41,13 @@ from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
 )
 
 import agent_messaging_plugin.session_hosts as session_hosts  # noqa: E402
+from agent_messaging_plugin.model_capability_store import load_seed_table, seed_catalog  # noqa: E402
+from agent_messaging_plugin.model_capability_verbs import select_dispatch_tier  # noqa: E402
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
+from agent_messaging_plugin.schema import (  # noqa: E402
+    CELL_ACCEPTANCE_ACCEPTED,
+    TABLE_MODEL_CAPABILITY_CELL,
+)
 from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
     SpawnSessionRequest,
     VerbError,
@@ -134,13 +141,28 @@ def _state() -> Any:
             "conflict_columns": ["external_id"],
         },
     )
+    now = datetime.now(UTC).isoformat()
+    seed_catalog(state, seed=load_seed_table())
+    for row in state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MODEL_CAPABILITY_CELL):
+        row.update(
+            acceptance=CELL_ACCEPTANCE_ACCEPTED,
+            accepted_at=now,
+            measured_at=now,
+            last_refresh_run_id="role-provisioning-fixture",
+        )
     return state
 
 
-def _raw(tmp: Path) -> dict[str, object]:
+def _raw(tmp: Path, state: Any) -> dict[str, object]:
     brief = tmp / "brief.md"
     brief.write_text("role provisioning fixture\n", encoding="utf-8")
     now = datetime.now(UTC)
+    selected = select_dispatch_tier(
+        state,
+        {"required_score": 38, "billing_objective": "metered_usd", "dispatch_kind": "infrastructure"},
+    )
+    receipt = selected["selection_receipt"]
+    chosen = receipt["selected"]
     return {
         "role_name": "Git-Controller",
         "lane_id": "role-provisioning-fixture",
@@ -153,16 +175,18 @@ def _raw(tmp: Path) -> dict[str, object]:
         },
         "work_class": "production_mutation",
         "budget_line": "role-provisioning-fixture-budget",
-        "model": "gpt-5.6-sol",
+        "model": chosen["model"],
         "dispatch_kind": "infrastructure",
-        "effort": "xhigh",
+        "difficulty_score": receipt["required_score"],
+        "selection_receipt": receipt,
+        "effort": chosen["effort"],
         "agent_runtime": "codex",
         "allowed_hosts": [_HOST],
         "host": _HOST,
         "spawned_by_role": "Coordinator-Main",
         "visibility": "headless",
         "report_by_seconds": 900,
-        "ttl_seconds": 3600,
+
         "allowed_tools": [],
         "permission_mode": "bypassPermissions",
         "transport": "mcp",
@@ -171,7 +195,7 @@ def _raw(tmp: Path) -> dict[str, object]:
         "uptake_due_at": (now + timedelta(minutes=2)).isoformat(),
         "report_by": (now + timedelta(minutes=15)).isoformat(),
         "watchdog_due_at": (now + timedelta(minutes=3)).isoformat(),
-        "expires_at": (now + timedelta(hours=1)).isoformat(),
+
     }
 
 
@@ -220,7 +244,7 @@ def _assert_existing_controller_is_reused(
 ) -> None:
     _bind_existing_controller(state)
     existing_result = plugin.provision_role_session(
-        {"parameters": _raw(tmp)}, _authenticated_state(),
+        {"parameters": _raw(tmp, state)}, _authenticated_state(),
     )
     existing_data = cast(dict[str, Any], existing_result.get("data", {}))
     existing_holder = cast(dict[str, Any], existing_data.get("existing_holder", {}))
@@ -246,14 +270,21 @@ def test_provisioning_and_red_mutation() -> None:
     try:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
-            os.environ["APP_HOME"] = str(tmp / "profile")
+            # The register Unit is resolved from the lane root (APP_HOME's
+            # parent), so the fixture names its own temp checkout, and the
+            # register is a double that can never reach the live psolet.
+            lane_root = tmp / "repo"
+            (lane_root / ".git").mkdir(parents=True)
+            os.environ["APP_HOME"] = str(lane_root / "profile")
             os.environ["SOLET_NAME"] = "fixture"
             plugin = AgentMessagingPlugin()
             plugin.orchestrator_ref = cast(Any, _Orchestrator(state))
             plugin._peer_registry = cast(Any, _Registry())  # noqa: SLF001
+            register = RegisterUnitDouble()
+            plugin._register_unit_client = lambda: register  # type: ignore[method-assign]  # noqa: SLF001
             with RecordedLaneWorktreeFixture(tmp) as fixture:
                 result = plugin.provision_role_session(
-                    {"parameters": _raw(tmp)}, _authenticated_state(),
+                    {"parameters": _raw(lane_root, state)}, _authenticated_state(),
                 )
                 data = cast(dict[str, Any], result.get("data", {}))
                 attempt = cast(dict[str, Any], data.get("attempt", {}))
@@ -287,7 +318,7 @@ def test_provisioning_and_red_mutation() -> None:
                 _assert_existing_controller_is_reused(
                     plugin=plugin,
                     state=state,
-                    tmp=tmp,
+                    tmp=lane_root,
                     fixture=fixture,
                     driver=driver,
                 )
