@@ -21,6 +21,16 @@
       "origin_id": "31bfa93c-fe20-4988-b019-f8186684e88e",
       "manifest_sha256": "6af4e689b3f1519b5a31eb854172aca354ecb79892acc24c84cd4c08d1c348c7",
       "legacy_anchor_id": null
+    },
+    {
+      "repository": "https://github.com/solet-public/macos-bizops.git",
+      "commit": "ea6ee0cbfd1d3715a3aa588d4c45bafd96fc1421",
+      "tree": "7bd118d64755d1ac23d8e152158c911ea5ebd386",
+      "provenance_sha256": "d7b9e73d34eb4261420ee2cf853a40c3452b33bf4673604587901ff7a33013c5",
+      "seed_id": "b4d95d6d-b7b8-5785-819a-786851159496",
+      "origin_id": "31bfa93c-fe20-4988-b019-f8186684e88e",
+      "manifest_sha256": "a38db6f97b8aadf17670fa8fa9677dbaf93623e13814abc3a4061ec7e4c8d60b",
+      "legacy_anchor_id": null
     }
   ],
   "source_operation": {

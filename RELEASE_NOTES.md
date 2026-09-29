@@ -2,6 +2,30 @@
 
 Newest release first. Earlier releases follow below the divider.
 
+## 2026-09-28 — r56: solets on stable r48 can update
+
+**Solet Manager manager-v0.1.0-r56.** This is a full seed build for
+`solet-public/macos-bizops-daily`, with Manager artifacts in
+dwestgate/homebrew-tap-validate. A stable cut to `solet-public/macos-bizops`
+follows only after an existing-solet update round from stable r48 reaches its
+end state on this build.
+
+Changes since r55 (source `380585edb`):
+
+- **A solet installed from stable r48 can run `solet-manager update`.**
+  The update accepts only listed stable releases, matched exactly by commit
+  and tree. The list named r43 but not r48 (`solet-public/macos-bizops`
+  commit `ea6ee0cb`), so every r48 solet was refused with
+  `predecessor_unsupported` before anything changed. r48 is now listed, with
+  its published identity. An r48 solet already uses Core AI embeddings and
+  Apple Foundation Models summaries, so the update has nothing to switch and
+  leaves its plugins and bindings as they are.
+- A commit that is not a listed release is still refused.
+
+Known limits:
+
+- Unchanged from r55.
+
 ## 2026-09-28 — r55: setup on macOS 26 waits for llama.cpp's first start
 
 **Solet Manager manager-v0.1.0-r55.** This is a full seed build for

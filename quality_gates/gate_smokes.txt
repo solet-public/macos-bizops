@@ -5161,6 +5161,7 @@ plugins/macos_inference_plugin/tests/provider_isolation_smoke.py
 # not shipped: plugins/github_midwife_plugin/tests/plugin_transition_smoke.py requires plugins/macos_inference_plugin/src/macos_inference_plugin/resources/default_config.json; absent from macos_free_minimal and macos_samantha; its fixture copies that file from the repository into every target (cross_bundle_transition)
 # not shipped: solet_cli/tests/update_plugin_transition_deferral_smoke.py requires plugins/macos_inference_plugin/src/macos_inference_plugin/resources/default_config.json; absent from macos_free_minimal and macos_samantha; its fixture copies that file from the repository into every target (cross_bundle_transition)
 # not shipped: solet_cli/tests/update_transition_bundle_candidates_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builds each bundle's candidate from seed_resolver, and the seed factory is in no capability bundle (fixture_build_tooling)
+# not shipped: solet_cli/tests/update_stable_r48_predecessor_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; it builds its candidate with update_transition_bundle_candidates_smoke's seed_resolver fixture, and the seed factory is in no capability bundle (fixture_build_tooling)
 
 # LM Studio provisioning, singleton login and passive diagnostics
 plugins/github_midwife_plugin/tests/lm_studio_provisioning_smoke.py
@@ -5409,6 +5410,8 @@ ananta/tests/llm/session_ledger/embedding_token_budget_smoke.py
 # and Apple-native predecessors update; macOS 26 keeps LM Studio for embeddings and summaries (rul_5cc2910c); a host
 # that later reaches macOS 27 switches at the next release; an interrupted switch
 # is put back; a fresh solet never gets the transition-retained plugins; LM Studio and its models stay byte-identical.
+# iss_ae956dd6 (r56): a stable r48 solet (real r48 roster, judged at the real r48 commit and tree against the shipped
+# predecessor rows) previews an actionable plan and promotes verified; r55 and the r48 commit with r43's tree are refused.
 # iss_fcbfabb7: a create blocked only at completion (the r46-r48 embeddings checks) updates and
 # promotes; one predicate gates update and import at preview and apply; installs in flight and identity
 # mismatches still refuse; the predicate is proven over every checkpoint assignment.
