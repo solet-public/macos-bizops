@@ -1,9 +1,23 @@
 # Core AI Nomic embedding runtime
 
 The plugin implements the synchronous `EmbeddingServiceInterface` on macOS 27.
-Configure an absolute `asset_root` and `compute_preference` (`gpu`, the default,
-or `cpu`). Install the separately pinned asset through the asset acquisition
+Configure an absolute `asset_root` and `compute_preference` (`cpu`, the default,
+or `gpu`). Install the separately pinned asset through the asset acquisition
 API before preparation. Runtime preparation and inference never download assets.
+
+## Why the default is CPU (`iss_f3e65e52`)
+
+Core AI's GPU inference leaks one IOSurface per embed call, and only process exit
+frees it. After about 16.3k GPU embeds in one process the next output allocation
+hits a Swift `fatalError` (`NDArray+Pool.swift:77`, "Failed to allocate storage for
+NDArray ... ioSurface"), an uncatchable SIGTRAP that kills the host process. A
+re-index of a moved knowledge base can pass 16k embeds in minutes. CPU compute does
+not leak, at about 8 embeds/s against about 100/s on GPU. Every default and every
+config the seed writes (the three macOS profile templates, the fresh-setup and
+`openai_to_coreai` transition renders, this plugin's defaults) is therefore `cpu`
+until a recycled GPU worker lands (`iss_f531e57f`). `gpu` stays an accepted value,
+and an install that already has `gpu` is still valid: the doctor and the transition
+classifier accept either value. An update does not rewrite an existing `gpu` config.
 
 ## Lifecycle and failures
 

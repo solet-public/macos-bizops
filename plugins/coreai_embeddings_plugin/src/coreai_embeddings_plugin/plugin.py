@@ -68,7 +68,7 @@ class CoreAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface):
 
     def _settings(self) -> tuple[Path, str]:
         root = self.config.get("asset_root")
-        preference = self.config.get("compute_preference", "gpu")
+        preference = self.config.get("compute_preference", "cpu")
         if not isinstance(root, str) or not root.strip() or not Path(root).is_absolute():
             raise EmbeddingError(ErrorCode.UNAVAILABLE, "asset_root must be an absolute directory path")
         if preference not in ("gpu", "cpu"):
@@ -157,6 +157,6 @@ class CoreAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface):
             "type": "object", "additionalProperties": False, "required": ["asset_root"],
             "properties": {
                 "asset_root": {"type": "string", "description": "Absolute installed asset root"},
-                "compute_preference": {"type": "string", "enum": ["gpu", "cpu"], "default": "gpu"},
+                "compute_preference": {"type": "string", "enum": ["gpu", "cpu"], "default": "cpu"},
             },
         }
