@@ -19,8 +19,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from macos_self_deployment_plugin.release_git_batches import (
+    GIT_TIMEOUT_SECONDS,
+    GitBatchError,
+    GitIgnoreSession,
+    blob_digests,
+)
+
 COLLECTOR_POLICY_VERSION: Final[str] = "release-code-collector/v1"
-GIT_TIMEOUT_SECONDS: Final[float] = 10.0
+# Sources named per ``cp -c`` call, so a directory with thousands of files
+# cannot exceed the kernel's argument-size limit.
+COW_COPY_BATCH_FILES: Final[int] = 256
 
 
 class ReleaseCodeCollectionError(RuntimeError):
@@ -56,28 +65,13 @@ class CollectionPlan:
     git_state: str
 
 
-def _is_git_ignored(
-    git_runner: Callable[..., subprocess.CompletedProcess[str]],
-    relative_path: str,
-    git_state: str,
-) -> bool:
-    """Return whether Git excludes this untracked path from source identity.
+@dataclass(frozen=True, slots=True)
+class _HeadEntry:
+    """One tracked HEAD path: its Git mode, object type and object id."""
 
-    The collector only applies ignore rules when it has a Git checkout to ask.
-    ``git check-ignore`` deliberately does not match tracked paths, so a
-    tracked symbolic link remains subject to the collector's fail-closed link
-    refusal.
-    """
-    if git_state == "nogit":
-        return False
-    result = git_runner("check-ignore", "-q", "--", relative_path)
-    if result.returncode == 0:
-        return True
-    if result.returncode == 1:
-        return False
-    raise ReleaseCodeCollectionError(
-        f"git ignore check failed for {relative_path}: {result.stderr.strip()}"
-    )
+    mode: str
+    object_type: str
+    object_id: str
 
 
 def _git_ignored_exclusion(relative_path: str) -> ExcludedPath:
@@ -87,6 +81,61 @@ def _git_ignored_exclusion(relative_path: str) -> ExcludedPath:
         reason="gitignored_path",
         evidence={"git_check_ignore": "matched"},
     )
+
+
+def _membership_mismatches(
+    head_population: dict[str, _HeadEntry], artifact_population: dict[str, SelectedFile]
+) -> list[dict[str, object]]:
+    """Name each membership disagreement in stable path order."""
+    head_paths = set(head_population)
+    artifact_paths = set(artifact_population)
+    missing: list[dict[str, object]] = [
+        {"kind": "missing_from_artifact", "path": relative_path}
+        for relative_path in sorted(head_paths - artifact_paths)
+    ]
+    extra: list[dict[str, object]] = [
+        {"kind": "extra_in_artifact", "path": relative_path}
+        for relative_path in sorted(artifact_paths - head_paths)
+    ]
+    return missing + extra
+
+
+def _executable_mode_mismatch(
+    relative_path: str, head_mode: str, item: SelectedFile
+) -> dict[str, object] | None:
+    """Return evidence only when Git's executable bit disagrees."""
+    if (head_mode == "100755") == bool(item.mode & 0o111):
+        return None
+    return {
+        "kind": "executable_mode_differs",
+        "path": relative_path,
+        "head_mode": head_mode,
+        "artifact_mode": f"{item.mode:04o}",
+    }
+
+
+def _parse_head_population(listing: bytes) -> dict[str, _HeadEntry] | None:
+    """Parse ``git ls-tree -r -z`` output; ``None`` for anything not plain blobs/gitlinks."""
+    population: dict[str, _HeadEntry] = {}
+    try:
+        for raw_entry in listing.split(b"\0"):
+            if not raw_entry:
+                continue
+            metadata, raw_path = raw_entry.split(b"\t", maxsplit=1)
+            mode, object_type, object_id = metadata.split(maxsplit=2)
+            if object_type not in (b"blob", b"commit"):
+                return None
+            relative_path = os.fsdecode(raw_path)
+            if relative_path in population:
+                return None
+            population[relative_path] = _HeadEntry(
+                mode=mode.decode("ascii"),
+                object_type=object_type.decode("ascii"),
+                object_id=object_id.decode("ascii"),
+            )
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return population
 
 
 class ReleaseCodeCollector:
@@ -110,14 +159,18 @@ class ReleaseCodeCollector:
         git_head, git_state = self._git_identity()
         files: list[SelectedFile] = []
         exclusions: list[ExcludedPath] = []
-        for subtree in self._code_subtrees:
-            root = self._source_root / subtree
-            root_stat = self._lstat(root, "code subtree")
-            if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
-                raise ReleaseCodeCollectionError(
-                    f"code subtree must be a real directory, not a link or other entry: {subtree}"
-                )
-            self._walk(root, files, exclusions, git_head, git_state)
+        if git_state == "nogit":
+            self._walk_subtrees(files, exclusions, git_head, git_state, lambda _path: False)
+        else:
+            # The collector only applies ignore rules when it has a Git
+            # checkout to ask; one process answers every question.
+            try:
+                with GitIgnoreSession(self._source_root) as ignore_session:
+                    self._walk_subtrees(
+                        files, exclusions, git_head, git_state, ignore_session.is_ignored
+                    )
+            except GitBatchError as exc:
+                raise ReleaseCodeCollectionError(str(exc)) from exc
         return CollectionPlan(
             code_subtrees=self._code_subtrees,
             files=tuple(sorted(files, key=lambda item: item.relative_path)),
@@ -126,31 +179,64 @@ class ReleaseCodeCollector:
             git_state=git_state,
         )
 
+    def _walk_subtrees(
+        self,
+        files: list[SelectedFile],
+        exclusions: list[ExcludedPath],
+        git_head: str | None,
+        git_state: str,
+        is_ignored: Callable[[str], bool],
+    ) -> None:
+        for subtree in self._code_subtrees:
+            root = self._source_root / subtree
+            root_stat = self._lstat(root, "code subtree")
+            if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+                raise ReleaseCodeCollectionError(
+                    f"code subtree must be a real directory, not a link or other entry: {subtree}"
+                )
+            self._walk(root, files, exclusions, git_head, git_state, is_ignored)
+
     def materialize(self, plan: CollectionPlan, destination: Path) -> None:
         """CoW-copy exactly the selected regular files, then re-attest them."""
         destination.mkdir(parents=True, exist_ok=False)
+        by_directory: dict[str, list[SelectedFile]] = {}
         for item in plan.files:
-            source = self._source_root / item.relative_path
-            target = destination / item.relative_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            source_before = self._regular_stat(source, item.relative_path)
-            if stat.S_IMODE(source_before.st_mode) != item.mode or self._sha256(source) != item.sha256:
-                raise ReleaseCodeCollectionError(
-                    f"source changed after selection and before copy: {item.relative_path}"
+            by_directory.setdefault(os.path.dirname(item.relative_path), []).append(item)
+        for relative_dir, items in by_directory.items():
+            target_dir = destination / relative_dir
+            target_dir.mkdir(parents=True, exist_ok=True)
+            for item in items:
+                self._verify_source_before_copy(item)
+            for offset in range(0, len(items), COW_COPY_BATCH_FILES):
+                batch = items[offset : offset + COW_COPY_BATCH_FILES]
+                self._cow_copy_into(
+                    [self._source_root / item.relative_path for item in batch], target_dir
                 )
-            self._cow_copy(source, target)
-            os.chmod(target, item.mode, follow_symlinks=False)
-            source_after = self._regular_stat(source, item.relative_path)
-            target_stat = self._regular_stat(target, f"materialized {item.relative_path}")
-            if (
-                stat.S_IMODE(source_after.st_mode) != item.mode
-                or self._sha256(source) != item.sha256
-                or stat.S_IMODE(target_stat.st_mode) != item.mode
-                or self._sha256(target) != item.sha256
-            ):
-                raise ReleaseCodeCollectionError(
-                    f"source changed during copy or materialized bytes differ: {item.relative_path}"
-                )
+            for item in items:
+                self._verify_copied(item, destination / item.relative_path)
+
+    def _verify_source_before_copy(self, item: SelectedFile) -> None:
+        source = self._source_root / item.relative_path
+        source_before = self._regular_stat(source, item.relative_path)
+        if stat.S_IMODE(source_before.st_mode) != item.mode or self._sha256(source) != item.sha256:
+            raise ReleaseCodeCollectionError(
+                f"source changed after selection and before copy: {item.relative_path}"
+            )
+
+    def _verify_copied(self, item: SelectedFile, target: Path) -> None:
+        source = self._source_root / item.relative_path
+        os.chmod(target, item.mode, follow_symlinks=False)
+        source_after = self._regular_stat(source, item.relative_path)
+        target_stat = self._regular_stat(target, f"materialized {item.relative_path}")
+        if (
+            stat.S_IMODE(source_after.st_mode) != item.mode
+            or self._sha256(source) != item.sha256
+            or stat.S_IMODE(target_stat.st_mode) != item.mode
+            or self._sha256(target) != item.sha256
+        ):
+            raise ReleaseCodeCollectionError(
+                f"source changed during copy or materialized bytes differ: {item.relative_path}"
+            )
 
     def verify_materialized(self, plan: CollectionPlan, destination: Path) -> None:
         """Prove the staged code tree has precisely the selected population."""
@@ -226,6 +312,7 @@ class ReleaseCodeCollector:
         exclusions: list[ExcludedPath],
         git_head: str | None,
         git_state: str,
+        is_ignored: Callable[[str], bool],
     ) -> None:
         relative_dir = directory.relative_to(self._source_root).as_posix()
         environment_evidence = self._environment_evidence(directory)
@@ -239,7 +326,7 @@ class ReleaseCodeCollector:
                 )
             )
             return
-        if _is_git_ignored(self._git, relative_dir, git_state):
+        if is_ignored(relative_dir):
             exclusions.append(_git_ignored_exclusion(relative_dir))
             return
         try:
@@ -256,9 +343,9 @@ class ReleaseCodeCollector:
             if stat.S_ISDIR(entry_stat.st_mode):
                 # Let _walk preserve the stronger nested-environment evidence
                 # before applying a directory-level ignore exclusion.
-                self._walk(path, files, exclusions, git_head, git_state)
+                self._walk(path, files, exclusions, git_head, git_state, is_ignored)
                 continue
-            if _is_git_ignored(self._git, relative, git_state):
+            if is_ignored(relative):
                 exclusions.append(_git_ignored_exclusion(relative))
                 continue
             if stat.S_ISLNK(entry_stat.st_mode):
@@ -393,7 +480,7 @@ class ReleaseCodeCollector:
             }
 
         artifact_population = {item.relative_path: item for item in plan.files}
-        mismatches = self._membership_mismatches(head_population, artifact_population)
+        mismatches = _membership_mismatches(head_population, artifact_population)
         content_mismatches, unavailable_path = self._content_and_mode_mismatches(
             head_population, artifact_population
         )
@@ -413,57 +500,37 @@ class ReleaseCodeCollector:
             "mismatches": mismatches,
         }
 
-    @staticmethod
-    def _membership_mismatches(
-        head_population: dict[str, str], artifact_population: dict[str, SelectedFile]
-    ) -> list[dict[str, object]]:
-        """Name each membership disagreement in stable path order."""
-        head_paths = set(head_population)
-        artifact_paths = set(artifact_population)
-        missing: list[dict[str, object]] = [
-            {"kind": "missing_from_artifact", "path": relative_path}
-            for relative_path in sorted(head_paths - artifact_paths)
-        ]
-        extra: list[dict[str, object]] = [
-            {"kind": "extra_in_artifact", "path": relative_path}
-            for relative_path in sorted(artifact_paths - head_paths)
-        ]
-        return missing + extra
-
     def _content_and_mode_mismatches(
-        self, head_population: dict[str, str], artifact_population: dict[str, SelectedFile]
+        self, head_population: dict[str, _HeadEntry], artifact_population: dict[str, SelectedFile]
     ) -> tuple[list[dict[str, object]], str | None]:
         """Compare common paths and preserve an unavailable HEAD blob as unknown."""
+        common = sorted(set(head_population) & set(artifact_population))
+        try:
+            digests = blob_digests(
+                self._source_root,
+                {
+                    head_population[relative_path].object_id
+                    for relative_path in common
+                    if head_population[relative_path].object_type == "blob"
+                },
+            )
+        except GitBatchError as exc:
+            raise ReleaseCodeCollectionError(str(exc)) from exc
         mismatches: list[dict[str, object]] = []
-        for relative_path in sorted(set(head_population) & set(artifact_population)):
-            result = self._git_bytes("show", f"HEAD:{relative_path}")
-            if result.returncode != 0:
+        for relative_path in common:
+            entry = head_population[relative_path]
+            digest = digests.get(entry.object_id) if entry.object_type == "blob" else None
+            if digest is None:
                 return mismatches, relative_path
             item = artifact_population[relative_path]
-            if hashlib.sha256(result.stdout).hexdigest() != item.sha256:
+            if digest != item.sha256:
                 mismatches.append({"kind": "bytes_differ", "path": relative_path})
-            mode_mismatch = self._executable_mode_mismatch(
-                relative_path, head_population[relative_path], item
-            )
+            mode_mismatch = _executable_mode_mismatch(relative_path, entry.mode, item)
             if mode_mismatch is not None:
                 mismatches.append(mode_mismatch)
         return mismatches, None
 
-    @staticmethod
-    def _executable_mode_mismatch(
-        relative_path: str, head_mode: str, item: SelectedFile
-    ) -> dict[str, object] | None:
-        """Return evidence only when Git's executable bit disagrees."""
-        if (head_mode == "100755") == bool(item.mode & 0o111):
-            return None
-        return {
-            "kind": "executable_mode_differs",
-            "path": relative_path,
-            "head_mode": head_mode,
-            "artifact_mode": f"{item.mode:04o}",
-        }
-
-    def _head_population(self, code_subtrees: tuple[str, ...]) -> dict[str, str] | None:
+    def _head_population(self, code_subtrees: tuple[str, ...]) -> dict[str, _HeadEntry] | None:
         """Read the complete tracked HEAD population under the release roots.
 
         Git's executable model has only the regular-file modes 100644 and
@@ -474,22 +541,7 @@ class ReleaseCodeCollector:
         result = self._git_bytes("ls-tree", "-r", "-z", "HEAD", "--", *code_subtrees)
         if result.returncode != 0:
             return None
-        population: dict[str, str] = {}
-        try:
-            for raw_entry in result.stdout.split(b"\0"):
-                if not raw_entry:
-                    continue
-                metadata, raw_path = raw_entry.split(b"\t", maxsplit=1)
-                mode, object_type, _object_id = metadata.split(maxsplit=2)
-                if object_type not in (b"blob", b"commit"):
-                    return None
-                relative_path = os.fsdecode(raw_path)
-                if relative_path in population:
-                    return None
-                population[relative_path] = mode.decode("ascii")
-        except (UnicodeDecodeError, ValueError):
-            return None
-        return population
+        return _parse_head_population(result.stdout)
 
     def _git(self, *args: str) -> subprocess.CompletedProcess[str]:
         try:
@@ -514,20 +566,24 @@ class ReleaseCodeCollector:
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ReleaseCodeCollectionError(f"git {' '.join(args)} failed: {exc}") from exc
 
-    def _cow_copy(self, source: Path, target: Path) -> None:
+    def _cow_copy_into(self, sources: list[Path], target_dir: Path) -> None:
+        """One ``cp -c`` for several files that share a destination directory."""
         try:
             result = subprocess.run(
-                [self._cp_binary, "-c", str(source), str(target)],
+                [self._cp_binary, "-c", *(str(source) for source in sources), str(target_dir)],
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=self._clone_timeout_seconds,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ReleaseCodeCollectionError(f"cp -c {source} -> {target} failed: {exc}") from exc
+            raise ReleaseCodeCollectionError(
+                f"cp -c {len(sources)} files -> {target_dir} failed: {exc}"
+            ) from exc
         if result.returncode != 0:
             raise ReleaseCodeCollectionError(
-                f"cp -c {source} -> {target} exited {result.returncode}: {result.stderr.strip()}"
+                f"cp -c {len(sources)} files -> {target_dir} exited {result.returncode}: "
+                f"{result.stderr.strip()}"
             )
 
     @staticmethod

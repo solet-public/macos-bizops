@@ -2,7 +2,7 @@
   "schema_version": 1,
   "channels": [
     {
-      "anchor_table_sha256": "6c0eb8f0f70d1bb7bb528fea0535b6798dba0c477a00eff02d0881b276fdbef6",
+      "anchor_table_sha256": "790d46a072308874ec9b38733218774d5e6dce7b4d5f49a176104f73f5fd66c7",
       "channel_id": "stable"
     }
   ]

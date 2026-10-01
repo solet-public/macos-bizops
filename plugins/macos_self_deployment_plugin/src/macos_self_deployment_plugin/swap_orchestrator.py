@@ -32,7 +32,7 @@ import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 from ananta.core.plugins.profile_manifest import load_manifest_plugin_set
 from ananta.core.runtime import get_runtime_dir
@@ -65,6 +65,10 @@ from macos_self_deployment_plugin.preflight_probe_runner import (
     ProbeOutcome,
 )
 from macos_self_deployment_plugin.release_manager import (
+    VENV_BIN_DIRNAME,
+    VENV_PYTHON_BASENAME,
+    VENV_SUBTREE,
+    VERSION_FILENAME,
     CandidatePaths,
     GcResult,
     ReleaseManagerError,
@@ -265,6 +269,77 @@ def _root_manifest_restart_result(
         reason=reason,
         expected_etag=expected_etag,
         logger=logger,
+    )
+
+
+PRE_BUILD_PROBE_RELEASE_ID: Final[str] = "pre-build-source-tree"
+
+
+def _pre_build_root_manifest_refusal(
+    probe: PreflightProbeFn, *, app_home: Path, reason: str, expected_etag: str,
+    logger: logging.Logger,
+) -> RestartResult | None:
+    """Refuse root-manifest drift BEFORE the release build, or return ``None``.
+
+    The drift is a property of the deployment root, so it is known without a
+    built release; finding it only after the build cost a full build for a
+    refusal that needed none of it (iss_aca2ea39).  §46.1 forbids running the
+    check in this process (its imports are as old as its last start), so the
+    SAME probe seam runs it under the source checkout's own interpreter: the
+    candidate is a clone of that checkout's code and venv, which makes the
+    code doing the validating the code about to be activated.
+
+    Only a root-manifest failure refuses here, with the same classification
+    and message the post-build probe gives.  Anything else the early probe
+    reports (a plugin-manifest failure, a harness error, a missing source
+    venv) is left to the post-build probe, which stays the authoritative gate
+    on the candidate's own interpreter.
+    """
+    source_root = resolve_project_root(app_home)
+    source_target = CandidatePaths(
+        release_id=PRE_BUILD_PROBE_RELEASE_ID,
+        release_dir=source_root,
+        code_root=source_root,
+        venv_python=source_root / VENV_SUBTREE / VENV_BIN_DIRNAME / VENV_PYTHON_BASENAME,
+        version_file=source_root / VERSION_FILENAME,
+        missing_pth_targets=(),
+        schema_snapshot=None,
+    )
+    outcome = _contained_probe_outcome(
+        probe, candidate=source_target, app_home=app_home, logger=logger,
+    )
+    if outcome.ok:
+        return None
+    refusal = _root_manifest_restart_result(
+        outcome, reason=reason, expected_etag=expected_etag, logger=logger,
+    )
+    if refusal is None:
+        logger.info(
+            "pre-build probe of the source tree did not report root-manifest "
+            "drift (%s); the post-build probe of the candidate decides",
+            outcome.payload.get("error_class"),
+        )
+    return refusal
+
+
+def _dry_run_envelope(
+    reason: str, expected_etag: str, self_color: str
+) -> RestartResult:
+    next_color = (
+        opposite_color(self_color) if is_valid_color(self_color) else COLOR_GREEN
+    )
+    message = (
+        f"dry_run=True; would spawn next_color={next_color}, "
+        f"wait for register, activate, quiesce, enqueue complete_swap. "
+        f"Reason: {reason}"
+    )
+    return RestartResult(
+        status=RestartStatus.QUEUED,
+        restart_action_id=_now_audit_token(),
+        message=message,
+        reason=reason,
+        expected_etag=expected_etag,
+        dry_run=True,
     )
 
 
@@ -693,7 +768,7 @@ class SwapOrchestrator:
         previews.
         """
         if dry_run:
-            return self._dry_run_envelope(reason, expected_etag, self_color)
+            return _dry_run_envelope(reason, expected_etag, self_color)
 
         # F1 cutover preflight — refuses to spawn green on root-manifest drift
         # (design memo §6.1) — no longer runs HERE. §46.1: validating in this
@@ -926,8 +1001,9 @@ class SwapOrchestrator:
         Returns a :class:`_SwapPlan` (next color + the built candidate
         release) on success, or a FAILED :class:`RestartResult` on any
         pre-spawn refusal — router unreachable, self not the router-active
-        instance (C3: color AND instance must match), a release build
-        failure, or a non-additive schema diff (§3). On every failure path
+        instance (C3: color AND instance must match), root-manifest drift
+        (found before the build), a release build failure, or a non-additive
+        schema diff (§3). On every failure path
         nothing is spawned and the live router + ``current``/``previous``
         stay untouched.
 
@@ -955,6 +1031,13 @@ class SwapOrchestrator:
                 ),
                 reason_code=RestartReasonCode.NOT_ACTIVE_INSTANCE,
             )
+        # Root-manifest drift needs no built release (iss_aca2ea39).
+        early_refusal = _pre_build_root_manifest_refusal(
+            self._preflight_probe, app_home=app_home, reason=reason,
+            expected_etag=expected_etag, logger=self._logger,
+        )
+        if early_refusal is not None:
+            return early_refusal
         # §4.5/§4.7: materialize the immutable candidate BEFORE the spawn so the
         # green child is launched from the candidate's own venv/code — NOT
         # ``current``, which still names the live old release until ``cutover``
@@ -1031,26 +1114,6 @@ class SwapOrchestrator:
         return _SwapPlan(
             next_color=next_color, candidate=candidate,
             probe_evidence=probe_outcome.payload,
-        )
-
-    def _dry_run_envelope(
-        self, reason: str, expected_etag: str, self_color: str
-    ) -> RestartResult:
-        next_color = (
-            opposite_color(self_color) if is_valid_color(self_color) else COLOR_GREEN
-        )
-        message = (
-            f"dry_run=True; would spawn next_color={next_color}, "
-            f"wait for register, activate, quiesce, enqueue complete_swap. "
-            f"Reason: {reason}"
-        )
-        return RestartResult(
-            status=RestartStatus.QUEUED,
-            restart_action_id=_now_audit_token(),
-            message=message,
-            reason=reason,
-            expected_etag=expected_etag,
-            dry_run=True,
         )
 
     def _failure(

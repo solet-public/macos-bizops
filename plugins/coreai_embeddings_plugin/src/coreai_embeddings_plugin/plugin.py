@@ -96,11 +96,14 @@ class CoreAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface):
                 if len(inputs) > 128:
                     raise EmbeddingError(ErrorCode.INVALID_INPUT, "Maximum batch size is 128")
                 if not self.is_ready() or self._runtime is None:
-                    raise self._last_error
+                    # Reported as stored, outside the handlers below: a stored TIMEOUT must not start a recovery.
+                    return failure(self._last_error)
                 vectors = self._runtime.generate(inputs)
                 return result({"embeddings": vectors, "dimension": DIMENSION, "model": MODEL_ID})
             except EmbeddingError as exc:
-                if exc.code in (ErrorCode.UNAVAILABLE, ErrorCode.INVALID_OUTPUT):
+                if exc.code is ErrorCode.TIMEOUT:
+                    self._recover_from_timeout(exc)
+                elif exc.code in (ErrorCode.UNAVAILABLE, ErrorCode.INVALID_OUTPUT):
                     self._unavailable(exc)
                 return failure(exc)
             except (RuntimeError, ValueError, KeyError, TypeError) as exc:
@@ -116,7 +119,24 @@ class CoreAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface):
         with self._lock:
             if not self.is_ready() or self._runtime is None:
                 raise self._last_error
-            return self._runtime.count_tokens(text)
+            try:
+                return self._runtime.count_tokens(text)
+            except EmbeddingError as exc:
+                if exc.code is ErrorCode.TIMEOUT:
+                    self._recover_from_timeout(exc)
+                raise
+
+    def _recover_from_timeout(self, error: EmbeddingError) -> None:
+        """Replace a runtime whose native call timed out; the failed call is reported, never retried (iss_a457a147).
+
+        The timed-out call cannot be interrupted and still holds its worker, so that runtime is abandoned and a new one
+        is prepared once. A failed re-preparation, a timed-out one included, leaves the plugin unavailable with its own
+        error, which later calls report without preparing again, until a reload or an explicit preparation.
+        """
+        logger.warning("Core AI native call timed out (%s); preparing a new runtime once", error)
+        self.prepare_for_readiness()
+        if self.is_ready():
+            logger.warning("Core AI runtime prepared again after a timed-out native call")
 
     def get_default_dimensions(self) -> int:
         """Static schema-init metadata does not assert runtime availability."""

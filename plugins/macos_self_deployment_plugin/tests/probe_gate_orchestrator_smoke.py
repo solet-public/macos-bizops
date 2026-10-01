@@ -51,7 +51,10 @@ from macos_self_deployment_plugin.schema_preflight import (  # noqa: E402
     PreflightVerdict,
     SchemaChange,
 )
-from macos_self_deployment_plugin.swap_orchestrator import SwapOrchestrator  # noqa: E402
+from macos_self_deployment_plugin.swap_orchestrator import (  # noqa: E402
+    PRE_BUILD_PROBE_RELEASE_ID,
+    SwapOrchestrator,
+)
 
 _passed = 0
 _failed: list[str] = []
@@ -165,7 +168,11 @@ class _Harness:
     def __init__(self, *, schema_preflight: Any, probe: Any) -> None:
         self.release_mgr = _RecordingReleaseManager()
         self.spawn_calls: list[str] = []
+        # The post-build probe of the candidate; the r68 pre-build root-manifest
+        # probe of the source tree is recorded apart so these pins stay about
+        # the candidate gate.
         self.probe_calls: list[str] = []
+        self.pre_build_probe_calls: list[str] = []
         self._probe = probe
 
         def _spawn(
@@ -185,7 +192,10 @@ class _Harness:
 
         def _probe_seam(*, candidate: CandidatePaths, app_home: Path) -> ProbeOutcome:
             del app_home
-            self.probe_calls.append(candidate.release_id)
+            if candidate.release_id == PRE_BUILD_PROBE_RELEASE_ID:
+                self.pre_build_probe_calls.append(candidate.release_id)
+            else:
+                self.probe_calls.append(candidate.release_id)
             outcome = self._probe(candidate)
             return cast("ProbeOutcome", outcome)
 
