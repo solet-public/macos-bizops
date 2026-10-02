@@ -1861,6 +1861,8 @@ class Plugin(
                 action_status="completed",
                 data={"status": "flow_complete"},
                 actions=[],
+                error=None,
+                timestamp=datetime.now(UTC).isoformat(),
             )
 
         try:
@@ -2087,6 +2089,7 @@ class Plugin(
             }
             return {
                 "action_status": ActionStatus.ERROR.value,
+                "actions": [],
                 "data": {"available": False, "provider": "lm_studio"},
                 "error": error_detail,
                 "timestamp": datetime.now(UTC).isoformat(),
@@ -2110,6 +2113,7 @@ class Plugin(
             }
             return {
                 "action_status": ActionStatus.ERROR.value,
+                "actions": [],
                 "data": {},
                 "error": error_detail,
                 "timestamp": datetime.now(UTC).isoformat(),

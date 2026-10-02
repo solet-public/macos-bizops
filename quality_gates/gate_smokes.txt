@@ -309,6 +309,19 @@ plugins/agent_messaging_plugin/tests/role_claim_handover_smoke.py
 # watcher exits loudly on its next refused plain re-claim rather than re-steal.
 plugins/agent_messaging_plugin/tests/takeover_route_reachability_smoke.py
 
+# iss_d97f6633 — the Git-Controller landing path's two act-time reads (the role
+# ownership re-check and the caller's own inbox pages) are also served on direct
+# bridge routes, so a held action queue (a deploy, a slow peer_send_by_name)
+# cannot freeze them. One parametrised table over BOTH doors (verb and route:
+# held, displaced, vacant, unregistered-instance, duplicate-binding), inbox page
+# parity across both sections and every refusal, the route policy (unknown or
+# closed bridge 404; an OAuth bridge held to the per-session allowlist), a
+# stall test through the REAL serial poller drain (both routes answer inside
+# 1 s while a queued peer_holds_role does not), the holds-role/inbox CLI, and
+# three mutants that must be killed: drop delivery_route_attached, return an
+# empty page instead of raising, skip bridge resolution. Offline.
+plugins/agent_messaging_plugin/tests/peer_direct_routes_smoke.py
+
 # S1-S3 agent_session_id splice — reconnect self-refresh for ROLE sends. Drives
 # the REAL /peer/register route END-TO-END (FastAPI TestClient + in-memory state):
 # a reconnect (rotated agent_instance_id, stable agent_session_id) re-points every
@@ -1085,6 +1098,13 @@ ananta/tests/llm/session_ledger/summarize_outcome_visibility_smoke.py
 # fail-closed on missing embedding/vector bindings. Offline (stub state /
 # embedding / vector services mirroring the real data.result envelope shapes).
 ananta/tests/llm/session_ledger/event_embeddings_smoke.py
+
+# iss_6aa96266 (unt_99b1886d): the event-embedding drain always makes progress. Drives the real drain over the
+# real PGVectorProvider against a UNIQUE(external_id) table with soft/hard delete semantics: a re-embed lands
+# (soft delete left a tombstone that blocked every store of the id), a tombstone clears on the next fire, a
+# 13610-token event is split to the 2048-token budget, one refused event is skipped with a WARNING and the cursor
+# advances, an embedder outage still halts. Five named mutants, each killed. Offline.
+ananta/tests/llm/session_ledger/event_embed_drain_progress_smoke.py
 
 # REL-03 swap-window terminated-flow guard (2026-07-02): a failed flow's
 # already-queued process_error/process_results siblings, dequeued mid blue-green
@@ -2556,6 +2576,23 @@ plugins/agent_messaging_plugin/tests/role_binding_store_smoke.py
 # and keyed on MEASURED model digests, cache hit / miss / revoke-on-missing-image,
 # per-stage checkpoints on the E3 row, guest_validation_failed with the
 # preserved snapshot name, and resume from that snapshot.
+# seed_factory_plugin LADDER PROFILE RESOLVER (2026-10-01, unt_8e48cf62,
+# wgr_e734cece) — a ladder_profile NAME resolves to the E3 driver's complete
+# LadderInputs through the declared recipes (guest_recipe): the profile
+# publish_release defaults to is declared, the recipe's decisions are real
+# options of the shipped setup flow and its Brewfile carries the flow's
+# required packages, the base image is measured and refused unless it is the
+# approved digest, an unknown name refuses ladder_inputs_unresolved naming the
+# declared profiles and never recommending required=false. No guest.
+# seed_factory_plugin MODEL-CACHE SEEDING (2026-10-01, unt_8e48cf62, iss_03712f93) —
+# the ladder seeds the pinned model asset from the HOST cache and never downloads
+# it (rul_18bd93a3): the recipe plans the mount and copy with pins equal to the
+# plugin's distribution manifest, the boot line carries the cache as a third
+# read-only share on every boot, the helper copies once, verifies every file
+# against its pin, is idempotent, warns (never fails) on an absent cache entry,
+# fails loudly on a corrupt copy and issues only test/mkdir/cp/shasum; a seed
+# naming a URL or a path outside its root is refused; and through the whole
+# ladder the seed runs after genesis and before the models stage. No guest.
 # seed_factory_plugin SIGNATURE-CHECK FAULT INJECTION (2026-09-19, chg_0af350a8
 # §8 Phase 2) — the five fault-injection scenarios the migration path requires
 # before signature_policy can default to "required": a one-byte plugin edit
@@ -3390,6 +3427,16 @@ ananta/tests/core/actions/action_failure_error_typing_smoke.py
 # logic this mark feeds is covered separately in
 # ananta/tests/llm/agent_messaging/role_inbox_smoke.py.
 plugins/agent_messaging_plugin/tests/peer_mark_role_covered_smoke.py
+
+# Role covered-mark floor versus the authorization intake read (Problem
+# wgr_b6007d23): a mark any reader advanced hid authorization rows, including the
+# mark's own row, from git_controller_authorization.py. Proves the observer-only
+# include_covered read (service, peer_inbox process request, solet-bridge inbox
+# flag, helper frontier argv) returns every row, that the default drain and the
+# pending-count observer read still floor, that the read never moves the mark, and
+# that the history cursor cannot return the mark's own row. Hermetic: in-memory
+# state, mock bridge transport.
+plugins/agent_messaging_plugin/tests/role_covered_floor_intake_smoke.py
 
 # Fleet session-management D4 Part B item 1 (§3.1 Q1) — the legislate_role
 # governance-act verb: the ONE sanctioned path that stamps an
@@ -5251,6 +5298,7 @@ plugins/macos_inference_plugin/tests/provider_isolation_smoke.py
 # not shipped: plugins/github_midwife_plugin/tests/profile_install_vendor_find_links_smoke.py requires repository history (its RED fixture reads one pinned pre-fix commit's blob via `git show`); a born clone is a git-archive extract with no .git (repository_hygiene)
 # not shipped: plugins/github_midwife_plugin/tests/plugin_transition_smoke.py requires plugins/macos_inference_plugin/src/macos_inference_plugin/resources/default_config.json; absent from macos_free_minimal and macos_samantha; its fixture copies that file from the repository into every target (cross_bundle_transition)
 # not shipped: plugins/github_midwife_plugin/tests/plugin_transition_identity_smoke.py requires plugins/macos_inference_plugin/src/macos_inference_plugin/resources/default_config.json; absent from macos_free_minimal and macos_samantha; it builds its fixtures with plugin_transition_smoke, which copies that file from the repository into every target (cross_bundle_transition)
+# not shipped: plugins/github_midwife_plugin/tests/plugin_transition_inherited_gpu_smoke.py requires plugins/macos_inference_plugin/src/macos_inference_plugin/resources/default_config.json; absent from macos_free_minimal and macos_samantha; it builds its fixtures with plugin_transition_smoke, which copies that file from the repository into every target (cross_bundle_transition)
 # not shipped: solet_cli/tests/update_plugin_transition_deferral_smoke.py requires plugins/macos_inference_plugin/src/macos_inference_plugin/resources/default_config.json; absent from macos_free_minimal and macos_samantha; its fixture copies that file from the repository into every target (cross_bundle_transition)
 # not shipped: solet_cli/tests/update_transition_bundle_candidates_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; its fixture builds each bundle's candidate from seed_resolver, and the seed factory is in no capability bundle (fixture_build_tooling)
 # not shipped: solet_cli/tests/update_stable_r48_predecessor_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; it builds its candidate with update_transition_bundle_candidates_smoke's seed_resolver fixture, and the seed factory is in no capability bundle (fixture_build_tooling)
@@ -5516,6 +5564,8 @@ plugins/github_midwife_plugin/tests/apple_model_availability_warning_smoke.py
 # preserved operator edits, interruption and repeat; the update defers a not-ready transition, promotes
 # needs_attention and retries it (crash legs at every boundary). iss_9166af93: embedding inputs split to the
 # provider's token budget, never truncated; the chunking-policy backfill re-embeds refused and head-only events.
+# iss_34f1e3c7 (iss_f3e65e52): an r64 Apple-native install that holds Core AI compute_preference gpu is rewritten to cpu by the
+# update, named in the preview the approval covers and in the doctor's advisory; every other key and file is kept.
 ananta/tests/llm/session_ledger/embedding_token_budget_smoke.py
 # rul_ffd59e37 / rul_ef0363a2 / rul_c11cf191: per bundle, against candidates pruned as assembly prunes -- LM Studio
 # and Apple-native predecessors update; macOS 26 keeps LM Studio for embeddings and summaries (rul_5cc2910c); a host
@@ -5697,3 +5747,43 @@ plugins/github_midwife_plugin/tests/seed_public_text_gate_smoke.py
 # into SessionStart exactly once and names a file that exists. Like the other hook smokes,
 # this lives under .claude/hooks/ -- the gate scope regex misses that directory, so the
 # static gates are hand-run over the hook and the smoke.
+
+# wgr_5de9baf3 / unt_37b85986: a blue-green deploy row (apply_manifest, restart_with_manifest,
+# rollback_release, cutover_release) no longer holds the serial action poller. The real
+# _poll_once with a deploy-shaped handler queued ahead of fast actions: they dispatch while the
+# deploy runs, no SLOW_ACTION, one deploy in flight, failure still recorded, and the orphan reap
+# skips the live deploy's row. Offline.
+ananta/tests/core/actions/deploy_detached_from_poller_smoke.py
+
+# iss_dae31745 / wgr_a14ecbc2 / unt_50e7554f: every plugin result carries all five ActionResult
+# fields (action_status, data, actions, error, timestamp). Drives the fixed sites (openai and
+# titan embeddings verbs, salesforce probe_cli, postgres and rds list_namespaces, coreai, the
+# thinking planning submit and the lifecycle hooks) through the REAL ActionProcessor
+# plugin-contract validator, success and failure, plus a source audit of every plugin
+# ActionResult literal. Offline.
+ananta/tests/core/actions/plugin_action_result_contract_smoke.py
+
+# iss_faf5802c / unt_3279ca01: two colours over ONE action queue each claim only their own boot
+# rows. Two real ActionQueuePollers over one shared in-memory action_events table (the state
+# grammar's own filter function), the real fetch and conditional claim: the old colour mid-deploy
+# leaves the candidate's pinned starting actions; the candidate, until the router names it active,
+# claims only its own pinned rows; unpinned rows stay shared; abandoned pins are reaped. Offline.
+ananta/tests/core/actions/candidate_starting_actions_pin_smoke.py
+
+# iss_faf5802c / unt_3279ca01: the deploy plugin restricts a booting instance to its own pinned
+# rows from prepare_for_readiness and releases it only when the router names that instance
+# active, through the real heartbeat activation check; the release is idempotent. Offline.
+plugins/macos_self_deployment_plugin/tests/claim_restriction_lifecycle_smoke.py
+
+# embedding_service bound process (iss_5fdedd1c). An external consumer embeds through whichever
+# provider embedding_service is BOUND to, never naming a provider plugin: generate_embeddings and
+# get_embedding_dimension are discoverable and keyed on the service name, their schema names all five
+# contract fields, and each KB JSON carries an in-bound embedding_description. Through the real
+# _execute_service_interface_action and the REAL EventOrchestrator.get_service over a ServiceBindings
+# loaded from a test binding table: two fake providers give two different model ids and dimensions, a
+# provider hard-coded or cached in the binding resolution fails, an unbound service raises the
+# framework's own FrameworkError, and the real CoreAIEmbeddingsPlugin (fake native runtime) returns
+# model and dimension with the vectors and refuses over-batch, over-long, empty, blank and foreign-model
+# input with an error carrying action_status, data, actions, error and timestamp, embedding no partial
+# batch. Red on base (12 checks); twelve mutants killed by named checks. Offline.
+ananta/tests/core/substrate_contracts/embedding_service_bound_process_smoke.py

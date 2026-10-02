@@ -274,6 +274,7 @@ class EmbeddingService(EmbeddingServiceAPI, BootstrappableServiceInterface):
         }
         return {
             "action_status": "error",
+            "data": {},
             "actions": [],
             "timestamp": stamp,
             "error": {

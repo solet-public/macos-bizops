@@ -3201,6 +3201,10 @@ class SessionLedgerSearchAPI(ABC):
                         "per-event bound (tail dropped, logged)."
                     ),
                 ),
+                "events_failed": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="Events skipped after failing to embed (a WARNING names each).",
+                ),
                 "exhausted": ParameterMetadata(
                     type=ParameterType.BOOLEAN,
                     description=(

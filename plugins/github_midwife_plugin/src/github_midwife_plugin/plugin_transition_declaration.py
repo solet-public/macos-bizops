@@ -38,6 +38,7 @@ __all__ = [
     "TargetPlugin",
     "Transition",
     "classify",
+    "inherited_gpu",
     "owner_sentence",
     "parse_declaration",
 ]
@@ -46,6 +47,8 @@ SCHEMA = "solet.plugin_transitions.v1"
 CONFIG_RENDERERS = frozenset({"coreai_embeddings", "apple_inference"})
 READINESS_KINDS = frozenset({"coreai_embedding", "import"})
 _COREAI_PLUGIN = "coreai_embeddings_plugin"
+#: Core AI's GPU path leaks one IOSurface per embedding and kills the process at about 16.3k (iss_f3e65e52).
+_GPU_PREFERENCE = "gpu"
 _KINDS = frozenset({"replace", "add", "retire"})
 _MATCHES = frozenset({"exact", "fields"})
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{1,127}$")
@@ -53,7 +56,7 @@ _MIGRATION_ID = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
 _PROFILE = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
 
 type Kind = Literal["replace", "add", "retire"]
-type State = Literal["not_applicable", "unsupported", "done", "cleanup", "eligible", "partial", "conflict", "host_unsupported"]
+type State = Literal["not_applicable", "unsupported", "done", "cleanup", "rewrite", "eligible", "partial", "conflict", "host_unsupported"]
 
 
 class DeclarationError(ValueError):
@@ -138,12 +141,17 @@ class Classification:
     ``running`` is the plugin the transition's service is bound to in the observation this was classified on
     (``None``: unbound, or no service).  Every owner sentence that says where the service runs is built from it,
     never from the state's name.
+
+    ``gpu`` is set when the replacement is Core AI and its config holds ``gpu`` (iss_34f1e3c7).  A state the base
+    classifier calls ``done`` becomes ``rewrite``, and ``cleanup`` keeps its state with the config rewrite planned
+    beside the roster removal; every other state, a conflict above all, is left as it is and writes nothing for it.
     """
 
     state: State
     detail: str
     repair: str = _CONFIG_REPAIR
     running: str | None = None
+    gpu: bool = False
 
 
 # --- parsing ---------------------------------------------------------------------
@@ -283,7 +291,12 @@ def classify(transition: Transition, observation: Observation, rendered: str | N
         state = _classify_add(transition, observation, rendered)
     else:
         state = _classify_retire(transition, observation)
-    return replace(state, running=None if transition.service is None else observation.bindings.get(transition.service))
+    state = replace(state, running=None if transition.service is None else observation.bindings.get(transition.service))
+    if transition.target is None or not inherited_gpu(observation, transition.target.plugin):
+        return state
+    if state.state == "done":
+        return replace(state, state="rewrite", detail=f"{state.detail}; its compute_preference is {_GPU_PREFERENCE}", gpu=True)
+    return replace(state, gpu=True)
 
 
 def _classify_replace(transition: Transition, observation: Observation, rendered: str | None) -> Classification:
@@ -335,6 +348,15 @@ def _classify_served(transition: Transition, observation: Observation) -> Classi
     if bound:
         return Classification("conflict", f"{listed} and still bound to {', '.join(bound)}; it is kept, not removed", _LEFTOVER_REPAIR)
     return Classification("cleanup", f"{listed} and unused")
+
+
+def inherited_gpu(observation: Observation, plugin: str) -> bool:
+    """Core AI's config holds ``gpu``, r64's default, which an update must change (iss_34f1e3c7).
+
+    The config cannot tell r64's default from an owner's own choice, so every ``gpu`` is treated as inherited.
+    """
+    config = observation.configs.get(plugin)
+    return plugin == _COREAI_PLUGIN and config is not None and config.value is not None and config.value.get("compute_preference") == _GPU_PREFERENCE
 
 
 def _profile_gate(transition: Transition, observation: Observation, excluded: State) -> Classification | None:
@@ -429,6 +451,9 @@ def _bound(observation: Observation, plugin: str) -> list[str]:
 # --- owner-facing sentences --------------------------------------------------------------
 
 _LEFT_AS_IS = "LM Studio and its models are left exactly as they were"
+_GPU_RISK = "compute_preference gpu, which leaks memory and can crash the solet after about 16,000 embeddings"
+_GPU_ALONGSIDE_CLEANUP = f" That update also changes Core AI from {_GPU_RISK}, to cpu."
+_GPU_ALONGSIDE_CONFLICT = f" Core AI also has {_GPU_RISK}; it becomes cpu once this is resolved."
 
 
 def owner_sentence(transition: Transition, state: Classification) -> str:
@@ -448,17 +473,24 @@ def owner_sentence(transition: Transition, state: Classification) -> str:
     old = "LM Studio"
     now = _now(transition, state)
     on_source = _runs_on_source(transition, state)
+    gpu_note = _gpu_note(state)
     sentences: dict[str, str] = {
         "done": f"{label.capitalize()} run on {replacement}.{' ' + transition.done_note if transition.done_note else ''} {_LEFT_AS_IS}; the solet simply stops using them for {label}.",
-        "cleanup": f"{label.capitalize()} run on {replacement}.{' ' + transition.done_note if transition.done_note else ''} The unused {transition.source.plugin if transition.source else 'old plugin'} entry is still in the plugin roster; the next update removes it. {_LEFT_AS_IS}.",
+        "cleanup": f"{label.capitalize()} run on {replacement}.{' ' + transition.done_note if transition.done_note else ''} The unused {transition.source.plugin if transition.source else 'old plugin'} entry is still in the plugin roster; the next update removes it. {_LEFT_AS_IS}.{gpu_note}",
+        "rewrite": f"{label.capitalize()} run on {replacement} with compute_preference gpu: that path leaks memory and crashes the solet after about 16,000 embeddings. The next update changes it to cpu; to change it now, set compute_preference to cpu in profile/config/plugins/coreai_embeddings_plugin.json and restart the solet.",
         "eligible": f"{label.capitalize()} {'still use ' + old if on_source else now}. This Mac supports Apple-native; the solet switches {label} to {replacement} with the next release's update (or when an update that left the switch pending is re-run). {old + ' stays in use until then' if on_source else 'Nothing changes until then'}.",
         "partial": f"A switch of {label} to {replacement} was interrupted; the next update finishes it, and {label} keep working meanwhile.",
-        "conflict": f"{label.capitalize()} {now}: {state.detail}. {_LEFT_AS_IS}.",
+        "conflict": f"{label.capitalize()} {now}: {state.detail}. {_LEFT_AS_IS}.{gpu_note}",
         "host_unsupported": f"{state.detail[0].upper()}{state.detail[1:]}. {'The solet keeps using ' + old + ' for ' + label if on_source else label.capitalize() + ' ' + now}; {_LEFT_AS_IS}.",
         "unsupported": f"{label.capitalize()} keep using {old} on this solet's profile; keep {old} installed and running." if on_source else f"{label.capitalize()} {now}; this solet's profile has no switch declared for them.",
         "not_applicable": f"Nothing to switch: this solet does not use {old} for {label}." if not on_source else f"Nothing to switch: {label} are bound to {old}, which is not in the plugin roster.",
     }
     return sentences[state.state]
+
+
+def _gpu_note(state: Classification) -> str:
+    """The sentence tail that names Core AI's gpu crash risk where the state does not already say it."""
+    return {"cleanup": _GPU_ALONGSIDE_CLEANUP, "conflict": _GPU_ALONGSIDE_CONFLICT}.get(state.state, "") if state.gpu else ""
 
 
 def _runs_on_source(transition: Transition, state: Classification) -> bool:

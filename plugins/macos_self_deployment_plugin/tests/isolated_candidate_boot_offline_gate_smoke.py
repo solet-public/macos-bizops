@@ -124,7 +124,15 @@ class _RouterHarness:
 
 
 class _PollerHarness:
-    """Minimal collaborators around the real poller's batch/serial method."""
+    """A REAL ``ActionQueuePoller`` with only its I/O seams replaced.
+
+    ``__init__`` needs a state service, action processor, flow graph and action
+    factory, so the poller is built without it. Everything ``_poll_once`` calls
+    (the deploy-detach branch, the stall report, ``_dispatch_claimed``, the colour
+    gate) is the shipped method; the state those methods read is the poller's own
+    class-level default. An imitation that merely borrowed ``_poll_once`` broke
+    each time the loop gained a helper it did not have.
+    """
 
     def __init__(
         self,
@@ -135,23 +143,36 @@ class _PollerHarness:
         self._handler = handler
         self.claimed: list[str] = []
         self.dispatched: list[str] = []
-        self.total_actions_processed = 0
-        self._last_observed_queue_depth = 0
+        poller = ActionQueuePoller.__new__(ActionQueuePoller)
+        poller._get_queued_actions = self._get_queued_actions  # type: ignore[method-assign,assignment]
+        poller._mark_action_processing = self._mark_action_processing  # type: ignore[method-assign]
+        poller._process_action = self._process_action  # type: ignore[method-assign,assignment]
+        poller._mark_action_failed = self._mark_action_failed  # type: ignore[method-assign]
+        poller.total_actions_processed = 0
+        poller._last_observed_queue_depth = 0
+        self._poller = poller
+
+    @property
+    def total_actions_processed(self) -> int:
+        return self._poller.total_actions_processed
 
     async def _get_queued_actions(self) -> list[SimpleNamespace]:
-        self._last_observed_queue_depth = len(self._actions)
+        self._poller._last_observed_queue_depth = len(self._actions)
         return self._actions
 
     def _mark_action_processing(self, action_id: str) -> bool:
         self.claimed.append(action_id)
         return True
 
+    def _mark_action_failed(self, action_id: str, message: str, *_: object, **__: object) -> None:
+        raise AssertionError(f"action {action_id} failed in the offline gate: {message}")
+
     async def _process_action(self, action: SimpleNamespace) -> None:
         self.dispatched.append(action.id)
         await self._handler(action)
 
     async def run_once(self) -> None:
-        await ActionQueuePoller._poll_once(self)  # type: ignore[arg-type]
+        await self._poller._poll_once()
 
 
 def _start_heartbeat(

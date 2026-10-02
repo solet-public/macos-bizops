@@ -23,11 +23,12 @@ Implementation is decomposed across sibling modules:
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ananta.core.domain.enums import ActionStatus
-from ananta.core.domain.types import ActionResult
+from ananta.core.domain.enums import ActionStatus, ErrorSeverity
+from ananta.core.domain.types import ActionResult, ErrorDetail
 from ananta.core.plugins.plugin_base import ServicePlugin
 from ananta.interfaces.embedding_service_interface import TokenBudget
 from ananta.interfaces.knowledge_service_interface import KnowledgeServiceInterface
@@ -46,6 +47,37 @@ from .kb_lifecycle import (
 from .schema import get_knowledge_schema
 
 logger = logging.getLogger(__name__)
+
+
+def _lifecycle_completed() -> ActionResult:
+    """Build the completed ActionResult every lifecycle hook returns."""
+    return {
+        "action_status": ActionStatus.COMPLETED.value,
+        "data": {},
+        "actions": [],
+        "error": None,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+
+def _lifecycle_refusal() -> ActionResult:
+    """Build the error ActionResult for a stop refused while this plugin is the active interface."""
+    stamp = datetime.now(UTC).isoformat()
+    error: ErrorDetail = {
+        "type": "KnowledgeLifecycleError",
+        "code": "default_knowledge.stop_refused_active_interface",
+        "message": "Cannot stop services while this plugin is the active interface provider",
+        "details": {"plugin_name": PLUGIN_NAME},
+        "severity": ErrorSeverity.ERROR.value,
+        "timestamp": stamp,
+    }
+    return {
+        "action_status": ActionStatus.ERROR.value,
+        "data": {},
+        "actions": [],
+        "error": error,
+        "timestamp": stamp,
+    }
 
 
 class DefaultKnowledgePlugin(
@@ -153,10 +185,10 @@ class DefaultKnowledgePlugin(
     async def start_services(self) -> ActionResult:
         """Start knowledge services."""
         if self._services_started:
-            return {"action_status": ActionStatus.COMPLETED.value}
+            return _lifecycle_completed()
         self._services_started = True
         logger.debug(f"{PLUGIN_NAME}: services started")
-        return {"action_status": ActionStatus.COMPLETED.value}
+        return _lifecycle_completed()
 
     def auto_install_knowledge_bases(
         self, manifest_plugin_set: set[str] | None = None,
@@ -195,9 +227,9 @@ class DefaultKnowledgePlugin(
     async def stop_services(self) -> ActionResult:
         """Stop knowledge services."""
         if not self._services_started:
-            return {"action_status": ActionStatus.COMPLETED.value}
+            return _lifecycle_completed()
         if self.is_active_interface_provider():
-            return {"action_status": ActionStatus.ERROR.value}
+            return _lifecycle_refusal()
         self._services_started = False
         logger.debug(f"{PLUGIN_NAME}: services stopped")
-        return {"action_status": ActionStatus.COMPLETED.value}
+        return _lifecycle_completed()

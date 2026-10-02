@@ -1,8 +1,8 @@
 {
   "process_key": "plugin::openai_embeddings_plugin::list_models_action",
   "display_name": "List Embedding Models",
-  "description": "List available embedding models and their capabilities.",
-  "embedding_description": "List available embedding models and metadata such as dimension, max input length, and supported input types. Use to choose a model for semantic search, confirm defaults, and validate service configuration.",
+  "description": "Read an OpenAI-compatible server's model catalogue; callers should list the solet's models through service_interface::embedding_service::list_models.",
+  "embedding_description": "Read the configured server's /models route and keep the embedder entries, those typed embedding, untyped, or with embed in the id, placing the configured default first when absent. Each carries a name, text input type and description, never a dimension or input limit. Not the solet's general model list.",
   "result_processor_customizations": {
     "action_label": "Embedding models listed",
     "result_type": "models_listed",

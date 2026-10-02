@@ -109,6 +109,8 @@ class VectorServiceInterface(ABC):
 
         This is an internal API used by services (like memory) that store
         business identifiers in external_id. Not exposed as an AI-callable action.
+        The rows are removed outright: ``external_id`` is unique across active and
+        soft-deleted rows, so a tombstone would block storing a replacement.
 
         Args:
             namespace: Plugin namespace

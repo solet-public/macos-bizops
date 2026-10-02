@@ -18,8 +18,8 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Final
-from urllib.parse import quote
+from typing import Any, Final, Protocol
+from urllib.parse import quote, urlencode
 
 import httpx
 from ananta.core.config.environment_config import EnvironmentConfig
@@ -218,7 +218,79 @@ def resolve_base_url(solet_name: str | None = None) -> str:
     return f"http://127.0.0.1:{port}"
 
 
-class BridgeClient:
+class _BridgeHttp(Protocol):
+    """What the queue-free peer reads need from the client they are mixed into."""
+
+    def _require_bridge(self) -> str: ...
+
+    def _get(self, path: str) -> dict[str, Any]: ...
+
+
+class _QueueFreePeerReads:
+    """The two act-time peer reads served on DIRECT bridge routes (iss_d97f6633).
+
+    ``peer_holds_role`` and ``peer_inbox`` are platform processes, whose only
+    route for a caller with no registered bridge is ``process/call`` — the serial
+    action queue a deploy can hold for minutes. These reads are cheap, so the
+    bridge serves them on plain GET routes that a held queue cannot stall.
+    Kept apart from ``BridgeClient``'s own surface: they share one property (no
+    queue, no registration), not the lifecycle/process/watch surface.
+    """
+
+    def peer_holds_role(
+        self: _BridgeHttp, *, name: str, agent_instance_id: str,
+    ) -> dict[str, Any]:
+        """Act-time role-ownership re-check over the DIRECT bridge route.
+
+        The same read as the ``peer_holds_role`` process, served without the
+        serial action queue (``GET .../peer/holds_role``), so a held queue
+        cannot stall it. Works from an unregistered one-shot bridge: the
+        instance whose ownership is asked about is a query argument, not this
+        bridge's identity. Returns the route's object (``holds``, ``name``,
+        ``agent_session_id``, ``delivery_route_attached``, ``instance_registered``,
+        ``session_label``); a refusal raises ``BridgeCallError``.
+        """
+        bridge_id = self._require_bridge()
+        query = urlencode({"name": name, "agent_instance_id": agent_instance_id})
+        return self._get(f"{API_PREFIX}/{bridge_id}/peer/holds_role?{query}")
+
+    def peer_inbox_for_session(
+        self: _BridgeHttp,
+        *,
+        agent_session_id: str,
+        limit: int,
+        after: str | None = None,
+        role_after: str | None = None,
+        observer: bool = False,
+        include_covered: bool = False,
+    ) -> dict[str, Any]:
+        """One ``peer_inbox`` page for the caller's own session, over the DIRECT route.
+
+        Unlike :meth:`peer_inbox` this needs no ``peer_register``: the session is
+        named explicitly and resolved server-side, so an unregistered one-shot
+        bridge can read without registering under (and sweeping) the caller's own
+        registry row. The page is byte-for-byte what the ``peer_inbox`` process
+        returns; the cursors keep their meaning (see :meth:`peer_inbox`).
+        ``include_covered`` (observer-only) reads the role section with no covered-mark
+        floor and is the only request field that crosses besides the cursors. A
+        refusal raises ``BridgeCallError`` — never an empty page.
+        """
+        bridge_id = self._require_bridge()
+        params: dict[str, str | int] = {"agent_session_id": agent_session_id, "limit": limit}
+        if after:
+            params["after"] = after
+        if role_after:
+            params["role_after"] = role_after
+        if observer:
+            params["observer"] = "true"
+        if include_covered:
+            params["include_covered"] = "true"
+        return self._get(
+            f"{API_PREFIX}/{bridge_id}/peer/inbox_for_session?{urlencode(params)}",
+        )
+
+
+class BridgeClient(_QueueFreePeerReads):
     """One-shot synchronous client over a solet's bridge HTTP surface."""
 
     def __init__(

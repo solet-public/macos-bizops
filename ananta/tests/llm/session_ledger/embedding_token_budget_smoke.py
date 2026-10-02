@@ -288,6 +288,7 @@ def test_facade_refuses_loudly_and_counts() -> None:
     error = refused.get("error") or {}
     _check(refused.get("action_status") == "error" and error.get("code") == "embedding_input_too_long", "facade: an over-budget batch is refused with embedding_input_too_long")
     _check(error.get("details", {}).get("oversize_inputs") == [{"index": 1, "tokens": 2100}, {"index": 2, "tokens": 3000}], "facade: the refusal names every oversize input and its count")
+    _check(all(field in refused for field in ("action_status", "data", "actions", "error", "timestamp")) and refused.get("data") == {}, "facade: the refusal carries all five contract fields, data an empty dict")
     _check(service.oversize_inputs_refused == 2 and not provider.batches, "facade: counted (2) and the provider never ran; nothing truncated")
     _check(any("oversize_inputs_refused=2" in record.getMessage() for record in records), "facade: a WARNING carries the running count")
     _check(service.generate_embeddings(["fine"]).get("action_status") == "completed", "facade: a fitting batch passes through")
@@ -304,12 +305,12 @@ def test_policy_backfill() -> None:
         halted = writer.drain_missing_events(page_size=1)
     finally:
         event_embeddings.chunk_event_content = original
-    _check(halted["halted_on_error"] and "evt_long:0" not in vectors.present and "evt_b:0" not in vectors.present, "before the fix: the drain halts at the over-budget event and strands everything after it")
+    _check(not halted["halted_on_error"] and halted["events_failed"] == 1 and "evt_long:0" not in vectors.present and "evt_b:0" in vectors.present, "before the fix: the over-budget event is skipped and counted, and the drain still embeds everything after it (iss_6aa96266)")
     repository = writer._repository  # noqa: SLF001
-    _check(repository.get_event_embed_chunk_policy() is None, "a halted sweep records no policy, so the backfill repeats")
+    _check(repository.get_event_embed_chunk_policy() is None, "a sweep that skipped an event records no policy, so the backfill repeats")
     swept = writer.drain_missing_events(page_size=1)
     _check(swept["policy_backfill"] and swept["reconcile"] and not swept["halted_on_error"], "the first drain under the new policy is a full backfill sweep")
-    _check({"evt_long:0", "evt_long:1", "evt_b:0"} <= vectors.present, "the previously failed event and everything it stranded are embedded")
+    _check({"evt_long:0", "evt_long:1", "evt_b:0"} <= vectors.present, "the previously failed event is embedded by the repeated sweep")
     _check(repository.get_event_embed_chunk_policy() == f"tokens:{_MAX}+chars:{EVENT_CHUNK_MAX_CHARS}", "the completed backfill records the policy")
     later = writer.drain_missing_events(page_size=1)
     _check(not later["policy_backfill"] and not later["reconcile"], "later drains are incremental again")

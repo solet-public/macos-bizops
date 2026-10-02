@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Repo-level shipped-smoke checkout-only contract consistency gate (iss_59385149).
+"""Repo-level shipped-smoke source contract gate (iss_59385149, wgr_42e3a251).
 
 WHAT THIS CLOSES. ``shipped_smoke_contract._checkout_only_violations`` (V1)
 checks that every checkout-only smoke declaration agrees across three
@@ -13,14 +13,20 @@ publish lap later when r50's assembly failed closed (``rrun_78ae868f``).
 This gate runs the same V1 predicate at REPO scope, before a commit exists,
 so that exact class goes red here instead of at a later assembly.
 
-BUNDLE-FREE AND RETAINED-SET-FREE. It calls
-``checkout_only_consistency_violations``, which passes an EMPTY retained set
-on purpose — see that function's own docstring: at repo level only the
-three-surface agreement is checked, never which entries a particular
-capability bundle would still keep. Whether a checkout-only entry is
-(wrongly) still retained in some bundle is a separate, per-profile question
-that ``check_source_tree_contract`` / ``validate_contract`` still answer at
-assembly; this gate does not duplicate that check.
+PER-PROFILE ROWS (wgr_42e3a251). The V1 predicate above is bundle-free: it
+calls ``checkout_only_consistency_violations``, which passes an EMPTY retained
+set on purpose. The per-profile half — a retained shipped smoke with an
+undeclared repo-local dependency absent from the seed, or a checkout-only entry
+still retained in some bundle — is ``check_source_tree_contract``, which
+returns rows for every capability profile without assembling. Its only other
+caller is a smoke that prints the rows and exits 0, so a violation reached
+the publish-time assembly with nothing at landing time failing on it. This gate now also runs it for every profile and reports each row as
+``[<profile>] <row>``. A row is a finding exactly like a V1 disagreement: it
+blocks unless the allowlist carries it. The allowlist is the baseline, so
+"candidate rows are a subset of the parent's rows" (Step 7.5) is "candidate rows
+are a subset of the tracked baseline", with no second checkout. The detector
+reads ``git ls-files --cached``, so it sees a candidate once staged, which is
+where Git-Controller runs it.
 
 WRONG-TREE DEFENCE. The installed ``seed_factory_plugin`` package resolves
 through this checkout's ``.venv``, which in a lane worktree is a SYMLINK to
@@ -40,21 +46,20 @@ raised and produced no verdict. 2 rather than 1 for the same reason
 Python's own unhandled-exception code, so a 1-is-blocking gate would read a
 crash as a violation count over code that was never measured.
 
-NOT MEANINGFULLY ALLOWLISTABLE. A three-surface disagreement IS the r50
-defect class, not a style preference with a legitimate exception — this
-mirrors the schema-init gate's standing ruling (2026-09-20, under
-``rul_367d8bd6``) that a live boot-crash is never allowlisted. The
-``--allowlist`` flag still exists, for uniformity with every other gate
-``code_quality_check.py`` wires in this same way, and so this module is not
-blocked from growing a legitimately-tolerable finding shape later without a
-wiring change — but it starts, and is expected to stay, empty.
+ALLOWLIST. A three-surface disagreement IS the r50 defect class, not a style
+preference with a legitimate exception — this mirrors the schema-init gate's
+standing ruling (2026-09-20, under ``rul_367d8bd6``) that a live boot-crash is
+never allowlisted — so no V1 entry is expected. Per-profile rows that master
+already carried when the gate began blocking are tracked debt: each is one
+allowlist line with owner, reason and expiry, and fixing the row deletes the
+line.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -69,14 +74,17 @@ EXIT_BLOCKING: Final[int] = 2
 EXIT_USAGE_ERROR: Final[int] = 64
 EXIT_GATE_CRASH: Final[int] = 70
 
-_CONTRACT_RELPATH: Final[str] = "plugins/seed_factory_plugin/knowledge_base/shipped_smoke_contract.yaml"
+_KNOWLEDGE_BASE_RELPATH: Final[str] = "plugins/seed_factory_plugin/knowledge_base"
+_CONTRACT_RELPATH: Final[str] = f"{_KNOWLEDGE_BASE_RELPATH}/shipped_smoke_contract.yaml"
+_MANIFEST_RELPATH: Final[str] = f"{_KNOWLEDGE_BASE_RELPATH}/seed_manifest.yaml"
+_BUNDLES_RELPATH: Final[str] = f"{_KNOWLEDGE_BASE_RELPATH}/capability_bundles.yaml"
 _PLUGIN_SRC_RELPATH: Final[str] = "plugins/seed_factory_plugin/src"
 _DEFAULT_ALLOWLIST_RELPATH: Final[str] = "quality_gates/smoke_contract_lint_gate_allowlist.txt"
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Repo-level shipped-smoke checkout-only contract consistency gate."
+        description="Repo-level shipped-smoke source contract gate."
     )
     parser.add_argument("--repo-root", type=Path, default=Path.cwd(),
                         help="checkout root to measure (default: cwd)")
@@ -107,6 +115,7 @@ def run(argv: Sequence[str]) -> int:
     try:
         from seed_factory_plugin.shipped_smoke_contract import (
             ShippedSmokeContractError,
+            check_source_tree_contract,
             checkout_only_consistency_violations,
         )
     except ImportError as exc:
@@ -118,6 +127,13 @@ def run(argv: Sequence[str]) -> int:
 
     try:
         violations = checkout_only_consistency_violations(contract_path)
+        reports = check_source_tree_contract(
+            repo_root,
+            manifest_path=repo_root / _MANIFEST_RELPATH,
+            bundles_path=repo_root / _BUNDLES_RELPATH,
+            contract_path=contract_path,
+        )
+        violations.extend(profile_row_findings((r.profile, r.rows) for r in reports))
         allowlist = load_allowlist(allowlist_path)
     except (ShippedSmokeContractError, OSError) as exc:
         print(f"🛑 GATE CRASH: smoke_contract_lint_gate produced NO VERDICT — {type(exc).__name__}: {exc}")
@@ -126,18 +142,27 @@ def run(argv: Sequence[str]) -> int:
     return _verdict(violations, allowlist)
 
 
+def profile_row_findings(reports: Iterable[tuple[str, Sequence[str]]]) -> list[str]:
+    """One ``[<profile>] <row>`` finding per per-profile contract row.
+
+    The profile prefix keeps the same row distinct across profiles, so an
+    allowlist entry baselines one profile's row and not another's.
+    """
+    return [f"[{profile}] {row}" for profile, rows in reports for row in rows]
+
+
 def _verdict(violations: Sequence[str], allowlist: frozenset[str]) -> int:
     blocking = [v for v in violations if v not in allowlist]
     allowed = [v for v in violations if v in allowlist]
     for violation in allowed:
         print(f"[allowlisted] {violation}")
     if blocking:
-        print(f"\n❌ BLOCKING: checkout-only contract disagreement ({len(blocking)})")
+        print(f"\n❌ BLOCKING: shipped-smoke contract violation ({len(blocking)})")
         for violation in blocking:
             print(f"    {violation}")
         return EXIT_BLOCKING
     print(
-        "✅ smoke_contract_lint_gate: checkout-only contract self-consistent "
+        "✅ smoke_contract_lint_gate: shipped-smoke contract holds for every profile "
         f"({len(violations)} tolerated)"
     )
     return EXIT_OK

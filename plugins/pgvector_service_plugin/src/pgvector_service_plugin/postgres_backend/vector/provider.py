@@ -333,41 +333,38 @@ class PGVectorProvider:
         namespace: str,
         external_ids: list[str],
     ) -> dict[str, Any]:
-        """Delete vectors by external_id."""
-        if not external_ids:
-            return {KEY_DELETED_COUNT: 0}
+        """HARD-delete every row (active or tombstoned) holding each external_id.
 
+        The embeddings table carries a standalone ``UNIQUE(external_id)``, so a
+        soft-deleted row (``is_deleted = 1``) would keep reserving its id and
+        make the replacement ``store_vectors`` of that id fail with a unique
+        violation -- a re-embed could never land (iss_6aa96266).  Removing the
+        row outright frees the id and also clears tombstones a soft delete left
+        behind.  No reader of the vector tables looks at ``is_deleted = 1``
+        rows: every read filters to active rows, and
+        ``find_missing_external_ids`` already counts a tombstone as missing.
+        A failed delete raises -- never a partial count.
+        """
+        deleted = 0
         try:
-            table_name = qualified_table(
-                self.config.schema_name, f"{namespace}{TABLE_SUFFIX}"
-            )
-            placeholders = ", ".join(["%s"] * len(external_ids))
-            query = (
-                f"SELECT {COLUMN_ID} FROM {table_name} "
-                f"WHERE {COLUMN_EXTERNAL_ID} IN ({placeholders}) "
-                f"AND ({COLUMN_IS_DELETED} IS NULL OR {COLUMN_IS_DELETED} = {DELETED_FLAG_ACTIVE})"
-            )
-
-            sql_result = self._state_service.execute_sql(
-                sql_query=query,
-                sql_params=list(external_ids),
-            )
-
-            if sql_result.get(KEY_ACTION_STATUS) != STATUS_COMPLETED:
-                raise RuntimeError(f"Failed to lookup vectors: {sql_result.get(KEY_ERROR)}")
-
-            data = cast(dict[str, Any], sql_result.get(KEY_DATA, {}))
-            records = cast(list[list[object]], data.get(KEY_RECORDS, []))
-
-            if not records:
-                return {KEY_DELETED_COUNT: 0}
-
-            vector_ids = [str(row[0]) for row in records]
-            return self.delete_vectors(namespace=namespace, vector_ids=vector_ids)
-
+            for external_id in external_ids:
+                delete_result = self._state_service.delete_records(
+                    namespace=namespace,
+                    query={
+                        KEY_TABLE: TABLE_EMBEDDINGS,
+                        KEY_FILTERS: {COLUMN_EXTERNAL_ID: external_id},
+                        KEY_SOFT_DELETE: False,
+                    },
+                )
+                if delete_result.get(KEY_ACTION_STATUS) != STATUS_COMPLETED:
+                    raise RuntimeError(f"hard delete of {external_id!r} failed: {delete_result.get(KEY_ERROR)}")
+                data = cast(dict[str, Any], delete_result.get(KEY_DATA, {}))
+                result_data = cast(dict[str, Any], data.get(KEY_RESULT, {}))
+                deleted += cast(int, result_data.get(KEY_DELETED, 0))
         except Exception as e:
             logger.error("Failed to delete by external_ids: %s", e)
             raise RuntimeError(f"Delete by external_ids failed: {e}") from e
+        return {KEY_DELETED_COUNT: deleted}
 
     def find_missing_external_ids(
         self,

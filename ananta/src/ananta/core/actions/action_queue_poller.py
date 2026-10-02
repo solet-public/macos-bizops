@@ -14,10 +14,11 @@ import json
 import logging
 import os
 import re
+import time
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
@@ -48,9 +49,20 @@ from ananta.constants import (
 )
 from ananta.core.actions.action_path_liveness import (
     ACTION_PATH_LIVENESS,
+    DEPLOY_REAP_EXEMPTION_CEILING_SECONDS,
+    DEPLOY_STALL_THRESHOLD_SECONDS,
     SLOW_ACTION_THRESHOLD_SECONDS,
 )
-from ananta.core.actions.orphan_reaper import reap_orphaned_processing_actions
+from ananta.core.actions.instance_pin import (
+    exclusion_entries,
+    pinned_instance,
+    process_instance_id,
+    solet_version,
+)
+from ananta.core.actions.orphan_reaper import (
+    reap_abandoned_pinned_rows,
+    reap_orphaned_processing_actions,
+)
 from ananta.core.actions.payload_bounds import (
     OversizedActionPayloadError,
     check_claimed_parameters_size,
@@ -136,6 +148,18 @@ _DISPATCH_READ_CAP = 100
 # one-hour orphan threshold needs, and rare enough that the extra query is
 # invisible against dispatch traffic.
 _ORPHAN_REAP_EVERY_N_CYCLES = 300
+
+# Process keys whose handler is a whole candidate build, restart and blue-green
+# swap (apply_manifest reaches the same swap through ``_delegate_restart``).
+# The drain loop starts these as a background task instead of awaiting them, so
+# queued actions keep dispatching while a deploy runs (wgr_5de9baf3). At most one
+# is in flight; another deploy row stays queued until it finishes.
+DETACHED_DEPLOY_PROCESS_KEYS: Final[frozenset[str]] = frozenset({
+    "service_interface::lifecycle_management_service::apply_manifest",
+    "service_interface::self_deployment_service::restart_with_manifest",
+    "service_interface::local_self_deployment_service::rollback_release",
+    "service_interface::local_self_deployment_service::cutover_release",
+})
 
 # REL-03 swap-window guard. The two VERTEX result/error-PROCESSING process
 # keys — the ONLY action class that produced the mid-cutover
@@ -342,12 +366,43 @@ def _terminal_write_landed(
     return True
 
 
+@dataclass
+class _DetachedDeploy:
+    """The one deploy running off the drain loop, and what has been said about it."""
+
+    action_id: str
+    process_key: str
+    task: asyncio.Task[None]
+    #: Deploy rows already reported as held back behind this one (logged once each).
+    held_back: set[str] = field(default_factory=set)
+    #: When ``DEPLOY_STALLED`` was last logged, so it repeats once per interval.
+    stall_logged_monotonic: float | None = None
+
+
 class ActionQueuePoller:
     """
     Background service that polls for queued actions and processes them.
 
     Much simpler and more reliable than database triggers.
     """
+
+    #: The one deploy running off the drain loop; see
+    #: ``DETACHED_DEPLOY_PROCESS_KEYS``. Class-level ``None`` so a poller built
+    #: without ``__init__`` (smokes) starts with no deploy in flight.
+    _detached_deploy: _DetachedDeploy | None = None
+
+    #: Color-active gate (see ``set_is_active_color_getter``); ``None`` means
+    #: always active. Class-level default for the same reason as above.
+    _is_active_color_getter: Callable[[], bool] | None = None
+
+    #: Own-rows-only gate (see ``set_own_rows_only_getter``); ``None`` means
+    #: unrestricted. Class-level default for the same reason as above.
+    _own_rows_only_getter: Callable[[], bool] | None = None
+
+    #: This poller's claim identity for pinned rows (see ``instance_pin``);
+    #: ``None`` means the process identity. Smokes set distinct values to run
+    #: two instances' pollers in one process.
+    _claim_instance_id: str | None = None
 
     def __init__(
         self,
@@ -398,7 +453,8 @@ class ActionQueuePoller:
         # plugin's complete_deploy targeting (addendum §K). Defaults to
         # 'local' for non-cloud births; cloud task definitions set
         # SOLET_VERSION=v<N> per the per-birth + blue-green deploys.
-        self._solet_version = os.environ.get("SOLET_VERSION") or "local"
+        self._solet_version = solet_version()
+        self._claim_instance_id = process_instance_id()
         self.inference_model_name = inference_model_name  # For error routing model config
         self._max_flow_errors: int = 3  # Safety net for unrecoverable errors only
         self._max_recoverable_retries: int = 3  # Per-process consecutive retry bound
@@ -418,6 +474,11 @@ class ActionQueuePoller:
         # for legacy / no-router deployments). The orchestrator binds this
         # to `lambda: self.is_active_color` in _delegate_action_attributes.
         self._is_active_color_getter: Callable[[], bool] | None = None
+        # Own-rows-only gate (iss_faf5802c): while it returns True this poller
+        # claims only rows pinned to its own instance. Bound by the orchestrator
+        # to ``claims_own_rows_only``, which a router-backed instance holds
+        # until the router names it active.
+        self._own_rows_only_getter: Callable[[], bool] | None = None
         # Deterministic-continuation plan advancement: resolves the
         # plan-lifecycle service LAZILY (this poller is built before plugin
         # bindings exist; the orchestrator wires the resolver in
@@ -885,6 +946,22 @@ class ActionQueuePoller:
         """
         self._is_active_color_getter = getter
 
+    def set_own_rows_only_getter(self, getter: Callable[[], bool]) -> None:
+        """Wire the orchestrator's own-rows-only flag into the claim filter.
+
+        While the getter returns True this poller claims only rows pinned to
+        its own instance (``instance_pin``): a booting instance that the router
+        has not yet named active must not take the live instance's work.
+        """
+        self._own_rows_only_getter = getter
+
+    def _claims_own_rows_only(self) -> bool:
+        getter = self._own_rows_only_getter
+        return getter is not None and getter()
+
+    def _own_instance_id(self) -> str:
+        return self._claim_instance_id or process_instance_id()
+
     def set_plan_lifecycle_resolver(
         self, resolver: Callable[[], object | None],
     ) -> None:
@@ -918,10 +995,13 @@ class ActionQueuePoller:
             return
         self.running = False
 
-        if self.poller_task:
-            self.poller_task.cancel()
+        deploy = self._running_deploy()
+        for task in (self.poller_task, None if deploy is None else deploy.task):
+            if task is None:
+                continue
+            task.cancel()
             try:
-                await self.poller_task
+                await task
             except asyncio.CancelledError:
                 pass
 
@@ -950,6 +1030,7 @@ class ActionQueuePoller:
 
     async def _poll_once(self) -> None:
         """Execute one polling cycle"""
+        self._report_stalled_deploy()
         # Query for queued actions
         queued_actions = await self._get_queued_actions()
 
@@ -970,10 +1051,34 @@ class ActionQueuePoller:
         # actually begun.
         dispatched = 0
         for action in queued_actions:
+            if self._is_active_color_getter is not None and not self._is_active_color_getter():
+                # A swap gated this colour off mid-batch (the deploy's own thread
+                # does it). The rest stays queued for the new colour; claiming it
+                # here could claim this colour's own complete_swap.
+                break
+            is_deploy = action.process_key in DETACHED_DEPLOY_PROCESS_KEYS
+            running = self._running_deploy()
+            if is_deploy and running is not None:
+                # One deploy at a time: this row stays queued, unclaimed.
+                self._note_held_back(running, action.id, action.process_key)
+                continue
             if not self._mark_action_processing(action.id):
                 # A competing poller or a cancellation transitioned the row
                 # after our bounded queue read.  This poller did not acquire
                 # it, so it must never execute it.
+                continue
+            if is_deploy:
+                # Not awaited: a deploy is minutes to hours of build and swap,
+                # and everything queued behind it would wait that long.
+                ACTION_PATH_LIVENESS.begin_detached_deploy(
+                    action_id=action.id, process_key=action.process_key,
+                )
+                self._detached_deploy = _DetachedDeploy(
+                    action.id,
+                    action.process_key,
+                    asyncio.create_task(self._run_detached_deploy(action)),
+                )
+                dispatched += 1
                 continue
             # Name the in-flight action for /health before entering it, so a
             # handler that never returns is identified, not just inferred.
@@ -981,17 +1086,7 @@ class ActionQueuePoller:
                 action_id=action.id, process_key=action.process_key,
             )
             try:
-                await self._process_action(action)
-                self.total_actions_processed += 1
-                dispatched += 1
-
-            except Exception as e:
-                logger.error(f"Failed to process action {action.id}: {e}", exc_info=True)
-                # Mark action as failed, carrying the exception's typing when it
-                # has any — str(e) alone discards an AnantaError's error_code.
-                self._mark_action_failed(
-                    action.id, str(e), error_detail=_typed_error_detail(e),
-                )
+                dispatched += await self._dispatch_claimed(action)
             finally:
                 _log_if_slow(action, ACTION_PATH_LIVENESS.end_action())
 
@@ -1003,6 +1098,104 @@ class ActionQueuePoller:
             queue_depth=self._last_observed_queue_depth,
             dispatched=dispatched,
         )
+
+    async def _dispatch_claimed(self, action: QueuedAction) -> int:
+        """Run one claimed action; 1 if it dispatched, 0 if it failed (row marked failed)."""
+        try:
+            await self._process_action(action)
+        except Exception as e:
+            logger.error(f"Failed to process action {action.id}: {e}", exc_info=True)
+            # Mark action as failed, carrying the exception's typing when it
+            # has any — str(e) alone discards an AnantaError's error_code.
+            self._mark_action_failed(
+                action.id, str(e), error_detail=_typed_error_detail(e),
+            )
+            return 0
+        self.total_actions_processed += 1
+        return 1
+
+    async def _run_detached_deploy(self, action: QueuedAction) -> None:
+        """Dispatch a claimed deploy row off the drain loop, with the loop's own semantics."""
+        started = time.monotonic()
+        try:
+            await self._dispatch_claimed(action)
+        except Exception:
+            # The failure write itself raised. In the loop that reaches
+            # ``_poll_loop``'s handler; nothing awaits this task, so say it here.
+            logger.error(
+                "DEPLOY_DETACHED_UNRECORDED: action %s (%s) could not be recorded; "
+                "the row is left processing for the orphan reaper",
+                action.id,
+                action.process_key,
+                exc_info=True,
+            )
+            return
+        finally:
+            ACTION_PATH_LIVENESS.end_detached_deploy()
+        logger.info(
+            "DEPLOY_DETACHED: action %s (%s) ran %.1fs off the serial dispatch loop",
+            action.id,
+            action.process_key,
+            time.monotonic() - started,
+        )
+
+    def _running_deploy(self) -> _DetachedDeploy | None:
+        """The deploy still running off the loop, or ``None``."""
+        deploy = self._detached_deploy
+        return None if deploy is None or deploy.task.done() else deploy
+
+    def _note_held_back(self, deploy: _DetachedDeploy, action_id: str, process_key: str) -> None:
+        """Say once per row that a deploy row waits behind the in-flight deploy."""
+        if action_id in deploy.held_back:
+            return
+        deploy.held_back.add(action_id)
+        logger.warning(
+            "DEPLOY_HELD_BACK: deploy action %s (%s) stays queued behind deploy %s "
+            "(%s), in flight %.0fs; one deploy runs at a time",
+            action_id,
+            process_key,
+            deploy.action_id,
+            deploy.process_key,
+            ACTION_PATH_LIVENESS.detached_deploy_age_seconds() or 0.0,
+        )
+
+    def _report_stalled_deploy(self) -> None:
+        """Log ``DEPLOY_STALLED`` at ERROR while the detached deploy is past the stall threshold.
+
+        Once per threshold interval, not per cycle. A hung deploy no longer
+        stops the poll cycle, so this and ``/health`` are how it is seen.
+        """
+        deploy = self._running_deploy()
+        age = ACTION_PATH_LIVENESS.detached_deploy_age_seconds()
+        if deploy is None or age is None or age <= DEPLOY_STALL_THRESHOLD_SECONDS:
+            return
+        now = time.monotonic()
+        last = deploy.stall_logged_monotonic
+        if last is not None and now - last < DEPLOY_STALL_THRESHOLD_SECONDS:
+            return
+        deploy.stall_logged_monotonic = now
+        logger.error(
+            "DEPLOY_STALLED: deploy action %s (%s) has been in flight %.0fs "
+            "(stall threshold %.0fs); later deploy rows stay queued behind it, and "
+            "the orphan reaper stops exempting it at %.0fs",
+            deploy.action_id,
+            deploy.process_key,
+            age,
+            DEPLOY_STALL_THRESHOLD_SECONDS,
+            DEPLOY_REAP_EXEMPTION_CEILING_SECONDS,
+        )
+
+    def _live_detached_action_ids(self) -> frozenset[str]:
+        """Ids of rows this process is running right now, off the drain loop.
+
+        A deploy past ``DEPLOY_REAP_EXEMPTION_CEILING_SECONDS`` is not listed:
+        the reaper then fails its row loudly instead of exempting it forever.
+        """
+        deploy = self._running_deploy()
+        age = ACTION_PATH_LIVENESS.detached_deploy_age_seconds()
+        if deploy is None or age is None or age > DEPLOY_REAP_EXEMPTION_CEILING_SECONDS:
+            return frozenset()
+        return frozenset({deploy.action_id})
 
     def _maybe_reap_orphans(self) -> None:
         """Run the D8 orphan reap occasionally, never on every cycle.
@@ -1020,7 +1213,12 @@ class ActionQueuePoller:
         if self.total_poll_cycles % _ORPHAN_REAP_EVERY_N_CYCLES != 0:
             return
         try:
-            reap_orphaned_processing_actions(self.state_service)
+            reap_orphaned_processing_actions(
+                self.state_service, live_action_ids=self._live_detached_action_ids(),
+            )
+            reap_abandoned_pinned_rows(
+                self.state_service, own_instance_id=self._own_instance_id(),
+            )
         except Exception as exc:  # noqa: BLE001 — maintenance must not stop dispatch
             logger.error("Orphan reap pass failed: %s", exc, exc_info=True)
 
@@ -1104,21 +1302,30 @@ class ActionQueuePoller:
         single-namespace ``query_ordered`` read (``status='queued'`` ordered by
         ``sequence`` then ``id``, capped at ``_DISPATCH_READ_CAP``), a Python
         ``excluded_versions`` filter, a take of ``max_actions_per_poll``, and one
-        batch namespace-enrichment read. Exact in practice: only the single
-        self-deployment ``complete_deploy`` row ever carries ``excluded_versions``
-        and it is enqueued at the BACK by ``sequence``, so the oldest-N window is
-        never materially thinned (Architect ground-truth); ``_warn_if_dispatch_starved``
-        is the fail-loud tripwire if that ever stops holding. ``include_deleted=True``
+        batch namespace-enrichment read. Exact in practice: the rows that carry
+        ``excluded_versions`` are the self-deployment ``complete_deploy`` row and
+        each instance's pinned starting actions (``instance_pin``). Another
+        instance's pinned rows are claimed by it within seconds, or failed by
+        ``reap_abandoned_pinned_rows`` once abandoned, so the oldest-N window is
+        never materially thinned; ``_warn_if_dispatch_starved`` is the fail-loud
+        tripwire if that ever stops holding. An instance restricted to its own
+        rows reads only rows that carry ``excluded_versions``. ``include_deleted=True``
         matches the legacy query, which carried no ``is_deleted`` predicate. The
         ``id`` tie-break is new (the raw query ordered by ``sequence`` alone) and
         makes equal-``sequence`` ordering deterministic.
         """
+        filters: dict[str, object] = {"status": ActionStatus.QUEUED.value}
+        if self._claims_own_rows_only():
+            # Pinned rows only, in SQL: the instance's own rows are the newest
+            # in the queue, and a live backlog must not push them out of the
+            # bounded read window.
+            filters["excluded_versions"] = {"op": "is_not_null"}
         try:
             result = self.state_service.query_ordered(
                 "core",
                 {
                     "table": "action_events",
-                    "filters": {"status": ActionStatus.QUEUED.value},
+                    "filters": filters,
                     "order_by": [["sequence", "asc"], ["id", "asc"]],
                     "limit": _DISPATCH_READ_CAP,
                     "include_deleted": True,
@@ -1132,7 +1339,7 @@ class ActionQueuePoller:
             claimable = [
                 row
                 for row in rows
-                if not self._version_excluded(row.get("excluded_versions"))
+                if self._claimable(row) and not self._held_back_behind_deploy(row)
             ]
             taken = claimable[: self.max_actions_per_poll]
             self._warn_if_dispatch_starved(len(rows), len(taken))
@@ -1170,38 +1377,60 @@ class ActionQueuePoller:
             logger.error(f"Error querying queued actions: {e}", exc_info=True)
             return []
 
+    def _held_back_behind_deploy(self, row: dict[str, object]) -> bool:
+        """True for a deploy row while a deploy runs, so it takes no dispatch slot.
+
+        Left in the batch it would be skipped each cycle while still counting
+        toward ``max_actions_per_poll``: enough retried deploy rows would
+        starve everything behind them, the original defect again.
+        """
+        running = self._running_deploy()
+        process_key = row.get("process_key")
+        if running is None or process_key not in DETACHED_DEPLOY_PROCESS_KEYS:
+            return False
+        self._note_held_back(running, str(row.get("id")), str(process_key))
+        return True
+
+    def _claimable(self, row: dict[str, object]) -> bool:
+        """Whether this poller may claim a queued row (iss_faf5802c).
+
+        A row pinned to an instance is claimable by that instance alone; its
+        version entry only shields pollers that predate pins, so it is not
+        consulted here. An instance restricted to its own rows claims nothing
+        else. Every other row follows the version exclusion as before.
+        """
+        raw = row.get("excluded_versions")
+        pin = pinned_instance(exclusion_entries(raw))
+        if pin is not None:
+            return pin == self._own_instance_id()
+        if self._claims_own_rows_only():
+            return False
+        return not self._version_excluded(raw)
+
     def _version_excluded(self, raw: object) -> bool:
         """True if THIS poller's ``SOLET_VERSION`` is in the action's
         ``excluded_versions`` list — the self-deployment ``complete_deploy``
-        targeting filter (only that one producer ever sets it). The JSONB column
-        reads back as a Python list (or, defensively, a JSON string); ``NULL`` /
-        empty / malformed means not excluded, i.e. claim the row.
+        targeting filter. The JSONB column reads back as a Python list (or,
+        defensively, a JSON string); ``NULL`` / empty / malformed means not
+        excluded, i.e. claim the row.
         """
-        if raw is None:
-            return False
-        versions: object = raw
-        if isinstance(versions, str):
-            try:
-                versions = json.loads(versions)
-            except json.JSONDecodeError:
-                return False
-        if not isinstance(versions, list):
-            return False
-        return self._solet_version in versions
+        return self._solet_version in exclusion_entries(raw)
 
     def _warn_if_dispatch_starved(self, rows_read: int, dispatched: int) -> None:
         """Fail-loud tripwire (Q2 ground-truth guard). The over-read hit the cap
         — so MORE queued rows exist beyond the window — yet ``excluded_versions``
         filtering left fewer than a full batch. Under the load-bearing invariant
-        (only ~1 ``complete_deploy`` row is ever excluded) this is impossible; if
-        it fires, ``excluded_versions`` has gone high-cardinality and the queued
-        backlog may stall behind the filter.
+        (only the ``complete_deploy`` row and other instances' pinned starting
+        actions are excluded, and those are claimed or reaped) this should not
+        happen; if it fires, ``excluded_versions`` has gone high-cardinality and
+        the queued backlog may stall behind the filter.
         """
         if rows_read == _DISPATCH_READ_CAP and dispatched < self.max_actions_per_poll:
             logger.warning(
                 "DISPATCH-TRIPWIRE: read hit the %d-row cap but only %d of %d "
                 "slots filled after excluded_versions filtering — excluded_versions "
-                "may have gone high-cardinality (expected ~1 complete_deploy row); "
+                "may have gone high-cardinality (expected complete_deploy and "
+                "other instances' pinned starting actions only); "
                 "queued backlog may stall.",
                 _DISPATCH_READ_CAP,
                 dispatched,

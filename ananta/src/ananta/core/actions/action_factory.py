@@ -18,6 +18,7 @@ from ananta.constants import (
 )
 from ananta.core.actions.action_submission_types import QueuedAction
 from ananta.core.actions.inference_processor_templates import merge_processor_template
+from ananta.core.actions.instance_pin import CLAIM_PIN_KEY
 from ananta.core.contexts.normalization import normalize_flow_id, normalize_session_id
 from ananta.core.domain.error_codes import ErrorCode
 from ananta.core.plugins.plugin_contracts import ActionStatus
@@ -252,7 +253,8 @@ class ActionFactory:
     # Metadata keys copied from action_def to runtime action.
     # Includes session/flow/context routing, processor config, and the
     # ``parent_id`` link the recorder stores as ``core__action_events_id``
-    # (parent provenance for child actions submitted by dispatchers).
+    # (parent provenance for child actions submitted by dispatchers), and the
+    # instance pin the recorder writes into ``excluded_versions``.
     _METADATA_KEYS = (
         "session_id", "flow_id", "context_id",
         "result_processor", "result_processor_target",
@@ -261,6 +263,7 @@ class ActionFactory:
         "error_processor_kind",
         "job_result_ref",
         "parent_id",
+        CLAIM_PIN_KEY,
     )
 
     def _preserve_action_metadata(

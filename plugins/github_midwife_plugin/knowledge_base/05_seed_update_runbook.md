@@ -154,7 +154,7 @@ the `solet-manager` command. `solet inspect` is a different, active probe.
 **A pre-Manager plain clone (a `git clone` of the seed, not `solet create`), r64.**
 The Manager proves a plain clone only at a seed commit it lists: the
 channel's own release, or a stable seed in its reviewed anchor table (every
-`supported_predecessors` row, r43 `8207c151` through r65 `a6cfa885`).
+`supported_predecessors` row, r43 `8207c151` through r69 `3bfd5670`).
 `git -C <clone> rev-parse HEAD` tells you which case you have:
 
 1. HEAD is a listed seed commit: run the six commands below unchanged.
@@ -617,6 +617,42 @@ What the transition guarantees:
   service, it is kept and the transition reports a leftover conflict naming
   that service (`plugin_transition_conflict`, with the repair to rebind it or
   remove it by hand); it is never removed silently or ignored.
+- **An inherited Core AI `gpu` preference becomes `cpu` (iss_34f1e3c7).**
+  Core AI's GPU path leaks one IOSurface per embedding and kills the solet's
+  process after about 16,300 embeddings (iss_f3e65e52). r65 made `cpu` the
+  default only for configs it newly writes, so a solet that took `gpu` from r64
+  kept it. The transition is classified exactly as it is without `gpu`, and
+  `gpu` changes only what a finished transition does. A solet whose embeddings
+  are served by `coreai_embeddings_plugin` and whose Core AI config reads
+  `compute_preference: gpu` reads `rewrite` where it would read `done`: the
+  update's dry-run lists one planned `file_write` on that config, shown by its id
+  `plugin_transition.<migration_id>.compute_preference` (for example
+  `plugin_transition.embedding_service.openai_to_coreai.v1.compute_preference`),
+  and that id and its target are part of the approval fingerprint. The Manager's
+  runtime preview shows plugin-transition planned actions by id only
+  (iss_d39a7bcc), so the plain-words sentence (Core AI changes from GPU to CPU,
+  and why: it can crash the solet after about 16,000 embeddings) appears only in
+  the `solet-manager doctor` `plugin_transitions` row. The update backs the file
+  up like any planned write, replaces that one value with `cpu` in place (the
+  file's formatting, every other key and its file mode stay), and the
+  transition reads `done`. If the key cannot be matched exactly once (an escaped
+  spelling or a repeated key), the file is re-rendered in the release's form
+  instead, with every other key and the file mode kept. A solet that also has an
+  unused old plugin still listed reads `cleanup`, and the dry-run plans and the
+  update applies both writes, the config and then the roster removal, so the
+  post-apply probe verifies. A conflict stays a conflict: the dry-run shows the
+  refusal (`...refuse`), nothing is written and the update defers as it does
+  without `gpu`, with the same deferral repair text. Only the doctor row's
+  conflict sentence also names the crash risk and says the config becomes `cpu`
+  once the conflict is resolved. The same rewrite
+  happens when a switch still ahead finds an existing `gpu` config. The config
+  cannot tell r64's default from an owner's own choice, so every `gpu` counts as
+  inherited and an owner who wants `gpu` sets it again after the update. The
+  doctor's `plugin_transitions` row carries the sentence naming the crash risk,
+  as an advisory. An update at the release a verified solet already runs is
+  `already_current`, so such a solet takes the rewrite with the next release's
+  update; until then, setting `compute_preference` to `cpu` in the Core AI plugin
+  config and restarting is the repair.
 - **Everything else is preserved.** Extra plugins keep their roster place,
   the old plugin's config file stays on disk (inert), and `profile/data` is
   untouched. LM Studio and its models are left exactly as they were: no

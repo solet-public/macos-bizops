@@ -285,17 +285,18 @@ from .model_dispatch_policy import DispatchPolicyError
 from .operator_session_liveness_reconciliation import (
     reconcile_operator_session_liveness as lifecycle_reconcile_operator_session_liveness,
 )
+from .peer_direct_reads import (
+    PEER_INBOX_DEFAULT_LIMIT,
+    PeerInboxReadRefusedError,
+    read_holds_role,
+    read_peer_inbox_for_session,
+)
 from .peer_dispatch import (
     EVENT_POST_MESSAGE,
     NativeWakeError,
     build_wake_reply_hint,
     dispatch_peer_send,
     dispatch_role_send,
-)
-from .peer_inbox_view import (
-    InvalidInboxCursorError,
-    parse_since_cursor,
-    serialize_peer_inbox_page,
 )
 from .peer_list_view import serialize_peer_list
 from .peer_registry import (
@@ -420,7 +421,7 @@ if TYPE_CHECKING:  # pragma: no cover — type-only references
     from ananta.types.schema_types import SchemaDefinition
     from fastapi import FastAPI
 
-    from .models import BridgeBinding, BridgeSessionState
+    from .models import BridgeSessionState
 
 logger = logging.getLogger(__name__)
 SYSTEM_SCHEDULER_ID: Final[str] = "system:scheduler"
@@ -436,16 +437,6 @@ their own thread per recipient instead of interleaving them with scheduler
 traffic.
 """
 SYSTEM_JOB_COMPLETION_LABEL: Final[str] = "System (Job Completion)"
-# peer_inbox page size. Deliberately far below the route's 50: a freshly
-# /clear'd Coordinator-Dawn measured a 422,513-character page at 50 instance +
-# 50 role entries on 2026-08-01 — roughly 4KB per entry, because an entry
-# carries the whole message. ``limit`` bounds the COUNT, so bytes are the
-# caller's arithmetic, not the platform's promise: 5 is a page a session can
-# read and still act on, and the two cursors exist to fetch the rest.
-PEER_INBOX_DEFAULT_LIMIT: Final[int] = 5
-PEER_INBOX_MIN_LIMIT: Final[int] = 1
-# Parity with the /peer/inbox route's own clamp — one ceiling, both surfaces.
-PEER_INBOX_MAX_LIMIT: Final[int] = 100
 
 
 def _git_controller_launcher_report(role_name: str) -> dict[str, object]:
@@ -7825,6 +7816,10 @@ class AgentMessagingPlugin(
         caller-supplied session id, then compares it to the live holder's. It NEVER
         writes: the anti-pattern is a self-re-claim (a WRITE that would STEAL the role
         back from a legitimate new holder) — this is a pure read.
+
+        The body is :func:`peer_direct_reads.read_holds_role`, shared with the direct
+        ``GET .../peer/holds_role`` bridge route that answers while the action queue
+        is held (iss_d97f6633); this verb returns exactly the four fields it always has.
         """
         raw = params.get("parameters", params)
         name = str(raw.get("name", "")).strip()
@@ -7840,19 +7835,14 @@ class AgentMessagingPlugin(
                 code="state_service_unavailable",
                 message="state_service is not bound on this solet.",
             )
-        agent_session_id = self._claimant_session_id(agent_instance_id)
-        holds = holds_role(state_service, name, agent_session_id)
-        return _success_result(
-            data={
-                "holds": holds,
-                "name": name,
-                "agent_session_id": agent_session_id,
-                "delivery_route_attached": self._role_delivery_route_attached(
-                    state_service,
-                    name,
-                ),
-            },
+        read = read_holds_role(
+            state_service,
+            self._peer_registry,
+            self._bridge_manager,
+            name=name,
+            agent_instance_id=agent_instance_id,
         )
+        return _success_result(data=read.verb_data())
 
     @platform_process(
         name="peer_mark_role_covered",
@@ -7986,58 +7976,6 @@ class AgentMessagingPlugin(
             },
         )
 
-    def _role_delivery_route_attached(
-        self,
-        state_service: Any,
-        name: str,
-    ) -> bool:
-        """Does the role's CURRENT holder have a live bridge bound right now?
-
-        A role binding outlives the session that claimed it, so
-        ``holds=True`` can be reported for a role whose holder has no receiver
-        left — the claim is durable, the route is not. This measures the route:
-        the holder's stable session id resolves to a ``peer_binding`` row, and
-        that row's bridge is open (an MCP bridge session or an armed ``watch``
-        long-poll — both are the same kind of attachment here).
-
-        Named for what it measures. NOT ``receiving``: on MCP transport a route
-        can be attached while no waker ever fires, so a truthful name is the
-        narrow one. False is also the honest answer for a vacant role and for a
-        holder whose binding is gone.
-
-        **Total by construction.** Every fault this lookup can raise —
-        a duplicate binding for one session id, a malformed role row — is
-        answered ``False`` rather than propagated. ``peer_holds_role`` is
-        Git-Controller's Step-9.5 pre-commit ownership re-check: ``holds`` is
-        the safety answer and must survive anything the route lookup does. An
-        additive truth-in-reporting field that can convert that boolean into an
-        exception would be a regression wearing an addition's clothes.
-
-        Caveat, stated rather than engineered away: this reads the role binding
-        a second time (``holds_role`` read it first), so a displacement landing
-        between the two reads would report ``holds`` for one holder and the
-        route of another. Fixing that would mean re-implementing ``holds_role``
-        inline, and changing the Step-9.5 safety computation to improve an
-        advisory field is the wrong trade. The window is one state read wide.
-        """
-        if self._peer_registry is None or self._bridge_manager is None:
-            return False
-        try:
-            resolved = resolve_role_binding(state_service, name)
-            binding = self._peer_registry.resolve_by_agent_session_id(
-                resolved.agent_session_id,
-            )
-        except (
-            RoleBindingVacantError,
-            RoleBindingMalformedError,
-            PeerSessionAmbiguousError,
-        ):
-            return False
-        if binding is None:
-            return False
-        bridge = self._bridge_manager.get(binding.bridge_id)
-        return bridge is not None and not bridge.closed
-
     @platform_process(
         name="peer_inbox",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
@@ -8091,6 +8029,17 @@ class AgentMessagingPlugin(
             ),
             "observer": ParameterMetadata(
                 description="Read operational pending state without issuing a display-receipt page.",
+                required=False,
+                type=ParameterType.BOOLEAN,
+                default=False,
+            ),
+            "include_covered": ParameterMetadata(
+                description=(
+                    "Read the role section with no covered-mark floor, so rows a "
+                    "reader attested covered (including the mark's own row) are "
+                    "returned. For a fail-closed consumer that must see every "
+                    "row; requires observer=true. Repeat it on every page."
+                ),
                 required=False,
                 type=ParameterType.BOOLEAN,
                 default=False,
@@ -8214,57 +8163,15 @@ class AgentMessagingPlugin(
                 ),
             )
         raw = params.get("parameters", params)
-        agent_session_id = str(raw.get("agent_session_id", "")).strip()
-        if not agent_session_id:
-            return _failure_result(
-                code="missing_argument",
-                message=(
-                    "peer_inbox requires the caller's own non-empty "
-                    "'agent_session_id' (the launcher exports it as "
-                    "$AGENT_SESSION_ID)."
-                ),
-            )
         try:
-            binding = self._peer_registry.resolve_by_agent_session_id(
-                agent_session_id,
+            data = read_peer_inbox_for_session(
+                raw,
+                peer_registry=self._peer_registry,
+                service=self._require_service(),
             )
-        except PeerSessionAmbiguousError as exc:
-            return _failure_result(
-                code="peer_session_ambiguous",
-                message=str(exc),
-            )
-        if binding is None:
-            return _failure_result(
-                code="identity_not_registered",
-                message=(
-                    f"no live peer_binding for agent_session_id "
-                    f"{agent_session_id!r}. This usually means this session's "
-                    f"watcher or bridge is no longer registered — re-arm it "
-                    f"('<solet> watch --role <role>', or peer_register "
-                    f"over MCP) and retry. Read this as 'the reader is "
-                    f"unknown', never as 'the reader has no mail': the "
-                    f"messages are durable and still waiting. A wrong "
-                    f"agent_session_id produces this same error, so check the "
-                    f"value came from $AGENT_SESSION_ID and not a stale note."
-                ),
-            )
-        try:
-            request = _build_peer_inbox_request(raw, binding)
-        except InvalidInboxCursorError as exc:
-            return _failure_result(code=exc.code, message=str(exc))
-        try:
-            page = self._require_service().peer_inbox(request)
-        except AgentMessagingError as exc:
-            return _failure_result(
-                code="peer_inbox_rejected",
-                message=str(exc),
-            )
-        # The caller proved liveness by reading; keep "last active" in step with
-        # the delivery path, exactly as the /peer/inbox route does.
-        self._peer_registry.touch_binding(binding.agent_instance_id)
-        return _success_result(
-            data=serialize_peer_inbox_page(page, binding.agent_instance_id),
-        )
+        except PeerInboxReadRefusedError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=data)
 
     @platform_process(
         name="peer_ack_role_read_page",
@@ -11835,65 +11742,6 @@ def _coerce_role_receipt_candidates(raw_candidates: object) -> list[tuple[str, s
             raise ValueError("candidates require recipient_key and role_row_id.")
         candidates.append((key, row_id))
     return candidates
-
-
-def _build_peer_inbox_request(
-    raw: dict[str, Any],
-    binding: BridgeBinding,
-) -> PeerInboxRequest:
-    """Coerce caller args + the resolved binding into one ``PeerInboxRequest``.
-
-    The recipient triple comes from ``binding`` and never from ``raw`` — a
-    caller names only its own session, and the identity it reads with is the one
-    the registry holds for that session. The two cursors are read independently
-    and neither ever feeds the other. Raises ``InvalidInboxCursorError`` for a
-    malformed ``after`` or ``since``: a broken cursor means the caller's paging
-    is wrong, and silently restarting from page one would turn that into an
-    unbounded re-read.
-    """
-    after_raw = raw.get("after")
-    try:
-        after_created_at = (
-            datetime.fromisoformat(str(after_raw)) if after_raw not in (None, "") else None
-        )
-    except ValueError as exc:
-        message = (
-            f"'after' must be an ISO-8601 datetime (the previous newest-first page's "
-            f"next_after_created_at): {exc}"
-        )
-        raise InvalidInboxCursorError("after", message) from exc
-    role_after_raw = raw.get("role_after")
-    return PeerInboxRequest(
-        recipient_agent_id=binding.agent_id,
-        recipient_agent_instance_id=binding.agent_instance_id,
-        recipient_agent_session_id=binding.agent_session_id,
-        after_created_at=after_created_at,
-        since_created_at=parse_since_cursor(raw.get("since")),
-        limit=_clamp_peer_inbox_limit(raw.get("limit")),
-        # A4 (2026-08-04): the silent/important split at send time is
-        # retired, so the catch-up view is the only meaningful one — never
-        # read from the caller. This closes the hatch the same way Amendment
-        # 3 closes send_peer_message's: the schema entry AND the
-        # read-and-branch code both go, not just one.
-        include_important=True,
-        role_after=(str(role_after_raw) if role_after_raw not in (None, "") else None),
-        observer=bool(raw.get("observer", False)),
-    )
-
-
-def _clamp_peer_inbox_limit(raw: object) -> int:
-    """Coerce a caller's ``limit`` to the supported page size.
-
-    Absent or non-numeric → the modest default (the flood guard is what makes
-    an unqualified ``peer_inbox`` call safe to advertise). Out-of-range values
-    clamp rather than error: the caller asked for "as much as you'll give me",
-    and a page size is not a correctness argument — unlike ``after`` /
-    ``role_after``, where a malformed value means the caller's paging is broken
-    and must fail loud.
-    """
-    if isinstance(raw, bool) or not isinstance(raw, int):
-        return PEER_INBOX_DEFAULT_LIMIT
-    return max(PEER_INBOX_MIN_LIMIT, min(raw, PEER_INBOX_MAX_LIMIT))
 
 
 def _opt_int(raw: object) -> int | None:

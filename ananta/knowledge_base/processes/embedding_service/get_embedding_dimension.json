@@ -1,18 +1,18 @@
 {
   "process_key": "service_interface::embedding_service::get_embedding_dimension",
   "display_name": "Get Embedding Dimension",
-  "description": "Get the vector dimension for an embedding model.",
-  "embedding_description": "",
+  "description": "Read the model id and vector dimension of the provider bound to embedding_service, without embedding any text. Cheap and read-only; both values come from the provider itself. Pass model to ask whether a specific model is the bound one; a model the provider does not serve is refused with an unsupported_model error.",
+  "embedding_description": "Which embedding model does the solet use? Answers with the model id and vector size, the number of dimensions, of the bound service; the caller supplies no text and receives no vectors. Read-only compatibility check against a stored vector index or schema column width.",
   "result_processor_customizations": {
     "action_label": "Embedding dimension retrieved",
     "result_type": "dimension_retrieved",
-    "result_description": "Model dimension info with keys: dimension (integer vector size), model (model name queried)",
-    "presentation_guidance": "",
+    "result_description": "data.result holds dimension (the provider's vector length) and model (the provider's model id); action_status, data, actions, error and timestamp are always present",
+    "presentation_guidance": "State the model id and dimension together.",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },
   "error_processor_customizations": {
     "action_context": "Retrieves the vector dimension (number of floats) for an embedding model. Dimension is needed for vector database schema configuration.",
-    "error_interpretation": "ModelNotFoundError: specified model does not exist. ServiceError: embedding service unavailable.",
-    "recovery_guidance": "For model errors: use list_models to discover available models. For service errors: check embedding service status and retry."
+    "error_interpretation": "error.code is the provider's own code. unsupported_model: model is not the bound provider's model. unavailable: the provider is not ready.",
+    "recovery_guidance": "Omit model to read the bound provider's own. For unavailable, read the provider's readiness error."
   }
 }

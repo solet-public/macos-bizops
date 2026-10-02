@@ -1,8 +1,8 @@
 {
   "process_key": "plugin::openai_embeddings_plugin::generate_embeddings_action",
   "display_name": "Generate Embeddings",
-  "description": "Generate vector embeddings from text for semantic search and similarity matching.",
-  "embedding_description": "Generate vector embeddings from text inputs using an OpenAI-compatible API. Provide a list of strings plus optional model and input_type. Returns embeddings array and dimension for semantic search, similarity, clustering, or retrieval indexing.",
+  "description": "Embed text by posting the whole list to an OpenAI-compatible server such as LM Studio; callers should use the solet's bound service, service_interface::embedding_service::generate_embeddings.",
+  "embedding_description": "Post the whole list of strings in one request to an LM Studio-style server, with an optional model name; text input only. Returns the vectors in input order (sorted by the server's index), their length and the model name the server reports. A provider-specific path, not the general route; callers should use the solet's bound service.",
   "result_processor_customizations": {
     "action_label": "Embeddings generated",
     "result_type": "embeddings_generated",

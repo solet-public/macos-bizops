@@ -237,8 +237,9 @@ def _role_addressed_inbox_page(
 
 
 def _process_result_handler(data: dict[str, Any]) -> Handler:
-    """A one-shot bridge (`open`/`close`) plus a `process/call`+`process/result`
-    pair that always answers `data` — the routes `solet inbox` actually uses.
+    """A one-shot bridge (`open`/`close`) plus the direct `peer/inbox_for_session`
+    route that always answers the bare page `data` — the route `solet inbox`
+    actually uses (not the serial action queue, iss_d97f6633).
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -249,21 +250,8 @@ def _process_result_handler(data: dict[str, Any]) -> Handler:
             )
         if path.endswith("/close"):
             return httpx.Response(200, json={"status": "closed"})
-        if path.endswith("/process/call"):
-            return httpx.Response(
-                200, json={"status": "queued", "action_id": "ae-inbox-smoke"},
-            )
-        if "/process/result/" in path:
-            return httpx.Response(
-                200,
-                json={
-                    "action_id": "ae-inbox-smoke",
-                    "status": "completed",
-                    "result": {
-                        "action_status": "completed", "data": data, "error": None,
-                    },
-                },
-            )
+        if path.endswith("/peer/inbox_for_session"):
+            return httpx.Response(200, json=data)
         return httpx.Response(404, json={"detail": f"unmapped {path}"})
 
     return handler
@@ -347,7 +335,7 @@ def test_inbox_reports_incomplete_loudly_on_a_role_section_fault() -> None:
 def _ack_pages_handler(
     *, fail_first_ack: bool = False, timeline: list[str] | None = None,
 ) -> tuple[Handler, list[str]]:
-    """Real process-call transport with two issued role page tokens."""
+    """Direct inbox-page route plus the process-call ack, with two issued role page tokens."""
     calls: list[str] = []
     pages = [
         _role_addressed_inbox_page(role_entries=[_entry("role-1", "2026-09-12T00:00:01")]),
@@ -365,23 +353,20 @@ def _ack_pages_handler(
             return httpx.Response(200, json={"bridge_id": "agc-ack", "session_id": "s"})
         if path.endswith("/close"):
             return httpx.Response(200, json={"status": "closed"})
+        if path.endswith("/peer/inbox_for_session"):
+            page = pages[1] if request.url.params.get("role_after") == "r-1" else pages[0]
+            return httpx.Response(200, json=page)
         if path.endswith("/process/call"):
-            body = json.loads(request.content)
-            key = body["process_key"]
-            arguments = body["arguments"]
+            arguments = json.loads(request.content)["arguments"]
             action = f"ae-{len(pending)}"
-            if key == cli_mod.PEER_INBOX_PROCESS_KEY:
-                page = pages[1] if arguments.get("role_after") == "r-1" else pages[0]
-                pending[action] = {"action_status": "completed", "data": page}
-            else:
-                calls.append(str(arguments["page_token"]))
-                if timeline is not None:
-                    timeline.append(f"ack:{arguments['page_token']}")
-                pending[action] = (
-                    {"action_status": "failed", "error": "ack down"}
-                    if fail_first_ack and len(calls) == 1
-                    else {"action_status": "completed", "data": {"status": "acked"}}
-                )
+            calls.append(str(arguments["page_token"]))
+            if timeline is not None:
+                timeline.append(f"ack:{arguments['page_token']}")
+            pending[action] = (
+                {"action_status": "failed", "error": "ack down"}
+                if fail_first_ack and len(calls) == 1
+                else {"action_status": "completed", "data": {"status": "acked"}}
+            )
             return httpx.Response(200, json={"status": "queued", "action_id": action})
         if "/process/result/" in path:
             action = path.rsplit("/", 1)[-1]

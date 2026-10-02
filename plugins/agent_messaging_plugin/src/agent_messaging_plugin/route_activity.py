@@ -54,6 +54,8 @@ MODEL_INITIATED_ROUTES: frozenset[str] = frozenset(
         f"{_P}/{{bridge_id}}/peer/send",
         f"{_P}/{{bridge_id}}/peer/send_by_name",
         f"{_P}/{{bridge_id}}/peer/inbox",
+        f"{_P}/{{bridge_id}}/peer/inbox_for_session",
+        f"{_P}/{{bridge_id}}/peer/holds_role",
         f"{_P}/{{bridge_id}}/current_identity",
         f"{_P}/{{bridge_id}}/agent/thread/open",
         f"{_P}/{{bridge_id}}/agent/{{thread_id}}/send",

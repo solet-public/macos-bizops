@@ -71,6 +71,8 @@ GET    /api/v1/bridge/{bridge_id}/peer/list
 POST   /api/v1/bridge/{bridge_id}/peer/send
 POST   /api/v1/bridge/{bridge_id}/peer/send_by_name
 GET    /api/v1/bridge/{bridge_id}/peer/inbox
+GET    /api/v1/bridge/{bridge_id}/peer/holds_role         (direct read, no action queue)
+GET    /api/v1/bridge/{bridge_id}/peer/inbox_for_session  (direct read, no action queue)
 
 # Health
 GET    /api/v1/bridge/health
@@ -240,6 +242,74 @@ notifications/solet/peer_message
 This method is intentionally narrow. Bridge-delivery result/error events
 and non-peer Codex events still use `notifications/claude/channel`.
 
+## Direct act-time reads (no action queue)
+
+`peer_holds_role` and `peer_inbox` are platform processes, so a caller with no
+registered bridge reaches them through `process/call`, which runs on the
+serial action queue. A deploy (`apply_manifest` holds that queue for the whole
+action) or a slow `peer_send_by_name` therefore froze the Git-Controller
+landing guard even though both reads are cheap state reads (iss_d97f6633). The bridge's HTTP surface stays responsive while the
+queue is held, so the same two reads are served directly:
+
+```
+GET /api/v1/bridge/{bridge_id}/peer/holds_role?name=N&agent_instance_id=I
+  resp: { "holds": true, "name": "N", "agent_session_id": "ases-...",
+          "delivery_route_attached": true,
+          "instance_registered": true, "session_label": "..." }
+  # The first four fields are exactly what the peer_holds_role process returns.
+  # instance_registered and session_label come from the instance's own
+  # peer_binding row (the same row that supplied agent_session_id).
+
+GET /api/v1/bridge/{bridge_id}/peer/inbox_for_session
+      ?agent_session_id=S&observer=true&limit=100&after=T&role_after=C&include_covered=true
+  resp: the page the peer_inbox process returns for S (entries, role_entries,
+        both cursors, role_section_status, ...)
+  # include_covered (observer-only, default false) reads the role section with
+  # no covered-mark floor; it is the only request field besides the cursors
+  # that crosses to the server. The route does not take the instance
+  # section's forward `since` cursor. A page that comes back with
+  # role_floor_applied=true for an include_covered request means the server or
+  # the route dropped the field, and `solet-bridge inbox --include-covered`
+  # treats that as a loud fault.
+```
+
+Each route and its process call ONE shared function
+(`peer_direct_reads.read_holds_role` and `read_peer_inbox_for_session`), so the
+answer cannot drift between the two doors; every refusal of the process is the
+same refusal on the route (`missing_argument`, `identity_not_registered`,
+`peer_session_ambiguous` as 409, `invalid_after`, `peer_inbox_rejected`), and a
+refusal is never an empty page. A malformed `role_after` is not a refusal of the
+read: the page carries `role_section_status: "error"` at both doors. Nothing is
+cached and no table is added. The caller needs no `peer/register`: the instance
+or session is a query argument, so an unregistered one-shot `solet-bridge`
+bridge reads without registering under, and sweeping, its own registry row.
+`solet-bridge holds-role --name N --instance-id I` and `solet-bridge inbox` use
+these routes.
+
+**Route policy.** The two routes are held to the policy of the process each one
+stands in for:
+
+- The bridge is resolved exactly as `process/call` resolves it
+  (`bridge_manager.get`); an unknown or closed bridge is refused 404
+  `bridge_not_found`.
+- The per-session allowlist (M5 §14.5) is `bridge_sessions.bridge_allows_process`,
+  the one function `process/call` also uses, applied to the route's own process
+  key (`plugin::agent_messaging_plugin::peer_holds_role`, respectively
+  `plugin::agent_messaging_plugin::peer_inbox`). A stdio bridge
+  (`client_id == ""`, which is every `solet-bridge` one-shot) has no allowlist,
+  as on `process/call`. An OAuth-bound bridge must carry the process key, or be
+  operator-equivalent (unrestricted), or it is refused 403
+  `bridge.process_not_allowed`; an empty allowlist refuses everything.
+- Both routes are `MODEL_INITIATED` in `route_activity`, as `process/call` is, so
+  model-activity stamping is unchanged; moving them to INFRA is a separate choice.
+- The process export policy is not consulted: these are bridge routes like
+  `peer/inbox` and `peer/list`, not process exports.
+
+What stays refused: a real outage or restart, or a hold that freezes the HTTP
+surface itself (a GIL-holding handler), still refuses a landing. That is correct
+and unchanged. Only the refusal caused by a healthy HTTP surface with a held
+action queue goes away.
+
 ## post_message (solet → agent)
 
 This is the IO interface surface. Direct HTTP submission of
@@ -291,7 +361,8 @@ caller-supplied.
 |---|---|---|
 | 400 | `agent_request_invalid` | malformed `peer_send`/`peer_inbox` body, oversize content, etc. |
 | 400 | `peer_ambiguous` | `peer_send` to a kind with multiple registered instances and no `peer_agent_instance_id` hint |
-| 404 | `bridge_not_found` | URL `bridge_id` is unknown |
+| 403 | `bridge.process_not_allowed` | an OAuth-bound bridge's per-session allowlist lacks the process key behind `peer/holds_role` or `peer/inbox_for_session` |
+| 404 | `bridge_not_found` | URL `bridge_id` is unknown or closed |
 | 404 | `peer_unreachable` | targeted `peer_agent_instance_id` is not registered |
 | 503 | `agent_messaging_disabled` | plugin config `enabled: false` |
 

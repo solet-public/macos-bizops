@@ -14,15 +14,22 @@
 # exit-2 verdict. Removing an entry is the unit of remediation progress.
 # This register is NOT a skip path.
 #
-# NOT MEANINGFULLY ALLOWLISTABLE BY DESIGN: a three-surface disagreement IS
-# the defect this gate exists to catch before assembly, not a style
+# V1 three-surface disagreements are NOT MEANINGFULLY ALLOWLISTABLE BY DESIGN:
+# one IS the defect this gate exists to catch before assembly, not a style
 # preference with a legitimate exception (mirrors the schema-init gate's
 # standing ruling, 2026-09-20, under rul_367d8bd6, that a live boot-crash is
-# never allowlisted). This file is expected to stay empty; it exists only
-# for uniformity with the other gates code_quality_check.py wires the same
-# way. Entries here require operator ratification (KB: "Gate Allowlist
-# Conventions").
+# never allowlisted). No V1 entry is expected.
+#
+# PER-PROFILE ROWS (wgr_42e3a251). The gate also runs check_source_tree_contract
+# for every capability profile and reports each row as "[<profile>] <row>",
+# matched verbatim. A row not listed here blocks (exit 2). The baseline is
+# 0/0/0 (macos-bizops / macos_free_minimal / macos_samantha): the two rows master
+# carried when the gate began blocking (schema_diff_nullability_relaxation_smoke
+# -> macos_self_deployment_plugin) were fixed in the same unit, not listed. Fix
+# a new row; do not list it. Entries here require operator ratification (KB:
+# "Gate Allowlist Conventions").
 #
 # ---------------------------------------------------------------------------
 # Registered 2026-09-28 (lane-smoke-contract-lint-20260928, iss_59385149)
-# with ZERO entries.
+# with ZERO entries. Still zero after the per-profile rows were added
+# 2026-10-01 (unt_158366bf).

@@ -43,6 +43,7 @@ from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
 import agent_messaging_plugin.session_hosts as session_hosts  # noqa: E402
 from agent_messaging_plugin.model_capability_store import load_seed_table, seed_catalog  # noqa: E402
 from agent_messaging_plugin.model_capability_verbs import select_dispatch_tier  # noqa: E402
+from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
     CELL_ACCEPTANCE_ACCEPTED,
@@ -116,11 +117,27 @@ class _Orchestrator:
 
 
 class _Registry:
+    _SESSIONS = {
+        "agi-coordinator": "ases-coordinator",
+        "agi-existing-controller": "ases-existing-controller",
+    }
+
     def agent_session_id_for_instance(self, agent_instance_id: str) -> str:
-        return {
-            "agi-coordinator": "ases-coordinator",
-            "agi-existing-controller": "ases-existing-controller",
-        }.get(agent_instance_id, "")
+        return self._SESSIONS.get(agent_instance_id, "")
+
+    def resolve_by_agent_instance_id(self, agent_instance_id: str) -> BridgeBinding | None:
+        """The real registry's shape: a BridgeBinding for a registered instance, else None."""
+        session_id = self._SESSIONS.get(agent_instance_id)
+        if session_id is None:
+            return None
+        return BridgeBinding(
+            bridge_id=f"agc-{agent_instance_id}",
+            agent_id="codex",
+            agent_instance_id=agent_instance_id,
+            session_label=agent_instance_id,
+            parent_pid=None,
+            agent_session_id=session_id,
+        )
 
 
 def _state() -> Any:

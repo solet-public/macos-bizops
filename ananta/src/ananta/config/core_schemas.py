@@ -927,7 +927,11 @@ class CoreSchemaDefinitions:
                                 "queue pollers must NOT claim this row. Used by the self-deployment "
                                 "plugin to ensure the v(N)-side deploy_self enqueues complete_deploy "
                                 "exclusively for v(N+1)'s poller; the v(N) container's poller filters "
-                                "itself out via this column. NULL on all other actions (backward compatible)."
+                                "itself out via this column. An entry 'instance:<id>' pins the row to one "
+                                "instance's poller (ananta.core.actions.instance_pin): only that instance "
+                                "claims it, and the writer's own SOLET_VERSION entry beside it shields "
+                                "pollers that predate pins. Every starting action is pinned. NULL on all "
+                                "other actions (backward compatible)."
                             ),
                         ),
                     },

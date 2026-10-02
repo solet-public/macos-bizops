@@ -70,6 +70,31 @@ MANAGEMENT_ALLOWLIST: tuple[str, ...] = (
 _UNRESTRICTED: tuple[str, ...] = ("__operator_equivalent_unrestricted__",)
 
 
+def bridge_allows_process(bridge: BridgeSessionState, process_key: str) -> bool:
+    """M5 §14.5 per-session allowlist: may ``bridge`` invoke ``process_key``?
+
+    The ONE statement of the policy, used by ``PlatformSurface`` for
+    ``process/call`` and by the direct bridge routes that serve a process's read
+    without the action queue (``peer/holds_role``, ``peer/inbox_for_session``),
+    so a route can never be looser than the process it stands in for.
+
+    * Stdio bridges (``client_id == ""``) bypass the check entirely — they
+      predate the OAuth-principal model; per-session allowlists semantically
+      apply only to OAuth-bound bridges where the policy resolver minted a real
+      allowlist from the bearer's client_id.
+    * ``_UNRESTRICTED`` (identity-checked) bypasses the membership test —
+      operator-equivalent OAuth clients get every allowed process.
+    * Any other tuple is membership-checked. ``EMPTY_ALLOWLIST = ()`` therefore
+      rejects everything, the correct fail-closed outcome for an OAuth bridge
+      with no resolved policy.
+    """
+    if not bridge.client_id:
+        return True
+    if bridge.process_export_allowlist is _UNRESTRICTED:
+        return True
+    return process_key in bridge.process_export_allowlist
+
+
 class BridgeNotFoundError(LookupError):
     """Raised when a caller references a bridge_id that is not registered."""
 
@@ -355,4 +380,5 @@ __all__ = [
     "BridgeQueueFullError",
     "BridgeSessionManager",
     "MANAGEMENT_ALLOWLIST",
+    "bridge_allows_process",
 ]

@@ -649,18 +649,20 @@ _SCHEMA_INIT_GATE = _GateSpec(
     allowlist=_SCHEMA_INIT_ALLOWLIST,
 )
 
-# Repo-level shipped-smoke checkout-only contract lint gate (iss_59385149).
+# Repo-level shipped-smoke source contract lint gate (iss_59385149, wgr_42e3a251).
 # Tree-walking (no scope-path argv splicing) — checks that every checkout-only
 # smoke declaration agrees across all three surfaces (gate_smokes.txt marker,
 # shipped_smoke_contract.yaml entry, seed_manifest.yaml exclude_paths), the
-# same V1 predicate ``assemble()`` runs, but reachable before a bundle exists.
+# same V1 predicate ``assemble()`` runs, but reachable before a bundle exists,
+# and that no capability profile reports a per-profile contract row beyond the
+# allowlisted baseline (``check_source_tree_contract``, ~15 s, hence 120 s).
 # ``unt_85473403`` landed a smoke with only the marker; the full pre-landing
 # battery and two reviews passed it, and the gap surfaced one publish lap
 # later at assembly (``rrun_78ae868f``). Exit codes follow the canonical
 # _WRAPPER_OK (0) / _WRAPPER_BLOCKING (2) pattern.
 _SMOKE_CONTRACT_LINT_GATE = _GateSpec(
     name="smoke_contract_lint",
-    description="shipped-smoke checkout-only contract consistency",
+    description="shipped-smoke source contract (checkout-only consistency and per-profile rows)",
     script=_SMOKE_CONTRACT_LINT_CHECK,
     allowlist=_SMOKE_CONTRACT_LINT_ALLOWLIST,
 )
@@ -1163,9 +1165,9 @@ def _check_smoke_contract_lint_gate(project_root: Path, venv_python: Path,
     argv = [str(venv_python), str(script), "--repo-root", str(project_root),
             "--allowlist", str(allowlist)]
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
-        print(f"❌ BLOCKING: {_SMOKE_CONTRACT_LINT_GATE.name} gate timed out after 60s")
+        print(f"❌ BLOCKING: {_SMOKE_CONTRACT_LINT_GATE.name} gate timed out after 120s")
         return True
     except FileNotFoundError as exc:
         print(f"❌ BLOCKING: {_SMOKE_CONTRACT_LINT_GATE.name} gate cannot invoke: {exc}")

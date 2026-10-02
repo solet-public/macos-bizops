@@ -695,6 +695,7 @@ class AgentMessagingService:
                     limit=request.limit,
                     role_after=request.role_after,
                     observer=request.observer,
+                    include_covered=request.include_covered,
                 )
             )
         except Exception as exc:  # noqa: BLE001 — the Q1 fault-domain boundary
@@ -1082,6 +1083,7 @@ class AgentMessagingService:
         limit: int,
         role_after: str | None,
         observer: bool = False,
+        include_covered: bool = False,
     ) -> tuple[tuple[PeerInboxEntry, ...], str | None, bool, str | None]:
         """The role-inbox section — a global ``(created_at, id)`` k-way merge.
 
@@ -1098,10 +1100,16 @@ class AgentMessagingService:
         OMITS both the ``important`` and ``delivered`` filters so already-
         delivered IMPORTANT rows resurface (there is deliberately no
         ``core__agent_message`` projection to fall back on).
+        ``include_covered=True`` reads with no floor, so a consumer that must
+        see every row (the authorization helper) is never blinded by a mark
+        any reader advanced; it is observer-only because it is a read of rows
+        the caller may already have been shown.
         ``include_important=False`` is an explicit silent-only status view.
         Returns ``((), None, False, None)`` for a holder with no roles.
         Re-readable + durable (rows are never consumed on read).
         """
+        if include_covered and not observer:
+            raise AgentRequestInvalidError("include_covered requires observer")
         held_roles = self._enumerate_held_roles(agent_instance_id)
         if not held_roles:
             return (), None, False, None
@@ -1110,7 +1118,8 @@ class AgentMessagingService:
             held_roles=tuple(held_roles),
             agent_instance_id=agent_instance_id,
         )
-        after, skip_floor = self._decode_role_after(role_after, scope)
+        after, history_read = self._decode_role_after(role_after, scope)
+        skip_floor = history_read or include_covered
         marks = {} if skip_floor else self._read_role_covered_marks(held_roles)
         per_role_records: list[list[dict[str, object]]] = []
         any_floor_truncated = False

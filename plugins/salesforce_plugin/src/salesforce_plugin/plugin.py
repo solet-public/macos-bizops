@@ -439,6 +439,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             "data": self._require_executor().probe_cli(),
             "actions": [],
             "error": None,
+            "timestamp": datetime.now(UTC).isoformat(),
         }
 
     @platform_process(

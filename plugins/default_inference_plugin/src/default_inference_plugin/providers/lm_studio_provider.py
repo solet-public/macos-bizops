@@ -155,6 +155,7 @@ class LMStudioProvider:
 
             return {
                 "action_status": ActionStatus.COMPLETED.value,
+                "actions": [],
                 "data": {
                     "result": {
                         "completion": completion,
@@ -239,6 +240,7 @@ class LMStudioProvider:
 
             return {
                 "action_status": ActionStatus.COMPLETED.value,
+                "actions": [],
                 "data": {
                     "available": True,
                     "provider": "lm_studio",
@@ -261,6 +263,7 @@ class LMStudioProvider:
             }
             return {
                 "action_status": ActionStatus.ERROR.value,
+                "actions": [],
                 "data": {
                     "available": False,
                     "provider": "lm_studio",
@@ -291,6 +294,7 @@ class LMStudioProvider:
         """Get model information."""
         return {
             "action_status": ActionStatus.COMPLETED.value,
+            "actions": [],
             "data": {
                 "model_name": self.model,
                 "provider": "lm_studio",

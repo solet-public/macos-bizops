@@ -32,6 +32,8 @@ def error_result(
     }
     return {
         "action_status": ActionStatus.ERROR.value,
+        "data": {},
+        "actions": [],
         "error": error,
         "timestamp": now(),
     }
@@ -43,5 +45,6 @@ def success_result(data: dict[str, Any]) -> ActionResult:
         "action_status": ActionStatus.COMPLETED.value,
         "data": {"result": data},
         "actions": [],
+        "error": None,
         "timestamp": now(),
     }

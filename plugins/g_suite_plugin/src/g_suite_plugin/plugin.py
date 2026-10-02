@@ -216,6 +216,7 @@ class GSuitePlugin(ServicePlugin, EdgeProcessProvider):
                 "data": {"message": "Service already running"},
                 "actions": [],
                 "error": None,
+                "timestamp": datetime.now(UTC).isoformat(),
             }
         self._deferred.stop_event.clear()
         self._deferred.thread = threading.Thread(
@@ -232,6 +233,7 @@ class GSuitePlugin(ServicePlugin, EdgeProcessProvider):
             "data": {"message": "Service started successfully"},
             "actions": [],
             "error": None,
+            "timestamp": datetime.now(UTC).isoformat(),
         }
 
     @service_lifecycle(operation="stop")
@@ -243,6 +245,7 @@ class GSuitePlugin(ServicePlugin, EdgeProcessProvider):
                 "data": {"message": "Service already stopped"},
                 "actions": [],
                 "error": None,
+                "timestamp": datetime.now(UTC).isoformat(),
             }
         self._deferred.stop_event.set()
         if self._deferred.thread is not None:
@@ -255,6 +258,7 @@ class GSuitePlugin(ServicePlugin, EdgeProcessProvider):
             "data": {"message": "Service stopped successfully"},
             "actions": [],
             "error": None,
+            "timestamp": datetime.now(UTC).isoformat(),
         }
 
     # ------------------------------------------------------------------

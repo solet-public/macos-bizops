@@ -1,18 +1,18 @@
 {
   "process_key": "service_interface::embedding_service::generate_embeddings",
   "display_name": "Generate Embeddings",
-  "description": "Generate vector embeddings from text for semantic search and similarity matching.",
-  "embedding_description": "",
+  "description": "Embed a list of texts through whichever provider the solet binds to embedding_service, without naming a provider plugin. Returns one vector per input in input order, plus the provider's own model id and vector dimension on every result. inputs must be a non-empty list of non-empty strings no larger than the provider's batch limit, each within its token ceiling; the provider refuses over-limit input with an error and never truncates or falls back to another provider.",
+  "embedding_description": "Generate vector embeddings from text through the solet's bound embedding service, to vectorize documents. Embed text: send a list of strings and get one embedding vector per text, in input order, with the embedding model id and vector dimension on every successful result. Refuses over-limit batches and over-long texts instead of truncating.",
   "result_processor_customizations": {
     "action_label": "Embeddings generated",
     "result_type": "embeddings_generated",
-    "result_description": "Vector embeddings with keys: embeddings (list of float arrays), dimension (vector size), model (model used), count (number of embeddings)",
-    "presentation_guidance": "",
+    "result_description": "data.result holds embeddings (one float vector per input, in input order), dimension (the provider's vector length) and model (the provider's model id); action_status, data, actions, error and timestamp are always present",
+    "presentation_guidance": "Report the model id and dimension with the vectors; vectors from different model ids or dimensions are not comparable.",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },
   "error_processor_customizations": {
-    "action_context": "Generates vector embeddings from text input using an embedding model. Embeddings are numerical representations of text for semantic operations.",
-    "error_interpretation": "ValidationError with 'inputs': empty or invalid text list provided. ModelError: specified embedding model not available or failed. RateLimitError: embedding API rate limit exceeded. ServiceError: embedding service unavailable.",
-    "recovery_guidance": "For input errors: ensure inputs is a non-empty list of strings. For model errors: check available models with list_models or use default. For rate limits: wait and retry, or reduce batch size. For service errors: check embedding service status and retry."
+    "action_context": "Embeds a list of texts through the provider bound to embedding_service. generate_embeddings accepts {inputs, model?, input_type?}; the provider's model id and dimension accompany every successful result.",
+    "error_interpretation": "error.code is the provider's own code. invalid_input: inputs is empty, not a list of non-empty strings, or over the batch limit. input_too_long: a text exceeds the provider's token ceiling. unsupported_model: model is not the bound provider's model. unavailable: the provider is not ready.",
+    "recovery_guidance": "Fix inputs and retry: split a long text into windows that fit the ceiling and send smaller batches. Omit model to use the bound provider's own. For unavailable, read the provider's readiness error; never switch providers to get around a refusal."
   }
 }

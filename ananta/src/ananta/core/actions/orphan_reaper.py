@@ -57,6 +57,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from ananta.core.actions.instance_pin import exclusion_entries, pinned_instance
 from ananta.core.actions.payload_bounds import (
     MAX_ACTION_PARAMETERS_BYTES,
     OversizedActionPayloadError,
@@ -150,8 +151,13 @@ def reap_orphaned_processing_actions(
     orphan_age_seconds: float = DEFAULT_ORPHAN_AGE_SECONDS,
     page_limit: int = DEFAULT_REAP_PAGE_LIMIT,
     bound_bytes: int = MAX_ACTION_PARAMETERS_BYTES,
+    live_action_ids: frozenset[str] = frozenset(),
 ) -> dict[str, int]:
     """Fail abandoned ``processing`` actions; never return them to ``queued``.
+
+    ``live_action_ids`` are rows this process is running right now (a deploy
+    detached from the drain loop can outlast the age threshold); they are
+    skipped, not failed.
 
     Returns:
         Counts of ``{"examined", "failed", "oversized"}`` for logging
@@ -187,7 +193,7 @@ def reap_orphaned_processing_actions(
 
     for row in rows:
         action_id = row.get("id")
-        if not isinstance(action_id, str):
+        if not isinstance(action_id, str) or action_id in live_action_ids:
             continue
         process_key = row.get("process_key")
         process_key_str = process_key if isinstance(process_key, str) else "<unknown>"
@@ -267,10 +273,93 @@ def reap_orphaned_processing_actions(
     return {"examined": len(rows), "failed": failed, "oversized": oversized}
 
 
+def abandoned_pin_error_message(pin: str, age_seconds: float, abandon_age_seconds: float) -> str:
+    """The legible reason written to a reaped pinned row's ``error_message``."""
+    return (
+        f"abandoned pinned row: still queued after {age_seconds:.0f}s for instance "
+        f"{pin}, the only instance that may claim it (threshold "
+        f"{abandon_age_seconds:.0f}s); failed, not re-run"
+    )
+
+
+def reap_abandoned_pinned_rows(
+    state_service: _OrderedReader,
+    *,
+    own_instance_id: str,
+    abandon_age_seconds: float = DEFAULT_ORPHAN_AGE_SECONDS,
+    page_limit: int = DEFAULT_REAP_PAGE_LIMIT,
+) -> int:
+    """Fail ``queued`` rows pinned to another instance that never claimed them.
+
+    A row pinned to an instance (``instance_pin``) is claimable by that instance
+    alone, so if the instance died before claiming it nothing else ever will,
+    and the row would hold a slot in every poller's bounded read window. The
+    same age reasoning as the processing reap applies: an instance claims its
+    own rows within seconds of starting its poller, so an hour is far beyond
+    any live owner. Rows pinned to ``own_instance_id`` are never touched.
+
+    Returns the number of rows failed. Silent when there is nothing to do.
+    """
+    now = _naive_utc_now()
+    cutoff = now - timedelta(seconds=abandon_age_seconds)
+    result = state_service.query_ordered(
+        "core",
+        {
+            "table": "action_events",
+            "filters": {
+                "status": "queued",
+                "excluded_versions": {"op": "is_not_null"},
+                "updated_at": {"op": "lt", "value": cutoff},
+                "created_at": {"op": "gt", "value": EVIDENCE_FLOOR_CREATED_AT},
+            },
+            "order_by": [["updated_at", "asc"], ["id", "asc"]],
+            "limit": page_limit,
+            "include_deleted": True,
+        },
+    )
+    failed = 0
+    for row in _extract_records(result):
+        action_id = row.get("id")
+        pin = pinned_instance(exclusion_entries(row.get("excluded_versions")))
+        if not isinstance(action_id, str) or pin is None or pin == own_instance_id:
+            continue
+        age_seconds = _orphan_age_seconds(row.get("updated_at"), now)
+        logger.error(
+            "PINNED_ROW_ABANDONED: action %s (%s) is pinned to instance %s and has "
+            "waited %.0fs (threshold %.0fs); no other instance may claim it, so it "
+            "is failed",
+            action_id,
+            row.get("process_key"),
+            pin,
+            age_seconds,
+            abandon_age_seconds,
+        )
+        updated = updated_row_count(
+            state_service.update_state(
+                namespace="core",
+                query={
+                    "table": "action_events",
+                    "filters": {"id": action_id, "status": "queued"},
+                },
+                updates={
+                    "status": "failed",
+                    "error_message": abandoned_pin_error_message(
+                        pin, age_seconds, abandon_age_seconds,
+                    ),
+                },
+            ),
+            what=f"abandoned-pin reap of {action_id}",
+        )
+        failed += updated
+    return failed
+
+
 __all__ = [
     "DEFAULT_ORPHAN_AGE_SECONDS",
     "DEFAULT_REAP_PAGE_LIMIT",
     "EVIDENCE_FLOOR_CREATED_AT",
     "abandoned_error_message",
+    "abandoned_pin_error_message",
+    "reap_abandoned_pinned_rows",
     "reap_orphaned_processing_actions",
 ]

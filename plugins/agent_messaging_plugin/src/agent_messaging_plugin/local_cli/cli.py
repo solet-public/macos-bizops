@@ -16,6 +16,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, Final, NoReturn
 
@@ -405,7 +406,23 @@ def health() -> None:
     help="Page size per fetch.",
 )
 @click.option("--observer", is_flag=True, help="Observe pending inbox state without display acknowledgement.")
-def inbox(limit: int, observer: bool) -> None:
+@click.option(
+    "--include-covered", is_flag=True,
+    help=(
+        "Read the role section with no covered-mark floor, so rows any reader "
+        "attested covered are returned too (requires --observer). For a "
+        "fail-closed consumer that must see every row."
+    ),
+)
+@click.option(
+    "--since", "since", default=None,
+    help=(
+        "ISO-8601 horizon, required with --include-covered: the floor-free role "
+        "walk stops at the first row at or before it and reports complete for that "
+        "window, so the read stays bounded as the role history grows."
+    ),
+)
+def inbox(limit: int, observer: bool, include_covered: bool, since: str | None) -> None:
     """Read THIS session's full durable inbox — BOTH sections, merged.
 
     MSG-04: `peer_inbox` returns two independently-paged sections —
@@ -433,6 +450,11 @@ def inbox(limit: int, observer: bool) -> None:
     read via THIS command are both unaffected; it is only the sender-side
     DIRECT-send workaround that fails.
     """
+    if include_covered and not observer:
+        raise click.UsageError("--include-covered requires --observer")
+    if include_covered != (since is not None):
+        raise click.UsageError("--include-covered and --since are required together")
+    role_horizon = _horizon_mark(since) if since is not None else ""
     agent_session_id = _caller_agent_session_id()
     if not agent_session_id:
         _die(
@@ -447,16 +469,23 @@ def inbox(limit: int, observer: bool) -> None:
     def _fn(client: BridgeClient) -> dict[str, Any]:
         def _fetch(
             after: str | None, role_after: str | None, *, observe: bool,
+            covered: bool = False,
         ) -> dict[str, Any]:
             data = _one_shot_peer_inbox_page(
                 client, agent_session_id, limit, after=after, role_after=role_after,
-                observer=observe,
+                observer=observe, include_covered=covered,
             )
             status = data.get("role_section_status")
             if status == "error" and "role" not in fault:
                 fault["role"] = str(
                     data.get("role_section_error")
                     or "role section reported an error with no message",
+                )
+            if covered and data.get("role_floor_applied") is True and "role" not in fault:
+                fault["role"] = (
+                    "include_covered page came back floored (role_floor_applied=true): the "
+                    "server predates the include_covered fix and needs a deploy, or the "
+                    "route dropped the parameter"
                 )
             token = data.get("role_read_page_token")
             if not observe and isinstance(token, str) and token:
@@ -467,7 +496,9 @@ def inbox(limit: int, observer: bool) -> None:
             lambda after, role_after: _fetch(after, role_after, observe=True), "", seeding=False,
         )
         role_entries, _, role_exhausted = _drain_role_section(
-            lambda after, role_after: _fetch(after, role_after, observe=observer), "", seeding=False,
+            lambda after, role_after: _fetch(
+                after, role_after, observe=observer, covered=include_covered,
+            ), role_horizon, seeding=False,
         )
         merged = sorted(
             [{**entry, "section": "direct"} for entry in direct_entries]
@@ -509,6 +540,29 @@ def inbox(limit: int, observer: bool) -> None:
             err=True,
         )
         raise SystemExit(int(ExitCodes.EXTERNAL_ERROR))
+
+
+@cli.command("holds-role")
+@click.option("--name", required=True, help="Role name to re-check.")
+@click.option(
+    "--instance-id", "instance_id", required=True,
+    help="The agent_instance_id whose ownership of --name is asked about.",
+)
+def holds_role(name: str, instance_id: str) -> None:
+    """Act-time check: does INSTANCE_ID's session STILL hold role NAME?
+
+    Answers from the direct bridge route (``GET .../peer/holds_role``), not the
+    action queue, so it keeps answering while a deploy holds the queue — the
+    ``peer_holds_role`` process it replaces for landing guards did not. Prints
+    the ``result.success`` / ``result.data`` envelope that ``solet-bridge call``
+    prints for the process, with ``data`` carrying ``holds``, ``name``,
+    ``agent_session_id`` and ``delivery_route_attached`` plus
+    ``instance_registered`` and ``session_label`` from the instance's peer
+    binding. A refusal or an unreachable bridge exits non-zero with no envelope:
+    a caller that cannot read the answer must not read it as "held".
+    """
+    data = _run(lambda c: c.peer_holds_role(name=name, agent_instance_id=instance_id))
+    _emit({"status": "completed", "result": {"success": True, "data": data}})
 
 
 def _flush_inbox_output() -> None:
@@ -1026,7 +1080,6 @@ def _inbox_section(page: dict[str, Any], section: str) -> list[Any]:
     return items
 
 
-PEER_INBOX_PROCESS_KEY: Final[str] = "plugin::agent_messaging_plugin::peer_inbox"
 PEER_ACK_ROLE_READ_PAGE_PROCESS_KEY: Final[str] = "plugin::agent_messaging_plugin::peer_ack_role_read_page"
 
 
@@ -1038,38 +1091,30 @@ def _one_shot_peer_inbox_page(
     after: str | None,
     role_after: str | None,
     observer: bool = False,
+    include_covered: bool = False,
 ) -> dict[str, Any]:
-    """Fetch one ``peer_inbox`` page through the no-MCP platform process.
+    """Fetch one ``peer_inbox`` page over the direct, queue-free bridge route.
 
     Unlike `solet-bridge watch`'s ``client.peer_inbox`` (the registered-bridge HTTP
     route, which needs a prior ``peer_register``), ``solet-bridge inbox`` runs as a
     fresh, unregistered bridge — the exact caller ``peer_inbox_action``'s own
     module docstring names as having "no pull path at all" before it existed.
-    So this goes through the platform PROCESS instead, naming the caller's own
-    session explicitly, and unwraps the dispatch envelope into the bare page —
-    raising loud (never a silent empty page) on a call that did not complete.
+    So this names the caller's own session explicitly on ``GET .../peer/inbox_for_session``
+    — the same read the ``peer_inbox`` process serves, without the serial action
+    queue a deploy can hold for minutes (iss_d97f6633) — and raises loud (never a
+    silent empty page) on a refusal or a body that is not a page. ``include_covered``
+    is the one request field besides the paging cursors that crosses to the server
+    (the role-covered-floor read, observer-only); the CLI's ``--since`` horizon is a
+    stop inside the drain and is never sent.
     """
-    dispatched = client.call_and_wait(
-        PEER_INBOX_PROCESS_KEY,
-        {
-            "agent_session_id": agent_session_id,
-            "limit": limit,
-            **({"after": after} if after else {}),
-            **({"role_after": role_after} if role_after else {}),
-            **({"observer": True} if observer else {}),
-        },
-        reason="solet-bridge inbox: one-shot both-section drain (MSG-04)",
+    return client.peer_inbox_for_session(
+        agent_session_id=agent_session_id,
+        limit=limit,
+        after=after,
+        role_after=role_after,
+        observer=observer,
+        include_covered=include_covered,
     )
-    outcome = dispatched.get("result")
-    if not isinstance(outcome, dict) or outcome.get("action_status") != "completed":
-        error = outcome.get("error") if isinstance(outcome, dict) else None
-        raise BridgeCallError(
-            f"{PEER_INBOX_PROCESS_KEY} did not complete: {error or dispatched!r}",
-        )
-    data = outcome.get("data")
-    if not isinstance(data, dict):
-        raise BridgeCallError(f"{PEER_INBOX_PROCESS_KEY} returned no data: {outcome!r}")
-    return data
 
 
 def _one_shot_ack_role_read_page(
@@ -1088,6 +1133,17 @@ def _one_shot_ack_role_read_page(
     if not isinstance(data, dict):
         raise BridgeCallError(f"{PEER_ACK_ROLE_READ_PAGE_PROCESS_KEY} returned no data")
     return data
+
+
+def _horizon_mark(since: str) -> str:
+    """``--since`` as the naive-UTC ISO mark ``_drain_role_section`` compares against."""
+    try:
+        parsed = datetime.fromisoformat(since)
+    except ValueError as exc:
+        raise click.UsageError(f"--since must be an ISO-8601 datetime: {since!r}") from exc
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+    return parsed.isoformat(timespec="microseconds")
 
 
 def _entry_created_at(entry: object) -> str:

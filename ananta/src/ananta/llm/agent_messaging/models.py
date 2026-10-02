@@ -291,6 +291,11 @@ class PeerInboxRequest:
     # Observers (watch/status/hidden-output callers) are read-only: they must
     # neither issue a page token nor create a display receipt.
     observer: bool = False
+    # Read the role section with no covered-mark floor. A fail-closed consumer
+    # (the authorization helper) needs every row regardless of what any reader
+    # attested covered, including the mark's own row, which a history cursor
+    # can never return. Read-only, so it requires ``observer``.
+    include_covered: bool = False
 
 
 @dataclass(frozen=True, slots=True)

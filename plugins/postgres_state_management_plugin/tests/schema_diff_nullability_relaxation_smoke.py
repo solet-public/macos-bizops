@@ -15,21 +15,20 @@ sys.path.insert(
 )
 sys.path.insert(
     0,
-    str(REPO_ROOT / "plugins" / "macos_self_deployment_plugin" / "src"),
-)
-sys.path.insert(
-    0,
     str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
+# macos_self_deployment_plugin is resolved PER PROFILE and is absent from
+# macos_free_minimal, so only the blue-green preflight leg depends on it; that
+# leg runs where the plugin ships and is disclosed as skipped where it does not
+# (the same repair io_interface_shadow_docs_smoke applies to its discord leg).
+_PREFLIGHT_SRC = REPO_ROOT / "plugins" / "macos_self_deployment_plugin" / "src"
+if _PREFLIGHT_SRC.is_dir():
+    sys.path.insert(0, str(_PREFLIGHT_SRC))
 
 from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
     AGENT_ROLE_BINDING_NAMESPACE,
 )
 from ananta.types.schema_types import SchemaDefinition  # noqa: E402
-from macos_self_deployment_plugin.schema_preflight import (  # noqa: E402
-    classify_snapshot_diff,
-    schemas_to_snapshot,
-)
 from postgres_state_management_plugin.postgres_backend.schema_diff import (  # noqa: E402
     _is_nullability_relaxation_only,
     diff_schema,
@@ -111,6 +110,14 @@ def test_exact_f1_relaxation() -> None:
         all("DROP NOT NULL" in operation for operation in rendered)
         and all(any(f'"{name}"' in operation for operation in rendered) for name in _LEGACY_TTL_COLUMNS),
         "typed schema diff emits DROP NOT NULL for exactly the three bridge columns",
+    )
+
+    if not _PREFLIGHT_SRC.is_dir():
+        print("  SKIP  macos_self_deployment_plugin: not in this profile's resolved plugin set")
+        return
+    from macos_self_deployment_plugin.schema_preflight import (
+        classify_snapshot_diff,
+        schemas_to_snapshot,
     )
 
     old_snapshot = schemas_to_snapshot({AGENT_ROLE_BINDING_NAMESPACE: current})

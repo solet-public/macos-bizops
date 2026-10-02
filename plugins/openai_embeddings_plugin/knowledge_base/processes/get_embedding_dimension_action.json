@@ -1,8 +1,8 @@
 {
   "process_key": "plugin::openai_embeddings_plugin::get_embedding_dimension_action",
   "display_name": "Get Embedding Dimension",
-  "description": "Get the vector dimension for an embedding model.",
-  "embedding_description": "Get the embedding vector dimension for a model name or default. Use before creating vector tables or validating index sizes and to ensure embeddings share a consistent dimension. Returns model and dimension for compatibility checks.",
+  "description": "Learn how long an OpenAI-compatible server's vectors are by embedding a probe text; callers should read the solet's dimension through service_interface::embedding_service::get_embedding_dimension.",
+  "embedding_description": "Measure how long an OpenAI-compatible server's vectors are by sending the probe text 'dimension probe' and counting the numbers returned. Reports the length and model name and spends one real server request. Only for that provider; the solet's own figure comes from its bound service.",
   "result_processor_customizations": {
     "action_label": "Embedding dimension retrieved",
     "result_type": "dimension_retrieved",

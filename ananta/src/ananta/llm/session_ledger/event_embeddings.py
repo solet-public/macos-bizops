@@ -31,6 +31,7 @@ thinking, so they stay embeddable.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -79,6 +80,9 @@ EXCLUDED_MESSAGE_SUBTYPES = frozenset({"reasoning"})
 # EMBEDS the rare straggler; already-embedded rows are find_missing-skipped),
 # and it bounds a race-skipped event's un-searchable window to ~a day.
 _RECONCILE_EVERY_FIRES = 144
+
+# Embedded after an event fails: if even this fails the embedder is down, not the event (iss_6aa96266).
+_EMBEDDER_PROBE_TEXT = "embedder health probe"
 
 # The user-facing message roles (operator scope ruling 2026-07-06).
 EMBEDDABLE_EVENT_ROLES = frozenset(
@@ -225,7 +229,7 @@ def _policy_backfill_plan(repository: SessionLedgerRepository, budget: TokenBudg
 
 
 def _record_policy_backfill(repository: SessionLedgerRepository, policy: str, *, completed: bool) -> None:
-    """Record ``policy`` once its backfill sweep completed without halting; an interrupted one repeats."""
+    """Record ``policy`` once its backfill sweep completed without halting or skipping an event; any other repeats."""
     if completed:
         repository.set_event_embed_chunk_policy(policy)
 
@@ -417,6 +421,7 @@ class EventEmbeddingWriter:
             "events_skipped_existing": 0,
             "events_skipped_filtered": 0,
             "events_truncated": 0,
+            "events_failed": 0,
         }
         cursor: tuple[object, object] | None = None
         exhausted = False
@@ -465,10 +470,7 @@ class EventEmbeddingWriter:
             if replaces is None:
                 tally["events_skipped_existing"] += 1
                 continue
-            outcome = self.embed_event(dict(row), replaces_chunks=replaces)
-            tally["events_embedded"] += 1
-            tally["chunks_stored"] += int(outcome["chunks_stored"])
-            tally["events_truncated"] += 1 if outcome["truncated"] else 0
+            _embed_event_or_skip(self, self._generate_embeddings, row, replaces, tally)
 
     # ------------------------------------------------------------------
     # Write — Lane-1 heartbeat drain (durable cursor, drain-until-caught-up)
@@ -506,11 +508,14 @@ class EventEmbeddingWriter:
           re-reads every row sharing the boundary ``imported_at`` and
           ``find_missing`` skips the embedded ones — closing the same-arrival
           uuid-tiebreak gap that a strict ``(imported_at, id)`` cursor leaves).
-        * **Transient-safe / poison-loud.** A page whose embed raises does NOT
-          advance the cursor — the fire halts and the next heartbeat retries the
-          same page once the embedder recovers (idempotent skip-existing means
-          no double work). A genuinely un-embeddable event therefore re-surfaces
-          loudly every fire rather than being silently skipped into a gap.
+        * **Transient-safe / poison-loud.** A page whose embed raises because the
+          embedder is down does NOT advance the cursor — the fire halts and the
+          next heartbeat retries the same page once it recovers (idempotent
+          skip-existing means no double work). A lone un-embeddable event is
+          instead skipped with a WARNING naming its event_id and counted in
+          ``events_failed`` so it cannot stall the cursor for its whole page
+          (iss_6aa96266); it stays un-embedded, so the reconciliation sweep
+          retries it rather than the gap being silent.
 
         Runs on the single-slot drain thread (see
         ``SessionLedgerService.drain_event_embeddings``) so its synchronous
@@ -547,6 +552,7 @@ class EventEmbeddingWriter:
             "events_skipped_existing": 0,
             "events_skipped_filtered": 0,
             "events_truncated": 0,
+            "events_failed": 0,
             "pages": 0,
         }
         halted_on_error = False
@@ -574,7 +580,9 @@ class EventEmbeddingWriter:
             last_imported_at = str(rows[-1]["imported_at"])
             page_after = (last_imported_at, rows[-1]["id"])
             self._repository.set_event_embed_cursor(last_imported_at)
-        _record_policy_backfill(self._repository, policy, completed=policy_changed and not halted_on_error)
+        _record_policy_backfill(
+            self._repository, policy, completed=policy_changed and not halted_on_error and tally["events_failed"] == 0,
+        )
         return {
             **tally,
             "halted_on_error": halted_on_error,
@@ -803,6 +811,36 @@ class EventEmbeddingWriter:
         if not isinstance(rows, list):
             return []
         return [row for row in rows if isinstance(row, dict)]
+
+
+def _embed_event_or_skip(
+    writer: EventEmbeddingWriter,
+    embed_texts: Callable[[list[str]], list[list[float]]],
+    row: dict[str, object],
+    replaces: int,
+    tally: dict[str, int],
+) -> None:
+    """Embed one event; a failure caused by that event is a WARNING naming the event_id, counted, and skipped.
+
+    One event the embedder or store refuses must not stall the cursor for its whole page (iss_6aa96266).  A
+    failure that is not the event's -- the embedder itself is down -- is told apart by a probe embed through
+    ``embed_texts``: if the probe also fails it raises, so the page halts without advancing the cursor and the
+    next fire retries it.  A skipped event stays un-embedded, so the reconciliation sweep retries it.
+    """
+    try:
+        outcome = writer.embed_event(dict(row), replaces_chunks=replaces)
+    except Exception:
+        tally["events_failed"] += 1
+        logger.warning(
+            "embed_event: event %s failed to embed; skipping it so the cursor can advance "
+            "(events_failed=%d) -- the reconciliation sweep retries it",
+            row["id"], tally["events_failed"], exc_info=True,
+        )
+        embed_texts([_EMBEDDER_PROBE_TEXT])
+        return
+    tally["events_embedded"] += 1
+    tally["chunks_stored"] += int(outcome["chunks_stored"])
+    tally["events_truncated"] += 1 if outcome["truncated"] else 0
 
 
 def _as_dict(value: object) -> dict[str, Any]:

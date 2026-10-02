@@ -70,6 +70,21 @@ DEFAULT_STALL_THRESHOLD_SECONDS = 120.0
 # sync-verb remediation ruling's Phase 0 instrumentation.
 SLOW_ACTION_THRESHOLD_SECONDS = 10.0
 
+# A blue-green deploy runs off the drain loop (wgr_5de9baf3), so a hung one no
+# longer freezes the poll cycle and the poll-age alarm cannot see it. The
+# detached deploy is therefore reported in flight with its age, and past this
+# long it is stalled: ``action_path_stalled`` goes true and the poller logs
+# ``DEPLOY_STALLED`` at ERROR (repeated at this interval). Above the 525 to
+# 1000 s a deploy took on 09-28 to 09-30, below the 5345 s ceiling below.
+DEPLOY_STALL_THRESHOLD_SECONDS = 1800.0
+
+# The orphan reaper skips the deploy this process is running, because a
+# deploy can outlast its one-hour orphan threshold. Past this age it no longer
+# does: the row is failed loudly (``ORPHAN_REAP_FAILED``) instead of being
+# exempt for the life of the process. Two hours is above the longest measured
+# deploy (5345.7 s on 2026-10-01) with margin for a slower host.
+DEPLOY_REAP_EXEMPTION_CEILING_SECONDS = 7200.0
+
 
 @dataclass
 class ActionPathLiveness:
@@ -109,6 +124,37 @@ class ActionPathLiveness:
     in_flight_process_key: str | None = None
     in_flight_started_at: str | None = None
     in_flight_started_monotonic: float | None = None
+
+    #: The blue-green deploy running OFF the drain loop, or ``None``. The loop
+    #: is not inside it, so ``in_flight_*`` above never names it; these do.
+    detached_deploy_action_id: str | None = None
+    detached_deploy_process_key: str | None = None
+    detached_deploy_started_at: str | None = None
+    detached_deploy_started_monotonic: float | None = None
+
+    def begin_detached_deploy(self, *, action_id: str, process_key: str) -> None:
+        """Record that a deploy now runs off the drain loop."""
+        self.detached_deploy_started_monotonic = time.monotonic()
+        self.detached_deploy_started_at = datetime.now(UTC).isoformat()
+        self.detached_deploy_process_key = process_key
+        self.detached_deploy_action_id = action_id
+
+    def end_detached_deploy(self) -> None:
+        """Clear the detached deploy."""
+        self.detached_deploy_action_id = None
+        self.detached_deploy_process_key = None
+        self.detached_deploy_started_at = None
+        self.detached_deploy_started_monotonic = None
+
+    def detached_deploy_age_seconds(self) -> float | None:
+        """Seconds the detached deploy has run, or ``None`` if none is running."""
+        started = self.detached_deploy_started_monotonic
+        return None if started is None else max(0.0, time.monotonic() - started)
+
+    def detached_deploy_stalled(self) -> bool:
+        """True when the detached deploy has run past ``DEPLOY_STALL_THRESHOLD_SECONDS``."""
+        age = self.detached_deploy_age_seconds()
+        return age is not None and age > DEPLOY_STALL_THRESHOLD_SECONDS
 
     def begin_action(self, *, action_id: str, process_key: str) -> None:
         """Record that the drain loop has entered ``action_id``."""
@@ -185,11 +231,18 @@ class ActionPathLiveness:
         numbers so a consumer does not have to re-derive the stale-age check
         (and get it wrong) to know whether the action path is alive. The
         ``in_flight_*`` fields name the action the drain loop is inside, so a
-        stalled snapshot says what it is stalled on.
+        stalled snapshot says what it is stalled on. The ``detached_deploy_*``
+        fields name a blue-green deploy running off the loop, with its age; one
+        past ``DEPLOY_STALL_THRESHOLD_SECONDS`` also makes ``action_path_stalled``
+        true.
         """
         in_flight_age = self.in_flight_age_seconds()
+        deploy_age = self.detached_deploy_age_seconds()
         return {
-            "action_path_stalled": self.stalled(threshold_seconds=threshold_seconds),
+            "action_path_stalled": (
+                self.stalled(threshold_seconds=threshold_seconds)
+                or self.detached_deploy_stalled()
+            ),
             "poll_age_seconds": round(self.poll_age_seconds(), 3),
             "queued_depth": self.last_observed_queue_depth,
             "last_poll_at_utc": self.last_poll_at_utc,
@@ -201,6 +254,13 @@ class ActionPathLiveness:
             "in_flight_age_seconds": (
                 None if in_flight_age is None else round(in_flight_age, 3)
             ),
+            "detached_deploy_action_id": self.detached_deploy_action_id,
+            "detached_deploy_process_key": self.detached_deploy_process_key,
+            "detached_deploy_started_at": self.detached_deploy_started_at,
+            "detached_deploy_age_seconds": (
+                None if deploy_age is None else round(deploy_age, 3)
+            ),
+            "detached_deploy_stalled": self.detached_deploy_stalled(),
         }
 
 
@@ -214,6 +274,8 @@ ACTION_PATH_LIVENESS = ActionPathLiveness()
 __all__ = [
     "ACTION_PATH_LIVENESS",
     "DEFAULT_STALL_THRESHOLD_SECONDS",
+    "DEPLOY_REAP_EXEMPTION_CEILING_SECONDS",
+    "DEPLOY_STALL_THRESHOLD_SECONDS",
     "SLOW_ACTION_THRESHOLD_SECONDS",
     "ActionPathLiveness",
 ]

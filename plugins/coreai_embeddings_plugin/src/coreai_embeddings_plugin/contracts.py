@@ -45,7 +45,7 @@ def failure(error: EmbeddingError) -> ActionResult:
     """Return a typed failure without a partial embedding batch."""
     stamp = datetime.now(UTC).isoformat()
     return {
-        "action_status": "error", "actions": [], "timestamp": stamp,
+        "action_status": "error", "data": {}, "actions": [], "timestamp": stamp,
         "error": {"type": "CoreAIEmbeddingsError", "code": error.code.value,
                   "message": str(error), "details": {}, "severity": "error",
                   "timestamp": stamp},

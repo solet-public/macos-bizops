@@ -46,6 +46,7 @@ from .plugin_transition_declaration import (
     TargetPlugin,
     Transition,
     classify,
+    inherited_gpu,
     owner_sentence,
     parse_declaration,
 )
@@ -72,12 +73,16 @@ _VENV_PYTHON = Path(".venv/bin/python3")
 # Children run isolated: no inherited PYTHONPATH, no cwd on sys.path, so nothing in the
 # target tree or the parent's environment can shadow the target venv's packages (iss_831383f5).
 _ISOLATED = ("-I", "-c")
+_GPU_VALUE = re.compile(r'("compute_preference"\s*:\s*)"gpu"')
 _ACQUIRE_TIMEOUT_SECONDS = 150
 _PROOF_TIMEOUT_SECONDS = 120
 _WRITE_RESERVE_SECONDS = 30
 _MIN_CHILD_SECONDS = 10
 _clock: Callable[[], float] = time.monotonic
-_OPEN_STATES = frozenset({"eligible", "partial", "cleanup", "conflict"})
+_OPEN_STATES = frozenset({"eligible", "partial", "cleanup", "rewrite", "conflict"})
+#: The planned action's title for rewriting an inherited Core AI gpu preference (iss_34f1e3c7). The approval fingerprint covers the action's id and target, not this title,
+#: and the Manager's runtime preview shows plugin-transition actions by id only (iss_d39a7bcc); an owner reads the plain-words sentence in the doctor row (``owner_sentence``).
+_GPU_REWRITE_TITLE = "Switch Core AI embeddings from the GPU to the CPU (compute_preference gpu to cpu): the GPU path leaks memory and crashes the solet after about 16,000 embeddings"
 _RENDERERS: dict[str, Callable[[Path], str | None]] = {
     "coreai_embeddings": coreai_config_text,
     "apple_inference": apple_inference_config_text,
@@ -145,7 +150,7 @@ def migration_plugin_transition(request: AdapterRequest, runtime: Runtime) -> Js
         states = [(item, _classify(item, observation, request.target, gate)) for item in declaration.transitions]
         items = [_summary_evidence(declaration, observation, gate), *(_transition_evidence(item, state) for item, state in states)]
         if request.phase == "probe":
-            return _probe_result(request, states, items)
+            return _probe_result(request, states, items, observation)
         return _apply(request, runtime, declaration, items, gate)
     except DeclarationError as exc:
         return blocked(request, "plugin_transition_declaration_invalid", f"{exc}. Reinstall the reviewed release, then re-preview.")
@@ -319,21 +324,21 @@ def _host_refusal(transition: Transition, gate: HostGate) -> str | None:
 # --- probe -----------------------------------------------------------------------
 
 
-def _probe_result(request: AdapterRequest, states: list[tuple[Transition, Classification]], items: list[JsonObject]) -> JsonObject:
+def _probe_result(request: AdapterRequest, states: list[tuple[Transition, Classification]], items: list[JsonObject], observation: Observation) -> JsonObject:
     open_states = [(item, state) for item, state in states if state.state in _OPEN_STATES]
     if not open_states:
         return result(request, status="verified", evidence_items=items)
-    actions = [action for item, state in open_states for action in _planned_actions(request.target, item, state)]
+    actions = [action for item, state in open_states for action in _planned_actions(request.target, item, state, observation)]
     return result(request, status="pending", actions=actions, evidence_items=items, repair="Approve the declared plugin transition shown in the preview.")
 
 
-def _planned_actions(target: Path, transition: Transition, state: Classification) -> list[JsonObject]:
+def _planned_actions(target: Path, transition: Transition, state: Classification, observation: Observation) -> list[JsonObject]:
     prefix = f"plugin_transition.{transition.migration_id}"
     evidence_ref = f"plugin_transition.{transition.migration_id}"
     if state.state == "conflict":
         return [planned_action(action_id=f"{prefix}.refuse", title=f"Refuse {transition.migration_id} and keep the current plugin: {state.detail}", mutation_kind="none", target="$TARGET/profile/config", evidence_ref=evidence_ref)]
-    if state.state == "cleanup":
-        return [planned_action(action_id=f"{prefix}.roster", title=_roster_title(transition, cleanup=True), mutation_kind="file_write", target=str(target / _MANIFEST), evidence_ref=evidence_ref)]
+    if state.state in {"rewrite", "cleanup"}:
+        return _finish_actions(target, transition, state)
     actions: list[JsonObject] = []
     replacement = transition.target
     # The list must not depend on what apply is about to change: the Manager keys each
@@ -343,10 +348,23 @@ def _planned_actions(target: Path, transition: Transition, state: Classification
         actions.append(planned_action(action_id=f"{prefix}.acquire", title="Make sure the pinned Core AI model asset is present and verified (downloaded only if missing)", mutation_kind="host_provisioning", target=f"$TARGET/{COREAI_ASSET_ROOT}", evidence_ref=evidence_ref))
     if replacement is not None:
         actions.append(planned_action(action_id=f"{prefix}.prove", title=f"Prove {replacement.plugin} works before any config changes", mutation_kind="none", target="$TARGET/.venv", evidence_ref=evidence_ref))
-        actions.append(planned_action(action_id=f"{prefix}.config", title=f"Write the {replacement.plugin} config", mutation_kind="file_write", target=str(target / _PLUGIN_CONFIGS / f"{replacement.plugin}.json"), evidence_ref=evidence_ref))
+        config_title = _GPU_REWRITE_TITLE if inherited_gpu(observation, replacement.plugin) else f"Write the {replacement.plugin} config"
+        actions.append(planned_action(action_id=f"{prefix}.config", title=config_title, mutation_kind="file_write", target=str(target / _PLUGIN_CONFIGS / f"{replacement.plugin}.json"), evidence_ref=evidence_ref))
     actions.append(planned_action(action_id=f"{prefix}.roster", title=_roster_title(transition), mutation_kind="file_write", target=str(target / _MANIFEST), evidence_ref=evidence_ref))
     if transition.service is not None:
         actions.append(planned_action(action_id=f"{prefix}.binding", title=f"Bind {transition.service} to {replacement.plugin if replacement else 'nothing'}", mutation_kind="file_write", target=str(target / _BINDINGS), evidence_ref=evidence_ref))
+    return actions
+
+
+def _finish_actions(target: Path, transition: Transition, state: Classification) -> list[JsonObject]:
+    """The rewrite and the roster removal of a transition that only needs finishing: both planned (so both are backed up and fingerprinted), in the order apply writes them."""
+    prefix = f"plugin_transition.{transition.migration_id}"
+    actions: list[JsonObject] = []
+    if state.gpu:
+        config_path = target / _PLUGIN_CONFIGS / f"{cast(TargetPlugin, transition.target).plugin}.json"
+        actions.append(planned_action(action_id=f"{prefix}.compute_preference", title=_GPU_REWRITE_TITLE, mutation_kind="file_write", target=str(config_path), evidence_ref=prefix))
+    if state.state == "cleanup":
+        actions.append(planned_action(action_id=f"{prefix}.roster", title=_roster_title(transition, cleanup=True), mutation_kind="file_write", target=str(target / _MANIFEST), evidence_ref=prefix))
     return actions
 
 
@@ -395,8 +413,11 @@ def _apply(request: AdapterRequest, runtime: Runtime, declaration: Declaration, 
             deferrals.append(Deferral(transition.migration_id, "plugin_transition_conflict", _conflict_repair(transition, state, request.name, repeat=(state.detail, state.repair) in refused)))
             refused.add((state.detail, state.repair))
             continue
-        if state.state == "cleanup":
-            _roster_remove(request.target, runtime, cast(SourcePlugin, transition.source).plugin)
+        if state.state in {"rewrite", "cleanup"}:
+            if state.gpu:
+                _rewrite_gpu_to_cpu(request.target / _PLUGIN_CONFIGS / f"{cast(TargetPlugin, transition.target).plugin}.json", runtime)
+            if state.state == "cleanup":
+                _roster_remove(request.target, runtime, cast(SourcePlugin, transition.source).plugin)
         else:
             deferred = _switch(transition, request, runtime, gate, deadline, items)
             if deferred is not None:
@@ -515,11 +536,30 @@ def _write_forward(transition: Transition, request: AdapterRequest, runtime: Run
         config_path = target / _PLUGIN_CONFIGS / f"{replacement.plugin}.json"
         if not config_path.exists():
             runtime.atomic_write(config_path, cast(str, _rendered(transition, target)), mode=0o600)
+        else:
+            _rewrite_gpu_to_cpu(config_path, runtime)
         _roster_insert(target, runtime, replacement.plugin, after=None if source is None else source.plugin)
     if transition.service is not None and replacement is not None:
         _set_binding(target, runtime, transition.service, replacement.plugin)
     if source is not None:
         _roster_remove(target, runtime, source.plugin)
+
+
+def _rewrite_gpu_to_cpu(path: Path, runtime: Runtime) -> None:
+    """Rewrite an inherited Core AI ``gpu`` preference to ``cpu`` (iss_34f1e3c7), keeping the file's mode.
+
+    The one value is replaced in place, so the file's formatting and every other byte stay.  A file whose key
+    cannot be matched exactly once (an escaped key spelling, a repeated key) is re-rendered in the release's own
+    form instead, every other key kept; the Manager's backup of the planned target covers both.
+    """
+    config = _plugin_config(path)
+    if config.text is None or config.value is None or config.value.get("compute_preference") != "gpu":
+        return
+    expected = {**config.value, "compute_preference": "cpu"}
+    text, replaced = _GPU_VALUE.subn(r'\1"cpu"', config.text)
+    if replaced != 1 or json.loads(text) != expected:
+        text = json.dumps(expected, indent=2, sort_keys=True) + "\n"
+    runtime.atomic_write(path, text, mode=_mode(path))
 
 
 def _revert_partial(transition: Transition, request: AdapterRequest, runtime: Runtime) -> None:

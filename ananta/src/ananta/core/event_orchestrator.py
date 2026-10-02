@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 from ananta.constants import CONTEXT_KEY_FLOW_ID, CONTEXT_KEY_SESSION_ID
+from ananta.core.actions.instance_pin import CLAIM_PIN_KEY, process_instance_id
 from ananta.core.events import ActionEvent, EventResult, SystemEvent
 from ananta.core.orchestration.event_handler_manager import EventHandlerManager
 from ananta.core.orchestration.initialization_manager import InitializationManager
@@ -109,6 +110,14 @@ class EventOrchestrator:
         # no-router) deployments behave identically; the deployment plugin
         # flips this on the inactive color during a swap.
         self.is_active_color: bool = True
+
+        # Own-rows-only claim restriction (iss_faf5802c): while True the poller
+        # claims only rows pinned to this instance. False by default, so an
+        # instance with no router behaves as before; the self-deployment plugin
+        # sets it at readiness and clears it once the router names this
+        # instance active, so a booting candidate cannot take the live
+        # instance's work.
+        self.claims_own_rows_only: bool = False
 
         # SIGTERM drain-exit bookkeeping (blue-green respawn suppression). Set by
         # ``_on_sigterm`` (installed in ``run``): whether a SIGTERM arrived and
@@ -240,6 +249,9 @@ class EventOrchestrator:
         if self.action_queue_poller is not None:
             self.action_queue_poller.set_is_active_color_getter(
                 lambda: self.is_active_color,
+            )
+            self.action_queue_poller.set_own_rows_only_getter(
+                lambda: self.claims_own_rows_only,
             )
             # Deterministic-continuation plan advancement: the poller is
             # built before plugin bindings exist, so it resolves the
@@ -420,6 +432,10 @@ class EventOrchestrator:
         Injects flow_id/session_id into each action_def before submission since
         ActionFactory now requires flow_id in action_definition (no context fallback).
 
+        Pins each one to this instance (``instance_pin``): starting actions
+        are this process's own boot work (its bridge, its schedules), and the
+        queue is shared with any other colour that is running.
+
         Raises:
             FrameworkError: If flow_id is not available for injection
         """
@@ -439,6 +455,7 @@ class EventOrchestrator:
             action_def[CONTEXT_KEY_FLOW_ID] = self.current_flow_id
             if self.current_session_id:
                 action_def[CONTEXT_KEY_SESSION_ID] = self.current_session_id
+            action_def[CLAIM_PIN_KEY] = process_instance_id()
 
             name = action_def.get("name") or action_def.get("process_key", "unknown")
             logger.debug(f"EventOrchestrator: Submitting starting action: {name}")

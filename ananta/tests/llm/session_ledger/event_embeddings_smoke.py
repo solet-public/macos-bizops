@@ -509,6 +509,7 @@ def test_embed_missing_walk() -> None:
             "events_skipped_existing": 1,
             "events_skipped_filtered": 1,
             "events_truncated": 0,
+            "events_failed": 0,
             "exhausted": True,
             "batch_limit": 10,
         },
@@ -715,17 +716,34 @@ def test_drain_halts_without_advancing_past_a_failed_page() -> None:
         embedding_service=embed,  # type: ignore[arg-type]
         vector_service=vec,  # type: ignore[arg-type]
     )
+    # A lone event the embedder refuses is SKIPPED (iss_6aa96266): the embedder still embeds
+    # the health probe, so the failure is the event's, not an outage, and the cursor advances.
     outcome = writer.drain_missing_events(page_size=1)
     _check(
-        outcome["halted_on_error"] is True and outcome["events_embedded"] == 1,
-        "[15] a page embed failure halts the drain after the last good page",
+        outcome["halted_on_error"] is False
+        and outcome["events_embedded"] == 1
+        and outcome["events_failed"] == 1,
+        "[15] one refused event is counted and skipped; the drain does not halt",
     )
     _check(
-        repo.get_event_embed_cursor() == "2026-07-06T01:00:00",
-        "[15] cursor advances only past SUCCESSFUL pages (the arrival time of "
-        "evt_ok) — the failing page is NOT skipped (red-first: move "
-        "set_event_embed_cursor BEFORE the page embed and this fails — the "
-        "poison page's cursor would persist and strand evt_bad in a gap)",
+        repo.get_event_embed_cursor() == "2026-07-06T02:00:00",
+        "[15] the cursor advances past the skipped event (red-first: re-raise the "
+        "failure and the poison page halts without advancing — the stall iss_6aa96266 fixed)",
+    )
+    # An embedder OUTAGE (the probe fails too) still halts WITHOUT advancing past the page.
+    state2 = StubStateService()
+    repo2 = _DrainRepo(state2, rows)
+    embed2 = _StubEmbeddingService()
+    embed2.raise_on_input = "e"  # every input, the health probe included, contains "e"
+    writer2 = EventEmbeddingWriter(
+        repository=repo2,
+        embedding_service=embed2,  # type: ignore[arg-type]
+        vector_service=_StubVectorService(),  # type: ignore[arg-type]
+    )
+    outage = writer2.drain_missing_events(page_size=1)
+    _check(
+        outage["halted_on_error"] is True and repo2.get_event_embed_cursor() is None,
+        "[15] an embedder outage (probe fails too) halts the drain without advancing the cursor",
     )
 
 

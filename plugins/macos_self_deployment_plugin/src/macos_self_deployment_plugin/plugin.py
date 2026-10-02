@@ -722,6 +722,29 @@ def _autostart_envelope(result: AutostartResult) -> dict[str, Any]:
     }
 
 
+def _set_claims_own_rows_only(
+    orchestrator: Any, restricted: bool, logger: logging.Logger,
+) -> None:
+    """Restrict or release this instance's poller to its own pinned rows.
+
+    Set at readiness: until the router names this instance active, its poller
+    claims only rows pinned to it (its starting actions), never the live
+    instance's work (iss_faf5802c). Released when the router names it active.
+    Logs only on a change, since the release runs on every healthy heartbeat.
+    """
+    if orchestrator is None or getattr(orchestrator, "claims_own_rows_only", None) is restricted:
+        return
+    orchestrator.claims_own_rows_only = restricted
+    logger.info(
+        "%s: CLAIM_RESTRICTION %s: %s",
+        PLUGIN_NAME,
+        "on" if restricted else "off",
+        "this instance claims only rows pinned to it until the router names it active"
+        if restricted
+        else "the router named this instance active; it claims unpinned rows too",
+    )
+
+
 # ---------------------------------------------------------------------
 # Plugin class
 # ---------------------------------------------------------------------
@@ -876,6 +899,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
             os.environ.get(ENV_SOLET_INSTANCE_ID, "").strip()
             or f"solet-{self._self_color}-{uuid.uuid4().hex[:8]}"
         )
+        _set_claims_own_rows_only(getattr(self, "orchestrator_ref", None), True, self.logger)
 
         # SwapOrchestrator is lazily constructed by _require_orchestrator on
         # first use (Task #19 fix). Platform-side injection order is
@@ -975,6 +999,7 @@ class MacosSelfDeploymentPlugin(  # noqa: D101 — class docstring on first line
         from ananta.core.orchestration.startup_sequence import start_post_registration_work
 
         orch = getattr(self, "orchestrator_ref", None)
+        _set_claims_own_rows_only(orch, False, self.logger)
         if orch is not None:
             start_post_registration_work(orch)
 

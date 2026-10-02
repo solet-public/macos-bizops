@@ -580,19 +580,12 @@ class PlatformSurface:
         the correct outcome for an OAuth bridge with no resolved policy
         (a client neither operator_equivalent nor paired-shipper).
         """
-        # M5.B post-merge hot-fix: stdio bridges have no OAuth principal,
-        # so the allowlist semantics don't apply. Skip the check entirely
-        # rather than fail-closed against legitimate first-party callers.
-        if not bridge.client_id:
-            return
         # Late import to avoid circular: bridge_sessions imports models +
-        # auth; this module imports models directly. Importing the
-        # sentinel lazily keeps the dep DAG acyclic.
-        from .bridge_sessions import _UNRESTRICTED  # noqa: PLC0415
+        # auth; this module imports models directly. Importing the policy
+        # lazily keeps the dep DAG acyclic.
+        from .bridge_sessions import bridge_allows_process  # noqa: PLC0415
 
-        if bridge.process_export_allowlist is _UNRESTRICTED:
-            return
-        if process_key not in bridge.process_export_allowlist:
+        if not bridge_allows_process(bridge, process_key):
             raise BridgeError(
                 ERR_PROCESS_NOT_ALLOWED,
                 (

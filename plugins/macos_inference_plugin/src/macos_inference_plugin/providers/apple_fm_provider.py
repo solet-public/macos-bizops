@@ -201,6 +201,7 @@ class AppleFMProvider:
         if available:
             return {
                 "action_status": ActionStatus.COMPLETED.value,
+                "actions": [],
                 "data": data,
                 "error": None,
                 "timestamp": _timestamp(),
@@ -215,6 +216,7 @@ class AppleFMProvider:
         }
         return {
             "action_status": ActionStatus.ERROR.value,
+            "actions": [],
             "data": data,
             "error": error,
             "timestamp": _timestamp(),
@@ -375,6 +377,7 @@ class AppleFMProvider:
         )
         return {
             "action_status": ActionStatus.COMPLETED.value,
+            "actions": [],
             "data": {
                 "result": {
                     "completion": completion,
@@ -404,6 +407,7 @@ class AppleFMProvider:
         data = availability.get("data", {})
         return {
             "action_status": ActionStatus.COMPLETED.value,
+            "actions": [],
             "data": {
                 "model_name": self.model,
                 "provider": "apple_fm",

@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ananta.core.config.config_provider import ConfigProvider
-from ananta.core.domain.enums import ActionStatus
-from ananta.core.domain.types import ActionResult
+from ananta.core.domain.enums import ActionStatus, ErrorSeverity
+from ananta.core.domain.types import ActionResult, ErrorDetail
 from ananta.core.plans import (
     advance_plan_markers,
     normalize_content,
@@ -100,6 +100,37 @@ if TYPE_CHECKING:
     from ananta.services.context_management.service import ContextManagementService
 
 logger = logging.getLogger(__name__)
+
+
+def _lifecycle_completed() -> ActionResult:
+    """Build the completed ActionResult every lifecycle hook returns."""
+    return {
+        "action_status": ActionStatus.COMPLETED.value,
+        "data": {},
+        "actions": [],
+        "error": None,
+        "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+    }
+
+
+def _lifecycle_refusal(plugin_name: str) -> ActionResult:
+    """Build the error ActionResult for a stop refused while this plugin is the active interface."""
+    stamp = datetime.datetime.now(datetime.UTC).isoformat()
+    error: ErrorDetail = {
+        "type": "ThinkingLifecycleError",
+        "code": "default_thinking.stop_refused_active_interface",
+        "message": "Cannot stop services while this plugin is the active interface provider",
+        "details": {"plugin_name": plugin_name},
+        "severity": ErrorSeverity.ERROR.value,
+        "timestamp": stamp,
+    }
+    return {
+        "action_status": ActionStatus.ERROR.value,
+        "data": {},
+        "actions": [],
+        "error": error,
+        "timestamp": stamp,
+    }
 
 
 # Plan window construction is now in ``ananta.core.plans.windowing``.
@@ -688,20 +719,20 @@ class DefaultThinkingPlugin(ServicePlugin):
     async def start_services(self) -> ActionResult:
         """Start services. Thinking plugin is stateless — just mark as started."""
         if self._services_started:
-            return {"action_status": ActionStatus.COMPLETED.value}
+            return _lifecycle_completed()
         self._services_started = True
         self.logger.debug(f"{self.name}: services started")
-        return {"action_status": ActionStatus.COMPLETED.value}
+        return _lifecycle_completed()
 
     async def stop_services(self) -> ActionResult:
         """Stop services. Thinking plugin holds no connections."""
         if not self._services_started:
-            return {"action_status": ActionStatus.COMPLETED.value}
+            return _lifecycle_completed()
         if self.is_active_interface_provider():
-            return {"action_status": ActionStatus.ERROR.value}
+            return _lifecycle_refusal(self.name)
         self._services_started = False
         self.logger.debug(f"{self.name}: services stopped")
-        return {"action_status": ActionStatus.COMPLETED.value}
+        return _lifecycle_completed()
 
     def _acquire_context_services(self) -> None:
         """Try to acquire context management services. Non-fatal if unavailable."""
@@ -4468,6 +4499,8 @@ class DefaultThinkingPlugin(ServicePlugin):
                 "planning_status": "in_progress",
                 "actions_submitted": len(submitted),
             },
+            "error": None,
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
         }
 
     def _finalize_playbook(
@@ -4550,6 +4583,9 @@ class DefaultThinkingPlugin(ServicePlugin):
                 "kb_written": bool(plan_kb_path),
                 "planning_status": "completed",
             },
+            "actions": [],
+            "error": None,
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
         }
 
     def _retire_old_plan(self, playbook_id: str) -> None:

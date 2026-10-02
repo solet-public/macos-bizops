@@ -2,6 +2,99 @@
 
 Newest release first. Earlier releases follow below the divider.
 
+## 2026-10-02 — r71: an update changes an inherited Core AI `gpu` setting to `cpu`, a deploy no longer holds up queued actions, and the ledger embedding drain no longer stalls
+
+**Solet Manager manager-v0.1.0-r71.**
+
+A solet on stable r69 can update to r71. r70 made the r69 stable head `3bfd5670` a supported predecessor (see the r70 entry), and r71 is the first
+stable release that carries that change, so a solet on r69 is no longer refused with `predecessor_unsupported`.
+
+**What changes on a solet that updates.**
+
+- **An update changes a solet's Core AI compute preference from `gpu` to `cpu`.** r65 made `cpu` the default for Core AI configs it newly writes and said a solet that already had `gpu` keeps it; this supersedes that. Core AI's GPU path leaks one IOSurface per embedding and kills the solet's process at about 16.3k embeds (`iss_f3e65e52`), so a solet that took `gpu` from r64 still crashed under any large re-index (`iss_34f1e3c7`). When the Core AI config reads `compute_preference: gpu`, `solet-manager update <name> --dry-run` now lists one planned file write on that config, shown by its id `plugin_transition.embedding_service.openai_to_coreai.v1.compute_preference`, so the approval fingerprint covers it. The update then replaces only that value in place, after the Manager's backup, keeping formatting, every other key and the file mode. If the value cannot be safely replaced in place (the key is not matched exactly once, or the one match is not the top-level key), the update re-renders the file in the release's form, still keeping every other key and the file mode. A solet with an unused old embeddings plugin still listed gets the config write and the roster removal in one plan. A transition that is refused still writes nothing and defers. When a solet serving embeddings through Core AI is still on `gpu`, `solet-manager doctor` says so in plain words in its `plugin_transitions` row and names the crash risk. For a pending rewrite or cleanup it says the next update changes the config to `cpu`. For a refused transition it says the config becomes `cpu` once the refusal is resolved. The config cannot tell r64's default from a deliberate choice, so every `gpu` is rewritten, and an owner who wants `gpu` sets it again after the update. A solet already on r65 through r69 takes the change with the update that carries it.
+- **The session-ledger embedding drain no longer stops advancing because of one event.** An event that had to be embedded a second time, as
+  happens when the embedding provider's chunk size changes, left a soft-deleted vector row holding its id. The embeddings table keeps one row
+  per `external_id` whether or not it is deleted, so storing the replacement failed, the drain's cursor stopped on that page, and every
+  later heartbeat failed the same way (`iss_6aa96266`). The vector delete by `external_id` now removes the rows outright, so a replacement
+  can be stored. This is a change to the pgvector service plugin and its RDS variant, and `actr_memory_plugin` uses the same delete, so a
+  vector it removes by id is deleted rather than marked deleted. Separately, one event that still fails to embed is now skipped: the solet's log
+  carries a WARNING that names its `event_id`, the drain's result counts it in the new `events_failed`, and the event stays un-embedded for
+  the periodic reconciliation sweep to retry. A page whose failure is the embedder being down still halts without advancing the cursor,
+  and the drain tells the two apart by embedding a short probe text after a failure. A chunk-policy backfill sweep that skipped an event is
+  not recorded as complete, so it repeats on the next fire. A solet whose recorded chunk policy differs from the current one, which is what
+  a drain stuck in that backfill has, takes a one-time catch-up on its first drain after the update: the sweep re-checks every ledger event
+  and re-embeds those whose stored chunks differ, which can take a while on a large ledger. A solet whose recorded policy already matches
+  has no catch-up.
+- **A plugin result that lacked contract fields now carries them.** Every plugin result is meant to carry `action_status`, `data`, `actions`,
+  `error` and `timestamp`. The OpenAI and Titan embeddings verbs, the postgres and RDS state helpers, the Salesforce `probe_cli` result, the
+  thinking plugin's planning results, the lifecycle hooks of the default knowledge and default thinking plugins, the LM Studio provider
+  and inference plugin results, the Apple FM provider's results, and the `g_suite_plugin` start-service results built results without
+  some of them, and the ActionProcessor's plugin-contract check refused those (`iss_dae31745`). Each builder now fills all five. The default
+  knowledge and default thinking plugins also answer a refused stop, while they are the active interface provider, with an error that carries
+  the code `default_knowledge.stop_refused_active_interface` or `default_thinking.stop_refused_active_interface` and a message, where the
+  result was a bare `error` status before.
+- **The bound embedding service's embed and dimension verbs can be found.** `service_interface::embedding_service::generate_embeddings` and
+  `service_interface::embedding_service::get_embedding_dimension` were not discoverable, so a search over the platform's processes listed only
+  the provider-named `plugin::openai_embeddings_plugin::*` actions, which reach the LM Studio path and not the provider the solet is bound
+  to (`iss_5fdedd1c`). Both are now discoverable, their descriptions and return schema name the model id, the vector dimension and the five
+  contract fields, and a refusal from the bound Core AI provider now carries a `data` field like every other result.
+
+**The solet runs better afterwards.**
+
+- **A blue-green deploy no longer holds up every queued action.** `apply_manifest`, `restart_with_manifest`, `rollback_release` and
+  `cutover_release` ran inside the action queue's serial dispatch loop, so every other queued action waited for the whole build and swap.
+  The loop now starts them as a background task, one at a time, and keeps dispatching; a second deploy row stays queued until the running
+  one finishes. `solet-bridge health` now names a running deploy in its `action_path` block
+  (`detached_deploy_action_id`, `detached_deploy_process_key`, `detached_deploy_started_at`, `detached_deploy_age_seconds`). Past 1800 seconds
+  the status reads `degraded`, `action_path_stalled` is true and the solet's log carries `DEPLOY_STALLED` at ERROR, repeated every 1800
+  seconds. The orphan reaper skips the deploy this process is running only up to 7200 seconds, then fails its row loudly
+  (`ORPHAN_REAP_FAILED`).
+- **A booting colour's starting actions are claimable only by that instance.** With the deploy running off the loop, the old colour could
+  claim the candidate's `start_interface` and answer `bridge.already_running`, so the candidate never bound a bridge and the swap ended
+  `register_timeout`, and the candidate, before the router named it active, could claim the live colour's `peer_inbox` and `deliver_result`
+  rows and fail them `bridge.not_running` (`iss_faf5802c`). A starting action now carries an `instance:<id>` entry in its existing
+  `excluded_versions` column, so no schema changes, and only the process whose id it names may claim it. A router-backed instance claims only
+  rows pinned to itself until the router names it active, and the macOS deploy plugin releases that restriction at that point. A row pinned
+  to another instance that is still queued after an hour is failed and logged as `PINNED_ROW_ABANDONED`. This fix exists because of the
+  detached deploy above, and both are in r71.
+
+**Release and developer tooling.** The first two items concern the checkout that gates and publishes releases. The last two change
+`solet-bridge` commands that a solet's sessions run.
+
+- **The shipped-smoke contract lint gate also checks every capability profile.** It now runs the per-profile source-tree detector and blocks on
+  any row that is not in its allowlist, which is empty, so an undeclared dependency of a shipped smoke fails at the commit gate and not at
+  publish. One shipped smoke changed with it: `plugins/postgres_state_management_plugin/tests/schema_diff_nullability_relaxation_smoke.py`
+  imported `macos_self_deployment_plugin` unconditionally, and `macos_free_minimal` does not ship that plugin. Its blue-green preflight leg
+  now runs where the plugin is present and prints a `SKIP` line where it is not.
+- **`publish_release` resolves `guest_validation.ladder_profile`.** A profile name now resolves through a declared recipe table, which holds
+  `fresh-oci-macos-bizops`, and an undeclared name is refused at the first stage with `ladder_inputs_unresolved`. A guest base that measures
+  differently from the recipe's pin is refused with `ladder_inputs_invalid`. The ladder mounts the host model cache read-only and checks every
+  copied model file against its sha256 pin. When the cache has no entry it stops before the models stage and records `skipped_model_cache_missing`
+  with a WARNING; that is not a pass, so the fresh-guest stage refuses with `guest_validation_failed`, and the same validation resumes once the
+  cache is filled.
+- **`solet-bridge` reads a role inbox and a role's ownership on routes that do not wait for the action queue.** `peer_holds_role` and
+  `peer_inbox` were reachable from a caller with no registered bridge only through the serial action queue, which a deploy can hold for
+  minutes (`iss_d97f6633`). `solet-bridge inbox` and the new `solet-bridge holds-role --name <role> --instance-id <id>` now read
+  `GET peer/inbox_for_session` and `GET peer/holds_role` on the running solet's bridge. The verbs' results are unchanged, and `holds-role`
+  adds `instance_registered` and `session_label`. A refusal or an unreachable bridge is an error and never an empty inbox or a "not held".
+  The routes belong to the running solet, so a solet still running a process that predates the update answers 404 to these two commands. The
+  update's runtime stage (`solet-manager update <name> --yes --approval-fingerprint <fingerprint>`) restarts the solet, by a router cutover or
+  by restarting the instance LaunchAgent, and attests the running process before the update finishes, so a completed update does not leave
+  this state. It lasts only from the source stage's `--yes`, which replaces the files, until the runtime stage's restart, and on a clone
+  updated by hand and not restarted.
+- **`solet-bridge inbox --observer --include-covered --since <ISO-8601>` reads a role's inbox without its covered-mark floor.** The default
+  read hid every row at or before the mark any reader had advanced, including the mark's own row, so a caller that must see every row, such
+  as an authorization check, missed rows (`iss_ac0625ee`). `include_covered` works only with
+  `--observer`. It also requires `--since`, which stops the walk at the first row at or before that time so the read stays bounded as the
+  role's history grows. The command reports a page that still comes back floored as a fault. The covered mark, the default drain and the
+  pending count are unchanged. The `peer_inbox` process takes the same `include_covered` argument.
+
+## 2026-10-01 — r70: a solet on stable r69 can update
+
+**Solet Manager manager-v0.1.0-r70.**
+
+- **A solet on stable r69 can update to r70.** The update flow listed stable seeds r43 through r65 as supported predecessors and not the r69 stable head `3bfd5670`, so a solet or a pre-Manager plain clone on r69 was refused with `predecessor_unsupported`, and the next stable publish refused with `stable_head_not_supported_predecessor`. That head is now a supported predecessor and an anchor in the Manager's reviewed table, so a solet at r69 imports and updates.
+
 ## 2026-10-01 — r69: a solet on stable r65 can update
 
 **Solet Manager manager-v0.1.0-r69.**

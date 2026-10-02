@@ -3,6 +3,7 @@ import logging
 from datetime import UTC, datetime
 
 from ananta.constants import NOTES_MAX_LENGTH
+from ananta.core.actions.instance_pin import CLAIM_PIN_KEY, pinned_entries
 from ananta.core.actions.payload_bounds import check_action_parameters_size
 from ananta.core.contexts.normalization import normalize_flow_id, normalize_session_id
 from ananta.core.domain.types import ActionResult
@@ -169,10 +170,30 @@ class ActionEventRecorder(IActionEventRecorder):
         # whose action queue pollers must skip the row. NULL/absent on every
         # action that doesn't need version targeting (backward compatible).
         excluded_versions = action.get("excluded_versions")
+        claim_pin = action.get(CLAIM_PIN_KEY)
+        if claim_pin is not None:
+            excluded_versions = self._pin_entries(claim_pin, excluded_versions)
         if excluded_versions is not None:
             action_data["excluded_versions"] = json.dumps(excluded_versions)
 
         return action_data
+
+    @staticmethod
+    def _pin_entries(claim_pin: object, excluded_versions: object) -> list[object]:
+        """``excluded_versions`` for a row pinned to ``claim_pin`` (``instance_pin``)."""
+        if not isinstance(claim_pin, str) or not claim_pin:
+            raise FrameworkError(
+                message=f"{CLAIM_PIN_KEY} must be a non-empty instance id",
+                error_code="action_recorder.invalid_claim_pin",
+                details={CLAIM_PIN_KEY: claim_pin},
+            )
+        if excluded_versions is not None and not isinstance(excluded_versions, list):
+            raise FrameworkError(
+                message="excluded_versions must be a list to carry an instance pin",
+                error_code="action_recorder.invalid_excluded_versions",
+                details={"excluded_versions": excluded_versions},
+            )
+        return [*(excluded_versions or []), *pinned_entries(claim_pin)]
 
     def _extract_generated_id(self, result: ActionResult) -> str:
         data = result.get("data", {})

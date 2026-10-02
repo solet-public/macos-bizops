@@ -71,14 +71,14 @@ from agent_messaging_plugin.local_cli.wake import (  # noqa: E402
     _compose_wake_packet,
 )
 from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
-from agent_messaging_plugin.peer_dispatch import IMPORTANT_MARKER_RE  # noqa: E402
-from agent_messaging_plugin.peer_registry import PeerRegistry  # noqa: E402
-from agent_messaging_plugin.plugin import (  # noqa: E402
+from agent_messaging_plugin.peer_direct_reads import (  # noqa: E402
     PEER_INBOX_DEFAULT_LIMIT,
     PEER_INBOX_MAX_LIMIT,
     PEER_INBOX_MIN_LIMIT,
-    AgentMessagingPlugin,
 )
+from agent_messaging_plugin.peer_dispatch import IMPORTANT_MARKER_RE  # noqa: E402
+from agent_messaging_plugin.peer_registry import PeerRegistry  # noqa: E402
+from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
 from agent_messaging_plugin.role_binding_store import (  # noqa: E402
     HolderClaim,
     claim_role_binding_v4,

@@ -60,6 +60,7 @@ from .bridge_sessions import (
     BridgeNotFoundError,
     BridgeQueueFullError,
     BridgeSessionManager,
+    bridge_allows_process,
 )
 from .operator_codex_registration import (
     OperatorClaudeRegistration,
@@ -68,6 +69,13 @@ from .operator_codex_registration import (
     claude_operator_tmux_host_ref,
     register_operator_claude_host,
     register_operator_codex_host,
+)
+from .peer_direct_reads import (
+    PEER_HOLDS_ROLE_PROCESS_KEY,
+    PEER_INBOX_PROCESS_KEY,
+    PeerInboxReadRefusedError,
+    read_holds_role,
+    read_peer_inbox_for_session,
 )
 from .peer_dispatch import (
     EVENT_PEER_MESSAGE,
@@ -92,10 +100,11 @@ from .peer_registry import (
     PeerSessionAmbiguousError,
     PeerUnreachableError,
 )
-from .platform_surface import BridgeError, PlatformSurface
+from .platform_surface import ERR_PROCESS_NOT_ALLOWED, BridgeError, PlatformSurface
 from .role_binding_store import (
     UNCLAIMED_SESSION_ID,
     ResolvedRole,
+    RoleBindingMalformedError,
     RoleBindingVacantError,
     holds_role,
     list_roles_for_agent_instance,
@@ -368,6 +377,13 @@ def register_routes(
         app,
         platform_surface=platform_surface,
         bridge_manager=bridge_manager,
+    )
+    _register_direct_read_routes(
+        app,
+        bridge_manager=bridge_manager,
+        peer_registry=peer_registry,
+        agent_messaging_service=agent_messaging_service,
+        state_service=state_service,
     )
     _register_peer_routes(
         app,
@@ -832,6 +848,134 @@ def _effective_registration_agent_session_id(
     if stored_agent_session_id and stored_agent_session_id != UNCLAIMED_SESSION_ID:
         return stored_agent_session_id
     return incoming_agent_session_id
+
+
+# ---------------------------------------------------------------------------
+# Direct reads: the two act-time reads of Git-Controller's landing path
+# ---------------------------------------------------------------------------
+#
+# ROUTE POLICY (iss_d97f6633). ``peer_holds_role`` and ``peer_inbox`` are
+# platform processes, so a caller with no registered bridge reaches them only
+# through ``process/call`` — the serial action queue, which a deploy or a slow
+# ``peer_send_by_name`` holds for minutes. These two GET routes serve the SAME
+# reads (one shared function each, ``peer_direct_reads``) without the queue.
+# They are held to the policy of the process they stand in for:
+#
+# * The bridge is resolved exactly as ``process_call_route`` resolves it
+#   (``bridge_manager.get``); an unknown or closed bridge is refused 404.
+# * The per-session allowlist (M5 §14.5) is ``bridge_allows_process`` — the one
+#   function ``process/call`` also uses — applied to the stood-in process key.
+#   A stdio bridge (``client_id == ""``, every ``solet-bridge`` one-shot) has no
+#   allowlist, exactly as on ``process/call``; an OAuth-bound bridge must carry
+#   the process key or is refused 403, never silently allowed.
+# * Both routes are MODEL_INITIATED in ``route_activity`` (as ``process/call``
+#   is), so behaviour is neutral; moving them to INFRA is a separate choice.
+# * Neither route caches, writes a table, or registers the caller: an
+#   unregistered one-shot bridge reads without touching its own registry row.
+# * The process export policy (``ProcessExportPolicy``) is NOT consulted: these
+#   are bridge routes like ``peer/inbox`` and ``peer/list``, not process exports.
+
+
+def _refuse_unresolvable_or_disallowed_bridge(
+    bridge_manager: BridgeSessionManager,
+    bridge_id: str,
+    process_key: str,
+) -> JSONResponse | None:
+    """The route policy above: ``None`` when the bridge may make this read."""
+    bridge = bridge_manager.get(bridge_id)
+    if bridge is None or bridge.closed:
+        return _bridge_not_found(bridge_id)
+    if not bridge_allows_process(bridge, process_key):
+        return _bridge_error_response(
+            BridgeError(
+                ERR_PROCESS_NOT_ALLOWED,
+                f"Process {process_key} is not in the bridge session's "
+                "per-session allowlist",
+            ),
+        )
+    return None
+
+
+def _register_direct_read_routes(
+    app: FastAPI,
+    *,
+    bridge_manager: BridgeSessionManager,
+    peer_registry: PeerRegistry,
+    agent_messaging_service: Any,
+    state_service: Any | None,
+) -> None:
+    @app.get(f"{API_PREFIX}/{{bridge_id}}/peer/holds_role")
+    async def peer_holds_role_route(
+        bridge_id: str,
+        name: str = "",
+        agent_instance_id: str = "",
+    ) -> JSONResponse:
+        refusal = _refuse_unresolvable_or_disallowed_bridge(
+            bridge_manager, bridge_id, PEER_HOLDS_ROLE_PROCESS_KEY,
+        )
+        if refusal is not None:
+            return refusal
+        role_name = name.strip()
+        instance_id = agent_instance_id.strip()
+        if not role_name or not instance_id:
+            return _validation_error(
+                "missing_argument",
+                "peer/holds_role requires non-empty 'name' and 'agent_instance_id'.",
+            )
+        if state_service is None:
+            return _state_unavailable("state_service is not bound on this solet.")
+        try:
+            read = await asyncio.to_thread(
+                read_holds_role,
+                state_service,
+                peer_registry,
+                bridge_manager,
+                name=role_name,
+                agent_instance_id=instance_id,
+            )
+        except RoleBindingMalformedError as exc:
+            # A data fault must surface, never read as "not held" (holds_role).
+            return JSONResponse(
+                content={"code": "role_binding_malformed", "message": str(exc)},
+                status_code=500,
+            )
+        return JSONResponse(content=read.route_data(), status_code=200)
+
+    @app.get(f"{API_PREFIX}/{{bridge_id}}/peer/inbox_for_session")
+    async def peer_inbox_for_session_route(
+        bridge_id: str,
+        agent_session_id: str = "",
+        observer: bool = False,
+        limit: int | None = None,
+        after: str | None = None,
+        role_after: str | None = None,
+        include_covered: bool = False,
+    ) -> JSONResponse:
+        refusal = _refuse_unresolvable_or_disallowed_bridge(
+            bridge_manager, bridge_id, PEER_INBOX_PROCESS_KEY,
+        )
+        if refusal is not None:
+            return refusal
+        try:
+            page = await asyncio.to_thread(
+                read_peer_inbox_for_session,
+                {
+                    "agent_session_id": agent_session_id,
+                    "observer": observer,
+                    "limit": limit,
+                    "after": after,
+                    "role_after": role_after,
+                    "include_covered": include_covered,
+                },
+                peer_registry=peer_registry,
+                service=agent_messaging_service,
+            )
+        except PeerInboxReadRefusedError as exc:
+            return JSONResponse(
+                content={"code": exc.code, "message": exc.message},
+                status_code=exc.http_status,
+            )
+        return JSONResponse(content=page, status_code=200)
 
 
 def _register_peer_routes(
