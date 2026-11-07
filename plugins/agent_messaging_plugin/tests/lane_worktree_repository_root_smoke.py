@@ -21,6 +21,7 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _real_state_fake import RealShapeState  # noqa: E402
+from _register_unit_double import FIXTURE_UNIT_ID, RegisterUnitDouble, fixture_assignment  # noqa: E402
 from ananta.interfaces.state_management_interface import StateManagementInterface  # noqa: E402
 
 import agent_messaging_plugin.session_lifecycle_verbs as lifecycle_verbs  # noqa: E402
@@ -29,6 +30,7 @@ from agent_messaging_plugin.lane_worktrees import (  # noqa: E402
     LaneWorktree,
     LaneWorktreeSweep,
 )
+from agent_messaging_plugin.register_unit_client import RegisterActor  # noqa: E402
 from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
     ManagedSessionSpec,
     insert_managed_session,
@@ -49,7 +51,7 @@ def _request(repository_root: Path) -> SpawnSessionRequest:
     return SpawnSessionRequest(
         role_class="ephemeral",
         lane_id="foreign-lane",
-        brief_ref="workbench/foreign.md",
+        unit_id=FIXTURE_UNIT_ID, assignment=fixture_assignment(),
         work_class="analysis_deliverable",
         budget_line="foreign-root-proof",
         host="operator",
@@ -119,7 +121,7 @@ def _assert_cross_repository_provision_and_retire() -> None:
                 ManagedSessionSpec(
                     agent_instance_id="agi-foreign",
                     lane_id="foreign-lane",
-                    brief_ref="workbench/foreign.md",
+                    assignment=fixture_assignment(),
                     work_class="analysis_deliverable",
                     budget_line="foreign-root-proof",
                     host="operator",
@@ -190,13 +192,13 @@ def _assert_spawn_session_wires_resolved_root() -> None:
             lifecycle_verbs._dispatch_first_turn = (  # type: ignore[assignment]  # noqa: SLF001
                 lambda *_args, **_kwargs: ("fallback", True, "")
             )
-            spawned = spawn_session(state, _request(foreign_root))
+            spawned = spawn_session(state, _request(foreign_root), register=RegisterUnitDouble(), actor=RegisterActor("agi-coordinator", "ases-agi-coordinator", "Coordinator-Main", "fixture-lane"))
             row = read_managed_session(state, str(spawned["agent_instance_id"]))
             assert row["lane_repo_root"] == str(foreign_root), row
 
             lifecycle_verbs._provisioned_lane_repo_root = lambda _worktree: ""  # type: ignore[assignment]  # noqa: SLF001
             mutant_request = replace(_request(foreign_root), lane_id="foreign-mutant")
-            mutant = spawn_session(state, mutant_request)
+            mutant = spawn_session(state, mutant_request, register=RegisterUnitDouble(), actor=RegisterActor("agi-coordinator", "ases-agi-coordinator", "Coordinator-Main", "fixture-lane"))
             mutant_row = read_managed_session(state, str(mutant["agent_instance_id"]))
             try:
                 assert mutant_row["lane_repo_root"] == str(foreign_root), mutant_row

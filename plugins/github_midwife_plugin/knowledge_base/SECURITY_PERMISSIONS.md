@@ -132,8 +132,8 @@ An item with no declared System Settings pane or denial behavior says so explici
 
 - WHAT: Configure Codex MCP access
 - WHY: Authorize the Genesis append to ~/.codex/config.toml that registers this solet as a Codex MCP server.
-- WHEN: Always required.
-- WHAT DENIAL DOES: Decline state: `blocked`. Genesis does not run because every profile installs the named no-MCP launcher and its Codex MCP configuration together.
+- WHEN: When `coding_agents` contains `codex`.
+- WHAT DENIAL DOES: Decline state: `blocked`. Genesis pauses when Codex is selected because its MCP configuration requires consent. Claude Code alone needs no Codex configuration.
 - SYSTEM SETTINGS PANE: Not applicable (consent, not a macOS permission entry).
 - GRANT ACTOR: operator (explicit assent)
 

@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Read-only statement guard smoke tests for snowflake_plugin.
+"""Snowflake statement validation smoke tests for snowflake_plugin.
 
 Hermetic — pure functions, no connection needed. Red-first: every check
-asserts REAL behavior of the leader classification. This guard is FAST-FAIL
-ONLY (§1 of the KB overview) — it is not the write boundary (there is no
-Snowflake session-level read-only flag); the true boundary is the
-operator-granted read-only role, which cannot be exercised hermetically.
+asserts REAL behavior of input validation. The validator rejects malformed
+input, then passes statements through; Snowflake vendor RBAC is the access
+boundary and cannot be exercised hermetically.
 
 Exercises:
-  1. Read leaders (SELECT/SHOW/DESCRIBE/DESC/EXPLAIN/WITH) all pass
+  1. Query leaders (SELECT/SHOW/DESCRIBE/DESC/EXPLAIN/WITH) all pass
   2. Write/DDL leaders (INSERT/UPDATE/DELETE/MERGE/CREATE incl. TEMPORARY,
-     PUT/GET/COPY/CALL/USE) all refuse with snowflake.read_only_violation
+     PUT/GET/COPY/CALL/USE) all pass through
   3. Comment-led input is refused outright (fail loud, no stripping)
   4. A leading parenthesis is tolerated ("(SELECT ...)")
   5. Empty / whitespace-only input refused with snowflake.invalid_params
@@ -58,7 +57,7 @@ def _refused(sql: str) -> str:
     return ""
 
 
-def test_read_leaders_pass() -> None:
+def test_query_leaders_pass() -> None:
     for sql in (
         "SELECT * FROM t",
         "SHOW TABLES",
@@ -68,10 +67,10 @@ def test_read_leaders_pass() -> None:
         "WITH cte AS (SELECT 1) SELECT * FROM cte",
     ):
         code = _refused(sql)
-        _assert(f"read leader admitted: {sql.split()[0]}", code == "", code)
+        _assert(f"query leader admitted: {sql.split()[0]}", code == "", code)
 
 
-def test_write_leaders_refused() -> None:
+def test_write_leaders_pass_through() -> None:
     for sql in (
         "INSERT INTO t VALUES (1)",
         "UPDATE t SET x = 1",
@@ -86,11 +85,7 @@ def test_write_leaders_refused() -> None:
         "USE DATABASE d",
     ):
         code = _refused(sql)
-        _assert(
-            f"write/DDL leader refused: {sql.split()[0]}",
-            code == "snowflake.read_only_violation",
-            code,
-        )
+        _assert(f"write/DDL leader passed: {sql.split()[0]}", code == "", code)
 
 
 def test_comment_led_refused() -> None:
@@ -115,8 +110,8 @@ def test_empty_input_refused() -> None:
 def main() -> int:
     print("\nsnowflake_plugin statement-guard smoke tests")
     print("=" * 47)
-    test_read_leaders_pass()
-    test_write_leaders_refused()
+    test_query_leaders_pass()
+    test_write_leaders_pass_through()
     test_comment_led_refused()
     test_leading_parenthesis_tolerated()
     test_empty_input_refused()

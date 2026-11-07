@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "ananta" / "src"))
 sys.path.insert(0, str(ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -86,9 +87,14 @@ _CHEAPEST_USD = 0.01
 def _cell(row: tuple[str, str, str, float, float | None], *, measured_at: datetime = _MEASURED, acceptance: str = "accepted") -> CapabilityCell:
     runtime, model, effort, score, usd = row
     return CapabilityCell(
-        runtime=runtime, model=model, effort=effort, capability_score=score, cost_per_task_usd=usd,
+        runtime=runtime,
+        model=model,
+        effort=effort,
+        capability_score=score,
+        cost_per_task_usd=usd,
         relative_cost_multiplier=None if usd is None else round(usd / _CHEAPEST_USD),
-        measured_at=measured_at, acceptance=acceptance,
+        measured_at=measured_at,
+        acceptance=acceptance,
     )
 
 
@@ -148,32 +154,13 @@ def test_cheap_model_effort_is_exhausted_before_switching() -> None:
     _check(_named(picked.selected) == "gpt-5.6-luna@xhigh", "score 35: luna xhigh ($0.09) wins before any model switch")
 
 
-def test_exhausted_vendor_fails_over_and_unknown_quota_never_excludes() -> None:
-    quotas = {cell.pair: "available" for cell in CATALOG}
-    quotas[("codex", "gpt-5.6-luna")] = "exhausted"
-    fallback = select_tier(
-        CATALOG, required_score=35, objective="metered_usd", now=_NOW, max_age=_WINDOW,
-        quota_status_by_pair=quotas,
-    )
-    _check(_named(fallback.selected) == "gpt-5.6-sol@medium", "exhausted cheapest vendor/model falls back to next cheapest clearing cell")
-    _check(fallback.excluded["quota_exhausted"] == 5, "all exhausted-model cells are counted")
-    unknown = {cell.pair: "unknown" for cell in CATALOG}
-    unrestricted = select_tier(CATALOG, required_score=35, objective="metered_usd", now=_NOW, max_age=_WINDOW)
-    all_unknown = select_tier(
-        CATALOG, required_score=35, objective="metered_usd", now=_NOW, max_age=_WINDOW, quota_status_by_pair=unknown,
-    )
-    _check(
-        _named(all_unknown.selected) == _named(unrestricted.selected) and "quota_unknown" not in all_unknown.excluded,
-        "an unknown quota state excludes nothing: the answer is the unrestricted one",
-    )
-    exhausted = {cell.pair: "exhausted" for cell in CATALOG}
-    _check(
-        _code(lambda: select_tier(
-            CATALOG, required_score=35, objective="metered_usd", now=_NOW, max_age=_WINDOW,
-            quota_status_by_pair=exhausted,
-        )) == "no_cell_clears_threshold",
-        "a catalog that is known exhausted everywhere still refuses",
-    )
+def test_quota_is_not_a_selection_input() -> None:
+    import inspect
+
+    chosen = select_tier(CATALOG, required_score=35, objective="metered_usd", now=_NOW, max_age=_WINDOW)
+    _check(_named(chosen.selected) == "gpt-5.6-luna@xhigh", "enabled cheapest cell remains selected without quota admission")
+    _check("quota_status_by_pair" not in inspect.signature(select_tier).parameters, "quota admission input removed without a shim")
+    _check(not any("quota" in key for key in (*chosen.excluded, *chosen.advisories)), "quota fields removed from selector output")
 
 
 def test_objectives_and_margins() -> None:
@@ -197,18 +184,82 @@ def test_near_tie_prefers_lower_effort() -> None:
 
 def test_refusals_are_distinct() -> None:
     _check(_code(lambda: select_tier((), required_score=1, objective="metered_usd", now=_NOW, max_age=_WINDOW)) == "catalog_empty", "empty catalog refuses")
-    stale = tuple(_cell(row, measured_at=_NOW - timedelta(days=30)) for row in _TABLE)
-    _check(_code(lambda: select_tier(stale, required_score=1, objective="metered_usd", now=_NOW, max_age=_WINDOW)) == "catalog_stale", "all-stale catalog refuses as stale, not as impossible")
     pending = tuple(_cell(row, acceptance="pending_crosscheck") for row in _TABLE)
-    _check(_code(lambda: select_tier(pending, required_score=1, objective="metered_usd", now=_NOW, max_age=_WINDOW)) == "catalog_stale", "un-cross-checked cells are never served")
+    _check(_code(lambda: select_tier(pending, required_score=1, objective="metered_usd", now=_NOW, max_age=_WINDOW)) == "catalog_unaccepted", "un-cross-checked cells are never served")
     _check(_code(lambda: select_tier(CATALOG, required_score=99, objective="metered_usd", now=_NOW, max_age=_WINDOW)) == "no_cell_clears_threshold", "impossible threshold refuses distinctly")
     _check(_code(lambda: select_tier(CATALOG, required_score=1, objective="metered_usd", now=_NOW, max_age=_WINDOW, score_margin=-1)) == "parameter_invalid", "negative margin refuses")
+
+
+def test_unknown_effort_row_is_excluded_not_raised() -> None:
+    """Brief U3 / design G9: an effort outside EFFORT_ORDER (Codex ``ultra``) is excluded and counted, never raised."""
+    base = select_tier(CATALOG, required_score=45, objective="metered_usd", now=_NOW, max_age=_WINDOW)
+    ultra = _cell(("codex", "gpt-6-astra", "ultra", 70, 0.01))
+    with_ultra = select_tier((*CATALOG, ultra), required_score=45, objective="metered_usd", now=_NOW, max_age=_WINDOW)
+    _check(_named(with_ultra.selected) == _named(base.selected), "a catalog with an ultra row still selects the same cell as without it")
+    _check(with_ultra.excluded["unknown_effort"] == 1, "the ultra row is counted under excluded['unknown_effort']")
+    _check(with_ultra.unknown_effort_cells == ("codex/gpt-6-astra@ultra",), "the ultra row is named in unknown_effort_cells")
+    _check(base.excluded["unknown_effort"] == 0 and base.unknown_effort_cells == (), "a catalog with no unknown effort counts and names none")
+    _check(with_ultra.dominated == base.dominated and with_ultra.frontier == base.frontier, "the ultra row joins neither the frontier nor the dominations")
+    _check(
+        [(step.to_effort, step.points_per_cost_unit) for step in with_ultra.ladder] == [(step.to_effort, step.points_per_cost_unit) for step in base.ladder],
+        "the selected model's ladder is unchanged by an ultra row on the same model",
+    )
+    _check(
+        _code(lambda: select_tier((*CATALOG, ultra), required_score=60, objective="metered_usd", now=_NOW, max_age=_WINDOW)) == "no_cell_clears_threshold",
+        "an ultra row that would clear the bar is never selected: the refusal is the ordinary one",
+    )
+    _check(
+        _code(lambda: select_tier((ultra,), required_score=1, objective="metered_usd", now=_NOW, max_age=_WINDOW)) == "catalog_unknown_effort",
+        "a catalog whose every cell is unknown-effort refuses distinctly",
+    )
+
+
+def test_stale_readings_never_block_selection() -> None:
+    """rul_becb4bed regression: with every reading older than the window the best cell is still chosen, and the ages ride the answer."""
+    fresh = select_tier(CATALOG, required_score=45, objective="metered_usd", now=_NOW, max_age=_WINDOW)
+    _check(fresh.advisories["stale_reading_used"] == 0 and fresh.stale_readings == (), "fresh readings raise no stale advisory")
+    aged_at = _NOW - timedelta(days=30)
+    aged = tuple(_cell(row, measured_at=aged_at) for row in _TABLE)
+    picked = select_tier(aged, required_score=45, objective="metered_usd", now=_NOW, max_age=_WINDOW)
+    _check(_named(picked.selected) == _named(fresh.selected), "an all-stale catalog selects the same best feasible cell as a fresh one")
+    _check(picked.advisories["stale_reading_used"] > 0, "stale readings are counted in the advisories")
+    _check("stale" not in picked.excluded, "age is not an exclusion class")
+    _check(
+        all(reading.age_hours == 30 * 24 and reading.window_hours == 7 * 24 and reading.measured_at == aged_at for reading in picked.stale_readings),
+        "every stale reading reports its measured_at, age in hours and the window",
+    )
+    _check(
+        [reading for reading in picked.stale_readings if reading.selected] != [] and sum(reading.selected for reading in picked.stale_readings) == 1,
+        "exactly one stale reading is flagged as the selected cell's",
+    )
+    _check(len(picked.stale_readings) == picked.advisories["stale_reading_used"], "advisory count equals the listed stale readings")
+
+
+def test_mixed_age_catalog_uses_cheapest_cell_and_reports_only_stale_ones() -> None:
+    old = _NOW - timedelta(days=10)
+    mixed = tuple(_cell(row, measured_at=old if row[1] == "gpt-6-astra" else _MEASURED) for row in _TABLE)
+    picked = select_tier(mixed, required_score=45, objective="metered_usd", now=_NOW, max_age=_WINDOW)
+    _check(_named(picked.selected) == "gpt-6-astra@low", "a stale cell that is cheapest is still the answer")
+    _check(
+        {reading.model for reading in picked.stale_readings} == {"gpt-6-astra"} and picked.stale_readings[0].age_hours == 240,
+        "only the stale cells are listed, with their age",
+    )
+    tightened = select_tier(CATALOG, required_score=45, objective="metered_usd", now=_NOW, max_age=timedelta(hours=6))
+    _check(
+        _named(tightened.selected) == "gpt-6-astra@low" and tightened.advisories["stale_reading_used"] > 0,
+        "a tighter window only changes the advisory, never the answer",
+    )
+    never_accepted = tuple(_cell(row, acceptance="pending_crosscheck", measured_at=old) for row in _TABLE)
+    _check(
+        _code(lambda: select_tier(never_accepted, required_score=1, objective="metered_usd", now=_NOW, max_age=_WINDOW)) == "catalog_unaccepted",
+        "a never-accepted cell keeps its refusal however old it is",
+    )
 
 
 def test_register_phase_selection_with_state_schema_provenance() -> None:
     state = RealShapeState()
     typed = cast("StateManagementInterface", state)
-    now = datetime(2026, 9, 24, 12, tzinfo=UTC)
+    now = datetime(2026, 10, 3, 12, tzinfo=UTC)
     seed_catalog(typed, seed=load_seed_table())
     for row in state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MODEL_CAPABILITY_CELL):
         row["acceptance"] = CELL_ACCEPTANCE_ACCEPTED
@@ -216,31 +267,45 @@ def test_register_phase_selection_with_state_schema_provenance() -> None:
         row["measured_at"] = now.isoformat()
         row["last_refresh_run_id"] = "phase-selector-fixture"
     kinds = (
-        "DESIGN", "FIX", "build", "design", "diagnose", "docs", "fix", "implement",
-        "implementation", "infrastructure", "integration", "repair", "review",
-        "smoke-test", "test", "test-close",
+        "DESIGN",
+        "FIX",
+        "build",
+        "design",
+        "diagnose",
+        "docs",
+        "fix",
+        "implement",
+        "implementation",
+        "infrastructure",
+        "integration",
+        "repair",
+        "review",
+        "smoke-test",
+        "test",
+        "test-close",
     )
     for kind in kinds:
         selected = verbs.select_dispatch_tier(
             typed,
-            {"required_score": 50, "scope_tags": ["state_schema"], "dispatch_kind": kind,
-             "cost_tolerance": 0},
+            {"required_score": 50, "scope_tags": ["state_schema"], "dispatch_kind": kind, "cost_tolerance": 0},
             now=now,
         )
+        _check({"pin", "pin_basis", "effort_ceiling", "exclude_model_prefixes", "exclude_runtimes"} <= selected["selection_receipt"].keys(), "final five receipt keys")
+        _check(selected["selection_receipt"]["effort_ceiling"] is None and selected["selection_receipt"]["exclude_model_prefixes"] == [] and selected["selection_receipt"]["exclude_runtimes"] == [], "selector receipt carries constraint defaults")
         cell = selected["selected"]
         _check(
-            (cell["runtime"], cell["model"], cell["effort"], cell["capability_score"])
-            == ("codex", "gpt-6-astra", "medium", 50),
+            (cell["runtime"], cell["model"], cell["effort"], cell["capability_score"]) == ("codex", "gpt-6-astra", "medium", 50),
             f"register kind {kind!r} clears score 50 at Astra medium",
         )
         _check(
-            selected["capability_floors"] == []
-            and selected["excluded"]["capability_floor_disallowed"] == 0,
+            selected["capability_floors"] == [] and selected["excluded"]["capability_floor_disallowed"] == 0,
             f"register kind {kind!r} has no state_schema model floor",
         )
     for kind in ("unknown-phase", "test ", "TEST"):
         selected = verbs.select_dispatch_tier(
-            typed, {"required_score": 50, "dispatch_kind": kind}, now=now,
+            typed,
+            {"required_score": 50, "dispatch_kind": kind},
+            now=now,
         )
         _check(selected["selected"]["capability_score"] >= 50, f"open nonblank provenance {kind!r} selects")
     for kind in ("", " ", "\t", 123):
@@ -257,10 +322,13 @@ if __name__ == "__main__":
     test_operator_dominance_examples()
     test_ladder_shows_diminishing_returns()
     test_cheap_model_effort_is_exhausted_before_switching()
-    test_exhausted_vendor_fails_over_and_unknown_quota_never_excludes()
+    test_quota_is_not_a_selection_input()
     test_objectives_and_margins()
     test_near_tie_prefers_lower_effort()
     test_refusals_are_distinct()
+    test_unknown_effort_row_is_excluded_not_raised()
+    test_stale_readings_never_block_selection()
+    test_mixed_age_catalog_uses_cheapest_cell_and_reports_only_stale_ones()
     test_register_phase_selection_with_state_schema_provenance()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     raise SystemExit(1 if _failed else 0)

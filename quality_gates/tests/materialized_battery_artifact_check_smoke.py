@@ -14,6 +14,8 @@ Run: ``.venv/bin/python3 quality_gates/tests/materialized_battery_artifact_check
 
 from __future__ import annotations
 
+import hashlib
+import os
 import subprocess
 import sys
 import tempfile
@@ -42,6 +44,14 @@ include = ["pkg"]
 """
 
 
+def _fixture_env() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("GIT_")
+    }
+
+
 def check(name: str, condition: bool) -> None:
     status = "PASS" if condition else "FAIL"
     print(f"  [{status}] {name}")
@@ -52,6 +62,7 @@ def check(name: str, condition: bool) -> None:
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(root), *args],
+        env=_fixture_env(),
         check=True, capture_output=True, text=True, timeout=60,
     )
 
@@ -248,12 +259,79 @@ def test_main_usage_error_is_64() -> None:
     check("exit 64 on missing required arguments", rc == 64)
 
 
+def test_hostile_git_environment_isolation() -> None:
+    print("a direct child with hostile Git paths leaves the caller repository alone")
+    with tempfile.TemporaryDirectory(prefix="git-env-proof-") as temp_dir:
+        proof_root = Path(temp_dir).resolve()
+        if proof_root.is_relative_to(_REPO_ROOT.resolve()):
+            raise RuntimeError("git environment proof temp directory is inside the checkout")
+        victim_git = (proof_root / "victim.git").resolve()
+        victim_work = (proof_root / "victim-work").resolve()
+        child_tmp = (proof_root / "child-tmp").resolve()
+        victim_work.mkdir()
+        child_tmp.mkdir()
+        if any(
+            not path.is_relative_to(proof_root)
+            for path in (victim_git, victim_work, child_tmp)
+        ):
+            raise RuntimeError("controlled Git paths escaped the proof temp directory")
+
+        subprocess.run(
+            ("git", "init", "--bare", str(victim_git)),
+            cwd=proof_root,
+            env=_fixture_env(),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        victim_config = victim_git / "config"
+        before_bytes = victim_config.read_bytes()
+        child_argv = [sys.executable, str(Path(__file__).resolve()), "--git-fixture-only"]
+        child_env = _fixture_env()
+        child_env.update(
+            {
+                "GIT_DIR": str(victim_git),
+                "GIT_WORK_TREE": str(victim_work),
+                "TMPDIR": str(child_tmp),
+            }
+        )
+        child = subprocess.run(
+            child_argv,
+            cwd=_REPO_ROOT,
+            env=child_env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        after_bytes = victim_config.read_bytes()
+        before_sha256 = hashlib.sha256(before_bytes).hexdigest()
+        after_sha256 = hashlib.sha256(after_bytes).hexdigest()
+        print(f"direct child argv: {child_argv!r}")
+        print(f"controlled GIT_DIR: {victim_git}")
+        print(f"controlled GIT_WORK_TREE: {victim_work}")
+        print(f"controlled TMPDIR: {child_tmp}")
+        print(f"direct child return code: {child.returncode}")
+        print(f"victim config SHA256 before: {before_sha256}")
+        print(f"victim config SHA256 after: {after_sha256}")
+        if child.returncode != 0:
+            print(f"direct child stdout:\n{child.stdout}")
+            print(f"direct child stderr:\n{child.stderr}")
+        check(
+            "hostile caller leaves scratch Git config byte-identical",
+            after_bytes == before_bytes,
+        )
+        check("hostile caller fixture-only child succeeds", child.returncode == 0)
+
+
 # ---------------------------------------------------------------------------
 
 
 def main() -> int:
     print("GTE-13 materialized-battery artifact discriminator smoke\n")
     for test in (
+        test_hostile_git_environment_isolation,
         test_evidence_default_verdict_is_real,
         test_clean_identical_and_pyright_clean_is_artifact,
         test_dirty_live_checkout_is_real,
@@ -274,4 +352,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--git-fixture-only"]:
+        with _scratch_repo():
+            pass
+        raise SystemExit(0)
     raise SystemExit(main())

@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::preview_order_async",
+  "display_name": "Zuora: Preview Order Asynchronously",
+  "description": "Start an asynchronous order preview (POST /v1/async/orders/preview) for large orders; completion carries Zuora's jobId, which get_async_order_job reads. Same body as preview_order. Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "Start a background Zuora order preview for a large order with many subscriptions or long preview periods, when the synchronous preview would time out. Returns Zuora's async job id; poll get_async_order_job for the preview invoices and metrics. Nothing is saved on the tenant.",
+  "result_processor_customizations": {
+    "action_label": "Zuora async order preview started",
+    "result_type": "zuora_preview_order_async_result",
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+  },
+  "error_processor_customizations": {
+    "action_context": "Start an asynchronous order preview (POST /v1/async/orders/preview) for large orders; completion carries Zuora's jobId, which get_async_order_job reads. Same body as preview_order.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape: a bad identifier, header value or query pairing, or a body missing a required field. zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.validation_failed is a vendor 4xx or an HTTP 200 carrying success false, with Zuora's reasons. zuora.object_not_found, zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the needed Orders, Subscriptions or Accounts permission or enable the vendor feature the reason names. Read current vendor state with the matching get or list verb before retrying a write; pass an idempotency_key where offered. Back off on rate limits."
+  }
+}

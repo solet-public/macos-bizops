@@ -3,9 +3,14 @@
 
 from __future__ import annotations
 
+import contextlib
+import importlib.util
+import io
 import json
+import os
 import sys
 from typing import Any
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 
@@ -19,33 +24,8 @@ from _harness import HOOKS_DIR, Results, preflight, run_hook  # noqa: E402
 REMINDERS = {
     "step_zero_reminder.js": {
         "event": "SessionStart",
-        "context": (
-            "For non-trivial work, checking two context sources in sequence "
-            "before other work is usually faster than re-deriving an answer "
-            "partway through: first any persistent knowledge base available "
-            "to this session (via a local CLI or a connected tool, if any), "
-            "then the current project's own instruction files. The sequence "
-            "is not a substitution -- the knowledge base carries platform "
-            "and cross-session knowledge, the instruction files govern the "
-            "task at hand, and neither replaces the other."
-        ),
-    },
-    "check_messages_reminder.js": {
-        "event": "UserPromptSubmit",
-        "context": (
-            "Unread coordination messages from other sessions may be pending, "
-            "if this project uses a peer-messaging or shared-inbox mechanism."
-        ),
-    },
-    "role_binding_reminder.js": {
-        "event": "SessionStart",
-        "context": (
-            "A session's local label and any external durable role binding are "
-            "separate state and can disagree after a clear, restart, or transport "
-            "reconnect. Presence alone is not evidence that the current session "
-            "holds the role claim."
-        ),
-    },
+        "context": "For non-trivial work, checking two context sources in sequence before other work is usually faster than re-deriving an answer partway through: first any persistent knowledge base available to this session (via a local CLI or a connected tool, if any), then the current project's own instruction files. The sequence is not a substitution -- the knowledge base carries platform and cross-session knowledge, the instruction files govern the task at hand, and neither replaces the other.",
+    }
 }
 
 DYNAMIC_SENTINELS = (
@@ -108,26 +88,6 @@ def _context(res: Results, script: str, *, label: str, stdin: str) -> tuple[str,
 
 #: Reminders that still have an arm condition, and the variable that arms them.
 #: step_zero is deliberately ABSENT — it has no condition at all (§7).
-_CONDITIONAL_REMINDERS = {
-    "check_messages_reminder.js": "AGENT_SESSION_ID",
-    "role_binding_reminder.js": "AGENT_SESSION_LABEL",
-}
-
-
-def check_disarmed_is_silent(res: Results) -> None:
-    """Each CONDITIONAL reminder is silent without ITS OWN variable.
-
-    ★ §7 parity 2026-08-02 (mirrors claude_plugin's 2fb49dbf2) — this leg no
-    longer covers step_zero, and the omission is the point: step_zero is now
-    unconditional, so a "disarmed step_zero" case would assert the opposite
-    of the contract. Its inverted leg is `check_step_zero_fires_everywhere`
-    below.
-    """
-    for script, var in _CONDITIONAL_REMINDERS.items():
-        proc = run_hook(script, env={}, stdin="{not-json")
-        res.check(proc.returncode == 0, f"{script} disarmed exits 0")
-        res.check(proc.stdout == "", f"{script} disarmed has no stdout ({var} absent)", proc.stdout[:120])
-        res.check(proc.stderr == "", f"{script} disarmed has no stderr", proc.stderr[:120])
 
 
 def check_step_zero_fires_everywhere(res: Results) -> None:
@@ -160,7 +120,7 @@ def check_step_zero_fires_everywhere(res: Results) -> None:
 
 #: Scripts that echo stdin's hook_event_name (two-value allowlist); the rest
 #: emit a fixed tag. step_zero joined 2026-08-11 (§41).
-ECHO_AWARE = ("step_zero_reminder.js", "check_messages_reminder.js")
+ECHO_AWARE = ("step_zero_reminder.js",)
 
 
 def check_exact_fixed_output(res: Results) -> None:
@@ -302,15 +262,40 @@ def _assert_echoes_bound_event(res: Results, script: str, event: str) -> None:
         )
 
 
+def check_live_context_null_stdin(res: Results) -> None:
+    """A None stdin is the empty event: live context exits zero with the {} output."""
+    spec = importlib.util.spec_from_file_location("session_start_context", HOOKS_DIR / "session_start_context.py")
+    if spec is None or spec.loader is None:
+        res.check(False, "session_start_context.py loads for the null-stdin case")
+        return
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    env = {"PROJECT_SOLET_CLI": "/nonexistent/psolet", "SOLET_BRIDGE": "/nonexistent/bridge"}
+    codes: list[int] = []
+    outputs: list[str] = []
+    for stdin in (None, io.StringIO("{}")):
+        buffer = io.StringIO()
+        with patch.dict(os.environ, env), patch.object(sys, "stdin", stdin), contextlib.redirect_stdout(buffer):
+            for name in ("AGENT_SESSION_ID", "AGENT_INSTANCE_ID", "SOLET_NAME"):
+                os.environ.pop(name, None)
+            codes.append(module.main())
+        outputs.append(buffer.getvalue())
+    res.check(
+        codes == [0, 0] and outputs[0] != "" and outputs[0] == outputs[1],
+        "live context with None stdin exits zero with the same output as the {} event",
+        repr((codes, outputs)),
+    )
+
+
 def main() -> int:
     preflight()
     res = Results("Codex reminder")
-    check_disarmed_is_silent(res)
     check_step_zero_fires_everywhere(res)
     check_exact_fixed_output(res)
     check_step_zero_async_clause_deliberately_absent(res)
     check_shared_event_echo(res)
     check_manifest_bound_events_echo(res)
+    check_live_context_null_stdin(res)
     return res.finish()
 
 

@@ -45,6 +45,7 @@ class SchedulerManager:
         """
         self.logger = logger
         self.scheduler: BackgroundScheduler | None = None
+        self._job_revisions: dict[str, int] = {}
 
     def initialize(self) -> None:
         """Initialize and configure APScheduler instance."""
@@ -72,10 +73,7 @@ class SchedulerManager:
             self.scheduler.start()
             if self.logger:
                 self.logger.debug("BackgroundScheduler started successfully")
-                self.logger.debug(
-                    f"SCHEDULER-STATE: scheduler.running={self.scheduler.running}, "
-                    f"scheduler.state={self.scheduler.state}"
-                )
+                self.logger.debug(f"SCHEDULER-STATE: scheduler.running={self.scheduler.running}, scheduler.state={self.scheduler.state}")
 
     def stop(self, wait: bool = True) -> None:
         """Stop the scheduler gracefully.
@@ -119,6 +117,9 @@ class SchedulerManager:
         func: Callable[[], None],
         cron_expression: str,
         job_id: str,
+        *,
+        replace_existing: bool = False,
+        revision: int = 0,
     ) -> None:
         """Add a cron-based recurring job to the scheduler.
 
@@ -138,11 +139,33 @@ class SchedulerManager:
         # config. Passing UTC explicitly here is the fix, not a style
         # preference — measured 2026-08-16, see
         # plugins/default_scheduling_plugin/tests/cron_utc_timezone_smoke.py.
+        existing = self.get_job(job_id) if replace_existing else None
+        timing = {"next_run_time": existing.next_run_time} if existing is not None and hasattr(existing, "next_run_time") else {}
         self.scheduler.add_job(
             func,
             CronTrigger.from_crontab(cron_expression, timezone=datetime.UTC),
             id=job_id,
+            replace_existing=replace_existing,
+            **timing,
         )
+        self._job_revisions[job_id] = revision
+
+    def ensure_cron_job(self, func: Callable[[], None], cron_expression: str, job_id: str, revision: int) -> None:
+        """Reconcile exactly one current callback while preserving existing timing."""
+        if self.scheduler is None:
+            raise RuntimeError("scheduler_activation_unavailable")
+        job = self.get_job(job_id)
+        if job is not None:
+            job.modify(func=func)
+            self._job_revisions[job_id] = revision
+        else:
+            self.add_cron_job(func, cron_expression, job_id, replace_existing=True, revision=revision)
+        if self.get_job(job_id) is None:
+            raise RuntimeError("scheduler_activation_unconfirmed")
+
+    def job_revision(self, job_id: str) -> int | None:
+        """Last reconciled callback revision; dispatch reads the current owner row."""
+        return self._job_revisions.get(job_id)
 
     def add_one_time_job(
         self,
@@ -175,6 +198,7 @@ class SchedulerManager:
         if self.scheduler:
             try:
                 self.scheduler.remove_job(job_id)
+                self._job_revisions.pop(job_id, None)
                 if self.logger:
                     self.logger.debug(f"Removed job {job_id} from scheduler")
             except Exception as e:
@@ -273,10 +297,11 @@ class SchedulerManager:
         def make_callback(sid: str, d: dict[str, Any]) -> Callable[[], None]:
             return lambda: execution_callback(sid, d)
 
-        self.add_cron_job(
+        self.ensure_cron_job(
             make_callback(schedule_id, data),
             data["cron_expression"],
             schedule_id,
+            int(data.get("revision", 0)),
         )
         return True
 
@@ -287,6 +312,8 @@ class SchedulerManager:
         execution_callback: Callable[[str, dict[str, Any]], None],
     ) -> bool:
         """Restore a one-time schedule if not expired."""
+        if self.get_job(schedule_id) is not None:
+            return True
         run_at = datetime.datetime.fromisoformat(data["run_at"])
         if run_at <= datetime.datetime.now(datetime.UTC):
             return False

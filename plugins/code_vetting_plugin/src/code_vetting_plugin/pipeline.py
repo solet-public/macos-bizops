@@ -35,7 +35,7 @@ from .l3_adapter import VerifierL3Adapter
 from .metrics import MetricsWriter
 from .models import ContextProfile
 from .report import ReportRenderer
-from .run_context import allowlist_totals, git_head, repo_root, system_clock
+from .run_context import CLI_IO, allowlist_totals, git_head, repo_root, system_clock
 from .run_record import AllowlistDelta, RunTarget
 from .samples import InMemoryStateWriter
 from .verify.dispatch import HeuristicSkepticDispatcher
@@ -85,21 +85,26 @@ async def main() -> None:
     """Run the deterministic end-to-end pass and write the report + metrics row."""
     root = repo_root()
     state = InMemoryStateWriter()
-    driver = _build_driver(root, state)
-    ref = git_head(root)
+    driver = await CLI_IO.run(_build_driver, root, state)
+    ref = await CLI_IO.run(git_head, root)
     run_id = f"vr-{ref}"
     target = RunTarget(repo="platform", ref=ref, scope="whole tracked tree (self-vet)")
     result = await driver.run(
         run_id=run_id,
         target=target,
-        allowlist_delta=AllowlistDelta(totals=allowlist_totals(root)),
+        allowlist_delta=AllowlistDelta(totals=await CLI_IO.run(allowlist_totals, root)),
         preamble=_PREAMBLE,
     )
 
+    row = await CLI_IO.run(_write_output, result, state, run_id)
+    await CLI_IO.run(_print_summary, result, row)
+
+
+def _write_output(result: VettingResult, state: InMemoryStateWriter, run_id: str) -> dict[str, object]:
     _REPORT_PATH.write_text(result.report, encoding="utf-8")
     row = state.rows[_NAMESPACE][run_id]
     _ROW_PATH.write_text(json.dumps(row, indent=2, ensure_ascii=True, sort_keys=True) + "\n", encoding="utf-8")
-    _print_summary(result, row)
+    return row
 
 
 if __name__ == "__main__":

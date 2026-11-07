@@ -43,7 +43,7 @@ sys.path[:0] = [str(_ROOT / "solet_cli" / "src"), str(_ROOT / "solet_setup_contr
 from _doctor_seams import doctor_seams  # noqa: E402
 from _release_identity_fixture import build_package, manifest, seed_lock_v3, write_json, write_receipt  # noqa: E402
 from operation_probe_adapter_support import _FixtureRegistry, _operation, _result  # noqa: E402
-from solet_manager import operation_executor  # noqa: E402
+from solet_manager import create_applied_edits, operation_executor  # noqa: E402
 from solet_manager.adapters import OperationRequest, OperationResult  # noqa: E402
 from solet_manager.contracts import ContractBundle  # noqa: E402
 from solet_manager.doctor import InstallationDoctor  # noqa: E402
@@ -352,6 +352,16 @@ def _leg_other_create_transaction(root: Path) -> None:
     _check(other == frozenset(), "a ledger bound to another create transaction accepts nothing")
 
 
+def _leg_git_query_allowlist(root: Path) -> None:
+    case = Case(root / "git-query-allowlist")
+    try:
+        create_applied_edits.query_target_git(case.target, "checkout", "--", "README.md")
+    except ValueError as exc:
+        _check("read-only" in str(exc), f"the shared query seam explains the refused subcommand: {exc}")
+    else:
+        raise AssertionError("the shared query seam accepted a mutating Git subcommand")
+
+
 def main() -> int:
     failures: list[str] = []
     legs: tuple[tuple[str, Callable[[Path], None]], ...] = (
@@ -365,6 +375,7 @@ def main() -> int:
         ("edit before an apply: not attributed to the apply", _leg_edit_before_apply),
         ("failed apply: nothing recorded, its writes warn", _leg_failed_apply),
         ("another create transaction: the ledger accepts nothing", _leg_other_create_transaction),
+        ("Git query seam: a mutating subcommand is refused", _leg_git_query_allowlist),
     )
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary).resolve()

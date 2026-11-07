@@ -83,3 +83,7 @@ solet_cli/src/solet_manager/plan_builder.py  # owner: lane-cdx-fix-review-r1-r1-
 # iss_a2bba79e-ae59-4e68-b363-2133b4f585db tracks complexity reduction.
 quality_gates/macos_bizops_identity_gate.py  # owner: rul_11fcd2ec-d5ef-4504-80f9-f79c4bfab5a7 reason: iss_1f9be587-7543-4eeb-b199-44d9403f9ecb tracked debt expires: 2026-12-17
 quality_gates/tests/macos_bizops_identity_gate_smoke.py  # owner: rul_11fcd2ec-d5ef-4504-80f9-f79c4bfab5a7 reason: iss_1f9be587-7543-4eeb-b199-44d9403f9ecb tracked debt expires: 2026-12-17
+
+# Pre-existing hidden-hook MI debt, measured at base 757245913 with
+# radon_mi_check.py over every tracked .claude/hooks/*.py file.
+.claude/hooks/git_controller_authorization.py  # owner: fleet-coordinator-seat reason: iss_94156bc0-d197-4114-8706-00d243dcef6a pre-existing hidden-hook static debt expires: 2026-12-03

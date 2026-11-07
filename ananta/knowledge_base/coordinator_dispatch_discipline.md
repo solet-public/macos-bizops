@@ -59,7 +59,7 @@ any host side effect:
 
 ```text
 lane_id, role_name, role_class, work_class, budget_line
-brief_ref, brief_sha256
+unit_id, expected_revision_id
 expected_path, completion_contract
 model, effort, agent_runtime, host, allowed_hosts
 visibility, local_name, report_by_seconds
@@ -69,7 +69,9 @@ spawned_by_instance_id, spawned_by_role, directed_by
 uptake_due_at, report_by, watchdog_due_at
 ```
 
-The brief exists first. Measure its SHA-256 and bind the exact digest. The
+The Unit and its registered brief revision exist first; the launch names only
+the `unit_id` (optionally the `expected_revision_id` it was reviewed against),
+and the dispatch binds the revision the register returns. The
 completion contract names the required evidence and gates, including how a
 skip must be reported. All deadlines are absolute, timezone-aware, future
 timestamps; each is validated independently as future.
@@ -112,7 +114,15 @@ The composite validates the complete envelope, writes
 through the runtime-specific host adapter, persists first-turn evidence, and
 enrolls the row in platform-wide supervision by leaving it nonterminal.
 
-The return states are deliberately conservative:
+The registered call returns `data.job_id` and `data.status=queued` after durable
+acceptance. Retain that id and retrieve `service_interface::job_service::get_job`
+until terminal before consuming `job.result.data`. A deterministic workflow
+schedules further reads while queued/processing; a CLI may await the job outside
+server dispatch. `launch_busy` names the active operation/job and starts no work.
+This also applies to `resolve_managed_dispatch`: wait for its terminal original
+result before consuming a resolution, causal version, or replacement identity.
+
+The original operation's final states are deliberately conservative:
 
 - `uptake_pending`: host submission was confirmed; worker ACK is absent.
 - `uptake_uncertain`: submission failed, is unsupported, or is unknown.
@@ -142,7 +152,7 @@ loses loudly and remains in the audit trail.
 
 The four worker event kinds are:
 
-- `ack`: exact brief digest, held role binding, scope-readback digest, and plan
+- `ack`: exact brief revision id and digest, held role binding, scope-readback digest, and plan
   digest. This model-authored event is the only transition to `active`.
 - `milestone`: completed work, current evidence, exact next action, and a new
   future dispatch report deadline.
@@ -179,6 +189,15 @@ plugin::agent_messaging_plugin::resolve_managed_dispatch
 
 Legal actions include resolving a blocker, requesting one bounded replacement
 attempt, accepting or rejecting completion, and cancellation within authority.
+
+Dispatch rows created before Unit launch carry no registered assignment. They
+cannot be retried, accepted or relaunched; the only legal action on one is
+cancellation. That cancel-only path requires the plugin configuration key
+`historical_cancel_role` to be set to the fleet-driving seat's role (the live
+profile sets it at deploy); the caller must currently hold that role's binding,
+and a request cannot supply or override it. If the key is unset the call returns
+`historical_cancel_role_required` naming the key. Native rows keep the existing
+spawner check and do not use this setting.
 `request_retry` is the only replacement edge: it derives fresh deadlines from
 immutable windows, clears attempt-local evidence, reconstructs every spawn
 field from the prepared row, and starts the replacement. No sweep silently
@@ -227,6 +246,41 @@ raw receipts as subordinate audit detail. `session_status` separately exposes
 ledger lifecycle, tri-state liveness, `state_consistent`, and the explicit
 `managed` / `legacy_unsupervised` / `legacy_unmanaged` coordination projection;
 session and dispatch state must not be collapsed.
+
+Before requesting a milestone, capture fresh status fields `dispatch_id`,
+`attempt_number`, `current_agent_instance_id`, `version`, `report_by`, and
+`last_milestone_at` (null is valid before the first milestone), plus the aware
+UTC `requested_at` before sending. Ask the worker to submit a real milestone
+report or cite its exact `event_id`. Verify with a fresh status read:
+
+```json
+{"dispatch_id":"mdp-example","milestone_claim":{"baseline":{"dispatch_id":"mdp-example","attempt_number":1,"current_agent_instance_id":"agi-example","version":51,"report_by":"2026-10-18T04:00:00Z","last_milestone_at":null},"requested_at":"2026-10-18T04:01:00Z","event_id":"milestone-example"}}
+```
+
+`milestone_claim_verification` returns `satisfied`, `mismatch`, or
+`unverifiable`, specific reasons, request/event evidence, stored
+`post_transition` version/deadline/time and current readback. Satisfaction
+requires the exact accepted current-attempt milestone at or after the request,
+with causal prior version at least the baseline and stored version, milestone
+time and deadline advancing it. A heartbeat, supervision version bump, routing
+ACK or "already fulfilled" prose supplies no such proof. Quote the verdict
+and stored version/deadline; on mismatch continue the named milestone/blocker
+action. Missing legacy proof or malformed claims are advisory uncertainty,
+never a refusal of ordinary status or work. Historical assignments explicitly
+return unverifiable. A verified past transition does not clear a later
+`milestone_overdue` condition.
+
+The baseline is caller-held immutable request evidence; capture a new one to
+correct or supersede it and retire it when the request resolves. The optional
+claim is an ephemeral read input: replace it on a later read or omit it to
+clear it. Verification writes nothing and changes no authorization. Reports
+remain append-only, authenticated to the current attempt and prior-version
+CAS; duplicate events replay their original outcome and stale writes retain
+their refusal/audit. Corrections use a new semantic event. Current status and
+historical `managed_dispatch_events` retain their existing read/lifecycle
+contracts, including dispatch terminal/retry transitions. Existing steward
+review/request work and the platform milestone supervision interval provide
+uptake; no new scheduler or persistent request object is introduced.
 
 ## 7. Completion truth
 
@@ -310,15 +364,17 @@ unit state; unknown or stale inputs are blockers, never empty sets. The plan
 contains the ordered member/offer tuples, one pinned base, one supplied
 integration worktree and branch, and the canonical manifest digest.
 
-After `prepare` reserves that exact plan, the coordinator sends its one framed
-payload through this solet's `peer_send_by_name` to the repository's closed
-mutating role. A charter, worker statement, register event, relayed message, or
-collection of per-unit messages is not a wave authorization. Any offer/base/
-membership change requires a fresh plan, manifest, and direct first-party
-message.
+After `prepare` reserves that exact plan, the coordinator sends the
+repository's controller the plan and its member unit ids. The wave is
+authorized by register state alone (`iss_ffee3a36`): the controller requires
+every member's `landing-authorization intake` to answer `ready: true`, with
+that member's frozen candidate bytes, at intake and again before merge. No
+framed payload, charter, worker statement, relayed message or sender confers
+authority. Any offer/base/membership change requires a fresh plan and
+manifest, and every member's readiness is read again.
 
 The controller records the one sweep, each required staged/hook proof, common
-merge, and atomic completion receipt. A failed member commit leaves master
+merge, and one multi-unit landing observation. A failed member commit leaves master
 unchanged and preserves the integration branch; a post-merge record failure is
 reported as such, never described as a rollback. Coordinators report physical
 sweeps separately from member commits and merges: throughput is verified units

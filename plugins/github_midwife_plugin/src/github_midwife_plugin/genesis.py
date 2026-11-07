@@ -103,10 +103,7 @@ def _resolve_clone_root() -> Path:
     for ancestor in here.parents:
         if (ancestor / "ananta").is_dir() and (ancestor / "plugins").is_dir():
             return ancestor
-    raise GenesisError(
-        f"could not resolve the clone root by walking up from {here} -- "
-        "expected an ancestor directory with both ananta/ and plugins/."
-    )
+    raise GenesisError(f"could not resolve the clone root by walking up from {here} -- expected an ancestor directory with both ananta/ and plugins/.")
 
 
 def _resolve_kb_root(clone_root: Path) -> Path:
@@ -142,16 +139,9 @@ def resolve_profile_name(
     profile_name = _PROFILE_TEMPLATE_BY_BUNDLE.get(bundle_name)
     if profile_name is None:
         known = ", ".join(sorted(_PROFILE_TEMPLATE_BY_BUNDLE))
-        raise GenesisError(
-            f"{_PROVENANCE_FILENAME} declares unknown bundle {bundle_name!r}; "
-            f"known bundles: {known}. Declared seed bundles cannot be overridden."
-        )
+        raise GenesisError(f"{_PROVENANCE_FILENAME} declares unknown bundle {bundle_name!r}; known bundles: {known}. Declared seed bundles cannot be overridden.")
     if requested and requested != profile_name:
-        raise GenesisError(
-            "seed profile identity mismatch: "
-            f"{_PROVENANCE_FILENAME} bundle {bundle_name!r} requires "
-            f"profile {profile_name!r}, but {requested!r} was requested"
-        )
+        raise GenesisError(f"seed profile identity mismatch: {_PROVENANCE_FILENAME} bundle {bundle_name!r} requires profile {profile_name!r}, but {requested!r} was requested")
     return profile_name
 
 
@@ -162,6 +152,7 @@ def run_genesis(
     profile_name: str = _DEFAULT_PROFILE_NAME,
     autostart: bool = True,
     implementations: Mapping[str, str] = _NO_IMPLEMENTATIONS,
+    coding_agents: tuple[str, ...] = ("claude_code",),
     keychain: PerCredentialKeychain | None = None,
     alter_role_password: Callable[[str], None] | None = None,
     role_authenticates: Callable[[str], bool] | None = None,
@@ -212,22 +203,22 @@ def run_genesis(
     selected = dict(implementations)
 
     try:
-        allowlist = load_plugin_allowlist(
-            kb_root / "profile_templates" / f"{profile_name}.yaml", selected
-        )
+        allowlist = load_plugin_allowlist(kb_root / "profile_templates" / f"{profile_name}.yaml", selected)
         install_profile_allowlist(venv_dir=venv_dir, target=clone_root, plugin_allowlist=allowlist)
     except ProfileInstallError as exc:
         raise GenesisError(f"profile-driven allowlist install failed: {exc}") from exc
 
     ctx = GenesisContext(
-        name=name, profile_name=profile_name, target=clone_root, kb_root=kb_root, implementations=selected,
+        name=name,
+        profile_name=profile_name,
+        target=clone_root,
+        kb_root=kb_root,
+        implementations=selected,
     )
     steps = run_steps(ctx)
     last_step = steps[-1] if steps else {}
     if last_step.get("status") == "failed":
-        raise GenesisError(
-            f"genesis step machine failed at {last_step.get('step_name')}: {last_step.get('error')}"
-        )
+        raise GenesisError(f"genesis step machine failed at {last_step.get('step_name')}: {last_step.get('error')}")
 
     # Post-spine phase records ride the SAME attempt marker as the spine steps
     # (cold-run D4, 2026-07-13): the spine's marker says "spine_complete"; only
@@ -236,9 +227,15 @@ def run_genesis(
     phases: list[dict[str, Any]] = []
 
     def _finalize_marker(status: str) -> None:
-        write_marker(clone_root, build_marker_payload(
-            name=name, profile_name=profile_name, steps=steps + phases, status=status,
-        ))
+        write_marker(
+            clone_root,
+            build_marker_payload(
+                name=name,
+                profile_name=profile_name,
+                steps=steps + phases,
+                status=status,
+            ),
+        )
 
     try:
         if credential_provisioner is not None:
@@ -263,10 +260,13 @@ def run_genesis(
         phases.append({"step_name": "credential_seed", "status": "failed", "error": str(exc)})
         _finalize_marker("failed")
         raise GenesisError(f"credential provisioning failed: {exc}") from exc
-    phases.append({
-        "step_name": "credential_seed", "status": "completed",
-        "mode": "verb_provisioner" if credential_provisioner is not None else "self_seed",
-    })
+    phases.append(
+        {
+            "step_name": "credential_seed",
+            "status": "completed",
+            "mode": "verb_provisioner" if credential_provisioner is not None else "self_seed",
+        }
+    )
 
     # Finding F10 (2026-07-11): seed the vault passphrase FILE before
     # autostart loads the plist. `launchctl load -w` on a RunAtLoad job
@@ -275,15 +275,25 @@ def run_genesis(
     # unless the passphrase file already exists. Idempotent write-if-absent;
     # the generated value never touches this function's logs or return value.
     vault_passphrase_created = _run_vault_passphrase_phase(
-        clone_root, phases, _finalize_marker,
+        clone_root,
+        phases,
+        _finalize_marker,
     )
-    phases.append({
-        "step_name": "vault_passphrase", "status": "completed",
-        "seeded": vault_passphrase_created,
-    })
+    phases.append(
+        {
+            "step_name": "vault_passphrase",
+            "status": "completed",
+            "seeded": vault_passphrase_created,
+        }
+    )
 
     vault_stale_record = _run_vault_stale_check_phase(
-        name, clone_root, keychain, vault_passphrase_created, phases, _finalize_marker,
+        name,
+        clone_root,
+        keychain,
+        vault_passphrase_created,
+        phases,
+        _finalize_marker,
     )
     phases.append(vault_stale_record)
 
@@ -311,10 +321,14 @@ def run_genesis(
         phases.append({"step_name": "install_router", "status": "failed", "error": str(exc)})
         _finalize_marker("failed")
         raise
-    phases.append({
-        "step_name": "install_router", "status": "completed",
-        "router_status": router_result.status, "reason": router_result.reason,
-    })
+    phases.append(
+        {
+            "step_name": "install_router",
+            "status": "completed",
+            "router_status": router_result.status,
+            "reason": router_result.reason,
+        }
+    )
 
     # SEED — install the per-solet command launcher on the operator's PATH:
     # the no-MCP-first primary interface (`<name> search/call`). UNCONDITIONAL
@@ -327,13 +341,18 @@ def run_genesis(
         clone_root,
         command_launcher_bin_dir,
         (home_dir or Path.home()) / ".codex" / "config.toml",
+        "codex" in coding_agents,
         phases,
         _finalize_marker,
     )
-    phases.append({
-        "step_name": "install_command_launcher", "status": "completed",
-        "launcher_status": launcher_result.status, "launcher_path": launcher_result.launcher_path,
-    })
+    phases.append(
+        {
+            "step_name": "install_command_launcher",
+            "status": "completed",
+            "launcher_status": launcher_result.status,
+            "launcher_path": launcher_result.launcher_path,
+        }
+    )
 
     # Workstream A (2026-07-20): git-init the born tree LAST — every worktree-
     # writing step (materialize_configs / seed_root_manifest / kb_symlinks) has
@@ -355,7 +374,8 @@ def run_genesis(
         "autostart": {"status": autostart_status, "label": autostart_label},
         "router": {"status": router_result.status, "reason": router_result.reason},
         "command_launcher": {
-            "status": launcher_result.status, "path": launcher_result.launcher_path,
+            "status": launcher_result.status,
+            "path": launcher_result.launcher_path,
         },
         "git_init": {"status": git_init_record["status"]},
     }
@@ -380,10 +400,7 @@ def run_autostart_install(
     """
     deferral = _coreai_deferral(clone_root)
     if deferral is not None:
-        raise GenesisError(
-            f"LaunchAgent install refused: {deferral}; the roster loads Core AI, so "
-            "the target must not start until its pinned asset verifies"
-        )
+        raise GenesisError(f"LaunchAgent install refused: {deferral}; the roster loads Core AI, so the target must not start until its pinned asset verifies")
     return _install_autostart(name, clone_root, plist_dir, home_dir, launchctl_run)
 
 
@@ -442,34 +459,40 @@ def _run_autostart_phase(
     embeddings_implementation: str | None = None,
 ) -> tuple[str, str | None]:
     if not enabled:
-        phases.append({
-            "step_name": "install_autostart",
-            "status": "skipped",
-            "reason": "autostart_disabled",
-        })
+        phases.append(
+            {
+                "step_name": "install_autostart",
+                "status": "skipped",
+                "reason": "autostart_disabled",
+            }
+        )
         return "not_requested", None
     try:
         hold = _autostart_hold(clone_root, embeddings_implementation)
         if hold is not None:
             reason, detail, status = hold
-            phases.append({
-                "step_name": "install_autostart",
-                "status": "deferred",
-                "reason": reason,
-                "detail": detail,
-            })
+            phases.append(
+                {
+                    "step_name": "install_autostart",
+                    "status": "deferred",
+                    "reason": reason,
+                    "detail": detail,
+                }
+            )
             return status, None
         installed = _install_autostart(name, clone_root, plist_dir, home_dir, launchctl_run)
     except GenesisError as exc:
         phases.append({"step_name": "install_autostart", "status": "failed", "error": str(exc)})
         finalize_marker("failed")
         raise
-    phases.append({
-        "step_name": "install_autostart",
-        "status": "completed",
-        "autostart_status": installed.status,
-        "label": installed.label,
-    })
+    phases.append(
+        {
+            "step_name": "install_autostart",
+            "status": "completed",
+            "autostart_status": installed.status,
+            "label": installed.label,
+        }
+    )
     return installed.status, installed.label
 
 
@@ -487,7 +510,8 @@ def _run_git_init_phase(
     """
     try:
         return git_init_worktree(
-            clone_root, name,
+            clone_root,
+            name,
             run=git_init_run if git_init_run is not None else subprocess.run,
         )
     except GitInitError as exc:
@@ -518,6 +542,7 @@ def _run_command_launcher_phase(
     clone_root: Path,
     bin_dir: Path | None,
     codex_config_path: Path,
+    configure_codex: bool,
     phases: list[dict[str, Any]],
     finalize: Callable[[str], None],
 ) -> CommandLauncherResult:
@@ -531,13 +556,17 @@ def _run_command_launcher_phase(
             name=name,
             clone_root=clone_root,
             bin_dir=bin_dir if bin_dir is not None else DEFAULT_BIN_DIR,
-            codex_config_path=codex_config_path,
+            codex_config_path=codex_config_path if configure_codex else None,
         )
     except CommandLauncherError as exc:
         error = GenesisError(f"command launcher install failed: {exc}")
-        phases.append({
-            "step_name": "install_command_launcher", "status": "failed", "error": str(error),
-        })
+        phases.append(
+            {
+                "step_name": "install_command_launcher",
+                "status": "failed",
+                "error": str(error),
+            }
+        )
         finalize("failed")
         raise error from exc
 
@@ -650,11 +679,7 @@ def _vault_master_key_exists(keychain: PerCredentialKeychain | None) -> bool | N
 
 
 def _stale_vault_master_message(name: str, *, after_passphrase_seed: bool) -> str:
-    timing = (
-        "but genesis just created a fresh vault passphrase file"
-        if after_passphrase_seed
-        else "and would conflict with a fresh vault passphrase during genesis"
-    )
+    timing = "but genesis just created a fresh vault passphrase file" if after_passphrase_seed else "and would conflict with a fresh vault passphrase during genesis"
     return (
         f"stale macOS Keychain vault state for solet {name!r}: "
         f"service {name}-vault account {MASTER_KEY_ACCOUNT!r} already exists {timing}. "
@@ -664,9 +689,7 @@ def _stale_vault_master_message(name: str, *, after_passphrase_seed: bool) -> st
     )
 
 
-def _write_genesis_marker(
-    *, name: str, clone_root: Path, profile_name: str, result: dict[str, Any]
-) -> None:
+def _write_genesis_marker(*, name: str, clone_root: Path, profile_name: str, result: dict[str, Any]) -> None:
     """Write ``.solet/genesis.json``, the durable completion fact.
 
     The manager's ``genesis_artifacts_valid`` probe and the installation
@@ -684,17 +707,12 @@ def _write_genesis_marker(
         "solet_name": name,
         "profile": profile_name,
         "completed_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "steps": [
-            {"step_name": step["step_name"], "status": step["status"]}
-            for step in result["steps"]
-        ],
+        "steps": [{"step_name": step["step_name"], "status": step["status"]} for step in result["steps"]],
     }
     try:
         marker_dir.mkdir(mode=0o700, exist_ok=True)
         marker_dir.chmod(0o700)
-        (marker_dir / "genesis.json").write_text(
-            json.dumps(payload, indent=1, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        (marker_dir / "genesis.json").write_text(json.dumps(payload, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     except OSError as exc:
         raise GenesisError(f"genesis completion marker write failed: {exc}") from exc
 
@@ -703,9 +721,7 @@ def main() -> int:
     name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         print(
-            "FATAL: SOLET_NAME env var is required. The driving agent "
-            "must obtain the solet name from the user and set it "
-            "before invoking bootstrap.py.",
+            "FATAL: SOLET_NAME env var is required. The driving agent must obtain the solet name from the user and set it before invoking bootstrap.py.",
             file=sys.stderr,
         )
         return 2
@@ -714,23 +730,15 @@ def main() -> int:
     try:
         if arguments == [_STALE_VAULT_PRECHECK_ARGUMENT]:
             vault_stale_state_precheck(name)
-            print(
-                f"vault stale-keychain precheck OK: service {name}-vault "
-                f"account {MASTER_KEY_ACCOUNT} is absent"
-            )
+            print(f"vault stale-keychain precheck OK: service {name}-vault account {MASTER_KEY_ACCOUNT} is absent")
             return 0
         if arguments:
-            raise GenesisError(
-                f"unsupported genesis arguments: {arguments!r}; expected "
-                f"{_STALE_VAULT_PRECHECK_ARGUMENT!r} or no arguments"
-            )
+            raise GenesisError(f"unsupported genesis arguments: {arguments!r}; expected {_STALE_VAULT_PRECHECK_ARGUMENT!r} or no arguments")
         clone_root = _resolve_clone_root()
         operation_ref = _operation_ref_from_environment()
         if operation_ref == _AUTOSTART_INSTALL_OPERATION_REF:
             if not _autostart_from_environment():
-                raise GenesisError(
-                    "genesis::autostart.install requires SOLET_AUTOSTART=enabled"
-                )
+                raise GenesisError("genesis::autostart.install requires SOLET_AUTOSTART=enabled")
             installed = run_autostart_install(name=name, clone_root=clone_root)
             print(f"LaunchAgent {installed.label} {installed.status}")
             return 0
@@ -744,10 +752,9 @@ def main() -> int:
             profile_name=profile_name,
             autostart=_autostart_from_environment(),
             implementations=_implementations_from_environment(),
+            coding_agents=_coding_agents_from_environment(),
         )
-        _write_genesis_marker(
-            name=name, clone_root=clone_root, profile_name=profile_name, result=result
-        )
+        _write_genesis_marker(name=name, clone_root=clone_root, profile_name=profile_name, result=result)
     except GenesisError as exc:
         print(f"FATAL: genesis failed: {exc}", file=sys.stderr)
         return 1
@@ -770,9 +777,14 @@ def _autostart_from_environment() -> bool:
         return True
     if value == "disabled":
         return False
-    raise GenesisError(
-        f"{_AUTOSTART_ENV_VAR} must be exactly 'enabled' or 'disabled', got {value!r}"
-    )
+    raise GenesisError(f"{_AUTOSTART_ENV_VAR} must be exactly 'enabled' or 'disabled', got {value!r}")
+
+
+def _coding_agents_from_environment() -> tuple[str, ...]:
+    selected = tuple(os.environ.get("SOLET_CODING_AGENTS", "claude_code").split(","))
+    if any(agent not in {"claude_code", "codex"} for agent in selected) or len(selected) != len(set(selected)):
+        raise GenesisError("SOLET_CODING_AGENTS must name unique selected agents: claude_code, codex")
+    return selected
 
 
 def _implementations_from_environment() -> dict[str, str]:
@@ -793,10 +805,7 @@ def _operation_ref_from_environment() -> str:
     value = os.environ.get(_OPERATION_REF_ENV_VAR, _FULL_GENESIS_OPERATION_REF)
     if value in {_FULL_GENESIS_OPERATION_REF, _AUTOSTART_INSTALL_OPERATION_REF}:
         return value
-    raise GenesisError(
-        f"{_OPERATION_REF_ENV_VAR} must be one of "
-        f"{_FULL_GENESIS_OPERATION_REF!r} or {_AUTOSTART_INSTALL_OPERATION_REF!r}, got {value!r}"
-    )
+    raise GenesisError(f"{_OPERATION_REF_ENV_VAR} must be one of {_FULL_GENESIS_OPERATION_REF!r} or {_AUTOSTART_INSTALL_OPERATION_REF!r}, got {value!r}")
 
 
 def _mcp_register_suggestion(name: str, clone_root: Path) -> str:
@@ -809,14 +818,7 @@ def _mcp_register_suggestion(name: str, clone_root: Path) -> str:
     purely a copy-paste convenience: no secrets, nothing executed here.
     """
     venv_python = clone_root / ".venv" / "bin" / "python3"
-    return (
-        "\nNext step (run this yourself, or your driving agent will run it "
-        "for you -- see README.md \"Registering the MCP bridge\" for the "
-        "full probe/verify ladder):\n"
-        f"  claude mcp add --scope user -e SOLET_NAME={name} "
-        "-e AGENT_IDENTITY=claude_code "
-        f"{name} -- {venv_python} -m agent_messaging_plugin.mcp_bridge"
-    )
+    return f'\nNext step (run this yourself, or your driving agent will run it for you -- see README.md "Registering the MCP bridge" for the full probe/verify ladder):\n  claude mcp add --scope user -e SOLET_NAME={name} -e AGENT_IDENTITY=claude_code {name} -- {venv_python} -m agent_messaging_plugin.mcp_bridge'
 
 
 if __name__ == "__main__":

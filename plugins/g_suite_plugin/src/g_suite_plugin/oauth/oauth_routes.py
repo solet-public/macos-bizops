@@ -13,22 +13,87 @@ app-config loader, and pending-states dict by reference — no global state.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
+import threading
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
+from dataclasses import dataclass, field
 from typing import Any
 
-from ..constants import ERROR_OAUTH_STATE_INVALID, OAUTH_CALLBACK_PATH
+from ..constants import ACCOUNT_TIER_UNKNOWN, ERROR_OAUTH_STATE_INVALID, OAUTH_CALLBACK_PATH, OAUTH_SCOPES
 from .app_config import AppConfigError, AppConfigLoader
-from .oauth_client import exchange_code
+from .oauth_client import GoogleTokens, exchange_code
 from .token_store import TokenStore, TokenStoreError
 
 _logger = logging.getLogger(__name__)
+
+# One worker preserves the pre-offload callback/ledger mutation ordering.
+_REQUEST_WORKERS = 1
+_REQUEST_MAX_PENDING = 32
+_REQUEST_EXECUTOR = ThreadPoolExecutor(max_workers=_REQUEST_WORKERS, thread_name_prefix="google-oauth")
+_REQUEST_SLOTS = threading.BoundedSemaphore(_REQUEST_WORKERS + _REQUEST_MAX_PENDING)
+_logger.info("google-oauth executor created: workers=%d queue_bound=%d", _REQUEST_WORKERS, _REQUEST_MAX_PENDING)
+
+
+async def _run_request_work[**P, T](function: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+    """Wait asynchronously for bounded admission; retain admitted mutations."""
+    while not _REQUEST_SLOTS.acquire(blocking=False):
+        await asyncio.sleep(0.005)
+    context = copy_context()
+    try:
+        future = _REQUEST_EXECUTOR.submit(lambda: context.run(function, *args, **kwargs))
+    except BaseException:
+        _REQUEST_SLOTS.release()
+        raise
+    future.add_done_callback(lambda _done: _REQUEST_SLOTS.release())
+    return await asyncio.shield(asyncio.wrap_future(future))
+
+
+@dataclass(frozen=True)
+class CallbackOptions:
+    """Optional callback seams (Gmail build 1, 2026-11-07).
+
+    ``requested_scopes`` maps a state nonce to the scope list its consent URL
+    requested (absent = the default ``OAUTH_SCOPES``); the exchange must use the
+    same list. ``account_probe`` reads (email, tier) with the new access token
+    so the tier is recorded on the credential at connect time.
+    """
+
+    requested_scopes: dict[str, tuple[str, ...]] = field(default_factory=lambda: {})
+    account_probe: Callable[[str], tuple[str, str]] | None = None
+    # Multi-account completion (Operator ord 90): when set, it stores the
+    # exchanged tokens under the account the token belongs to (state, tokens)
+    # instead of the single legacy pair, and returns a note for the page ('' when none).
+    complete: Callable[[str, GoogleTokens], str] | None = None
+
+
+def _record_credential_facts(token_store: TokenStore, tokens: Any, options: CallbackOptions) -> None:
+    """Record granted scopes and account tier; advisory, never fails the connect."""
+    email, tier = "", ACCOUNT_TIER_UNKNOWN
+    try:
+        if options.account_probe is not None:
+            email, tier = options.account_probe(tokens.access_token)
+    except Exception as exc:  # noqa: BLE001 — a failed probe records "unknown", it never blocks connect
+        _logger.warning("OAuth callback: account tier probe failed (%s); tier recorded as unknown", type(exc).__name__)
+    try:
+        token_store.record_credential_facts(
+            granted_scopes=tuple(getattr(tokens, "granted_scopes", ()) or ()),
+            account_email=email,
+            account_tier=tier,
+        )
+    except Exception as exc:  # noqa: BLE001 — recording is advisory (rul_becb4bed)
+        _logger.warning("OAuth callback: credential facts not recorded (%s)", type(exc).__name__)
 
 
 def create_oauth_router(
     token_store: TokenStore,
     app_config_loader: AppConfigLoader,
     pending_states: dict[str, str],
+    *,
+    options: CallbackOptions | None = None,
 ) -> Any:
     """Return a FastAPI APIRouter wired to the token store and PKCE-state map.
 
@@ -41,7 +106,10 @@ def create_oauth_router(
     from fastapi import APIRouter, HTTPException
     from fastapi.responses import HTMLResponse
 
+    callback_options = options or CallbackOptions()
     router = APIRouter()
+    # Preserve callback mutation order even while bounded admission waits.
+    request_order = asyncio.Lock()
 
     @router.get(OAUTH_CALLBACK_PATH)
     async def oauth_callback(  # pyright: ignore[reportUnusedFunction]
@@ -60,8 +128,7 @@ def create_oauth_router(
             return HTMLResponse(
                 content=_html_result(
                     "OAuth Error",
-                    "Google returned an error during authorization. Check the "
-                    "solet logs and re-run connect_account.",
+                    "Google returned an error during authorization. Check the solet logs and re-run connect_account.",
                     success=False,
                 ),
                 status_code=400,
@@ -71,31 +138,28 @@ def create_oauth_router(
         if not state or code_verifier is None:
             # state is max-sensitivity metadata (and usually attacker-supplied or
             # already spent here) — log only a short redacted prefix, never the value.
-            _logger.warning(
-                "OAuth callback: invalid or expired state nonce (%s)", _redact(state)
-            )
+            _logger.warning("OAuth callback: invalid or expired state nonce (%s)", _redact(state))
             raise HTTPException(
                 status_code=400,
                 detail=f"{ERROR_OAUTH_STATE_INVALID}: state nonce is invalid or expired",
             )
 
         if not code:
-            raise HTTPException(
-                status_code=400, detail="OAuth callback received no authorization code"
-            )
+            raise HTTPException(status_code=400, detail="OAuth callback received no authorization code")
 
+        async with request_order:
+            return await _run_request_work(_complete_callback, code, state, code_verifier)
+
+    def _complete_callback(code: str, state: str, code_verifier: str) -> HTMLResponse:
         try:
             app_config = app_config_loader.load()
         except AppConfigError as exc:
             _logger.error("OAuth callback: failed to load app config: %s", exc)
-            raise HTTPException(
-                status_code=500, detail="OAuth app configuration is unavailable."
-            ) from exc
+            raise HTTPException(status_code=500, detail="OAuth app configuration is unavailable.") from exc
 
         try:
-            tokens = exchange_code(
-                app_config, code=code, state=state, code_verifier=code_verifier
-            )
+            scopes = callback_options.requested_scopes.pop(state, OAUTH_SCOPES)
+            tokens = exchange_code(app_config, code=code, state=state, code_verifier=code_verifier, scopes=scopes)
         except Exception as exc:
             _logger.error("OAuth callback: token exchange failed: %s", exc)
             raise HTTPException(status_code=502, detail="Google token exchange failed.") from exc
@@ -104,10 +168,24 @@ def create_oauth_router(
         if not refresh_token:
             raise HTTPException(
                 status_code=502,
-                detail=(
-                    "Google did not return a refresh token. Re-run connect_account; "
-                    "the OAuth app must request offline access with prompt=consent."
-                ),
+                detail=("Google did not return a refresh token. Re-run connect_account; the OAuth app must request offline access with prompt=consent."),
+            )
+
+        if callback_options.complete is not None:
+            try:
+                note = callback_options.complete(state, tokens)
+            except Exception as exc:  # noqa: BLE001 — any storage/probe fault is a typed 500, logged without secrets
+                _logger.error("OAuth callback: account storage failed: %s", type(exc).__name__)
+                raise HTTPException(status_code=500, detail=f"Token storage failed: {type(exc).__name__}.") from exc
+            if note:
+                _logger.warning("OAuth callback: %s", note)
+            _logger.info("Google OAuth bootstrap complete — account tokens stored in vault")
+            return HTMLResponse(
+                content=_html_result(
+                    "Google Workspace Authentication Complete",
+                    " ".join(filter(None, ["Account connected.", note, "You can close this window and return to the solet."])),
+                    success=True,
+                )
             )
 
         try:
@@ -120,6 +198,7 @@ def create_oauth_router(
             _logger.error("OAuth callback: failed to store tokens: %s", exc)
             raise HTTPException(status_code=500, detail="Token storage failed.") from exc
 
+        _record_credential_facts(token_store, tokens, callback_options)
         _logger.info("Google OAuth bootstrap complete — tokens stored in vault")
         return HTMLResponse(
             content=_html_result(
@@ -143,12 +222,4 @@ def _html_result(title: str, body: str, *, success: bool) -> str:
     # externally reachable, so nothing dynamic may become markup.
     safe_title = html.escape(title)
     safe_body = html.escape(body)
-    return (
-        "<!DOCTYPE html><html><head>"
-        f"<title>{safe_title}</title>"
-        "<style>body{font-family:sans-serif;max-width:600px;margin:60px auto;padding:20px}"
-        f"h1{{color:{color}}}</style></head><body>"
-        f"<h1>{safe_title}</h1>"
-        f"<p>{safe_body}</p>"
-        "</body></html>"
-    )
+    return f"<!DOCTYPE html><html><head><title>{safe_title}</title><style>body{{font-family:sans-serif;max-width:600px;margin:60px auto;padding:20px}}h1{{color:{color}}}</style></head><body><h1>{safe_title}</h1><p>{safe_body}</p></body></html>"

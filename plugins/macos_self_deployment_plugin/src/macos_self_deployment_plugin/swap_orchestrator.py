@@ -30,11 +30,10 @@ import os
 import time
 import uuid
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Final, Protocol
 
-from ananta.core.plugins.profile_manifest import load_manifest_plugin_set
+from ananta.core.actions.owned_deploy_admission import OwnedDeployAdmission
 from ananta.core.runtime import get_runtime_dir
 from ananta.interfaces.lifecycle_result_types import RestartResult, RestartStatus
 
@@ -51,37 +50,22 @@ from macos_self_deployment_plugin.constants import (
     ENV_SOLET_RELEASE_ID,
     FINISHER_ESCALATION_NEEDS_INTERVENTION,
     FINISHER_ESCALATION_SIGKILL_AFTER_GRACE,
+    OWNED_DEPLOY_OPERATION_RESTART,
+    OWNED_DEPLOY_OPERATION_ROLLBACK,
     PLUGIN_NAME,
     STATUS_FAILED,
     STATUS_QUEUED,
     RestartReasonCode,
     is_valid_color,
     opposite_color,
-    resolve_project_root,
-)
-from macos_self_deployment_plugin.preflight_probe_runner import (
-    CHECK_ROOT_MANIFEST,
-    PROBE_ERROR_HARNESS,
-    ProbeOutcome,
 )
 from macos_self_deployment_plugin.release_manager import (
-    VENV_BIN_DIRNAME,
-    VENV_PYTHON_BASENAME,
-    VENV_SUBTREE,
-    VERSION_FILENAME,
     CandidatePaths,
-    GcResult,
     ReleaseManagerError,
-    SwapResult,
 )
 from macos_self_deployment_plugin.router_client import (
     RouterClient,
     RouterClientError,
-)
-from macos_self_deployment_plugin.schema_preflight import PreflightVerdict
-from macos_self_deployment_plugin.schema_snapshot_producer import (
-    SchemaSnapshotFn,
-    build_schema_snapshot_fn,
 )
 from macos_self_deployment_plugin.swap_executor import (
     ActionFactoryProtocol,
@@ -91,248 +75,69 @@ from macos_self_deployment_plugin.swap_executor import (
     SwapExecutor,
     build_failed_result,
 )
-
-
-# A schema-preflight check (design §3): given the freshly-built candidate,
-# return the additive/non-additive verdict. The orchestrator aborts the
-# swap before spawning when the verdict is non-additive (durable code
-# rollback only holds over an unchanged/additive schema). Injected so the
-# plugin owns the extraction (current-release VERSION vs candidate VERSION
-# snapshot) and the orchestrator stays free of the platform schema deps.
-#
-# The spawn/quiesce spine types — ``SpawnFn``, ``SetActiveTarget``,
-# ``ActionFactoryProtocol``, ``SetColorActiveFn`` — live in
-# ``swap_executor`` (the executor owns the spine) and are imported above +
-# re-exported in ``__all__`` so callers that import them from this module
-# (plugin.py, smokes) keep working.
-class SchemaPreflightFn(Protocol):
-    """The §3 gate: classify the candidate against the resolved current snapshot.
-
-    ``current_snapshot`` is the orchestrator-resolved OLD side (read from the
-    current ``VERSION`` or DERIVED from ``current/code``); ``current_release_exists``
-    distinguishes a genuine bootstrap from a derive that failed to a None.
-    """
-
-    def __call__(
-        self,
-        candidate: CandidatePaths,
-        *,
-        current_snapshot: dict[str, object] | None,
-        current_release_exists: bool,
-    ) -> PreflightVerdict: ...
-
-
-class PreflightProbeFn(Protocol):
-    """GTE-06 L2 gate: fresh-source-probe the candidate with its OWN interpreter.
-
-    Returns a classified :class:`ProbeOutcome`; the production seam
-    (:func:`preflight_probe_runner.run_preflight_probe`) NEVER raises
-    (A5a). The orchestrator still wraps the call defensively so an
-    injected seam that violates the contract is contained to a
-    ``PROBE_FAILED`` result rather than escaping as ``plugin_raised``
-    core-side (which would leave the committed manifest bytes with no
-    rollback).
-    """
-
-    def __call__(
-        self, *, candidate: CandidatePaths, app_home: Path
-    ) -> ProbeOutcome: ...
-
-
-class ReleaseManagerProtocol(Protocol):
-    """The subset of :class:`~.release_manager.ReleaseManager` the swap uses.
-
-    Declared structurally so smokes can inject a fake that returns a
-    synthetic :class:`CandidatePaths` and records the ``cutover`` /
-    ``rollback`` calls without CoW-cloning the real 1.8 GB tree — mirroring
-    the ``spawn_fn`` injection seam. Carries both the forward-cutover surface
-    (``build_candidate`` / ``cutover``) and the durable-rollback surface
-    (``previous_release`` / ``candidate_for`` / ``rollback``).
-    """
-
-    @property
-    def current_release(self) -> str | None: ...
-
-    @property
-    def previous_release(self) -> str | None: ...
-
-    def build_candidate(
-        self,
-        *,
-        manifest_etag: str = ...,
-        manifest_plugins: tuple[str, ...] | None = ...,
-        schema_snapshot_fn: Callable[[Path], dict[str, object]] | None = ...,
-        reconciliation_provenance: dict[str, str] | None = ...,
-    ) -> CandidatePaths: ...
-
-    def candidate_for(self, release_id: str) -> CandidatePaths: ...
-
-    def current_schema_snapshot(self) -> dict[str, object] | None: ...
-
-    def cutover(self, candidate: CandidatePaths) -> SwapResult: ...
-
-    def rollback(self) -> SwapResult: ...
-
-    def gc(self, *, keep: int | None = ...) -> GcResult: ...
-
-
-@dataclass(frozen=True, slots=True)
-class _SwapPlan:
-    """The validated pre-spawn plan: which color to bring up, on which release.
-
-    ``probe_evidence`` is the GREEN L2 probe's success payload (Q5); the
-    forward cutover attaches it to the QUEUED result so the applied
-    envelope carries positive proof the probe executed.
-    """
-
-    next_color: str
-    candidate: CandidatePaths
-    probe_evidence: dict[str, Any] | None = None
+from macos_self_deployment_plugin.swap_orchestrator_admission import (
+    OwnedDeployGate as OwnedDeployGate,
+)
+from macos_self_deployment_plugin.swap_orchestrator_admission import (
+    _Entry as _Entry,
+)
+from macos_self_deployment_plugin.swap_orchestrator_admission import (
+    _owned_deploy as _owned_deploy,
+)
+from macos_self_deployment_plugin.swap_orchestrator_preflight import (
+    PRE_BUILD_PROBE_RELEASE_ID as PRE_BUILD_PROBE_RELEASE_ID,
+)
+from macos_self_deployment_plugin.swap_orchestrator_preflight import (
+    _capture_manifest_plugins as _capture_manifest_plugins,
+)
+from macos_self_deployment_plugin.swap_orchestrator_preflight import (
+    _contained_probe_outcome as _contained_probe_outcome,
+)
+from macos_self_deployment_plugin.swap_orchestrator_preflight import (
+    _derive_next_color as _derive_next_color,
+)
+from macos_self_deployment_plugin.swap_orchestrator_preflight import (
+    _gc_releases as _gc_releases,
+)
+from macos_self_deployment_plugin.swap_orchestrator_preflight import (
+    _pre_build_root_manifest_refusal as _pre_build_root_manifest_refusal,
+)
+from macos_self_deployment_plugin.swap_orchestrator_preflight import (
+    _probe_failed_restart_result as _probe_failed_restart_result,
+)
+from macos_self_deployment_plugin.swap_orchestrator_preflight import (
+    _provenance_kwargs as _provenance_kwargs,
+)
+from macos_self_deployment_plugin.swap_orchestrator_preflight import (
+    _resolve_current_snapshot as _resolve_current_snapshot,
+)
+from macos_self_deployment_plugin.swap_orchestrator_preflight import (
+    _root_manifest_restart_result as _root_manifest_restart_result,
+)
+from macos_self_deployment_plugin.swap_orchestrator_preflight import (
+    prepare_swap,
+)
+from macos_self_deployment_plugin.swap_orchestrator_types import (
+    PreflightProbeFn as PreflightProbeFn,
+)
+from macos_self_deployment_plugin.swap_orchestrator_types import (
+    ReleaseManagerProtocol as ReleaseManagerProtocol,
+)
+from macos_self_deployment_plugin.swap_orchestrator_types import (
+    SchemaPreflightFn as SchemaPreflightFn,
+)
+from macos_self_deployment_plugin.swap_orchestrator_types import (
+    _SwapPlan as _SwapPlan,
+)
 
 
 def _now_audit_token() -> str:
     return f"{AUDIT_TOKEN_PREFIX}{int(time.time())}-{uuid.uuid4().hex[:8]}"
 
 
-def _contained_probe_outcome(
-    probe: PreflightProbeFn, *, candidate: CandidatePaths, app_home: Path,
-    logger: logging.Logger,
-) -> ProbeOutcome:
-    """A5a: nothing escapes — a raising probe seam is a RED probe.
-
-    An exception escaping ``restart_with_manifest`` is classified
-    core-side as ``plugin_raised``, which routes to the
-    leave-the-committed-bytes envelope — bypassing the manifest rollback
-    exactly when the probe is least trustworthy. Containing the seam
-    here guarantees every probe-path failure lands on the
-    ``PROBE_FAILED`` → rollback path.
-    """
-    try:
-        return probe(candidate=candidate, app_home=app_home)
-    except Exception as exc:  # noqa: BLE001 — A5a containment is the contract
-        logger.exception("preflight probe seam raised — contained to PROBE_FAILED")
-        return ProbeOutcome(ok=False, payload={
-            "failing_step": "harness",
-            "error_class": PROBE_ERROR_HARNESS,
-            "detail": f"probe seam raised {type(exc).__name__}: {exc}",
-            "failures": [],
-            "release_id": candidate.release_id,
-        })
-
-
-def _root_manifest_restart_result(
-    outcome: ProbeOutcome, *, reason: str, expected_etag: str,
-    logger: logging.Logger,
-) -> RestartResult | None:
-    """F1 drift found by the probe → the F1 classification, not the probe's.
-
-    ``None`` when this rejection is not root-manifest drift.
-
-    §46.1 moved WHERE this gate executes (the outgoing process's stale
-    imports → the candidate's own interpreter) and deliberately changed
-    NOTHING about what a refusal means. That distinction is load-bearing
-    and is why this function exists:
-
-    * ``status`` is what core actually routes on —
-      ``PROBE_FAILED`` triggers the manifest-bytes rollback, ``FAILED``
-      does not. Root-manifest drift is a property of the DEPLOYMENT ROOT,
-      not of the manifest bytes being applied; rolling those bytes back
-      because the repo root carries a stray entry would punish the wrong
-      artifact. It stays ``FAILED`` — system unchanged, coherent,
-      retryable — exactly as it was before the move.
-    * ``reason_code`` is reported rather than routed on, and is preserved
-      for observability: an operator keeps seeing ``root_manifest_drift``
-      instead of a generic ``probe_rejected``.
-
-    Letting either flatten into the probe's own classification would have
-    changed live behaviour as a side effect of a bug fix.
-    """
-    failures = outcome.payload.get("failures")
-    if not isinstance(failures, list):
-        return None
-    drift = next(
-        (
-            failure for failure in failures
-            if isinstance(failure, dict)
-            and failure.get("check") == CHECK_ROOT_MANIFEST
-        ),
-        None,
-    )
-    if drift is None:
-        return None
-    envelope = str(drift.get("message", ""))
-    logger.warning("cutover preflight refused green spawn:\n%s", envelope)
-    return build_failed_result(
-        status=RestartStatus.FAILED,
-        reason_code=RestartReasonCode.ROOT_MANIFEST_DRIFT,
-        message="cutover preflight blocked on root_manifest drift:\n" + envelope,
-        reason=reason,
-        expected_etag=expected_etag,
-        logger=logger,
-    )
-
-
-PRE_BUILD_PROBE_RELEASE_ID: Final[str] = "pre-build-source-tree"
-
-
-def _pre_build_root_manifest_refusal(
-    probe: PreflightProbeFn, *, app_home: Path, reason: str, expected_etag: str,
-    logger: logging.Logger,
-) -> RestartResult | None:
-    """Refuse root-manifest drift BEFORE the release build, or return ``None``.
-
-    The drift is a property of the deployment root, so it is known without a
-    built release; finding it only after the build cost a full build for a
-    refusal that needed none of it (iss_aca2ea39).  §46.1 forbids running the
-    check in this process (its imports are as old as its last start), so the
-    SAME probe seam runs it under the source checkout's own interpreter: the
-    candidate is a clone of that checkout's code and venv, which makes the
-    code doing the validating the code about to be activated.
-
-    Only a root-manifest failure refuses here, with the same classification
-    and message the post-build probe gives.  Anything else the early probe
-    reports (a plugin-manifest failure, a harness error, a missing source
-    venv) is left to the post-build probe, which stays the authoritative gate
-    on the candidate's own interpreter.
-    """
-    source_root = resolve_project_root(app_home)
-    source_target = CandidatePaths(
-        release_id=PRE_BUILD_PROBE_RELEASE_ID,
-        release_dir=source_root,
-        code_root=source_root,
-        venv_python=source_root / VENV_SUBTREE / VENV_BIN_DIRNAME / VENV_PYTHON_BASENAME,
-        version_file=source_root / VERSION_FILENAME,
-        missing_pth_targets=(),
-        schema_snapshot=None,
-    )
-    outcome = _contained_probe_outcome(
-        probe, candidate=source_target, app_home=app_home, logger=logger,
-    )
-    if outcome.ok:
-        return None
-    refusal = _root_manifest_restart_result(
-        outcome, reason=reason, expected_etag=expected_etag, logger=logger,
-    )
-    if refusal is None:
-        logger.info(
-            "pre-build probe of the source tree did not report root-manifest "
-            "drift (%s); the post-build probe of the candidate decides",
-            outcome.payload.get("error_class"),
-        )
-    return refusal
-
-
-def _dry_run_envelope(
-    reason: str, expected_etag: str, self_color: str
-) -> RestartResult:
-    next_color = (
-        opposite_color(self_color) if is_valid_color(self_color) else COLOR_GREEN
-    )
-    message = (
-        f"dry_run=True; would spawn next_color={next_color}, "
-        f"wait for register, activate, quiesce, enqueue complete_swap. "
-        f"Reason: {reason}"
-    )
+def _dry_run_envelope(reason: str, expected_etag: str, self_color: str) -> RestartResult:
+    next_color = opposite_color(self_color) if is_valid_color(self_color) else COLOR_GREEN
+    message = f"dry_run=True; would spawn next_color={next_color}, wait for register, activate, quiesce, enqueue complete_swap. Reason: {reason}"
     return RestartResult(
         status=RestartStatus.QUEUED,
         restart_action_id=_now_audit_token(),
@@ -340,40 +145,6 @@ def _dry_run_envelope(
         reason=reason,
         expected_etag=expected_etag,
         dry_run=True,
-    )
-
-
-def _probe_failed_restart_result(
-    outcome: ProbeOutcome, *, reason: str, expected_etag: str,
-    logger: logging.Logger,
-) -> RestartResult:
-    """Typed PROBE_FAILED result carrying the rejection payload.
-
-    EXCEPT for root-manifest drift, which keeps its own classification —
-    see :func:`_root_manifest_restart_result`.
-    """
-    root_manifest_failure = _root_manifest_restart_result(
-        outcome, reason=reason, expected_etag=expected_etag, logger=logger,
-    )
-    if root_manifest_failure is not None:
-        return root_manifest_failure
-    error_class = outcome.payload.get("error_class")
-    detail = outcome.payload.get("detail")
-    logger.error(
-        "L2 preflight probe REJECTED the deploy [%s]: %s", error_class, detail,
-    )
-    return RestartResult(
-        status=RestartStatus.PROBE_FAILED,
-        restart_action_id="",
-        message=(
-            "L2 fresh-source preflight probe rejected the deploy: "
-            f"{error_class}: {detail}"
-        ),
-        reason=reason,
-        expected_etag=expected_etag,
-        dry_run=False,
-        reason_code=RestartReasonCode.PROBE_REJECTED,
-        probe=outcome.payload,
     )
 
 
@@ -406,83 +177,11 @@ def _rollback_cas_check(
     return build_failed_result(
         status=RestartStatus.FAILED,
         reason_code=RestartReasonCode.STALE_CURRENT_RELEASE,
-        message=(
-            f"stale current release: caller asserted current="
-            f"{expected_current_release!r} but the live current is "
-            f"{actual_current!r}; re-read current_release and retry."
-        ),
-        reason=reason, expected_etag=expected_etag, logger=logger,
+        message=(f"stale current release: caller asserted current={expected_current_release!r} but the live current is {actual_current!r}; re-read current_release and retry."),
+        reason=reason,
+        expected_etag=expected_etag,
+        logger=logger,
     )
-
-
-def _capture_manifest_plugins(app_home: Path) -> tuple[str, ...] | None:
-    """Snapshot the LIVE profile plugin set for the release being built (BLG-02).
-
-    Called at build time because that is the one moment the live manifest still
-    describes the tree being built: ``apply_manifest`` commits the new manifest
-    before delegating a restart, and the NEXT deploy overwrites it again. The §3
-    derive path therefore cannot read it back later and must consult the
-    release's own persisted copy instead.
-
-    ``None`` is preserved rather than flattened to an empty tuple: ``None``
-    means "ungated — load everything installed", while ``()`` would claim the
-    release had NO plugins and gate a later derive to an empty discovery, which
-    would silently produce an empty snapshot. Module-level alongside
-    ``_resolve_current_snapshot`` so ``SwapOrchestrator`` stays under the
-    god-class LOC bound.
-    """
-    live = load_manifest_plugin_set(app_home)
-    return None if live is None else tuple(sorted(live))
-
-
-def _resolve_current_snapshot(
-    release_manager: ReleaseManagerProtocol,
-    snapshot_fn: SchemaSnapshotFn,
-) -> dict[str, object] | None:
-    """Resolve the OLD side of the §3 diff — read it, or DERIVE it (B1·1).
-
-    The current release's persisted snapshot is the OLD side. When the current
-    release predates the producer (its ``VERSION`` has none) but a current
-    release EXISTS, DERIVE the snapshot by running the SAME collector
-    (``snapshot_fn``) against ``current/code`` — so a pre-producer current (e.g.
-    the live ``af157a1fe`` transition) is still gated.
-
-    The derive passes the OLD release's OWN captured plugin set as the
-    collector's manifest (BLG-02). By the time this runs, ``apply_manifest``
-    has already written the INCOMING deploy's manifest over the live one, so
-    letting the collector read ``APP_HOME`` would gate the old tree by the new
-    profile — and a deploy that GROWS the manifest would then false-REFUSE on a
-    plugin the old tree never had. ``None`` (a release built before capture
-    landed) preserves today's live-manifest behaviour rather than inventing a
-    more permissive one; it is a compat rung that stops firing once every
-    release in the chain postdates this.
-
-    FAIL-CLOSED on both legs: ``current_schema_snapshot`` raises on a torn
-    ``VERSION`` and the derive raises on any collect failure, so the only
-    outcomes are a snapshot or a ``ReleaseManagerError`` — NEVER a silent None
-    that would let the gate read a non-additive change as a bootstrap. A ``None``
-    return therefore means, unambiguously, "no current release". Module-level
-    (stateless beyond release state + the fn) alongside ``_rollback_cas_check``,
-    so the orchestrator class stays under the god-class LOC bound.
-    """
-    current_release = release_manager.current_release
-    current_snapshot = release_manager.current_schema_snapshot()
-    if current_snapshot is None and current_release is not None:
-        old_candidate = release_manager.candidate_for(current_release)
-        # THE point of use, and therefore the only place a rejected capture may
-        # refuse. Rehydrate deliberately reports rather than raises, so that a
-        # garbage schema-gate field cannot make a bootable release
-        # un-rollback-able; the cost of that choice is paid here, loudly.
-        if old_candidate.manifest_plugins_error is not None:
-            msg = (
-                f"§3 derive refused: {old_candidate.manifest_plugins_error} — refusing to "
-                "snapshot an old tree against an untrustworthy manifest"
-            )
-            raise ReleaseManagerError(msg)
-        current_snapshot = snapshot_fn(
-            old_candidate.code_root, old_candidate.manifest_plugins,
-        )
-    return current_snapshot
 
 
 def default_spawn(
@@ -553,63 +252,6 @@ def default_spawn(
     return proc.pid
 
 
-def _derive_next_color(
-    status_snap: dict[str, Any],
-    self_color: str,
-    self_instance_id: str,
-    logger: logging.Logger,
-) -> str | None:
-    """Confirm ``self`` is THE router-active instance; return opposite color or None.
-
-    C3: require both ``active_color == self_color`` AND ``active_instance_id ==
-    self_instance_id``. Color alone is not identity — a stale same-color process
-    (not the router-active instance) must not drive a swap and enqueue a
-    ``complete_swap`` for its own stale id. Module-level (pure but for the
-    injected logger) so :class:`SwapOrchestrator` stays under the god-class bound.
-    """
-    active_color = status_snap.get("active_color")
-    active_instance_id = status_snap.get("active_instance_id")
-    if not isinstance(active_color, str) or not isinstance(active_instance_id, str):
-        return None
-    if active_color != self_color:
-        logger.warning(
-            "self_color=%s but router.active_color=%s; refusing swap",
-            self_color, active_color,
-        )
-        return None
-    if active_instance_id != self_instance_id:
-        logger.warning(
-            "self_instance_id=%s but router.active_instance_id=%s "
-            "(stale non-active same-color process); refusing swap",
-            self_instance_id, active_instance_id,
-        )
-        return None
-    if not is_valid_color(self_color):
-        return None
-    return opposite_color(self_color)
-
-
-def _provenance_kwargs(
-    reconciliation_provenance: dict[str, str] | None,
-) -> dict[str, dict[str, str]]:
-    """Pass the provenance kwarg ONLY on the reconciliation path.
-
-    An ordinary deploy must call ``build_candidate`` with exactly the argument
-    list it always did, so widening that seam cannot silently change deploy
-    behaviour — and a release-manager stand-in that does not understand
-    provenance then fails loudly the moment a reconciliation actually uses it,
-    instead of quietly dropping the one field that records which approved act
-    produced these bytes.
-
-    Provenance reaches the build and nothing else: it never influences colour
-    selection, preflight, or any refusal, so a reconciliation swap and a deploy
-    swap remain the same operation with the same safety properties.
-    """
-    if reconciliation_provenance is None:
-        return {}
-    return {"reconciliation_provenance": reconciliation_provenance}
-
-
 def _finisher_escalation_for(reconciliation_provenance: dict[str, str] | None) -> str:
     """The finisher's SIGTERM-overrun policy for this swap (iss_8d1ec833).
 
@@ -632,35 +274,22 @@ def _prior_identity(
     resolved_pid = os.getpid() if prior_pid is None else prior_pid
     return (
         resolved_pid,
-        process_identity.start_token(resolved_pid)
-        if prior_start_token is None
-        else prior_start_token,
+        process_identity.start_token(resolved_pid) if prior_start_token is None else prior_start_token,
     )
-
-
-def _gc_releases(manager: ReleaseManagerProtocol, logger: logging.Logger) -> None:
-    """Best-effort release cleanup that never aborts a healthy swap."""
-    try:
-        result = manager.gc()
-    except (ReleaseManagerError, OSError) as exc:
-        logger.warning("release gc failed (non-fatal): %s", exc)
-        return
-    if result.deleted:
-        logger.info("release gc reaped %d: %s", len(result.deleted), result.deleted)
 
 
 class SwapOrchestrator:
     """Stateless coordinator for one ``restart_with_manifest`` turn.
 
-    ``stateless`` means: every public call is reentrant. The
-    orchestrator caches no in-flight bookkeeping between calls; per-call
-    state lives in local variables. The plugin keeps a single
-    orchestrator instance and reuses it; concurrent calls would step on
-    each other, but the lifecycle contract only fires
-    ``restart_with_manifest`` from inside ``apply_manifest`` which
-    holds the platform's manifest CAS lock — concurrent firings are
-    blocked at the apply-manifest layer.
+    ``stateless`` means: no in-flight bookkeeping is cached between calls;
+    per-call state lives in local variables. Concurrent swaps are excluded
+    by owned-deploy admission (:class:`OwnedDeployGate`): ``restart`` and
+    ``rollback_release`` admit through the per-solet lock shared with the
+    core ``apply_manifest`` commit and ``stop_self`` before any router
+    probe, build or spawn. ``apply_manifest`` delegating here on its own
+    thread joins its outer admission instead of re-locking.
     """
+
     def __init__(
         self,
         *,
@@ -690,6 +319,8 @@ class SwapOrchestrator:
         # B2: pending-finisher record dir (smokes inject a scratch dir so live
         # state is never touched); defaults to the live runtime dir.
         resolved_runtime_dir = runtime_dir or get_runtime_dir(solet_name)
+        admission = OwnedDeployAdmission(runtime_dir=resolved_runtime_dir, solet_name=solet_name, identity_probe=process_identity.start_token)
+        self.owned_deploy_gate = OwnedDeployGate(admission, self._logger)
         # The spawn → wait → activate → symlink-swap → quiesce → enqueue spine
         # (incl. the GreenCandidate router lifecycle) lives in the executor,
         # shared verbatim by the forward cutover and the durable rollback. The
@@ -713,6 +344,7 @@ class SwapOrchestrator:
     # Entry point: restart_with_manifest
     # ------------------------------------------------------------------
 
+    @_owned_deploy(OWNED_DEPLOY_OPERATION_RESTART)
     def restart(
         self,
         *,
@@ -784,8 +416,11 @@ class SwapOrchestrator:
         # the candidate — all BEFORE any spawn (§4.5/§4.7/§3). A failure here
         # leaves the live router + ``current``/``previous`` untouched.
         plan = self._prepare_swap(
-            reason=reason, expected_etag=expected_etag, app_home=app_home,
-            self_color=self_color, self_instance_id=self_instance_id,
+            reason=reason,
+            expected_etag=expected_etag,
+            app_home=app_home,
+            self_color=self_color,
+            self_instance_id=self_instance_id,
             reconciliation_provenance=reconciliation_provenance,
         )
         if isinstance(plan, RestartResult):
@@ -800,12 +435,17 @@ class SwapOrchestrator:
         # ``rollback`` instead); a register-timeout here is a plain FAILED
         # (system unchanged, retryable).
         resolved_prior_pid, resolved_prior_start_token = _prior_identity(
-            prior_pid, prior_start_token,
+            prior_pid,
+            prior_start_token,
         )
         result = self._executor.execute(
-            app_home=app_home, candidate=candidate, next_color=next_color,
-            reason=reason, expected_etag=expected_etag,
-            self_instance_id=self_instance_id, self_color=self_color,
+            app_home=app_home,
+            candidate=candidate,
+            next_color=next_color,
+            reason=reason,
+            expected_etag=expected_etag,
+            self_instance_id=self_instance_id,
+            self_color=self_color,
             prior_pid=resolved_prior_pid,
             prior_start_token=resolved_prior_start_token,
             poller_gate=poller_gate,
@@ -832,6 +472,7 @@ class SwapOrchestrator:
     # Entry point: rollback_release (durable code rollback — the escape hatch)
     # ------------------------------------------------------------------
 
+    @_owned_deploy(OWNED_DEPLOY_OPERATION_ROLLBACK)
     def rollback_release(
         self,
         *,
@@ -900,14 +541,17 @@ class SwapOrchestrator:
         cas_failure = _rollback_cas_check(
             release_manager=self._release_manager,
             expected_current_release=expected_current_release,
-            expected_etag=expected_etag, reason=reason, logger=self._logger,
+            expected_etag=expected_etag,
+            reason=reason,
+            logger=self._logger,
         )
         if cas_failure is not None:
             return cas_failure
         previous = self._release_manager.previous_release
         if previous is None:
             return self._failure(
-                reason=reason, expected_etag=expected_etag,
+                reason=reason,
+                expected_etag=expected_etag,
                 message="no previous release to roll back to",
                 reason_code=RestartReasonCode.NO_ROLLBACK_TARGET,
             )
@@ -918,20 +562,22 @@ class SwapOrchestrator:
             status_snap = self._router.status()
         except RouterClientError as exc:
             return self._failure(
-                reason=reason, expected_etag=expected_etag,
+                reason=reason,
+                expected_etag=expected_etag,
                 message=f"router status() failed: {exc}",
                 reason_code=RestartReasonCode.ROUTER_UNREACHABLE,
             )
         next_color = _derive_next_color(
-            status_snap, self_color, self_instance_id, self._logger,
+            status_snap,
+            self_color,
+            self_instance_id,
+            self._logger,
         )
         if next_color is None:
             return self._failure(
-                reason=reason, expected_etag=expected_etag,
-                message=(
-                    "router status() did not show this instance as the active "
-                    "color; refusing to roll back from a non-active instance."
-                ),
+                reason=reason,
+                expected_etag=expected_etag,
+                message=("router status() did not show this instance as the active color; refusing to roll back from a non-active instance."),
                 reason_code=RestartReasonCode.NOT_ACTIVE_INSTANCE,
             )
         # Rehydrate the previous release's spawn paths. A raise means the target
@@ -945,14 +591,18 @@ class SwapOrchestrator:
                 status=RestartStatus.NEEDS_INTERVENTION,
                 reason_code=RestartReasonCode.ROLLBACK_TARGET_UNBOOTABLE,
                 message=f"rollback target {previous} is not materializable: {exc}",
-                reason=reason, expected_etag=expected_etag, logger=self._logger,
+                reason=reason,
+                expected_etag=expected_etag,
+                logger=self._logger,
             )
         self._logger.info(
             "rolling back: bringing up previous release=%s as color=%s",
-            previous, next_color,
+            previous,
+            next_color,
         )
         resolved_prior_pid, resolved_prior_start_token = _prior_identity(
-            prior_pid, prior_start_token,
+            prior_pid,
+            prior_start_token,
         )
         return self._executor.execute(
             app_home=app_home,
@@ -992,8 +642,13 @@ class SwapOrchestrator:
     # ------------------------------------------------------------------
 
     def _prepare_swap(
-        self, *, reason: str, expected_etag: str, app_home: Path,
-        self_color: str, self_instance_id: str,
+        self,
+        *,
+        reason: str,
+        expected_etag: str,
+        app_home: Path,
+        self_color: str,
+        self_instance_id: str,
         reconciliation_provenance: dict[str, str] | None = None,
     ) -> _SwapPlan | RestartResult:
         """Pre-spawn phase: confirm self active + materialize + preflight candidate.
@@ -1010,114 +665,29 @@ class SwapOrchestrator:
         ``reconciliation_provenance`` reaches the candidate build and nothing
         else — see :func:`_provenance_kwargs`.
         """
-        try:
-            status_snap = self._router.status()
-        except RouterClientError as exc:
-            return self._failure(
-                reason=reason, expected_etag=expected_etag,
-                message=f"router status() failed: {exc}",
-                reason_code=RestartReasonCode.ROUTER_UNREACHABLE,
-            )
-        next_color = _derive_next_color(
-            status_snap, self_color, self_instance_id, self._logger,
-        )
-        if next_color is None:
-            return self._failure(
-                reason=reason, expected_etag=expected_etag,
-                message=(
-                    "router status() did not show this instance as the active "
-                    "color; refusing to spawn a parallel green from a "
-                    "non-active blue."
-                ),
-                reason_code=RestartReasonCode.NOT_ACTIVE_INSTANCE,
-            )
-        # Root-manifest drift needs no built release (iss_aca2ea39).
-        early_refusal = _pre_build_root_manifest_refusal(
-            self._preflight_probe, app_home=app_home, reason=reason,
-            expected_etag=expected_etag, logger=self._logger,
-        )
-        if early_refusal is not None:
-            return early_refusal
-        # §4.5/§4.7: materialize the immutable candidate BEFORE the spawn so the
-        # green child is launched from the candidate's own venv/code — NOT
-        # ``current``, which still names the live old release until ``cutover``
-        # flips it post-activate.
-        snapshot_fn = build_schema_snapshot_fn(
+
+        return prepare_swap(
+            router=self._router,
+            release_manager=self._release_manager,
+            schema_preflight=self._schema_preflight,
+            preflight_probe=self._preflight_probe,
             solet_name=self._solet_name,
-            app_home=app_home,
-            source_root=resolve_project_root(app_home),
-        )
-        try:
-            candidate = self._release_manager.build_candidate(
-                manifest_etag=expected_etag,
-                manifest_plugins=_capture_manifest_plugins(app_home),
-                schema_snapshot_fn=snapshot_fn,
-                **_provenance_kwargs(reconciliation_provenance),
-            )
-        except ReleaseManagerError as exc:
-            return self._failure(
-                reason=reason, expected_etag=expected_etag,
-                message=f"build candidate release failed: {exc}",
-                reason_code=RestartReasonCode.BUILD_FAILED,
-            )
-        self._logger.info(
-            "built candidate release=%s missing_pth=%d",
-            candidate.release_id, len(candidate.missing_pth_targets),
-        )
-        # §4.7 lifecycle GC: having materialized a new release, reap the stale
-        # tail (keep last K; §4.6 GC-safety never reaps current/previous/
-        # in_progress). Running it on EVERY build — before the preflight that
-        # may refuse this candidate — bounds BOTH accumulation sources to ~K:
-        # superseded releases AND rejected candidates from a run of
-        # build-then-refuse / post-build failures (the just-built candidate is
-        # newest, so it survives; the next build reaps it if it never landed).
-        _gc_releases(self._release_manager, self._logger)
-        # §3 preflight DDL-free gate: durable code rollback only holds over an
-        # unchanged/additive schema. A non-additive diff is refused HERE, before
-        # any spawn. The rejected candidate dir is left for the NEXT build's GC.
-        try:
-            current_snapshot = _resolve_current_snapshot(self._release_manager, snapshot_fn)
-        except ReleaseManagerError as exc:
-            return self._failure(
-                reason=reason, expected_etag=expected_etag,
-                message=f"schema preflight could not resolve the current snapshot: {exc}",
-                reason_code=RestartReasonCode.SCHEMA_PREFLIGHT_REFUSED,
-            )
-        verdict = self._schema_preflight(
-            candidate,
-            current_snapshot=current_snapshot,
-            current_release_exists=self._release_manager.current_release is not None,
-        )
-        if not verdict.is_additive:
-            return self._failure(
-                reason=reason, expected_etag=expected_etag,
-                message=(
-                    "schema preflight refused deploy — durable rollback only "
-                    f"protects code over an additive schema. {verdict.summary()}"
-                ),
-                reason_code=RestartReasonCode.SCHEMA_PREFLIGHT_REFUSED,
-            )
-        # GTE-06 L2 fresh-source probe — the LAST pre-spawn gate (design
-        # §3.1: cheap gates first; the probe pays a subprocess + full
-        # import pass, so it runs only on candidates that passed
-        # everything cheaper). RED ⇒ PROBE_FAILED before any spawn; core
-        # reacts by rolling the committed manifest bytes back.
-        probe_outcome = _contained_probe_outcome(
-            self._preflight_probe, candidate=candidate, app_home=app_home,
             logger=self._logger,
-        )
-        if not probe_outcome.ok:
-            return _probe_failed_restart_result(
-                probe_outcome, reason=reason, expected_etag=expected_etag,
-                logger=self._logger,
-            )
-        return _SwapPlan(
-            next_color=next_color, candidate=candidate,
-            probe_evidence=probe_outcome.payload,
+            failure=self._failure,
+            reason=reason,
+            expected_etag=expected_etag,
+            app_home=app_home,
+            self_color=self_color,
+            self_instance_id=self_instance_id,
+            reconciliation_provenance=reconciliation_provenance,
         )
 
     def _failure(
-        self, *, reason: str, expected_etag: str, message: str,
+        self,
+        *,
+        reason: str,
+        expected_etag: str,
+        message: str,
         reason_code: str = RestartReasonCode.NONE,
     ) -> RestartResult:
         """Build a pre-spawn FAILED result (router/build/preflight refusals).

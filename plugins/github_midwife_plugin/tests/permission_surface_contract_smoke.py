@@ -7,32 +7,26 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 _ROOT = Path(__file__).resolve().parents[3]
 _PLUGIN_SRC = _ROOT / "plugins/github_midwife_plugin/src"
 if str(_PLUGIN_SRC) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_SRC))
 
-from github_midwife_plugin.setup_adapter_contract import AdapterRequest  # noqa: E402
+from github_midwife_plugin.setup_adapter_contract import AdapterRequest, JsonObject  # noqa: E402
+from github_midwife_plugin.setup_adapter_runtime import Runtime  # noqa: E402
 from github_midwife_plugin.setup_operations import _genesis  # noqa: E402
 
 _FLOW_PATH = _ROOT / "plugins/github_midwife_plugin/knowledge_base/macos_setup_flow.json"
 _GENESIS_PATH = _ROOT / "plugins/github_midwife_plugin/src/github_midwife_plugin/genesis.py"
-_SETUP_OPERATIONS_PATH = (
-    _ROOT / "plugins/github_midwife_plugin/src/github_midwife_plugin/setup_operations.py"
-)
-_ROUTER_INSTALL_PATH = (
-    _ROOT / "plugins/github_midwife_plugin/src/github_midwife_plugin/router_install.py"
-)
-_BLUE_GREEN_ROUTER_PATH = (
-    _ROOT
-    / "plugins/macos_self_deployment_plugin/src/macos_self_deployment_plugin/blue_green_router/install_router.py"
-)
+_SETUP_OPERATIONS_PATH = _ROOT / "plugins/github_midwife_plugin/src/github_midwife_plugin/setup_operations.py"
+_ROUTER_INSTALL_PATH = _ROOT / "plugins/github_midwife_plugin/src/github_midwife_plugin/router_install.py"
+_BLUE_GREEN_ROUTER_PATH = _ROOT / "plugins/macos_self_deployment_plugin/src/macos_self_deployment_plugin/blue_green_router/install_router.py"
 _SELF_DEPLOYMENT_PLUGIN_ROOT = _ROOT / "plugins/macos_self_deployment_plugin"
 _SKIP_EXIT_CODE = 77
 
-_CHECKS = 0
+_checks = 0
 
 
 @dataclass(frozen=True)
@@ -61,14 +55,14 @@ def _bundle_plugin_skip(plugin_root: Path, plugin: str) -> BundlePluginSkip | No
 
 
 def _check(condition: object, message: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    global _checks
+    _checks += 1
     if not condition:
         raise AssertionError(message)
 
 
 def _check_genesis_codex_config(flow: dict[str, Any], setup_operations: str, genesis: str) -> None:
-    """Require the unconditional Codex MCP append to stay declared and previewed."""
+    """Require the selected Codex MCP append to stay declared and previewed."""
 
     operation = flow["operations"]["run_genesis"]
     consent = flow["consents"]["codex_mcp_configuration_consent"]
@@ -77,28 +71,31 @@ def _check_genesis_codex_config(flow: dict[str, Any], setup_operations: str, gen
         "red: Genesis Codex config append lacks its consent declaration",
     )
     _check(
-        consent["required"] is True and "required_when" not in consent,
-        "red: unconditional Genesis Codex config append must remain unconditionally declared",
+        consent["required"] is False
+        and consent.get("required_when")
+        == {
+            "decision_ref": "coding_agents",
+            "operator": "contains",
+            "value": "codex",
+        },
+        "red: Genesis Codex config consent must follow the explicit Codex selection",
     )
     _check(
-        "~/.codex/config.toml" in consent["scope"]
-        and any("[mcp_servers.<name>]" in item for item in consent["scope"]),
+        "~/.codex/config.toml" in consent["scope"] and any("[mcp_servers.<name>]" in item for item in consent["scope"]),
         "red: Codex config declaration must name the file and appended MCP table",
     )
     _check(
-        'runtime.home / ".codex" / "config.toml"' in setup_operations
-        and "config_append" in setup_operations,
+        'runtime.home / ".codex" / "config.toml"' in setup_operations and "config_append" in setup_operations,
         "red: Genesis preview must enumerate the Codex config append",
     )
-    actions = _genesis_preview_actions()
+    actions = _genesis_preview_actions(("codex",))
     _check(
-        any(
-            action["id"] == "genesis.configure_codex_mcp_server"
-            and action["mutation_kind"] == "config_append"
-            and action["target"].endswith("/.codex/config.toml")
-            for action in actions
-        ),
+        any(_codex_config_action(action) for action in actions),
         "red: Genesis preview response must render the Codex config append action",
+    )
+    _check(
+        not any(action["id"] == "genesis.configure_codex_mcp_server" for action in _genesis_preview_actions(("claude_code",))),
+        "red: Claude-only Genesis preview must omit the Codex config append",
     )
     _check(
         "# the no-MCP-first primary interface" in genesis and "UNCONDITIONAL" in genesis,
@@ -106,7 +103,12 @@ def _check_genesis_codex_config(flow: dict[str, Any], setup_operations: str, gen
     )
 
 
-def _genesis_preview_actions() -> list[dict[str, object]]:
+def _codex_config_action(action: JsonObject) -> bool:
+    target = action["target"]
+    return action["id"] == "genesis.configure_codex_mcp_server" and action["mutation_kind"] == "config_append" and isinstance(target, str) and target.endswith("/.codex/config.toml")
+
+
+def _genesis_preview_actions(selected: tuple[str, ...]) -> list[JsonObject]:
     request = AdapterRequest.from_dict(
         {
             "protocol_version": 1,
@@ -125,14 +127,14 @@ def _genesis_preview_actions() -> list[dict[str, object]]:
             "approval_fingerprint": None,
             "dry_run": True,
             "timeout_seconds": 30,
-            "public_inputs": {"autostart": "disabled"},
+            "public_inputs": {"autostart": "disabled", "selected_coding_agents": list(selected)},
         }
     )
-    response = _genesis(request, SimpleNamespace(home=Path("/tmp/permission-surface-home")))
+    response = _genesis(request, cast(Runtime, SimpleNamespace(home=Path("/tmp/permission-surface-home"))))
     actions = response["planned_actions"]
     if not isinstance(actions, list) or not all(isinstance(action, dict) for action in actions):
         raise AssertionError("red: Genesis preview returned malformed planned actions")
-    return actions
+    return cast(list[JsonObject], actions)
 
 
 def _check_coding_agent_plugin_metadata(flow: dict[str, Any]) -> None:
@@ -151,8 +153,7 @@ def _check_coding_agent_plugin_metadata(flow: dict[str, Any]) -> None:
     for operation_id, (consent_id, permission_id) in expected.items():
         operation = flow["operations"][operation_id]
         _check(
-            operation.get("consent_refs") == [consent_id]
-            and operation.get("permission_refs") == [permission_id],
+            operation.get("consent_refs") == [consent_id] and operation.get("permission_refs") == [permission_id],
             f"red: {operation_id} must carry its coding-agent consent and permission metadata",
         )
         _check(
@@ -171,9 +172,7 @@ def _check_coding_agent_plugin_metadata(flow: dict[str, Any]) -> None:
     )
 
 
-def _check_launchagent_cardinality(
-    flow: dict[str, Any], router_install: str, blue_green_router: str
-) -> None:
+def _check_launchagent_cardinality(flow: dict[str, Any], router_install: str, blue_green_router: str) -> None:
     """Match the main and router plist paths to distinct declared entries."""
 
     main = flow["permissions"]["background_items_permission"]
@@ -193,8 +192,7 @@ def _check_launchagent_cardinality(
         "red: blue-green router LaunchAgent must remain separately and conditionally declared",
     )
     _check(
-        flow["operations"]["run_genesis"].get("permission_refs")
-        == ["blue_green_router_background_items_permission"],
+        flow["operations"]["run_genesis"].get("permission_refs") == ["blue_green_router_background_items_permission"],
         "red: Genesis router installer lacks its background-items declaration",
     )
     _check(
@@ -224,7 +222,7 @@ def main() -> int:
         _ROUTER_INSTALL_PATH.read_text(encoding="utf-8"),
         _BLUE_GREEN_ROUTER_PATH.read_text(encoding="utf-8"),
     )
-    print(f"permission_surface_contract_smoke OK: {_CHECKS} checks passed")
+    print(f"permission_surface_contract_smoke OK: {_checks} checks passed")
     return 0
 
 

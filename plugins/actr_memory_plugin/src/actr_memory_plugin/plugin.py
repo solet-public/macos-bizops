@@ -6,8 +6,14 @@ This plugin wraps the memory_service interface, providing:
 - CLI access via entry points
 """
 
+import asyncio
 import datetime
 import logging
+import threading
+from collections import deque
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import UTC
 from typing import Any, ClassVar, cast
 
@@ -73,6 +79,86 @@ _ACTR_CONSOLIDATION_FLOW_ID = "flow-actr-consolidation"
 _ACTR_CONSOLIDATION_SESSION_ID = "sess-actr-consolidation"
 
 
+# A single running operation and FIFO async turn reservations preserve ordering.
+# Waiting callers never occupy an executor worker or its submission queue.
+# The process owns this pool across plugin stop/restart; Python retires it at exit.
+_F5_WORKERS = 1
+_F5_PENDING_BOUND = 1
+_F5_EXECUTOR = ThreadPoolExecutor(max_workers=_F5_WORKERS, thread_name_prefix="actr_memory-f5")
+_F5_SUBMISSION_LOCK = threading.RLock()
+_f5_in_flight: Future[object] | None = None
+_f5_turn: Future[None] | None = None
+_f5_waiters: deque[Future[None]] = deque()
+logging.getLogger(__name__).info("F5 executor actr_memory-f5: workers=%s pending=%s", _F5_WORKERS, _F5_PENDING_BOUND)
+
+
+def _release_f5_turn(turn: Future[None]) -> None:
+    global _f5_turn
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is not turn:
+            return
+        if _f5_waiters:
+            next_turn = _f5_waiters.popleft()
+            _f5_turn = next_turn
+            next_turn.set_result(None)
+        else:
+            _f5_turn = None
+
+
+def _cancel_f5_waiter(turn: Future[None]) -> None:
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is turn:
+            _release_f5_turn(turn)
+        elif turn in _f5_waiters:
+            _f5_waiters.remove(turn)
+            turn.cancel()
+
+
+def _complete_f5_operation(turn: Future[None], done: Future[object]) -> None:
+    global _f5_in_flight
+    with _F5_SUBMISSION_LOCK:
+        if _f5_in_flight is done:
+            _f5_in_flight = None
+        _release_f5_turn(turn)
+
+
+def _report_f5_late_failure(done: Future[object]) -> None:
+    error = done.exception()
+    if error is not None:
+        logging.getLogger(__name__).error("F5 operation failed after its waiter cancelled: %s", error)
+
+
+async def _run_f5_blocking[T](operation: Callable[[], T]) -> T:
+    """Reserve FIFO order before waiting; cancellation retains active ownership."""
+    global _f5_in_flight, _f5_turn
+    turn = Future[None]()
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is None:
+            _f5_turn = turn
+            turn.set_result(None)
+        else:
+            _f5_waiters.append(turn)
+    try:
+        await asyncio.shield(asyncio.gather(asyncio.wrap_future(turn), return_exceptions=True))
+    except asyncio.CancelledError:
+        _cancel_f5_waiter(turn)
+        raise
+    try:
+        with _F5_SUBMISSION_LOCK:
+            future = _F5_EXECUTOR.submit(copy_context().run, operation)
+            _f5_in_flight = cast(Future[object], future)
+    except BaseException:
+        _release_f5_turn(turn)
+        raise
+    future.add_done_callback(lambda done: _complete_f5_operation(turn, cast(Future[object], done)))
+    try:
+        await asyncio.shield(asyncio.gather(asyncio.wrap_future(future), return_exceptions=True))
+    except asyncio.CancelledError:
+        future.add_done_callback(lambda done: _report_f5_late_failure(cast(Future[object], done)))
+        raise
+    return future.result()
+
+
 class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     """Memory system with ACT-R decay and consolidation.
 
@@ -87,9 +173,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     """
 
     service_interfaces: ClassVar[tuple[type, ...]] = (MemoryServiceInterface,)
-    supported_interface_versions: ClassVar[dict[type, str]] = {
-        MemoryServiceInterface: MemoryServiceInterface.INTERFACE_VERSION
-    }
+    supported_interface_versions: ClassVar[dict[type, str]] = {MemoryServiceInterface: MemoryServiceInterface.INTERFACE_VERSION}
 
     def __init__(self) -> None:
         super().__init__()
@@ -181,9 +265,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
 
         APP_HOME = getattr(self.orchestrator_ref, "APP_HOME", None)
         if not APP_HOME:
-            raise RuntimeError(
-                f"{self.name}: Application directory not configured - plugin cannot initialize"
-            )
+            raise RuntimeError(f"{self.name}: Application directory not configured - plugin cannot initialize")
 
         # Initialize configuration and logging. Pull the merged operator config
         # DIRECTLY here (get_config().get_plugin_config) rather than depending
@@ -194,7 +276,8 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         # export_allowed_roots and the cron overrides never took effect on any
         # boot. Matches the postgres_state_management_plugin precedent.
         self._operator_config = get_config().get_plugin_config(
-            self.name, default_config=self.get_default_config(),
+            self.name,
+            default_config=self.get_default_config(),
         )
         self.config_provider = ConfigProvider(self.name, self._operator_config)
         self.logger = configure_plugin_logging(APP_HOME, self.name, self.config_provider)
@@ -203,9 +286,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         # Get required services for MemoryService instantiation
         state_service = self.orchestrator_ref.get_service("state_service")
         if not state_service:
-            raise RuntimeError(
-                f"{self.name}: state_service not available - check service_bindings.json"
-            )
+            raise RuntimeError(f"{self.name}: state_service not available - check service_bindings.json")
         # Retain the state_service handle on the plugin so `setup_schedules` can
         # pre-seed `core__sessions` + `core__flows` rows for system-owned cron
         # flow_ids per the TEMPLATE_FLOW lookup contract.
@@ -250,10 +331,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         if raw is None:
             return []
         if not isinstance(raw, list) or not all(isinstance(entry, str) for entry in raw):
-            raise RuntimeError(
-                f"{self.name}: {CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of "
-                "directory path strings"
-            )
+            raise RuntimeError(f"{self.name}: {CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory path strings")
         return list(raw)
 
     def _get_backend(self) -> ACTRMemoryBackend:
@@ -348,7 +426,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="remember_action",
-                parameters={
+        parameters={
             "content": ParameterMetadata(
                 description="The content to remember",
                 required=True,
@@ -371,15 +449,11 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.OBJECT,
             description="Memory creation result with memory_id",
             properties={
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="ID of the created memory"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Success message"
-                ),
+                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the created memory"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Success message"),
             },
         ),
-                summary="Store a new piece of knowledge in long-term memory",
+        summary="Store a new piece of knowledge in long-term memory",
         requires_result_processor=True,
     )
     def remember_action(
@@ -420,7 +494,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="recall_action",
-                parameters={
+        parameters={
             "query": ParameterMetadata(
                 description="Search query",
                 required=True,
@@ -458,15 +532,11 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.OBJECT,
             description="Search results with matching memories",
             properties={
-                "memories": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of matching memories"
-                ),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memories returned"
-                ),
+                "memories": ParameterMetadata(type=ParameterType.LIST, description="List of matching memories"),
+                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories returned"),
             },
         ),
-                summary="Search for relevant memories using semantic similarity and activation strength",
+        summary="Search for relevant memories using semantic similarity and activation strength",
         requires_result_processor=True,
     )
     def recall_action(
@@ -518,7 +588,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="forget_action",
-                parameters={
+        parameters={
             "memory_id": ParameterMetadata(
                 description="ID of the memory to archive",
                 required=True,
@@ -531,15 +601,11 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.OBJECT,
             description="Archive result",
             properties={
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="ID of the archived memory"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Success message"
-                ),
+                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the archived memory"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Success message"),
             },
         ),
-                summary="Archive a memory so it no longer appears in searches",
+        summary="Archive a memory so it no longer appears in searches",
         requires_result_processor=True,
     )
     def forget_action(
@@ -572,7 +638,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="reinforce_action",
-                parameters={
+        parameters={
             "memory_id": ParameterMetadata(
                 description="ID of the memory to reinforce",
                 required=True,
@@ -585,18 +651,12 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.OBJECT,
             description="Reinforcement result",
             properties={
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="ID of the reinforced memory"
-                ),
-                "new_strength": ParameterMetadata(
-                    type=ParameterType.FLOAT, description="Updated ACT-R activation strength"
-                ),
-                "retrieval_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Total number of retrievals"
-                ),
+                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the reinforced memory"),
+                "new_strength": ParameterMetadata(type=ParameterType.FLOAT, description="Updated ACT-R activation strength"),
+                "retrieval_count": ParameterMetadata(type=ParameterType.INTEGER, description="Total number of retrievals"),
             },
         ),
-                summary="Strengthen a memory by adding a retrieval timestamp",
+        summary="Strengthen a memory by adding a retrieval timestamp",
         requires_result_processor=True,
     )
     def reinforce_action(
@@ -646,12 +706,8 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.OBJECT,
             description="Focus buffer result",
             properties={
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="ID of the focused memory"
-                ),
-                "focused_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Current number of focused memories"
-                ),
+                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the focused memory"),
+                "focused_count": ParameterMetadata(type=ParameterType.INTEGER, description="Current number of focused memories"),
             },
         ),
         summary="Pin a memory to the focus buffer for guaranteed context inclusion",
@@ -703,15 +759,11 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.OBJECT,
             description="Unfocus result",
             properties={
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="ID of the unfocused memory"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
+                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the unfocused memory"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
             },
         ),
-        summary="Remove a memory from the focus buffer"
+        summary="Remove a memory from the focus buffer",
     )
     def unfocus_action(
         self,
@@ -753,15 +805,11 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.LIST,
             description="List of focused memories",
             properties={
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="ID of the focused memory"
-                ),
-                "content": ParameterMetadata(
-                    type=ParameterType.STRING, description="Full memory content"
-                ),
+                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the focused memory"),
+                "content": ParameterMetadata(type=ParameterType.STRING, description="Full memory content"),
             },
         ),
-        summary="List memories currently pinned in the focus buffer"
+        summary="List memories currently pinned in the focus buffer",
     )
     def get_focused_action(
         self,
@@ -788,7 +836,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="memorize_action",
-                parameters={
+        parameters={
             "memory_id": ParameterMetadata(
                 description="ID of existing memory to memorize",
                 required=False,
@@ -806,18 +854,12 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.OBJECT,
             description="Memorization queue result",
             properties={
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="ID of the memory being memorized"
-                ),
-                "next_review_at": ParameterMetadata(
-                    type=ParameterType.STRING, description="ISO timestamp of next scheduled review"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Success message"
-                ),
+                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the memory being memorized"),
+                "next_review_at": ParameterMetadata(type=ParameterType.STRING, description="ISO timestamp of next scheduled review"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Success message"),
             },
         ),
-                summary="Start spaced repetition learning for critical knowledge",
+        summary="Start spaced repetition learning for critical knowledge",
         requires_result_processor=True,
     )
     def memorize_action(
@@ -851,7 +893,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="stop_memorizing_action",
-                parameters={
+        parameters={
             "memory_id": ParameterMetadata(
                 description="ID of memory to stop memorizing",
                 required=True,
@@ -864,15 +906,11 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.OBJECT,
             description="Stop memorization result",
             properties={
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="ID of the memory removed from queue"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Success message"
-                ),
+                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the memory removed from queue"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Success message"),
             },
         ),
-                summary="Stop spaced repetition learning for a memory"
+        summary="Stop spaced repetition learning for a memory",
     )
     def stop_memorizing_action(
         self,
@@ -904,7 +942,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="list_memorizing_action",
-                parameters={
+        parameters={
             "include_completed": ParameterMetadata(
                 description="Include completed memorizations",
                 required=False,
@@ -917,15 +955,11 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.OBJECT,
             description="List of memorization entries",
             properties={
-                "items": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of memorization entries"
-                ),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of items in queue"
-                ),
+                "items": ParameterMetadata(type=ParameterType.LIST, description="List of memorization entries"),
+                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of items in queue"),
             },
         ),
-                summary="Show all memories currently in spaced repetition learning",
+        summary="Show all memories currently in spaced repetition learning",
         requires_result_processor=True,
     )
     def list_memorizing_action(
@@ -962,7 +996,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="learn_action",
-                parameters={
+        parameters={
             "path": ParameterMetadata(
                 description="File or directory path to ingest",
                 required=True,
@@ -995,24 +1029,14 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.OBJECT,
             description="Ingestion result with memory count",
             properties={
-                "path": ParameterMetadata(
-                    type=ParameterType.STRING, description="Path that was ingested"
-                ),
-                "memories_created": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memories created"
-                ),
-                "files_skipped": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of files skipped"
-                ),
-                "memorized": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="Whether added to memorization queue"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Summary message"
-                ),
+                "path": ParameterMetadata(type=ParameterType.STRING, description="Path that was ingested"),
+                "memories_created": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories created"),
+                "files_skipped": ParameterMetadata(type=ParameterType.INTEGER, description="Number of files skipped"),
+                "memorized": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether added to memorization queue"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Summary message"),
             },
         ),
-                summary="Ingest knowledge from documents into long-term memory",
+        summary="Ingest knowledge from documents into long-term memory",
         requires_result_processor=True,
     )
     def learn_action(
@@ -1059,7 +1083,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="consolidate_action",
-                parameters={
+        parameters={
             "dry_run": ParameterMetadata(
                 description="Preview what would be consolidated without making changes",
                 required=False,
@@ -1072,21 +1096,13 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.OBJECT,
             description="Consolidation result with actions taken",
             properties={
-                "candidates_found": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of weak memories found"
-                ),
-                "clusters_formed": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of clusters for summarization"
-                ),
-                "consolidations": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of consolidation actions taken"
-                ),
-                "dry_run": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="Whether this was a dry run"
-                ),
+                "candidates_found": ParameterMetadata(type=ParameterType.INTEGER, description="Number of weak memories found"),
+                "clusters_formed": ParameterMetadata(type=ParameterType.INTEGER, description="Number of clusters for summarization"),
+                "consolidations": ParameterMetadata(type=ParameterType.LIST, description="List of consolidation actions taken"),
+                "dry_run": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether this was a dry run"),
             },
         ),
-                summary="Run memory consolidation to summarize old, weak memories",
+        summary="Run memory consolidation to summarize old, weak memories",
         requires_result_processor=True,
     )
     def consolidate_action(
@@ -1119,22 +1135,18 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="recompute_strengths_action",
-                parameters={},
+        parameters={},
         output_type="object",
         output_description="Recomputation result",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="Recomputation result",
             properties={
-                "updated_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memories updated"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Success message"
-                ),
+                "updated_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories updated"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Success message"),
             },
         ),
-                summary="Force recalculation of all memory strength values"
+        summary="Force recalculation of all memory strength values",
     )
     def recompute_strengths_action(
         self,
@@ -1164,22 +1176,18 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="process_memorization_queue_action",
-                parameters={},
+        parameters={},
         output_type="object",
         output_description="Processing result with counts",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="Queue processing result",
             properties={
-                "processed_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of reviews processed"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Success message"
-                ),
+                "processed_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of reviews processed"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Success message"),
             },
         ),
-                summary="Run spaced repetition review processing"
+        summary="Run spaced repetition review processing",
     )
     def process_memorization_queue_action(
         self,
@@ -1214,28 +1222,20 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="memory_stats_action",
-                parameters={},
+        parameters={},
         output_type="object",
         output_description="Memory statistics",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="Memory system statistics",
             properties={
-                "total": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Total number of memories"
-                ),
-                "by_type": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="Count by memory type"
-                ),
-                "by_status": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="Count by status"
-                ),
-                "strength_distribution": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="Distribution by strength"
-                ),
+                "total": ParameterMetadata(type=ParameterType.INTEGER, description="Total number of memories"),
+                "by_type": ParameterMetadata(type=ParameterType.OBJECT, description="Count by memory type"),
+                "by_status": ParameterMetadata(type=ParameterType.OBJECT, description="Count by status"),
+                "strength_distribution": ParameterMetadata(type=ParameterType.OBJECT, description="Distribution by strength"),
             },
         ),
-                summary="Get statistics about the memory system",
+        summary="Get statistics about the memory system",
         requires_result_processor=True,
     )
     def memory_stats_action(
@@ -1255,7 +1255,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="list_memories_action",
-                parameters={
+        parameters={
             "memory_type": ParameterMetadata(
                 description="Filter by type: 'episodic', 'semantic_l1', 'semantic_l2'",
                 required=False,
@@ -1288,18 +1288,12 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.OBJECT,
             description="List of memories",
             properties={
-                "memories": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of memory objects"
-                ),
-                "total": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Total matching memories"
-                ),
-                "showing": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number shown"
-                ),
+                "memories": ParameterMetadata(type=ParameterType.LIST, description="List of memory objects"),
+                "total": ParameterMetadata(type=ParameterType.INTEGER, description="Total matching memories"),
+                "showing": ParameterMetadata(type=ParameterType.INTEGER, description="Number shown"),
             },
         ),
-                summary="Browse memories with filtering and sorting",
+        summary="Browse memories with filtering and sorting",
         requires_result_processor=True,
     )
     def list_memories_action(
@@ -1341,7 +1335,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="export_memories_action",
-                parameters={
+        parameters={
             "file_path": ParameterMetadata(
                 description="Output file path (auto-generated if not specified)",
                 required=False,
@@ -1359,15 +1353,11 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.OBJECT,
             description="Export result",
             properties={
-                "file_path": ParameterMetadata(
-                    type=ParameterType.STRING, description="Path to exported file"
-                ),
-                "memory_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memories exported"
-                ),
+                "file_path": ParameterMetadata(type=ParameterType.STRING, description="Path to exported file"),
+                "memory_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories exported"),
             },
         ),
-                summary="Export all memories to a JSON backup file",
+        summary="Export all memories to a JSON backup file",
         requires_result_processor=True,
     )
     def export_memories_action(
@@ -1405,7 +1395,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="import_memories_action",
-                parameters={
+        parameters={
             "file_path": ParameterMetadata(
                 description="Input file path",
                 required=True,
@@ -1418,18 +1408,12 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.OBJECT,
             description="Import result",
             properties={
-                "imported_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memories imported"
-                ),
-                "skipped_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memories skipped"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Success message"
-                ),
+                "imported_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories imported"),
+                "skipped_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories skipped"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Success message"),
             },
         ),
-                summary="Import memories from a JSON backup file"
+        summary="Import memories from a JSON backup file",
     )
     def import_memories_action(
         self,
@@ -1462,7 +1446,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="purge_memories_action",
-                parameters={
+        parameters={
             "confirm": ParameterMetadata(
                 description="Must be true to proceed with purge",
                 required=True,
@@ -1475,21 +1459,13 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             type=ParameterType.OBJECT,
             description="Purge result with deletion counts",
             properties={
-                "deleted_memories": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memories deleted"
-                ),
-                "deleted_memorizations": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memorizations deleted"
-                ),
-                "deleted_vectors": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of vectors deleted"
-                ),
-                "purged": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="Whether purge was executed"
-                ),
+                "deleted_memories": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories deleted"),
+                "deleted_memorizations": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memorizations deleted"),
+                "deleted_vectors": ParameterMetadata(type=ParameterType.INTEGER, description="Number of vectors deleted"),
+                "purged": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether purge was executed"),
             },
         ),
-                summary="Permanently delete all memories from the system",
+        summary="Permanently delete all memories from the system",
         requires_result_processor=True,
     )
     def purge_memories_action(
@@ -1544,22 +1520,18 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     # overwriting any values set here in the decorator.
     @platform_process(
         name="setup_schedules",
-                parameters={},
+        parameters={},
         output_type="object",
         output_description="Schedule setup result",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="Schedule setup result",
             properties={
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Success message"
-                ),
-                "schedules": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of configured schedules"
-                ),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Success message"),
+                "schedules": ParameterMetadata(type=ParameterType.LIST, description="List of configured schedules"),
             },
         ),
-                summary="Configure scheduled memory maintenance operations"
+        summary="Configure scheduled memory maintenance operations",
     )
     def setup_schedules(
         self,
@@ -1638,9 +1610,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
 
                 # Memorization queue processing (every 6 hours).
                 memorization_result = self._scheduling_service.create_cron_schedule(
-                    cron_expression=config.get(
-                        "memorization_queue_cron", MEMORIZATION_QUEUE_CRON
-                    ),
+                    cron_expression=config.get("memorization_queue_cron", MEMORIZATION_QUEUE_CRON),
                     label="ACT-R Memorization Queue Processing",
                     tags=[PLUGIN_NAME, "memorization"],
                     actions=[
@@ -1655,15 +1625,14 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
                     },
                 )
                 self._require_schedule_created(
-                    memorization_result, "ACT-R Memorization Queue Processing",
+                    memorization_result,
+                    "ACT-R Memorization Queue Processing",
                 )
                 created_schedules.append("memorization_queue")
 
                 # Strength recomputation (daily).
                 strength_result = self._scheduling_service.create_cron_schedule(
-                    cron_expression=config.get(
-                        "strength_recompute_cron", STRENGTH_RECOMPUTE_CRON
-                    ),
+                    cron_expression=config.get("strength_recompute_cron", STRENGTH_RECOMPUTE_CRON),
                     label="ACT-R Strength Recomputation",
                     tags=[PLUGIN_NAME, "strength"],
                     actions=[
@@ -1678,7 +1647,8 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
                     },
                 )
                 self._require_schedule_created(
-                    strength_result, "ACT-R Strength Recomputation",
+                    strength_result,
+                    "ACT-R Strength Recomputation",
                 )
                 created_schedules.append("strength_recompute")
 
@@ -1704,7 +1674,8 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
                     },
                 )
                 self._require_schedule_created(
-                    consolidation_result, "ACT-R Memory Consolidation",
+                    consolidation_result,
+                    "ACT-R Memory Consolidation",
                 )
                 created_schedules.append("consolidation")
 
@@ -1754,9 +1725,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         through the same LOUD failure path as an exception.
         """
         if result.get("action_status") != ActionStatus.COMPLETED.value:
-            raise FrameworkError(
-                f"create_cron_schedule for {label!r} did not complete: {result!r}"
-            )
+            raise FrameworkError(f"create_cron_schedule for {label!r} did not complete: {result!r}")
 
     # Boot-time entry point (`iss_d1a7662f`, ruling `dec_a975b80b`): wired via
     # `starting_actions` in `initialization/profiles/local.yaml`, which fires
@@ -1780,20 +1749,13 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         skipped forever.
         """
         if self._resolve_scheduling_service() is None:
-            raise FrameworkError(
-                f"{PLUGIN_NAME}: scheduling_service still unavailable after startup "
-                "(check service_bindings.json / startup order)"
-            )
+            raise FrameworkError(f"{PLUGIN_NAME}: scheduling_service still unavailable after startup (check service_bindings.json / startup order)")
         result = self.setup_schedules(params={}, state={})
         if result.get("action_status") != ActionStatus.COMPLETED.value:
-            raise FrameworkError(
-                f"{PLUGIN_NAME}: scheduled memory-maintenance install failed: {result!r}"
-            )
+            raise FrameworkError(f"{PLUGIN_NAME}: scheduled memory-maintenance install failed: {result!r}")
         data = result.get("data")
         if not isinstance(data, dict):
-            raise FrameworkError(
-                f"{PLUGIN_NAME}: setup_schedules returned no data dict: {result!r}"
-            )
+            raise FrameworkError(f"{PLUGIN_NAME}: setup_schedules returned no data dict: {result!r}")
         return cast(dict[str, Any], data)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1824,8 +1786,11 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
                 error_code="memory.backend_unavailable",
             )
         result = self._backend.remember(
-            content=content, tags=tags or [], source_file=source_file,
-            session_id=session_id, embed=embed,
+            content=content,
+            tags=tags or [],
+            source_file=source_file,
+            session_id=session_id,
+            embed=embed,
         )
         return result
 
@@ -1921,9 +1886,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
                 message="Memory service backend not initialized",
                 error_code="memory.backend_unavailable",
             )
-        result = self._backend.list_memories(
-            memory_type=memory_type, status=status, tag=tag, sort_by=sort_by, limit=limit
-        )
+        result = self._backend.list_memories(memory_type=memory_type, status=status, tag=tag, sort_by=sort_by, limit=limit)
         return result
 
     def consolidate(
@@ -1941,9 +1904,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
                 message="Memory service backend not initialized",
                 error_code="memory.backend_unavailable",
             )
-        result = self._backend.consolidate(
-            strength_threshold=strength_threshold, min_age_days=min_age_days, dry_run=dry_run
-        )
+        result = self._backend.consolidate(strength_threshold=strength_threshold, min_age_days=min_age_days, dry_run=dry_run)
         return result
 
     def consolidate_cron(self, dry_run: bool = False) -> dict[str, Any]:
@@ -1999,6 +1960,15 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
                 error_code="memory.backend_unavailable",
             )
         return self._backend.memory_stats()
+
+    def corpus_counts(self) -> dict[str, Any]:
+        """Return bounded scalar counts from the ACT-R memory backend."""
+        if not self._backend:
+            raise FrameworkError(
+                message="Memory service backend not initialized",
+                error_code="memory.backend_unavailable",
+            )
+        return self._backend.corpus_counts()
 
     def purge_memories(self, confirm: bool = False) -> dict[str, Any]:
         """Permanently delete all memories - interface method.
@@ -2066,9 +2036,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
                 message="Memory service backend not initialized",
                 error_code="memory.backend_unavailable",
             )
-        result = self._backend.learn(
-            path=path, pattern=pattern, recursive=recursive, memorize=memorize, tags=tags
-        )
+        result = self._backend.learn(path=path, pattern=pattern, recursive=recursive, memorize=memorize, tags=tags)
         return result
 
     def ingest_session(
@@ -2086,9 +2054,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
                 message="Memory service backend not initialized",
                 error_code="memory.backend_unavailable",
             )
-        result = self._backend.ingest_session(
-            transcript=transcript, session_id=session_id, chunk_by_turns=chunk_by_turns
-        )
+        result = self._backend.ingest_session(transcript=transcript, session_id=session_id, chunk_by_turns=chunk_by_turns)
         return result
 
     def memorize_by_tag(self, tag: str) -> dict[str, Any]:
@@ -2208,14 +2174,10 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
                 message="Memory service backend not initialized",
                 error_code="memory.backend_unavailable",
             )
-        result = self._backend.import_memories(
-            file_path=file_path, regenerate_embeddings=regenerate_embeddings
-        )
+        result = self._backend.import_memories(file_path=file_path, regenerate_embeddings=regenerate_embeddings)
         return result
 
-    def cleanup_orphaned_vectors(
-        self, dry_run: bool = False, confirm: bool = False
-    ) -> dict[str, Any]:
+    def cleanup_orphaned_vectors(self, dry_run: bool = False, confirm: bool = False) -> dict[str, Any]:
         """Rebuild the memory-vector namespace - interface method.
 
         Matches MemoryServiceAPI.cleanup_orphaned_vectors() signature.
@@ -2297,9 +2259,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
     ) -> dict[str, Any]:
         """Replace-by-tag: store new content, then delete previous memories - interface method."""
         backend = self._get_backend()
-        return backend.upsert_memory_by_tag(
-            content=content, tag=tag, tags=tags, session_id=session_id
-        )
+        return backend.upsert_memory_by_tag(content=content, tag=tag, tags=tags, session_id=session_id)
 
     def reindex_orphaned_vectors(self) -> dict[str, Any]:
         """Attempt to relink orphaned vectors to memories - interface method."""
@@ -2383,7 +2343,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         source_file: str | None = None,
         session_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.remember(content=content, tags=tags, source_file=source_file, session_id=session_id)
+        return await _run_f5_blocking(lambda: self.remember(content=content, tags=tags, source_file=source_file, session_id=session_id))
 
     async def recall_async(
         self,
@@ -2395,30 +2355,36 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         exclude_ids: list[str] | None = None,
         score_by_similarity: bool = False,
     ) -> dict[str, Any]:
-        return self.recall(
-            query=query, top_k=top_k, memory_type=memory_type,
-            include_archived=include_archived, tags=tags, exclude_ids=exclude_ids,
-            score_by_similarity=score_by_similarity,
+        return await _run_f5_blocking(
+            lambda: self.recall(
+                query=query,
+                top_k=top_k,
+                memory_type=memory_type,
+                include_archived=include_archived,
+                tags=tags,
+                exclude_ids=exclude_ids,
+                score_by_similarity=score_by_similarity,
+            )
         )
 
     async def forget_async(self, memory_id: str) -> dict[str, Any]:
-        return self.forget(memory_id=memory_id)
+        return await _run_f5_blocking(lambda: self.forget(memory_id=memory_id))
 
     async def reinforce_async(self, memory_id: str) -> dict[str, Any]:
-        return self.reinforce(memory_id=memory_id)
+        return await _run_f5_blocking(lambda: self.reinforce(memory_id=memory_id))
 
     async def memorize_async(
         self,
         memory_id: str | None = None,
         content: str | None = None,
     ) -> dict[str, Any]:
-        return self.memorize(memory_id=memory_id, content=content)
+        return await _run_f5_blocking(lambda: self.memorize(memory_id=memory_id, content=content))
 
     async def stop_memorizing_async(self, memory_id: str) -> dict[str, Any]:
-        return self.stop_memorizing(memory_id=memory_id)
+        return await _run_f5_blocking(lambda: self.stop_memorizing(memory_id=memory_id))
 
     async def list_memorizing_async(self, include_completed: bool = False) -> dict[str, Any]:
-        return self.list_memorizing(include_completed=include_completed)
+        return await _run_f5_blocking(lambda: self.list_memorizing(include_completed=include_completed))
 
     async def learn_async(
         self,
@@ -2428,7 +2394,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         memorize: bool = False,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        return self.learn(path=path, pattern=pattern, recursive=recursive, memorize=memorize, tags=tags)
+        return await _run_f5_blocking(lambda: self.learn(path=path, pattern=pattern, recursive=recursive, memorize=memorize, tags=tags))
 
     async def consolidate_async(
         self,
@@ -2436,15 +2402,13 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         min_age_days: int = 7,
         dry_run: bool = False,
     ) -> dict[str, Any]:
-        return self.consolidate(
-            strength_threshold=strength_threshold, min_age_days=min_age_days, dry_run=dry_run
-        )
+        return await _run_f5_blocking(lambda: self.consolidate(strength_threshold=strength_threshold, min_age_days=min_age_days, dry_run=dry_run))
 
     async def recompute_strengths_async(self) -> dict[str, Any]:
-        return self.recompute_strengths()
+        return await _run_f5_blocking(lambda: self.recompute_strengths())
 
     async def process_memorization_queue_async(self) -> dict[str, Any]:
-        return self.process_memorization_queue()
+        return await _run_f5_blocking(lambda: self.process_memorization_queue())
 
     async def list_memories_async(
         self,
@@ -2454,9 +2418,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         sort_by: str = "strength",
         limit: int = 20,
     ) -> dict[str, Any]:
-        return self.list_memories(
-            memory_type=memory_type, status=status, tag=tag, sort_by=sort_by, limit=limit
-        )
+        return await _run_f5_blocking(lambda: self.list_memories(memory_type=memory_type, status=status, tag=tag, sort_by=sort_by, limit=limit))
 
     async def export_memories_async(
         self,
@@ -2465,11 +2427,13 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         include_embeddings: bool = False,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        return self.export_memories(
-            file_path=file_path,
-            include_archived=include_archived,
-            include_embeddings=include_embeddings,
-            tags=tags,
+        return await _run_f5_blocking(
+            lambda: self.export_memories(
+                file_path=file_path,
+                include_archived=include_archived,
+                include_embeddings=include_embeddings,
+                tags=tags,
+            )
         )
 
     async def import_memories_async(
@@ -2477,12 +2441,10 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         file_path: str,
         regenerate_embeddings: bool = True,
     ) -> dict[str, Any]:
-        return self.import_memories(file_path=file_path, regenerate_embeddings=regenerate_embeddings)
+        return await _run_f5_blocking(lambda: self.import_memories(file_path=file_path, regenerate_embeddings=regenerate_embeddings))
 
-    async def cleanup_orphaned_vectors_async(
-        self, dry_run: bool = False, confirm: bool = False
-    ) -> dict[str, Any]:
-        return self.cleanup_orphaned_vectors(dry_run=dry_run, confirm=confirm)
+    async def cleanup_orphaned_vectors_async(self, dry_run: bool = False, confirm: bool = False) -> dict[str, Any]:
+        return await _run_f5_blocking(lambda: self.cleanup_orphaned_vectors(dry_run=dry_run, confirm=confirm))
 
     async def get_recent_memory_async(
         self,
@@ -2491,13 +2453,10 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         max_age_hours: int | None = None,
         namespace_filter: str | None = None,
     ) -> dict[str, Any]:
-        return self.get_recent_memory(
-            session_id=session_id, max_events=max_events,
-            max_age_hours=max_age_hours, namespace_filter=namespace_filter
-        )
+        return await _run_f5_blocking(lambda: self.get_recent_memory(session_id=session_id, max_events=max_events, max_age_hours=max_age_hours, namespace_filter=namespace_filter))
 
     async def get_session_event_stats_async(self, session_id: str) -> dict[str, Any]:
-        return self.get_session_event_stats(session_id=session_id)
+        return await _run_f5_blocking(lambda: self.get_session_event_stats(session_id=session_id))
 
     async def ingest_session_async(
         self,
@@ -2505,20 +2464,20 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         session_id: str | None = None,
         chunk_by_turns: bool = True,
     ) -> dict[str, Any]:
-        return self.ingest_session(transcript=transcript, session_id=session_id, chunk_by_turns=chunk_by_turns)
+        return await _run_f5_blocking(lambda: self.ingest_session(transcript=transcript, session_id=session_id, chunk_by_turns=chunk_by_turns))
 
     async def memorize_by_tag_async(self, tag: str) -> dict[str, Any]:
-        return self.memorize_by_tag(tag=tag)
+        return await _run_f5_blocking(lambda: self.memorize_by_tag(tag=tag))
 
     async def memory_stats_async(self) -> dict[str, Any]:
-        return self.memory_stats()
+        return await _run_f5_blocking(lambda: self.memory_stats())
 
     async def setup_schedules_async(
         self,
         params: dict[str, Any],
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        return self.setup_schedules(params=params, state=state)
+        return await _run_f5_blocking(lambda: self.setup_schedules(params=params, state=state))
 
     async def store_interaction_async(
         self,
@@ -2529,13 +2488,15 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         metadata: dict[str, Any] | None = None,
         timestamp: str | None = None,
     ) -> dict[str, Any]:
-        return self.store_interaction(
-            session_id=session_id,
-            source_namespace=source_namespace,
-            event_type=event_type,
-            content=content,
-            metadata=metadata,
-            timestamp=timestamp,
+        return await _run_f5_blocking(
+            lambda: self.store_interaction(
+                session_id=session_id,
+                source_namespace=source_namespace,
+                event_type=event_type,
+                content=content,
+                metadata=metadata,
+                timestamp=timestamp,
+            )
         )
 
     async def get_recent_memory_structured_async(
@@ -2545,25 +2506,27 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         max_age_hours: int | None = None,
         namespace_filter: str | None = None,
     ) -> dict[str, Any]:
-        return self.get_recent_memory_structured(
-            session_id=session_id,
-            max_events=max_events,
-            max_age_hours=max_age_hours,
-            namespace_filter=namespace_filter,
+        return await _run_f5_blocking(
+            lambda: self.get_recent_memory_structured(
+                session_id=session_id,
+                max_events=max_events,
+                max_age_hours=max_age_hours,
+                namespace_filter=namespace_filter,
+            )
         )
 
     async def delete_memories_by_tag_async(self, tag: str) -> dict[str, Any]:
-        return self.delete_memories_by_tag(tag=tag)
+        return await _run_f5_blocking(lambda: self.delete_memories_by_tag(tag=tag))
 
     async def delete_memories_by_ids_async(self, ids: list[str]) -> dict[str, Any]:
-        return self.delete_memories_by_ids(ids=ids)
+        return await _run_f5_blocking(lambda: self.delete_memories_by_ids(ids=ids))
 
     async def get_memories_by_tag_async(
         self,
         tag: str,
         include_archived: bool = False,
     ) -> dict[str, Any]:
-        return self.get_memories_by_tag(tag=tag, include_archived=include_archived)
+        return await _run_f5_blocking(lambda: self.get_memories_by_tag(tag=tag, include_archived=include_archived))
 
     async def upsert_memory_by_tag_async(
         self,
@@ -2572,21 +2535,21 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         tags: list[str] | None = None,
         session_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.upsert_memory_by_tag(
-            content=content, tag=tag, tags=tags, session_id=session_id
-        )
+        return await _run_f5_blocking(lambda: self.upsert_memory_by_tag(content=content, tag=tag, tags=tags, session_id=session_id))
 
     async def reindex_orphaned_vectors_async(self) -> dict[str, Any]:
-        return self.reindex_orphaned_vectors()
+        return await _run_f5_blocking(lambda: self.reindex_orphaned_vectors())
 
     async def audit_pinned_notes_async(
         self,
         include_completed: bool = False,
         strength_threshold: float | None = None,
     ) -> dict[str, Any]:
-        return self.audit_pinned_notes(
-            include_completed=include_completed,
-            strength_threshold=strength_threshold,
+        return await _run_f5_blocking(
+            lambda: self.audit_pinned_notes(
+                include_completed=include_completed,
+                strength_threshold=strength_threshold,
+            )
         )
 
     async def review_blocked_intents_async(
@@ -2594,9 +2557,11 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         min_age_days: int = 7,
         strength_threshold: float = -1.0,
     ) -> dict[str, Any]:
-        return self.review_blocked_intents(
-            min_age_days=min_age_days,
-            strength_threshold=strength_threshold,
+        return await _run_f5_blocking(
+            lambda: self.review_blocked_intents(
+                min_age_days=min_age_days,
+                strength_threshold=strength_threshold,
+            )
         )
 
     async def store_compaction_summary_async(
@@ -2606,9 +2571,11 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         compacted_event_count: int,
         session_id: str | None = None,
     ) -> dict[str, Any]:
-        return self.store_compaction_summary(
-            context_id=context_id,
-            summary=summary,
-            compacted_event_count=compacted_event_count,
-            session_id=session_id,
+        return await _run_f5_blocking(
+            lambda: self.store_compaction_summary(
+                context_id=context_id,
+                summary=summary,
+                compacted_event_count=compacted_event_count,
+                session_id=session_id,
+            )
         )

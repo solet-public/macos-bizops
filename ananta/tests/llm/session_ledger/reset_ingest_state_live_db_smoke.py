@@ -25,10 +25,9 @@ source file and re-derive the ids). The dedup property exercised is identical �
 the real ``append_event`` ON CONFLICT path — but the source-re-read is not in scope.
 
 Runs in a disposable schema (``example_test_reset_<hex>``), so it NEVER touches
-live solet data; env-gated behind ``LEDGER_RESET_LIVE_SMOKE=1``.
-
-    LEDGER_RESET_LIVE_SMOKE=1 \\
-      .venv/bin/python3 ananta/tests/llm/session_ledger/reset_ingest_state_live_db_smoke.py
+live solet data; Private fixture: run under quality_gates/provision_test_pg.py using the
+explicit the private manifest variable contract. Without it, exit 77; legacy enable flags
+never select a live profile. See quality_gates/private_postgres.md.
 """
 
 from __future__ import annotations
@@ -41,10 +40,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, LiteralString, cast
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+_ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(_ROOT))
+REPO_ROOT = _ROOT
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(
-    0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
+    0,
+    str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -67,15 +69,17 @@ from ananta.types.schema_standardizer import SchemaStandardizer  # noqa: E402
 from ingest_migration_live_smoke import (  # noqa: E402
     _envelope,
     _LiveStateAdapter,
-    _load_pg_config,
     _make_event,
 )
+from postgres_state_management_plugin.postgres_backend.config import PostgresConfig  # noqa: E402
 from postgres_state_management_plugin.postgres_backend.ddl_renderer import (  # noqa: E402
     emit_create_table_ops,
 )
 from postgres_state_management_plugin.postgres_backend.provider import (  # noqa: E402
     PostgresProvider,
 )
+
+from quality_gates.private_test_pg import MANIFEST_ENV, load_fixture, skip_fixture  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
@@ -125,11 +129,7 @@ def _create_schema_tables(provider: PostgresProvider) -> None:
     sandbox via the PRODUCTION DDL renderer — the path schema adoption drives."""
     schema = SchemaStandardizer().standardize_schema(get_session_ledger_schema())
     schema_name = provider.config.schema_name
-    ops = [
-        op
-        for table in schema.tables.values()
-        for op in emit_create_table_ops(NAMESPACE, table, schema_name)
-    ]
+    ops = [op for table in schema.tables.values() for op in emit_create_table_ops(NAMESPACE, table, schema_name)]
     with provider.get_transactional_connection() as conn, conn.cursor() as cur:
         provider.apply_schema_change_ops(cur, schema, ops)
 
@@ -184,7 +184,8 @@ def _append(repo: SessionLedgerRepository, session_id: str, batch_id: str, *, ex
 
 
 def test_reset_is_non_destructive_and_reconverges(
-    provider: PostgresProvider, schema_name: str,
+    provider: PostgresProvider,
+    schema_name: str,
 ) -> None:
     service = _build_service(provider)
     repo = cast("SessionLedgerRepository", service._repository)  # type: ignore[attr-defined]
@@ -210,11 +211,15 @@ def test_reset_is_non_destructive_and_reconverges(
     _append(repo, session_id, batch_id, external_id="ext_1", text="first")
     _append(repo, session_id, batch_id, external_id="ext_2", text="second")
     repo.write_cursor(
-        source_id=source_id, scope=CursorScope.DISCOVERY, cursor_payload={"offset": 1},
+        source_id=source_id,
+        scope=CursorScope.DISCOVERY,
+        cursor_payload={"offset": 1},
     )
     repo.write_cursor(
-        source_id=source_id, scope=CursorScope.EVENT_READ,
-        cursor_payload={"offset": 5}, scope_key=_EXT_SESSION,
+        source_id=source_id,
+        scope=CursorScope.EVENT_READ,
+        cursor_payload={"offset": 5},
+        scope_key=_EXT_SESSION,
     )
     _check(_count_table(provider, schema_name, "event") == 2, "seed: two event rows")
     _check(repo.count_active_source_cursors(source_id) == 2, "seed: two active source cursors")
@@ -229,10 +234,7 @@ def test_reset_is_non_destructive_and_reconverges(
         f"dry-run reports 2 cursors that would clear (got {dry['active_cursor_count_before']!r})",
     )
     _check(dry["deleted_count"] == 0, f"dry-run deletes nothing (got {dry['deleted_count']!r})")
-    preserved = {
-        str(row["table"]): int(cast("int", row["rows_preserved"]))
-        for row in cast("list[dict[str, object]]", dry["preserved_content"])
-    }
+    preserved = {str(row["table"]): int(cast("int", row["rows_preserved"])) for row in cast("list[dict[str, object]]", dry["preserved_content"])}
     _check(
         preserved.get("session_ledger__event") == 2 and preserved.get("session_ledger__session") == 1,
         f"dry-run preserved_content reports 2 events + 1 session (got {preserved})",
@@ -283,7 +285,8 @@ def test_reset_is_non_destructive_and_reconverges(
 
 
 def test_reset_refuses_with_null_external_id_events(
-    provider: PostgresProvider, schema_name: str,
+    provider: PostgresProvider,
+    schema_name: str,
 ) -> None:
     """The slice-3 dup-window guard, live: a legacy null-``external_id`` event
     (NULLs DISTINCT in the ``(session_id, external_id)`` unique) would be
@@ -310,7 +313,9 @@ def test_reset_refuses_with_null_external_id_events(
     )
     batch_id = repo.start_batch(source_id, polling_lease_token="plt_guard")
     repo.write_cursor(
-        source_id=source_id, scope=CursorScope.DISCOVERY, cursor_payload={"offset": 1},
+        source_id=source_id,
+        scope=CursorScope.DISCOVERY,
+        cursor_payload={"offset": 1},
     )
     # Seed a real event, then NULL its external_id to model a legacy null-vendor
     # row (the importer always stamps a non-null external_id post-slice-1, so the
@@ -318,9 +323,7 @@ def test_reset_refuses_with_null_external_id_events(
     _append(repo, session_id, batch_id, external_id="ext_g1", text="legacy")
     with provider.get_transactional_connection() as conn, conn.cursor() as cur:
         cur.execute(
-            cast(LiteralString,
-                 f'UPDATE "{schema_name}"."{NAMESPACE}__event" '
-                 "SET external_id = NULL WHERE external_id = %s"),
+            cast(LiteralString, f'UPDATE "{schema_name}"."{NAMESPACE}__event" SET external_id = NULL WHERE external_id = %s'),
             ("ext_g1",),
         )
     _check(
@@ -332,8 +335,7 @@ def test_reset_refuses_with_null_external_id_events(
     dry = service.reset_ingest_state(confirm=False)
     _check(
         dry["null_external_id_count"] == 1 and dry["precondition_met"] is False,
-        f"dry-run flags precondition NOT met (1 null) (got {dry['null_external_id_count']!r}/"
-        f"{dry['precondition_met']!r})",
+        f"dry-run flags precondition NOT met (1 null) (got {dry['null_external_id_count']!r}/{dry['precondition_met']!r})",
     )
 
     # confirm=True REFUSES (raises) before clearing any cursor.
@@ -354,7 +356,8 @@ def test_reset_refuses_with_null_external_id_events(
 
 
 def _run_in_fresh_schema(
-    config: Any, test_fn: Callable[[PostgresProvider, str], None],
+    config: Any,
+    test_fn: Callable[[PostgresProvider, str], None],
 ) -> None:
     schema_name = f"example_test_reset_{secrets.token_hex(3)}"
     config.pg_schema = schema_name
@@ -369,15 +372,10 @@ def _run_in_fresh_schema(
 
 
 def main() -> int:
-    if os.environ.get("LEDGER_RESET_LIVE_SMOKE") != "1":
-        print("=== reset_ingest_state_live_db_smoke ===")
-        print(
-            "  SKIP  set LEDGER_RESET_LIVE_SMOKE=1 to run; "
-            "needs the live solet DB."
-        )
-        return 0
+    if not os.environ.get(MANIFEST_ENV):
+        return skip_fixture()
     print("=== reset_ingest_state_live_db_smoke ===")
-    config = _load_pg_config()
+    config = PostgresConfig(**load_fixture("ledger_reset").connection_config())
     for test_fn in (
         test_reset_refuses_with_null_external_id_events,
         test_reset_is_non_destructive_and_reconverges,
@@ -389,6 +387,7 @@ def main() -> int:
         for label in _failed:
             print(f"  FAILED: {label}")
         return 1
+    print("PRIVATE_PG_BODY ledger_reset")
     return 0
 
 

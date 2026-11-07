@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::retire_role",
+  "display_name": "Retire a role in the retired-role registry",
+  "description": "Appends a role name to the solet's authoritative retired-role registry (iss_d9c955a2, operator ruling arm-2305256f transport part (a)). Once retired, peer_send_by_name, the bridge send_by_name route, the streamable peer_send_by_name tool and deliver_job_completion refuse that name with peer_role_retired before anything is persisted, and peer_claim_role refuses to claim it. Names match after NFKC, casefold and whitespace trimming. The new row is stamped with registry_version one higher than the registry's current version; the column is unique, so two concurrent retirements cannot share a version. Only a caller holding a primary- or principal-class role may retire (legislate_role assigns those classes). A role that a live session holds is refused until that holder releases it with peer_release_role; a stale binding does not block. Un-retiring is not supported by this verb.",
+  "embedding_description": "Mark a fleet role name as permanently retired so messages addressed to it are refused instead of silently queued, recording why, who retired it and any successor role; the write half of the retired-role registry whose read half is list_retired_roles.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Role retired",
+    "result_type": "retire_role_result",
+    "result_description": "The appended registry row: role (display spelling), retired_at, retired_by (the caller's authorizing seat plus the authority reference), reason, successor (or null) and registry_version (the registry's new version).",
+    "presentation_guidance": "State which role was retired, the new registry_version, and the successor if any. Senders addressing the role from now on get peer_role_retired quoting the reason."
+  },
+  "error_processor_customizations": {
+    "action_context": "Authorization, argument checks, the live-holder check and the already-retired check all run before the registry write, so a refused call writes nothing.",
+    "error_interpretation": "retire_role_not_authorized: the caller holds no primary- or principal-class role. missing_argument: name, reason or authority was empty. role_held_live: a live session holds the role. role_already_retired: the name (after normalization) is already in the registry. invalid_successor: the successor is the role itself or is itself retired. retired_role_write_conflict: another retirement took the same registry_version; re-run. retired_role_registry_unavailable: the registry could not be read. bridge.not_running: the bridge or state service is not started.",
+    "recovery_guidance": "For role_held_live, ask the holder to run peer_release_role first. For retire_role_not_authorized, route the retirement through a Main seat or have the operator legislate the requesting seat as principal. For retired_role_write_conflict, re-run the same call. Do not retry retired_role_registry_unavailable in a loop; report it."
+  }
+}

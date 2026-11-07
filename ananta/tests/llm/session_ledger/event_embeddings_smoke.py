@@ -66,6 +66,8 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+_ROOT = REPO_ROOT
+sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "tests" / "llm" / "session_ledger"))
 
@@ -145,9 +147,7 @@ class _StubEmbeddingService:
         input_type: str = "text",
     ) -> ActionResult:
         del model, input_type
-        if self.raise_on_input is not None and any(
-            self.raise_on_input in s for s in inputs
-        ):
+        if self.raise_on_input is not None and any(self.raise_on_input in s for s in inputs):
             raise RuntimeError(f"stub embedding failure on {self.raise_on_input!r}")
         self.batches.append(list(inputs))
         vectors = [[float(len(s)), 1.0, 0.0] for s in inputs]
@@ -171,9 +171,7 @@ class _StubVectorService:
         self.missing_all = True
         self.present_external_ids: set[str] = set()
 
-    def store_vectors(
-        self, namespace: str, vectors: list[dict[str, object]]
-    ) -> ActionResult:
+    def store_vectors(self, namespace: str, vectors: list[dict[str, object]]) -> ActionResult:
         self.ops.append("store")
         self.store_calls.append({"namespace": namespace, "vectors": vectors})
         # Stored chunks become PRESENT — so a subsequent find_missing on a
@@ -197,25 +195,15 @@ class _StubVectorService:
         self.search_calls.append({"namespace": namespace, "top_k": top_k})
         return _ok({"results": list(self.search_response[:top_k])})
 
-    def delete_by_external_ids(
-        self, namespace: str, external_ids: list[str]
-    ) -> ActionResult:
+    def delete_by_external_ids(self, namespace: str, external_ids: list[str]) -> ActionResult:
         self.ops.append("delete")
-        self.delete_calls.append(
-            {"namespace": namespace, "external_ids": list(external_ids)}
-        )
+        self.delete_calls.append({"namespace": namespace, "external_ids": list(external_ids)})
         return _ok({"deleted_count": 0})
 
-    def find_missing_external_ids(
-        self, namespace: str, candidate_external_ids: list[str]
-    ) -> ActionResult:
+    def find_missing_external_ids(self, namespace: str, candidate_external_ids: list[str]) -> ActionResult:
         del namespace
         self.find_missing_calls.append(list(candidate_external_ids))
-        missing = [
-            external_id
-            for external_id in candidate_external_ids
-            if self.missing_all or external_id not in self.present_external_ids
-        ]
+        missing = [external_id for external_id in candidate_external_ids if self.missing_all or external_id not in self.present_external_ids]
         return _ok({"missing": missing})
 
     def get_namespace_stats(self, namespace: str) -> ActionResult:
@@ -264,9 +252,7 @@ def _event_row(
     }
 
 
-def _build_writer() -> tuple[
-    EventEmbeddingWriter, StubStateService, _StubEmbeddingService, _StubVectorService
-]:
+def _build_writer() -> tuple[EventEmbeddingWriter, StubStateService, _StubEmbeddingService, _StubVectorService]:
     state = StubStateService()
     repo = SessionLedgerRepository(state_service=state)  # type: ignore[arg-type]
     embed = _StubEmbeddingService()
@@ -295,8 +281,7 @@ def test_scope_filter() -> None:
         not is_embeddable_event(
             _event_row(content_json={"subtype": "reasoning"}),
         ),
-        "[1] Codex reasoning subtype is EXCLUDED (red-first pin: neutralize "
-        "the subtype check in is_embeddable_event and this fails)",
+        "[1] Codex reasoning subtype is EXCLUDED (red-first pin: neutralize the subtype check in is_embeddable_event and this fails)",
     )
     _check(
         is_embeddable_event(_event_row(content_json={"subtype": "worklog"})),
@@ -347,9 +332,7 @@ def test_chunking() -> None:
     long_chunks = chunk_event_content(long_text)
     tail = long_chunks[-1]
     _check(
-        all(len(c) == EVENT_CHUNK_MAX_CHARS for c in long_chunks[:-1])
-        and 0 < len(tail) <= EVENT_CHUNK_MAX_CHARS
-        and len(tail) > EVENT_CHUNK_OVERLAP_CHARS,
+        all(len(c) == EVENT_CHUNK_MAX_CHARS for c in long_chunks[:-1]) and 0 < len(tail) <= EVENT_CHUNK_MAX_CHARS and len(tail) > EVENT_CHUNK_OVERLAP_CHARS,
         "[2] interior chunks are full windows; the tail is never pure overlap",
     )
 
@@ -377,18 +360,12 @@ def test_embed_event_single_chunk() -> None:
     )
     record = vec.store_calls[0]["vectors"][0]
     _check(
-        record["dimension"] == 3
-        and record["metadata"]["event_id"] == "evt_1"
-        and record["metadata"]["session_id"] == "les_1"
-        and record["metadata"]["chunk_index"] == 0
-        and record["metadata"]["event_at"] == "2026-07-06T01:00:00",
+        record["dimension"] == 3 and record["metadata"]["event_id"] == "evt_1" and record["metadata"]["session_id"] == "les_1" and record["metadata"]["chunk_index"] == 0 and record["metadata"]["event_at"] == "2026-07-06T01:00:00",
         "[3] vector record carries dimension + event/session/event_at/chunk metadata",
     )
     _check(
-        vec.ops == ["delete", "store"]
-        and vec.delete_calls[0]["external_ids"] == ["evt_1:0"],
-        "[3] same-id delete precedes the store (idempotent-retry pin: drop "
-        "the _delete_existing_vectors call and this fails)",
+        vec.ops == ["delete", "store"] and vec.delete_calls[0]["external_ids"] == ["evt_1:0"],
+        "[3] same-id delete precedes the store (idempotent-retry pin: drop the _delete_existing_vectors call and this fails)",
     )
 
 
@@ -402,9 +379,7 @@ def test_embed_event_multi_chunk_and_bounds() -> None:
         _event_row(row_id="evt_2", content_text="z" * (step + EVENT_CHUNK_MAX_CHARS + 128)),
     )
     _check(
-        outcome["chunks_stored"] == 3
-        and outcome["external_ids"] == ["evt_2:0", "evt_2:1", "evt_2:2"]
-        and outcome["truncated"] is False,
+        outcome["chunks_stored"] == 3 and outcome["external_ids"] == ["evt_2:0", "evt_2:1", "evt_2:2"] and outcome["truncated"] is False,
         "[4] multi-chunk event stores sequential chunk external_ids",
     )
     stored = vec.store_calls[-1]["vectors"]
@@ -420,8 +395,7 @@ def test_embed_event_multi_chunk_and_bounds() -> None:
     outcome = writer.embed_event(_event_row(row_id="evt_3", content_text=giant))
     _check(
         outcome["chunks_stored"] == EVENT_MAX_CHUNKS and outcome["truncated"] is True,
-        f"[4] chunk bound applies at {EVENT_MAX_CHUNKS} and is REPORTED "
-        "(loud truncation, not silent)",
+        f"[4] chunk bound applies at {EVENT_MAX_CHUNKS} and is REPORTED (loud truncation, not silent)",
     )
 
 
@@ -507,6 +481,7 @@ def test_embed_missing_walk() -> None:
             "events_embedded": 1,
             "chunks_stored": 1,
             "events_skipped_existing": 1,
+            "events_skipped_duplicate": 0,
             "events_skipped_filtered": 1,
             "events_truncated": 0,
             "events_failed": 0,
@@ -526,10 +501,7 @@ def test_embed_missing_walk() -> None:
 
 
 def test_embed_missing_batch_limit_and_cursor() -> None:
-    page1 = [
-        _event_row(row_id=f"evt_{i}", event_at=f"2026-07-06T0{9 - i}:00:00")
-        for i in range(3)
-    ]
+    page1 = [_event_row(row_id=f"evt_{i}", event_at=f"2026-07-06T0{9 - i}:00:00") for i in range(3)]
     page2 = [_event_row(row_id="evt_9", event_at="2026-07-06T00:30:00")]
     writer, _, vec = _paged_writer([page1, page2])
     outcome = writer.embed_missing_events(batch_limit=2, page_size=3)
@@ -565,9 +537,7 @@ class _DrainRepo(SessionLedgerRepository):
 
     __slots__ = ("corpus", "read_calls")
 
-    def __init__(
-        self, state_service: Any, corpus: list[dict[str, object]]
-    ) -> None:
+    def __init__(self, state_service: Any, corpus: list[dict[str, object]]) -> None:
         super().__init__(state_service)
         self.corpus = list(corpus)
         self.read_calls: list[dict[str, Any]] = []
@@ -580,23 +550,22 @@ class _DrainRepo(SessionLedgerRepository):
         order_column: str = "event_at",
         ascending: bool = False,
     ) -> list[dict[str, object]]:
-        self.read_calls.append(
-            {"after": after, "order_column": order_column, "ascending": ascending}
-        )
+        self.read_calls.append({"after": after, "order_column": order_column, "ascending": ascending, "limit": limit})
         keyed = sorted(
-            self.corpus, key=lambda r: (str(r[order_column]), str(r["id"])),
+            self.corpus,
+            key=lambda r: (str(r[order_column]), str(r["id"])),
         )
         if not ascending:
             keyed = list(reversed(keyed))
         if after is not None:
             key = (str(after[0]), str(after[1]))
-            keyed = [
-                r
-                for r in keyed
-                if ((str(r[order_column]), str(r["id"])) > key) == ascending
-                and (str(r[order_column]), str(r["id"])) != key
-            ]
+            keyed = [r for r in keyed if ((str(r[order_column]), str(r["id"])) > key) == ascending and (str(r[order_column]), str(r["id"])) != key]
         return [dict(r) for r in keyed[:limit]]
+
+
+def _walk_reads(read_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Candidate reads minus the duty-cycle pacer's idle probe (newest arrival: one row, descending; prb_f6964132)."""
+    return [call for call in read_calls if call["ascending"] or call["limit"] != 1]
 
 
 def test_drain_forward_cursor() -> None:
@@ -617,24 +586,17 @@ def test_drain_forward_cursor() -> None:
     )
     outcome = writer.drain_missing_events(page_size=2)
     _check(
-        outcome["events_embedded"] == 2
-        and outcome["events_skipped_existing"] == 1
-        and outcome["halted_on_error"] is False,
+        outcome["events_embedded"] == 2 and outcome["events_skipped_existing"] == 1 and outcome["halted_on_error"] is False,
         "[14] drain embeds the missing backlog and skips the already-embedded row",
     )
+    walk = _walk_reads(repo.read_calls)
     _check(
-        all(
-            c["order_column"] == "imported_at" and c["ascending"]
-            for c in repo.read_calls
-        )
-        and repo.read_calls[0]["after"] is None,
-        "[14] drain walks ASCending by imported_at (arrival order) from the "
-        "unset cursor",
+        bool(walk) and all(c["order_column"] == "imported_at" and c["ascending"] for c in walk) and walk[0]["after"] is None,
+        "[14] drain walks ASCending by imported_at (arrival order) from the unset cursor",
     )
     _check(
         repo.get_event_embed_cursor() == "2026-07-06T03:00:00",
-        "[14] durable cursor advances to (and persists) the newest ARRIVAL "
-        "timestamp",
+        "[14] durable cursor advances to (and persists) the newest ARRIVAL timestamp",
     )
     # Steady state: the second drain restarts INCLUSIVELY at the cursor, so it
     # re-reads only the boundary arrival and embeds nothing (find_missing skips
@@ -642,11 +604,8 @@ def test_drain_forward_cursor() -> None:
     before = len(vec.store_calls)
     outcome2 = writer.drain_missing_events(page_size=2)
     _check(
-        outcome2["events_embedded"] == 0
-        and outcome2["events_skipped_existing"] == 1
-        and len(vec.store_calls) == before,
-        "[14] a caught-up drain re-reads only the boundary arrival and embeds "
-        "nothing (inclusive-cursor steady state, not a full rescan)",
+        outcome2["events_embedded"] == 0 and outcome2["events_skipped_existing"] == 1 and len(vec.store_calls) == before,
+        "[14] a caught-up drain re-reads only the boundary arrival and embeds nothing (inclusive-cursor steady state, not a full rescan)",
     )
 
 
@@ -657,11 +616,13 @@ def test_drain_catches_late_historical_import() -> None:
     rows = [
         _event_row(
             row_id="evt_recent",
-            event_at="2026-07-06T05:00:00", imported_at="2026-07-06T05:00:01",
+            event_at="2026-07-06T05:00:00",
+            imported_at="2026-07-06T05:00:01",
         ),
         _event_row(
             row_id="evt_historical",
-            event_at="2024-01-01T00:00:00", imported_at="2026-07-06T05:00:02",
+            event_at="2024-01-01T00:00:00",
+            imported_at="2026-07-06T05:00:02",
         ),
     ]
     state = StubStateService()
@@ -677,17 +638,10 @@ def test_drain_catches_late_historical_import() -> None:
     # A prior drain already caught up to the recent arrival.
     repo.set_event_embed_cursor("2026-07-06T05:00:01")
     writer.drain_missing_events(page_size=10)
-    embedded = {
-        str(record["external_id"])
-        for call in vec.store_calls
-        for record in call["vectors"]
-    }
+    embedded = {str(record["external_id"]) for call in vec.store_calls for record in call["vectors"]}
     _check(
         "evt_historical:0" in embedded,
-        "[17] a late historical import (OLD event_at 2024, NEW imported_at after "
-        "the cursor) IS embedded — the drain keys on ARRIVAL time, not vendor "
-        "event_at (red-first: point drain order_column at 'event_at' and the "
-        "2024 event_at sorts below the cursor → skipped forever)",
+        "[17] a late historical import (OLD event_at 2024, NEW imported_at after the cursor) IS embedded — the drain keys on ARRIVAL time, not vendor event_at (red-first: point drain order_column at 'event_at' and the 2024 event_at sorts below the cursor → skipped forever)",
     )
     _check(
         repo.get_event_embed_cursor() == "2026-07-06T05:00:02",
@@ -698,11 +652,13 @@ def test_drain_catches_late_historical_import() -> None:
 def test_drain_halts_without_advancing_past_a_failed_page() -> None:
     rows = [
         _event_row(
-            row_id="evt_ok", imported_at="2026-07-06T01:00:00",
+            row_id="evt_ok",
+            imported_at="2026-07-06T01:00:00",
             content_text="fine content",
         ),
         _event_row(
-            row_id="evt_bad", imported_at="2026-07-06T02:00:00",
+            row_id="evt_bad",
+            imported_at="2026-07-06T02:00:00",
             content_text="POISON content",
         ),
     ]
@@ -720,15 +676,12 @@ def test_drain_halts_without_advancing_past_a_failed_page() -> None:
     # the health probe, so the failure is the event's, not an outage, and the cursor advances.
     outcome = writer.drain_missing_events(page_size=1)
     _check(
-        outcome["halted_on_error"] is False
-        and outcome["events_embedded"] == 1
-        and outcome["events_failed"] == 1,
+        outcome["halted_on_error"] is False and outcome["events_embedded"] == 1 and outcome["events_failed"] == 1,
         "[15] one refused event is counted and skipped; the drain does not halt",
     )
     _check(
         repo.get_event_embed_cursor() == "2026-07-06T02:00:00",
-        "[15] the cursor advances past the skipped event (red-first: re-raise the "
-        "failure and the poison page halts without advancing — the stall iss_6aa96266 fixed)",
+        "[15] the cursor advances past the skipped event (red-first: re-raise the failure and the poison page halts without advancing — the stall iss_6aa96266 fixed)",
     )
     # An embedder OUTAGE (the probe fails too) still halts WITHOUT advancing past the page.
     state2 = StubStateService()
@@ -748,9 +701,7 @@ def test_drain_halts_without_advancing_past_a_failed_page() -> None:
 
 
 def _set_drain_counter(state: StubStateService, value: int) -> None:
-    state.key_values[("session_ledger", "event_embed_drain_fires", "GLOBAL")] = str(
-        value
-    )
+    state.key_values[("session_ledger", "event_embed_drain_fires", "GLOBAL")] = str(value)
 
 
 def test_drain_periodic_reconcile_catches_below_cursor_straggler() -> None:
@@ -780,32 +731,20 @@ def test_drain_periodic_reconcile_catches_below_cursor_straggler() -> None:
     # re-reads the below-cursor straggler.
     _set_drain_counter(state, 1)  # next bump → 2, not a reconcile fire
     out_inc = writer.drain_missing_events(page_size=10)
-    embedded_inc = {
-        str(record["external_id"])
-        for call in vec.store_calls
-        for record in call["vectors"]
-    }
+    embedded_inc = {str(record["external_id"]) for call in vec.store_calls for record in call["vectors"]}
     _check(
         out_inc["reconcile"] is False and "evt_straggler:0" not in embedded_inc,
-        "[18] an INCREMENTAL fire never re-reads a straggler that committed "
-        "below the cursor (the imported_at pre-assign visibility race)",
+        "[18] an INCREMENTAL fire never re-reads a straggler that committed below the cursor (the imported_at pre-assign visibility race)",
     )
 
     # (b) A RECONCILIATION fire (counter hits the boundary) ignores the cursor,
     # re-checks the whole corpus, and embeds the straggler.
     _set_drain_counter(state, _RECONCILE_EVERY_FIRES - 1)  # next bump → boundary
     out_rec = writer.drain_missing_events(page_size=10)
-    embedded_rec = {
-        str(record["external_id"])
-        for call in vec.store_calls
-        for record in call["vectors"]
-    }
+    embedded_rec = {str(record["external_id"]) for call in vec.store_calls for record in call["vectors"]}
     _check(
         out_rec["reconcile"] is True and "evt_straggler:0" in embedded_rec,
-        "[18] a RECONCILIATION fire (every Nth) ignores the cursor, re-checks "
-        "the whole corpus, and embeds the below-cursor straggler — Codex "
-        "blocker #2 fix (red-first: drop the reconcile branch and it stays "
-        "stranded because the cursor never re-reads below itself)",
+        "[18] a RECONCILIATION fire (every Nth) ignores the cursor, re-checks the whole corpus, and embeds the below-cursor straggler — Codex blocker #2 fix (red-first: drop the reconcile branch and it stays stranded because the cursor never re-reads below itself)",
     )
 
 
@@ -831,24 +770,18 @@ def test_search_joins_and_ranks() -> None:
     hits = writer.search(query="what did we decide", limit=4)
     _check(
         [h["event_id"] for h in hits] == ["evt_b", "evt_a"],
-        "[8] hits join back to __event rows and rank by similarity DESC "
-        "(unjoinable + malformed ANN rows dropped)",
+        "[8] hits join back to __event rows and rank by similarity DESC (unjoinable + malformed ANN rows dropped)",
     )
     _check(
         abs(hits[0]["score"] - 0.88) < 1e-9 and hits[0]["chunk_index"] == 1,
-        "[8] score is similarity (1 - distance) and chunk_index is parsed "
-        "from the external_id",
+        "[8] score is similarity (1 - distance) and chunk_index is parsed from the external_id",
     )
     _check(
-        hits[0]["session_id"] == "les_b"
-        and hits[0]["content_text"] == "hello from the assistant"
-        and hits[0]["session_vendor"] == "codex"
-        and hits[0]["source_kind"] == "codex_local",
+        hits[0]["session_id"] == "les_b" and hits[0]["content_text"] == "hello from the assistant" and hits[0]["session_vendor"] == "codex" and hits[0]["source_kind"] == "codex_local",
         "[8] hit carries the event-window projection fields",
     )
     _check(
-        vec.search_calls[-1]["namespace"] == EVENT_VECTOR_NAMESPACE
-        and vec.search_calls[-1]["top_k"] == 4,
+        vec.search_calls[-1]["namespace"] == EVENT_VECTOR_NAMESPACE and vec.search_calls[-1]["top_k"] == 4,
         "[8] ANN runs in the event namespace with top_k=limit",
     )
 
@@ -869,7 +802,8 @@ def test_repository_candidate_read() -> None:
     state = StubStateService()
     repo = SessionLedgerRepository(state_service=state)  # type: ignore[arg-type]
     repo.list_event_embedding_candidates(
-        limit=500, after=("2026-07-06T01:00:00", "evt_5"),
+        limit=500,
+        after=("2026-07-06T01:00:00", "evt_5"),
     )
     call = state.query_ordered_calls[-1]
     _check(
@@ -883,20 +817,19 @@ def test_repository_candidate_read() -> None:
         "[10] candidate read passes the exact SQL-leg scope filter",
     )
     _check(
-        call.order_by == [["event_at", "desc"], ["id", "desc"]]
-        and call.limit == 100
-        and call.after == ["2026-07-06T01:00:00", "evt_5"],
-        "[10] newest-first composite order, ≤100 clamp, row-value cursor "
-        "passed through",
+        call.order_by == [["event_at", "desc"], ["id", "desc"]] and call.limit == 100 and call.after == ["2026-07-06T01:00:00", "evt_5"],
+        "[10] newest-first composite order, ≤100 clamp, row-value cursor passed through",
     )
     repo.list_event_embedding_candidates(
-        limit=50, after=None, order_column="imported_at", ascending=True,
+        limit=50,
+        after=None,
+        order_column="imported_at",
+        ascending=True,
     )
     asc_call = state.query_ordered_calls[-1]
     _check(
         asc_call.order_by == [["imported_at", "asc"], ["id", "asc"]],
-        "[10] the Lane-1 drain read orders oldest-first by imported_at (arrival "
-        "time), NOT vendor event_at",
+        "[10] the Lane-1 drain read orders oldest-first by imported_at (arrival time), NOT vendor event_at",
     )
 
 
@@ -910,14 +843,11 @@ def test_repository_cursor_kv() -> None:
     repo.set_event_embed_cursor("2026-07-06T05:00:00")
     _check(
         repo.get_event_embed_cursor() == "2026-07-06T05:00:00",
-        "[16] the drain cursor round-trips through the KV store as an arrival "
-        "(imported_at) timestamp",
+        "[16] the drain cursor round-trips through the KV store as an arrival (imported_at) timestamp",
     )
     _check(
-        repo.bump_event_embed_drain_counter() == 1
-        and repo.bump_event_embed_drain_counter() == 2,
-        "[16] the drain-fire counter increments durably (drives the periodic "
-        "reconciliation sweep)",
+        repo.bump_event_embed_drain_counter() == 1 and repo.bump_event_embed_drain_counter() == 2,
+        "[16] the drain-fire counter increments durably (drives the periodic reconciliation sweep)",
     )
 
 
@@ -931,8 +861,7 @@ def test_repository_events_by_ids() -> None:
     repo.list_events_by_ids(["evt_1", "evt_2"])
     call = state.query_state_calls[-1]
     _check(
-        call.table == TABLE_EVENT
-        and call.filters == {"id": ["evt_1", "evt_2"], "is_deleted": 0},
+        call.table == TABLE_EVENT and call.filters == {"id": ["evt_1", "evt_2"], "is_deleted": 0},
         "[11] join-back read uses = ANY(ids) + explicit is_deleted 0",
     )
 
@@ -946,7 +875,8 @@ class _StubPluginManager:
 
 
 def _make_service(
-    *, with_vector_bindings: bool = True,
+    *,
+    with_vector_bindings: bool = True,
 ) -> tuple[SessionLedgerService, _StubVectorService | None, StubStateService]:
     state = StubStateService()
     vec = _StubVectorService() if with_vector_bindings else None
@@ -984,13 +914,8 @@ def test_service_search_event_content() -> None:
     envelope = service2.search_event_content(query="find me")
     result = envelope["results"][0]
     _check(
-        result["vendor"] == "codex"
-        and "session_vendor" not in result
-        and result["event_id"] == "evt_y"
-        and result["chunk_index"] == 2
-        and abs(result["score"] - 0.9) < 1e-9,
-        "[12] public envelope maps vendor ← session_vendor and carries "
-        "chunk_index + score",
+        result["vendor"] == "codex" and "session_vendor" not in result and result["event_id"] == "evt_y" and result["chunk_index"] == 2 and abs(result["score"] - 0.9) < 1e-9,
+        "[12] public envelope maps vendor ← session_vendor and carries chunk_index + score",
     )
 
 
@@ -1035,16 +960,12 @@ def test_coverage_frontier_and_count() -> None:
     repo.set_event_embed_cursor("2026-07-06T02:00:00")  # BEHIND the newest arrival
     cov = writer.coverage()
     _check(
-        cov["caught_up"] is False
-        and cov["cursor_imported_at"] == "2026-07-06T02:00:00"
-        and cov["newest_in_scope_imported_at"] == "2026-07-06T03:00:00",
-        "[19] coverage: cursor BEHIND the newest in-scope arrival → caught_up=False "
-        "(red-first: hardcode caught_up=True and this flips)",
+        cov["caught_up"] is False and cov["cursor_imported_at"] == "2026-07-06T02:00:00" and cov["newest_in_scope_imported_at"] == "2026-07-06T03:00:00",
+        "[19] coverage: cursor BEHIND the newest in-scope arrival → caught_up=False (red-first: hardcode caught_up=True and this flips)",
     )
     _check(
         cov["embedded_chunk_count"] == 3,
-        "[19] coverage: embedded_chunk_count is the live vector (CHUNK) count from "
-        "get_namespace_stats (3 chunks across 2 events)",
+        "[19] coverage: embedded_chunk_count is the live vector (CHUNK) count from get_namespace_stats (3 chunks across 2 events)",
     )
     repo.set_event_embed_cursor("2026-07-06T03:00:00")  # AT the newest arrival
     _check(
@@ -1062,12 +983,8 @@ def test_coverage_edges() -> None:
     )
     cov = writer.coverage()
     _check(
-        cov["caught_up"] is True
-        and cov["newest_in_scope_imported_at"] is None
-        and cov["embedded_chunk_count"] == 0,
-        "[20] coverage: no in-scope events → caught_up=True + newest=None; an empty "
-        "namespace → embedded_chunk_count=0 (get_namespace_stats ValueError caught, "
-        "not a crash)",
+        cov["caught_up"] is True and cov["newest_in_scope_imported_at"] is None and cov["embedded_chunk_count"] == 0,
+        "[20] coverage: no in-scope events → caught_up=True + newest=None; an empty namespace → embedded_chunk_count=0 (get_namespace_stats ValueError caught, not a crash)",
     )
     # Candidates exist but the drain never ran (cursor None) → NOT caught up.
     vec2 = _StubVectorService()
@@ -1082,8 +999,7 @@ def test_coverage_edges() -> None:
     )
     _check(
         writer2.coverage()["caught_up"] is False,
-        "[20] coverage: candidates exist but the cursor never advanced (None) → "
-        "caught_up=False (the drain has not started)",
+        "[20] coverage: candidates exist but the cursor never advanced (None) → caught_up=False (the drain has not started)",
     )
 
 
@@ -1094,12 +1010,8 @@ def test_service_event_embedding_coverage() -> None:
     # No cursor set + no planted TABLE_EVENT candidate → caught_up True, newest None.
     cov = service.event_embedding_coverage()
     _check(
-        cov["caught_up"] is True
-        and cov["cursor_imported_at"] is None
-        and cov["newest_in_scope_imported_at"] is None
-        and cov["embedded_chunk_count"] == 2,
-        "[21] service verb event_embedding_coverage delegates the writer coverage "
-        "envelope (caught_up/cursor/newest/embedded_chunk_count)",
+        cov["caught_up"] is True and cov["cursor_imported_at"] is None and cov["newest_in_scope_imported_at"] is None and cov["embedded_chunk_count"] == 2,
+        "[21] service verb event_embedding_coverage delegates the writer coverage envelope (caught_up/cursor/newest/embedded_chunk_count)",
     )
     # Coverage stays AVAILABLE without vector bindings (degrades to 0) — contrast
     # search_event_content, which fails closed.
@@ -1107,8 +1019,7 @@ def test_service_event_embedding_coverage() -> None:
     cov_bare = bare_service.event_embedding_coverage()
     _check(
         cov_bare["caught_up"] is True and cov_bare["embedded_chunk_count"] == 0,
-        "[21] coverage stays available WITHOUT vector bindings (embedded=0), unlike "
-        "search which fails closed",
+        "[21] coverage stays available WITHOUT vector bindings (embedded=0), unlike search which fails closed",
     )
 
 

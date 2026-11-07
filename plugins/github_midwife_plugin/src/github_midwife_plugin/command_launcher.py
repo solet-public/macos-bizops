@@ -11,7 +11,7 @@ install location (``local_cli.client.resolve_solet_name`` walks to the
 clone root), so a symlink from anywhere on PATH resolves into THIS newborn's
 venv and pins THIS newborn — reaching no sibling. UNCONDITIONAL (every profile
 ships ``agent_messaging_plugin``, so every newborn has the console script).
-The same phase appends the newborn's Codex-native MCP bridge table. A correct
+When given a Codex config path, the phase appends the newborn's Codex-native MCP bridge table. A correct
 existing symlink is a no-op; a stale/wrong symlink is repointed; a NON-symlink
 already at the path is a fail-loud refusal. An existing same-name MCP table is
 also a fail-loud refusal: it may contain an operator hand-edit and is never
@@ -66,22 +66,9 @@ class _McpConfigRead:
     reason: str
 
 
-def _mcp_config_path() -> Path:
-    return Path.home() / ".codex" / "config.toml"
-
-
 def _mcp_block(name: str, clone_root: Path) -> str:
     python = clone_root / ".venv" / "bin" / "python3"
-    return (
-        f"[mcp_servers.{name}]\n"
-        f"command = {_toml_basic_string(str(python))}\n"
-        'args = ["-m", "agent_messaging_plugin.mcp_bridge"]\n'
-        'env_vars = ["CODEX_THREAD_ID"]\n\n'
-        f"[mcp_servers.{name}.env]\n"
-        f'SOLET_NAME = "{name}"\n'
-        'AGENT_IDENTITY = "codex"\n'
-        'AGENT_SESSION_LABEL = "Codex-Ambient"\n'
-    )
+    return f'[mcp_servers.{name}]\ncommand = {_toml_basic_string(str(python))}\nargs = ["-m", "agent_messaging_plugin.mcp_bridge"]\nenv_vars = ["CODEX_THREAD_ID"]\n\n[mcp_servers.{name}.env]\nSOLET_NAME = "{name}"\nAGENT_IDENTITY = "codex"\nAGENT_SESSION_LABEL = "Codex-Ambient"\n'
 
 
 def _toml_basic_string(value: str) -> str:
@@ -135,11 +122,7 @@ def _read_mcp_config(config_path: Path, name: str, clone_root: Path) -> _McpConf
                 reason="Codex MCP bridge already installed with generated configuration",
             )
         differing = ", ".join(_differing_mcp_keys(expected, actual)) or "table shape"
-        raise CommandLauncherError(
-            f"{config_path} [mcp_servers.{name}] differs from generated configuration at "
-            f"keys: {differing} — refusing to overwrite "
-            "an operator-managed Codex MCP configuration."
-        )
+        raise CommandLauncherError(f"{config_path} [mcp_servers.{name}] differs from generated configuration at keys: {differing} — refusing to overwrite an operator-managed Codex MCP configuration.")
     return _McpConfigRead(content=content, already_installed=False, reason="Codex MCP bridge installed")
 
 
@@ -165,13 +148,9 @@ def _replace_mcp_config_atomically(config_path: Path, updated_content: str) -> N
     """Publish validated configuration without mutating the current target first."""
     config_path.parent.mkdir(parents=True, exist_ok=True)
     if config_path.is_symlink():
-        raise CommandLauncherError(
-            f"refusing to atomically replace symlinked Codex config {config_path}"
-        )
+        raise CommandLauncherError(f"refusing to atomically replace symlinked Codex config {config_path}")
     if config_path.exists() and not config_path.is_file():
-        raise CommandLauncherError(
-            f"refusing to atomically replace non-file Codex config {config_path}"
-        )
+        raise CommandLauncherError(f"refusing to atomically replace non-file Codex config {config_path}")
 
     existing_mode = stat.S_IMODE(config_path.stat().st_mode) if config_path.exists() else None
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{config_path.name}.", dir=config_path.parent)
@@ -187,9 +166,7 @@ def _replace_mcp_config_atomically(config_path: Path, updated_content: str) -> N
         try:
             tomllib.loads(temporary.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError) as exc:
-            raise CommandLauncherError(
-                f"could not verify temporary Codex MCP config {config_path}: {exc}"
-            ) from exc
+            raise CommandLauncherError(f"could not verify temporary Codex MCP config {config_path}: {exc}") from exc
         os.replace(temporary, config_path)
         temporary = None
         _fsync_directory(config_path.parent)
@@ -208,15 +185,11 @@ def _append_mcp_block(config_path: Path, content: str, name: str, clone_root: Pa
     try:
         tomllib.loads(updated_content)
     except tomllib.TOMLDecodeError as exc:  # pragma: no cover - local block is covered by smoke.
-        raise CommandLauncherError(
-            f"generated Codex MCP configuration for {config_path} is invalid TOML: {exc}"
-        ) from exc
+        raise CommandLauncherError(f"generated Codex MCP configuration for {config_path} is invalid TOML: {exc}") from exc
     try:
         _replace_mcp_config_atomically(config_path, updated_content)
     except OSError as exc:
-        raise CommandLauncherError(
-            f"could not write Codex MCP config {config_path}: {exc}"
-        ) from exc
+        raise CommandLauncherError(f"could not write Codex MCP config {config_path}: {exc}") from exc
 
 
 def install_command_launcher_at_birth(
@@ -236,18 +209,13 @@ def install_command_launcher_at_birth(
     # Defense in depth: genesis validates the name first, but the launcher path
     # is `bin_dir / name`, so a bad name could escape bin_dir — refuse one here.
     if not is_valid_solet_name(name):
-        raise CommandLauncherError(
-            f"refusing to install a launcher for invalid solet name {name!r} "
-            f"(must match {NAME_PATTERN.pattern})."
-        )
+        raise CommandLauncherError(f"refusing to install a launcher for invalid solet name {name!r} (must match {NAME_PATTERN.pattern}).")
     target = clone_root / ".venv" / "bin" / CONSOLE_SCRIPT_NAME
     if not target.is_file():
-        raise CommandLauncherError(
-            f"console script missing at {target} — the venv must be provisioned "
-            f"and {CONSOLE_SCRIPT_NAME}'s plugin installed before the launcher."
-        )
-    config_path = codex_config_path or _mcp_config_path()
-    mcp_config = _read_mcp_config(config_path, name, clone_root)
+        raise CommandLauncherError(f"console script missing at {target} — the venv must be provisioned and {CONSOLE_SCRIPT_NAME}'s plugin installed before the launcher.")
+    config_path = codex_config_path
+    mcp_config = _read_mcp_config(config_path, name, clone_root) if config_path is not None else None
+    config_path_text = str(config_path) if config_path is not None else ""
     bin_dir.mkdir(parents=True, exist_ok=True)
     launcher = bin_dir / name
 
@@ -256,7 +224,9 @@ def install_command_launcher_at_birth(
             launcher_result = CommandLauncherResult(
                 status="already_installed",
                 reason="launcher already points at this newborn's console script",
-                launcher_path=str(launcher), target=str(target), mcp_config_path=str(config_path),
+                launcher_path=str(launcher),
+                target=str(target),
+                mcp_config_path=config_path_text,
             )
         else:
             launcher.unlink()
@@ -264,20 +234,33 @@ def install_command_launcher_at_birth(
             launcher_result = CommandLauncherResult(
                 status="repointed",
                 reason="launcher repointed to this newborn's console script",
-                launcher_path=str(launcher), target=str(target), mcp_config_path=str(config_path),
+                launcher_path=str(launcher),
+                target=str(target),
+                mcp_config_path=config_path_text,
             )
     elif launcher.exists():
-        raise CommandLauncherError(
-            f"{launcher} already exists and is not a symlink — refusing to clobber "
-            "an operator file; move it aside and re-run."
-        )
+        raise CommandLauncherError(f"{launcher} already exists and is not a symlink — refusing to clobber an operator file; move it aside and re-run.")
     else:
         launcher.symlink_to(target)
         launcher_result = CommandLauncherResult(
             status="installed",
             reason="per-solet command launcher installed on PATH",
-            launcher_path=str(launcher), target=str(target), mcp_config_path=str(config_path),
+            launcher_path=str(launcher),
+            target=str(target),
+            mcp_config_path=config_path_text,
         )
+    return _configure_selected_mcp(launcher_result, config_path, mcp_config, name, clone_root)
+
+
+def _configure_selected_mcp(
+    launcher_result: CommandLauncherResult,
+    config_path: Path | None,
+    mcp_config: _McpConfigRead | None,
+    name: str,
+    clone_root: Path,
+) -> CommandLauncherResult:
+    if config_path is None or mcp_config is None:
+        return launcher_result
     if mcp_config.already_installed:
         mcp_status = "already_installed"
         mcp_reason = mcp_config.reason

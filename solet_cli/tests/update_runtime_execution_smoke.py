@@ -87,12 +87,11 @@ from solet_manager.update_execution import apply_update, preview_update_instance
 from solet_manager.update_local_state import CLONE_EXCLUDE_RELATIVE, paths_ignored_by_declared_exclude, rebaseline_revision  # noqa: E402
 from solet_manager.update_runtime_plan import STEP5_CAPABILITIES, STEP5_MANAGED_SUB_SURFACES, STEP5_NON_TOUCH_SURFACES  # noqa: E402
 
-_CHECKS = 0
+_CHECKS_RUN: list[str] = []
 
 
 def _check(condition: object, label: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    _CHECKS_RUN.append(label)
     if not condition:
         raise AssertionError(label)
 
@@ -386,8 +385,8 @@ def _assert_d1_destination_rules(root: Path) -> None:
     preview = preview_update_instance(ignored.request)
     reasons = {(data(row, "subject"), data(row, "reason")) for row in cast(list[Any], preview.data["blocked"])}
     _check(not any(subject == "client_shell" for subject, _ in reasons), "an in-target destination the target ignores and the candidate does not track is admitted")
+    _check(preview.data["runtime_approval_fingerprint"] is not None, "admitted in-target artifact yields a fingerprint")
     fingerprint = cast(str, preview.data["runtime_approval_fingerprint"])
-    _check(fingerprint is not None, "admitted in-target artifact yields a fingerprint")
     (ignored.target / ".git" / "info" / "exclude").write_text(".venv/\nprofile/config/manifest.yaml\nprofile/data/\n")
     exc = expect(ProbeDriftError, lambda: apply_update(ignored.request, fingerprint), "changed ignore source accepted")
     _check("probe_drift" in cast(ProbeDriftError, exc).error_kind, "a change to a consulted ignore source between preview and apply is probe_drift")
@@ -609,7 +608,7 @@ def _replace_with_symlink(target: Path) -> None:
 
 def _assert_ignore_carve_out_is_narrow(root: Path) -> None:
     """Only a path that is unchanged and that the clone's own ignore file now covers is admitted, and only when that file was declared."""
-    write = lambda text: (lambda target: (target / "client" / "a.zsh").write_text(text, encoding="utf-8"))  # noqa: E731
+    write = lambda text: lambda target: (target / "client" / "a.zsh").write_text(text, encoding="utf-8")  # noqa: E731
     _check(_carve_admitted(root / "control", lambda target: None), "control: an ignore-file edit alone is admitted")
     _check(not _carve_admitted(root / "undeclared", lambda target: None, declared=frozenset()), "control: without the declared ignore file the vanished files are a violation")
     _check(not _carve_admitted(root / "same_size", write("omega\n")), "a client file rewritten at the same size is a violation")
@@ -675,7 +674,7 @@ def _kb_rebaseline(root: Path, create: Any, status: str) -> tuple[dict[str, Any]
         _check(exc.error_kind == "preservation_violated", f"the refusal is preservation_violated: {exc.error_kind}")
         return str(exc)
     _check(outcome is not None, "an admitted creation still moves current")
-    return cast(tuple[dict[str, Any], ...], cast(Any, outcome)[0])
+    return tuple(revision for revision, _ in cast(Any, outcome))
 
 
 _KB_EXACT = _kb_link("newkb", "../plugins/newkb/knowledge_base")
@@ -747,7 +746,7 @@ def _assert_strategy_selection(root: Path) -> None:
     missing_roster = build_fixture(root / "roster", roster=("github_midwife_plugin", "plugin_not_in_candidate"))
     advance_to_source_advanced(missing_roster)
     preview = preview_update_instance(missing_roster.request)
-    reasons = {data(row, "reason") for row in cast(list[Any], preview.data["blocked"])}
+    reasons = {cast(str, data(row, "reason")) for row in cast(list[Any], preview.data["blocked"])}
     _check("roster_plugin_absent_in_candidate" in reasons and preview.data["runtime_approval_fingerprint"] is None, "roster plugin absent from the candidate blocks before any write")
 
 
@@ -775,7 +774,7 @@ def main() -> int:
         _assert_fleet_crash_resume(root / "crash_resume")
         _assert_strategy_selection(root / "strategy")
     _check(subprocess.run(("git", "--version"), capture_output=True, check=False).returncode == 0, "git present")
-    print(f"update_runtime_execution_smoke OK: {_CHECKS} checks passed")
+    print(f"update_runtime_execution_smoke OK: {len(_CHECKS_RUN)} checks passed")
     return 0
 
 

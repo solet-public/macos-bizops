@@ -105,7 +105,7 @@ def prune_rotation_notices(
             {
                 "table": TABLE_AGENT_MESSAGE,
                 "filters": {_COL_THREAD_ID: thread_id},
-                "order_by": [[_COL_CURSOR, "desc"]],
+                "order_by": [[_COL_CURSOR, "desc"], ["id", "desc"]],
                 "limit": keep,
             },
         ),

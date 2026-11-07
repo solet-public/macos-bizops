@@ -128,7 +128,12 @@ def current_seed_record(paths: ManagerPaths, record: InstanceRecord) -> Instance
         raise StateConflictError(
             f"managed instance {record.name!r}: the v2 inventory row (origin {row.management_origin.value}, target "
             f"{target.canonical_path}, inode {target.filesystem_identity.inode}) is not the create record's alias "
-            f"(target {record.target}); the doctor cannot tell which seed release this checkout should be at"
+            f"(target {record.target}); the doctor cannot tell which seed release this checkout should be at",
+            repair=(
+                f"Do not edit Manager state. Restore the original target at {record.target}, or, if the replacement "
+                f"was intentional, first classify it read-only with `solet-manager inspect --target {target.canonical_path}` "
+                "and follow the explicit managed-instance recovery it reports before retrying doctor."
+            ),
         )
     release = row.source_release
     return replace(

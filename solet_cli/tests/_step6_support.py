@@ -18,7 +18,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -39,6 +38,7 @@ from _step5_support import (  # noqa: E402
     default_operations,
     operation,
     runtime_fingerprint,
+    scrubbed_git_environment,
 )
 from solet_manager import doctor_journal as doctor_journal_module  # noqa: E402
 from solet_manager import existing_install_doctor as doctor_module  # noqa: E402
@@ -540,4 +540,4 @@ def remove_tree(path: Path) -> None:
 
 
 def env_path_for_subprocess() -> dict[str, str]:
-    return {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    return scrubbed_git_environment()

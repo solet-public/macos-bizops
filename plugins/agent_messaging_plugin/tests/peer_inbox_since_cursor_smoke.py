@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -25,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _real_state_fake import RealShapeState  # noqa: E402
 from ananta.interfaces.state_management_interface import StateManagementInterface  # noqa: E402, TC002
 from ananta.llm.agent_messaging.repository import AgentMessagingRepository  # noqa: E402
+from ananta.llm.agent_messaging.schema import NAMESPACE, TABLE_AGENT_MESSAGE  # noqa: E402
 from peer_inbox_instance_exhaustion_smoke import (  # noqa: E402
     _AGENT_ID,
     _INSTANCE_ID,
@@ -77,6 +79,49 @@ def test_since_returns_only_newer_rows_oldest_first() -> None:
     _check(page["next_after_created_at"] is None, "a since page offers no backward cursor to misuse")
 
 
+def test_cov_boundaries() -> None:
+    state = RealShapeState()
+    _seed(state, count=6, threads=2)
+    plugin = _plugin(state)
+    first = _read(plugin, since=_at(-1), limit=2, observer=True)
+    token = first["next_since_cursor"]
+    second = _read(plugin, since_cursor=token, limit=2, observer=True)
+    direct = second["read_coverage"]["direct"]
+    _check(direct["effective_since"] == _at(-1), "cov: continuation retains original horizon")
+    _check(direct["since_cursor"] == token and direct["requested_since"] is None, "cov: supplied continuation retained")
+    _check(direct["continuation_safety"] == "tie_safe", "cov: opaque continuation tie safe")
+    _check(direct["continuation_after"] == first["read_coverage"]["direct"]["last"], "cov: decoded boundary exact")
+    _check(direct["first"] != direct["last"], "cov: distinct endpoints")
+    _check(direct["observer"] is True and direct["unread_count"] is None, "cov: observer unread unknown")
+    # A manual horizon jump skips the already seeded row 2 outside B's query.
+    later = _read(plugin, since=_at(3), limit=2)
+    _check(first["read_coverage"]["direct"]["last"]["created_at"] == _at(1) and later["read_coverage"]["direct"]["requested_since"] == _at(3), "cov: manual horizon jump visible")
+    _check(later["read_coverage"]["direct"]["outside_query"] == "unknown", "cov: skipped interval unverified")
+    for params in ({"since": _at(5)}, {"after": _at(0)}):
+        empty = _read(plugin, **params)["read_coverage"]["direct"]
+        _check(empty["count"] == 0 and empty["first"] is None and empty["last"] is None, "cov: empty null endpoints")
+        boundary = "requested_since" if "since" in params else "after"
+        _check(empty[boundary] == next(iter(params.values())), "cov: empty request boundary retained")
+
+
+def test_cov_ties() -> None:
+    state = RealShapeState()
+    _seed(state, count=12, threads=2)
+    for row in state.rows(NAMESPACE, TABLE_AGENT_MESSAGE):
+        row["created_at"] = _at(0)
+    plugin = _plugin(state)
+    first = _read(plugin, since=_at(-1), limit=5)
+    cov = first["read_coverage"]["direct"]
+    _check(cov["continuation_safety"] == "horizon_only" and "next_since_cursor" in cov["advisory"], "cov: tied forward timestamp warning")
+    skipped = _read(plugin, since=first["next_since_created_at"], limit=5)
+    _check(len(first["entries"]) == 5 and skipped["entries"] == [], "cov: timestamp tie omission unchanged")
+    backward = _read(plugin, limit=5)
+    cov = backward["read_coverage"]["direct"]
+    _check(cov["continuation_safety"] == "timestamp_only" and "tied rows" in cov["advisory"], "cov: tied backward timestamp warning")
+    older = _read(plugin, after=backward["next_after_created_at"], limit=5)
+    _check(older["entries"] == [] and older["read_coverage"]["direct"]["after"] == _at(0), "cov: backward tie omission unchanged")
+
+
 def test_since_is_strict_and_not_the_backward_cursor() -> None:
     """The reported shape: a timestamp past the newest row got history back."""
     state = RealShapeState()
@@ -104,20 +149,65 @@ def test_since_offset_forms_mean_the_same_instant() -> None:
         _check(_cursors(_read(plugin, since=value)) == [3, 4, 5], f"since with {label} bounds the same instant as naive UTC")
 
 
+def test_after_offset_forms_mean_the_same_instant() -> None:
+    """The shared ordered-query seam normalizes aware backward cursors."""
+    state = RealShapeState()
+    _seed(state, count=6, threads=2)
+    plugin = _plugin(state)
+    for label, value in (
+        ("Z suffix", _at(3) + "Z"),
+        ("+00:00", _at(3) + "+00:00"),
+        ("+02:00 local time of the same instant", "2026-08-01T02:00:03+02:00"),
+    ):
+        _check(
+            _cursors(_read(plugin, after=value)) == [2, 1, 0],
+            f"after with {label} is normalized to the naive-UTC storage instant",
+        )
+
+
 def test_since_paging_reaches_every_row_exactly_once() -> None:
     for count in (0, 1, 5, 6, 12):
         state = RealShapeState()
         _seed(state, count=count, threads=2)
         plugin = _plugin(state)
         collected: list[int] = []
-        cursor = _at(-1)
+        params: dict[str, object] = {"since": _at(-1)}
         for _ in range(count + 2):
-            page = _read(plugin, since=cursor, limit=5)
+            page = _read(plugin, **params, limit=5)
             collected.extend(_cursors(page))
-            cursor = page["next_since_created_at"]
             if page["instance_exhausted"]:
                 break
+            params = {"since_cursor": page["next_since_cursor"]}
         _check(collected == list(range(count)), f"depth {count}: echoed since cursor reaches every row once, oldest-first")
+
+
+def test_since_cursor_is_lossless_across_equal_timestamps() -> None:
+    """The opaque continuation must split a same-timestamp group by message id."""
+    state = RealShapeState()
+    _seed(state, count=12, threads=2)
+    for row in state.rows(NAMESPACE, TABLE_AGENT_MESSAGE):
+        row["created_at"] = _at(0)
+    plugin = _plugin(state)
+    collected: list[int] = []
+    page = _read(plugin, since=_at(-1), limit=5)
+    for _ in range(4):
+        collected.extend(_cursors(page))
+        if page["instance_exhausted"]:
+            break
+        continuation = page.get("next_since_cursor")
+        _check(
+            isinstance(continuation, str) and bool(continuation),
+            "a non-terminal forward page returns an opaque tie-safe cursor",
+        )
+        page = _read(plugin, since_cursor=continuation, limit=5)
+        _check(
+            page["role_since_created_at"] == _at(-1),
+            "the continuation preserves the original role-section horizon",
+        )
+    _check(
+        collected == list(range(12)),
+        "the opaque since cursor reaches every equal-timestamp row exactly once",
+    )
 
 
 def test_since_page_is_the_oldest_rows_when_a_thread_overflows_it() -> None:
@@ -128,7 +218,7 @@ def test_since_page_is_the_oldest_rows_when_a_thread_overflows_it() -> None:
     first = _read(plugin, since=_at(-1), limit=5)
     _check(_cursors(first) == [0, 1, 2, 3, 4], "a forward page over a deep thread starts at the oldest row after the cursor")
     _check(first["instance_exhausted"] is False, "a forward page over a deep thread is not exhausted")
-    second = _read(plugin, since=first["next_since_created_at"], limit=5)
+    second = _read(plugin, since_cursor=first["next_since_cursor"], limit=5)
     _check(_cursors(second) == [5, 6, 7, 8, 9], "the next forward page continues without a gap")
 
 
@@ -152,6 +242,27 @@ def test_since_and_after_together_are_refused() -> None:
     )
 
 
+def test_since_cursor_is_fail_closed_and_mutually_exclusive() -> None:
+    state = RealShapeState()
+    _seed(state, count=3, threads=1)
+    plugin = _plugin(state)
+    malformed = _call(plugin, since_cursor="not-a-cursor")
+    _check(
+        malformed["action_status"] == "failed" and malformed["error"]["code"] == "invalid_since_cursor",
+        "a malformed opaque continuation fails loud",
+    )
+    first = _read(plugin, since=_at(-1), limit=1)
+    both = _call(
+        plugin,
+        since=_at(-1),
+        since_cursor=first["next_since_cursor"],
+    )
+    _check(
+        both["action_status"] == "failed" and both["error"]["code"] == "peer_inbox_rejected",
+        "the first-page horizon and continuation token are mutually exclusive",
+    )
+
+
 def test_repository_refuses_both_directions() -> None:
     """The service refuses first; the repository guards its own direct callers."""
     state = RealShapeState()
@@ -160,8 +271,11 @@ def test_repository_refuses_both_directions() -> None:
     start = _START.replace(tzinfo=None)
     try:
         repo.list_peer_messages_for(
-            recipient_agent_id=_AGENT_ID, recipient_agent_instance_id=_INSTANCE_ID,
-            after_created_at=start, since_created_at=start, limit=5,
+            recipient_agent_id=_AGENT_ID,
+            recipient_agent_instance_id=_INSTANCE_ID,
+            after_created_at=start,
+            since_created_at=start,
+            limit=5,
         )
     except ValueError:
         _check(True, "the repository refuses opposite cursors from a direct caller")
@@ -182,12 +296,17 @@ def test_malformed_since_fails_loud() -> None:
 def main() -> None:
     print("=== peer_inbox since cursor smoke ===")
     test_since_returns_only_newer_rows_oldest_first()
+    test_cov_boundaries()
+    test_cov_ties()
     test_since_is_strict_and_not_the_backward_cursor()
     test_since_offset_forms_mean_the_same_instant()
+    test_after_offset_forms_mean_the_same_instant()
     test_since_paging_reaches_every_row_exactly_once()
+    test_since_cursor_is_lossless_across_equal_timestamps()
     test_since_page_is_the_oldest_rows_when_a_thread_overflows_it()
     test_since_exhaustion_is_truthful_at_the_page_boundary()
     test_since_and_after_together_are_refused()
+    test_since_cursor_is_fail_closed_and_mutually_exclusive()
     test_repository_refuses_both_directions()
     test_malformed_since_fails_loud()
     print(f"\n{_passed} passed, {len(_failed)} failed")

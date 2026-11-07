@@ -23,16 +23,26 @@ Acceptance (spec §17.3): the vendor parser at
 events with the right ``vendor_event_id`` / ``vendor_parent_event_id``
 discipline so the importer's tool-call projection resolves to
 ``status='succeeded'`` automatically.
+
+Activated polling uses the shared filesystem metadata policy: newest-first
+(mtime_ns, relative path) sweep continuation, per-session completed versions,
+explicit EOF reset, and leased oversized selection. Legacy direct discovery
+and vendor cursor methods below remain unchanged; the importer uses the safe
+poll hooks. New task/ambient snapshots replay completely, and rollout offsets
+continue only a proved same-inode append. No vendor event identity changes.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import os
+import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from time import monotonic, sleep
+from typing import Any, ClassVar, cast
 
 from ananta.core.actions.action_metadata import (
     ContextHandling,
@@ -48,7 +58,19 @@ from ananta.core.plugins.plugin_base import PluginBase
 from ananta.interfaces.edge_process_provider import EdgeProcessDefinition, EdgeProcessProvider
 from ananta.interfaces.llm_session_source_interface import (
     LLMSessionSourceInterface,
-    PullingSourceMixin,
+)
+from ananta.llm.session_ledger.filesystem_poll import (
+    FilesystemCandidate,
+    FilesystemPollingMixin,
+    acknowledge_read,
+    observe_candidate,
+    selected_path,
+)
+from ananta.llm.session_ledger.poll_advisories import (
+    begin_claude_read,
+    claude_line_context,
+    complete_claude_read,
+    completed_claude_read,
 )
 from ananta.llm.session_ledger.root_uri import root_uri_to_path
 from ananta.llm.session_ledger.types import (
@@ -78,17 +100,61 @@ _CURSOR_FIELD_MTIME = "mtime_high_water_iso"
 _CURSOR_FIELD_OFFSET = "byte_offset"
 
 
+# Admission stays on the existing single-slot ledger-poll worker. Bound its
+# enumeration slices even when one directory is huge or the clock is coarse.
+def _sweep_setting(name: str, default: float, *, integral: bool = False) -> float:
+    """Read a positive finite startup setting; malformed configuration names its cause."""
+    raw = os.environ.get(name, str(default))
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be positive and finite, got {raw!r}") from exc
+    if not math.isfinite(value) or value <= 0 or integral and not value.is_integer():
+        raise ValueError(f"{name} must be positive, finite and {'integral' if integral else 'numeric'}, got {raw!r}")
+    return value
+
+
+_DEFAULT_SWEEP_ENTRY_LIMIT = 128
+_DEFAULT_SWEEP_SLICE_SECONDS = 0.002
+_DEFAULT_SWEEP_YIELD_SECONDS = 0.001
+_DEFAULT_SWEEP_INTERVAL_SECONDS = 1.0
+_SWEEP_ENTRY_LIMIT = int(_sweep_setting("SOLET_CLAUDE_SWEEP_ENTRY_LIMIT", _DEFAULT_SWEEP_ENTRY_LIMIT, integral=True))
+_SWEEP_SLICE_SECONDS = _sweep_setting("SOLET_CLAUDE_SWEEP_SLICE_SECONDS", _DEFAULT_SWEEP_SLICE_SECONDS)
+_SWEEP_YIELD_SECONDS = _sweep_setting("SOLET_CLAUDE_SWEEP_YIELD_SECONDS", _DEFAULT_SWEEP_YIELD_SECONDS)
+_SWEEP_INTERVAL_SECONDS = _sweep_setting("SOLET_CLAUDE_SWEEP_INTERVAL_SECONDS", _DEFAULT_SWEEP_INTERVAL_SECONDS)
+
+
+class _SweepBudget:
+    """Yield the worker between bounded entry/time slices, never truncate a sweep."""
+
+    def __init__(self) -> None:
+        self._entries = 0
+        self._deadline = monotonic() + _SWEEP_SLICE_SECONDS
+
+    def checkpoint(self) -> None:
+        self._entries += 1
+        if self._entries < _SWEEP_ENTRY_LIMIT and monotonic() < self._deadline:
+            return
+        sleep(_SWEEP_YIELD_SECONDS)
+        self._entries = 0
+        self._deadline = monotonic() + _SWEEP_SLICE_SECONDS
+
+
 class ClaudeCodeFilesystemSessionSourcePlugin(
     PluginBase,
     LLMSessionSourceInterface,
-    PullingSourceMixin,
+    FilesystemPollingMixin,
     EdgeProcessProvider,
 ):
     """Walks ``~/.claude/projects/`` and surfaces each ``.jsonl`` as a session."""
 
+    supports_whole_session_poll: ClassVar[bool] = True
+
     def __init__(self) -> None:
         super().__init__()
         self.name = "claude_code_filesystem_session_source_plugin"
+        self._sweep_lock = threading.Lock()
+        self._next_sweep_at: dict[Path, float] = {}
 
     # ------------------------------------------------------------------
     # PluginBase lifecycle
@@ -109,6 +175,8 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
         from ananta.core.config.config_provider import ConfigProvider  # noqa: PLC0415
 
         self.config_provider = ConfigProvider(self.name, config)
+        with self._sweep_lock:
+            self._next_sweep_at.clear()
 
     def get_edge_process_definitions(self) -> dict[str, EdgeProcessDefinition]:
         """Declare the bounded source-local qualification result contract."""
@@ -130,10 +198,7 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
         context_handling=ContextHandling.NONE,
         parameters={},
         output_type="object",
-        output_description=(
-            "Bounded source-local Claude Code filesystem retrieval proof: "
-            "{source_registered, source_kind, backfill_count, sample_content_retrieved}."
-        ),
+        output_description=("Bounded source-local Claude Code filesystem retrieval proof: {source_registered, source_kind, backfill_count, sample_content_retrieved}."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="Registration, one bounded backfill, and a non-payload retrieval proof.",
@@ -272,6 +337,42 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
     # PullingSourceMixin
     # ------------------------------------------------------------------
 
+    def _poll_candidates(self, root_uri: str) -> Iterator[FilesystemCandidate]:
+        root = self._resolve_root_uri(root_uri)
+        if not root.is_dir():
+            return
+        with self._sweep_lock:
+            remaining = self._next_sweep_at.get(root, 0.0) - monotonic()
+            if remaining > 0:
+                sleep(remaining)
+            try:
+                budget = _SweepBudget()
+                for path in _poll_paths(root, root, self._resolve_glob(), budget):
+                    shape = _classify_session_path(path, root)
+                    if shape is None:
+                        logger.warning("%s: unrecognized jsonl path shape: %s", self.name, path)
+                        continue
+                    candidate = observe_candidate(path, external_id=shape[1], relative_path=path.relative_to(root).as_posix(), json_lines=True)
+                    if candidate is not None:
+                        yield candidate
+            finally:
+                self._next_sweep_at[root] = monotonic() + _SWEEP_INTERVAL_SECONDS
+
+    def _poll_ref(self, root_uri: str, candidate: FilesystemCandidate) -> ExternalSessionRef:
+        root = self._resolve_root_uri(root_uri)
+        shape = _classify_session_path(candidate.path, root)
+        assert shape is not None
+        metadata = claude_code_vendor.read_session_metadata(candidate.path)
+        return ExternalSessionRef(
+            external_session_id=candidate.external_id,
+            vendor_session_label=metadata.agent_name,
+            project_path=_decode_project_dir(shape[0].name),
+            first_seen_at=datetime.fromtimestamp(candidate.path.stat().st_ctime, tz=UTC),
+            originator_session_label=metadata.agent_name,
+            originator_agent_instance_id=metadata.bridge_session_id,
+            summary_text_seed=metadata.custom_title,
+        )
+
     def discover_sessions(
         self,
         root_uri: str,
@@ -310,9 +411,9 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
             shape = _classify_session_path(jsonl, root)
             if shape is None:
                 logger.warning(
-                    "%s: unrecognized jsonl path shape under projects/: %s; "
-                    "warn-and-skip (depth-2 root or depth-4 subagent expected)",
-                    self.name, jsonl,
+                    "%s: unrecognized jsonl path shape under projects/: %s; warn-and-skip (depth-2 root or depth-4 subagent expected)",
+                    self.name,
+                    jsonl,
                 )
                 continue
             project_dir, session_id = shape
@@ -346,35 +447,44 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
         session: ExternalSessionRef,
         cursor_payload: dict[str, object] | None,
     ) -> Iterator[RawSessionEvent]:
-        jsonl = self._locate_session_file(root_uri, session)
+        begin_claude_read(root_uri, session.external_session_id)
+        yield from self._read_events(root_uri, session, cursor_payload)
+        acknowledge_read(session)
+
+    def _read_events(
+        self,
+        root_uri: str,
+        session: ExternalSessionRef,
+        cursor_payload: dict[str, object] | None,
+    ) -> Iterator[RawSessionEvent]:
+        jsonl = selected_path(session) or self._locate_session_file(root_uri, session)
         if jsonl is None:
             return
         offset = _parse_cursor_int(cursor_payload, _CURSOR_FIELD_OFFSET) or 0
         try:
             handle = jsonl.open("rb")
         except OSError as exc:
-            raise ValueError(
-                f"claude_code filesystem: cannot open {jsonl}: {exc}"
-            ) from exc
+            raise ValueError(f"claude_code filesystem: cannot open {jsonl}: {exc}") from exc
         with handle:
             handle.seek(offset)
             while True:
                 line = handle.readline()
                 if not line:
+                    complete_claude_read(root_uri, session.external_session_id, offset)
                     return
                 if not line.endswith(b"\n"):
                     # Partial trailing line — leave it for the next tick.
                     # No fallback: refusing to parse half a record is the
                     # whole-line correctness invariant.
+                    complete_claude_read(root_uri, session.external_session_id, offset)
                     return
                 offset += len(line)
                 try:
                     decoded = line.decode("utf-8")
                 except UnicodeDecodeError as exc:
-                    raise ValueError(
-                        f"claude_code filesystem: non-UTF8 line in {jsonl}: {exc}"
-                    ) from exc
-                events = parse_line(decoded)
+                    raise ValueError(f"claude_code filesystem: non-UTF8 line in {jsonl}: {exc}") from exc
+                with claude_line_context(root_uri, session.external_session_id, offset):
+                    events = parse_line(decoded)
                 for event in events:
                     yield _augment_with_offset(event, offset)
 
@@ -400,7 +510,9 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
         session: ExternalSessionRef,
         last_event: RawSessionEvent | None,
     ) -> dict[str, object]:
-        del root_uri, session  # per-file byte offset; both implicit in last_event
+        completed = completed_claude_read(root_uri, session.external_session_id)
+        if completed is not None:
+            return {_CURSOR_FIELD_OFFSET: completed}
         if last_event is None:
             return {_CURSOR_FIELD_OFFSET: 0}
         offset = last_event.payload.get("_byte_offset")
@@ -432,7 +544,9 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
         return raw
 
     def _locate_session_file(
-        self, root_uri: str, session: ExternalSessionRef,
+        self,
+        root_uri: str,
+        session: ExternalSessionRef,
     ) -> Path | None:
         """Find the JSONL on disk whose stem equals ``session.external_session_id``.
 
@@ -480,6 +594,31 @@ _SUBAGENT_DIR_NAME = "subagents"
 _SUBAGENT_FILE_PREFIX = "agent-"
 
 
+def _poll_paths(directory: Path, root: Path, pattern: str, budget: _SweepBudget, depth: int = 0) -> Iterator[Path]:
+    """Stream only directories which can contain an accepted session shape.
+
+    Path.rglob materializes an entire scandir before yielding any matches.
+    Here no directory is materialized, and at most four handles are open.
+    Like rglob, do not recurse through directory symlinks. Disappearance or
+    unreadable directories remain availability advisories, never refusals.
+    """
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                budget.checkpoint()
+                path = Path(entry.path)
+                if path.relative_to(root).full_match(f"**/{pattern}") and (not pattern.endswith("/") or entry.is_dir()):
+                    yield path
+                if entry.is_dir(follow_symlinks=False) and _session_directory(depth, entry.name):
+                    yield from _poll_paths(path, root, pattern, budget, depth + 1)
+    except OSError as exc:
+        logger.warning("Claude session enumeration unavailable at %s: %s", directory, exc)
+
+
+def _session_directory(parent_depth: int, name: str) -> bool:
+    return parent_depth < _ROOT_SESSION_DEPTH or parent_depth == _ROOT_SESSION_DEPTH and name == _SUBAGENT_DIR_NAME
+
+
 def _classify_session_path(
     jsonl: Path,
     root: Path,
@@ -509,11 +648,7 @@ def _classify_session_path(
         return None
     if len(rel_parts) == _ROOT_SESSION_DEPTH:
         return (root / rel_parts[0], jsonl.stem)
-    if (
-        len(rel_parts) == _SUBAGENT_DEPTH
-        and rel_parts[2] == _SUBAGENT_DIR_NAME
-        and rel_parts[3].startswith(_SUBAGENT_FILE_PREFIX)
-    ):
+    if len(rel_parts) == _SUBAGENT_DEPTH and rel_parts[2] == _SUBAGENT_DIR_NAME and rel_parts[3].startswith(_SUBAGENT_FILE_PREFIX):
         return (root / rel_parts[0], jsonl.stem)
     return None
 
@@ -692,9 +827,7 @@ def _require_retrievable_content(ledger: Any, source_kind: str) -> None:
         raise RuntimeError(f"source {source_kind!r} yielded no retrievable content")
 
 
-def _registered_source(
-    sources: list[object], source_kind: str
-) -> dict[str, object] | None:
+def _registered_source(sources: list[object], source_kind: str) -> dict[str, object] | None:
     for source in sources:
         if not isinstance(source, dict) or source.get("source_kind") != source_kind:
             continue

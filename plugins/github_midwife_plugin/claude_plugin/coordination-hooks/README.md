@@ -6,19 +6,9 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   this project's documented conventions before non-trivial work. A reminder,
   not an enforced gate: the underlying search this suggests is asynchronous,
   so the hook cannot block on its result. Unconditionally armed — no
-  environment variable disarms it, unlike every other hook below — so a
+  environment variable disarms it, alongside the live-context hook below — so a
   session never silently loses awareness that the mechanism exists.
-- **Check-your-messages reminder** (`SessionStart`) —
-  a plain nudge to check for unread coordination messages. Intentionally has
-  no backend dependency: it always fires the same reminder and lets the
-  model's own tool call determine whether anything is actually there.
-- **Role-binding reminder** (`SessionStart`) — notes that a session's local
-  label and any external, durable role binding are separate things that can
-  disagree, so a binding made before a `/clear`, a restart, or a transport
-  reconnect may still point at a previous session. Performs no lookup: it
-  cannot tell whether a binding is actually stale, and deliberately does not
-  try. It echoes the session's own `AGENT_SESSION_LABEL` and leaves both
-  verification and re-assertion to the session's own tools.
+- **Live session context** (`session_start_context.py`, SessionStart) — bounded register-wide digest, current roles and observer inbox counts; explicit unavailable lines on failure. See the read and timeout contract below.
 - **Idle-wake waiter** (`Stop`) — opt-in per session (armed by environment
   variables, see Configuration), but the fleet this plugin ships with runs
   on it as the PRIMARY idle-wake mechanism as of 2026-08-06, not a
@@ -33,32 +23,19 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   session then fetches the actual messages itself via the normal tool
   path. The hook conveys exactly one bit of dynamic information —
   "deliveries pending" — plus timing; it never relays message content.
-- **Git-mutation guard** (`PreToolUse`) — opt-in, nameable gate that blocks
-  git mutations (commit, push, checkout, merge, rebase, etc.) and subagent
-  spawning (the `Agent` tool, and `Task` under its former name) from any
-  session other than the designated *git controller* session, regardless of
-  which directory or repository a command targets. Scope is peer *mistake*
-  prevention, not adversarial security — a session that wants to bypass the
-  hook can edit it. See `SECURITY.md` for the cross-repository reach this
-  implies and the disclosed residual.
-
-  The refusal text carries a **single-active-session exemption**: where only
-  one session is active, the policy does not apply. That exemption is
-  language-level and the gate implements no part of it — it detects nothing
-  new. A solo deployment's hydration simply never sets the arming variable,
-  so the gate never arms at all; the clause exists for the transiently solo
-  *fleet*, where a session relying on it must have a checkable basis and must
-  cite that basis in band. An operator instruction to proceed always
-  overrides.
 - **Heartbeat report-alive** (`PostToolUse`, unconditional) — opt-in per
-  session via `AGENT_INSTANCE_ID`. After a tool call completes, throttled to
-  at most once per ~180s via a local marker file, it shells out to the
-  fleet's `report_alive` CLI verb so a fleet-managed session's liveness stays
+  session via its owner receipt and `AGENT_INSTANCE_ID`. After each tool call
+  it takes a worktree attestation (three git read commands in the session's
+  working directory, snapshot kept in worktree-resync.json), and at most once
+  per ~180s it shells out to the fleet's `report_alive` CLI verb so a
+  fleet-managed session's liveness stays
   current without a standalone background loop — the loop shape this hook
   replaced could survive a session `/clear` and keep reporting a dead
   session as live for hours, since it had no coupling to whether the process
   it vouched for was still doing anything. This hook has no persistent
   process of its own; it dies with the tool-call lifecycle it fires inside.
+  Failed calls are kept in failures.json and reported on the next successful
+  heartbeat.
   Conveys no dynamic information back to the session — it never prints a
   `hookSpecificOutput` block, only an occasional stderr diagnostic on
   failure. See `SECURITY.md` for the full contract.
@@ -114,8 +91,8 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   library for `hydrate_render.py`, plus its own standalone entry point);
   `sync.py` wraps hydrate/drain into one Bash call per direction and is
   the one CLI utility in this group that shells out, via the same
-  PATH-resolved `solet` convention as the heartbeat/rotation-due
-  watch hooks. See `SECURITY.md` for the full per-file contract.
+  PATH-resolved `solet` convention as the rotation-due watch hook (the
+  heartbeat calls `solet-bridge` the same way). See `SECURITY.md` for the full per-file contract.
 - **Spawn-injected worker hooks** (`headless_tool_allowlist_gate.py`,
   `capture_session_mapping.py`) — NOT wired into this plugin's own
   `hooks/hooks.json` at all; a spawned headless/tmux worker's own host
@@ -133,43 +110,19 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   — non-fatal by design, like the memory-passthrough capture hook. See
   `SECURITY.md` for the full contract of each.
 
-## Cadence ruling (2026-08-11)
+## SessionStart cadence
 
-The knowledge-base-first and check-your-messages reminders fire on
-`SessionStart` (`startup`, `resume`, `clear`) only, not `UserPromptSubmit` —
-both used to re-fire on every prompt turn, which accumulated one copy per
-turn in the transcript. This changes CADENCE ONLY: the 2026-08-01 ruling
-that the knowledge-base-first reminder is unconditionally armed (no
-environment gate) is unchanged and still enforced by
-`tests/reminder_hooks_smoke.py`'s `check_step_zero_fires_everywhere`.
-
-**Tag-echo fix (2026-08-11, §41):** the cadence move initially shipped with
-`step_zero_reminder.py` still hardcoding `"hookEventName":
-"UserPromptSubmit"` — Claude Code rejects a hook output whose declared
-event name mismatches the firing event (debug-level only), so the reminder
-silently never landed after the rebinding. All three reminders now read
-`hook_event_name` off stdin and echo it back, and
-`check_manifest_bound_events_echo` derives each reminder's expected events
-from `hooks.json` itself, so a hardcoded tag can never silently desync from
-the wiring again.
-
-The
-memory-passthrough session-context hook still fires on both
-`SessionStart` and `UserPromptSubmit` — it was never in scope for this
-move, since it is not a reminder, it is the context-gauge/hydrate-drain
-instruction surface.
+The knowledge-base reminder and live session context fire on startup, resume
+and clear, never UserPromptSubmit. The memory-passthrough session-context hook
+keeps its separate existing SessionStart and UserPromptSubmit bindings.
 
 ## Configuration
 
-Fourteen of the fifteen hooks are default-off, each guarded on either an
-environment variable or a filesystem-presence check, and are silent
-no-ops when their guard is absent — so unrelated Claude Code sessions on
-the same machine, or a session in a project with no memory directory, are
-unaffected by them. The knowledge-base-first reminder is the one
-exception: it is unconditionally armed. `check_messages_reminder.py` and
-the idle-wake waiter key on `AGENT_SESSION_ID`; the role-binding reminder
-keys on `AGENT_SESSION_LABEL`; the heartbeat and rotation-due watch hooks
-key on `AGENT_INSTANCE_ID` (throttling additionally uses
+The knowledge-base and live-context hooks always run. The latter explicitly
+reports missing read configuration. The idle-wake waiter keys on
+`AGENT_SESSION_ID`; the heartbeat keys on its owner receipt with
+`AGENT_INSTANCE_ID` and `AGENT_SESSION_ID`, and the rotation-due watch hook
+keys on `AGENT_INSTANCE_ID` (its throttling additionally reads
 `AGENT_HEARTBEAT_MARKER_DIR` when set — see `SECURITY.md` for the fail-open
 behavior when it is absent but the instance id is present); the
 memory-passthrough capture and session-context hooks key on whether this
@@ -183,12 +136,6 @@ worker hooks key on their own adapter-supplied variables:
 `ANANTA_SESSION_MAPPING_SPOOL_DIR` and `AGENT_INSTANCE_ID` are set —
 neither is meaningful outside a spawned worker's own generated settings,
 so an ordinary interactive session never arms either.
-
-The git-mutation guard is separately opt-in via `GIT_CONTROLLER_NAME`: unset,
-the guard is fully OFF (every session may run git and spawn subagents).
-Set it to the session `name` (per Claude Code's `/rename`) that should be
-allowed to perform git mutations and spawn subagents; every other session is
-blocked.
 
 The idle-wake waiter is separately opt-in via `AGENT_WAKE_CLI`: unset, it is
 fully OFF. Set it to the coordination CLI the hook should invoke; the hook
@@ -228,55 +175,34 @@ empty value must not silently kill wakes on a watch deployment.
   nothing guaranteed and could silently fail to launch with no signal
   Claude Code surfaces to the user (measured 2026-08-08; retired the same
   day).
-- The git-mutation guard never executes target-controlled code — it only
-  inspects the tool-call payload Claude Code already passes on stdin.
-- No hook calls out to any external service or database directly. The
-  three reminders and the gate execute nothing at all. Four hooks/
-  utilities are disclosed exceptions with a bounded, fixed-shape
-  contract: the wake waiter executes exactly one operator-configured
-  local command (`$AGENT_WAKE_CLI wake --max-wait <seconds>`, fixed
-  argv, no shell), discards its output, and emits only its own
-  compiled-in text; the heartbeat and rotation-due watch hooks each
-  invoke the local `solet-bridge` CLI with a fixed `["solet-bridge", "call",
-  "<fixed process_key>", <JSON payload>]` argv (no shell) and write only
-  a small, secret-free timestamp marker file for throttling; `sync.py`
-  (memory-passthrough, agent-invoked, never auto-fired) invokes the same
-  `solet` CLI convention once per export and once per pending
-  journal entry on drain. Four memory-passthrough files write more than
-  a marker by design — `capture.py` appends one journal record,
-  `hydrate_render.py`/`index_render.py` write this agent's own per-fact
-  files and `MEMORY.md`, `_journal.py` is the shared library both use —
-  but every write target is this agent's own already-resolved memory
-  path, sourced from an already-exported snapshot or this agent's own
-  journal, never a path or content built from raw tool-call/message
-  data. Every string this plugin can ever inject into a session is a
-  fixed literal visible in its source, with two disclosed exceptions:
-  the role-binding reminder interpolates the session's own
-  `AGENT_SESSION_LABEL` into its text (JSON-escaped, read from the
-  process environment — never from stdin or message content), and the
-  memory-passthrough session-context hook interpolates this session's
-  own already-resolved paths and a pending-count integer into its fixed
-  instruction template. The heartbeat, rotation-due watch, and
-  memory-passthrough capture hooks inject nothing at all, ever — none
-  has a `hookSpecificOutput` stdout path, only occasional stderr
-  diagnostics. They are guardrails and plumbing, not a security
-  boundary — see the hooks' own docstrings for the precise scope
-  of each one.
-- Reminder text is phrased as factual statements about project state
-  ("unread messages may be pending"), never as imperative commands
-  ("check your messages now"). The Claude Code hooks documentation
-  ("Add context for Claude") states that text framed as out-of-band
-  system commands can trigger Claude's prompt-injection defenses, which
-  causes the text to be surfaced to the user instead of treated as
-  context — factual framing avoids that failure mode.
-- Reminder text names no project-specific mechanism (no fixed knowledge-base
-  tool, no fixed messaging system) and is written as a condition ("if this
-  project uses X") rather than an assumption that X exists — a project that
-  has no such mechanism gets a harmless no-op statement instead of a
-  reference to something Claude has no way to act on.
-- The gate resolves the calling session's name from
-  `~/.claude/sessions/<pid>.json`, a user-writable file — deliberate at
-  mistake-prevention scope, and stated plainly in `SECURITY.md`.
+- Hooks have no direct network/database client. Five files invoke local
+  children: session_start_context.py (read-only register/inbox), wake_waiter.py,
+  heartbeat_report_alive.py, rotation_due_watch.py and sync.py. Existing
+  marker/memory/spawn effects remain as documented in SECURITY.md.
+- Context sources are the fixed knowledge-base reminder, bounded live register
+  and inbox observations, and the existing qualified memory/rotation notices.
+  No environment-authored instruction channel or message-body relay is added.
+
+## Retired behaviours (inventory, not a replacement claim)
+
+This section records what this plugin used to refuse and no longer does. It is
+a statement of removal, kept apart from everything the plugin provides today:
+none of the three behaviours below is armed, evaluated or checked by any hook
+shipped here. The git-text gate (`git_controller_gate.py` and its policy
+modules) was removed in `0.9.0` by operator ruling `rul_e71e43be` (commit
+`91b8ace14`). Deleting the hook did not supply a mechanism for any of the three
+bans; whatever is meant to take over git control is separate work and is not
+delivered by this plugin.
+
+| Retired behaviour | What the gate refused | Enforced today | Covering mechanism today |
+|---|---|---|---|
+| Git mutation ban | A mutating `git` command in a `Bash` tool call (commit, push, checkout, merge, rebase and the like), and an `Edit`/`Write`/`MultiEdit`/`NotebookEdit` of the repository's own `.git/`, from any session other than the one named in `GIT_CONTROLLER_NAME`. Armed only when that variable was exported; fail-open when unset. | No | None in this plugin. Git control among sessions sharing a directory is the repository's own responsibility (`rul_d8893e33`): name the one git-mutating role by convention and tell the operator that no hook enforces it (hydration runbook, Step 4a). |
+| Agent and Task spawn ban | The `Agent` tool, and `Task` under its former name, from any session other than the named controller, so that a peer could not spawn a subagent that mutates git. | No | None. `headless_tool_allowlist_gate.py` is a different control and not a replacement: it constrains only spawned headless workers whose spawning call supplied an explicit `allowed_tools` list, ships unarmed otherwise, and never applies to an interactive session. |
+| Git beside a shell evaluator word or an untokenisable construct | A `Bash` command naming `git` that the policy could not safely inspect, refused fail-closed. The origin repository's own copy of the gate (`64e9810fb`, never shipped) went further: for every role, the controller included, it refused `git` beside a shell evaluator word (`bash`, `sh`, `zsh`, `dash`, `ksh`, `fish`, `eval`, `source`, `exec`) or an unreadable shell construct (ANSI-C quoting, backslash-newline, here-string, process substitution, backtick), and `git` its tokeniser could not parse. | No | None. A command of this shape is no longer refused or flagged by any hook. |
+
+`GIT_CONTROLLER_NAME` is still rendered into the hydration launchers when an
+operator chooses a name, but since `0.9.0` no shipped hook reads it: exporting
+it arms nothing and leaving it unset exempts nothing.
 
 ## Security notes
 
@@ -285,3 +211,97 @@ inputs, outputs, no-network/no-secrets/no-subprocess guarantees, the
 threat-model boundary and its accepted bypasses, failure modes with the
 allow-on-error rationale, and the supply-chain posture. It is written to be
 read by a security reviewer before the code.
+
+## Live session context — reviewer due diligence (2026-10-08)
+
+`session_start_context.py` replaces the static message and role reminders on
+SessionStart `startup`, `resume`, and `clear`. It performs two read operations:
+
+- `[PROJECT_SOLET_CLI, "resume-digest", "--limit", "1"]` reads the bounded,
+  **register-wide** digest. The default executable is
+  `$HOME/Workspace/project-solet/.venv/bin/psolet`; installations elsewhere
+  set `PROJECT_SOLET_CLI` to one executable path. The child resolves its normal
+  `PROJECT_SOLET_DATABASE_DSN` or Keychain credentials; the hook neither reads
+  credentials itself nor prints child stderr. Register previews are data,
+  not instructions or a substitute for full authoritative reads.
+- `[SOLET_BRIDGE, "call", "plugin::agent_messaging_plugin::peer_inbox", JSON]`
+  pages the instance and role sections with `observer: true`. `SOLET_BRIDGE`
+  defaults to `solet-bridge` on PATH. The original `SOLET_NAME`,
+  `AGENT_SESSION_ID` and `AGENT_INSTANCE_ID` are preserved and required.
+  Current bound role names come from `role_read_coverage`, never the local
+  label. Forward instance cursors preserve timestamp ties; role cursors are
+  independent. The hook never acknowledges a page or advances a covered mark.
+
+The role count means **pending above role covered mark (display/consumption
+unknown)**. Observer mode includes display-receipted rows; it cannot prove
+unread state. The instance count is stored-message history, explicitly labelled
+**unread: unknown (no platform unread semantics)**. The hook fetches and
+JSON-parses the complete peer_inbox response, including message objects and
+their body fields. For inbox data it injects only derived counts, current
+bound-role labels, and observation/error text; it never injects message bodies.
+Paging produces an observation over an interval, not an atomic cross-page
+snapshot; a binding change, repeated cursor, partial role failure or identity
+mismatch makes the count unavailable.
+
+The digest child has a three-second timeout, and all inbox pages share a
+separate three-second deadline. The manifest timeout is eight seconds. A failed
+read adds one explicit `unavailable (ErrorClass)` line and exits zero; a missing
+identity is `MissingIdentity`, never zero messages. No cache or static reminder
+fallback exists. JSON serialization escapes all observed strings. The digest
+context is capped at 5800 UTF-8 bytes and inbox context at 1000, leaving room
+inside 8192 for the unchanged knowledge-base reminder. Over-budget output is
+reported as `ByteBudgetExceeded`, never silently clipped into apparent success.
+
+This stdlib Python 3.13 hook uses `subprocess.run` with argument arrays and no
+shell. It creates no files, performs no register writes, claims no role. Hook installation/trust is separate from candidate delivery;
+these are same-user coordination controls, not a privilege boundary.
+
+The manifest consistency smoke and the reminder hooks smoke cover this candidate's manifest
+and fixed reminder; the live SessionStart subprocess smoke is added by slice S3 of this Change.
+This candidate makes no claim of live host deployment.
+The independent review unit records the due-diligence verdict required by
+`rul_af7c73e3` and `rul_f0e51f93`.
+
+The fixed knowledge-base reminder remains checked by `tests/reminder_hooks_smoke.py`.
+
+## Session-cron sentinel
+
+`session_cron_sentinel.py` observes CronCreate and ScheduleWakeup call attempts.
+Attempt observed, success unknown: neither a tool response nor a backend receipt
+proves schedule creation. This is the plan amendment under `uev_c545d677` to the
+original response-contract clause. Fixtures are synthetic-input-schema-derived;
+native response capture and a typed delay field remain owning-seat follow-ups.
+
+The hook reads only stdin and AGENT_INSTANCE_ID. Missing identity or unsupported
+input warns and exits 0. It creates no log, marker, cache, credential or session
+file, reads no history, runs no model and never promotes a prompt to a duty.
+Its only child is literal argv `["solet-bridge", "call",
+"plugin::fleet_maintenance_plugin::session_cron_observation", <json>]`, with
+shell=False, SESSION_CRON_BRIDGE_TIMEOUT_SECONDS (default 5 seconds), and
+bounded rendered diagnostics. SESSION_CRON_MAX_INPUT_CHARS (default 65536
+Unicode characters) bounds stdin and accepted receipt size. Invalid settings
+warn without blocking. These settings bound RPC/input, never test batteries. Child
+stdout is used only to validate the append-only receipt; child stderr is never
+relayed. Receipt failure warns without blocking the originating tool call.
+The process may persist an attempt even when the tool response reports failure.
+
+The strict backend receives observation_kind=capture, tool_name, instance/session
+provenance, aware hook receipt time, and the verbatim prompt. CronCreate supplies
+verbatim tool_input.cron as cron_expression. ScheduleWakeup supplies
+`delaySeconds=<n>` as wake_time: requested delay input text, never a computed
+instant or response field. No outcome or observed_job_id_unverified field is sent.
+recurring, durable, noop, stop and reason have no backend slot and are omitted;
+noop/stop still signal attempts. Backend bounds and truncation flags still apply.
+Corrections and withdrawals remain explicit backend/seat operations.
+
+Root settings and shipped hooks.json each register one CronCreate|ScheduleWakeup
+PostToolUse entry for their respective installation surface. Hydrated settings
+only enable coordination-hooks and carry no inline hooks. These surfaces are
+alternative installation routes, not two copies to install for the same event.
+The hook is label-independent; missing identity is visible rather than silent.
+No installation, live capture, schedule mutation or activation is proved here.
+`plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/session_cron_sentinel_smoke.py` covers the synthetic attempt inputs,
+bridge failures, literal argv, and checkout root/twin byte parity. In an isolated
+plugin artifact, the checkout-only root parity leg is unavailable and skipped.
+Package plugin.json metadata is outside this Unit's fence; the sentinel inventory
+is maintained in README.md, SECURITY.md and hooks.json instead.

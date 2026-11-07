@@ -113,7 +113,7 @@ def test_store_initial_tokens_order() -> None:
 
 
 def test_cache_hit() -> None:
-    envelope = _build_access_envelope("cached", 3600)
+    envelope = _build_access_envelope("cached", 3600, {})
     vault = _vault(
         exists={VAULT_KEY_REFRESH_TOKEN: True, VAULT_KEY_ACCESS_TOKEN: True},
         values={VAULT_KEY_ACCESS_TOKEN: envelope},
@@ -137,7 +137,7 @@ def test_not_connected() -> None:
 
 
 def test_refresh_does_not_rotate_refresh() -> None:
-    stale = _build_access_envelope("old", -100)  # already expired
+    stale = _build_access_envelope("old", -100, {})  # already expired
     vault = _vault(
         exists={VAULT_KEY_REFRESH_TOKEN: True, VAULT_KEY_ACCESS_TOKEN: True},
         values={VAULT_KEY_ACCESS_TOKEN: stale, VAULT_KEY_REFRESH_TOKEN: "rt-durable"},
@@ -155,7 +155,7 @@ def test_refresh_does_not_rotate_refresh() -> None:
 
 
 def test_invalid_grant_maps_to_auth_expired() -> None:
-    stale = _build_access_envelope("old", -100)
+    stale = _build_access_envelope("old", -100, {})
     vault = _vault(
         exists={VAULT_KEY_REFRESH_TOKEN: True, VAULT_KEY_ACCESS_TOKEN: True},
         values={VAULT_KEY_ACCESS_TOKEN: stale, VAULT_KEY_REFRESH_TOKEN: "rt-revoked"},
@@ -226,8 +226,7 @@ def test_start_interface_host_selection() -> None:
     )
     _assert(
         "call argument overrides configured callback host",
-        _start_interface_host({"callback_host": "0.0.0.0"}, {"host": "127.0.0.1"})
-        == "127.0.0.1",
+        _start_interface_host({"callback_host": "0.0.0.0"}, {"host": "127.0.0.1"}) == "127.0.0.1",
     )
 
 

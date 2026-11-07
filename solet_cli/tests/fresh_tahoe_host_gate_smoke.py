@@ -172,8 +172,22 @@ def _check_golden_gate(bundle: ContractBundle) -> None:
         "apple_foundation_models" in offered and "llama_cpp" not in offered,
         offered,
     )
-    refusal = _refusal(bundle, _GOLDEN_GATE, {"embeddings_implementation": "llama_cpp"})
-    _check("macOS 27 refuses llama.cpp embeddings", "not available on this Mac" in refusal and "Apple-native" in refusal, refusal)
+    for decision_id, alternative_id, label in (
+        ("embeddings_implementation", "coreai", "llama.cpp Nomic embeddings"),
+        ("inference_implementation", "apple_foundation_models", "llama.cpp with Qwen3 8B"),
+    ):
+        refusal = _refusal(bundle, _GOLDEN_GATE, {decision_id: "llama_cpp"})
+        expected_clause = (
+            f"this Mac meets the macOS 27 or later on arm64 profile and uses the "
+            f"Apple-native option instead of {label}"
+        )
+        _check(
+            f"macOS 27 refuses {decision_id} coherently and names {alternative_id}",
+            "not available on this Mac" in refusal
+            and expected_clause in refusal
+            and alternative_id in _offered(bundle, _GOLDEN_GATE, decision_id),
+            refusal,
+        )
 
 
 def _check_unmeasurable(bundle: ContractBundle) -> None:

@@ -54,6 +54,7 @@ from solet_manager.update_journal import (  # noqa: E402
     record_local_state_revision,
     write_update_journal,
 )
+from solet_manager.update_local_state import rebaseline_revision, verify_local_state  # noqa: E402
 from solet_manager.update_runtime_plan import REQUIRED_DISTRIBUTIONS, RuntimeSeams  # noqa: E402
 from solet_manager.update_topology import (  # noqa: E402
     OverlapRow,
@@ -218,6 +219,36 @@ def _assert_service_write(root: Path) -> None:
     _check(allowed_service_write(target, "workbench/new_plugin", previous) is None, "anything elsewhere is refused")
 
 
+def _assert_rebaseline_crash_window(root: Path) -> None:
+    """iss_0cde2ca4: a crash between the two per-revision journal writes loses neither the operation's revision nor the solet's creation."""
+    target, facts = _commitment_tree(root / "window")
+    before = observe_local_state(target, facts)
+    (target / "NOTICE").write_text("operation rewrote this\n", encoding="utf-8")
+    (target / "plugins" / "new_kb" / "knowledge_base").mkdir(parents=True)
+    (target / "knowledge_bases" / "new_kb").symlink_to("../plugins/new_kb/knowledge_base")
+    observed = replace(facts.untracked_paths, values=(*facts.untracked_paths.values, "knowledge_bases/new_kb"))
+    after_facts = replace(facts, untracked_paths=observed)
+    after = observe_local_state(target, after_facts)
+    row = {"status": "applying", "attempts": [{"evidence": {"planned_targets": [str(target / "NOTICE")]}}]}
+    journal = {"status": "runtime_reconciling", "local_state": {"current": before.snapshot()}, "runtime_operations": [row]}
+    steps = rebaseline_revision(cast(Any, journal), after, before, "op_x", frozenset({"NOTICE"}), "fixture", target)
+    _check(steps is not None and len(steps) == 2, "a service write beside an operation's change is two revisions")
+    first_revision, first_current = cast(Any, steps)[0]
+    final_revision, final_current = cast(Any, steps)[-1]
+    _check(final_current == after.snapshot(), "the last write carries the full observation")
+    _check(first_current != after.snapshot(), "the first write does not already carry everything the second revision explains")
+    # The crash: only the first write reached the journal.  Resume re-derives whatever it did not record.
+    crashed = {**journal, "local_state": {"current": first_current}}
+    report = verify_local_state(target, after_facts, cast(Any, crashed), None)
+    rederived = rebaseline_revision(cast(Any, crashed), after, None, "op_x", frozenset({"NOTICE"}), "fixture", target)
+    recorded = [first_revision]
+    rederived_rows = [item for item, _ in rederived or ()]
+    rederived_rows += [{"service_writes": {"committed_additions": list(report.additions)}}] if report.additions else []
+    _check(any("operation_id" in item and item.get("paths") == ["NOTICE"] for item in [*recorded, *rederived_rows]), "after the crash the operation's revision is recorded or re-derivable")
+    _check(any("service_writes" in item and [add["path"] for add in item["service_writes"]["committed_additions"]] == ["knowledge_bases/new_kb"] for item in [*recorded, *rederived_rows]), "after the crash the solet's creation is recorded or re-derivable")
+    _check(first_revision != final_revision, "the two writes carry two different revisions")
+
+
 def _assert_host_rows(root: Path) -> None:
     target = root / "hosttarget"
     (target / ".venv" / "bin").mkdir(parents=True)
@@ -337,6 +368,7 @@ def main() -> int:
         _assert_executed_code_roots(root)
         _assert_commitment(root)
         _assert_service_write(root)
+        _assert_rebaseline_crash_window(root)
         _assert_host_rows(root)
         _assert_journal_revisions(root)
         _assert_vocabulary()

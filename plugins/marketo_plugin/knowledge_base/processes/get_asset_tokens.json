@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::get_asset_tokens",
+  "display_name": "Marketo: Get Asset Tokens",
+  "description": "Read the My Tokens local to a Marketo Folder or Program. folder_type defaults to the vendor's Folder type when omitted. Exports the vendor folder/tokens structure to a workspace TSV; poll check_marketo_job_status for the result. This is asset content, not OAuth credential retrieval.",
+  "embedding_description": "Read the My Tokens local to a Marketo Folder or Program. folder_type defaults to the vendor's Folder type when omitted. Exports the vendor folder/tokens structure to a workspace TSV; poll check_marketo_job_status for the result. This is asset content, not OAuth credential retrieval.",
+  "result_processor_customizations": {
+    "action_label": "Marketo: Get Asset Tokens job dispatched",
+    "result_type": "marketo_get_asset_tokens_result",
+    "result_description": "Queued job_id and status. Poll check_marketo_job_status for a TSV handle, row_count, columns, truncated, per-page envelope metadata and next_offset when truncated.",
+    "presentation_guidance": "Poll the job before reporting success. Report path and row_count. Truncated reads can continue from next_offset with identical filters."
+  },
+  "error_processor_customizations": {
+    "action_context": "Read the My Tokens local to a Marketo Folder or Program. folder_type defaults to the vendor's Folder type when omitted. Exports the vendor folder/tokens structure to a workspace TSV; poll check_marketo_job_status for the result. This is asset content, not OAuth credential retrieval.",
+    "error_interpretation": "marketo.invalid_params: correct vendor-shaped inputs. marketo.permission_denied: vendor RBAC or workspace access refused. marketo.auth_failed: credential rejected. marketo.validation_failed: vendor rejected the operation. A transport failure may follow a mutation.",
+    "recovery_guidance": "Use the registered credential and vendor Read-Only Assets / Read-Write Assets permissions. Reads do not prove write access. Read back state before retrying an uncertain mutation; these endpoints offer no CAS/ETag."
+  }
+}

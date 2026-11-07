@@ -1,19 +1,162 @@
 {
   "process_key": "plugin::agent_messaging_plugin::peer_inbox",
   "display_name": "Read my own peer inbox",
-  "description": "PULL receive path: read one page of the peer messages addressed to the calling session, on demand and without MCP. Takes the caller's own stable agent_session_id (the fleet launcher exports it as $AGENT_SESSION_ID); the agent_id and agent_instance_id whose mail is read are resolved server-side from that session's live peer_binding row, so a caller can only ever read its own inbox. Returns TWO independently paged sections. The instance section (entries, next_after_created_at, next_since_created_at) holds messages addressed to this instance and is paged by an ISO-8601 timestamp: 'after' walks backward and 'since' reads forward. The role section (role_entries, next_role_cursor) holds messages addressed to any role this session holds, merged across roles, and is paged by 'role_after', an opaque token. The two cursors are independent and are never mixed: passing 'after' does nothing to the role section. The instance section has two cursors that run in OPPOSITE DIRECTIONS and cannot be combined (naming both is refused as peer_inbox_rejected). With neither, the page is the NEWEST messages, newest-first. 'after' walks BACKWARD: messages OLDER than the timestamp, newest-first, and next_after_created_at is a how-far-back-have-I-read bookmark, NOT a high-water mark. 'since' reads FORWARD: messages strictly NEWER than the timestamp, oldest-first, and next_since_created_at is a true high-water mark: store it and the next call resumes where this one stopped. A page returns exactly one of the two next_* cursors, the one for the direction the request used. To ask 'what arrived since I last looked', pass 'since' with the stored mark; passing it as 'after' returns older history instead. The role section is NEWEST-FIRST and 'role_after' walks BACKWARD into history, so next_role_cursor is likewise a how-far-back bookmark, NOT a high-water mark; it is also minted only when a full page is returned, so at exhaustion there is no token at all. A client that wants 'what arrived since I last looked' from the role section must keep its own created_at high-water mark and walk backward until it reaches it — storing next_role_cursor across sessions instead would resume reading OLDER messages and never surface a new one. One consequence to expect in a single response: a 'since' page's entries are oldest-first while role_entries are newest-first. role_section_status is a fault-domain flag, not a progress flag — 'ok' means the role section was computed without error and says NOTHING about whether it is drained; the role section is exhausted only when next_role_cursor is null, and 'error' means that section failed (detail in role_section_error) while the instance section was still served. 'limit' bounds entries per section, clamped 1..100, default 5: an entry carries the full message, so a large page is a large context, and the cursors — not a raised limit — are how a backlog gets drained. Reading a role message here does NOT by itself retire it for replay purposes (A4, 2026-08-04: this verb returns the full durable catch-up view unconditionally now — there is no include_important split to opt into). The surviving role-replay durability guarantee — the watcher's long-poll acknowledgement and the forwarder's confirmed emission — is what retires a role message, so a session that catches up through this verb may still see the same role messages re-served through that path until their holder acks them directly. That is expected, not a duplicate-delivery fault: treat a repeat of something already read as already handled.",
+  "description": "PULL receive path: read one page of the peer messages addressed to the calling session, on demand and without MCP. Takes the caller's own stable agent_session_id; the remaining identity is resolved server-side from that session's live peer_binding row. Returns independently paged direct and role sections. With no direct cursor, entries are the newest messages, newest-first. 'after' is the backward ISO-8601 cursor: it returns rows older than the timestamp and continues with next_after_created_at. 'since' is the first-page forward ISO-8601 horizon: it returns rows strictly newer than the horizon, oldest-first. Continue a forward read by echoing the opaque next_since_cursor as 'since_cursor'; that token preserves the original horizon and last emitted (created_at, id), so equal-timestamp page boundaries are lossless. next_since_created_at is retained only as a compatibility timestamp observation. 'after', 'since', and 'since_cursor' are mutually exclusive. The same fixed forward horizon bounds role_entries, which remain newest-first and page independently through opaque role_after/next_role_cursor. Storing next_role_cursor across sessions would instead resume reading OLDER messages and never surface a new one. role_since_created_at echoes the applied horizon. role_section_status reports computation success, not exhaustion; only next_role_cursor=null means the role section is drained. role_read_coverage explains covered-mark and receipt-hidden rows. Reading role mail here does not itself retire replay insurance; a repeat already read through another path is expected and should be treated as handled.",
   "embedding_description": "Read the messages other agents have sent to this session, pulling them on demand instead of waiting for a notification. The catch-up read after a restart, a session clear, or a stretch with no live receiver, covering both mail sent to this session directly and mail sent to the roles it holds, one page at a time. Instance pages are complete only when instance_exhausted is true.",
   "processor_policy_category": "edge",
   "result_processor_customizations": {
     "action_label": "Peer inbox page read",
     "result_type": "peer_inbox_page",
-    "result_description": "recipient_agent_id and recipient_agent_instance_id (the identity resolved from the caller's session id), then two sections. entries + next_after_created_at + next_since_created_at + instance_exhausted: messages addressed to this instance, paged by an ISO-8601 timestamp. Without a cursor or with 'after' the page is newest-first and next_after_created_at is the oldest returned row's timestamp; with 'since' the page is oldest-first and next_since_created_at is the newest returned row's timestamp. Only the cursor for the request's direction is non-null. instance_exhausted means no older row remains (after) or no newer row remains (since) under that timestamp-only cursor; it does not claim equal-created_at rows were globally observed. role_entries + next_role_cursor: messages addressed to roles this session holds, paged by an opaque token; next_role_cursor null means that section is drained. role_section_status is 'ok' or 'error' and reports only whether the role section COMPUTED — 'ok' never means drained. role_section_error carries the detail when status is 'error'. Every entry carries thread_id, the sender's agent_id / agent_instance_id / session_label, and the full message (id, cursor, role, kind, content parts, created_at, action_id, artifacts, metadata).",
-    "presentation_guidance": "Report the two sections separately and say whether each is drained: the instance section is drained only when instance_exhausted is true, and the role section when next_role_cursor is null. Do not infer instance completion from an empty page or from next_after_created_at / next_since_created_at. Never report 'ok' as 'no more messages'. Check role_section_status before trusting an empty role section — 'error' there means the role read FAILED and its messages are unread, not that there were none, and it arrives on an otherwise successful call. Attribute each message to its sender_session_label and sender_agent_instance_id — a reply needs the instance id, not the label.",
-    "output_action_guidance": "Act on the messages read; a request that arrived here is as real as one that arrived live. For instance mail, fetch pages until instance_exhausted is true before concluding the backlog is empty; for role mail, continue while next_role_cursor is non-null. Reply to a sender using the sender_agent_instance_id from the entry, and to a role by the role name."
+    "result_description": "recipient_agent_id and recipient_agent_instance_id, then two sections. entries + next_after_created_at + next_since_created_at + next_since_cursor + instance_exhausted are direct-instance mail. A forward page is oldest-first; next_since_cursor is the opaque lossless continuation and next_since_created_at is only its visible timestamp component. A backward or cursorless page is newest-first. role_entries + next_role_cursor are role mail. role_section_status is 'ok' or 'error' and reports only whether that section computed; role_section_error carries the fault. role_read_coverage reports covered-mark and receipt-hidden counts. Every entry includes thread_id, sender identity and the full message. read_coverage contains JSON-native direct and role objects describing requested/effective boundaries, returned-row endpoints and counts, cursor safety, exhaustion and observer/filter scope; nested role_read_coverage values are lists. Ranges describe returned rows only; unread totals, outside-query rows and human reading remain unknown.",
+    "presentation_guidance": "Report the two sections separately and say whether each is drained: the instance section only when instance_exhausted is true, the role section only when next_role_cursor is null. Continue a forward direct read with next_since_cursor, never next_since_created_at. Never report role_section_status='ok' as 'no more messages'. Attribute each message to sender_session_label and sender_agent_instance_id.",
+    "output_action_guidance": "Act on the messages read. For direct mail, fetch pages until instance_exhausted is true, using next_since_cursor for forward continuation or next_after_created_at for backward history. For role mail, continue while next_role_cursor is non-null. Reply to a sender with sender_agent_instance_id and to a role by role name."
   },
   "error_processor_customizations": {
     "action_context": "Read-only pull of the caller's own peer inbox, plus a liveness touch on the caller's binding. Identity is resolved from the caller's stable agent_session_id via its live peer_binding row; the inbox read itself spans every peer thread targeting that identity and every role the session holds.",
-    "error_interpretation": "A malformed 'role_after' does NOT arrive here — measured 2026-08-01. The role section has its own fault domain, so a bad role cursor comes back as a SUCCESSFUL call carrying role_section_status 'error', role_section_error with the detail, and empty role_entries, while the instance section is still served normally. Read the returned status, not just the envelope. The same status carries the 'include_covered requires observer' refusal: the floor-free role read was requested without observer=true. Missing required arguments: 'agent_session_id' was omitted entirely and the registry rejected the call before the verb ran. missing_argument: 'agent_session_id' was present but empty. identity_not_registered: no live peer_binding matches that session id, so there is no inbox to read; this is the dead-watcher case. peer_session_ambiguous: more than one live binding claims that session id, which is a data fault — a session holds at most one. invalid_after: 'after' was not an ISO-8601 datetime. invalid_since: 'since' was not an ISO-8601 datetime. bridge.not_running: the messaging bridge is not active on this solet — this is NOT an empty inbox, no read happened at all. peer_inbox_rejected: the messaging service rejected the request outright. The one caller-side cause is naming both 'after' and 'since', which are opposite directions; the role-cursor path does not reach it, so any other cause is an unexpected service-level fault.",
-    "recovery_guidance": "role_section_status 'error': drop 'role_after' and restart the role section from its first page rather than editing the token; for 'include_covered requires observer', add observer=true (or drop include_covered) and retry; a page that comes back with include_covered set and role_floor_applied true means the server ignored the parameter, so deploy the current code rather than retrying; the instance section in the same response is valid and should still be acted on. Missing required arguments: add 'agent_session_id' — the fleet launcher exports it as $AGENT_SESSION_ID, and peer_register, current_identity, and the watcher's armed line all echo it. missing_argument: same value, but non-empty. identity_not_registered: re-arm this session's watcher or re-register over MCP, then retry; the messages are durable and still waiting, so never report this as an empty inbox. invalid_after: pass back the previous page's next_after_created_at verbatim, or omit it for the first page. invalid_since: pass back the previous page's next_since_created_at verbatim, or a time you recorded as an ISO-8601 timestamp. peer_inbox_rejected with both cursors named: send only one — 'since' for newer than a time, 'after' to walk back into older history. bridge.not_running: start the messaging interface, then retry. peer_session_ambiguous: report it; duplicate live bindings for one session id need operator attention, not a retry."
+    "error_interpretation": "A malformed role_after stays inside the role section fault domain and returns role_section_status='error' while direct entries remain valid. invalid_after means after was not ISO-8601. invalid_since means the first-page horizon was not ISO-8601. invalid_since_cursor means the opaque continuation was malformed or unsupported. peer_inbox_rejected includes combining after, since or since_cursor in contradictory ways. identity_not_registered means no live peer binding matches the supplied session id; that is not an empty inbox. peer_session_ambiguous is a data fault. bridge.not_running means no read happened.",
+    "recovery_guidance": "For role_section_status='error', drop role_after and restart only that section. For invalid_after, echo the prior next_after_created_at. For invalid_since, supply an ISO-8601 first-page horizon. For invalid_since_cursor, echo next_since_cursor verbatim rather than constructing or substituting next_since_created_at. Send only one of after, since and since_cursor. Re-arm an unregistered watcher or bridge before retrying identity_not_registered; durable mail remains waiting."
+  },
+  "return_value_schema": {
+    "type": "object",
+    "description": "peer_inbox page \u2014 the exact shape emitted by peer_inbox_view.serialize_peer_inbox_page (the same payload the localhost /peer/inbox route and the MCP peer_inbox tool return)",
+    "properties": {
+      "recipient_agent_id": {
+        "type": "string",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "recipient_agent_instance_id": {
+        "type": "string",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "entries": {
+        "type": "list",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "next_after_created_at": {
+        "type": "string",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "next_since_created_at": {
+        "type": "string",
+        "required": false,
+        "description": "The last returned forward-row timestamp, retained for compatibility and diagnostics; not a lossless page boundary when timestamps tie.",
+        "data_sensitivity": 0.0
+      },
+      "next_since_cursor": {
+        "type": "string",
+        "required": false,
+        "description": "The opaque tie-safe forward cursor to echo as 'since_cursor'; null unless the request is a forward read with no returned or prior continuation row.",
+        "data_sensitivity": 0.0
+      },
+      "instance_exhausted": {
+        "type": "bool",
+        "required": false,
+        "description": "Whether the instance section is exhausted under the cursor the request used: no older row remains for 'after' (newest-first), no newer row for 'since' (oldest-first).",
+        "data_sensitivity": 0.0
+      },
+      "role_entries": {
+        "type": "list",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "next_role_cursor": {
+        "type": "string",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "role_section_status": {
+        "type": "string",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "role_section_error": {
+        "type": "string",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "role_limit": {
+        "type": "int",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "role_page_truncated": {
+        "type": "bool",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "role_truncation_reason": {
+        "type": "string",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "role_byte_ceiling": {
+        "type": "int",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "role_floor_applied": {
+        "type": "bool",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "role_history_cursor": {
+        "type": "string",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "role_read_page_token": {
+        "type": "string",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "role_read_page_status": {
+        "type": "string",
+        "required": false,
+        "description": "",
+        "data_sensitivity": 0.0
+      },
+      "role_since_created_at": {
+        "type": "string",
+        "required": false,
+        "description": "The 'since' horizon the role section applied; null when none was requested or the role section failed.",
+        "data_sensitivity": 0.0
+      },
+      "role_read_coverage": {
+        "type": "list",
+        "required": false,
+        "description": "One {role, covered_mark_present, floor_hidden, receipt_hidden} entry per role the role section read. floor_hidden / receipt_hidden count rows the covered-mark floor / a read receipt hid inside the window this call scanned (counts only, a lower bound on the role's whole hidden history). An entry also carries scan_truncated: true when the receipt refill spent its page budget; its rows are every unserved row found and next_role_cursor continues the scan. Empty when no role is held or the role section failed.",
+        "data_sensitivity": 0.0
+      },
+      "read_coverage": {
+        "type": "object",
+        "required": false,
+        "description": "JSON-native direct and role section objects: returned-row endpoints/count, requested and effective boundaries, cursor safety and scope; nested role_read_coverage is a list. Outside-query rows, human reading and unread totals are unknown.",
+        "data_sensitivity": 0.0
+      }
+    },
+    "examples": [],
+    "error_conditions": {},
+    "usage_patterns": [],
+    "chain_compatible_processes": [],
+    "common_transformations": []
   }
 }

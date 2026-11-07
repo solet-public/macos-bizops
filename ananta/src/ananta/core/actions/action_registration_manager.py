@@ -14,6 +14,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from ananta.constants import FRAMEWORK_NAMESPACE
+from ananta.core.actions._measured_action_lane import run_blocking
 from ananta.core.domain.status import is_status_match
 from ananta.core.plugins.plugin_contracts import ActionStatus
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
@@ -38,10 +39,7 @@ logger = logging.getLogger(__name__)
 # something is writing per-execution rows into a registry — and that is the
 # actual bug to go fix, not the ceiling.
 _ACTION_DEFINITIONS_CEILING = 10_000
-_ACTION_DEFINITIONS_CEILING_REASON = (
-    "action_definitions holds one row per registered action, so it is bounded by "
-    "how many actions the codebase defines and never by traffic or runtime."
-)
+_ACTION_DEFINITIONS_CEILING_REASON = "action_definitions holds one row per registered action, so it is bounded by how many actions the codebase defines and never by traffic or runtime."
 
 
 class ValidationServiceProtocol(Protocol):
@@ -79,6 +77,10 @@ class ActionRegistrationManager:
         self.process_external_id_getter = getter
 
     async def register_action(self, action_def: dict[str, object]) -> bool:
+        """Await registration, including external-id lookup, off the runtime loop."""
+        return await run_blocking(self._register_action, action_def)
+
+    def _register_action(self, action_def: dict[str, object]) -> bool:
         """
         Register a new action in the persistent registry.
 
@@ -117,9 +119,7 @@ class ActionRegistrationManager:
         }
 
         # Persist to registry
-        result = self.state_service.write_state(
-            namespace=FRAMEWORK_NAMESPACE, data=registration_data
-        )
+        result = self.state_service.write_state(namespace=FRAMEWORK_NAMESPACE, data=registration_data)
 
         if is_status_match(result.get("action_status"), ActionStatus.COMPLETED):
             return True
@@ -128,6 +128,10 @@ class ActionRegistrationManager:
             return False
 
     async def update_action(self, action_name: str, updates: dict[str, object]) -> bool:
+        """Await one complete registry correction on the F2 worker."""
+        return await run_blocking(self._update_action, action_name, updates)
+
+    def _update_action(self, action_name: str, updates: dict[str, object]) -> bool:
         """
         Update an existing action definition in the persistent registry.
 
@@ -150,6 +154,10 @@ class ActionRegistrationManager:
         return self._persist_action_updates(action_name, normalized_updates)
 
     async def deregister_action(self, action_name: str) -> bool:
+        """Await registry retirement on the F2 worker."""
+        return await run_blocking(self._deregister_action, action_name)
+
+    def _deregister_action(self, action_name: str) -> bool:
         """
         Remove action from the registry with proper cleanup.
 
@@ -175,6 +183,10 @@ class ActionRegistrationManager:
             return False
 
     async def get_registered_actions(self) -> dict[str, object]:
+        """Await the registry read and its ceiling check off the runtime loop."""
+        return await run_blocking(self._get_registered_actions)
+
+    def _get_registered_actions(self) -> dict[str, object]:
         """
         Retrieve all registered actions from persistent storage.
 
@@ -234,9 +246,7 @@ class ActionRegistrationManager:
 
         return True
 
-    def _resolve_process_external_id_for_registration(
-        self, action_def: dict[str, object]
-    ) -> str | None:
+    def _resolve_process_external_id_for_registration(self, action_def: dict[str, object]) -> str | None:
         """Resolve process external ID for action registration."""
         # Extract process information from action definition
         process_obj = action_def.get("process", {})
@@ -254,9 +264,7 @@ class ActionRegistrationManager:
         provider = str(provider_obj) if provider_obj is not None else None
 
         function_name_obj = process.get("function_name", "execute_action")
-        function_name = (
-            str(function_name_obj) if function_name_obj is not None else "execute_action"
-        )
+        function_name = str(function_name_obj) if function_name_obj is not None else "execute_action"
 
         if not provider:
             logger.error("Action definition missing required provider information")
@@ -275,9 +283,7 @@ class ActionRegistrationManager:
         logger.error(f"Using fallback process external ID generation for '{process_key}'")
         return process_key.replace("::", "_")
 
-    def _normalize_action_updates(
-        self, updates: dict[str, object], action_name: str
-    ) -> dict[str, object] | None:
+    def _normalize_action_updates(self, updates: dict[str, object], action_name: str) -> dict[str, object] | None:
         """Convert action updates to normalized schema format."""
         normalized_updates: dict[str, object] = {}
 
@@ -296,18 +302,14 @@ class ActionRegistrationManager:
                 logger.error(f"Process field in updates for action '{action_name}' must be a dict")
                 return None
 
-            process_external_id = self._resolve_process_external_id_for_update(
-                process_obj, action_name
-            )
+            process_external_id = self._resolve_process_external_id_for_update(process_obj, action_name)
             if process_external_id is None:
                 return None  # Process lookup failed
             normalized_updates["process_external_id"] = process_external_id
 
         return normalized_updates
 
-    def _resolve_process_external_id_for_update(
-        self, process: dict[str, object], action_name: str
-    ) -> str | None:
+    def _resolve_process_external_id_for_update(self, process: dict[str, object], action_name: str) -> str | None:
         """Resolve process external ID for action update process changes."""
         provider_type_obj = process.get("provider_type", "plugin")
         provider_type = str(provider_type_obj) if provider_type_obj is not None else "plugin"
@@ -316,9 +318,7 @@ class ActionRegistrationManager:
         provider = str(provider_obj) if provider_obj is not None else None
 
         function_name_obj = process.get("function_name", "execute_action")
-        function_name = (
-            str(function_name_obj) if function_name_obj is not None else "execute_action"
-        )
+        function_name = str(function_name_obj) if function_name_obj is not None else "execute_action"
 
         if provider and function_name:
             process_key = f"{provider_type}::{provider}::{function_name}"
@@ -334,9 +334,7 @@ class ActionRegistrationManager:
         logger.error(f"Invalid process specification in action update for '{action_name}'")
         return None
 
-    def _persist_action_updates(
-        self, action_name: str, normalized_updates: dict[str, object]
-    ) -> bool:
+    def _persist_action_updates(self, action_name: str, normalized_updates: dict[str, object]) -> bool:
         """Persist action updates to the registry and return success status."""
         result = self.state_service.update_state(
             namespace=FRAMEWORK_NAMESPACE,

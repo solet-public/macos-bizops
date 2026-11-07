@@ -154,7 +154,7 @@ the `solet-manager` command. `solet inspect` is a different, active probe.
 **A pre-Manager plain clone (a `git clone` of the seed, not `solet create`), r64.**
 The Manager proves a plain clone only at a seed commit it lists: the
 channel's own release, or a stable seed in its reviewed anchor table (every
-`supported_predecessors` row, r43 `8207c151` through r69 `3bfd5670`).
+`supported_predecessors` row, r43 `8207c151` through r71 `50383f0b`).
 `git -C <clone> rev-parse HEAD` tells you which case you have:
 
 1. HEAD is a listed seed commit: run the six commands below unchanged.
@@ -238,8 +238,19 @@ the Manager admits them only as the installer wrote them: every bare
 `python3` hook command bound to `<target>/.venv/bin/python3` and nothing
 else, re-derived byte-for-byte from the committed file (`local_state.installer_pins`
 lists them). Never restore these files to the shipped `python3`: the
-coordination hooks need the pin, and the fast-forward carries the pinned
-bytes onto the new release. Any further edit to either file, or a pin to a
+coordination hooks need the pin. If the release changes either manifest, the
+preview lists `hook_pin_carry` and plans `target.carry_hook_interpreter_pin`.
+The Manager durably backs up the exact pins, temporarily writes the committed
+bytes, fast-forwards, then re-pins the new HEAD before publishing source advance.
+It rebaselines those digests as declared Manager writes, or releases paths
+that no longer need an interpreter pin. A crash before the
+fast-forward restores the old pins on resume or abandon; a crash after it
+re-applies the new pins on every source re-entry. Both recovery paths validate
+the complete pin batch before writing: bytes and every saved permission bit,
+including a chmod such as 0644 to 0600 that Git does not display. A later change
+refuses without restoring an earlier manifest in the batch. Hand edits still refuse.
+The runtime uses its existing pinned plugin-cache copy during this source
+window; the later `plugin_cache_refresh` publishes the pinned new checkout. Any further edit to either file, or a pin to a
 different interpreter path, is refused as `executed_code_modified`, the same
 as a hand edit elsewhere under a roster plugin.
 
@@ -258,7 +269,7 @@ added inside or outside the block, or a mode change, is still
 | Reason (`data.topology.reasons`, exit 3) | Meaning | Repair |
 |---|---|---|
 | `history_diverged` | the clone's HEAD is not an ancestor of the candidate | re-birth, or Part C if the operator wants to hand-merge |
-| `tracked_overlap_present` | the candidate changes a file this installation modified locally | keep your lines by hand: `git diff <baseline>..<candidate> -- <path>`, then preview again; the Manager never overwrites, stashes or resets a local change. If the named file is a pinned coordination-hook manifest (listed in `local_state.installer_pins`), do not edit or restore it: upgrade the Manager (`brew tab --installed-on-request python@3.13 && brew upgrade solet`) and preview again — carrying the pin across a changed manifest is a Manager capability (`iss_c1a7df20`) |
+| `tracked_overlap_present` | the candidate changes a file this installation modified locally | keep your lines by hand: `git diff <baseline>..<candidate> -- <path>`, then preview again; the Manager never overwrites, stashes or resets a local change. Exact installer pins are carried across ordinary manifest content changes automatically. A pinned manifest named here instead has a structural transition (deletion, retyping or path overlap) the carry cannot perform; preserve it and inspect the release layout |
 | `hydration_block_uncarriable` | the candidate changes `AGENTS.md`/`CLAUDE.md` so the file's hydration block has no place to go (the file is deleted, or its text carries a stray `SOLET HYDRATION` marker) | follow the repair: save the block (`git diff -- <path>`), `git checkout -- <path>`, update, then copy the block back to the end of the file; the Manager never drops the block |
 | `staged_changes_present` | something is in the index | `git restore --staged <paths>` is the operator's call; the Manager never runs it |
 | `tracked_shape_changed` | a tracked path was deleted, retyped, mode-changed or symlinked | restore it to a content-only edit of the shipped regular file |
@@ -349,10 +360,8 @@ the whole result. A repair longer than 512 characters, and an evidence or planne
 is cut in the middle behind `[... <length> characters, middle cut ...]`: it keeps its beginning and the remedy it ends with,
 so a long path or CLI message cannot hide the command you are told to run.
 
-A known consequence, not fixed in r64: a later release that edits `hooks.json`
-refuses as `tracked_overlap_present` on these solets, as it already does on
-hydrated ones (`iss_c1a7df20`). Follow the pinned-manifest repair in the table
-above. The runtime preview refuses (`runtime_plan_blocked`, the reason under
+A later release that edits `hooks.json` now carries the installer pin through
+the journaled source transition (`iss_c1a7df20`). The runtime preview still refuses (`runtime_plan_blocked`, the reason under
 `data.blocked`, each row `{subject, reason, repair}` with the seed's own repair text, or `null` when it gave none)
 instead of overwriting anything or writing outside the clone in
 these cases:
@@ -740,8 +749,11 @@ git -C <clone> pull --ff-only
 If this refuses ("not possible to fast-forward"), STOP. The clone's history
 and the seed repo have diverged — that is not a normal update state. Present
 the facts to the operator; the usual resolution is re-birth from the current
-seed. Never force, never rebase, never merge — a factory re-mint always
-fast-forwards.
+seed. Never force and never rebase, and never merge on your own to get past
+the refusal — a factory re-mint always fast-forwards, so the refusal means the
+clone carries history of its own. A hand merge of a newer seed is the
+operator's decision, not yours; the Manager path already handles a clone whose
+HEAD sits on top of a listed seed (Part A).
 
 ## Step 2a — re-point `origin` to the seed's new home (ONE TIME, this update only)
 
@@ -1501,7 +1513,7 @@ respawn.
 **On whether the refresh itself can disrupt an unrelated live worker (a
 worker running fine, on a host that never carried the strict policy, that
 happens to be using this SAME plugin's already-registered hooks — e.g. the
-git-mutation gate): measured on this checkout's own cache as of this
+headless tool-allowlist gate): measured on this checkout's own cache as of this
 writing, no.** `~/.claude/plugins/cache/<marketplace>/coordination-hooks/`
 carries eight prior version directories going back to `0.3.0`
 (oldest orphan mark 13 days old at measurement time), each marked with an
@@ -1733,7 +1745,7 @@ diff (`git diff 6f840d7d7 248a1294a -- .../hooks/hooks.json`).
 | `UserPromptSubmit` | `step_zero_reminder.py`, `check_messages_reminder.py`, `session_context.py` (3 independent hook entries) | The KB-first reminder, the check-your-messages reminder, and per-prompt session context all fire on every prompt you submit. |
 | `SessionStart` | matcher `startup\|resume\|clear`: `check_messages_reminder.py`, `role_binding_reminder.py`; unconditional (any matcher): `session_context.py` | The check-your-messages and role-binding reminders fire on a startup/resume/`/clear`; session context fires on every `SessionStart`, including other matcher values not listed above (none currently defined). |
 | `Stop` | `wake_waiter.py` (`asyncRewake: true`, `timeout: 86400`) | The bounded idle-wake waiter, `0.3.1`+, is wired and its wait is capped rather than open-ended. |
-| `PreToolUse` | matcher `^(Bash\|Edit\|Write\|MultiEdit\|NotebookEdit\|Task\|Agent)$`: `git_controller_gate.py` | The git-mutation safety gate fires before every tool call in that matcher set — present since before this release, unaffected by `0.4.0`/`0.4.1`. |
+| `PreToolUse` | no matcher: `headless_tool_allowlist_gate.py` | The git-text gate was removed in `0.9.0` (operator ruling rul_e71e43be); the headless tool-allowlist gate is the only `PreToolUse` entry. |
 | `PostToolUse` | unconditional: `rotation_due_watch.py`, `heartbeat_report_alive.py` (2 independent hook entries, fire after every tool call); matcher `Write\|Edit\|MultiEdit`: `capture.py` | The rotation-due watcher and the heartbeat both fire on every tool call, new in `0.4.0`. `capture.py` (the memory-passthrough capture hook, new in `0.4.1`) fires only on file-mutating tool calls. |
 
 **Four CLI utilities ship in the same `hooks/` directory but are
@@ -1881,25 +1893,16 @@ gate register, not something this update caused or something an update
 step here can fix. Expect 247/249 on a healthy clone; those two entries
 are the exception, not a broken install.
 
-**A second known issue, still open** — the `coordination-hooks` plugin
-ships in the bundle and is enabled by default via the hydration path.
-Four of its five hooks (the reminder hooks) are invoked via `node`; this
-platform documents Python 3.13 as its dependency and never requires,
-installs, or mentions node. On a host without node on PATH, those four
-hooks do not run. **You will see most of this happen:** the two
-`UserPromptSubmit` reminder hooks and the two `SessionStart` reminder
-hooks fail to launch with a visible, on-screen error naming the missing
-command, and the session continues normally either way. **The exception
-is the `Stop`-bound idle-wake waiter — it fails without any indication at
-all**, since its normal job is to wait quietly in the background, so a
-failed launch and correct operation look identical from outside.
-(Measured: three repetitions per hook-event type against a validated
-harness with a positive control, on Claude Code v2.1.226; covers
-hook-launch failure specifically, not a hook that launches and then
-errors internally, times out, or hangs.) The fifth hook — the PreToolUse
-git-mutation safety gate — is implemented in `python3`, not `node`, and
-is unaffected either way; do not assume a missing node also removes your
-git guard. Not fixed by this release, and no fix is scheduled by it.
+**Historical node dependency, now resolved** — earlier versions of the
+`coordination-hooks` plugin invoked four reminder hooks via `node`, which
+the platform did not install. On hosts without node, those hooks failed to
+launch; the `Stop`-bound idle-wake waiter could fail without a visible
+indication. A validated harness measured that hook-launch behavior on Claude
+Code v2.1.226 (three repetitions per hook-event type). The current plugin
+`hooks.json` invokes every registered hook via `python3`, including the
+headless tool-allowlist gate as its only `PreToolUse` entry. The removed
+git-text gate provides no Git guard; follow the repository's current Git
+procedure instead.
 
 **Check for a newly-untracked `.gitignore` after updating.** A cloned
 seed previously never received one (the birth-time write was skipped

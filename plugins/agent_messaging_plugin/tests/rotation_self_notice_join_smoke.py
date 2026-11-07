@@ -583,6 +583,11 @@ _VENDORED_HOOK = (
     REPO_ROOT / "plugins" / "github_midwife_plugin" / "claude_plugin"
     / "coordination-hooks" / "hooks" / "rotation_due_watch.py"
 )
+_CHECKOUT_NOTICE_HOOK = _CHECKOUT_HOOKS_DIR / "rotation_due_notice.py"
+_VENDORED_NOTICE_HOOK = (
+    REPO_ROOT / "plugins" / "github_midwife_plugin" / "claude_plugin"
+    / "coordination-hooks" / "hooks" / "rotation_due_notice.py"
+)
 
 
 def _dev_checkout_shape() -> bool:
@@ -808,6 +813,44 @@ def test_both_hook_copies_report_the_join() -> None:
     )
 
 
+def test_notice_hook_copies_are_identical() -> None:
+    """Keep the notice hook's checkout and shipped copies byte-identical.
+
+    The vendored copy is the package's executable hook, so its presence is
+    asserted in every tree shape. A born clone has no checkout copy to compare;
+    in a development checkout, the checkout leg must exist and match the
+    vendored bytes exactly.
+    """
+    _check(
+        _VENDORED_NOTICE_HOOK.is_file(),
+        f"[vendored notice copy] the shipped notice hook exists in every tree "
+        f"shape: {_VENDORED_NOTICE_HOOK}",
+    )
+    if not _VENDORED_NOTICE_HOOK.is_file():
+        return
+
+    if not _dev_checkout_shape():
+        print(
+            "  N/A   [born-clone shape] checkout-vs-vendored notice parity: "
+            f"no .claude/hooks/ in this tree ({_CHECKOUT_HOOKS_DIR}); the "
+            "vendored shipping assertion above DID run.",
+        )
+        return
+
+    _check(
+        _CHECKOUT_NOTICE_HOOK.is_file(),
+        f"[dev-checkout shape] the checkout notice hook exists beside the "
+        f"vendored copy: {_CHECKOUT_NOTICE_HOOK}",
+    )
+    if not _CHECKOUT_NOTICE_HOOK.is_file():
+        return
+    _check(
+        _CHECKOUT_NOTICE_HOOK.read_bytes() == _VENDORED_NOTICE_HOOK.read_bytes(),
+        "[dev-checkout shape] checkout and vendored notice hook copies are "
+        f"byte-identical: {_CHECKOUT_NOTICE_HOOK} == {_VENDORED_NOTICE_HOOK}",
+    )
+
+
 def test_the_process_verb_mapping_does_not_drop_the_field() -> None:
     """★ CATCHES: the field being declared and mapped nowhere -- the last
     wiring joint, and the one a test of the lifecycle function cannot see.
@@ -889,6 +932,7 @@ def _run() -> int:
         test_the_verb_round_trips_the_join_and_preserves_null,
         test_the_hook_actually_sends_the_join,
         test_both_hook_copies_report_the_join,
+        test_notice_hook_copies_are_identical,
         test_the_process_verb_mapping_does_not_drop_the_field,
     ]
     for test in tests:

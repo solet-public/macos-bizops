@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::request",
+  "display_name": "Snowflake: Authenticated Request",
+  "description": "Send one authenticated HTTP request to the registered Snowflake account. Supply method (GET, POST, PUT, PATCH or DELETE), a relative path under any account REST base, optional query and headers, and an optional JSON body. The existing account/user/RSA private key supplies a fresh short-lived JWT; there is no new credential registration. Vendor RBAC alone decides writes and deletes. Returns job_id/status queued; HTTP completion follows separately.",
+  "embedding_description": "Call Snowflake REST APIs using the registered account's RSA credential: SQL API submit/status/results/cancel, resource create/update/delete, Cortex or Snowpipe. Supply method, relative path, query, headers and JSON body. Returns an async job, then HTTP status, headers and body without silent polling.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake REST request queued",
+    "result_type": "snowflake_request_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: status (HTTP integer), headers, body, body_encoding (json/text/base64), correlation_id, and error_code for vendor 4xx/5xx. Retry-After and pagination hints stay in headers/body unchanged except credential redaction. SQL handles are returned as data. Duplicate JSON members at any depth preserve the entire redacted response as text with an advisory; unique JSON stays structured. UTF8 BOMs, trailing non-JSON text and streaming event text are retained in full; non-UTF8 bytes are preserved as base64.",
+    "presentation_guidance": "This request may have changed vendor state. Queued means the job was accepted, not that Snowflake completed the operation. Report the HTTP status and body faithfully, including 4xx/5xx, Retry-After, SQL handles and pagination hints; do not claim mutation success from the job completing alone. No automatic polling, pagination, retries or redirects occur. Credential values are replaced with [REDACTED]. A transport error can leave vendor state uncertain; never silently retry a mutation."
+  },
+  "error_processor_customizations": {
+    "action_context": "Call the registered account's Snowflake REST API with its vendor-granted capabilities.",
+    "error_interpretation": "snowflake.invalid_params protects relative-path tenant binding and CR/LF-free headers. Host, Authorization, Proxy-Authorization and X-Snowflake-Authorization-Token-Type are plugin-owned and caller values are replaced or omitted. snowflake.api_error covers transport/configuration failure without exposing credential-bearing exception text. Vendor HTTP errors are completion data with status/body and typed error_code, including snowflake.rate_limited for 429.",
+    "recovery_guidance": "Read the complete vendor status/body before deciding whether to correct or retry. Use the existing snowflake_account registration and its RSA key-pair credential. The network timeout reuses login_timeout_seconds; JWT lifetime is 60 seconds, signed per call and kept in memory only. Query parameters augment query text already in path; explicit query values replace matching path-query keys. Use the returned handle or pagination hint in an explicit later request. A redirect is surfaced for inspection; credentials are never sent automatically to its target."
+  }
+}

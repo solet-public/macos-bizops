@@ -15,6 +15,7 @@ from ananta.constants import (
 from ananta.core.domain.enums import ActionStatus
 from ananta.core.domain.status import is_status_match
 from ananta.core.domain.types import ActionResult
+from ananta.core.state.async_job_persistence import create_job_and_request, update_job_and_payloads
 from ananta.core.state.execution_token_context import get_current_flow_token_id
 from ananta.core.state.job_completion_reach import record_completion_reach
 from ananta.core.state.job_completion_route import (
@@ -177,70 +178,12 @@ class AsyncJobManager:
         """Create job record and write payload. Assumes state_service is available."""
         assert self.state_service is not None  # Caller must verify
 
-        result = self.state_service.write_state(
-            namespace=self._namespace,
-            data={"table": self._table, "record": job_record},
-        )
-
-        if not is_status_match(result.get("action_status"), ActionStatus.COMPLETED):
-            logger.error("Failed to create async job: %s", result)
-            return {
-                "action_status": "error",
-                "error": {"message": f"Failed to create job: {result.get('error', 'Unknown')}"},
-            }
-
-        generated_id = self._extract_generated_id(result)
-        if not generated_id:
-            logger.error("Job created but no ID returned for %s", provider_name)
-            return {
-                "action_status": "error",
-                "error": {"message": "Failed to get generated job ID"},
-            }
-
-        if request_payload:
-            self._write_request_payload(generated_id, request_payload)
-
+        generated_id = create_job_and_request(self.state_service, job_record, request_payload)
         logger.debug("Created async job %s for %s", generated_id, provider_name)
         return {
             "action_status": "completed",
             "data": {"job_id": generated_id, "status": "queued"},
         }
-
-    def _write_request_payload(self, job_id: str, request_payload: dict[str, object]) -> None:
-        """Write request payload for a job. Logs warning on failure."""
-        assert self.state_service is not None
-
-        payload_result = self.state_service.write_state(
-            namespace=self._namespace,
-            data={
-                "table": "job_payload",
-                "record": {
-                    "job_id": job_id,
-                    "payload_type": "request",
-                    "payload_data": json.dumps(request_payload),
-                    "sequence": 1,
-                },
-            },
-        )
-
-        if not is_status_match(payload_result.get("action_status"), ActionStatus.COMPLETED):
-            logger.error(
-                "Job %s created but payload write failed: %s",
-                job_id,
-                payload_result.get("error"),
-            )
-
-    def _extract_generated_id(self, result: ActionResult) -> str | None:
-        data = result.get("data")
-        if not isinstance(data, dict):
-            return None
-
-        result_obj = data.get("result")
-        if isinstance(result_obj, dict):
-            generated_id = result_obj.get("generated_id")
-            if isinstance(generated_id, str):
-                return generated_id
-        return None
 
     def get_job(self, job_id: str) -> dict[str, object]:
         """Get a job by ID.
@@ -456,6 +399,7 @@ class AsyncJobManager:
 
     def update_job(self, job_id: str, updates: dict[str, object]) -> dict[str, object]:
         """Update job in unified ledger with support for payload fields."""
+        outcome_committed = False
         try:
             if not self.state_service:
                 return {
@@ -465,20 +409,11 @@ class AsyncJobManager:
 
             ledger_updates, result_payload, error_payload = self._extract_update_fields(updates)
 
-            if ledger_updates:
-                error_result = self._update_ledger(job_id, ledger_updates)
-                if error_result:
-                    return error_result
-
-            next_sequence = self._get_next_payload_sequence(job_id)
-
-            if result_payload is not None:
-                next_sequence = self._write_payload(job_id, "result", result_payload, next_sequence)
-
-            if error_payload is not None:
-                self._write_payload(job_id, "error", error_payload, next_sequence)
-
+            update_job_and_payloads(
+                self.state_service, job_id, ledger_updates, result_payload, error_payload,
+            )
             new_status = updates.get("status")
+            outcome_committed = new_status in ("completed", "error", "cancelled")
             if new_status in ("completed", "error", "cancelled"):
                 # Stamped BEFORE the continuation is submitted, deliberately:
                 # _handle_completion_actions can raise (a missing flow_id in
@@ -491,33 +426,33 @@ class AsyncJobManager:
                 # that never lands leaves the drain marker exactly where a
                 # reader will find it. Losing both the push and the marker is
                 # the one outcome that must be impossible.
-                record_completion_reach(
-                    self.state_service,
-                    self._namespace,
-                    self._table,
-                    job_id,
-                    self._fetch_job_metadata(job_id),
-                )
-                if not self._route_completion_to_role(
-                    job_id, str(new_status), result_payload, error_payload
-                ):
-                    self._handle_completion_actions(
+                try:
+                    record_completion_reach(
+                        self.state_service,
+                        self._namespace,
+                        self._table,
                         job_id,
-                        str(new_status),
-                        result_payload,
-                        error_payload,
+                        self._fetch_job_metadata(job_id),
                     )
-                # PRESERVED unconditionally across BOTH paths: routing changes
-                # who hears about the job, never whether its flow closes. A
-                # routed completion still resolves its FRG token.
-                self._resolve_job_token(job_id, success=(new_status == "completed"))
+                    if not self._route_completion_to_role(
+                        job_id, str(new_status), result_payload, error_payload
+                    ):
+                        self._handle_completion_actions(
+                            job_id, str(new_status), result_payload, error_payload,
+                        )
+                finally:
+                    # Delivery failure stays drainable; it cannot strand the token.
+                    self._resolve_job_token(job_id, success=(new_status == "completed"))
 
-            return {"action_status": "completed", "data": {"job_id": job_id, "updated": True}}
+            return {"action_status": "completed", "data": {
+                "job_id": job_id, "updated": True, "outcome_committed": outcome_committed,
+            }}
 
         except Exception as e:
             logger.error(f"Error updating async job {job_id}: {e}")
             return {
                 "action_status": "error",
+                "data": {"job_id": job_id, "outcome_committed": outcome_committed},
                 "error": {"message": f"Exception updating job: {str(e)}"},
             }
 
@@ -540,78 +475,6 @@ class AsyncJobManager:
             error_payload = updates["error"]
 
         return ledger_updates, result_payload, error_payload
-
-    def _update_ledger(
-        self, job_id: str, ledger_updates: dict[str, object]
-    ) -> dict[str, object] | None:
-        """Update job ledger record. Returns error dict on failure, None on success."""
-        result = self.state_service.update_state(
-            namespace=self._namespace,
-            query={"table": self._table, "filters": {"id": job_id}},
-            updates=ledger_updates,
-        )
-
-        if not is_status_match(result.get("action_status"), ActionStatus.COMPLETED):
-            logger.error(f"Failed to update async job ledger {job_id}: {result}")
-            return {
-                "action_status": "error",
-                "error": {
-                    "message": f"Failed to update job ledger: {result.get('error', 'Unknown error')}"
-                },
-            }
-        return None
-
-    def _get_next_payload_sequence(self, job_id: str) -> int:
-        """Get next sequence number for job payload records."""
-        sequence_result = self.state_service.read_state(
-            namespace=self._namespace,
-            query={
-                "table": "job_payload",
-                "filters": {"job_id": job_id},
-                "order_by": "sequence DESC",
-                "limit": 1,
-            },
-        )
-
-        if not is_status_match(sequence_result.get("action_status"), ActionStatus.COMPLETED):
-            return 1
-
-        data = sequence_result.get("data")
-        if not isinstance(data, dict):
-            return 1
-
-        # State service returns records directly in data, not nested under result
-        records = data.get("records")
-        if not isinstance(records, list) or not records:
-            return 1
-
-        last_record = records[0]
-        if not isinstance(last_record, dict):
-            return 1
-
-        last_seq = last_record.get("sequence")
-        return last_seq + 1 if isinstance(last_seq, int) else 1
-
-    def _write_payload(
-        self, job_id: str, payload_type: str, payload_data: dict[str, object], sequence: int
-    ) -> int:
-        """Write a payload record and return next sequence number."""
-        payload_result = self.state_service.write_state(
-            namespace=self._namespace,
-            data={
-                "table": "job_payload",
-                "record": {
-                    "job_id": job_id,
-                    "payload_type": payload_type,
-                    "payload_data": json.dumps(payload_data),
-                    "sequence": sequence,
-                },
-            },
-        )
-        if not is_status_match(payload_result.get("action_status"), ActionStatus.COMPLETED):
-            logger.error(f"Failed to write {payload_type} payload for {job_id}: {payload_result}")
-            return sequence
-        return sequence + 1
 
     def _parse_process_key(self, process_key: str) -> tuple[str, str, str]:
         """Parse process_key into provider parts."""
@@ -890,6 +753,7 @@ class AsyncJobManager:
                 exc,
                 exc_info=True,
             )
+            raise
 
     def _route_completion_to_role(
         self,

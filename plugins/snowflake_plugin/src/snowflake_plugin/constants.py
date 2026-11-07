@@ -1,20 +1,14 @@
 """Snowflake plugin constants.
 
 Single source of truth for every magic value: the address-book credential
-shape, session hardening knobs, the read-only statement-leader set (belt),
-result caps, error codes, and result types.
+shape, session hardening knobs, result caps, error codes, and result types.
 
 Posture (operator-ratified RATIFY-2/§5.6 for the READ verbs; reversed for
 write by operator ruling 2026-08-09 + Amendment 1 — "vendor RBAC is the
-control plane"): every read verb stays READ-ONLY via the connector-side
-statement-leader guard, FAST-FAIL ONLY (defense-in-depth + UX) since Snowflake
-has no session-level read-only connection characteristic — the TRUE
-developer-proof boundary for those verbs is the read-only ROLE the connection
-is pinned to (GRANT SELECT/USAGE only, no INSERT/UPDATE/DELETE/MERGE/DDL). The
-write verb (``run_statement``) performs NO plugin-side access control at all —
-what it can do is decided entirely by the registered credential's own
-server-side role grants. See knowledge_base/01_snowflake_overview.md for the
-full posture + the asymmetry with the Postgres connector.
+control plane"): statements are forwarded under the operator-registered role;
+writes and deletes are supported where vendor RBAC permits them, and this
+plugin performs no separate write gate. See
+knowledge_base/01_snowflake_overview.md for the full access model.
 
 This plugin reaches ONLY the Snowflake account resolved from the
 "snowflake_account" address-book entry — never any other external system.
@@ -33,8 +27,7 @@ def _solet_or_fail() -> str:
     name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "snowflake_plugin.constants: SOLET_NAME env var is "
-            "required to resolve scoped vault keys.",
+            "snowflake_plugin.constants: SOLET_NAME env var is required to resolve scoped vault keys.",
         )
     return name
 
@@ -46,6 +39,54 @@ _SOLET = _solet_or_fail()
 # ---------------------------------------------------------------------------
 PLUGIN_NAME: Final[str] = "snowflake_plugin"
 PLUGIN_VERSION: Final[str] = "1.0.0"
+
+# REST uses the existing account and key-pair credential. JWTs are never cached.
+REST_JWT_LIFETIME_SECONDS: Final[int] = 60
+REST_REDACTED: Final[str] = "[REDACTED]"
+REST_RESULT_TYPE: Final[str] = "snowflake_request_result"
+REST_ERROR_RATE_LIMITED: Final[str] = "snowflake.rate_limited"
+REST_ERROR_CONFLICT: Final[str] = "snowflake.conflict"
+REST_ERROR_STATEMENT_FAILED: Final[str] = "snowflake.statement_failed"
+# Typed REST families (rest_families.py): one verb per vendor family.
+RESULT_TYPE_SQL_API: Final[str] = "snowflake_sql_api_result"
+RESULT_TYPE_TASK: Final[str] = "snowflake_task_result"
+RESULT_TYPE_STREAM: Final[str] = "snowflake_stream_result"
+RESULT_TYPE_DYNAMIC_TABLE: Final[str] = "snowflake_dynamic_table_result"
+RESULT_TYPE_DATABASE: Final[str] = "snowflake_database_result"
+RESULT_TYPE_SCHEMA: Final[str] = "snowflake_schema_result"
+RESULT_TYPE_WAREHOUSE: Final[str] = "snowflake_warehouse_result"
+RESULT_TYPE_STAGE: Final[str] = "snowflake_stage_result"
+RESULT_TYPE_TABLE: Final[str] = "snowflake_table_result"
+RESULT_TYPE_VIEW: Final[str] = "snowflake_view_result"
+RESULT_TYPE_SEQUENCE: Final[str] = "snowflake_sequence_result"
+RESULT_TYPE_PIPE: Final[str] = "snowflake_pipe_result"
+REST_PROTECTED_HEADERS: Final[frozenset[str]] = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "host",
+        "x-snowflake-authorization-token-type",
+    }
+)
+REST_SECRET_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "authorization",
+        "proxy_authorization",
+        "cookie",
+        "set_cookie",
+        "password",
+        "private_key",
+        "private_key_der",
+        "access_token",
+        "refresh_token",
+        "token",
+        "jwt",
+        # stage.yaml Credentials: an external stage body carries cloud secrets.
+        "aws_secret_key",
+        "aws_token",
+        "azure_sas_token",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Credentials — ONE address-book entry: "snowflake_account". Single-account v1
@@ -87,18 +128,6 @@ STATEMENT_TIMEOUT_SECONDS_DEFAULT: Final[int] = 60
 CONFIG_KEY_STATEMENT_TIMEOUT_SECONDS: Final[str] = "statement_timeout_seconds"
 LOGIN_TIMEOUT_SECONDS_DEFAULT: Final[int] = 30
 CONFIG_KEY_LOGIN_TIMEOUT_SECONDS: Final[str] = "login_timeout_seconds"
-
-# ---------------------------------------------------------------------------
-# Read-leader guard (belt — FAST-FAIL ONLY; Snowflake has no session-level
-# read-only flag, so the TRUE write-stopper is the operator-granted read-only
-# ROLE, not this guard). The Datagrip-parity read/introspection family
-# (rev-D addendum b): SELECT, WITH, SHOW, DESCRIBE/DESC, EXPLAIN. DML-with-CTE
-# leads with the DML verb (INSERT INTO … WITH …), so a WITH leader is
-# SELECT-shaped; PUT/GET/COPY/CALL/USE/CREATE all refuse.
-# ---------------------------------------------------------------------------
-READ_LEADERS: Final[frozenset[str]] = frozenset(
-    {"SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "WITH"}
-)
 
 # ---------------------------------------------------------------------------
 # Result caps (business-data limits + data-export migration, 2026-08-02 —
@@ -150,7 +179,6 @@ ERROR_INVALID_PARAMS: Final[str] = "snowflake.invalid_params"
 ERROR_AUTH_FAILED: Final[str] = "snowflake.auth_failed"
 ERROR_PERMISSION_DENIED: Final[str] = "snowflake.permission_denied"
 ERROR_OBJECT_NOT_FOUND: Final[str] = "snowflake.object_not_found"
-ERROR_READ_ONLY_VIOLATION: Final[str] = "snowflake.read_only_violation"
 ERROR_TIMEOUT: Final[str] = "snowflake.timeout"
 ERROR_WAREHOUSE_SUSPENDED: Final[str] = "snowflake.warehouse_suspended"
 ERROR_API_ERROR: Final[str] = "snowflake.api_error"
@@ -164,23 +192,11 @@ ERROR_EXPORT_PATH_REFUSED: Final[str] = "snowflake.export_path_refused"
 # query-syntax classes may keep driver detail (it describes the caller's own
 # query/object, not our topology).
 # ---------------------------------------------------------------------------
-GENERIC_MESSAGE_AUTH_FAILED: Final[str] = (
-    "authentication failed for the configured Snowflake account"
-)
-GENERIC_MESSAGE_PERMISSION_DENIED: Final[str] = (
-    "the configured role lacks permission for this operation"
-)
-GENERIC_MESSAGE_CONNECTION_FAILED: Final[str] = (
-    "could not connect to the configured Snowflake account"
-)
+GENERIC_MESSAGE_AUTH_FAILED: Final[str] = "authentication failed for the configured Snowflake account"
+GENERIC_MESSAGE_PERMISSION_DENIED: Final[str] = "the configured role lacks permission for this operation"
+GENERIC_MESSAGE_CONNECTION_FAILED: Final[str] = "could not connect to the configured Snowflake account"
 GENERIC_MESSAGE_TIMEOUT: Final[str] = "the query exceeded the statement timeout"
-GENERIC_MESSAGE_WAREHOUSE_SUSPENDED: Final[str] = (
-    "the configured warehouse is suspended or unavailable"
-)
-GENERIC_MESSAGE_READ_ONLY: Final[str] = (
-    "this connector is read-only; write and DDL statements are refused"
-)
-
+GENERIC_MESSAGE_WAREHOUSE_SUSPENDED: Final[str] = "the configured warehouse is suspended or unavailable"
 # ---------------------------------------------------------------------------
 # Result types
 # ---------------------------------------------------------------------------

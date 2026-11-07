@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final, NoReturn
 
 from ananta.services.store import Store, open_store
 
@@ -45,6 +45,17 @@ if TYPE_CHECKING:
     from .models import BridgeBinding, NativeWakeAdapter
 
 logger = logging.getLogger(__name__)
+
+# iss_59a7f833 / iss_7009ad9a: ONE lock for every request-path registry write.
+# The HTTP ``peer/register`` body is check-then-act (session-id conflict
+# refusal and orphan downgrade read the registry, then ``register`` writes it);
+# the streamable transport registers a binding at session allocation and
+# relabels it on ``tools/call peer_register``. Since ``af96438a5`` both run on
+# worker threads, so a lock private to one of them left the other free to
+# interleave its read-delete-insert with the first one's check-then-act. Both
+# transports take this lock around those writes. It is never held across a
+# delivery drive: dispatch only schedules drives (``delivery_drive``).
+PEER_REGISTRATION_LOCK: Final[threading.Lock] = threading.Lock()
 
 
 def _is_known_agent_session_id(agent_session_id: str) -> bool:
@@ -388,32 +399,65 @@ class PeerRegistry:
            the candidate ``agent_instance_id`` and ``session_label``
            lists so the caller can prompt for disambiguation.
         """
-        if peer_agent_instance_id is not None:
-            row = self._bindings.read_one(
-                {
-                    "agent_id": peer_id,
-                    "agent_instance_id": peer_agent_instance_id,
-                },
+        if peer_id.startswith("agi-"):
+            raise PeerUnreachableError(
+                f"peer_wrong_kind: {peer_id!r} is an agent instance ID, not "
+                f"an agent kind; pass the agent kind as peer_id and this ID "
+                f"as peer_agent_instance_id",
             )
-            if row is None:
-                raise PeerUnreachableError(
-                    f"peer_unreachable: no binding for "
-                    f"{peer_id!r}/{peer_agent_instance_id!r}",
-                )
-            return _binding_from_row(row)
+        if peer_agent_instance_id is not None:
+            return self._resolve_instance(peer_id, peer_agent_instance_id)
         rows = self._bindings.read({"agent_id": peer_id})
         if not rows:
-            raise PeerUnreachableError(
-                f"peer agent_id {peer_id!r} is not currently "
-                f"registered (no live bindings)",
-            )
+            self._raise_no_bindings(peer_id)
         if len(rows) == 1:
             return _binding_from_row(rows[0])
+        raise self._ambiguous_error(peer_id, rows)
+
+    def _resolve_instance(
+        self,
+        peer_id: str,
+        peer_agent_instance_id: str,
+    ) -> BridgeBinding:
+        row = self._bindings.read_one(
+            {
+                "agent_id": peer_id,
+                "agent_instance_id": peer_agent_instance_id,
+            },
+        )
+        if row is None:
+            raise PeerUnreachableError(
+                f"peer_unreachable: no binding for "
+                f"{peer_id!r}/{peer_agent_instance_id!r}",
+            )
+        return _binding_from_row(row)
+
+    def _raise_no_bindings(self, peer_id: str) -> NoReturn:
+        available_agent_ids = sorted(self.list_agent_ids())
+        bounded_agent_ids = available_agent_ids[:8]
+        available_text = ", ".join(repr(agent_id) for agent_id in bounded_agent_ids)
+        if len(available_agent_ids) > len(bounded_agent_ids):
+            available_text += ", …"
+        available_guidance = (
+            f" Available registered agent kinds: {available_text}."
+            if available_text
+            else " No agent kinds are currently registered."
+        )
+        raise PeerUnreachableError(
+            f"peer agent_id {peer_id!r} is not currently "
+            f"registered (no live bindings).{available_guidance}",
+        )
+
+    def _ambiguous_error(
+        self,
+        peer_id: str,
+        rows: list[dict[str, object]],
+    ) -> PeerAmbiguousError:
         candidates = sorted(
             (_binding_from_row(r) for r in rows),
             key=lambda b: b.agent_instance_id,
         )
-        raise PeerAmbiguousError(
+        return PeerAmbiguousError(
             peer_agent_id=peer_id,
             candidate_instance_ids=[c.agent_instance_id for c in candidates],
             candidate_session_labels=[c.session_label for c in candidates],
@@ -559,6 +603,7 @@ def _binding_from_row(row: dict[str, object]) -> BridgeBinding:
 
 
 __all__ = [
+    "PEER_REGISTRATION_LOCK",
     "PeerAmbiguousError",
     "PeerRegistry",
     "PeerSessionAmbiguousError",

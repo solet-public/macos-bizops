@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::delete_asset_token",
+  "display_name": "Marketo: Delete Asset Token",
+  "description": "Delete a local My Token from a Marketo Folder or Program by name and token_type. This changes vendor state and can be reversed by set_asset_token using the prior value. Poll check_marketo_job_status for the vendor envelope, and read back before retrying an uncertain deletion.",
+  "embedding_description": "Delete a local My Token from a Marketo Folder or Program by name and token_type. This changes vendor state and can be reversed by set_asset_token using the prior value. Poll check_marketo_job_status for the vendor envelope, and read back before retrying an uncertain deletion.",
+  "result_processor_customizations": {
+    "action_label": "Marketo: Delete Asset Token job dispatched",
+    "result_type": "marketo_delete_asset_token_result",
+    "result_description": "Queued job_id and status. Poll check_marketo_job_status for the redacted vendor success/result/requestId/warnings envelope.",
+    "presentation_guidance": "Poll the job before reporting success. Report vendor results and warnings; read back before retrying uncertain writes."
+  },
+  "error_processor_customizations": {
+    "action_context": "Delete a local My Token from a Marketo Folder or Program by name and token_type. This changes vendor state and can be reversed by set_asset_token using the prior value. Poll check_marketo_job_status for the vendor envelope, and read back before retrying an uncertain deletion.",
+    "error_interpretation": "marketo.invalid_params: correct vendor-shaped inputs. marketo.permission_denied: vendor RBAC or workspace access refused. marketo.auth_failed: credential rejected. marketo.validation_failed: vendor rejected the operation. A transport failure may follow a mutation.",
+    "recovery_guidance": "Use the registered credential and vendor Read-Only Assets / Read-Write Assets permissions. Reads do not prove write access. Read back state before retrying an uncertain mutation; these endpoints offer no CAS/ETag."
+  }
+}

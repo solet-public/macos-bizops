@@ -13,11 +13,16 @@ import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
+
+if TYPE_CHECKING:
+    from ananta.core.actions.action_processor import QueuedActionProtocol
+
+    from agent_messaging_plugin.bridge_sessions import BridgeSessionManager
 
 from ananta.core.actions.action_factory import (  # noqa: E402
     UNKNOWN_ARGUMENTS_ERROR_CODE,
@@ -59,8 +64,9 @@ def _check(condition: object, label: str) -> None:
 
 class _TemplateEngine:
     def resolve_templates(
-        self, action_def: dict[str, object], _context: dict[str, object],
+        self, action_def: dict[str, object], context: dict[str, object],
     ) -> dict[str, object]:
+        del context
         return action_def
 
 
@@ -108,7 +114,7 @@ class _BridgeManager:
 def _registry() -> dict[str, object]:
     session_processes: dict[str, object] = {}
     for process_key in _SESSION_START_KEYS:
-        method = getattr(AgentMessagingPlugin, process_key.rsplit("::", 1)[1])
+        method = getattr(AgentMessagingPlugin, f"{process_key.rsplit('::', 1)[1]}_action")
         metadata = cast(ActionMetadata, getattr(method, "_platform_process_metadata"))  # noqa: B009
         session_processes[process_key] = {
             "parameters": {
@@ -160,7 +166,7 @@ def _surface(factory: ActionFactory) -> tuple[PlatformSurface, _FlowManager]:
             action_factory=factory,
             flow_manager=flows,
             compilation_context_builder=_CompilationContextBuilder(),
-            bridge_manager=_BridgeManager(bridge),
+            bridge_manager=cast("BridgeSessionManager", _BridgeManager(bridge)),
             export_policy=ProcessExportPolicy(
                 allow_patterns=("service_interface::*", "plugin::*"),
             ),
@@ -207,17 +213,18 @@ def _assert_bridge_unknown(process_key: str, arguments: dict[str, object]) -> No
 
 
 def test_unknown_arguments_refused_on_both_families_and_surfaces() -> None:
-    for process_key, arguments in (
+    cases: tuple[tuple[str, dict[str, object]], ...] = (
         (_SERVICE_KEY, {"query": "needle", "xyzzy": "bad"}),
         (_PLUGIN_KEY, {"xyzzy": "bad"}),
-    ):
+    )
+    for process_key, arguments in cases:
         _assert_core_unknown(process_key, arguments)
         _assert_bridge_unknown(process_key, arguments)
 
 
 def test_service_processor_rejects_a_bypassed_undeclared_argument() -> None:
     processor = object.__new__(ActionProcessor)
-    action = SimpleNamespace(process_key=_SERVICE_KEY)
+    action = cast("QueuedActionProtocol", SimpleNamespace(process_key=_SERVICE_KEY))
     try:
         processor._filter_and_inject_arguments(
             {"query": "needle", "xyzzy": "bad"},

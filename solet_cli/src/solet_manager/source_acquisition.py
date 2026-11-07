@@ -28,9 +28,7 @@ from .target_parent import ParentIdentity, ensure_target_parent
 
 _GIT_TIMEOUT_SECONDS = 120
 _REPOSITORY_PROBE_TIMEOUT_SECONDS = 15
-_GITHUB_REPOSITORY = re.compile(
-    r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repository>[A-Za-z0-9_.-]+)\.git$"
-)
+_GITHUB_REPOSITORY = re.compile(r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repository>[A-Za-z0-9_.-]+)\.git$")
 _HTTP_STATUS = re.compile(r"^HTTP/\S+ (?P<status>[0-9]{3})(?: |$)")
 _GIT_CURL_RESPONSE_HEADER = "<= Recv header:"
 _ACCESS_ELIGIBLE_HTTP_STATUSES = frozenset({401, 403, 404})
@@ -42,6 +40,22 @@ class RunResult:
     stdout: str
     stderr: str
     final_http_status: int | None = None
+
+
+@dataclass(frozen=True)
+class SealedSeedBundle:
+    """Guest-validation only: a sealed release's locked seed tag carried as a Git bundle.
+
+    Before a release's public acts its locked tag exists only in the release host's
+    sealed scratch repository, so the fresh-guest ladder carries exactly that tag into
+    the guest as a bundle. Only the place the bytes are fetched from changes: the
+    bundle must name the lock's own commit and tag, the fetched tag must still peel to
+    the locked commit and tree, and ``origin`` stays the locked public repository.
+    """
+
+    path: Path
+    commit: str
+    release_tag: str
 
 
 type CommandRunner = Callable[[Sequence[str], Path | None, int], RunResult]
@@ -124,21 +138,37 @@ def materialize_locked_seed(
     runner: CommandRunner = subprocess_runner,
     replace_runner: ReplaceRunner | None = None,
     repository_probe_runner: CommandRunner = subprocess_runner,
+    sealed_seed_bundle: SealedSeedBundle | None = None,
 ) -> Path:
     """Fetch one immutable seed identity, verify it, and retain origin/main.
 
     The staging checkout is deliberately retained on failure for diagnosis; no
-    implicit cleanup or target deletion is part of acquisition.
+    implicit cleanup or target deletion is part of acquisition. ``sealed_seed_bundle``
+    is set only by a release's guest-validation ladder; every other create fetches
+    from ``origin``.
     """
 
+    fetch_source = _fetch_source(seed, sealed_seed_bundle)
     staging, parent_identity = _prepare_staging(target, cache_dir)
     _initialize_staging(seed, staging, runner)
-    _fetch_and_verify_identity(seed, staging, runner, repository_probe_runner)
+    _fetch_and_verify_identity(seed, staging, runner, repository_probe_runner, fetch_source)
     _checkout_verified_seed(seed, staging, runner)
     _verify_provenance_identity(staging, seed.profile, runner)
     _verify_origin_and_main(seed, staging, runner)
     _finalize_staging(staging, target, parent_identity, replace_runner)
     return target
+
+
+def _fetch_source(seed: SeedLock, bundle: SealedSeedBundle | None) -> str:
+    """``origin``, or the sealed bundle's path once it provably names the lock's own identity."""
+
+    if bundle is None:
+        return "origin"
+    if seed.release_tag is None or bundle.release_tag != seed.release_tag or bundle.commit != seed.commit:
+        raise SourceIdentityError(f"sealed seed bundle names tag {bundle.release_tag!r} at {bundle.commit!r}, but the lock names tag {seed.release_tag!r} at {seed.commit!r}")
+    if not bundle.path.is_absolute() or not bundle.path.is_file():
+        raise SourceError(f"sealed seed bundle is not an absolute path to a regular file: {bundle.path}")
+    return str(bundle.path)
 
 
 def _prepare_staging(target: Path, cache_dir: Path) -> tuple[Path, ParentIdentity]:
@@ -163,14 +193,13 @@ def _fetch_and_verify_identity(
     staging: Path,
     runner: CommandRunner,
     repository_probe_runner: CommandRunner,
+    fetch_source: str,
 ) -> None:
-    commit = _fetch_locked_commit(seed, staging, runner, repository_probe_runner)
+    commit = _fetch_locked_commit(seed, staging, runner, repository_probe_runner, fetch_source)
     _verify_fetched_commit(seed, commit)
     tree = _run_checked(runner, ("git", "rev-parse", f"{seed.commit}^{{tree}}"), staging).strip()
     if tree != seed.tree_hash:
-        raise SourceIdentityError(
-            f"commit tree {tree!r} differs from locked tree {seed.tree_hash!r}"
-        )
+        raise SourceIdentityError(f"commit tree {tree!r} differs from locked tree {seed.tree_hash!r}")
 
 
 def _fetch_locked_commit(
@@ -178,6 +207,7 @@ def _fetch_locked_commit(
     staging: Path,
     runner: CommandRunner,
     repository_probe_runner: CommandRunner,
+    fetch_source: str,
 ) -> str:
     if seed.release_tag is None:
         _fetch_locked_seed(
@@ -191,7 +221,7 @@ def _fetch_locked_commit(
     tag_ref = f"refs/tags/{seed.release_tag}"
     _fetch_locked_seed(
         runner,
-        ("git", "fetch", "--no-tags", "origin", f"{tag_ref}:{tag_ref}"),
+        ("git", "fetch", "--no-tags", fetch_source, f"{tag_ref}:{tag_ref}"),
         staging,
         seed,
         repository_probe_runner,
@@ -202,12 +232,8 @@ def _fetch_locked_commit(
 def _verify_fetched_commit(seed: SeedLock, commit: str) -> None:
     if commit != seed.commit:
         if seed.release_tag is None:
-            raise SourceIdentityError(
-                f"fetched commit {commit!r} differs from locked commit {seed.commit!r}"
-            )
-        raise SourceIdentityError(
-            f"tag {seed.release_tag!r} peeled to {commit!r}, expected locked commit {seed.commit!r}"
-        )
+            raise SourceIdentityError(f"fetched commit {commit!r} differs from locked commit {seed.commit!r}")
+        raise SourceIdentityError(f"tag {seed.release_tag!r} peeled to {commit!r}, expected locked commit {seed.commit!r}")
 
 
 def _checkout_verified_seed(seed: SeedLock, staging: Path, runner: CommandRunner) -> None:
@@ -229,9 +255,7 @@ def _finalize_staging(
     try:
         (replace_runner or _atomic_sibling_replace)(staging, target, parent_identity)
     except OSError as exc:
-        raise SourceError(
-            f"verified staging checkout could not be atomically installed at {target}: {exc}"
-        ) from exc
+        raise SourceError(f"verified staging checkout could not be atomically installed at {target}: {exc}") from exc
 
 
 def _atomic_sibling_replace(
@@ -261,35 +285,24 @@ def _verify_origin_and_main(seed: SeedLock, checkout: Path, runner: CommandRunne
     origin = _run_checked(runner, ("git", "remote", "get-url", "origin"), checkout).strip()
     main = _run_checked(runner, ("git", "rev-parse", "main^{commit}"), checkout).strip()
     if origin != seed.repository or main != seed.commit:
-        raise SourceIdentityError(
-            f"materialized checkout identity drifted: origin={origin!r}, main={main!r}"
-        )
+        raise SourceIdentityError(f"materialized checkout identity drifted: origin={origin!r}, main={main!r}")
 
 
-def _verify_provenance_identity(
-    checkout: Path, expected_profile: str, runner: CommandRunner
-) -> None:
+def _verify_provenance_identity(checkout: Path, expected_profile: str, runner: CommandRunner) -> None:
     """Bind checked-out bytes and HEAD trailers through the shared strict verifier."""
     try:
-        committed = _run_checked(runner, ("git", "show", "HEAD:PROVENANCE.json"), checkout).encode(
-            "utf-8"
-        )
+        committed = _run_checked(runner, ("git", "show", "HEAD:PROVENANCE.json"), checkout).encode("utf-8")
         working = (checkout / "PROVENANCE.json").read_bytes()
     except (OSError, SourceError) as exc:
         raise SourceIdentityError(f"seed provenance is missing from committed HEAD: {exc}") from exc
     if working != committed:
-        raise SourceIdentityError(
-            "working PROVENANCE.json differs byte-for-byte from committed HEAD"
-        )
+        raise SourceIdentityError("working PROVENANCE.json differs byte-for-byte from committed HEAD")
     try:
         stamp = parse_provenance_v1(committed)
     except ProvenanceV1Error as exc:
         raise SourceIdentityError(f"seed provenance is malformed: {exc}") from exc
     if stamp.bundle_name != expected_profile:
-        raise SourceIdentityError(
-            "seed provenance bundle/profile identity mismatch: "
-            f"bundle={stamp.bundle_name!r}, locked_profile={expected_profile!r}"
-        )
+        raise SourceIdentityError(f"seed provenance bundle/profile identity mismatch: bundle={stamp.bundle_name!r}, locked_profile={expected_profile!r}")
     message = _run_checked(runner, ("git", "show", "-s", "--format=%B", "HEAD"), checkout)
     try:
         verify_seal_trailers(stamp, _trailer_values(message))
@@ -298,9 +311,7 @@ def _verify_provenance_identity(
 
 
 def _trailer_values(message: str) -> dict[str, list[str]]:
-    values: dict[str, list[str]] = {
-        "Subject": [message.splitlines()[0]] if message.splitlines() else []
-    }
+    values: dict[str, list[str]] = {"Subject": [message.splitlines()[0]] if message.splitlines() else []}
     for line in message.splitlines()[1:]:
         if ": " not in line:
             continue
@@ -329,9 +340,7 @@ def _run_checked(
         raise SourceError(f"could not run {command[0]} {command[1]}: {exc}") from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()[-500:]
-        raise SourceError(
-            f"{command[0]} {command[1]} failed with exit {result.returncode}: {detail}"
-        )
+        raise SourceError(f"{command[0]} {command[1]} failed with exit {result.returncode}: {detail}")
     return result.stdout
 
 
@@ -419,11 +428,7 @@ def _authenticated_metadata_reason(
     if status != 404:
         return False, None
     viewer = _probe(runner, ("gh", "api", "user", "--jq", ".login"))
-    if (
-        viewer is not None
-        and viewer.returncode == 0
-        and viewer.stdout.strip().casefold() == owner.casefold()
-    ):
+    if viewer is not None and viewer.returncode == 0 and viewer.stdout.strip().casefold() == owner.casefold():
         return True, RepositoryAccessReason.MISSING
     return True, RepositoryAccessReason.PRIVATE_OR_MISSING
 
@@ -501,39 +506,21 @@ def _repository_access_error(
     seed: SeedLock,
     reason: RepositoryAccessReason,
 ) -> SeedRepositoryAccessError:
-    prefix = (
-        f"source acquisition fetch refused [reason={reason.value}]: locked seed "
-        f"{seed.profile!r} at {_seed_identity_label(seed)!r}"
-    )
+    prefix = f"source acquisition fetch refused [reason={reason.value}]: locked seed {seed.profile!r} at {_seed_identity_label(seed)!r}"
     if reason is RepositoryAccessReason.PRIVATE:
         return SeedRepositoryAccessError(
-            f"{prefix} uses an existing private repository that is not anonymously "
-            f"readable: {seed.repository}",
+            f"{prefix} uses an existing private repository that is not anonymously readable: {seed.repository}",
             reason=reason,
-            repair=(
-                "Obtain authorized Git access through the operator's intended Git "
-                "mechanism, then rerun the same create command. Alternatively, rerun "
-                "with `--seed <name>` or `--seed-lock <path>` selecting a reviewed "
-                "public seed; the manager will not change repository visibility."
-            ),
+            repair=("Obtain authorized Git access through the operator's intended Git mechanism, then rerun the same create command. Alternatively, rerun with `--seed <name>` or `--seed-lock <path>` selecting a reviewed public seed; the manager will not change repository visibility."),
         )
     if reason is RepositoryAccessReason.MISSING:
         return SeedRepositoryAccessError(
-            f"{prefix} names a repository that is missing or has not been published "
-            f"and therefore cannot be read anonymously: {seed.repository}",
+            f"{prefix} names a repository that is missing or has not been published and therefore cannot be read anonymously: {seed.repository}",
             reason=reason,
-            repair=(
-                "Ask the publisher to publish the exact locked seed or correct the "
-                "repository reference, then rerun. Alternatively, use `--seed <name>` "
-                "or `--seed-lock <path>` to select a reviewed public seed. Intentional "
-                "private operation requires a valid existing private repository and "
-                "authorized Git access."
-            ),
+            repair=("Ask the publisher to publish the exact locked seed or correct the repository reference, then rerun. Alternatively, use `--seed <name>` or `--seed-lock <path>` to select a reviewed public seed. Intentional private operation requires a valid existing private repository and authorized Git access."),
         )
     return SeedRepositoryAccessError(
-        f"{prefix} is not anonymously visible; without authorized repository metadata, "
-        f"GitHub cannot distinguish an existing private repository from one that is "
-        f"missing or not published: {seed.repository}",
+        f"{prefix} is not anonymously visible; without authorized repository metadata, GitHub cannot distinguish an existing private repository from one that is missing or not published: {seed.repository}",
         reason=reason,
         repair=(
             "For a public seed, ask the publisher to publish it or correct the "

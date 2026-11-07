@@ -39,10 +39,12 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "g_suite_plugin" / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from g_suite_plugin import drive_actions  # noqa: E402
 from g_suite_plugin.plugin import GSuitePlugin  # noqa: E402
 from googleapiclient.errors import HttpError  # noqa: E402
+from gsuite_fakes import FakeVault, connect_accounts  # noqa: E402  # pyright: ignore[reportMissingImports]
 
 _passed = 0
 _failed: list[str] = []
@@ -80,15 +82,8 @@ class _FakeAsyncJobManager:
         self._payloads[job_id] = request_data
         return {"action_status": "completed", "data": {"job_id": job_id, "status": "queued"}}
 
-    def list_jobs(
-        self, status: str | None = None, provider_name: str | None = None, **_: Any
-    ) -> dict[str, Any]:
-        jobs = [
-            j
-            for j in self._jobs.values()
-            if (status is None or j["status"] == status)
-            and (provider_name is None or j["provider_name"] == provider_name)
-        ]
+    def list_jobs(self, status: str | None = None, provider_name: str | None = None, **_: Any) -> dict[str, Any]:
+        jobs = [j for j in self._jobs.values() if (status is None or j["status"] == status) and (provider_name is None or j["provider_name"] == provider_name)]
         return {"action_status": "completed", "data": {"jobs": jobs}}
 
     def get_job_payload(self, job_id: str, payload_type: str = "request") -> dict[str, Any]:
@@ -106,8 +101,8 @@ class _FakeAsyncJobManager:
 def _plugin_with_fake_manager() -> tuple[GSuitePlugin, _FakeAsyncJobManager]:
     plugin = GSuitePlugin()
     plugin.initialize({})
-    plugin._token_store = SimpleNamespace(is_connected=lambda: True)
-    plugin._service_factory = SimpleNamespace(drive=lambda: "fake-drive", sheets=lambda: "fake-sheets")
+    connect_accounts(plugin, ["me@corp.example"])
+    plugin._require_factory = lambda: SimpleNamespace(drive=lambda: "fake-drive", sheets=lambda: "fake-sheets")  # type: ignore[method-assign]
     fake_manager = _FakeAsyncJobManager()
     plugin._deferred.manager = fake_manager
     return plugin, fake_manager
@@ -142,10 +137,8 @@ def test_dispatch_requires_session_and_flow_id() -> None:
 
 def test_dispatch_requires_connected_account() -> None:
     plugin, _ = _plugin_with_fake_manager()
-    plugin._token_store = SimpleNamespace(is_connected=lambda: False)
-    result = plugin.sheets_create_from_files(
-        {"title": "t", "tabs": []}, {"session_id": "s1", "flow_id": "fl1"}
-    )
+    connect_accounts(plugin, [], FakeVault())
+    result = plugin.sheets_create_from_files({"title": "t", "tabs": []}, {"session_id": "s1", "flow_id": "fl1"})
     _assert("no connected account -> error status", result["action_status"] == "error")
     _assert(
         "no connected account -> not_connected code",
@@ -182,9 +175,7 @@ def test_worker_completes_job_on_success() -> None:
 
 def test_worker_completes_job_on_error() -> None:
     plugin, fake_manager = _plugin_with_fake_manager()
-    dispatch = plugin.drive_upload_file(
-        {"name": "x", "blob_key": "b1"}, {"session_id": "s1", "flow_id": "fl1"}
-    )
+    dispatch = plugin.drive_upload_file({"name": "x", "blob_key": "b1"}, {"session_id": "s1", "flow_id": "fl1"})
     job_id = dispatch["data"]["job_id"]
 
     original = drive_actions.upload_file
@@ -239,9 +230,7 @@ def test_all_migrated_verbs_have_a_registered_producer() -> None:
 
 def test_worker_unknown_verb_fails_loud() -> None:
     plugin, fake_manager = _plugin_with_fake_manager()
-    job_id = fake_manager.create_job(
-        plugin_name="g_suite_plugin", action_name="workspace_job", request_data={"verb": "no_such_verb", "params": {}}
-    )["data"]["job_id"]
+    job_id = fake_manager.create_job(plugin_name="g_suite_plugin", action_name="workspace_job", request_data={"verb": "no_such_verb", "params": {}})["data"]["job_id"]
     plugin._process_job({"id": job_id})
     error_update = fake_manager.update_calls[-1][1]
     _assert(

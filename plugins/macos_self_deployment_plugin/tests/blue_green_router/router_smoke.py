@@ -34,8 +34,10 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import cast
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
@@ -180,11 +182,16 @@ class _MockColor:
 
 
 @asynccontextmanager
-async def _router_running(socket_path: Path, public_port: int):
+async def _router_running(
+    socket_path: Path,
+    public_port: int,
+    runtime_dir: Path,
+) -> AsyncGenerator[asyncio.Task[None]]:
     ready = asyncio.Event()
     task = asyncio.create_task(
         run_router(
             solet="smoke",
+            runtime_dir=runtime_dir,
             public_port=public_port,
             public_host="127.0.0.1",
             socket_path=socket_path,
@@ -211,6 +218,40 @@ async def _router_running(socket_path: Path, public_port: int):
 def _stamp(label: str, ok: bool, detail: str = "") -> bool:
     sym = "PASS" if ok else "FAIL"
     print(f"  [{sym}] {label}" + (f" — {detail}" if detail else ""))
+    return ok
+
+
+def _require_object_records(value: object, field_name: str) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        raise AssertionError(f"status {field_name} must be a list")
+    records: list[dict[str, object]] = []
+    for record in cast(list[object], value):
+        if not isinstance(record, dict) or not all(
+            isinstance(key, str) for key in cast(dict[object, object], record)
+        ):
+            raise AssertionError(f"each {field_name} record must be an object with string keys")
+        records.append(cast(dict[str, object], record))
+    return records
+
+
+def _case_runtime_isolation(
+    runtime_dir: Path,
+    public_port: int,
+) -> bool:
+    ok = True
+    for suffix in ("router", "bridge"):
+        port_file = runtime_dir / f"smoke.{suffix}.port"
+        exists = port_file.is_file()
+        is_in_temp_runtime = exists and port_file.resolve().parent == runtime_dir.resolve()
+        ok &= _stamp(
+            f"{port_file.name} written under resolved smoke runtime",
+            is_in_temp_runtime,
+        )
+        if exists:
+            ok &= _stamp(
+                f"{port_file.name} contains public port",
+                port_file.read_text(encoding="utf-8") == str(public_port),
+            )
     return ok
 
 
@@ -350,11 +391,15 @@ async def case_status_and_rollback(mgmt: _Mgmt) -> bool:
     await mgmt.call("activate", {"color": "green", "instance_id": "i-green"})
     status_resp = await mgmt.call("status")
     has_active = status_resp.get("active_color") == "green"
-    blue_drain_ids = [
-        e.get("instance_id")
-        for e in status_resp.get("drain_entries", [])
-        if e.get("color") == "blue"
-    ]
+    drain_entries = _require_object_records(status_resp.get("drain_entries"), "drain_entries")
+    blue_drain_ids: list[str] = []
+    for entry in drain_entries:
+        color = entry.get("color")
+        instance_id = entry.get("instance_id")
+        if color == "blue":
+            if not isinstance(instance_id, str):
+                raise AssertionError("blue drain entry instance_id must be a string")
+            blue_drain_ids.append(instance_id)
     has_two_blue_drains = {"i-blue", newest_blue_id}.issubset(blue_drain_ids)
     _stamp("status: active=green", has_active, repr(status_resp.get("active_color")))
     _stamp(
@@ -427,7 +472,9 @@ async def main_async() -> int:
     logging.basicConfig(level=logging.WARNING)
     public_port = _pick_free_port()
     tmpdir = Path(tempfile.mkdtemp(prefix="bg-router-smoke-"))
-    socket_path = tmpdir / "router.sock"
+    runtime_dir = tmpdir / "runtime"
+    runtime_dir.mkdir()
+    socket_path = runtime_dir / "router.sock"
     blue = _MockColor("blue", BLUE_PORT)
     green = _MockColor("green", GREEN_PORT)
     await blue.start()
@@ -437,7 +484,7 @@ async def main_async() -> int:
         f"drain={SMOKE_DRAIN_SECONDS}s"
     )
     try:
-        async with _router_running(socket_path, public_port):
+        async with _router_running(socket_path, public_port, runtime_dir):
             mgmt = _Mgmt(socket_path)
             results = [
                 ("basic_routing", await case_basic_routing(mgmt, public_port)),
@@ -446,6 +493,10 @@ async def main_async() -> int:
                 ("status_and_rollback", await case_status_and_rollback(mgmt)),
                 ("heartbeat", await case_heartbeat(mgmt)),
                 ("no_band_enforcement", await case_no_band_enforcement(mgmt)),
+                (
+                    "runtime_isolation",
+                    _case_runtime_isolation(runtime_dir, public_port),
+                ),
             ]
     finally:
         await blue.stop()

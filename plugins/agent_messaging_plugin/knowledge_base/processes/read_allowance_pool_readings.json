@@ -1,13 +1,13 @@
 {
   "process_key": "plugin::agent_messaging_plugin::read_allowance_pool_readings",
   "display_name": "List recorded subscription usage allowance readings",
-  "description": "iss_c6fbf9ae. Returns every recorded allowance-pool reading, optionally for one profile_id, each with its consumed and remaining percent, as_of, next_reset_at, expires_at, effective_expiry, source, recorded_by and a state of current or expired judged at call time, plus how many are current. A pool with no row here, or only an expired one, reads unknown to select_dispatch_tier, which excludes nothing for an unknown pool. Read-only.",
+  "description": "iss_c6fbf9ae. Returns every recorded allowance-pool reading, optionally for one profile_id, each with its consumed and remaining percent, as_of, next_reset_at, expires_at, effective_expiry, source, recorded_by and a state of current or expired judged at call time, plus how many are current. A pool with no row here, or only an expired one, reads unknown to select_dispatch_tier, which excludes nothing for an unknown pool. Read-only. Optional history=true returns immutable record/correction/retraction snapshots oldest first by (recorded_at,id). after_id is the previous next_cursor; limit is 1..200 (default 50), assembled from primitive pages of at most 100. Unknown after_id or limits 0/201 are parameter_invalid. Default current-reading output is unchanged.",
   "embedding_description": "Looking up which subscription plan usage windows currently have a recorded percentage reading, which of those have lapsed, and who recorded each, to learn which readings automated model selection still applies.",
   "processor_policy_category": "edge",
   "result_processor_customizations": {
     "action_label": "Allowance readings listed",
     "result_type": "read_allowance_pool_readings_result",
-    "result_description": "readings (each with profile_id, pool_id, consumed, remaining, as_of, next_reset_at, expires_at, effective_expiry, state current or expired, source, recorded_by, recorded_at), current_readings, as_of.",
+    "result_description": "readings (each with profile_id, pool_id, consumed, remaining, as_of, next_reset_at, expires_at, effective_expiry, state current or expired, source, recorded_by, recorded_at), current_readings, as_of. With history=true: history rows and next_cursor (null at exhaustion).",
     "presentation_guidance": "List pool by pool with percent consumed and remaining and the time the reading stops counting. Call out every expired reading first; those readings no longer count.",
     "output_action_guidance": "To keep an exhausted pool excluded, record a fresh reading with record_allowance_pool_reading. A pool with no row is simply unknown and excludes nothing."
   },

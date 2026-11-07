@@ -16,12 +16,16 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from ..constants import (
     ACCESS_TOKEN_EARLY_REFRESH_SECONDS,
+    ACCESS_TOKEN_VALUE_KEY_ACCOUNT_EMAIL,
+    ACCESS_TOKEN_VALUE_KEY_ACCOUNT_TIER,
     ACCESS_TOKEN_VALUE_KEY_EXPIRES_AT,
+    ACCESS_TOKEN_VALUE_KEY_GRANTED_SCOPES,
     ACCESS_TOKEN_VALUE_KEY_TOKEN,
+    ACCOUNT_TIER_UNKNOWN,
     ERROR_AUTH_EXPIRED,
     ERROR_NOT_CONNECTED,
     ERROR_REFRESH_TOKEN_ROTATE_FAILED,
@@ -35,6 +39,24 @@ from ..constants import (
 )
 from .app_config import AppConfigError, AppConfigLoader
 from .oauth_client import refresh_access_token
+
+_FACT_KEYS = (
+    ACCESS_TOKEN_VALUE_KEY_GRANTED_SCOPES,
+    ACCESS_TOKEN_VALUE_KEY_ACCOUNT_EMAIL,
+    ACCESS_TOKEN_VALUE_KEY_ACCOUNT_TIER,
+)
+
+# Google's documented limit for an External OAuth client in Testing mode: its
+# refresh tokens expire 7 days after consent (invalid_grant on the next refresh).
+_REAUTH_GUIDANCE = (
+    "Google rejected the stored refresh token (invalid_grant), so the account must be "
+    "reconnected. The most common cause: a self-registered External OAuth client whose "
+    "consent screen is in Testing mode, where Google expires refresh tokens 7 days after "
+    "consent. Other causes: the user revoked access, changed the password, or the token "
+    "went 6 months unused. Reconnect: run start_interface, then connect_account, open the "
+    "returned authorize_url and approve. To stop the weekly expiry, set the app's OAuth "
+    "consent screen publishing status to In production in Google Cloud console."
+)
 
 
 class TokenStoreError(RuntimeError):
@@ -52,7 +74,14 @@ class TokenStore:
     plugin never imports from macos_vault_plugin.
     """
 
-    def __init__(self, vault_service: Any, app_config_loader: AppConfigLoader) -> None:
+    def __init__(
+        self,
+        vault_service: Any,
+        app_config_loader: AppConfigLoader,
+        *,
+        refresh_key: str = VAULT_KEY_REFRESH_TOKEN,
+        access_key: str = VAULT_KEY_ACCESS_TOKEN,
+    ) -> None:
         if vault_service is None:
             raise TokenStoreError(
                 ERROR_VAULT_NOT_AVAILABLE,
@@ -60,6 +89,9 @@ class TokenStore:
             )
         self._vault = vault_service
         self._app_config_loader = app_config_loader
+        # One account's key pair; the defaults are the legacy single-account pair.
+        self._refresh_key = refresh_key
+        self._access_key = access_key
 
     # ------------------------------------------------------------------
     # Bootstrap write path — called by the OAuth callback handler
@@ -71,9 +103,64 @@ class TokenStore:
         access_token: str,
         expires_in: int,
     ) -> None:
-        """Write both tokens after a successful authorization_code exchange."""
+        """Write both tokens after a successful authorization_code exchange.
+
+        A new consent starts with no recorded credential facts; the callback
+        records them with :meth:`record_credential_facts` right after.
+        """
         self._write_refresh_token(refresh_token)
-        self._write_access_token(access_token, expires_in)
+        self._write_envelope(_build_access_envelope(access_token, expires_in, {}))
+
+    def record_credential_facts(
+        self,
+        *,
+        granted_scopes: tuple[str, ...],
+        account_email: str,
+        account_tier: str,
+    ) -> None:
+        """Record what Google granted and which account tier signed in.
+
+        Stored on the access envelope and carried across every refresh, so a
+        missing-scope error and test_connection can name the actual grant.
+        """
+        envelope = self._read_envelope()
+        if envelope is None:
+            raise TokenStoreError(ERROR_NOT_CONNECTED, "No access token stored to record credential facts on.")
+        envelope[ACCESS_TOKEN_VALUE_KEY_GRANTED_SCOPES] = list(granted_scopes)
+        envelope[ACCESS_TOKEN_VALUE_KEY_ACCOUNT_EMAIL] = account_email
+        envelope[ACCESS_TOKEN_VALUE_KEY_ACCOUNT_TIER] = account_tier
+        self._write_envelope(json.dumps(envelope, separators=(",", ":")))
+
+    def credential_facts(self) -> dict[str, Any]:
+        """The recorded grant and tier; ``None``/"unknown" when never recorded."""
+        envelope = self._read_envelope() or {}
+        scopes = envelope.get(ACCESS_TOKEN_VALUE_KEY_GRANTED_SCOPES)
+        granted = [str(scope) for scope in scopes] if isinstance(scopes, list) else None  # pyright: ignore[reportUnknownVariableType]
+        email = envelope.get(ACCESS_TOKEN_VALUE_KEY_ACCOUNT_EMAIL)
+        tier = envelope.get(ACCESS_TOKEN_VALUE_KEY_ACCOUNT_TIER)
+        return {
+            "granted_scopes": granted,
+            "account_email": email if isinstance(email, str) else "",
+            "account_tier": tier if isinstance(tier, str) and tier else ACCOUNT_TIER_UNKNOWN,
+        }
+
+    def issued_secrets(self) -> list[str]:
+        """Every secret this credential holds, for redaction (never logged)."""
+        secrets: list[str] = []
+        refresh_value = self._read_value(self._refresh_key)
+        if refresh_value:
+            secrets.append(refresh_value)
+        envelope = self._read_envelope() or {}
+        access_value = envelope.get(ACCESS_TOKEN_VALUE_KEY_TOKEN)
+        if isinstance(access_value, str) and access_value:
+            secrets.append(access_value)
+        try:
+            client_secret = self._app_config_loader.load().client_secret
+        except Exception:  # noqa: BLE001 — redaction must still run on the tokens it has
+            client_secret = ""
+        if client_secret:
+            secrets.append(client_secret)
+        return secrets
 
     # ------------------------------------------------------------------
     # Runtime read path — called by the service factory
@@ -87,9 +174,43 @@ class TokenStore:
                 return cached
         return self._refresh_and_persist()
 
+    @property
+    def refresh_key(self) -> str:
+        return self._refresh_key
+
+    @property
+    def access_key(self) -> str:
+        return self._access_key
+
+    def read_raw_pair(self) -> tuple[str | None, str | None]:
+        """The stored refresh token and access envelope, verbatim (account migration)."""
+        return self._read_value(self._refresh_key), self._read_value(self._access_key)
+
+    def write_raw_pair(self, refresh_token: str, access_envelope: str | None) -> None:
+        """Write a refresh token and access envelope verbatim (account migration)."""
+        self._write_refresh_token(refresh_token)
+        if access_envelope is not None:
+            self._write_envelope(access_envelope)
+
+    def delete_all(self) -> None:
+        """Delete this account's refresh token and access envelope from vault."""
+        for key in (self._refresh_key, self._access_key):
+            if self._exists(key):
+                self._vault.delete(key)
+
+    def token_health(self) -> str:
+        """No-network health word: access_token_fresh, refreshes_on_next_call or missing_refresh_token."""
+        if not self._exists(self._refresh_key):
+            return "missing_refresh_token"
+        envelope = self._read_envelope() or {}
+        expires_raw = envelope.get(ACCESS_TOKEN_VALUE_KEY_EXPIRES_AT)
+        if isinstance(expires_raw, str) and _is_token_fresh(datetime.fromisoformat(expires_raw)):
+            return "access_token_fresh"
+        return "refreshes_on_next_call"
+
     def is_connected(self) -> bool:
         """True when a refresh token is present in vault."""
-        return self._exists(VAULT_KEY_REFRESH_TOKEN)
+        return self._exists(self._refresh_key)
 
     # ------------------------------------------------------------------
     # Internal — refresh path
@@ -101,7 +222,7 @@ class TokenStore:
         except AppConfigError as exc:
             raise TokenStoreError(exc.code, str(exc)) from exc
 
-        refresh_value = self._read_value(VAULT_KEY_REFRESH_TOKEN)
+        refresh_value = self._read_value(self._refresh_key)
         if refresh_value is None:
             raise TokenStoreError(
                 ERROR_NOT_CONNECTED,
@@ -124,11 +245,11 @@ class TokenStore:
     # ------------------------------------------------------------------
 
     def _write_refresh_token(self, refresh_token: str) -> None:
-        if self._exists(VAULT_KEY_REFRESH_TOKEN):
-            result = self._vault.rotate(VAULT_KEY_REFRESH_TOKEN, refresh_token)
+        if self._exists(self._refresh_key):
+            result = self._vault.rotate(self._refresh_key, refresh_token)
         else:
             result = self._vault.store(
-                key=VAULT_KEY_REFRESH_TOKEN,
+                key=self._refresh_key,
                 value=refresh_token,
                 tags=[VAULT_TAG_REFRESH_TOKEN],
                 metadata={"issued_at": datetime.now(UTC).isoformat()},
@@ -136,7 +257,7 @@ class TokenStore:
         _require_completed(result, "refresh-token vault write failed")
 
     def _rotate_refresh_token(self, new_refresh_token: str) -> None:
-        result = self._vault.rotate(VAULT_KEY_REFRESH_TOKEN, new_refresh_token)
+        result = self._vault.rotate(self._refresh_key, new_refresh_token)
         if not _is_completed(result):
             raise TokenStoreError(
                 ERROR_REFRESH_TOKEN_ROTATE_FAILED,
@@ -144,12 +265,26 @@ class TokenStore:
             )
 
     def _write_access_token(self, access_token: str, expires_in: int) -> None:
-        envelope = _build_access_envelope(access_token, expires_in)
-        if self._exists(VAULT_KEY_ACCESS_TOKEN):
-            result = self._vault.rotate(VAULT_KEY_ACCESS_TOKEN, envelope)
+        previous = self._read_envelope() or {}
+        facts = {key: previous[key] for key in _FACT_KEYS if key in previous}
+        self._write_envelope(_build_access_envelope(access_token, expires_in, facts))
+
+    def _read_envelope(self) -> dict[str, Any] | None:
+        envelope = self._read_value(self._access_key)
+        if envelope is None:
+            return None
+        try:
+            payload: Any = json.loads(envelope)
+        except ValueError:
+            return None
+        return cast(dict[str, Any], payload) if isinstance(payload, dict) else None
+
+    def _write_envelope(self, envelope: str) -> None:
+        if self._exists(self._access_key):
+            result = self._vault.rotate(self._access_key, envelope)
         else:
             result = self._vault.store(
-                key=VAULT_KEY_ACCESS_TOKEN,
+                key=self._access_key,
                 value=envelope,
                 tags=[VAULT_TAG_ACCESS_TOKEN],
                 metadata={},
@@ -157,7 +292,7 @@ class TokenStore:
         _require_completed(result, "access-token vault write failed")
 
     def _read_cached_access_token(self) -> str | None:
-        envelope = self._read_value(VAULT_KEY_ACCESS_TOKEN)
+        envelope = self._read_value(self._access_key)
         if envelope is None:
             return None
         token, expires_at = _parse_access_envelope(envelope)
@@ -186,20 +321,17 @@ class TokenStore:
 def _classify_refresh_error(exc: Exception) -> TokenStoreError:
     error_text = str(exc).lower()
     if "invalid_grant" in error_text or "invalid_client" in error_text:
-        return TokenStoreError(
-            ERROR_AUTH_EXPIRED,
-            "Google refresh token was revoked or expired. Run connect_account "
-            "to re-authenticate.",
-        )
+        return TokenStoreError(ERROR_AUTH_EXPIRED, _REAUTH_GUIDANCE)
     return TokenStoreError(ERROR_TOKEN_EXCHANGE_FAILED, f"Google token refresh failed: {exc}")
 
 
-def _build_access_envelope(access_token: str, expires_in: int) -> str:
+def _build_access_envelope(access_token: str, expires_in: int, facts: dict[str, Any]) -> str:
     expires_at = datetime.now(UTC) + timedelta(seconds=expires_in)
     return json.dumps(
         {
             ACCESS_TOKEN_VALUE_KEY_TOKEN: access_token,
             ACCESS_TOKEN_VALUE_KEY_EXPIRES_AT: expires_at.isoformat(),
+            **facts,
         },
         separators=(",", ":"),
     )

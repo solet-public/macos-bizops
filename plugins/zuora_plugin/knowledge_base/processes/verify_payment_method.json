@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::verify_payment_method",
+  "display_name": "Zuora: Verify Payment Method",
+  "description": "Verify a card or PayPal payment method with its gateway (PUT /v1/payment-methods/{payment-method-id}/verify): a zero or one dollar authorization or a billing-agreement check; body is optional. Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "Check that a stored card or PayPal agreement still works by having the payment gateway run a zero or one dollar authorization or a billing-agreement status check. Use before a large charge or after a customer updates their card.",
+  "result_processor_customizations": {
+    "action_label": "Zuora payment method verified",
+    "result_type": "zuora_verify_payment_method_result",
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+  },
+  "error_processor_customizations": {
+    "action_context": "Verify a card or PayPal payment method with its gateway (PUT /v1/payment-methods/{payment-method-id}/verify): a zero or one dollar authorization or a billing-agreement check; body is optional.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape: a bad identifier, header value or query pairing, a body missing a required field, or an unreadable upload file. zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.validation_failed is a vendor 4xx or an HTTP 200 carrying success false, with Zuora's reasons. zuora.object_not_found, zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the needed Payments or Payment Methods permission or enable the vendor feature the reason names (for example Invoice Settlement). Read current vendor state with the matching get or list verb before retrying a write; pass an idempotency_key where offered. Back off on rate limits."
+  }
+}

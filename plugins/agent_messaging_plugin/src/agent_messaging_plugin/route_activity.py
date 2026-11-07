@@ -23,10 +23,12 @@ already accepts.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import TYPE_CHECKING
 
+from .bridge_sessions import run_bridge_work
 from .http_routes import API_PREFIX
 
 if TYPE_CHECKING:
@@ -105,10 +107,7 @@ def classify_route(path_template: str) -> str | None:
     return None
 
 
-_MODEL_ROUTE_REGEXES: tuple[re.Pattern[str], ...] = tuple(
-    re.compile("^" + re.sub(r"\{[^}]+\}", "[^/]+", tmpl) + "$")
-    for tmpl in MODEL_INITIATED_ROUTES
-)
+_MODEL_ROUTE_REGEXES: tuple[re.Pattern[str], ...] = tuple(re.compile("^" + re.sub(r"\{[^}]+\}", "[^/]+", tmpl) + "$") for tmpl in MODEL_INITIATED_ROUTES)
 _BRIDGE_ID_RE: re.Pattern[str] = re.compile(rf"^{re.escape(_P)}/(?P<bridge_id>[^/]+)/")
 
 
@@ -139,8 +138,13 @@ def stamp_model_activity_for_bridge(
     if bridge is None or bridge.agent_instance_id is None:
         return
     stamp = bridge.stamp_model_activity()
+    _mirror_model_activity(peer_registry, bridge.agent_instance_id, stamp, bridge_id)
+
+
+def _mirror_model_activity(peer_registry: PeerRegistry, agent_instance_id: str, stamp: str, bridge_id: str) -> None:
+    """Mirror the timestamp captured on the request loop, never a later time."""
     try:
-        peer_registry.stamp_model_activity(bridge.agent_instance_id, stamp)
+        peer_registry.stamp_model_activity(agent_instance_id, stamp)
     except Exception:  # noqa: BLE001 — the mirror is best-effort; the in-memory stamp is authoritative
         logger.warning(
             "model-activity mirror failed for bridge %s (in-memory stamp kept)",
@@ -152,9 +156,7 @@ def stamp_model_activity_for_bridge(
 def make_model_activity_middleware(
     bridge_manager: BridgeSessionManager,
     peer_registry: PeerRegistry,
-) -> Callable[
-    [Request, Callable[[Request], Awaitable[Response]]], Awaitable[Response]
-]:
+) -> Callable[[Request, Callable[[Request], Awaitable[Response]]], Awaitable[Response]]:
     """Build the ASGI-http middleware that stamps model activity on model routes.
 
     Runs after the handler: if the request path is a model-initiated bridge
@@ -165,6 +167,22 @@ def make_model_activity_middleware(
     is still a call the model made); a stale/gone bridge simply no-ops.
     """
 
+    # Keep tasks alive and serialize mirrors for one identity. Slow writes may
+    # finish after newer requests; they must not regress the durable timestamp.
+    pending: dict[str, asyncio.Task[None]] = {}
+
+    async def mirror_after(previous: asyncio.Task[None] | None, agent_instance_id: str, stamp: str, bridge_id: str) -> None:
+        if previous is not None:
+            await asyncio.shield(previous)
+        try:
+            await run_bridge_work(_mirror_model_activity, peer_registry, agent_instance_id, stamp, bridge_id)
+        except Exception:  # noqa: BLE001 — executor faults also keep the authoritative stamp and response
+            logger.warning("model-activity mirror scheduling failed for bridge %s (in-memory stamp kept)", bridge_id, exc_info=True)
+
+    def forget(agent_instance_id: str, task: asyncio.Task[None]) -> None:
+        if pending.get(agent_instance_id) is task:
+            del pending[agent_instance_id]
+
     async def model_activity_middleware(
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
@@ -174,9 +192,15 @@ def make_model_activity_middleware(
         if is_model_initiated_path(path):
             bridge_id = bridge_id_from_path(path)
             if bridge_id is not None:
-                stamp_model_activity_for_bridge(
-                    bridge_manager, peer_registry, bridge_id,
-                )
+                bridge = bridge_manager.get(bridge_id)
+                if bridge is not None and bridge.agent_instance_id is not None:
+                    agent_instance_id = bridge.agent_instance_id
+                    # Authoritative consumption evidence is captured now, before
+                    # returning the response; only the durable mirror is queued.
+                    stamp = bridge.stamp_model_activity()
+                    task = asyncio.create_task(mirror_after(pending.get(agent_instance_id), agent_instance_id, stamp, bridge_id))
+                    pending[agent_instance_id] = task
+                    task.add_done_callback(lambda done, identity=agent_instance_id: forget(identity, done))
         return response
 
     return model_activity_middleware

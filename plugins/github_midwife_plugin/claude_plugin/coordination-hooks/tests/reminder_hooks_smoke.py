@@ -24,34 +24,31 @@ import sys
 # Must precede the _harness import — see manifest_consistency_smoke.py for why.
 sys.dont_write_bytecode = True
 
+import contextlib  # noqa: E402
+import importlib.util  # noqa: E402
+import io  # noqa: E402
 import json  # noqa: E402
+import os  # noqa: E402
 from typing import Any  # noqa: E402
+from unittest.mock import patch  # noqa: E402
 
 from _harness import HOOKS_DIR, Results, preflight, run_hook  # noqa: E402
 
-REMINDERS = ("step_zero_reminder.py", "check_messages_reminder.py", "role_binding_reminder.py")
+REMINDERS = ("step_zero_reminder.py",)
 
 # Hooks that read Claude Code's stdin payload to learn which event fired.
 # step_zero joined 2026-08-11 (§41): its previously hardcoded tag silently
 # desynced from hooks.json when the cadence move rebound it to SessionStart.
-STDIN_AWARE = (
-    "step_zero_reminder.py",
-    "check_messages_reminder.py",
-    "role_binding_reminder.py",
-)
+STDIN_AWARE = REMINDERS
 
 # The single hook SECURITY.md discloses as interpolating a value.
-INTERPOLATING = ("role_binding_reminder.py",)
+INTERPOLATING: tuple[str, ...] = ()
 
 # Each hook's compiled-in default event name, used when stdin is absent or junk.
 # These are FALLBACKS only — the authoritative tag-vs-wiring assertion is
 # `check_manifest_bound_events_echo`, which derives the expected events from
 # hooks.json itself instead of asserting a literal that can go stale (§41).
-DEFAULT_EVENT = {
-    "step_zero_reminder.py": "SessionStart",
-    "check_messages_reminder.py": "UserPromptSubmit",
-    "role_binding_reminder.py": "SessionStart",
-}
+DEFAULT_EVENT = {"step_zero_reminder.py": "SessionStart"}
 
 LABEL_A = "Coordinator-Day"
 LABEL_B = "Architect-Night"
@@ -110,30 +107,6 @@ def _context(res: Results, hook: str, label: str, stdin: str = "") -> str | None
 
 #: Reminders that still have an arm condition, and the variable that arms them.
 #: step_zero is deliberately ABSENT — it has no condition at all (§7).
-_CONDITIONAL_REMINDERS = {
-    "check_messages_reminder.py": "AGENT_SESSION_ID",
-    "role_binding_reminder.py": "AGENT_SESSION_LABEL",
-}
-
-
-def check_disarmed_is_silent(res: Results) -> None:
-    """Each CONDITIONAL reminder is silent without ITS OWN variable.
-
-    ★ §7 2026-08-01 — this leg no longer covers step_zero, and the omission is
-    the point: step_zero is now unconditional, so a "disarmed step_zero" case
-    would assert the opposite of the contract. Its inverted leg is
-    `check_step_zero_fires_everywhere` below.
-
-    The environment CANNOT leak either variable in: the harness scrubs both via
-    GUARD_VARS, so a case that omits one is genuinely without it rather than
-    quietly inheriting the launcher's.
-    """
-    for hook, var in _CONDITIONAL_REMINDERS.items():
-        proc = run_hook(hook, env={})
-        res.check(proc.returncode == 0, f"{hook} disarmed exits 0", f"exit {proc.returncode}")
-        res.check(proc.stdout == "", f"{hook} disarmed writes no stdout ({var} absent)",
-                  f"got {proc.stdout[:120]!r}")
-        res.check(proc.stderr == "", f"{hook} disarmed writes no stderr", f"got {proc.stderr[:120]!r}")
 
 
 def check_step_zero_fires_everywhere(res: Results) -> None:
@@ -153,13 +126,10 @@ def check_step_zero_fires_everywhere(res: Results) -> None:
     hook = "step_zero_reminder.py"
     bare = run_hook(hook, env={})
     res.check(bare.returncode == 0, f"{hook} exits 0 with no env", f"exit {bare.returncode}")
-    res.check(bare.stdout != "", f"{hook} FIRES with no env at all (awareness is unconditional)",
-              "emitted nothing — a re-added env condition is the likely cause")
+    res.check(bare.stdout != "", f"{hook} FIRES with no env at all (awareness is unconditional)", "emitted nothing — a re-added env condition is the likely cause")
     res.check(bare.stderr == "", f"{hook} writes no stderr with no env", f"got {bare.stderr[:120]!r}")
     labelled = run_hook(hook, env=_armed())
-    res.check(bare.stdout == labelled.stdout,
-              f"{hook} output is BYTE-IDENTICAL labelled vs unlabelled",
-              "output differs — the literal is carrying fleet context")
+    res.check(bare.stdout == labelled.stdout, f"{hook} output is BYTE-IDENTICAL labelled vs unlabelled", "output differs — the literal is carrying fleet context")
 
 
 def check_step_zero_text_verify(res: Results) -> None:
@@ -216,9 +186,7 @@ def check_step_zero_text_verify(res: Results) -> None:
         f"got: {context!r}",
     )
     res.check(
-        "knowledge base" in context
-        and "working directory" in context
-        and context.index("knowledge base") < context.index("working directory"),
+        "knowledge base" in context and "working directory" in context and context.index("knowledge base") < context.index("working directory"),
         "step_zero orders the knowledge base before the working directory's docs",
         f"got: {context!r}",
     )
@@ -383,43 +351,34 @@ def check_fixed_literal_claim(res: Results) -> None:
             )
 
 
-def check_label_injection_is_escaped(res: Results) -> None:
-    """A hostile label must never restructure the emitted JSON."""
-    for hook in INTERPOLATING:
-        for label in INJECTION_LABELS:
-            proc = run_hook(hook, env=_armed(label))
-            payload = _parse(res, proc.stdout, f"{hook} label={label[:24]!r}")
-            if payload is None:
-                continue
-            res.check(
-                set(payload) == {"hookSpecificOutput"},
-                f"{hook} keeps one top-level key under a hostile label",
-                f"got {sorted(payload)} for {label!r}",
-            )
-            inner = payload.get("hookSpecificOutput")
-            if not isinstance(inner, dict):
-                res.fail(f"{hook} hookSpecificOutput", f"not an object for {label!r}")
-                continue
-            res.check(
-                set(inner) == {"hookEventName", "additionalContext"},
-                f"{hook} keeps exactly two fields under a hostile label",
-                f"got {sorted(inner)} for {label!r}",
-            )
-            context = inner.get("additionalContext", "")
-            # The hook embeds JSON.stringify(label), so the ESCAPED form is what
-            # appears in the text -- that escaping is precisely the property under
-            # test. Finding the raw label instead would mean it went in unescaped.
-            res.check(
-                isinstance(context, str) and json.dumps(label) in context,
-                f"{hook} embeds the hostile label in escaped form",
-                f"JSON.stringify form of {label!r} not found in the injected text",
-            )
+def check_live_context_null_stdin(res: Results) -> None:
+    """A None stdin is the empty event: live context exits zero with the {} output."""
+    spec = importlib.util.spec_from_file_location("session_start_context", HOOKS_DIR / "session_start_context.py")
+    if spec is None or spec.loader is None:
+        res.check(False, "session_start_context.py loads for the null-stdin case")
+        return
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    env = {"PROJECT_SOLET_CLI": "/nonexistent/psolet", "SOLET_BRIDGE": "/nonexistent/bridge"}
+    codes: list[int] = []
+    outputs: list[str] = []
+    for stdin in (None, io.StringIO("{}")):
+        buffer = io.StringIO()
+        with patch.dict(os.environ, env), patch.object(sys, "stdin", stdin), contextlib.redirect_stdout(buffer):
+            for name in ("AGENT_SESSION_ID", "AGENT_INSTANCE_ID", "SOLET_NAME"):
+                os.environ.pop(name, None)
+            codes.append(module.main())
+        outputs.append(buffer.getvalue())
+    res.check(
+        codes == [0, 0] and outputs[0] != "" and outputs[0] == outputs[1],
+        "live context with None stdin exits zero with the same output as the {} event",
+        repr((codes, outputs)),
+    )
 
 
 def main() -> int:
     preflight()
     res = Results("coordination-hooks — reminder hooks")
-    check_disarmed_is_silent(res)
     check_step_zero_fires_everywhere(res)
     check_step_zero_text_verify(res)
     check_armed_emits_valid_context(res)
@@ -428,7 +387,7 @@ def main() -> int:
     check_manifest_bound_events_echo(res)
     check_malformed_stdin_degrades(res)
     check_fixed_literal_claim(res)
-    check_label_injection_is_escaped(res)
+    check_live_context_null_stdin(res)
     return res.finish()
 
 

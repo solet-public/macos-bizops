@@ -1,0 +1,2 @@
+# PASS-BEFORE-AND-AFTER guard for the event-embedding drain's owned worker.
+ananta/tests/llm/session_ledger/event_embedding_loop_responsiveness_smoke.py

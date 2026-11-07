@@ -1,7 +1,9 @@
 """Quality Service Interface — run the platform's own quality gates + smokes.
 
 The platform ships a suite of quality gates (``quality_gates/*.py``) and a
-gate-eligible smoke register (``quality_gates/gate_smokes.txt``). This
+gate-eligible smoke register (``quality_gates/gate_smokes.txt`` together with
+every fragment under ``quality_gates/gate_smokes.d/``, which register smokes on
+equal terms). This
 service exposes three thin, allowlist-only verbs over that machinery so an
 external MCP client (or the ``run_joseki`` driver's live e2e run) can
 enumerate the gates, run one gate by name, and run the smoke suite —
@@ -34,27 +36,83 @@ if TYPE_CHECKING:
     from ananta.core.services.call_context import CallContext
 
 
-class QualityServiceInterface(ABC):
-    """Enumerate, run, and read-only verify platform quality/landing evidence."""
-
-    INTERFACE_VERSION: ClassVar[str] = "1.1.0"
+class QualitySmokeProofInterface(ABC):
+    """The coherent frozen-selection, proof and campaign contract."""
 
     @abstractmethod
-    def list_gates(
-        self, *, call_context: CallContext | None = None
-    ) -> dict[str, Any]:
+    def select_smokes(self, request: dict[str, Any], *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Compute immutable focused selection and current clean proof reuse."""
+        ...
+
+    @abstractmethod
+    def run_selected_smokes(self, request: dict[str, Any], *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Execute the complete computed selection and append honest per-smoke attempts."""
+        ...
+
+    @abstractmethod
+    def get_smoke_proof(self, key: str, as_of: int | None = None, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Read the current or historical smoke proof projection."""
+        ...
+
+    @abstractmethod
+    def list_smoke_proofs(self, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """List current smoke proof projections without modifying history."""
+        ...
+
+    @abstractmethod
+    def get_smoke_proof_history(self, key: str, as_of: int | None = None, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Read immutable smoke proof history, optionally through one version."""
+        ...
+
+    @abstractmethod
+    def correct_smoke_proof(self, key: str, metadata: dict[str, Any], expected_version: int, reason: str, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Set or correct optional proof links with current-version authorization."""
+        ...
+
+    @abstractmethod
+    def clear_smoke_proof(self, key: str, fields: list[str], clear_reuse: bool, expected_version: int, reason: str, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Clear optional metadata or active reuse while retaining all observations."""
+        ...
+
+    @abstractmethod
+    def retire_smoke_proof(self, key: str, expected_version: int, reason: str, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Retire a proof from reuse with append-only versioned history."""
+        ...
+
+    @abstractmethod
+    def reinstate_smoke_proof(self, key: str, request: dict[str, Any], expected_version: int, reason: str, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Revalidate a current frozen input key before reinstating a clean proof."""
+        ...
+
+    @abstractmethod
+    def ensure_full_smoke_schedule(self, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Ensure the six-hour full battery and five-minute durable retry schedules."""
+        ...
+
+    @abstractmethod
+    def trigger_full_smoke_battery(self, trigger: str = "schedule", *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Queue a full battery or retry pending work off the action queue."""
+        ...
+
+
+class QualityServiceInterface(QualitySmokeProofInterface):
+    """Enumerate, run, and read-only verify platform quality/landing evidence."""
+
+    INTERFACE_VERSION: ClassVar[str] = "1.2.0"
+
+    @abstractmethod
+    def list_gates(self, *, call_context: CallContext | None = None) -> dict[str, Any]:
         """Read-only enumeration of the server-side gate registry + smoke register.
 
-        Returns the known gates (name, kind, description, whether directly
-        runnable via ``run_gate`` or only via the aggregate, per-gate timeout)
-        and the smoke register read from ``gate_smokes.txt``. Executes nothing.
+        Returns the known gates (name, kind, description, direct/routed status,
+        and ``timeout_seconds``, always ``None`` because there is no per-gate
+        execution deadline) together with the smoke register read from
+        the gate register: ``gate_smokes.txt`` plus its fragments. Executes nothing.
         """
         ...
 
     @abstractmethod
-    def run_gate(
-        self, gate: str, *, call_context: CallContext | None = None
-    ) -> dict[str, Any]:
+    def run_gate(self, gate: str, *, call_context: CallContext | None = None) -> dict[str, Any]:
         """Run ONE gate by allowlisted name; report pass/fail + bounded output.
 
         The name maps to a fixed ``quality_gates/<script>.py`` argv (with
@@ -65,9 +123,7 @@ class QualityServiceInterface(ABC):
         ...
 
     @abstractmethod
-    def run_test(
-        self, smoke: str | None = None, *, call_context: CallContext | None = None
-    ) -> dict[str, Any]:
+    def run_test(self, smoke: str | None = None, *, call_context: CallContext | None = None) -> dict[str, Any]:
         """Run the gate-eligible smoke suite, or one registered smoke by path.
 
         With no argument, runs the full suite via ``run_smokes.py`` against the

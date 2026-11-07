@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::get_opportunities",
+  "display_name": "Marketo: Get Opportunities",
+  "description": "Dispatch an async query of Marketo opportunity records (GET /rest/v1/opportunities.json) by filter_type and up to 300 filter_values. Pages internally at the vendor's 300-per-call ceiling up to 500 rows by default (5000 with acknowledge_default_limit_override plus row_limit). The finished job writes the records to output_tsv_path and reports truncated.",
+  "embedding_description": "Query Marketo opportunity (deal) records by a searchable field and up to 300 values. Async job pages through the vendor's nextPageToken and writes matching opportunities to a workspace TSV, with a truncated flag. Keyed by externalOpportunityId (dedupe) or marketoGUID. Distinct from describe_opportunities, which returns the schema.",
+  "result_processor_customizations": {
+    "action_label": "Marketo opportunities query job dispatched",
+    "result_type": "marketo_get_opportunities_result",
+    "result_description": "Dict with job_id and status 'queued'. The completed job result (via check_marketo_job_status) is a TSV handle: path, columns, row_count, and truncated (true when more records may exist beyond the row limit).",
+    "presentation_guidance": "Confirm the job was dispatched and give the job_id; the records are not available until check_marketo_job_status reports completed. Then state the TSV path and row_count and say plainly when truncated is true."
+  },
+  "error_processor_customizations": {
+    "action_context": "Read Marketo opportunities from the configured instance.",
+    "error_interpretation": "marketo.invalid_params: refused at dispatch before any vendor call (missing or malformed parameters, more than 300 entries, an action/dedupe_by/delete_by value Marketo does not define, or an output_tsv_path outside export_allowed_roots). On the finished job: marketo.permission_denied (vendor 603 or HTTP 403) means the API user's Role lacks the Access API permission; marketo.auth_failed (601/602 after one re-mint, or HTTP 401) means the credential was rejected; marketo.validation_failed and other vendor codes carry Marketo's own message.",
+    "recovery_guidance": "marketo.permission_denied: grant Read-Only Opportunity (or Read-Write Opportunity) under Admin > Users & Roles > Roles > the API role > Access API, then retry. Adobe documents some Lead Database object APIs as unavailable on subscriptions with a native CRM sync; that vendor error is reported as returned."
+  }
+}

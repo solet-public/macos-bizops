@@ -19,12 +19,14 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 from ..constants import (
     DEFAULT_MGMT_SOCKET_PROBE_TIMEOUT_SECONDS,
     DEFAULT_MGMT_SOCKET_RECLAIM_POLL_INTERVAL_SECONDS,
     DEFAULT_MGMT_SOCKET_RECLAIM_WAIT_SECONDS,
 )
+from .mcp_ingress import ROUTER_IO
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +52,7 @@ class MgmtServer:
         socket_path: Path,
         dispatch: DispatchFn,
         reclaim_wait_seconds: float = DEFAULT_MGMT_SOCKET_RECLAIM_WAIT_SECONDS,
-        reclaim_poll_interval_seconds: float = (
-            DEFAULT_MGMT_SOCKET_RECLAIM_POLL_INTERVAL_SECONDS
-        ),
+        reclaim_poll_interval_seconds: float = (DEFAULT_MGMT_SOCKET_RECLAIM_POLL_INTERVAL_SECONDS),
     ) -> None:
         self._socket_path = socket_path
         self._dispatch = dispatch
@@ -65,18 +65,28 @@ class MgmtServer:
         self._bound_identity: tuple[int, int] | None = None
 
     async def start(self) -> None:
-        self._socket_path.parent.mkdir(parents=True, exist_ok=True)
+        await ROUTER_IO.run(self._socket_path.parent.mkdir, parents=True, exist_ok=True)
         await self._reclaim_socket_path()
-        self._server = await asyncio.start_unix_server(
-            self._handle_client, path=str(self._socket_path)
-        )
-        self._socket_path.chmod(0o600)
-        self._bound_identity = self._path_identity()
+        # Do not accept clients during the worker await: permissions are the
+        # management API's authentication boundary and must precede serving.
+        self._server = await asyncio.start_unix_server(self._handle_client, path=str(self._socket_path), start_serving=False)
+        try:
+            self._bound_identity = await ROUTER_IO.run(self._prepare_socket)
+            await self._server.start_serving()
+        except BaseException:
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
+            raise
         logger.info(
             "mgmt: listening on %s (dev/ino %s)",
             self._socket_path,
             self._bound_identity,
         )
+
+    def _prepare_socket(self) -> tuple[int, int] | None:
+        self._socket_path.chmod(0o600)
+        return self._path_identity()
 
     async def _reclaim_socket_path(self) -> None:
         """Take the socket path only if no live router is answering on it.
@@ -110,18 +120,12 @@ class MgmtServer:
         deadline = time.monotonic() + self._reclaim_wait_seconds
         waited_for_incumbent = False
         while True:
-            if not self._socket_path.exists():
+            if not await ROUTER_IO.run(self._socket_path.exists):
                 return
             if await self._probe_status() is None:
                 break
             if time.monotonic() >= deadline:
-                raise RouterSocketBusyError(
-                    f"mgmt socket {self._socket_path} is held by a router that "
-                    f"still answers `status` after "
-                    f"{self._reclaim_wait_seconds:.1f}s. Refusing to unlink a "
-                    "LIVE router's socket — a second router is running against "
-                    "this path. Stop the incumbent before starting this one."
-                )
+                raise RouterSocketBusyError(f"mgmt socket {self._socket_path} is held by a router that still answers `status` after {self._reclaim_wait_seconds:.1f}s. Refusing to unlink a LIVE router's socket — a second router is running against this path. Stop the incumbent before starting this one.")
             waited_for_incumbent = True
             await asyncio.sleep(self._reclaim_poll_interval_seconds)
         if waited_for_incumbent:
@@ -135,7 +139,7 @@ class MgmtServer:
                 self._socket_path,
             )
         try:
-            self._socket_path.unlink()
+            await ROUTER_IO.run(self._socket_path.unlink)
         except FileNotFoundError:
             pass
 
@@ -149,10 +153,8 @@ class MgmtServer:
         writer: asyncio.StreamWriter | None = None
         try:
             async with asyncio.timeout(DEFAULT_MGMT_SOCKET_PROBE_TIMEOUT_SECONDS):
-                reader, writer = await asyncio.open_unix_connection(
-                    str(self._socket_path)
-                )
-                writer.write(json.dumps({"verb": "status", "args": {}}).encode() + b"\n")
+                reader, writer = await asyncio.open_unix_connection(str(self._socket_path))
+                writer.write(b'{"verb": "status", "args": {}}\n')
                 await writer.drain()
                 line = await reader.readline()
         except (TimeoutError, OSError) as exc:
@@ -168,7 +170,7 @@ class MgmtServer:
         if not line.strip():
             return None
         try:
-            payload = json.loads(line.decode("utf-8", errors="replace"))
+            payload = await ROUTER_IO.run(_decode_probe, line)
         except json.JSONDecodeError as exc:
             logger.debug("mgmt: probe reply at %s not JSON: %s", self._socket_path, exc)
             return None
@@ -194,7 +196,7 @@ class MgmtServer:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
-        self._release_socket_path()
+        await ROUTER_IO.run(self._release_socket_path)
 
     def _release_socket_path(self) -> None:
         """Unlink the socket file ONLY if it is still the one we bound.
@@ -225,8 +227,7 @@ class MgmtServer:
             return
         if current != bound:
             logger.warning(
-                "mgmt: socket %s now belongs to another server "
-                "(we bound dev/ino %s, on-disk is %s) — leaving it in place",
+                "mgmt: socket %s now belongs to another server (we bound dev/ino %s, on-disk is %s) — leaving it in place",
                 self._socket_path,
                 bound,
                 current,
@@ -250,7 +251,7 @@ class MgmtServer:
                 if not line:
                     break
                 response = await self._process_line(line)
-                writer.write(json.dumps(response).encode() + b"\n")
+                writer.write(await ROUTER_IO.run(_encode_response, response))
                 await writer.drain()
         except (ConnectionResetError, BrokenPipeError):
             logger.debug("mgmt: client disconnected %s", peer)
@@ -263,7 +264,7 @@ class MgmtServer:
 
     async def _process_line(self, line: bytes) -> dict[str, object]:
         try:
-            payload = json.loads(line.decode())
+            payload = await ROUTER_IO.run(_decode_request, line)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             logger.warning("mgmt: bad request: %s", exc)
             return {"error": "bad_json", "detail": str(exc)}
@@ -280,3 +281,15 @@ class MgmtServer:
         except Exception as exc:
             logger.exception("mgmt: dispatch failed for verb=%s", verb)
             return {"error": "dispatch_failed", "detail": str(exc)}
+
+
+def _decode_probe(line: bytes) -> Any:
+    return json.loads(line.decode("utf-8", errors="replace"))
+
+
+def _decode_request(line: bytes) -> Any:
+    return json.loads(line.decode())
+
+
+def _encode_response(response: dict[str, object]) -> bytes:
+    return json.dumps(response).encode() + b"\n"

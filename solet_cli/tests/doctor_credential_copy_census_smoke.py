@@ -34,9 +34,11 @@ touches the Keychain, or reads a secret value.
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+_SOLET_CLI_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_SOLET_CLI_ROOT / "src"))
 
 from solet_manager.doctor_credential_copy_census import (  # noqa: E402
     _parse_attributes,
@@ -47,6 +49,9 @@ _ID = "doctor::offline_credential_copy_current_v1"
 
 _LIVE = "db_password"
 _OFFLINE = "password"
+
+# A target that ships the offline reader; set by main below a scratch dir.
+_SHIPPED_TARGET = ""
 
 _CHECKS = 0
 
@@ -60,18 +65,27 @@ def _check(condition: bool, message: str) -> None:
 
 class _Record:
     name = "census"
-    target = "/nonexistent/census-target"
+
+    def __init__(self, target: str) -> None:
+        self.target = target
+
+
+def _write_consumer(consumer: Path) -> None:
+    consumer.parent.mkdir(parents=True)
+    consumer.write_text("# fixture: the offline reader this target ships\n", encoding="utf-8")
 
 
 def _advisory(
     items: dict[str, dict[str, str] | None] | Exception,
+    target: str | None = None,
 ) -> dict[str, object]:
     def _reader(_service: str, account: str) -> dict[str, str] | None:
         if isinstance(items, Exception):
             raise items
         return items.get(account)
 
-    results = collect_credential_copy_advisories(_Record(), attribute_reader=_reader)
+    record = _Record(_SHIPPED_TARGET if target is None else target)
+    results = collect_credential_copy_advisories(record, attribute_reader=_reader)
     _check(len(results) == 1, f"the census stopped emitting exactly one check: {len(results)}")
     entry = results[0]
     assert isinstance(entry, dict)
@@ -194,12 +208,7 @@ def _assert_parser_reads_real_security_output() -> None:
     so nothing this test pins depends on what that name is.
     """
 
-    sample = (
-        '    "acct"<blob>="db_password"\n'
-        '    "cdat"<timedate>=0x32303236303632383232303232315A00  "20260628220221Z\\000"\n'
-        '    "mdat"<timedate>=0x32303236303632383232303232315A00  "20260628220221Z\\000"\n'
-        '    "svce"<blob>="census.postgres_state_management_plugin"\n'
-    )
+    sample = '    "acct"<blob>="db_password"\n    "cdat"<timedate>=0x32303236303632383232303232315A00  "20260628220221Z\\000"\n    "mdat"<timedate>=0x32303236303632383232303232315A00  "20260628220221Z\\000"\n    "svce"<blob>="census.postgres_state_management_plugin"\n'
     attributes = _parse_attributes(sample)
     _check(
         attributes.get("acct") == "db_password",
@@ -219,15 +228,61 @@ def _assert_parser_reads_real_security_output() -> None:
     )
 
 
+def _assert_offline_consumer_missing_is_not_applicable() -> None:
+    """A target that ships no offline reader has no raw copy to grade.
+
+    With the reader absent and the raw account absent, the check reads
+    not_applicable: nonblocking, and named by reason. With the reader shipped,
+    the same missing raw account is still the named warning.
+    """
+
+    with tempfile.TemporaryDirectory(dir=_SOLET_CLI_ROOT) as scratch:
+        absent_target = str(Path(scratch) / "no-reader")
+        absent = _advisory(
+            {_LIVE: _item("20260628220221Z", "20260628220221Z"), _OFFLINE: None},
+            target=absent_target,
+        )
+        _check(
+            absent["status"] == "not_applicable",
+            f"target without offline consumer and raw copy: status is {absent['status']}",
+        )
+        _check(
+            absent["reason_code"] == "offline_consumer_not_shipped",
+            f"an unshipped reader was not named: {absent['reason_code']}",
+        )
+        _check(absent["blocking"] is False, "not_applicable must never block a doctor result")
+
+        consumer = Path(scratch) / "with-reader" / "plugins" / "default_knowledge_plugin" / "tools" / "_pg_credentials.py"
+        _write_consumer(consumer)
+        shipped = _advisory(
+            {_LIVE: _item("20260628220221Z", "20260628220221Z"), _OFFLINE: None},
+            target=str(Path(scratch) / "with-reader"),
+        )
+        _check(
+            shipped["status"] == "warn",
+            f"a shipped reader with no raw copy did not warn: {shipped['status']}",
+        )
+        _check(
+            shipped["reason_code"] == "offline_credential_copy_absent",
+            f"a shipped reader with no raw copy was not named: {shipped['reason_code']}",
+        )
+
+
 def main() -> int:
-    _assert_rotation_after_offline_write_is_named()
-    _assert_younger_but_unrotated_is_green()
-    _assert_offline_newer_is_green()
-    _assert_missing_offline_account_is_named()
-    _assert_missing_live_account_is_unknown()
-    _assert_unreadable_keychain_is_unknown_not_green()
-    _assert_missing_dates_are_unknown_not_green()
-    _assert_parser_reads_real_security_output()
+    global _SHIPPED_TARGET
+    with tempfile.TemporaryDirectory(dir=_SOLET_CLI_ROOT) as scratch:
+        consumer = Path(scratch) / "plugins" / "default_knowledge_plugin" / "tools" / "_pg_credentials.py"
+        _write_consumer(consumer)
+        _SHIPPED_TARGET = scratch
+        _assert_offline_consumer_missing_is_not_applicable()
+        _assert_rotation_after_offline_write_is_named()
+        _assert_younger_but_unrotated_is_green()
+        _assert_offline_newer_is_green()
+        _assert_missing_offline_account_is_named()
+        _assert_missing_live_account_is_unknown()
+        _assert_unreadable_keychain_is_unknown_not_green()
+        _assert_missing_dates_are_unknown_not_green()
+        _assert_parser_reads_real_security_output()
     print(f"doctor_credential_copy_census_smoke OK: {_CHECKS} checks passed")
     return 0
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import cast
 
+from ananta.interfaces.state_service_protocol import StateServiceProtocol
 from ananta.llm.session_ledger.base import SessionLedgerRepositoryBase
 from ananta.llm.session_ledger.schema import (
     ID_PREFIX_SUMMARY,
@@ -104,18 +105,22 @@ class SessionLedgerSummarizeMixin(SessionLedgerRepositoryBase):
                 NAMESPACE,
                 {
                     "table": TABLE_SUMMARY,
-                    "record": {
-                        "id": summary_id,
-                        "namespace": NAMESPACE,
-                        "session_id": session_id,
-                        "chunk_index": chunk_index,
-                        "summary_text": clean_summary_text,
-                        "embedding_vector_id": embedding_vector_id,
-                        "generated_at": generated_at,
-                        "generated_by_client_id": generated_by_client_id,
-                        "created_at": now,
-                        "updated_at": now,
-                    },
+                    "record": cast(StateServiceProtocol, self._state).prepare_record(
+                        NAMESPACE,
+                        TABLE_SUMMARY,
+                        {
+                            "id": summary_id,
+                            "namespace": NAMESPACE,
+                            "session_id": session_id,
+                            "chunk_index": chunk_index,
+                            "summary_text": clean_summary_text,
+                            "embedding_vector_id": embedding_vector_id,
+                            "generated_at": generated_at,
+                            "generated_by_client_id": generated_by_client_id,
+                            "created_at": now,
+                            "updated_at": now,
+                        },
+                    ),
                 },
             )
             chunks = txn.query_state(
@@ -135,9 +140,7 @@ class SessionLedgerSummarizeMixin(SessionLedgerRepositoryBase):
                 NAMESPACE,
                 {"table": TABLE_SESSION, "filters": {"id": session_id}},
             )
-            summary_text_is_null = (
-                bool(sessions) and sessions[0].get("summary_text") is None
-            )
+            summary_text_is_null = bool(sessions) and sessions[0].get("summary_text") is None
             if summary_text_is_null or chunk_index >= max_chunk:
                 txn.update_state(
                     NAMESPACE,

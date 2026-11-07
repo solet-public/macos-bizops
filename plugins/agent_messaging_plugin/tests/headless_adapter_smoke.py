@@ -34,8 +34,11 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
+
+from _register_unit_double import FIXTURE_UNIT_ID, fixture_assignment_record  # noqa: E402
 
 from agent_messaging_plugin import headless_adapter  # noqa: E402
 from agent_messaging_plugin.headless_adapter import (  # noqa: E402
@@ -108,7 +111,9 @@ def _stub_worker_hook_files(tmp_dir: Path) -> None:
 
 
 def _configured_driver(
-    tmp_dir: Path, *, popen_fn: Any = None,
+    tmp_dir: Path,
+    *,
+    popen_fn: Any = None,
 ) -> HeadlessHostDriver:
     mcp_config = tmp_dir / ".mcp.json"
     mcp_config.write_text("{}")
@@ -143,7 +148,9 @@ def _restore_env(key: str, val: str | None) -> None:
 
 
 _APP_HOME_DERIVED_ENV_FAMILY = (
-    "APP_HOME", "ANANTA_SESSION_MAPPING_SPOOL_DIR", "AGENT_HEARTBEAT_MARKER_DIR",
+    "APP_HOME",
+    "ANANTA_SESSION_MAPPING_SPOOL_DIR",
+    "AGENT_HEARTBEAT_MARKER_DIR",
     "AGENT_COORDINATION_RECEIPT_PATH",
 )
 
@@ -218,8 +225,7 @@ def test_resolve_default_cwd_falls_back_when_app_home_not_a_checkout() -> None:
         try:
             _check(
                 _resolve_default_cwd() == Path.cwd(),
-                "APP_HOME's parent lacking .git/ananta -> falls back to Path.cwd(), "
-                "never trusts an unvalidated APP_HOME blindly",
+                "APP_HOME's parent lacking .git/ananta -> falls back to Path.cwd(), never trusts an unvalidated APP_HOME blindly",
             )
         finally:
             _restore_env("APP_HOME", orig)
@@ -243,8 +249,7 @@ def test_driver_uses_resolved_default_cwd_when_none_passed() -> None:
             )
             _check(
                 driver._cwd == clone.resolve(),  # noqa: SLF001 -- testing the resolved default directly
-                "a HeadlessHostDriver constructed with cwd=None resolves its "
-                "cwd from APP_HOME's parent, not the process's bare Path.cwd()",
+                "a HeadlessHostDriver constructed with cwd=None resolves its cwd from APP_HOME's parent, not the process's bare Path.cwd()",
             )
         finally:
             _restore_env("APP_HOME", orig)
@@ -275,25 +280,28 @@ def test_resolve_worker_hook_path_falls_back_to_rung2() -> None:
         resolved = _resolve_worker_hook_path(repo_root, "wake_waiter.py")
         _check(
             resolved == rung2,
-            "rung 2 (shipped plugin fallback) resolves when rung 1 is absent -- "
-            "the born-clone case, no .claude/hooks/ directory at all",
+            "rung 2 (shipped plugin fallback) resolves when rung 1 is absent -- the born-clone case, no .claude/hooks/ directory at all",
         )
 
 
 def test_resolve_worker_hook_path_fails_loud_when_neither_rung_resolves() -> None:
+    """An optional hook absent at both rungs warns and retains its key/path."""
     with tempfile.TemporaryDirectory() as tmp:
-        repo_root = Path(tmp)
-        raised = False
+        root = Path(tmp)
+        guard = root / ".claude" / "hooks" / "headless_tool_allowlist_gate.py"
+        guard.parent.mkdir(parents=True)
+        guard.write_text("", encoding="utf-8")
         try:
-            _resolve_worker_hook_path(repo_root, "wake_waiter.py")
+            resolved = _resolve_worker_hook_paths(root)
         except WorkerHookResolutionError as exc:
-            raised = True
-            _check(
-                "wake_waiter.py" in str(exc) and str(repo_root) in str(exc),
-                "the error names the missing file and probes both rung paths, "
-                "never a silent/opaque failure",
-            )
-        _check(raised, "neither rung resolving raises WorkerHookResolutionError, never returns a guess")
+            raise AssertionError("both optional rungs absent settings construction succeeds") from exc
+        print("REACHED both optional rungs absent; guard present", resolved)
+        assert set(resolved) == set(_WORKER_INJECTED_HOOK_FILENAMES), "missing optional keys retained"
+        assert resolved["wake_waiter.py"] == root / ".claude/hooks/wake_waiter.py", "optional intended path"
+        driver = HeadlessHostDriver(cwd=root, solet_name="fixture", permission_mode="default")
+        command = driver._spawn_command(fixture_assignment_record(), label="fixture", transport="watch")
+        assert "--settings" in command, "both optional rungs absent settings construction succeeds"
+        _check(True, "optional absence preserves settings construction and all resolver keys")
 
 
 def test_resolve_worker_hook_paths_resolves_every_required_filename() -> None:
@@ -315,11 +323,7 @@ def test_resolve_worker_hook_paths_resolves_every_required_filename() -> None:
 
 
 def test_spawn_refuses_when_a_worker_hook_resolves_at_neither_rung() -> None:
-    """The end-to-end fail-loud contract: a spawn() whose cwd has NEITHER
-    rung populated for even one required file must refuse via
-    HostCannotSpawnError (never emit generated settings referencing a
-    missing path), and the underlying WorkerHookResolutionError's detail
-    must survive into that error's message."""
+    """An armed security gate missing at both rungs retains spawn refusal."""
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         mcp_config = tmp_dir / ".mcp.json"
@@ -332,25 +336,31 @@ def test_spawn_refuses_when_a_worker_hook_resolves_at_neither_rung() -> None:
             permission_mode="bypassPermissions",
             mcp_config_path=mcp_config,
             cwd=tmp_dir,
+            popen_fn=lambda *args, **kwargs: _FakeProc(pid=4242),
         )
         raised = False
         try:
-            driver.spawn({"agent_instance_id": "agi-ladder-refuse"})
+            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-ladder-refuse", "allowed_tools": ["Read"]})
         except HostCannotSpawnError as exc:
             raised = True
             _check(
                 "resolves at neither rung" in str(exc),
                 "HostCannotSpawnError carries the underlying ladder failure's own detail",
             )
-        _check(raised, "spawn() refuses via HostCannotSpawnError when a required worker hook is unresolvable")
+        print("REACHED armed missing guard refusal", raised)
+        assert raised, "armed missing guard refused"
+        _check(raised, "spawn() refuses via HostCannotSpawnError when the security guard is unresolvable")
 
 
 def test_verify_config_remedies_are_independent() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         unconfigured = HeadlessHostDriver(
-            claude_bin="/nonexistent/claude", solet_name="", permission_mode="",
-            mcp_config_path=tmp_dir / "missing.json", cwd=tmp_dir,
+            claude_bin="/nonexistent/claude",
+            solet_name="",
+            permission_mode="",
+            mcp_config_path=tmp_dir / "missing.json",
+            cwd=tmp_dir,
         )
         # transport="mcp" is what makes the MCP-config remedy reachable at
         # all (Dax Part 36 §36.3) -- see the dedicated watch/mcp legs below.
@@ -360,10 +370,7 @@ def test_verify_config_remedies_are_independent() -> None:
             f"all 4 remedies fire when nothing is configured, mcp transport (got {len(remedies)})",
         )
         _check(
-            any("claude" in r for r in remedies)
-            and any("SOLET_NAME" in r for r in remedies)
-            and any("permission mode" in r for r in remedies)
-            and any("MCP config" in r for r in remedies),
+            any("claude" in r for r in remedies) and any("SOLET_NAME" in r for r in remedies) and any("permission mode" in r for r in remedies) and any("MCP config" in r for r in remedies),
             "each remedy names its own specific gap",
         )
         configured = _configured_driver(tmp_dir)
@@ -392,7 +399,8 @@ def test_managed_policy_hooks_plugin_only_refuses_spawn() -> None:
             {"strictPluginOnlyCustomization": ["hooks"]},
         )
         remedies = driver.verify_config(
-            transport="watch", managed_settings_paths=(policy,),
+            transport="watch",
+            managed_settings_paths=(policy,),
         )
         _check(len(remedies) == 1, f"exactly one remedy fires (got {remedies!r})")
         _check(
@@ -427,8 +435,7 @@ def test_default_policy_paths_include_the_remote_pulled_location() -> None:
     )
     _check(
         names and names[0] == (".claude", "remote-settings.json"),
-        "and it is searched FIRST — the only location a real affected machine "
-        "has been observed to use",
+        "and it is searched FIRST — the only location a real affected machine has been observed to use",
     )
     _check(
         any(p.name == "managed-settings.json" for p in _MANAGED_SETTINGS_PATHS),
@@ -464,9 +471,11 @@ def test_managed_policy_acknowledged_degraded_proceeds() -> None:
         )
         _check(
             driver.verify_config(
-                transport="watch", managed_settings_paths=(policy,),
+                transport="watch",
+                managed_settings_paths=(policy,),
                 degraded_hooks_acknowledged=True,
-            ) == [],
+            )
+            == [],
             "an acknowledged-degraded spawn is allowed through the preflight",
         )
 
@@ -493,8 +502,10 @@ def test_managed_policy_absent_file_is_silent() -> None:
         driver = _configured_driver(tmp_dir)
         _check(
             driver.verify_config(
-                transport="watch", managed_settings_paths=(tmp_dir / "nope.json",),
-            ) == [],
+                transport="watch",
+                managed_settings_paths=(tmp_dir / "nope.json",),
+            )
+            == [],
             "no policy file -> no remedy (the ordinary machine, including this one)",
         )
 
@@ -511,7 +522,8 @@ def test_verify_config_mcp_config_required_only_for_mcp_transport() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         driver = HeadlessHostDriver(
-            claude_bin=_executable_stub(tmp_dir), solet_name="testhom",
+            claude_bin=_executable_stub(tmp_dir),
+            solet_name="testhom",
             permission_mode="bypassPermissions",
             mcp_config_path=tmp_dir / "missing.mcp.json",  # never created -- born-clone shape
             cwd=tmp_dir,
@@ -522,14 +534,11 @@ def test_verify_config_mcp_config_required_only_for_mcp_transport() -> None:
         )
         _check(
             driver.verify_config(transport="watch") == [],
-            "watch transport never reads .mcp.json -- verify_config must not "
-            "refuse a spawn for its absence",
+            "watch transport never reads .mcp.json -- verify_config must not refuse a spawn for its absence",
         )
         _check(
             driver.verify_config() == [],
-            "bare verify_config() with no transport arg resolves through the same "
-            "floor spawn() would ('' -> charter default 'watch') and likewise does "
-            "not require .mcp.json",
+            "bare verify_config() with no transport arg resolves through the same floor spawn() would ('' -> charter default 'watch') and likewise does not require .mcp.json",
         )
         _check(
             any("MCP config" in r for r in driver.verify_config(transport="mcp")),
@@ -549,20 +558,21 @@ def test_spawn_watch_transport_succeeds_without_mcp_json_present() -> None:
         solet_bin.write_text("#!/bin/sh\nexit 0\n")
         solet_bin.chmod(0o755)
         driver = HeadlessHostDriver(
-            claude_bin=_executable_stub(tmp_dir), solet_name="testhom",
+            claude_bin=_executable_stub(tmp_dir),
+            solet_name="testhom",
             permission_mode="bypassPermissions",
             mcp_config_path=tmp_dir / "missing.mcp.json",
-            cwd=tmp_dir, solet_bin=str(solet_bin),
+            cwd=tmp_dir,
+            solet_bin=str(solet_bin),
             python_executable=str(solet_bin.parent / "python3"),
             popen_fn=lambda *a, **k: _FakeProc(pid=4242),
         )
         host_ref = driver.spawn(
-            {"agent_instance_id": "agi-watchspawn", "transport": "watch"},
+            {**fixture_assignment_record(), "agent_instance_id": "agi-watchspawn", "transport": "watch"},
         )
         _check(
             host_ref == "4242",
-            "spawn() with transport='watch' succeeds on a born-clone tree "
-            "(no .mcp.json present anywhere)",
+            "spawn() with transport='watch' succeeds on a born-clone tree (no .mcp.json present anywhere)",
         )
 
 
@@ -576,8 +586,11 @@ def test_verify_config_accepts_a_per_spawn_permission_mode_override() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         driver = HeadlessHostDriver(
-            claude_bin=_executable_stub(tmp_dir), solet_name="testhom",
-            permission_mode="", mcp_config_path=tmp_dir / ".mcp.json", cwd=tmp_dir,
+            claude_bin=_executable_stub(tmp_dir),
+            solet_name="testhom",
+            permission_mode="",
+            mcp_config_path=tmp_dir / ".mcp.json",
+            cwd=tmp_dir,
         )
         (tmp_dir / ".mcp.json").write_text("{}")
         _check(
@@ -586,20 +599,22 @@ def test_verify_config_accepts_a_per_spawn_permission_mode_override() -> None:
         )
         _check(
             driver.verify_config(permission_mode="default") == [],
-            "a per-spawn permission_mode override alone clears the remedy, even "
-            "with no constructor/env value set -- this is what spawn() must pass",
+            "a per-spawn permission_mode override alone clears the remedy, even with no constructor/env value set -- this is what spawn() must pass",
         )
 
 
 def test_spawn_refuses_when_unconfigured() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         driver = HeadlessHostDriver(
-            claude_bin="/nonexistent/claude", solet_name="", permission_mode="",
-            mcp_config_path=Path(tmp) / "missing.json", cwd=Path(tmp),
+            claude_bin="/nonexistent/claude",
+            solet_name="",
+            permission_mode="",
+            mcp_config_path=Path(tmp) / "missing.json",
+            cwd=Path(tmp),
         )
         refused = False
         try:
-            driver.spawn({"agent_instance_id": "agi-x"})
+            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-x"})
         except HostCannotSpawnError:
             refused = True
         _check(refused, "spawn() refuses (HostCannotSpawnError) before ever calling popen_fn")
@@ -615,18 +630,20 @@ def test_spawn_succeeds_via_per_spawn_permission_mode_with_no_env_floor() -> Non
         tmp_dir = Path(tmp)
         _stub_worker_hook_files(tmp_dir)
         driver = HeadlessHostDriver(
-            claude_bin=_executable_stub(tmp_dir), solet_name="testhom",
-            permission_mode="", mcp_config_path=tmp_dir / ".mcp.json", cwd=tmp_dir,
+            claude_bin=_executable_stub(tmp_dir),
+            solet_name="testhom",
+            permission_mode="",
+            mcp_config_path=tmp_dir / ".mcp.json",
+            cwd=tmp_dir,
             popen_fn=lambda *a, **k: _FakeProc(pid=2222),
         )
         (tmp_dir / ".mcp.json").write_text("{}")
         host_ref = driver.spawn(
-            {"agent_instance_id": "agi-permcheck", "permission_mode": "default"},
+            {**fixture_assignment_record(), "agent_instance_id": "agi-permcheck", "permission_mode": "default"},
         )
         _check(
             host_ref == "2222",
-            "spawn() succeeds with a per-spawn permission_mode even though "
-            "the driver's own constructor/env value is empty",
+            "spawn() succeeds with a per-spawn permission_mode even though the driver's own constructor/env value is empty",
         )
 
 
@@ -635,7 +652,7 @@ def test_spawn_refuses_without_agent_instance_id() -> None:
         driver = _configured_driver(Path(tmp), popen_fn=lambda *a, **k: _FakeProc(pid=999))
         refused = False
         try:
-            driver.spawn({"lane_id": "lane-x"})
+            driver.spawn({**fixture_assignment_record(), "lane_id": "lane-x"})
         except HostCannotSpawnError as exc:
             refused = True
             _check(
@@ -662,8 +679,11 @@ def test_spawn_env_and_command_wiring() -> None:
         driver = _configured_driver(Path(tmp), popen_fn=_capture)
         host_ref = driver.spawn(
             {
-                "agent_instance_id": "agi-abc", "lane_id": "lane-x",
-                "model": "opus", "effort": "high",
+                **fixture_assignment_record(),
+                "agent_instance_id": "agi-abc",
+                "lane_id": "lane-x",
+                "model": "opus",
+                "effort": "high",
             },
         )
         _check(host_ref == "54321", "spawn() returns str(pid) as host_ref")
@@ -692,13 +712,8 @@ def test_spawn_env_and_command_wiring() -> None:
         _check(env["AGENT_SESSION_LABEL"] == "lane-x", "label prefers lane_id when given")
         _check(env["SOLET_NAME"] == "testhom", "SOLET_NAME flows from driver config")
         _check(
-            Path(env["AGENT_WAKE_CLI"]).name == "solet-bridge"
-            and env["AGENT_WAKE_CLI"] != env["SOLET_NAME"],
-            "AGENT_WAKE_CLI is the wake-CLI EXECUTABLE, never the solet "
-            "instance name -- `which <instance-name>` cannot resolve, so a "
-            "value that tracked solet_name (e.g. 'testhom' here) silently "
-            "broke every worker's idle-wake Stop hook; deaf-wake fix, "
-            "2026-08-08",
+            Path(env["AGENT_WAKE_CLI"]).name == "solet-bridge" and env["AGENT_WAKE_CLI"] != env["SOLET_NAME"],
+            "AGENT_WAKE_CLI is the wake-CLI EXECUTABLE, never the solet instance name -- `which <instance-name>` cannot resolve, so a value that tracked solet_name (e.g. 'testhom' here) silently broke every worker's idle-wake Stop hook; deaf-wake fix, 2026-08-08",
         )
         _check(
             Path(env["AGENT_WAKE_CLI"]).is_absolute(),
@@ -709,16 +724,12 @@ def test_spawn_env_and_command_wiring() -> None:
             "(FileNotFoundError, exit 0); registration-loss fix, 2026-08-14",
         )
         _check(
-            env["PATH"].split(os.pathsep)[0]
-            == str(Path(env["AGENT_WAKE_CLI"]).parent),
-            "the CLI's directory leads PATH, so hooks and skills that invoke "
-            "a BARE `solet-bridge` resolve it too",
+            env["PATH"].split(os.pathsep)[0] == str(Path(env["AGENT_WAKE_CLI"]).parent),
+            "the CLI's directory leads PATH, so hooks and skills that invoke a BARE `solet-bridge` resolve it too",
         )
         _check(
             env["FLEET_TRANSPORT"] == "watch",
-            "an unspecified transport resolves to the charter's default 'watch' "
-            "(fleet-watch-transport-migration phase 2 slice 1, 2026-08-06 -- "
-            "non-MCP is now the fleet's PRIMARY transport, not 'mcp')",
+            "an unspecified transport resolves to the charter's default 'watch' (fleet-watch-transport-migration phase 2 slice 1, 2026-08-06 -- non-MCP is now the fleet's PRIMARY transport, not 'mcp')",
         )
         cmd = calls[0]["cmd"]
         _check(
@@ -730,55 +741,42 @@ def test_spawn_env_and_command_wiring() -> None:
         _check(calls[0]["stdin"] == subprocess.PIPE, "stdin is a pipe (the driver channel)")
         _check(
             "--append-system-prompt" in cmd,
-            "T2 authority-template: --append-system-prompt is ALWAYS injected, on by "
-            "default, even for a caller (this test) that never supplied role_class/"
-            "brief_ref/spawned_by_role -- missing fields render blank, never skip the flag",
+            "T2 authority-template: --append-system-prompt is ALWAYS injected, on by default, even for a caller (this test) that never supplied role_class/spawned_by_role; the required registered assignment is still supplied",
         )
         _check(
             "FLEET_HEADLESS_TOOL_ALLOWLIST" not in env,
-            "an omitted allowed_tools leaves the gate env var ENTIRELY ABSENT -- the "
-            "deny-hook is unarmed by default (operator ruling, 2026-08-03: 'we don't "
-            "have any restrictions now'), never an always-on empty-allowlist gate",
+            "an omitted allowed_tools leaves the gate env var ENTIRELY ABSENT -- the deny-hook is unarmed by default (operator ruling, 2026-08-03: 'we don't have any restrictions now'), never an always-on empty-allowlist gate",
         )
         idx = cmd.index("--setting-sources")
         _check(
             cmd[idx + 1] == "project",
-            "--setting-sources is pinned to project-only, excluding both this operator's "
-            "user-scope bypassPermissions default and this checkout's local-scope broad "
-            "Bash allow list (both verified live to leak into a spawned worker otherwise)",
+            "--setting-sources is pinned to project-only, excluding both this operator's user-scope bypassPermissions default and this checkout's local-scope broad Bash allow list (both verified live to leak into a spawned worker otherwise)",
         )
         settings_idx = cmd.index("--settings")
         settings_json = json.loads(cmd[settings_idx + 1])
         hook_command = settings_json["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
         _check(
             hook_command.endswith("headless_tool_allowlist_gate.py"),
-            "--settings injects the PreToolUse allowlist gate hook, scoped to this "
-            "spawned worker only (never the shared .claude/settings.json)",
+            "--settings injects the PreToolUse allowlist gate hook, scoped to this spawned worker only (never the shared .claude/settings.json)",
         )
         session_start_command = settings_json["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         _check(
             session_start_command.endswith("capture_session_mapping.py"),
-            "--settings ALSO injects the T1 usage-capture SessionStart hook, "
-            "merged alongside the PreToolUse gate (not replacing it)",
+            "--settings ALSO injects the T1 usage-capture SessionStart hook, merged alongside the PreToolUse gate (not replacing it)",
         )
         post_tool_use_command = settings_json["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         _check(
             post_tool_use_command.endswith("heartbeat_report_alive.py"),
-            "--settings ALSO injects the T2 heartbeat PostToolUse hook, "
-            "merged alongside the other two (not replacing either)",
+            "--settings ALSO injects the T2 heartbeat PostToolUse hook, merged alongside the other two (not replacing either)",
         )
         rotation_due_command = settings_json["hooks"]["PostToolUse"][0]["hooks"][1]["command"]
         _check(
             rotation_due_command.endswith("rotation_due_watch.py"),
-            "--settings ALSO injects the rotation-due watch PostToolUse hook "
-            "(rotation-systematization P2 slice B), SECOND in the same PostToolUse "
-            "group as the heartbeat hook, not replacing it",
+            "--settings ALSO injects the rotation-due watch PostToolUse hook (rotation-systematization P2 slice B), SECOND in the same PostToolUse group as the heartbeat hook, not replacing it",
         )
         _check(
             settings_json["permissions"]["deny"] == ["Agent", "Task"],
-            "--settings ALSO injects the Agent/Task tool deny rule (capability-tier "
-            "guardrail redesign, 2026-08-06), merged alongside the three hooks -- "
-            "'Agent' is the live-registry-confirmed name, 'Task' a defensive alias",
+            "--settings ALSO injects the Agent/Task tool deny rule (capability-tier guardrail redesign, 2026-08-06), merged alongside the three hooks -- 'Agent' is the live-registry-confirmed name, 'Task' a defensive alias",
         )
 
 
@@ -796,7 +794,7 @@ def test_spawn_transport_mcp_override_uses_real_mcp_config() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         driver = _configured_driver(tmp_dir, popen_fn=_capture)
-        driver.spawn({"agent_instance_id": "agi-mcp-1", "transport": "mcp"})
+        driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-mcp-1", "transport": "mcp"})
     env = calls[0]["env"]
     cmd = calls[0]["cmd"]
     _check(env["FLEET_TRANSPORT"] == "mcp", "an explicit transport='mcp' flows into the env var")
@@ -822,21 +820,19 @@ def test_spawn_transport_watch_uses_explicit_empty_mcp_config() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         driver = _configured_driver(Path(tmp), popen_fn=_capture)
-        driver.spawn({"agent_instance_id": "agi-watch-1", "transport": "watch"})
+        driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-watch-1", "transport": "watch"})
     env = calls[0]["env"]
     cmd = calls[0]["cmd"]
     _check(env["FLEET_TRANSPORT"] == "watch", "an explicit transport='watch' flows into the env var")
     idx = cmd.index("--mcp-config")
     _check(
         cmd[idx + 1] == '{"mcpServers":{}}',
-        "transport='watch' gets an EXPLICIT empty MCP config, not the real file path "
-        "and not an omitted flag",
+        "transport='watch' gets an EXPLICIT empty MCP config, not the real file path and not an omitted flag",
     )
     _check("--strict-mcp-config" in cmd, "--strict-mcp-config is still present for the watch transport")
     _check(
         "--dangerously-load-development-channels" in cmd,
-        "dev-channel loading stays unconditional -- orthogonal to MCP-vs-watch "
-        "(a separate mechanism per the phase-2 scope ruling)",
+        "dev-channel loading stays unconditional -- orthogonal to MCP-vs-watch (a separate mechanism per the phase-2 scope ruling)",
     )
 
 
@@ -856,11 +852,15 @@ def test_spawn_transport_constructor_floor_used_when_spec_omits_it() -> None:
         mcp_config.write_text("{}")
         _stub_worker_hook_files(Path(tmp))
         driver = HeadlessHostDriver(
-            claude_bin=_executable_stub(Path(tmp)), solet_name="testhom",
-            permission_mode="bypassPermissions", transport="mcp",
-            mcp_config_path=mcp_config, cwd=Path(tmp), popen_fn=_capture,
+            claude_bin=_executable_stub(Path(tmp)),
+            solet_name="testhom",
+            permission_mode="bypassPermissions",
+            transport="mcp",
+            mcp_config_path=mcp_config,
+            cwd=Path(tmp),
+            popen_fn=_capture,
         )
-        driver.spawn({"agent_instance_id": "agi-floor-1"})
+        driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-floor-1"})
     env = calls[0]["env"]
     _check(
         env["FLEET_TRANSPORT"] == "mcp",
@@ -885,15 +885,13 @@ def test_spawn_env_session_mapping_spool_dir() -> None:
         os.environ["APP_HOME"] = str(app_home)
         try:
             driver = _configured_driver(Path(tmp), popen_fn=_capture)
-            driver.spawn({"agent_instance_id": "agi-spool-2"})
+            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-spool-2"})
         finally:
             _restore_env("APP_HOME", orig)
     env = calls[0]["env"]
     _check(
-        env.get("ANANTA_SESSION_MAPPING_SPOOL_DIR")
-        == str(app_home / "data" / "session_claude_mapping_spool"),
-        "ANANTA_SESSION_MAPPING_SPOOL_DIR is rooted under APP_HOME's data dir, "
-        "like every other platform spool (profile/data/{blobs,logs,plugin_data})",
+        env.get("ANANTA_SESSION_MAPPING_SPOOL_DIR") == str(app_home / "data" / "session_claude_mapping_spool"),
+        "ANANTA_SESSION_MAPPING_SPOOL_DIR is rooted under APP_HOME's data dir, like every other platform spool (profile/data/{blobs,logs,plugin_data})",
     )
 
     calls.clear()
@@ -901,14 +899,13 @@ def test_spawn_env_session_mapping_spool_dir() -> None:
     try:
         with tempfile.TemporaryDirectory() as tmp:
             driver = _configured_driver(Path(tmp), popen_fn=_capture)
-            driver.spawn({"agent_instance_id": "agi-spool-3"})
+            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-spool-3"})
     finally:
         _restore_env_family(prior)
     env = calls[0]["env"]
     _check(
         "ANANTA_SESSION_MAPPING_SPOOL_DIR" not in env,
-        "APP_HOME unset -> the spool env var is ENTIRELY ABSENT, never an "
-        "empty/bogus path -- the hook's own non-fatal contract handles this",
+        "APP_HOME unset -> the spool env var is ENTIRELY ABSENT, never an empty/bogus path -- the hook's own non-fatal contract handles this",
     )
 
 
@@ -929,24 +926,21 @@ def test_spawn_env_heartbeat_marker_dir() -> None:
         os.environ["APP_HOME"] = str(app_home)
         try:
             driver = _configured_driver(Path(tmp), popen_fn=_capture)
-            driver.spawn({"agent_instance_id": "agi-hb-spool-1"})
+            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-hb-spool-1"})
         finally:
             _restore_env("APP_HOME", orig)
     env = calls[0]["env"]
     _check(
         env.get("AGENT_HEARTBEAT_MARKER_DIR") == str(app_home / "data" / "heartbeat_marker"),
-        "AGENT_HEARTBEAT_MARKER_DIR is rooted under APP_HOME's data dir, "
-        "in its OWN subdirectory distinct from the mapping spool",
+        "AGENT_HEARTBEAT_MARKER_DIR is rooted under APP_HOME's data dir, in its OWN subdirectory distinct from the mapping spool",
     )
     _check(
-        env.get("AGENT_COORDINATION_RECEIPT_PATH")
-        == str(app_home / "data/coordination-hooks/claude/installation.v1.json"),
+        env.get("AGENT_COORDINATION_RECEIPT_PATH") == str(app_home / "data/coordination-hooks/claude/installation.v1.json"),
         "AGENT_COORDINATION_RECEIPT_PATH is rooted under APP_HOME, never the worker cwd",
     )
     designated_reporter = env.get("AGENT_CONTEXT_GAUGE_REPORTER_PATH", "")
     _check(
-        Path(designated_reporter).is_absolute()
-        and designated_reporter.endswith("rotation_due_watch.py"),
+        Path(designated_reporter).is_absolute() and designated_reporter.endswith("rotation_due_watch.py"),
         "the headless worker receives an absolute designated gauge-reporter path",
     )
 
@@ -955,14 +949,13 @@ def test_spawn_env_heartbeat_marker_dir() -> None:
     try:
         with tempfile.TemporaryDirectory() as tmp:
             driver = _configured_driver(Path(tmp), popen_fn=_capture)
-            driver.spawn({"agent_instance_id": "agi-hb-spool-2"})
+            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-hb-spool-2"})
     finally:
         _restore_env_family(prior)
     env = calls[0]["env"]
     _check(
         "AGENT_HEARTBEAT_MARKER_DIR" not in env,
-        "APP_HOME unset -> the heartbeat marker dir env var is ENTIRELY ABSENT, "
-        "never an empty/bogus path",
+        "APP_HOME unset -> the heartbeat marker dir env var is ENTIRELY ABSENT, never an empty/bogus path",
     )
     _check(
         "AGENT_COORDINATION_RECEIPT_PATH" not in env,
@@ -971,7 +964,7 @@ def test_spawn_env_heartbeat_marker_dir() -> None:
 
 
 def test_spawn_wires_authority_system_prompt_with_full_substitution() -> None:
-    """T2 authority-template: a spec carrying role_class/brief_ref/
+    """T2 authority-template: a spec carrying role_class/unit_id/
     spawned_by_role (the shape spawn_session's own widened dict now sends)
     flows all the way through to --append-system-prompt's rendered text."""
     calls: list[dict[str, Any]] = []
@@ -984,10 +977,11 @@ def test_spawn_wires_authority_system_prompt_with_full_substitution() -> None:
         driver = _configured_driver(Path(tmp), popen_fn=_capture)
         driver.spawn(
             {
+                **fixture_assignment_record(),
                 "agent_instance_id": "agi-authority-1",
                 "lane_id": "fleet-authority-test",
                 "role_class": "project",
-                "brief_ref": "workbench/2026-08-04_x.md",
+                "unit_id": FIXTURE_UNIT_ID,
                 "spawned_by_role": "Coordinator-Main",
             },
         )
@@ -997,7 +991,7 @@ def test_spawn_wires_authority_system_prompt_with_full_substitution() -> None:
         _check("agi-authority-1" in rendered, "the rendered prompt carries agent_instance_id")
         _check("'project'" in rendered, "the rendered prompt carries role_class")
         _check("'fleet-authority-test'" in rendered, "the rendered prompt carries lane_id")
-        _check("workbench/2026-08-04_x.md" in rendered, "the rendered prompt carries brief_ref")
+        _check("drv_fixture-revision" in rendered, "the rendered prompt carries registered revision")
         _check("'Coordinator-Main'" in rendered, "the rendered prompt carries spawned_by_role")
         _check("{role_class}" not in rendered, "no unresolved placeholder ships into the command")
 
@@ -1013,7 +1007,9 @@ def test_spawn_threads_allowed_tools_into_the_gate_env_var() -> None:
         driver = _configured_driver(Path(tmp), popen_fn=_capture)
         driver.spawn(
             {
-                "agent_instance_id": "agi-allow", "lane_id": "lane-allow",
+                **fixture_assignment_record(),
+                "agent_instance_id": "agi-allow",
+                "lane_id": "lane-allow",
                 "allowed_tools": ["mcp__testhom__peer_register", "mcp__testhom__process_call"],
             },
         )
@@ -1034,7 +1030,7 @@ def test_spawn_label_falls_back_to_agent_instance_id() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         driver = _configured_driver(Path(tmp), popen_fn=_capture)
-        driver.spawn({"agent_instance_id": "agi-nolane"})
+        driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-nolane"})
         _check(
             calls[0]["env"]["AGENT_SESSION_LABEL"] == "agi-nolane",
             "an ephemeral spawn with no lane_id falls back to agent_instance_id as the label",
@@ -1049,7 +1045,7 @@ def test_spawn_wraps_popen_oserror() -> None:
         driver = _configured_driver(Path(tmp), popen_fn=_raiser)
         wrapped = False
         try:
-            driver.spawn({"agent_instance_id": "agi-y"})
+            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-y"})
         except HostCannotSpawnError:
             wrapped = True
         _check(wrapped, "a Popen OSError is wrapped as HostCannotSpawnError, never leaks raw")
@@ -1060,14 +1056,17 @@ def _real_short_lived_popen_fn(*_a: Any, **_k: Any) -> subprocess.Popen[str]:
     process so alive()/terminate()/shutdown() exercise real OS signals."""
     return subprocess.Popen(  # noqa: S603 -- fixed harmless argv, test-only
         [sys.executable, "-c", "import time; time.sleep(30)"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
 
 
 def test_alive_and_terminate_real_process() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         driver = _configured_driver(Path(tmp), popen_fn=_real_short_lived_popen_fn)
-        host_ref = driver.spawn({"agent_instance_id": "agi-real-1"})
+        host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-real-1"})
         _check(driver.alive(host_ref), "a freshly-spawned real process reports alive=True")
         _check(driver.alive("not-a-pid") is False, "a non-numeric host_ref is never alive")
         driver.terminate(host_ref, grace_seconds=2)
@@ -1080,7 +1079,9 @@ def test_alive_and_terminate_real_process() -> None:
 
 
 def _real_echo_to_file_popen_fn(
-    echo_file: Path, *, launch_delay_s: float = 0.0,
+    echo_file: Path,
+    *,
+    launch_delay_s: float = 0.0,
 ) -> Any:
     """A real process that reads ONE line from stdin and writes it to
     ``echo_file`` (NOT stdout) -- spawn() now drains stdout in a background
@@ -1135,15 +1136,22 @@ def _real_echo_to_file_popen_fn(
             # a second writer on the same path is what broke this.
             return subprocess.Popen(  # noqa: S603 -- caller-supplied stub argv, test-only
                 [str(x) for x in argv],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
             )
         return subprocess.Popen(  # noqa: S603 -- fixed harmless argv, test-only
             [
-                sys.executable, "-c",
+                sys.executable,
+                "-c",
                 "import sys; open(sys.argv[1], 'w').write(sys.stdin.readline())",
                 str(echo_file),
             ],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
 
     return _fn
@@ -1153,9 +1161,10 @@ def test_driver_channel_send_writes_stream_json_envelope() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         echo_file = Path(tmp) / "echo.txt"
         driver = _configured_driver(
-            Path(tmp), popen_fn=_real_echo_to_file_popen_fn(echo_file),
+            Path(tmp),
+            popen_fn=_real_echo_to_file_popen_fn(echo_file),
         )
-        host_ref = driver.spawn({"agent_instance_id": "agi-echo-1"})
+        host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-echo-1"})
         channel = driver.driver_channel(host_ref)
         _check(
             channel is not None,
@@ -1237,8 +1246,7 @@ def test_sidecar_popen_never_targets_the_worker_side_channel() -> None:
             proc.kill()
         _check(
             echo_file.read_text() == "SENTINEL",
-            "a SIDECAR-argv child never writes the worker's side-channel file "
-            "(argv-blind fixtures truncate it — the R1 gate blocker)",
+            "a SIDECAR-argv child never writes the worker's side-channel file (argv-blind fixtures truncate it — the R1 gate blocker)",
         )
 
 
@@ -1258,7 +1266,7 @@ def test_watcher_arm_does_not_clobber_the_worker_side_channel() -> None:
             Path(tmp),
             popen_fn=_real_echo_to_file_popen_fn(echo_file, launch_delay_s=0.15),
         )
-        host_ref = driver.spawn({"agent_instance_id": "agi-echo-clobber"})
+        host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-echo-clobber"})
         channel = driver.driver_channel(host_ref)
         assert channel is not None
         channel.send("/clear")
@@ -1283,8 +1291,7 @@ def test_driver_channel_none_for_unknown_host_ref() -> None:
         driver = _configured_driver(Path(tmp), popen_fn=_real_short_lived_popen_fn)
         _check(
             driver.driver_channel("99999999") is None,
-            "driver_channel() is None for a host_ref this driver never spawned "
-            "(the exact post-restart case clear_session/compact_session will check)",
+            "driver_channel() is None for a host_ref this driver never spawned (the exact post-restart case clear_session/compact_session will check)",
         )
 
 
@@ -1295,14 +1302,17 @@ def _real_exit_immediately_popen_fn(*_a: Any, **_k: Any) -> subprocess.Popen[str
     ``driver_channel()``'s liveness check now guards against)."""
     return subprocess.Popen(  # noqa: S603 -- fixed harmless argv, test-only
         [sys.executable, "-c", "pass"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
 
 
 def test_driver_channel_none_for_dead_but_still_tracked_process() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         driver = _configured_driver(Path(tmp), popen_fn=_real_exit_immediately_popen_fn)
-        host_ref = driver.spawn({"agent_instance_id": "agi-dead-tracked-1"})
+        host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-dead-tracked-1"})
         deadline = time.monotonic() + 5
         while driver.alive(host_ref) and time.monotonic() < deadline:
             time.sleep(0.05)
@@ -1312,15 +1322,17 @@ def test_driver_channel_none_for_dead_but_still_tracked_process() -> None:
         )
         _check(
             driver.driver_channel(host_ref) is None,
-            "driver_channel() is None for a still-tracked pid that died on its own "
-            "(never terminate()'d) -- a dead process must not hand back a live-looking channel",
+            "driver_channel() is None for a still-tracked pid that died on its own (never terminate()'d) -- a dead process must not hand back a live-looking channel",
         )
 
 
 def test_send_swallows_broken_pipe_from_dead_process() -> None:
     proc = subprocess.Popen(  # noqa: S603 -- fixed harmless argv, test-only
         [sys.executable, "-c", "pass"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     proc.wait(timeout=5)
     channel = _StreamJsonDriverChannel(proc=proc)
@@ -1331,8 +1343,7 @@ def test_send_swallows_broken_pipe_from_dead_process() -> None:
         raised = True
     _check(
         not raised,
-        "send() on a dead process's stdin swallows the broken pipe (fire-and-forget "
-        "contract) instead of raising an unmapped exception through the verb layer",
+        "send() on a dead process's stdin swallows the broken pipe (fire-and-forget contract) instead of raising an unmapped exception through the verb layer",
     )
     if proc.stdin is not None:
         with contextlib.suppress(OSError):
@@ -1342,8 +1353,8 @@ def test_send_swallows_broken_pipe_from_dead_process() -> None:
 def test_shutdown_terminates_every_tracked_process() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         driver = _configured_driver(Path(tmp), popen_fn=_real_short_lived_popen_fn)
-        ref1 = driver.spawn({"agent_instance_id": "agi-shutdown-1"})
-        ref2 = driver.spawn({"agent_instance_id": "agi-shutdown-2"})
+        ref1 = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-shutdown-1"})
+        ref2 = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-shutdown-2"})
         _check(
             driver.alive(ref1) and driver.alive(ref2),
             "precondition: both tracked processes are alive",
@@ -1441,12 +1452,13 @@ def test_permissions_inert_policy_warns_and_never_refuses() -> None:
         )
         _check(
             _managed_policy_voids_permission_rules((policy,)) == policy,
-            "but the prover does detect it, so the empty remedy list is a "
-            "decision rather than a blind spot",
+            "but the prover does detect it, so the empty remedy list is a decision rather than a blind spot",
         )
         with _captured_warnings() as records:
             returned = _warn_permission_denies_inert(
-                (policy,), agent_instance_id="agi-fixture", host="headless",
+                (policy,),
+                agent_instance_id="agi-fixture",
+                host="headless",
                 denied_tools=_HEADLESS_DENIED_TOOLS,
             )
         _check(returned == policy, "the warn helper reports which file it fired on")
@@ -1463,8 +1475,7 @@ def test_permissions_inert_policy_warns_and_never_refuses() -> None:
         )
         _check(
             "hygiene" in text and "security control" in text,
-            "and frames the loss honestly -- a deny a local policy can switch "
-            "off was never a boundary, so this must not read as a breach",
+            "and frames the loss honestly -- a deny a local policy can switch off was never a boundary, so this must not read as a breach",
         )
 
 
@@ -1486,7 +1497,8 @@ def test_permissions_inert_and_hooks_keys_are_independent() -> None:
             },
         )
         remedies = driver.verify_config(
-            transport="watch", managed_settings_paths=(policy,),
+            transport="watch",
+            managed_settings_paths=(policy,),
         )
         _check(
             len(remedies) == 1 and "strictPluginOnlyCustomization" in remedies[0],
@@ -1557,8 +1569,7 @@ def test_permissions_inert_requires_literal_true() -> None:
         )
         _check(
             _managed_policy_voids_permission_rules((exact,)) == exact,
-            "and the reachable all-clear: literal true DOES fire, so the legs "
-            "above are not all passing for the trivial reason",
+            "and the reachable all-clear: literal true DOES fire, so the legs above are not all passing for the trivial reason",
         )
 
 
@@ -1608,8 +1619,7 @@ def test_capability_report_answers_permission_state_without_spawning() -> None:
             "the report names the denies this driver injects",
         )
         _check(
-            clean.get("permission_denies_operative") is True
-            and clean.get("permission_policy_path") is None,
+            clean.get("permission_denies_operative") is True and clean.get("permission_policy_path") is None,
             "on a host with no managed policy the denies are operative",
         )
         policy = _write_policy(
@@ -1638,7 +1648,8 @@ def test_spawn_warns_on_a_permissions_inert_host_and_still_spawns() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         driver = _configured_driver(
-            tmp_dir, popen_fn=lambda *a, **k: _FakeProc(pid=4242),
+            tmp_dir,
+            popen_fn=lambda *a, **k: _FakeProc(pid=4242),
         )
         policy = _write_policy(
             tmp_dir / "managed-settings.json",
@@ -1646,16 +1657,13 @@ def test_spawn_warns_on_a_permissions_inert_host_and_still_spawns() -> None:
         )
         with _default_policy_paths((policy,)), _captured_warnings() as records:
             host_ref = driver.spawn(
-                {"agent_instance_id": "agi-inert", "transport": "watch"},
+                {**fixture_assignment_record(), "agent_instance_id": "agi-inert", "transport": "watch"},
             )
         _check(host_ref == "4242", "the spawn PROCEEDS on a permissions-inert host")
-        inert_warnings = [
-            r for r in records if "PERMISSION DENIES INERT" in r.getMessage()
-        ]
+        inert_warnings = [r for r in records if "PERMISSION DENIES INERT" in r.getMessage()]
         _check(
             len(inert_warnings) == 1,
-            f"and emits exactly one inert-permissions warning (got "
-            f"{len(inert_warnings)})",
+            f"and emits exactly one inert-permissions warning (got {len(inert_warnings)})",
         )
         _check(
             "headless" in inert_warnings[0].getMessage() if inert_warnings else False,

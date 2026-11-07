@@ -240,9 +240,7 @@ def test_org_binding_verified_once() -> None:
 
 def test_run_json_rest_level_failure() -> None:
     executor = _executor()
-    error_envelope = json.dumps(
-        {"name": "NOT_FOUND", "message": "top-level", "data": {"errorCode": "NOT_FOUND", "message": "detail"}}
-    )
+    error_envelope = json.dumps({"name": "NOT_FOUND", "message": "top-level", "data": {"errorCode": "NOT_FOUND", "message": "detail"}})
     with patch("salesforce_plugin.client.subprocess.run") as run_mock:
         run_mock.side_effect = [_completed(_org_display_envelope()), _completed(error_envelope, returncode=1)]
         code, message = "", ""
@@ -328,23 +326,24 @@ def test_edge_parity() -> None:
     actions = discover_actions(plugin)
     raised = None
     try:
-        PluginRegistrationValidator().validate_edge_process_provider(
-            "salesforce_plugin", plugin, actions
-        )
+        PluginRegistrationValidator().validate_edge_process_provider("salesforce_plugin", plugin, actions)
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 15 verbs discovered", len(actions) == 15, str(len(actions)))
+    _assert("all 23 verbs discovered", len(actions) == 23, str(len(actions)))
 
 
 def test_cli_provisioning() -> None:
     """Fixture-proof the formula route before its shipped documentation changes."""
 
     existing = SalesforceCliExecutor(None, sf_cli_path="sf")  # type: ignore[arg-type]
-    with patch("salesforce_plugin.client.shutil.which", return_value="/fake/bin/sf"), patch(
-        "salesforce_plugin.client.subprocess.run",
-        return_value=_completed("@salesforce/cli/2.99.0\n"),
-    ) as run_mock:
+    with (
+        patch("salesforce_plugin.client.shutil.which", return_value="/fake/bin/sf"),
+        patch(
+            "salesforce_plugin.client.subprocess.run",
+            return_value=_completed("@salesforce/cli/2.99.0\n"),
+        ) as run_mock,
+    ):
         observed = existing.provision_cli(acknowledge_system_change=False)
     _assert("existing sf does not invoke Homebrew", observed["provisioned"] is False, str(observed))
     _assert("existing sf has no package mutation", run_mock.call_count == 1, str(run_mock.call_args_list))
@@ -359,23 +358,25 @@ def test_cli_provisioning() -> None:
     _assert("missing sf refuses without consent", consent_code == ERROR_PROVISION_CONSENT_REQUIRED, consent_code)
 
     provisioned = SalesforceCliExecutor(None, sf_cli_path="sf")  # type: ignore[arg-type]
-    with patch(
-        "salesforce_plugin.client.shutil.which",
-        side_effect=[None, "/fake/bin/brew", "/fake/bin/sf"],
-    ), patch(
-        "salesforce_plugin.client.subprocess.run",
-        side_effect=[
-            _completed("Would install 2 formulae:\nnode\nsf\n"),
-            _completed(""),
-            _completed("@salesforce/cli/2.99.0\n"),
-        ],
-    ) as run_mock:
+    with (
+        patch(
+            "salesforce_plugin.client.shutil.which",
+            side_effect=[None, "/fake/bin/brew", "/fake/bin/sf"],
+        ),
+        patch(
+            "salesforce_plugin.client.subprocess.run",
+            side_effect=[
+                _completed("Would install 2 formulae:\nnode\nsf\n"),
+                _completed(""),
+                _completed("@salesforce/cli/2.99.0\n"),
+            ],
+        ) as run_mock,
+    ):
         observed = provisioned.provision_cli(acknowledge_system_change=True)
     _assert("missing sf installs only after consent", observed["provisioned"] is True, str(observed))
     _assert(
         "sf dry-run precedes exactly one install",
-        [call.args[0] for call in run_mock.call_args_list][:2]
-        == [["/fake/bin/brew", "install", "--dry-run", "sf"], ["/fake/bin/brew", "install", "sf"]],
+        [call.args[0] for call in run_mock.call_args_list][:2] == [["/fake/bin/brew", "install", "--dry-run", "sf"], ["/fake/bin/brew", "install", "sf"]],
         str(run_mock.call_args_list),
     )
 

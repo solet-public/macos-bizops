@@ -22,9 +22,16 @@ from solet_manager.adapters import (  # noqa: E402
 )
 from solet_manager.create import _normalize_apply_result  # noqa: E402
 from solet_manager.errors import AdapterProtocolError  # noqa: E402
+from solet_manager.existing_install_adapters import (  # noqa: E402
+    ExistingInstallAdapterRegistry,
+    invoke_existing_adapter,
+)
 from solet_manager.models import CheckpointStatus  # noqa: E402
 
-from bootstrap_adapter.routes import _CASK_LINK_RETRY_ATTEMPTS, execute_adapter_request  # noqa: E402
+from bootstrap_adapter.routes import (  # noqa: E402
+    _CASK_LINK_RETRY_ATTEMPTS,
+    execute_adapter_request,
+)
 
 _CHECKS = 0
 _SCRIPT = r"""
@@ -145,6 +152,145 @@ def _raises(error: type[BaseException], callback: object, label: str) -> None:
         _check(True, label)
     else:
         _check(False, label)
+
+
+def _check_existing_install_signal_exit(target: Path) -> None:
+    adapter_target = target / "existing-install-target"
+    python = adapter_target / ".venv" / "bin" / "python3"
+    adapter = (
+        adapter_target
+        / "plugins"
+        / "github_midwife_plugin"
+        / "src"
+        / "github_midwife_plugin"
+        / "setup_adapter.py"
+    )
+    python.parent.mkdir(parents=True)
+    python.touch()
+    adapter.parent.mkdir(parents=True)
+    adapter.touch()
+    registry = ExistingInstallAdapterRegistry(
+        name="bizops",
+        target=adapter_target,
+        bridge_cli_path=Path("/fixture/solet-bridge"),
+        base_python=None,
+    )
+    request = OperationRequest(
+        request_id="b433c70f-a3dd-4f50-b829-928c7c8f4bc3",
+        operation_id="signal_exit",
+        operation_ref="existing::migration.solet_rename",
+        phase="probe",
+        probe_purpose="pre_apply",
+        attempt=1,
+        name="bizops",
+        target=str(adapter_target),
+        flow_id="existing-install",
+        flow_source_revision="a" * 40,
+        answers_fingerprint="sha256:" + "1" * 64,
+        approval_fingerprint=None,
+        dry_run=True,
+        timeout_seconds=5,
+    )
+
+    def completed(returncode: int) -> OperationResult:
+        def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                command, returncode, "adapter stdout retained", "adapter stderr retained"
+            )
+
+        with patch("solet_manager.existing_install_adapters.subprocess.run", run):
+            return invoke_existing_adapter(registry, request)
+
+    signaled = completed(-11)
+    _check(
+        signaled.checkpoint_status is CheckpointStatus.BLOCKED
+        and signaled.error_kind == "adapter_exit_error"
+        and signaled.exit_code == 139,
+        "SIGSEGV becomes a blocked adapter exit with shell-style code",
+    )
+    parsed = OperationResult.from_dict(signaled.to_dict(), request)
+    _check(
+        parsed.stdout == "adapter stdout retained"
+        and "adapter stderr retained" in parsed.stderr
+        and "signal 11 (SIGSEGV)" in parsed.stderr,
+        "signal result retains streams and diagnosis in its envelope",
+    )
+    _check(
+        parsed.reason is not None
+        and parsed.reason["exit_code"] == 139
+        and "signal 11 (SIGSEGV)" in str(parsed.reason["stderr_diagnostic"]),
+        "signal result reason mirrors normalized exit code and diagnosis",
+    )
+    exited = completed(7)
+    parsed_exit = OperationResult.from_dict(exited.to_dict(), request)
+    _check(
+        parsed_exit.error_kind == "adapter_exit_error" and parsed_exit.exit_code == 7,
+        "ordinary adapter exit code remains unchanged",
+    )
+
+
+def _check_process_exit_normalization(target: Path, base: OperationRequest, registry: AdapterRegistry) -> None:
+    def run_with_returncode(returncode: int) -> OperationResult:
+        def run(actual_command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(actual_command, returncode, "adapter out", "adapter err")
+
+        with patch("solet_manager.adapters.subprocess.run", run):
+            return invoke_adapter(registry, runner="bootstrap", request=base)
+
+    public_result = run_with_returncode(-11)
+    parsed = OperationResult.from_dict(public_result.to_dict(), base)
+    _check(
+        parsed.checkpoint_status is CheckpointStatus.BLOCKED
+        and parsed.exit_code == 139
+        and "signal 11 (SIGSEGV)" in parsed.stderr,
+        "public invoke_adapter normalizes SIGSEGV and preserves diagnosis",
+    )
+
+    install_request = replace(
+        base,
+        operation_id="install_python_runtime",
+        operation_ref="setup::python.install_313",
+        phase="apply",
+        probe_purpose=None,
+        approval_fingerprint="sha256:" + "b" * 64,
+        dry_run=False,
+    )
+    installer_registry = AdapterRegistry(target=target)
+
+    def invoke_installer(returncodes: tuple[int, ...]) -> OperationResult:
+        results = iter(returncodes)
+
+        def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            returncode = next(results)
+            output = "Would install 1 formula:\npython@3.13\n" if "--dry-run" in command else "installer err"
+            return subprocess.CompletedProcess(command, returncode, output, "installer stderr")
+
+        with (
+            patch("solet_manager.adapters.resolve_long_lived_python", return_value=None),
+            patch("solet_manager.adapters.resolve_brew_executable", return_value="/fixture/brew"),
+            patch("solet_manager.adapters._homebrew_install_plan_allowed", return_value=True),
+            patch("solet_manager.adapters.subprocess.run", run),
+        ):
+            return invoke_adapter(installer_registry, runner="bootstrap", request=install_request)
+
+    planned = invoke_installer((-11,))
+    parsed_plan = OperationResult.from_dict(planned.to_dict(), install_request)
+    _check(
+        parsed_plan.error_kind == "python_runtime_install_plan_rejected"
+        and parsed_plan.checkpoint_status is CheckpointStatus.BLOCKED
+        and parsed_plan.exit_code == 139
+        and "signal 11 (SIGSEGV)" in parsed_plan.stderr,
+        "Python installer plan signal exit is normalized",
+    )
+    applied = invoke_installer((0, -11))
+    parsed_apply = OperationResult.from_dict(applied.to_dict(), install_request)
+    _check(
+        parsed_apply.error_kind == "python_runtime_install_failed"
+        and parsed_apply.checkpoint_status is CheckpointStatus.BLOCKED
+        and parsed_apply.exit_code == 139
+        and "signal 11 (SIGSEGV)" in parsed_apply.stderr,
+        "Python installer apply signal exit is normalized",
+    )
 
 
 def _adapter_result(request: dict[str, object]) -> str:
@@ -518,6 +664,8 @@ def main() -> int:
             timeout_seconds=5,
             public_inputs={"mode": "valid"},
         )
+        _check_existing_install_signal_exit(target)
+        _check_process_exit_normalization(target, base, registry)
         no_python_registry = AdapterRegistry(target=target)
         _check_python_bootstrap_transport(
             target=target,

@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
@@ -79,6 +80,12 @@ _SESSION_ID = "471a05a5-d18c-4dc0-87c3-e96a02b852ff"
 
 
 _NEWLY_SKIPPED_LINES: dict[str, dict[str, object]] = {
+    "api-request-blob": {"type": "api-request-blob", "sessionId": _SESSION_ID},
+    "api-request": {"type": "api-request", "sessionId": _SESSION_ID},
+    "api-request-shape": {"type": "api-request-shape", "sessionId": _SESSION_ID},
+    "atis-latch": {"type": "atis-latch", "sessionId": _SESSION_ID},
+    "cost-state": {"type": "cost-state", "sessionId": _SESSION_ID},
+    "file-history-delta": {"type": "file-history-delta", "sessionId": _SESSION_ID},
     "custom-title": {
         "type": "custom-title",
         "customTitle": "Claude-A",
@@ -156,15 +163,17 @@ def test_each_newly_skipped_type_yields_no_events() -> None:
     for type_name, data in _NEWLY_SKIPPED_LINES.items():
         raised: ValueError | None = None
         events: list[object] = []
-        try:
-            events = list(claude_code.parse_line_data(dict(data)))
-        except ValueError as exc:
-            raised = exc
+        with patch.object(claude_code, "record_unknown_line") as record_unknown_line:
+            try:
+                events = list(claude_code.parse_line_data(dict(data)))
+            except ValueError as exc:
+                raised = exc
         _check(
             raised is None and events == [],
-            f"line type {type_name!r} parses to 0 events without raising "
-            f"(raised={raised!r}, events={len(events)})",
+            f"line type {type_name!r} parses to 0 events without raising (raised={raised!r}, events={len(events)})",
         )
+        if type_name in {"api-request-blob", "api-request", "api-request-shape", "atis-latch", "cost-state", "file-history-delta"}:
+            _check(not record_unknown_line.called, f"line type {type_name!r} does not record unknown-line advisory")
 
 
 # ───── (2) Pre-existing skipped types keep their behavior ───────────────────
@@ -180,8 +189,7 @@ def test_preexisting_skipped_types_unchanged() -> None:
             raised = exc
         _check(
             raised is None and events == [],
-            f"pre-existing skipped type {type_name!r} still yields 0 events "
-            f"without raising (raised={raised!r}, events={len(events)})",
+            f"pre-existing skipped type {type_name!r} still yields 0 events without raising (raised={raised!r}, events={len(events)})",
         )
 
 
@@ -234,65 +242,68 @@ def test_realistic_471a05a5_head_sequence_parses_cleanly() -> None:
         raised = exc
     _check(
         raised is None,
-        f"realistic 471a05a5 head sequence does not raise "
-        f"(raised={raised!r})",
+        f"realistic 471a05a5 head sequence does not raise (raised={raised!r})",
     )
     _check(
         len(yielded_events) == 2,
-        f"exactly 2 conversational events yielded "
-        f"(user + assistant message); got {len(yielded_events)}",
+        f"exactly 2 conversational events yielded (user + assistant message); got {len(yielded_events)}",
     )
 
 
-# ───── (4) Existing-skip set still rejects unknown types ────────────────────
+# Unknown top-level types are advisory success, including event-shaped objects.
 
 
-def test_unknown_type_still_raises() -> None:
-    """Vendor stays strict on GENUINELY-NEW EVENT-SHAPE lines, while tolerating
-    non-event-shape metadata drift. `parse_line_data` (see its 2026 comment
-    block) scopes the fast-fail to unknown ``type``s that DO carry the
-    event-shape signal (a ``message`` dict with a ``role``) — those raise so a
-    real new event kind is caught loudly; an unknown ``type`` WITHOUT that
-    signal is deliberately skip-with-debug-logged to keep ingest alive across
-    vendor drift. This asserts BOTH halves so the contract can't silently
-    collapse either way.
+def test_unknown_types_continue() -> None:
+    """Unknown objects need neither a timestamp nor a session id to skip."""
+    for extra in ({}, {"message": {"role": "user", "content": "synthetic"}}):
+        _check(list(claude_code.parse_line_data({"type": "synthetic-unknown-line-type", **extra})) == [], "unknown type yields zero events")
 
-    Both fixtures carry a ``timestamp`` so the parser gets PAST
-    :func:`_parse_timestamp` and reaches the unknown-``type`` branch.
-    """
-    # (a) event-shape unknown -> RAISES (the retained fast-fail safety net).
-    event_shape_unknown: dict[str, object] = {
-        "type": "future-unknown-shape-2027",
-        "sessionId": _SESSION_ID,
-        "timestamp": "2027-01-15T00:00:00.000Z",
-        "message": {"role": "user", "content": [{"type": "text", "text": "x"}]},
-    }
-    raised: ValueError | None = None
-    try:
-        list(claude_code.parse_line_data(event_shape_unknown))
-    except ValueError as exc:
-        raised = exc
-    _check(
-        raised is not None and "unrecognized event-shape line 'type'" in str(raised),
-        f"unknown EVENT-SHAPE type raises the vendor-contract-change ValueError "
-        f"(raised={raised!r})",
-    )
-    # (b) non-event-shape unknown -> TOLERATED (0 events, no raise) for drift-resilience.
-    tol_events: list[object] = []
-    tol_raised: ValueError | None = None
-    try:
-        tol_events = list(claude_code.parse_line_data({
-            "type": "future-unknown-shape-2027",
+
+def test_fallback_and_unknown_blocks() -> None:
+    """Vendor control blocks preserve surrounding text, tools and usage."""
+    from ananta.llm.session_ledger.poll_advisories import claude_line_context, collect_poll_advisories, poll_source_context
+    from ananta.llm.session_ledger.types import UnknownLineAdvisory
+
+    for kind in ("fallback", "synthetic-future-block-2099"):
+        line = {
+            "type": "assistant",
             "sessionId": _SESSION_ID,
-            "timestamp": "2027-01-15T00:00:00.000Z",
-        }))
-    except ValueError as exc:
-        tol_raised = exc
-    _check(
-        tol_raised is None and tol_events == [],
-        f"unknown NON-event-shape type is tolerated (0 events, no raise) "
-        f"(raised={tol_raised!r}, events={len(tol_events)})",
-    )
+            "uuid": "synthetic-block-line",
+            "timestamp": "2026-10-22T00:00:00Z",
+            "message": {
+                "role": "assistant",
+                "model": "fixture-model",
+                "usage": {"input_tokens": 3},
+                "content": [
+                    {"type": "text", "text": "before"},
+                    {"type": kind, "from": {"model": "old"}, "to": {"model": "new"}, "private": "PRIVATE_PAYLOAD"},
+                    {"type": "text", "text": "after"},
+                    {"type": "tool_use", "id": "synthetic-tool", "name": "Read", "input": {}},
+                ],
+            },
+        }
+        with collect_poll_advisories() as collector, poll_source_context("source"), claude_line_context("root", _SESSION_ID, 10):
+            try:
+                events = list(claude_code.parse_line_data(line))
+            except ValueError as exc:
+                _check(False, f"{kind} must preserve events: {exc}")
+                continue
+            _check(len(events) == 2 and events[0].payload["text"] == "before\nafter", f"{kind}: text and tool suffix survive")
+            _check(events[0].payload["usage"] == {"input_tokens": 3, "model": "fixture-model"}, f"{kind}: usage survives unchanged")
+            expected = () if kind == "fallback" else (UnknownLineAdvisory("source", _SESSION_ID, kind, 1),)
+            _check(collector.snapshot() == expected, f"{kind}: exact kind/session advisory; fallback silent")
+
+
+def test_unknown_block_warning_is_safe() -> None:
+    """Direct parsing warns with kind/session only, never vendor payload."""
+    from unittest.mock import patch
+
+    line = _user_message_line("synthetic-warning")
+    line["message"] = {"role": "user", "content": [{"type": "synthetic-future-block-2099", "private": "PRIVATE_PAYLOAD"}]}
+    with patch("ananta.llm.session_ledger.poll_advisories.logger.warning") as warning:
+        _check(list(claude_code.parse_line_data(line)) == [], "unknown-only block fabricates no events")
+        warning.assert_called_once_with("claude_code: skipping unknown line type=%r session=%r", "synthetic-future-block-2099", _SESSION_ID)
+        _check("PRIVATE_PAYLOAD" not in str(warning.call_args), "unknown block payload never logged")
 
 
 # ───── Driver ───────────────────────────────────────────────────────────────
@@ -303,7 +314,9 @@ def main() -> int:
     test_each_newly_skipped_type_yields_no_events()
     test_preexisting_skipped_types_unchanged()
     test_realistic_471a05a5_head_sequence_parses_cleanly()
-    test_unknown_type_still_raises()
+    test_unknown_types_continue()
+    test_fallback_and_unknown_blocks()
+    test_unknown_block_warning_is_safe()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

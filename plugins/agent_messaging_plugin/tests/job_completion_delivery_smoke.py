@@ -198,6 +198,11 @@ class _FakeStateService:
             "data": {"records": [{"id": _JOB, "metadata": json.dumps({"flow_id": "f1"})}]},
         }
 
+    def query_state(self, namespace: str, query: dict[str, object]) -> dict[str, object]:
+        # The verb consults the retired-role registry before resolving
+        # (iss_d9c955a2); no registry row means the recipient role is not retired.
+        return {"action_status": "completed", "data": {"records": []}}
+
     def update_state(
         self, namespace: str, query: dict[str, object], updates: dict[str, object]
     ) -> dict[str, object]:

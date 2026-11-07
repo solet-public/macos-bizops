@@ -4,6 +4,7 @@ from typing import TypeVar
 
 from ananta.config.schema_factory import get_standardized_schema
 from ananta.constants import FRAMEWORK_NAMESPACE, STATE_VERSION
+from ananta.core.actions._measured_action_lane import run_blocking
 from ananta.core.actions.action_factory import ActionFactory
 from ananta.core.domain.enums import ActionStatus, ErrorSeverity
 from ananta.core.domain.error_codes import ErrorCode
@@ -202,9 +203,7 @@ class StateManager[T: StateDict]:
             await self.save(state)
             return state
         except AnantaError:
-            logger.error(
-                f"Error occurred while setting result for action: {action_name}", exc_info=True
-            )
+            logger.error(f"Error occurred while setting result for action: {action_name}", exc_info=True)
             raise
         except Exception as e:
             error = FrameworkError(
@@ -251,9 +250,7 @@ class StateManager[T: StateDict]:
             await self.save(state)
             return state
         except AnantaError:
-            logger.error(
-                f"Error occurred while setting error for action: {action_name}", exc_info=True
-            )
+            logger.error(f"Error occurred while setting error for action: {action_name}", exc_info=True)
             raise
         except Exception as e:
             error = FrameworkError(
@@ -291,6 +288,10 @@ class StateManager[T: StateDict]:
         return state_data if isinstance(state_data, dict) else {}
 
     async def get_plugin_state(self, plugin_name: str) -> dict[str, object]:
+        """Read plugin state without running its synchronous provider on the loop."""
+        return await run_blocking(self._get_plugin_state, plugin_name)
+
+    def _get_plugin_state(self, plugin_name: str) -> dict[str, object]:
         if not plugin_name:
             raise FrameworkError(
                 message="Plugin name cannot be empty",
@@ -358,9 +359,7 @@ class StateManager[T: StateDict]:
 
     def _check_plugin_state_exists(self, plugin_name: str) -> bool:
         """Check if plugin state record exists."""
-        existing_result = self.state_service.read_state(
-            namespace=plugin_name, query={"table": "plugin_state", "filters": {}, "limit": 1}
-        )
+        existing_result = self.state_service.read_state(namespace=plugin_name, query={"table": "plugin_state", "filters": {}, "limit": 1})
 
         if not is_status_match(existing_result.get("action_status"), ActionStatus.COMPLETED):
             return False
@@ -376,9 +375,7 @@ class StateManager[T: StateDict]:
         records = result_obj.get("records")
         return isinstance(records, list) and len(records) > 0
 
-    def _write_or_update_plugin_state(
-        self, plugin_name: str, current_state: dict[str, object], has_records: bool
-    ) -> ActionResult:
+    def _write_or_update_plugin_state(self, plugin_name: str, current_state: dict[str, object], has_records: bool) -> ActionResult:
         """Write or update plugin state record."""
         if has_records:
             return self.state_service.update_state(
@@ -391,26 +388,25 @@ class StateManager[T: StateDict]:
             data={"table": "plugin_state", "record": {"state_data": current_state}},
         )
 
+    def _persist_plugin_state(self, plugin_name: str, data: dict[str, object]) -> None:
+        """Keep the existing schema/read/merge/write sequence in one worker turn."""
+        self._ensure_plugin_schema(plugin_name)
+        current_state = self._get_plugin_state(plugin_name)
+        current_state.update(data)
+        has_records = self._check_plugin_state_exists(plugin_name)
+        result = self._write_or_update_plugin_state(plugin_name, current_state, has_records)
+        if not is_status_match(result.get("action_status"), ActionStatus.COMPLETED):
+            raise FrameworkError(
+                message=f"Failed to update plugin state: {result}",
+                error_code=ErrorCode.SYSTEM_GENERIC,
+                details={"plugin_name": plugin_name, "result": result},
+                severity=ErrorSeverity.ERROR,
+            )
+
     async def update_plugin_state(self, plugin_name: str, data: dict[str, object]) -> T:
         self._validate_plugin_state_inputs(plugin_name, data)
-
         try:
-            self._ensure_plugin_schema(plugin_name)
-
-            current_state = await self.get_plugin_state(plugin_name)
-            current_state.update(data)
-
-            has_records = self._check_plugin_state_exists(plugin_name)
-            result = self._write_or_update_plugin_state(plugin_name, current_state, has_records)
-
-            if not is_status_match(result.get("action_status"), ActionStatus.COMPLETED):
-                raise FrameworkError(
-                    message=f"Failed to update plugin state: {result}",
-                    error_code=ErrorCode.SYSTEM_GENERIC,
-                    details={"plugin_name": plugin_name, "result": result},
-                    severity=ErrorSeverity.ERROR,
-                )
-
+            await run_blocking(self._persist_plugin_state, plugin_name, data)
             return await self.load()
 
         except AnantaError:
@@ -474,9 +470,7 @@ class StateManager[T: StateDict]:
                 for action in actions_to_inject:
                     actions.append(action)
                     action_name_obj = action.get("name")
-                    _action_name_str = (
-                        str(action_name_obj) if action_name_obj is not None else "unknown"
-                    )
+                    _action_name_str = str(action_name_obj) if action_name_obj is not None else "unknown"
 
                 state["actions"] = actions
                 await self.save(state)

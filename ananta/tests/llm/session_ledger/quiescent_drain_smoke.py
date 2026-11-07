@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import io
 import logging
 import sys
 import threading
@@ -547,6 +548,61 @@ def test_wi0_static_entry_submits_without_inline_summarization() -> None:
     )
 
 
+def test_executor_diagnostics_preserve_executor_name_and_retry_state() -> None:
+    """Named executors report their own identity for start and task failures."""
+    output = io.StringIO()
+    handler = logging.StreamHandler(output)
+    executor_logger = logging.getLogger(
+        "ananta.services.session_ledger_service.summary_executor",
+    )
+    prior_level = executor_logger.level
+    executor_logger.setLevel(logging.ERROR)
+    executor_logger.addHandler(handler)
+    try:
+        for name in ("ledger-summary-test", "kb-retrieval-audit-test"):
+            executor = BoundedSummaryExecutor(name=name)
+            _check(executor._slot.acquire(blocking=False), f"{name} test reserves its slot")
+            try:
+                executor._run(lambda: (_ for _ in ()).throw(RuntimeError("task failed")))
+            finally:
+                _check(
+                    name in output.getvalue()
+                    and "no automatic retry" in output.getvalue()
+                    and "later submission" in output.getvalue(),
+                    f"top-level failure identifies {name} and caller-driven retry behavior",
+                )
+
+            start_output = io.StringIO()
+
+            class _ThreadStartFailure:
+                def __init__(self, *, target: Any, args: tuple[Any, ...], name: str, daemon: bool) -> None:
+                    _ = (target, args, daemon)
+                    self.name = name
+
+                def start(self) -> None:
+                    raise RuntimeError("thread start failed")
+
+            original_thread = threading.Thread
+            threading.Thread = _ThreadStartFailure  # type: ignore[assignment]
+            try:
+                local_handler = logging.StreamHandler(start_output)
+                executor_logger.addHandler(local_handler)
+                accepted = BoundedSummaryExecutor(name=name).submit(lambda: None)
+                executor_logger.removeHandler(local_handler)
+            finally:
+                threading.Thread = original_thread
+            message = start_output.getvalue()
+            _check(not accepted, f"{name} start failure is not accepted")
+            _check(
+                name in message and "not accepted" in message
+                and "caller resubmission" in message,
+                f"start failure identifies {name} and caller-driven retry behavior",
+            )
+    finally:
+        executor_logger.removeHandler(handler)
+        executor_logger.setLevel(prior_level)
+
+
 def main() -> int:
     print("=== quiescent_drain_smoke (singleton drain-until-empty, 2026-07-02) ===")
     test_drain_until_empty_then_second_drain_noops()
@@ -559,6 +615,7 @@ def main() -> int:
     test_singleton_second_fire_noops_while_drainer_running()
     test_wi0_no_summarization_on_the_calling_thread()
     test_wi0_static_entry_submits_without_inline_summarization()
+    test_executor_diagnostics_preserve_executor_name_and_retry_state()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

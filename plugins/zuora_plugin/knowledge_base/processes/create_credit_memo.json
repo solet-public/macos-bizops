@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::create_credit_memo",
+  "display_name": "Zuora: Create Credit Memo",
+  "description": "Create an ad-hoc credit memo from product rate plan charges (POST /v1/credit-memos): accountId or accountNumber, charges with amounts, effectiveDate, reasonCode, autoPost. Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "Issue a credit to a customer that is not tied to a specific invoice, priced from product catalog charges, such as a goodwill credit, service-level penalty or promotional discount. Can be posted immediately. Use when you need to owe the customer money from a catalog charge.",
+  "result_processor_customizations": {
+    "action_label": "Zuora credit memo created",
+    "result_type": "zuora_create_credit_memo_result",
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+  },
+  "error_processor_customizations": {
+    "action_context": "Create an ad-hoc credit memo from product rate plan charges (POST /v1/credit-memos): accountId or accountNumber, charges with amounts, effectiveDate, reasonCode, autoPost.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape: a bad identifier, header value or query pairing, a body missing a required field, or an unreadable or wrongly typed upload file. zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.validation_failed is a vendor 4xx or an HTTP 200 carrying success false, with Zuora's reasons. zuora.object_not_found, zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the Billing permission the reason names, or enable the vendor feature it names (for example Invoice Settlement or billing document file generation). Read current vendor state with the matching get or list verb before retrying a write; pass an idempotency_key where offered. Back off on rate limits."
+  }
+}

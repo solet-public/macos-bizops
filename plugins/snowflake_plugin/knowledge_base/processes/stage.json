@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::stage",
+  "display_name": "Snowflake: Stages",
+  "description": "Manage Snowflake stages under /api/v2/databases/{database}/schemas/{schema}/stages. Operations: list (like), create (body Stage with name, for example kind, url, storage_integration, credentials, encryption, directory_table, file_format, copy_options; createMode), get, delete (ifExists), list_files (LIST @stage; pattern regex), presigned_url (file_path, optional body expiration_time in seconds; returns FileTransferMaterial.presigned_url, which the vendor issues only for server-side encrypted stages) and fetch_result (result_handler, page). File upload and download (PUT, GET), REMOVE and COPY INTO are connector SQL commands outside this REST API; run_statement forwards them. Credentials in a create body are redacted from results. Vendor RBAC alone decides. Returns job_id/status queued.",
+  "embedding_description": "Create, inspect and drop Snowflake internal and external stages through the Stage REST API, list the files on a stage with a regex pattern, and get a time-limited presigned URL to download or upload one staged file. Use for stage lifecycle and staged-file discovery before loading or unloading data. Vendor role grants decide every operation.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake stage operation queued",
+    "result_type": "snowflake_stage_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: family, operation, method, status (HTTP), headers, body (Stage objects, StageFile entries (name, size, md5, last_modified), FileTransferMaterial with presigned_url, the vendor's status message or a SuccessAcceptedResponse), body_encoding, correlation_id, error_code for 4xx/5xx, and pagination: Link relations, location and result_handler for 202 responses; list and list_files take only like or pattern and return every match.",
+    "presentation_guidance": "This operation may have changed vendor state. Queued means the job was accepted, not that Snowflake completed the operation. Report the HTTP status, error_code and body faithfully. A presigned_url is a time-limited bearer URL for one file: give it only to the caller that requested it, with its expiration. Report deletes from the vendor status, never from job completion alone."
+  },
+  "error_processor_customizations": {
+    "action_context": "Manage Snowflake stages with the registered role's grants.",
+    "error_interpretation": "snowflake.invalid_params is raised before any vendor call when the operation, identifiers, query parameter names, types or ranges (boolean ifExists, a non-empty file_path without control characters), createMode or required body members do not match the documented vendor shape. Vendor HTTP errors are completion data with status, body and error_code: auth_failed (401), permission_denied (403), object_not_found (404), timeout (408), conflict (409), rate_limited (429), api_error otherwise. snowflake.api_error without a status is a transport or configuration failure.",
+    "recovery_guidance": "Read the vendor status and body before retrying. A 403 means the registered role lacks the grant: grant it in Snowflake, the plugin adds no gate of its own. Double-quote identifiers that contain other characters. For a 202, call the same verb with operation fetch_result and the pagination.result_handler. Never silently retry a mutation after a transport error: read the object first."
+  }
+}

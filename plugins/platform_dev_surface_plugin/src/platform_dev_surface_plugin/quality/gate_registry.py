@@ -26,12 +26,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Per-gate timeout table (Q4). Heavy tree-walkers + the aggregate + the full
-# smoke suite get 600s; the lighter tree-walking gates get 300s.
-_TIMEOUT_AGGREGATE = 600
-_TIMEOUT_HEAVY_WALK = 600
-_TIMEOUT_WALK = 300
-
 # The aggregate gate name — the C1 joseki card's verb target; covers ruff,
 # pyright, the coherence trio (canonical scope), W-INT, and service-interface
 # AST in one self-orchestrating run.
@@ -45,7 +39,7 @@ class GateSpec:
     name: str
     kind: str  # aggregate | integration | sql | warn | coherence
     description: str
-    timeout_seconds: int
+    timeout_seconds: None
     script: str | None = None  # repo-relative path under quality_gates/
     allowlist: str | None = None  # repo-relative path under quality_gates/
     extra_flags: tuple[str, ...] = field(default_factory=tuple)
@@ -56,59 +50,39 @@ _GATES: tuple[GateSpec, ...] = (
     GateSpec(
         name=AGGREGATE_GATE_NAME,
         kind="aggregate",
-        description=(
-            "Whole-tree aggregate commit gate: ruff, pyright --strict, the "
-            "coherence trio (god_class / radon_cc / radon_mi at canonical "
-            "scope), whole-tree integration, and service-interface AST. The "
-            "authoritative single gate — the run_joseki C1 card's target."
-        ),
-        timeout_seconds=_TIMEOUT_AGGREGATE,
+        description=("Whole-tree aggregate commit gate: ruff, pyright --strict, the coherence trio (god_class / radon_cc / radon_mi at canonical scope), whole-tree integration, and service-interface AST. The authoritative single gate — the run_joseki C1 card's target."),
+        timeout_seconds=None,
         script="quality_gates/code_quality_check.py",
     ),
     GateSpec(
         name="whole_tree_integration",
         kind="integration",
-        description=(
-            "Whole-tree integration gate (W-INT): walks service public.py, "
-            "plugin.py, KB JSON dirs, and scheduling call-sites for cross-tree "
-            "wiring drift. Self-locating; no scope-path argv."
-        ),
-        timeout_seconds=_TIMEOUT_HEAVY_WALK,
+        description=("Whole-tree integration gate (W-INT): walks service public.py, plugin.py, KB JSON dirs, and scheduling call-sites for cross-tree wiring drift. Self-locating; no scope-path argv."),
+        timeout_seconds=None,
         script="quality_gates/whole_tree_integration_gate.py",
         allowlist="quality_gates/whole_tree_integration_gate_allowlist.txt",
     ),
     GateSpec(
         name="service_interface_ast",
         kind="integration",
-        description=(
-            "Service-interface AST consistency: decorator name == function "
-            "name, every service-ABC abstractmethod carries the decorator, "
-            "every processes/<provider>/*.json matches a registered verb."
-        ),
-        timeout_seconds=_TIMEOUT_WALK,
+        description=("Service-interface AST consistency: decorator name == function name, every service-ABC abstractmethod carries the decorator, every processes/<provider>/*.json matches a registered verb."),
+        timeout_seconds=None,
         script="quality_gates/service_interface_ast_check.py",
         allowlist="quality_gates/service_interface_ast_allowlist.txt",
     ),
     GateSpec(
         name="sql_access",
         kind="sql",
-        description=(
-            "SQL-access lockdown: no new raw SQL / hand-DDL / direct driver "
-            "use outside the sanctioned state-interface owner. Tree-walking, "
-            "allowlist-gated."
-        ),
-        timeout_seconds=_TIMEOUT_WALK,
+        description=("SQL-access lockdown: no new raw SQL / hand-DDL / direct driver use outside the sanctioned state-interface owner. Tree-walking, allowlist-gated."),
+        timeout_seconds=None,
         script="quality_gates/sql_access_gate.py",
         allowlist="quality_gates/sql_access_allowlist.txt",
     ),
     GateSpec(
         name="wint2_driver_import",
         kind="warn",
-        description=(
-            "W-INT Cycle 2 driver-import ratchet (WARN mode): flags NEW "
-            "direct-driver-import drift. Findings print but do not block."
-        ),
-        timeout_seconds=_TIMEOUT_WALK,
+        description=("W-INT Cycle 2 driver-import ratchet (WARN mode): flags NEW direct-driver-import drift. Findings print but do not block."),
+        timeout_seconds=None,
         script="quality_gates/wint2_driver_import_check.py",
         allowlist="quality_gates/wint2_driver_import_allowlist.txt",
         extra_flags=("--warn-only",),
@@ -116,12 +90,8 @@ _GATES: tuple[GateSpec, ...] = (
     GateSpec(
         name="wint2_vault_key_declaration",
         kind="warn",
-        description=(
-            "W-INT Cycle 2 vault-key-declaration ratchet (WARN mode): flags "
-            "scoped vault reads missing a key declaration. Findings print but "
-            "do not block."
-        ),
-        timeout_seconds=_TIMEOUT_WALK,
+        description=("W-INT Cycle 2 vault-key-declaration ratchet (WARN mode): flags scoped vault reads missing a key declaration. Findings print but do not block."),
+        timeout_seconds=None,
         script="quality_gates/wint2_vault_key_declaration_check.py",
         allowlist="quality_gates/wint2_vault_key_declaration_allowlist.txt",
         extra_flags=("--warn-only",),
@@ -129,12 +99,8 @@ _GATES: tuple[GateSpec, ...] = (
     GateSpec(
         name="god_class",
         kind="coherence",
-        description=(
-            "God-class structure (coherence-aware): non-process LOC / method / "
-            "attr thresholds. Per-file scope; run via the code_quality "
-            "aggregate to apply the canonical scope."
-        ),
-        timeout_seconds=_TIMEOUT_WALK,
+        description=("God-class structure (coherence-aware): non-process LOC / method / attr thresholds. Per-file scope; run via the code_quality aggregate to apply the canonical scope."),
+        timeout_seconds=None,
         script="quality_gates/god_class_check.py",
         allowlist="quality_gates/god_class_allowlist.txt",
         directly_runnable=False,
@@ -142,11 +108,8 @@ _GATES: tuple[GateSpec, ...] = (
     GateSpec(
         name="radon_cc",
         kind="coherence",
-        description=(
-            "Cyclomatic-complexity gate (A/B only, tracked-debt allowlist). "
-            "Per-file scope; run via the code_quality aggregate."
-        ),
-        timeout_seconds=_TIMEOUT_WALK,
+        description=("Cyclomatic-complexity gate (A/B only, tracked-debt allowlist). Per-file scope; run via the code_quality aggregate."),
+        timeout_seconds=None,
         script="quality_gates/radon_cc_check.py",
         allowlist="quality_gates/radon_cc_allowlist.txt",
         directly_runnable=False,
@@ -154,11 +117,8 @@ _GATES: tuple[GateSpec, ...] = (
     GateSpec(
         name="radon_mi",
         kind="coherence",
-        description=(
-            "Maintainability-index gate (A/B only, coherence-aware strip). "
-            "Per-file scope; run via the code_quality aggregate."
-        ),
-        timeout_seconds=_TIMEOUT_WALK,
+        description=("Maintainability-index gate (A/B only, coherence-aware strip). Per-file scope; run via the code_quality aggregate."),
+        timeout_seconds=None,
         script="quality_gates/radon_mi_check.py",
         allowlist="quality_gates/radon_mi_allowlist.txt",
         directly_runnable=False,

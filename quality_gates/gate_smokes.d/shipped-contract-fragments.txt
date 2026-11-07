@@ -1,0 +1,30 @@
+# Fragment of the gate-smoke register, owned by one candidate (prb_ae6d81ea,
+# chg_46d4755e). Same grammar and same meaning as quality_gates/gate_smokes.txt;
+# the union is read by quality_gates/gate_smoke_register.py for every runner and
+# census, and by seed_factory_plugin.shipped_smoke_contract for the three-surface
+# agreement and the contract's own freshness and retention.
+#
+# WRITE YOUR OWN FILE HERE. Two candidates registering a smoke share no path, so
+# neither invalidates the other's frozen base entries. Do not add your entry to
+# someone else's fragment, and do not migrate or reorder entries that already
+# live in gate_smokes.txt.
+#
+# THIS FILE SHIPS, so it carries no reserved origin identity token in its name or
+# its content -- the shipped-content validator refuses one in any shipped path or
+# body, and that is why this fragment and its two companions are named for what
+# they declare rather than for the plan that added them.
+#
+# The checkout-only MARKER for this candidate's own smoke lives here, in a
+# fragment, which is the surface this candidate added: the marker route is the
+# outcome demonstrating itself. Its two companion declarations are
+# plugins/seed_factory_plugin/knowledge_base/shipped_smoke_contract.d/shipped-contract-fragments.yaml
+# and plugins/seed_factory_plugin/knowledge_base/seed_manifest.d/shipped-contract-fragments.yaml,
+# so declaring this smoke touched no file another candidate writes to.
+# not shipped: quality_gates/tests/shipped_contract_fragment_union_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; it drives the real contract parser, the real seed-manifest parser and assemble's own exclusion predicate over real fragment files, and the seed factory is in no capability bundle (fixture_build_tooling)
+
+# Proves the two yaml fragment surfaces end to end: a fragment-only contract row,
+# a fragment-only marker, a fragment-only exclusion honoured by assemble's own
+# prune predicate, the duplicate-entry refusal, the unreadable-fragment advisory,
+# the union digest behind toolchain.contract_hash, and parity between the plugin's
+# fragment reader and quality_gates/gate_smoke_register.py. Offline, hermetic.
+quality_gates/tests/shipped_contract_fragment_union_smoke.py

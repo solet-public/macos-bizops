@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::disconnect_account",
+  "display_name": "Google Workspace: Disconnect Account",
+  "description": "Disconnect one Google account: revoke its grant at Google (POST oauth2.googleapis.com/revoke) and delete only that account's tokens from the vault. Other accounts are untouched. If it was the default, the next connected account becomes the default. A revoke failure is reported in revoke_status and the local credentials are still deleted. For an account migrated from the pre-multi-account credential, the legacy vault entries are deleted too.",
+  "embedding_description": "Unlink one Google account (work, home or a personal Gmail) from this assistant: revoke its access at Google and delete only its stored tokens, leaving other linked accounts working. Reports whether the revoke succeeded and which account is the new default.",
+  "result_processor_customizations": {
+    "action_label": "Google account disconnected",
+    "result_type": "g_suite_disconnect_account_result",
+    "result_description": "{account, revoke_status (revoked, already_invalid, revoke_failed_*), credentials_deleted, new_default}.",
+    "presentation_guidance": "Confirm which account was disconnected and name the new default if one changed; mention revoke_status only when it is not revoked."
+  },
+  "error_processor_customizations": {
+    "action_context": "Disconnect one connected Google account.",
+    "error_interpretation": "gsuite.unknown_account: no connected account matches; the message lists the connected accounts. gsuite.invalid_params: account missing.",
+    "recovery_guidance": "Pick an email or alias from the listed accounts (list_accounts)."
+  }
+}

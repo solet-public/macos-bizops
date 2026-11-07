@@ -140,9 +140,7 @@ class AsyncJobManagerProtocol(Protocol):
 
 class EventBusProtocol(Protocol):
     def publish(self, event: object) -> bool: ...
-    def subscribe(
-        self, event_type: str, handler: Callable[[dict[str, object]], object]
-    ) -> None: ...
+    def subscribe(self, event_type: str, handler: Callable[[dict[str, object]], object]) -> None: ...
 
 
 class UnifiedMetadataRegistryProtocol(Protocol):
@@ -167,9 +165,7 @@ class DiscoveryServiceProtocol(Protocol):
 
 
 class ActionManager:
-    discovery_service: DiscoveryServiceProtocol | None = (
-        None  # Optional discovery service for process lookup
-    )
+    discovery_service: DiscoveryServiceProtocol | None = None  # Optional discovery service for process lookup
 
     def __init__(
         self,
@@ -226,17 +222,13 @@ class ActionManager:
         self.memory_service = memory_service  # Memory service for template function execution
         self.knowledge_service = knowledge_service  # Knowledge service for template function execution
 
-    def _initialize_service_components(
-        self, state_service: StateServiceProtocol | None, state_manager: StateManagerProtocol
-    ) -> None:
+    def _initialize_service_components(self, state_service: StateServiceProtocol | None, state_manager: StateManagerProtocol) -> None:
         """Initialize validation, tracking, and processing service components."""
         # Validate state_service before passing to ActionValidator
         # ActionValidator expects StateService | None but we have StateServiceProtocol | None
         # Since StateServiceProtocol is a duck-typed interface, we can safely pass it
         self.validator = ActionValidator(state_service)  # type: ignore[arg-type]
-        self.validation_service = ValidationService(
-            validator=self.validator, state_service=state_service
-        )
+        self.validation_service = ValidationService(validator=self.validator, state_service=state_service)
 
         # EXTRACTED: Registry management service for all registry operations
         # Type narrowing: registry_manager_state_service is compatible with RegistryManager's Protocol
@@ -258,9 +250,7 @@ class ActionManager:
         )
 
         # EXTRACTED: Validation coordination service for plugin and service validation
-        self.validation_coordinator = ValidationCoordinator(
-            validation_service=self.validation_service
-        )
+        self.validation_coordinator = ValidationCoordinator(validation_service=self.validation_service)
 
         # EXTRACTED: Execution tracking and performance monitoring service
         self.execution_tracking_manager = ExecutionTrackingManager(state_service=state_service)
@@ -269,17 +259,11 @@ class ActionManager:
         self.performance_stats_manager = PerformanceStatsManager(state_service=state_service)
 
         # EXTRACTED: Action validation service
-        self.action_validation_manager = ActionValidationManager(
-            execution_tracking_manager=self.execution_tracking_manager
-        )
+        self.action_validation_manager = ActionValidationManager(execution_tracking_manager=self.execution_tracking_manager)
 
         # EXTRACTED: Result processing and formatting service
         # Build IO process key resolver from orchestrator (for no_matches shortcut)
-        io_resolver = (
-            FlowBasedIOProcessKeyResolver(self.orchestrator)
-            if self.orchestrator
-            else None
-        )
+        io_resolver = FlowBasedIOProcessKeyResolver(self.orchestrator) if self.orchestrator else None
         self.result_processing_manager = ResultProcessingManager(
             template_engine=None,
             state_manager=state_manager,  # Will be set after template engine initialization
@@ -306,9 +290,7 @@ class ActionManager:
         # Set the process external ID getter for the registry manager
         self.registry_manager.set_process_external_id_getter(self._get_process_external_id)
 
-    def _initialize_execution_engine(
-        self, state_service: StateServiceProtocol | None, event_bus: EventBusProtocol | None
-    ) -> None:
+    def _initialize_execution_engine(self, state_service: StateServiceProtocol | None, event_bus: EventBusProtocol | None) -> None:
         """Initialize the action execution engine with required dependencies."""
         self.execution_engine = ActionExecutionEngine(
             state_service=state_service,
@@ -328,15 +310,12 @@ class ActionManager:
     ) -> None:
         """Initialize template engine with fail-fast validation."""
         if OrchestrationFeatureFlags.use_new_template_engine() and unified_metadata_registry:
-            self._setup_new_template_engine(
-                unified_metadata_registry, state_service, plugin_manager, self.knowledge_service
-            )
+            self._setup_new_template_engine(unified_metadata_registry, state_service, plugin_manager, self.knowledge_service)
         else:
             # FAIL-FAST: No fallback to legacy TemplateEngine
-            raise RuntimeError(
-                "Unified metadata registry not available and fallback to legacy TemplateEngine "
-                "is prohibited. Feature flags must enable NewTemplateEngine."
-            )
+            from ananta.platform.platform_services_manager import metadata_registry_startup_detail
+
+            raise RuntimeError(metadata_registry_startup_detail())
 
     def _setup_new_template_engine(
         self,
@@ -376,10 +355,7 @@ class ActionManager:
 
         except Exception as e:
             # FAIL-FAST: No fallback to legacy TemplateEngine
-            raise RuntimeError(
-                f"NewTemplateEngine failed to initialize and fallback to legacy TemplateEngine "
-                f"is prohibited. Original error: {e}"
-            ) from e
+            raise RuntimeError(f"NewTemplateEngine failed to initialize and fallback to legacy TemplateEngine is prohibited. Original error: {e}") from e
 
     def _resolve_file_references(self, action_def: ActionDefinition) -> ActionDefinition:
         """
@@ -423,16 +399,12 @@ class ActionManager:
         """
         return await self.registry_manager.register_action(action_def)
 
-    def _validate_action_definition_for_registration(
-        self, action_def: ActionDefinition
-    ) -> dict[str, object]:
+    def _validate_action_definition_for_registration(self, action_def: ActionDefinition) -> dict[str, object]:
         """Validate action definition and return validation result with action name."""
         # Validate action definition using unified validator
         # Convert ActionDefinition TypedDict to dict for validation
         action_def_dict: dict[str, object] = dict(action_def)
-        valid, validation_error = self.validator.definition_manager.validate_action_definition(
-            action_def_dict
-        )
+        valid, validation_error = self.validator.definition_manager.validate_action_definition(action_def_dict)
         if not valid:
             logger.error(f"Action definition validation failed: {validation_error}")
             return {"valid": False}
@@ -444,9 +416,7 @@ class ActionManager:
 
         return {"valid": True, "action_name": action_name}
 
-    def _extract_and_validate_process_info(
-        self, action_def: dict[str, object], action_name: str
-    ) -> dict[str, object]:
+    def _extract_and_validate_process_info(self, action_def: dict[str, object], action_name: str) -> dict[str, object]:
         """
         Delegate process info extraction and validation to ActionDefinitionProcessor.
 
@@ -458,9 +428,7 @@ class ActionManager:
             process_external_id_getter=self._get_process_external_id,
         )
 
-    def _store_action_definition_record(
-        self, action_name: str, process_external_id: str, action_def: dict[str, object]
-    ) -> bool:
+    def _store_action_definition_record(self, action_name: str, process_external_id: str, action_def: dict[str, object]) -> bool:
         """Store action definition record in persistent registry and return success status."""
         if self.state_service is None:
             logger.error("State service not available for storing action definition")
@@ -495,18 +463,14 @@ class ActionManager:
         """
         return await self.registry_manager.update_action(action_name, updates)
 
-    def _validate_update_prerequisites(
-        self, _action_name: str
-    ) -> bool:  # Reserved for interface compatibility
+    def _validate_update_prerequisites(self, _action_name: str) -> bool:  # Reserved for interface compatibility
         """Validate that prerequisites for action update are met."""
         if not self.state_service:
             logger.error("State service not available for action update")
             return False
         return True
 
-    def _normalize_action_updates(
-        self, updated_action: dict[str, object], action_name: str
-    ) -> dict[str, object] | None:
+    def _normalize_action_updates(self, updated_action: dict[str, object], action_name: str) -> dict[str, object] | None:
         """Convert updated action definition to normalized schema format."""
         normalized_updates = {}
 
@@ -520,22 +484,16 @@ class ActionManager:
         if "process" in updated_action:
             process_obj = updated_action["process"]
             if not isinstance(process_obj, dict):
-                logger.error(
-                    f"Invalid process specification for action '{action_name}': expected dict"
-                )
+                logger.error(f"Invalid process specification for action '{action_name}': expected dict")
                 return None
-            process_external_id = self._resolve_process_external_id_for_update(
-                process_obj, action_name
-            )
+            process_external_id = self._resolve_process_external_id_for_update(process_obj, action_name)
             if process_external_id is None:
                 return None  # Process lookup failed
             normalized_updates["process_external_id"] = process_external_id
 
         return normalized_updates
 
-    def _resolve_process_external_id_for_update(
-        self, process: dict[str, object], action_name: str
-    ) -> str | None:
+    def _resolve_process_external_id_for_update(self, process: dict[str, object], action_name: str) -> str | None:
         """Resolve process external ID for action update process changes."""
         provider_type = process.get("provider_type", "plugin")
         provider = process.get("provider") or process.get("plugin")
@@ -547,17 +505,13 @@ class ActionManager:
             if process_external_id:
                 return process_external_id
             else:
-                logger.error(
-                    f"Process '{process_key}' not found when updating action '{action_name}'"
-                )
+                logger.error(f"Process '{process_key}' not found when updating action '{action_name}'")
                 return None
 
         logger.error(f"Invalid process specification in action update for '{action_name}'")
         return None
 
-    def _persist_action_updates(
-        self, action_name: str, normalized_updates: dict[str, object]
-    ) -> bool:
+    def _persist_action_updates(self, action_name: str, normalized_updates: dict[str, object]) -> bool:
         """Persist action updates to the registry and return success status."""
         if self.state_service is None:
             logger.error("State service not available for persisting action updates")
@@ -638,21 +592,15 @@ class ActionManager:
 
         REFACTORED: Extracted B(6) complexity method to ExecutionTrackingManager - maintaining API contract.
         """
-        await self.execution_tracking_manager.track_action_execution_start(
-            execution_id, action_name, parameters, start_time, source_context
-        )
+        await self.execution_tracking_manager.track_action_execution_start(execution_id, action_name, parameters, start_time, source_context)
 
-    async def _update_execution_provider(
-        self, execution_id: str, provider_type: str, provider: str
-    ) -> None:
+    async def _update_execution_provider(self, execution_id: str, provider_type: str, provider: str) -> None:
         """
         Delegate execution provider update to ExecutionTrackingManager service.
 
         REFACTORED: Extracted A complexity method to ExecutionTrackingManager - maintaining API contract.
         """
-        await self.execution_tracking_manager.update_execution_provider(
-            execution_id, provider_type, provider
-        )
+        await self.execution_tracking_manager.update_execution_provider(execution_id, provider_type, provider)
 
     async def _track_action_execution_end(
         self,
@@ -667,13 +615,9 @@ class ActionManager:
 
         REFACTORED: Extracted B(8) complexity method to ExecutionTrackingManager - maintaining API contract.
         """
-        await self.execution_tracking_manager.track_action_execution_end(
-            execution_id, start_time, success, result, error
-        )
+        await self.execution_tracking_manager.track_action_execution_end(execution_id, start_time, success, result, error)
 
-    async def get_action_performance_stats(
-        self, action_name: str | None = None, hours: int = 24
-    ) -> dict[str, object]:
+    async def get_action_performance_stats(self, action_name: str | None = None, hours: int = 24) -> dict[str, object]:
         """
         Delegate performance statistics retrieval to PerformanceStatsManager service.
 
@@ -681,9 +625,7 @@ class ActionManager:
         """
         return await self.performance_stats_manager.get_action_performance_stats(action_name, hours)
 
-    def _calculate_performance_stats(
-        self, records: list[dict[str, object]], action_name: str | None = None
-    ) -> dict[str, object]:
+    def _calculate_performance_stats(self, records: list[dict[str, object]], action_name: str | None = None) -> dict[str, object]:
         """
         Delegate performance statistics calculation to PerformanceStatsManager service.
 
@@ -741,14 +683,10 @@ class ActionManager:
             function_name=function_name,
         )
 
-        plugin_function = self.validation_service.validate_and_get_plugin_function(
-            plugin, function_name, action_name
-        )
+        plugin_function = self.validation_service.validate_and_get_plugin_function(plugin, function_name, action_name)
 
         # Phase 3: Execute plugin function and validate result
-        return self.validation_service.execute_and_validate_plugin_result(
-            plugin_function, action_name, action_object
-        )
+        return self.validation_service.execute_and_validate_plugin_result(plugin_function, action_name, action_object)
 
     def _handle_plugin_execution_error(self, error: Exception, action_name: str) -> Exception:
         """Handle different types of plugin execution errors with appropriate error types."""
@@ -788,35 +726,25 @@ class ActionManager:
             original_error=error,
         )
 
-    def _validate_plugin_execution_prerequisites(
-        self, plugin: PluginInterface, action_name: str
-    ) -> None:
+    def _validate_plugin_execution_prerequisites(self, plugin: PluginInterface, action_name: str) -> None:
         """
         Delegate plugin execution prerequisite validation to ValidationCoordinator.
 
         REFACTORED: Extracted validation logic to ValidationCoordinator - maintaining API contract.
         """
-        return self.validation_coordinator.validate_plugin_execution_prerequisites(
-            plugin, action_name
-        )
+        return self.validation_coordinator.validate_plugin_execution_prerequisites(plugin, action_name)
 
-    def _validate_and_get_plugin_function(
-        self, plugin: PluginInterface, function_name: str, action_name: str
-    ) -> Callable[[dict[str, object], dict[str, object], str, dict[str, object]], object]:
+    def _validate_and_get_plugin_function(self, plugin: PluginInterface, function_name: str, action_name: str) -> Callable[[dict[str, object], dict[str, object], str, dict[str, object]], object]:
         """
         Delegate plugin function validation to ValidationCoordinator.
 
         REFACTORED: Extracted validation logic to ValidationCoordinator - maintaining API contract.
         """
-        return self.validation_coordinator.validate_and_get_plugin_function(
-            plugin, function_name, action_name
-        )
+        return self.validation_coordinator.validate_and_get_plugin_function(plugin, function_name, action_name)
 
     def _execute_and_validate_plugin_result(
         self,
-        plugin_function: Callable[
-            [dict[str, object], dict[str, object], str, dict[str, object]], object
-        ],
+        plugin_function: Callable[[dict[str, object], dict[str, object], str, dict[str, object]], object],
         action_object: dict[str, object],
         state: dict[str, object],
         plugin_config: dict[str, object],
@@ -838,21 +766,15 @@ class ActionManager:
             timestamp=timestamp,
         )
 
-    def _parse_action_parameters(
-        self, action_name: str, action_def_or_parameters: dict[str, object]
-    ) -> tuple[dict[str, object], dict[str, object] | None, bool]:
+    def _parse_action_parameters(self, action_name: str, action_def_or_parameters: dict[str, object]) -> tuple[dict[str, object], dict[str, object] | None, bool]:
         """
         Delegate action parameter parsing to ParameterProcessor service.
 
         REFACTORED: Extracted parameter parsing logic to ParameterProcessor - maintaining API contract.
         """
-        return self.parameter_processor.parse_action_parameters(
-            action_name, action_def_or_parameters
-        )
+        return self.parameter_processor.parse_action_parameters(action_name, action_def_or_parameters)
 
-    def _create_source_context(
-        self, state: dict[str, object], execution_id: str
-    ) -> dict[str, object]:
+    def _create_source_context(self, state: dict[str, object], execution_id: str) -> dict[str, object]:
         """
         Delegate source context creation to ParameterProcessor service.
 
@@ -884,9 +806,7 @@ class ActionManager:
             action_definition_getter=self._get_action_definition_for_process_key_resolution,
         )
 
-    def _get_action_definition_for_process_key_resolution(
-        self, action_name: str, state: dict[str, object] | None, process_key: str | None
-    ) -> dict[str, object] | None:
+    def _get_action_definition_for_process_key_resolution(self, action_name: str, state: dict[str, object] | None, process_key: str | None) -> dict[str, object] | None:
         """
         Delegate safe action definition retrieval to RegistryManager service.
 
@@ -894,9 +814,7 @@ class ActionManager:
         """
         return self.registry_manager.get_safe_action_definition(action_name, state, process_key)
 
-    def _validate_and_prepare_process_record(
-        self, process_key: str, process_data: dict[str, object]
-    ) -> dict[str, object] | None:
+    def _validate_and_prepare_process_record(self, process_key: str, process_data: dict[str, object]) -> dict[str, object] | None:
         """
         Delegate process record validation to RegistryManager service.
 
@@ -943,9 +861,7 @@ class ActionManager:
         process_key: str | None = None,
     ) -> dict[str, object]:
         """Execute an action with comprehensive error handling and tracking."""
-        result = await self.execution_engine.execute_action(
-            action_name, state, action_def_or_parameters, plugin_override, process_key
-        )
+        result = await self.execution_engine.execute_action(action_name, state, action_def_or_parameters, plugin_override, process_key)
 
         # Handle result_processor if specified in action definition
         # Note: This functionality may need to be moved to ActionExecutionEngine in future refactoring
@@ -976,9 +892,7 @@ class ActionManager:
                 state,
             )
         except FrameworkError as error:
-            await self._track_action_execution_end(
-                execution_id, start_time, success=False, error=error.to_dict()
-            )
+            await self._track_action_execution_end(execution_id, start_time, success=False, error=error.to_dict())
             raise
 
     async def _prepare_action_definition(
@@ -1021,9 +935,7 @@ class ActionManager:
         """Get action definition for legacy path with parameter merging."""
         retrieved_action_def = self.get_action_definition(action_name, state, process_key)
         if not retrieved_action_def:
-            logger.error(
-                f"No action definition found for '{action_name}' - using runtime parameters only"
-            )
+            logger.error(f"No action definition found for '{action_name}' - using runtime parameters only")
             return {"name": action_name, "arguments": action_parameters.copy()}
         else:
             # Merge runtime parameters with action definition arguments
@@ -1058,9 +970,7 @@ class ActionManager:
                 "parent_action_id": getattr(state, "parent_action_id", None),
             }
 
-            validation_result = self.validator.validate_with_routing(
-                dict(resolved_action), dict(resolved_action), source_context
-            )
+            validation_result = self.validator.validate_with_routing(dict(resolved_action), dict(resolved_action), source_context)
             if not validation_result.success:
                 validation_error = FrameworkError(
                     message=f"Action validation failed for '{action_name}': {validation_result.error_message}",
@@ -1072,9 +982,7 @@ class ActionManager:
                     severity=ErrorSeverity.ERROR,
                 )
                 logger.error(f"VALIDATION_FAILED: {validation_error.message}")
-                await self._track_action_execution_end(
-                    execution_id, start_time, success=False, error=validation_error.to_dict()
-                )
+                await self._track_action_execution_end(execution_id, start_time, success=False, error=validation_error.to_dict())
                 raise validation_error
 
         except (TemplateResolutionError, UnresolvedTemplateVariablesError) as e:
@@ -1085,9 +993,7 @@ class ActionManager:
                 details={"action_name": action_name, "template_error": str(e)},
                 original_error=e,
             )
-            await self._track_action_execution_end(
-                execution_id, start_time, success=False, error=template_error.to_dict()
-            )
+            await self._track_action_execution_end(execution_id, start_time, success=False, error=template_error.to_dict())
             raise template_error from None
 
     async def _execute_action_by_provider(
@@ -1104,19 +1010,13 @@ class ActionManager:
         provider_type, provider, function_name = self._parse_process_key(process_key, action_name)
 
         # Apply plugin override handling
-        provider = self._apply_plugin_override(
-            provider_type, provider, plugin_override, action_name
-        )
+        provider = self._apply_plugin_override(provider_type, provider, plugin_override, action_name)
 
         # Route to appropriate execution method
         if provider_type == "service_interface":
-            return await self._execute_service_interface_action(
-                action_name, provider, function_name, merged_params, state, execution_id
-            )
+            return await self._execute_service_interface_action(action_name, provider, function_name, merged_params, state, execution_id)
         elif provider_type == "plugin":
-            return await self._execute_plugin_action(
-                action_name, provider, function_name, merged_params, state, execution_id
-            )
+            return await self._execute_plugin_action(action_name, provider, function_name, merged_params, state, execution_id)
         else:
             raise FrameworkError(
                 message=f"Unsupported provider_type '{provider_type}' for action '{action_name}'",
@@ -1135,25 +1035,19 @@ class ActionManager:
             provider_type, provider, function_name = process_key.split("::", 2)
             return provider_type, provider, function_name
         except ValueError as e:
-            logger.error(
-                f'Invalid process_key format: "{process_key}" - expected "provider_type::provider::function_name"'
-            )
+            logger.error(f'Invalid process_key format: "{process_key}" - expected "provider_type::provider::function_name"')
             raise FrameworkError(
                 message=f"Invalid process_key format: {process_key}",
                 error_code=ErrorCode.ACTION_INVALID_FORMAT,
                 details={"action_name": action_name, "process_key": process_key},
             ) from e
 
-    def _apply_plugin_override(
-        self, provider_type: str, provider: str, plugin_override: str | None, action_name: str
-    ) -> str:
+    def _apply_plugin_override(self, provider_type: str, provider: str, plugin_override: str | None, action_name: str) -> str:
         """Apply plugin override only for plugin provider types."""
         if plugin_override and provider_type == "plugin":
             return plugin_override
         elif plugin_override and provider_type != "plugin":
-            logger.error(
-                f"Ignoring plugin override '{plugin_override}' for action '{action_name}' - process_key specifies provider_type '{provider_type}', not 'plugin'"
-            )
+            logger.error(f"Ignoring plugin override '{plugin_override}' for action '{action_name}' - process_key specifies provider_type '{provider_type}', not 'plugin'")
         return provider
 
     async def _execute_service_interface_action(
@@ -1173,9 +1067,7 @@ class ActionManager:
         # Update execution record with service provider name
         await self._update_execution_provider(execution_id, "service_interface", provider)
 
-        result = await self.execute_service(
-            service, function_name, action_name, merged_params, state
-        )
+        result = await self.execute_service(service, function_name, action_name, merged_params, state)
         return result
 
     async def _execute_plugin_action(
@@ -1205,22 +1097,16 @@ class ActionManager:
 
         plugin_config = get_config().get_plugin_config(plugin.name)
 
-        result = self.execute_plugin(
-            plugin, function_name, action_name, merged_params, state, plugin_config
-        )
+        result = self.execute_plugin(plugin, function_name, action_name, merged_params, state, plugin_config)
         # execute_plugin returns dict[str, object] compatible with PluginExecutionResult
         return result
 
-    def _validate_action_parameters(
-        self, action_name: str, action_parameters: dict[str, object], action_def: dict[str, object]
-    ) -> None:
+    def _validate_action_parameters(self, action_name: str, action_parameters: dict[str, object], action_def: dict[str, object]) -> None:
         # ARCHITECTURAL SEPARATION: Validation layer uses 'parameters' (processed data for validation)
         action: dict[str, object] = {"name": action_name, "parameters": action_parameters}
         validate_action(action, action_def)
 
-    def _prepare_action_execution(
-        self, action_name: str, action_def: dict[str, object], plugin_override: str | None = None
-    ) -> tuple[str, str, str]:
+    def _prepare_action_execution(self, action_name: str, action_def: dict[str, object], plugin_override: str | None = None) -> tuple[str, str, str]:
         """
         Prepare action execution parameters with validation and provider resolution.
 
@@ -1238,17 +1124,13 @@ class ActionManager:
         process: dict[str, object] = process_obj
 
         # Phase 1: Resolve provider information (with plugin override support)
-        provider_type, provider, function_name = self.provider_manager.resolve_action_provider_info(
-            action_name, process, plugin_override
-        )
+        provider_type, provider, function_name = self.provider_manager.resolve_action_provider_info(action_name, process, plugin_override)
 
         # Phase 2: Validate all required execution parameters
         # Convert provider_type to string for validation
         provider_type_str = str(provider_type)
         provider_str = str(provider) if not isinstance(provider, str) else provider
-        self.validation_service.validate_action_execution_parameters(
-            action_name, provider_type_str, provider_str, function_name, process
-        )
+        self.validation_service.validate_action_execution_parameters(action_name, provider_type_str, provider_str, function_name, process)
 
         return provider_type_str, provider_str, function_name
 
@@ -1288,9 +1170,7 @@ class ActionManager:
 
         try:
             # Phase 1: Validate service and function
-            function_validated = self.validation_service.validate_service_function(
-                service, function_name, action_name
-            )
+            function_validated = self.validation_service.validate_service_function(service, function_name, action_name)
             # Cast to proper type after validation - validation ensures it returns dict
             function: Callable[[dict[str, object]], dict[str, object]] = function_validated  # type: ignore[assignment]
             timestamp = datetime.now(UTC).isoformat()
@@ -1309,17 +1189,13 @@ class ActionManager:
                 original_error=e,
             ) from e
 
-    def _validate_service_function(
-        self, service: object, function_name: str, action_name: str
-    ) -> Callable[[dict[str, object]], dict[str, object]]:
+    def _validate_service_function(self, service: object, function_name: str, action_name: str) -> Callable[[dict[str, object]], dict[str, object]]:
         """
         Delegate service function validation to ValidationCoordinator.
 
         REFACTORED: Extracted validation logic to ValidationCoordinator - maintaining API contract.
         """
-        func = self.validation_coordinator.validate_service_function(
-            service, function_name, action_name
-        )
+        func = self.validation_coordinator.validate_service_function(service, function_name, action_name)
         # Cast validated function to expected type
         return func  # type: ignore[return-value]
 
@@ -1350,9 +1226,7 @@ class ActionManager:
         else:
             return await self._execute_generic_service_method(function, function_name, params)
 
-    async def _execute_special_service_method(
-        self, service: object, function_name: str, params: dict[str, object]
-    ) -> dict[str, object]:
+    async def _execute_special_service_method(self, service: object, function_name: str, params: dict[str, object]) -> dict[str, object]:
         """Execute special service interface methods with custom routing."""
         if function_name == "start_service_via_interface":
             method = getattr(service, "start_service_via_interface", None)
@@ -1417,9 +1291,7 @@ class ActionManager:
         """Log information about the service function result."""
         pass
 
-    def _format_service_result(
-        self, result: dict[str, object], timestamp: str
-    ) -> dict[str, object]:
+    def _format_service_result(self, result: dict[str, object], timestamp: str) -> dict[str, object]:
         """Format service result into proper action response format.
 
         EXTRACTED TO: ResultProcessingManager.format_service_result() - B(6) complexity
@@ -1439,26 +1311,18 @@ class ActionManager:
         try:
             self._log_correction_routing_info(action_name, validation_result)
             success = await self._attempt_correction_routing(action_name, validation_result)
-            await self._track_correction_routing_result(
-                execution_id, start_time, success, validation_result
-            )
+            await self._track_correction_routing_result(execution_id, start_time, success, validation_result)
         except Exception as e:
             await self._handle_correction_routing_error(action_name, execution_id, start_time, e)
 
-    def _log_correction_routing_info(
-        self, action_name: str, validation_result: ValidationResult
-    ) -> None:
+    def _log_correction_routing_info(self, action_name: str, validation_result: ValidationResult) -> None:
         """Log information about the correction routing attempt."""
         pass
 
-    async def _attempt_correction_routing(
-        self, action_name: str, validation_result: ValidationResult
-    ) -> bool:
+    async def _attempt_correction_routing(self, action_name: str, validation_result: ValidationResult) -> bool:
         """Attempt to route the correction event through the event bus."""
         if not self.event_bus:
-            logger.error(
-                f"Event bus not available - cannot route correction for action '{action_name}'"
-            )
+            logger.error(f"Event bus not available - cannot route correction for action '{action_name}'")
             return False
 
         correction_event = self._create_correction_event(action_name, validation_result)
@@ -1468,9 +1332,7 @@ class ActionManager:
         self._log_correction_event_result(action_name, validation_result, success)
         return success
 
-    def _create_correction_event(
-        self, action_name: str, validation_result: ValidationResult
-    ) -> ActionRequestEvent:
+    def _create_correction_event(self, action_name: str, validation_result: ValidationResult) -> ActionRequestEvent:
         """Create an action correction event."""
         return create_action_correction_event(
             action_name=action_name,
@@ -1486,9 +1348,7 @@ class ActionManager:
             original_context=validation_result.original_context,
         )
 
-    def _log_correction_event_result(
-        self, action_name: str, validation_result: ValidationResult, success: bool
-    ) -> None:
+    def _log_correction_event_result(self, action_name: str, validation_result: ValidationResult, success: bool) -> None:
         """Log the result of the correction event publication."""
         if success:
             pass
@@ -1516,9 +1376,7 @@ class ActionManager:
             },
         )
 
-    async def _handle_correction_routing_error(
-        self, action_name: str, execution_id: str, start_time: datetime, error: Exception
-    ) -> None:
+    async def _handle_correction_routing_error(self, action_name: str, execution_id: str, start_time: datetime, error: Exception) -> None:
         """Handle errors during correction routing."""
         logger.error(f"Error in routing for correction for action '{action_name}': {error}")
         await self._track_action_execution_end(
@@ -1539,6 +1397,4 @@ class ActionManager:
 
         EXTRACTED TO: ResultProcessingManager.handle_result_processor() - B(8) complexity
         """
-        await self.result_processing_manager.handle_result_processor(
-            action_def=action_def, action_name=action_name, result=result, state=state
-        )
+        await self.result_processing_manager.handle_result_processor(action_def=action_def, action_name=action_name, result=result, state=state)

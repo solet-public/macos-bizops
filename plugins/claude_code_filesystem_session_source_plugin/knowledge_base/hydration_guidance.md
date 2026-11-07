@@ -14,6 +14,58 @@ With this plugin present but not wired up, the solet has zero visibility into it
 
 Enabling this means the solet reads your local Claude Code session transcript files (`~/.claude/projects/<encoded_cwd>/<session_id>.jsonl`, one per session, on THIS machine). Nothing leaves the machine, but it is real filesystem access to your own conversation history, and that is exactly why it needs an explicit yes before wiring. Consent-gated is not the same as optional: this is a CORE capability of the platform — the deployment report card tracks it until configured. Ask before wiring it up: "Right now this solet can't recall anything about past conversations, even the one you're having right now once it ends. I can set up ingestion of your Claude Code session transcripts so it can search its own history — that means reading your local `~/.claude/projects/` files. Want this set up?"
 
+## Polling work and pacing
+
+The ledger's periodic poll normally fires every five minutes. It submits to
+the existing single-slot `ledger-poll` worker; discovery does not create a
+thread or an unbounded work queue. A slow pass may still be running when the
+next heartbeat arrives, in which case that heartbeat reports already running.
+
+Activated Claude filesystem discovery streams directory entries rather than
+materializing each directory through `Path.rglob`. It visits only the project,
+root-session, and `subagents` directories that can contain the accepted depth-2
+root sessions or depth-4 `agent-*.jsonl` sessions. Directory symlinks are not
+followed. The configured glob, accepted session identities, newest-first
+metadata ordering, and completed-version cursors retain their meaning.
+
+The worker yields for 1 ms after 128 entries or 2 ms of enumeration, whichever
+comes first, and leaves a one-second gap after a sweep before scanning the same
+root again. These named module defaults bound each enumeration slice, not the
+total population or the duration of an individual filesystem call. A sweep
+still returns every recognized match; it does not cache or truncate the
+population. A configuration replacement clears the in-memory cadence, and
+closing an abandoned discovery iterator releases its sweep lock. Unreadable
+or disappearing directories produce an availability warning.
+
+Startup environment overrides are `SOLET_CLAUDE_SWEEP_ENTRY_LIMIT` (128),
+`SOLET_CLAUDE_SWEEP_SLICE_SECONDS` (0.002),
+`SOLET_CLAUDE_SWEEP_YIELD_SECONDS` (0.001), and
+`SOLET_CLAUDE_SWEEP_INTERVAL_SECONDS` (1.0). Values must be positive and finite;
+the entry limit must be an integer. Correct an invalid value or clear the
+override to restore its default, then restart the platform to apply it.
+
+Direct `poll_source` calls use the same dedicated ledger-poll slot as periodic
+polling. Busy direct callers wait for that slot and receive the original result
+or exception; they do not run importing work on their caller's loop thread.
+Calls already on the owner worker remain on that worker. Periodic heartbeats
+retain their already-running no-op.
+
+The session bridge likewise hands direct `drain_once` calls to its owned
+single-worker executor (`session-bridge-drain_0`), with admission held through
+completion so only one job can be submitted. Its periodic worker uses that same
+path. Stop drains and
+closes the executor off-loop; a later direct call or service start reopens it.
+Spool enumeration, metadata/stat work, cursor changes, file draining and deletion
+yield between entry/time slices while retaining chronological order and the
+watermark anchor. Startup environment settings are
+`SOLET_SESSION_SPOOL_ENTRY_LIMIT` (128),
+`SOLET_SESSION_SPOOL_SLICE_SECONDS` (0.002),
+`SOLET_SESSION_SPOOL_YIELD_SECONDS` (0.001), and
+`SOLET_SESSION_BRIDGE_DRAIN_INTERVAL_SECONDS` (5.0). Values must be positive and
+finite; the entry limit must be integral. These are worker execution guarantees;
+the synchronous caller still waits for its result. They do not claim that every
+caller becomes an asynchronous API.
+
 ## Setup
 
 On an explicit yes:
@@ -31,3 +83,26 @@ MCP.
 If the operator also uses Codex, see `plugins/codex_filesystem_session_source_plugin/knowledge_base/hydration_guidance.md` for the equivalent source rows. The shared setup is `ledger_allowed_roots`, not a session-ledger service binding.
 
 On decline: stop, no partial wiring — the consent boundary is real and a no is respected. But state what it means, and keep it visible: without ingestion this solet has no session memory at all, and the platform treats ledger functionality as core correctness, not an optional extra (operator ruling 2026-08-02, quoted in the hydration runbook's ingestion disclosure). The deployment report card (`plugins/github_midwife_plugin/knowledge_base/08_deployment_report_card.md`) carries the decline as an unconfigured core row on every future card; re-offer at natural moments rather than silently accepting the gap as permanent.
+
+## Unknown transcript line types
+
+The six recognized Claude Code metadata types (`api-request-blob`, `api-request`,
+`api-request-shape`, `atis-latch`, `cost-state`, and `file-history-delta`) are
+silently skipped and yield no ledger events. An unknown string top-level `type`
+still yields no ledger event and records an advisory. Known messages before and
+after it still import with their usage and model identity. Malformed JSON,
+missing/non-string `type`, and malformed known events retain integrity errors;
+unknown content-block kinds yield advisories and are skipped.
+The existing drain completion log groups physical unknown-line counts by source,
+session and type, without logging the payload. Known metadata types remain silent.
+The public poll result still contains the same four counts.
+
+A successful filesystem read checkpoints all consumed complete lines, including
+trailing or all-unknown lines. Partial trailing bytes remain for the next eligible
+read; failed reads do not publish a successful checkpoint. A later explicit replay
+can legitimately report those physical unknown lines again.
+
+This patch does not automatically repair old abandoned suffixes on unchanged
+files: discovery may already have advanced its mtime cursor. An active affected
+session becomes eligible on its next natural append. Historical repair requires
+separate authorization; this change performs no blanket rescan or history rewrite.

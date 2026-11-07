@@ -24,12 +24,10 @@ sub-phase 2e for the route table and dispatch semantics.
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import logging
 import re
 import secrets
-import threading
 from datetime import datetime as _dt
 from typing import TYPE_CHECKING, Any, Final
 
@@ -37,6 +35,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 from ananta.core.actions.action_path_liveness import ACTION_PATH_LIVENESS
+from ananta.core.runtime.loop_invariant import handler_entry_snapshot, record_handler_entry
+from ananta.core.runtime.loop_lag import LOOP_LAG
 from ananta.llm.agent_messaging.models import (
     PeerInboxRequest,
     TextPart,
@@ -55,18 +55,23 @@ from fastapi import Body, FastAPI
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
+from ._role_refresh_evidence import RoleRefreshEvidence, capture_role_refresh_evidence
 from .bridge_lifecycle import run_full_bridge_cleanup
 from .bridge_sessions import (
     BridgeNotFoundError,
     BridgeQueueFullError,
     BridgeSessionManager,
     bridge_allows_process,
+    run_bridge_work,
 )
+from .delivery_drive import drive_queue_snapshot
 from .operator_codex_registration import (
     OperatorClaudeRegistration,
     OperatorCodexRegistration,
+    OperatorHostProbe,
     OperatorHostQualificationError,
     claude_operator_tmux_host_ref,
+    prepare_operator_host_probe,
     register_operator_claude_host,
     register_operator_codex_host,
 )
@@ -88,6 +93,7 @@ from .peer_dispatch import (
 )
 from .peer_inbox_view import (
     InvalidInboxCursorError,
+    parse_since_continuation_cursor,
     parse_since_cursor,
     serialize_peer_inbox_page,
 )
@@ -95,18 +101,24 @@ from .peer_list_view import (
     serialize_peer_list,
 )
 from .peer_registry import (
+    PEER_REGISTRATION_LOCK,
     PeerAmbiguousError,
     PeerRegistry,
     PeerSessionAmbiguousError,
     PeerUnreachableError,
 )
 from .platform_surface import ERR_PROCESS_NOT_ALLOWED, BridgeError, PlatformSurface
+from .retired_role_registry import (
+    RetiredRoleRegistryError,
+    RoleRetiredError,
+    refuse_if_retired,
+)
 from .role_binding_store import (
     UNCLAIMED_SESSION_ID,
     ResolvedRole,
     RoleBindingMalformedError,
     RoleBindingVacantError,
-    holds_role,
+    holds_role_for_instance,
     list_roles_for_agent_instance,
     refresh_role_binding_cas,
     resolve_role_binding,
@@ -126,7 +138,7 @@ from .session_lifecycle_store import (
 )
 
 if TYPE_CHECKING:
-    from .models import BridgeBinding, QueuedEvent
+    from .models import BridgeBinding, BridgeSessionState, QueuedEvent
 
 logger = logging.getLogger(__name__)
 
@@ -143,22 +155,26 @@ API_PREFIX: Final[str] = "/api/v1/bridge"
 
 _AGENT_ID_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
-# iss_87aa81c4: the peer routes whose handlers reach ``dispatch_peer_send`` /
-# ``dispatch_role_send`` (and so ``drive_on_delivery`` and the tmux driver's
-# ``_wait_for_paste_stable``: ``time.sleep`` + ``subprocess.run``, up to 10 s
-# per Claude wake) or a tmux/ps host probe run their synchronous body via
-# ``asyncio.to_thread``. Run inline, that body stalled THIS server's event loop
-# for the whole drive, starving every bridge's ``/events`` long-poll and
-# ``/health`` at once. The collaborators are already worker-thread safe: the
-# same dispatch/claim functions run on the action-queue thread via the plugin
-# verbs, and ``BridgeSessionManager.append_event`` signals the long-poll
-# through the loop it was armed on with ``call_soon_threadsafe``.
+# iss_87aa81c4 / iss_5cf6184d: every route whose body does blocking work —
+# a state-service (Postgres) read or write, a tmux/ps host probe, or a
+# dispatch — runs that body via the bounded ``run_bridge_work`` pool. Run inline, the body
+# stalled THIS server's event loop, starving every bridge's ``/events``
+# long-poll and ``/health`` at once (a slow database froze the loop the same
+# way a tmux drive did). ``/open`` also uses the pool: its production session
+# factory writes to the database. Only ``/health`` and the yielding ``/events``
+# long-poll wait itself stay on the loop. The
+# collaborators are worker-thread safe: the same functions run on the
+# action-queue thread via the plugin verbs, ``BridgeSessionManager`` guards its
+# tables with locks, and ``append_event`` signals the long-poll through the
+# loop it was armed on with ``call_soon_threadsafe``.
 #
-# ``peer/register`` was check-then-act with no ``await`` in between (the
-# session-id conflict refusal and the orphan downgrade read the registry, then
-# register writes it), so the loop serialized two registrations for free.
-# Off-loop, this lock keeps exactly that serialization between registrations.
-_PEER_REGISTER_LOCK: Final[threading.Lock] = threading.Lock()
+# Delivery drives no longer run on these threads at all: dispatch schedules
+# them on the bounded delivery-drive executor (iss_ab680764, iss_ba4d1c81).
+#
+# ``peer/register`` is check-then-act (the session-id conflict refusal and the
+# orphan downgrade read the registry, then register writes it). It holds
+# ``peer_registry.PEER_REGISTRATION_LOCK``, which the streamable transport's
+# registry writes share (iss_59a7f833).
 
 # Map BridgeError.code → HTTP status.  Anything not in this table maps
 # to 400, matching the platform_surface convention of "bad input"
@@ -329,6 +345,7 @@ def register_routes(
     config: Any,
     state_service: Any | None = None,
     readiness_probe: Callable[[], bool] | None = None,
+    post_registration_status: Callable[[], dict[str, Any] | None] | None = None,
     inference_provider_register: Callable[..., None] | None = None,
     inference_provider_clear: Callable[[str], int] | None = None,
     autonomic_on_register: Callable[..., str] | None = None,
@@ -399,6 +416,7 @@ def register_routes(
 
     @app.get(f"{API_PREFIX}/health")
     async def health() -> JSONResponse:
+        record_handler_entry("route::agent_messaging_plugin::health", "route")
         if readiness_probe is not None and not readiness_probe():
             return JSONResponse(
                 content={"status": "starting"},
@@ -414,13 +432,26 @@ def register_routes(
         # exists to detect, taking the target group down with it instead of
         # reporting the problem.
         liveness = ACTION_PATH_LIVENESS.snapshot()
+        invariant = handler_entry_snapshot()
         # ``degraded`` still answers 200: the bridge surface IS serving, and
         # failing the probe would make a supervisor kill a process whose
         # messaging half is healthy. The status string is the alarm; the HTTP
         # code stays honest about what this endpoint can actually attest.
-        status = "degraded" if liveness["action_path_stalled"] else "healthy"
+        startup_status = post_registration_status() if post_registration_status is not None else None
+        startup_degraded = startup_status is not None and startup_status.get("state") in {"degraded", "failed"}
+        status = "degraded" if liveness["action_path_stalled"] or startup_degraded else "healthy"
         return JSONResponse(
-            content={"status": status, "action_path": liveness},
+            content={
+                "status": status,
+                "action_path": liveness,
+                "loop_lag": LOOP_LAG.snapshot(),
+                "violations": invariant["violations"],
+                "handler_entries": invariant,
+                "post_registration_work": startup_status,
+                # iss_ab680764: queued + running delivery drives against their
+                # cap — in-process counters, same no-lock/no-I/O rule as above.
+                "delivery_drives": drive_queue_snapshot(),
+            },
             status_code=200,
         )
 
@@ -447,20 +478,27 @@ def _register_bridge_lifecycle_routes(
         # Bridge open is the one operation that needs the solet
         # name — the session_id_factory bound onto the manager closes
         # over it, so the handler doesn't need it explicitly.
-        bridge = bridge_manager.open(
-            solet_name="",
-            parent_pid=body.parent_pid,
-        )
-        # §34.6 sender attribution: park the caller's opaque session key on the
-        # in-memory bridge state ONLY. No registry write, no agent_instance_id,
-        # no delivery route — an unregistered caller stays unregistered. The
-        # identity is derived server-side from the REGISTERED binding this key
-        # resolves to, at trigger-data-build time.
-        bridge.caller_agent_session_id = body.caller_agent_session_id.strip()
+        record_handler_entry("route::agent_messaging_plugin::open_bridge", "route")
+
+        def _open_blocking() -> BridgeSessionState:
+            bridge = bridge_manager.open(
+                solet_name="",
+                parent_pid=body.parent_pid,
+            )
+            # §34.6 sender attribution: park the caller's opaque session key on the
+            # in-memory bridge state ONLY. No registry write, no agent_instance_id,
+            # no delivery route — an unregistered caller stays unregistered. The
+            # identity is derived server-side from the REGISTERED binding this key
+            # resolves to, at trigger-data-build time.
+            bridge.caller_agent_session_id = body.caller_agent_session_id.strip()
+            return bridge
+
+        bridge = await run_bridge_work(_open_blocking)
         return JSONResponse(
             content={
                 "bridge_id": bridge.bridge_id,
                 "session_id": bridge.session_id,
+                "server_lifecycle_id": bridge_manager.server_lifecycle_id,
                 "long_poll_timeout_seconds": long_poll_timeout_s,
             },
             status_code=200,
@@ -479,13 +517,20 @@ def _register_bridge_lifecycle_routes(
         # racing the close cannot resolve to a dead bridge; without the
         # unregister, open/close cycles accumulate zombie bindings and
         # peer_send eventually hits peer_ambiguous.
-        run_full_bridge_cleanup(
-            bridge_id,
-            inference_provider_clear=inference_provider_clear,
-            autonomic_on_close=autonomic_on_close,
-            unregister=peer_registry.unregister,
-        )
-        bridge_manager.close(bridge_id)
+        record_handler_entry("route::agent_messaging_plugin::close_bridge", "route")
+
+        def _close_blocking() -> None:
+            run_full_bridge_cleanup(
+                bridge_id,
+                inference_provider_clear=inference_provider_clear,
+                autonomic_on_close=autonomic_on_close,
+                unregister=peer_registry.unregister,
+            )
+            reported = body.get("client_reported_reason")
+            bridge_manager.close(bridge_id, reason="explicit_close", client_reported_reason=reported if isinstance(reported, str) else None)
+
+        # iss_5cf6184d: the cleanup is DB work (sidecar, autonomic, unregister).
+        await run_bridge_work(_close_blocking)
         return JSONResponse(content={"status": "closed"}, status_code=200)
 
     @app.get(f"{API_PREFIX}/{{bridge_id}}/events")
@@ -493,6 +538,7 @@ def _register_bridge_lifecycle_routes(
         bridge_id: str,
         after: int = -1,
     ) -> JSONResponse:
+        record_handler_entry("route::agent_messaging_plugin::events_bridge", "route")
         try:
             acked, events = await bridge_manager.events_after(
                 bridge_id,
@@ -501,22 +547,14 @@ def _register_bridge_lifecycle_routes(
             )
         except BridgeNotFoundError:
             return _bridge_not_found(bridge_id)
-        # An actively long-polling registered client (the no-MCP watcher) is
-        # alive — bump its binding so "last active" liveness agrees with the
-        # delivery path, same as peer_inbox does. Without this, a watcher that
-        # only ever long-polls looks inactive to binding-liveness consumers
-        # while its bridge keeps answering, one half of the persisted_silent
-        # black hole (field-observed on a live deployment).
-        binding = _lookup_binding_for_bridge(peer_registry, bridge_id)
-        if binding is not None:
-            peer_registry.touch_binding(binding.agent_instance_id)
-            # A watcher's cursor ack proves the acked events streamed into its
-            # watch output — the pull equivalent of entering a turn. Stamps
-            # role rows consumed. MCP-transport bridges confirm via
-            # /peer/drain instead — never here (their forwarder drains events
-            # without the model having read them).
-            if binding.is_watcher and acked:
-                _consume_watcher_acked_events(agent_messaging_service, acked)
+        # iss_5cf6184d: the binding read, touch and watcher consume are DB work.
+        await run_bridge_work(
+            _record_poll_activity,
+            peer_registry,
+            agent_messaging_service,
+            bridge_id,
+            acked,
+        )
         next_cursor = events[-1].cursor if events else after
         return JSONResponse(
             content={
@@ -538,97 +576,200 @@ def _register_platform_surface_routes(
     platform_surface: PlatformSurface,
     bridge_manager: BridgeSessionManager,
 ) -> None:
+    # iss_5cf6184d: every platform-surface call is DB work (discovery
+    # embedding search, schema lookup, action submit / result read, blob
+    # read), so each body runs on a worker thread.
     @app.post(f"{API_PREFIX}/{{bridge_id}}/process/search")
     async def process_search_route(
         bridge_id: str,
         body: ProcessSearchBody,
     ) -> JSONResponse:
-        # M5 §14.7: pass bridge_id through so process_search applies the
-        # bridge session's per-session allowlist on top of global policy.
-        try:
-            payload = platform_surface.process_search(
-                query=body.query,
-                max_results=body.max_results,
-                bridge_id=bridge_id,
-            )
-        except BridgeError as exc:
-            return _bridge_error_response(exc)
-        return JSONResponse(content=payload, status_code=200)
+        record_handler_entry("route::agent_messaging_plugin::process_search_route", "route")
+        return await run_bridge_work(
+            _process_search_blocking,
+            platform_surface,
+            bridge_id,
+            body,
+        )
 
     @app.post(f"{API_PREFIX}/{{bridge_id}}/process/schema")
     async def process_schema_route(
         bridge_id: str,
         body: ProcessSchemaBody,
     ) -> JSONResponse:
-        # M5 §14.7: pass bridge_id so the schema lookup is gated by the
-        # bridge session's allowlist before the discovery call runs.
-        try:
-            payload = platform_surface.process_schema(
-                process_key=body.process_key,
-                bridge_id=bridge_id,
-            )
-        except BridgeError as exc:
-            return _bridge_error_response(exc)
-        return JSONResponse(content=payload, status_code=200)
+        record_handler_entry("route::agent_messaging_plugin::process_schema_route", "route")
+        return await run_bridge_work(
+            _process_schema_blocking,
+            platform_surface,
+            bridge_id,
+            body,
+        )
 
     @app.post(f"{API_PREFIX}/{{bridge_id}}/process/call")
     async def process_call_route(
         bridge_id: str,
         body: ProcessCallBody,
     ) -> JSONResponse:
-        bridge = bridge_manager.get(bridge_id)
-        if bridge is None or bridge.closed:
-            return _bridge_not_found(bridge_id)
-        trigger_data: dict[str, Any] = {
-            "bridge_id": bridge_id,
-            "session_id": bridge.session_id,
-        }
-        if body.reason is not None:
-            trigger_data["reason"] = body.reason
-        try:
-            payload = platform_surface.process_call(
-                process_key=body.process_key,
-                arguments=body.arguments,
-                trigger_data=trigger_data,
-            )
-        except BridgeError as exc:
-            return _bridge_error_response(exc)
-        return JSONResponse(content=payload, status_code=200)
+        record_handler_entry("route::agent_messaging_plugin::process_call_route", "route")
+        return await run_bridge_work(
+            _process_call_blocking,
+            platform_surface,
+            bridge_manager,
+            bridge_id,
+            body,
+        )
 
     @app.get(f"{API_PREFIX}/{{bridge_id}}/process/result/{{action_id}}")
     async def process_result_route(
         bridge_id: str,
         action_id: str,
     ) -> JSONResponse:
+        record_handler_entry("route::agent_messaging_plugin::process_result_route", "route")
         _ = bridge_id
-        try:
-            payload = platform_surface.process_result(action_id=action_id)
-        except BridgeError as exc:
-            return _bridge_error_response(exc)
-        return JSONResponse(content=payload, status_code=200)
+        return await run_bridge_work(
+            _process_result_blocking,
+            platform_surface,
+            action_id,
+        )
 
     @app.get(f"{API_PREFIX}/{{bridge_id}}/download/{{blob_id}}")
     async def download_route(
         bridge_id: str,
         blob_id: str,
     ) -> Response:
+        record_handler_entry("route::agent_messaging_plugin::download_route", "route")
         _ = bridge_id
-        try:
-            blob = platform_surface.download(blob_id=blob_id)
-        except BridgeError as exc:
-            return _bridge_error_response(exc)
-        return Response(
-            content=blob.content,
-            media_type=blob.mime_type,
-            headers={
-                "Content-Disposition": (f'attachment; filename="{blob.filename}"'),
-            },
+        return await run_bridge_work(_download_blocking, platform_surface, blob_id)
+
+
+def _process_search_blocking(
+    platform_surface: PlatformSurface,
+    bridge_id: str,
+    body: ProcessSearchBody,
+) -> JSONResponse:
+    # M5 §14.7: pass bridge_id through so process_search applies the
+    # bridge session's per-session allowlist on top of global policy.
+    try:
+        payload = platform_surface.process_search(
+            query=body.query,
+            max_results=body.max_results,
+            bridge_id=bridge_id,
         )
+    except BridgeError as exc:
+        return _bridge_error_response(exc)
+    return JSONResponse(content=payload, status_code=200)
+
+
+def _process_schema_blocking(
+    platform_surface: PlatformSurface,
+    bridge_id: str,
+    body: ProcessSchemaBody,
+) -> JSONResponse:
+    # M5 §14.7: pass bridge_id so the schema lookup is gated by the
+    # bridge session's allowlist before the discovery call runs.
+    try:
+        payload = platform_surface.process_schema(
+            process_key=body.process_key,
+            bridge_id=bridge_id,
+        )
+    except BridgeError as exc:
+        return _bridge_error_response(exc)
+    return JSONResponse(content=payload, status_code=200)
+
+
+def _process_call_blocking(
+    platform_surface: PlatformSurface,
+    bridge_manager: BridgeSessionManager,
+    bridge_id: str,
+    body: ProcessCallBody,
+) -> JSONResponse:
+    bridge = bridge_manager.get(bridge_id)
+    if bridge is None or bridge.closed:
+        return _bridge_not_found(bridge_id)
+    trigger_data: dict[str, Any] = {
+        "bridge_id": bridge_id,
+        "session_id": bridge.session_id,
+    }
+    if body.reason is not None:
+        trigger_data["reason"] = body.reason
+    try:
+        payload = platform_surface.process_call(
+            process_key=body.process_key,
+            arguments=body.arguments,
+            trigger_data=trigger_data,
+        )
+    except BridgeError as exc:
+        return _bridge_error_response(exc)
+    return JSONResponse(content=payload, status_code=200)
+
+
+def _process_result_blocking(
+    platform_surface: PlatformSurface,
+    action_id: str,
+) -> JSONResponse:
+    try:
+        payload = platform_surface.process_result(action_id=action_id)
+    except BridgeError as exc:
+        return _bridge_error_response(exc)
+    return JSONResponse(content=payload, status_code=200)
+
+
+def _download_blocking(platform_surface: PlatformSurface, blob_id: str) -> Response:
+    try:
+        blob = platform_surface.download(blob_id=blob_id)
+    except BridgeError as exc:
+        return _bridge_error_response(exc)
+    return Response(
+        content=blob.content,
+        media_type=blob.mime_type,
+        headers={
+            "Content-Disposition": (f'attachment; filename="{blob.filename}"'),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
 # Peer routes: register / list / send / inbox
 # ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _InboxQuery:
+    """The ``GET peer/inbox`` query parameters, carried to the worker thread."""
+
+    after: str | None
+    limit: int
+    include_important: bool
+    role_after: str | None
+    observer: bool
+    since: str | None
+    since_cursor: str | None
+
+
+def _implicit_claude_enrichment(body: PeerRegisterBody) -> bool:
+    """A Claude registration with no declared host gets its host discovered."""
+    return not body.operator_tmux_host and body.agent_id.strip() == "claude_code"
+
+
+def _probe_claude_host_ref(body: PeerRegisterBody) -> str:
+    """The label-only tmux probe for an implicit Claude host, or ``""``.
+
+    Depends on nothing but the request body, so ``peer/register`` runs it
+    before taking ``PEER_REGISTRATION_LOCK`` (iss_7009ad9a): a slow tmux
+    server no longer stalls unrelated registrations. A failed probe keeps the
+    ordinary registration, as before.
+    """
+    if not _implicit_claude_enrichment(body):
+        return ""
+    try:
+        return claude_operator_tmux_host_ref(body.session_label)
+    except OperatorHostQualificationError as exc:
+        logger.warning(
+            "peer/register: Claude operator-host discovery failed; continuing ordinary registration (agi=%s): %s",
+            body.agent_instance_id.strip(),
+            exc,
+        )
+        return ""
 
 
 def _managed_session_registration_backfill(
@@ -653,8 +794,7 @@ def _managed_session_registration_backfill(
     """
     if state_service is None:
         logger.warning(
-            "peer/register: state_service unbound — managed_session "
-            "registration backfill skipped (agi=%s)",
+            "peer/register: state_service unbound — managed_session registration backfill skipped (agi=%s)",
             agent_instance_id,
         )
         return
@@ -672,7 +812,7 @@ def _managed_session_registration_backfill(
             ManagedSessionSpec(
                 agent_instance_id=agent_instance_id,
                 lane_id="",
-                brief_ref="",
+                assignment=None,
                 work_class="",
                 budget_line="",
                 host=OPERATOR_HOST,
@@ -692,14 +832,10 @@ def _managed_session_registration_backfill(
             agent_id=agent_id,
             agent_session_id=agent_session_id,
         ):
-            raise RuntimeError(
-                "peer/register: inserted operator managed_session row could not be backfilled"
-            )
+            raise RuntimeError("peer/register: inserted operator managed_session row could not be backfilled")
     except Exception:  # noqa: BLE001 — best-effort; registration MUST still succeed
         logger.exception(
-            "peer/register: managed_session registration backfill FAULTED "
-            "(agi=%s) — registration kept 200, but the session's ledger row "
-            "(if any) was NOT updated",
+            "peer/register: managed_session registration backfill FAULTED (agi=%s) — registration kept 200, but the session's ledger row (if any) was NOT updated",
             agent_instance_id,
         )
 
@@ -709,6 +845,7 @@ def _state_table_self_refresh(
     *,
     agent_session_id: str,
     new_agent_instance_id: str,
+    evidence: RoleRefreshEvidence,
 ) -> str:
     """Reconnect self-refresh: re-point every role this session holds in the
     ``agent_role_binding`` STATE TABLE to the rotated ``agent_instance_id`` (S2).
@@ -716,8 +853,8 @@ def _state_table_self_refresh(
     Replaces the retired address-book self-refresh. The state table is the SOLE
     resolution authority (v10 Control #2.C), so re-pointing it is what actually
     keeps role wakes reaching a reconnected holder (whose ``agent_instance_id``
-    rotated). Filtered on the stable ``agent_session_id`` — one CAS re-points ALL
-    held roles. NEVER raises: a self-refresh fault is loud but the bridge
+    rotated). Matches the observed predecessor when available; missing evidence
+    retains rotation with ERROR attribution advisories. NEVER raises: the bridge
     registration MUST still succeed (200).
 
     Tokens: ``rerouted:<n>`` (re-pointed n held roles) / ``no_roles`` (session
@@ -727,9 +864,7 @@ def _state_table_self_refresh(
     """
     if not agent_session_id or agent_session_id == UNCLAIMED_SESSION_ID:
         logger.warning(
-            "peer/register: no stable agent_session_id (%r) — this session's roles "
-            "will NOT survive reconnect (state-table self-refresh disabled). Launch "
-            "with AGENT_SESSION_ID exported to enable reconnect survival.",
+            "peer/register: no stable agent_session_id (%r) — this session's roles will NOT survive reconnect (state-table self-refresh disabled). Launch with AGENT_SESSION_ID exported to enable reconnect survival.",
             agent_session_id,
         )
         return "no_session_key"
@@ -744,6 +879,7 @@ def _state_table_self_refresh(
             state_service,
             agent_session_id=agent_session_id,
             new_agent_instance_id=new_agent_instance_id,
+            evidence=evidence,
         )
     except Exception:  # noqa: BLE001 — a self-refresh fault is loud-but-non-fatal; the bridge MUST still register
         # Systemic tradeoff (one-shot-at-register, NO retry): during a reconnect
@@ -751,17 +887,14 @@ def _state_table_self_refresh(
         # they strand until the next reconnect / re-claim. Accepted + LOUD (this
         # error log fires per fault); a retry/queue is a separate hardening call.
         logger.exception(
-            "peer/register: state-table role self-refresh FAULTED (session %r, new "
-            "agi=%s); registration kept 200 but held roles were NOT re-pointed and "
-            "will strand until re-claim",
+            "peer/register: state-table role self-refresh FAULTED (session %r, new agi=%s); registration kept 200 but held roles were NOT re-pointed and will strand until re-claim",
             agent_session_id,
             new_agent_instance_id,
         )
         return "error"
     if rerouted >= 1:
         logger.info(
-            "peer/register: re-pointed %d role(s) to agent_instance_id=%s on "
-            "reconnect (session %r)",
+            "peer/register: re-pointed %d role(s) to agent_instance_id=%s on reconnect (session %r)",
             rerouted,
             new_agent_instance_id,
             agent_session_id,
@@ -775,6 +908,7 @@ def _session_role_held_token(
     *,
     session_role: str,
     agent_session_id: str,
+    agent_instance_id: str,
     self_refresh: str,
 ) -> str:
     """Does this session STILL hold its configured standing role?
@@ -796,8 +930,8 @@ def _session_role_held_token(
     self-refresh helpers above.
 
     ``self_refresh == "error"`` is NOT answerable and must not read as ``held``.
-    :func:`holds_role` compares the stable ``agent_session_id`` ALONE — it cannot
-    see whether the binding's ``agent_instance_id`` pointer is live. When the
+    The probe checks both session and instance, including a lost expected-holder
+    CAS. When the
     re-point CAS just faulted, the binding is exactly the "held by my session id
     but pointing at my DEAD instance" state whose documented remedy is the
     re-claim (see :func:`_state_table_self_refresh`: "will strand until
@@ -812,12 +946,10 @@ def _session_role_held_token(
     if state_service is None:
         return "unknown"
     try:
-        held = holds_role(state_service, session_role, agent_session_id)
+        held = holds_role_for_instance(state_service, session_role, agent_session_id, agent_instance_id)
     except Exception:  # noqa: BLE001 — never fail a registration on this probe
         logger.exception(
-            "peer/register: session_role_held probe FAULTED for role %r "
-            "(session %r); registration kept 200 and the caller will re-claim "
-            "as before",
+            "peer/register: session_role_held probe FAULTED for role %r (session %r); registration kept 200 and the caller will re-claim as before",
             session_role,
             agent_session_id,
         )
@@ -889,8 +1021,7 @@ def _refuse_unresolvable_or_disallowed_bridge(
         return _bridge_error_response(
             BridgeError(
                 ERR_PROCESS_NOT_ALLOWED,
-                f"Process {process_key} is not in the bridge session's "
-                "per-session allowlist",
+                f"Process {process_key} is not in the bridge session's per-session allowlist",
             ),
         )
     return None
@@ -910,8 +1041,11 @@ def _register_direct_read_routes(
         name: str = "",
         agent_instance_id: str = "",
     ) -> JSONResponse:
+        record_handler_entry("route::agent_messaging_plugin::peer_holds_role_route", "route")
         refusal = _refuse_unresolvable_or_disallowed_bridge(
-            bridge_manager, bridge_id, PEER_HOLDS_ROLE_PROCESS_KEY,
+            bridge_manager,
+            bridge_id,
+            PEER_HOLDS_ROLE_PROCESS_KEY,
         )
         if refusal is not None:
             return refusal
@@ -925,7 +1059,7 @@ def _register_direct_read_routes(
         if state_service is None:
             return _state_unavailable("state_service is not bound on this solet.")
         try:
-            read = await asyncio.to_thread(
+            read = await run_bridge_work(
                 read_holds_role,
                 state_service,
                 peer_registry,
@@ -948,22 +1082,29 @@ def _register_direct_read_routes(
         observer: bool = False,
         limit: int | None = None,
         after: str | None = None,
+        since: str | None = None,
+        since_cursor: str | None = None,
         role_after: str | None = None,
         include_covered: bool = False,
     ) -> JSONResponse:
+        record_handler_entry("route::agent_messaging_plugin::peer_inbox_for_session_route", "route")
         refusal = _refuse_unresolvable_or_disallowed_bridge(
-            bridge_manager, bridge_id, PEER_INBOX_PROCESS_KEY,
+            bridge_manager,
+            bridge_id,
+            PEER_INBOX_PROCESS_KEY,
         )
         if refusal is not None:
             return refusal
         try:
-            page = await asyncio.to_thread(
+            page = await run_bridge_work(
                 read_peer_inbox_for_session,
                 {
                     "agent_session_id": agent_session_id,
                     "observer": observer,
                     "limit": limit,
                     "after": after,
+                    "since": since,
+                    "since_cursor": since_cursor,
                     "role_after": role_after,
                     "include_covered": include_covered,
                 },
@@ -976,6 +1117,109 @@ def _register_direct_read_routes(
                 status_code=exc.http_status,
             )
         return JSONResponse(content=page, status_code=200)
+
+
+def _operator_registration_request(
+    body: PeerRegisterBody,
+    probed: str,
+    session_id: str,
+) -> OperatorCodexRegistration | OperatorClaudeRegistration | None:
+    """Build the same declaration before observation and after session resolution."""
+    agent_id = body.agent_id.strip()
+    host = body.operator_tmux_host or probed
+    if not host:
+        return None
+    request_type = {"codex": OperatorCodexRegistration, "claude_code": OperatorClaudeRegistration}.get(agent_id)
+    if request_type is None:
+        return None
+    return request_type(
+        host_ref=host,
+        agent_id=agent_id,
+        agent_instance_id=body.agent_instance_id.strip(),
+        agent_session_id=session_id,
+        session_label=body.session_label,
+        parent_pid=body.parent_pid,
+        watcher_declared=body.watcher_declared,
+    )
+
+
+def _prepare_registration_host(body: PeerRegisterBody, probed: str) -> OperatorHostProbe | None:
+    request = _operator_registration_request(body, probed, body.agent_session_id)
+    return prepare_operator_host_probe(request) if request is not None else None
+
+
+def _register_operator_hosts(
+    body: PeerRegisterBody,
+    probed: str,
+    session_id: str,
+    prepared: OperatorHostProbe | None,
+    state_service: Any,
+) -> tuple[dict[str, str], dict[str, str]] | JSONResponse:
+    """Validate observed OS facts and write state only under registration lock."""
+    codex: dict[str, str] = {}
+    claude: dict[str, str] = {}
+    if not (body.operator_tmux_host or probed):
+        return codex, claude
+    try:
+        request = _operator_registration_request(body, probed, session_id)
+        if isinstance(request, OperatorCodexRegistration):
+            codex = register_operator_codex_host(state_service, request, prepared=prepared)
+        elif isinstance(request, OperatorClaudeRegistration):
+            claude = register_operator_claude_host(state_service, request, prepared=prepared)
+        else:
+            raise OperatorHostQualificationError("operator tmux host is supported only for Codex or Claude")
+    except (OperatorHostQualificationError, StateOperationError) as exc:
+        if not _implicit_claude_enrichment(body):
+            return _validation_error("operator_host_unqualified", str(exc))
+        logger.warning(
+            "peer/register: Claude operator-host qualification failed; continuing ordinary registration (agi=%s): %s",
+            body.agent_instance_id.strip(),
+            exc,
+        )
+    return codex, claude
+
+
+def _register_inference_sidecar(
+    callback: Callable[..., None] | None,
+    body: PeerRegisterBody,
+    bridge_id: str,
+    agent_instance_id: str,
+    agent_id: str,
+    effective_label: str,
+) -> None:
+    if callback is not None and body.provides_inference:
+        try:
+            callback(bridge_id=bridge_id, agent_instance_id=agent_instance_id, agent_id=agent_id, session_label=effective_label)
+        except Exception:  # noqa: BLE001 — sidecar populate is best-effort
+            logger.warning(
+                "inference_provider_register raised for bridge %s agent_instance_id=%s; registration kept; provider sidecar WILL be missing for this peer",
+                bridge_id,
+                agent_instance_id,
+                exc_info=True,
+            )
+
+
+def _register_autonomic(
+    callback: Callable[..., str] | None,
+    body: PeerRegisterBody,
+    bridge_id: str,
+    agent_instance_id: str,
+    agent_id: str,
+    session_id: str,
+    label: str,
+) -> str:
+    if callback is None:
+        return "disabled"
+    try:
+        return callback(agent_id=agent_id, agent_instance_id=agent_instance_id, agent_session_id=session_id, session_label=label, provides_inference=body.provides_inference)
+    except Exception:  # noqa: BLE001 — lifecycle policy never blocks a registration
+        logger.warning(
+            "autonomic_on_register raised for bridge %s agi=%s; registration kept",
+            bridge_id,
+            agent_instance_id,
+            exc_info=True,
+        )
+        return "error"
 
 
 def _register_peer_routes(
@@ -993,6 +1237,8 @@ def _register_peer_routes(
     def _peer_register_blocking(
         bridge_id: str,
         body: PeerRegisterBody,
+        probed_claude_host_ref: str,
+        prepared_host: OperatorHostProbe | None,
     ) -> JSONResponse:
         bridge = bridge_manager.get(bridge_id)
         if bridge is None or bridge.closed:
@@ -1061,65 +1307,16 @@ def _register_peer_routes(
                 effective_agent_session_id,
             )
             effective_agent_session_id = ""
-        operator_host: dict[str, str] = {}
-        operator_claude_host: dict[str, str] = {}
-        claude_host_ref = body.operator_tmux_host
-        implicit_claude_enrichment = (
-            not claude_host_ref and agent_id == "claude_code"
+        hosts = _register_operator_hosts(
+            body,
+            probed_claude_host_ref,
+            effective_agent_session_id,
+            prepared_host,
+            state_service,
         )
-        if implicit_claude_enrichment:
-            try:
-                claude_host_ref = claude_operator_tmux_host_ref(body.session_label)
-            except OperatorHostQualificationError as exc:
-                logger.warning(
-                    "peer/register: Claude operator-host discovery failed; "
-                    "continuing ordinary registration (agi=%s): %s",
-                    agent_instance_id,
-                    exc,
-                )
-        if body.operator_tmux_host or claude_host_ref:
-            try:
-                if agent_id == "codex":
-                    operator_host = register_operator_codex_host(
-                        state_service,
-                        OperatorCodexRegistration(
-                            host_ref=body.operator_tmux_host,
-                            agent_id=agent_id,
-                            agent_instance_id=agent_instance_id,
-                            agent_session_id=effective_agent_session_id,
-                            session_label=body.session_label,
-                            parent_pid=body.parent_pid,
-                            watcher_declared=body.watcher_declared,
-                        ),
-                    )
-                elif agent_id == "claude_code":
-                    operator_claude_host = register_operator_claude_host(
-                        state_service,
-                        OperatorClaudeRegistration(
-                            host_ref=claude_host_ref,
-                            agent_id=agent_id,
-                            agent_instance_id=agent_instance_id,
-                            agent_session_id=effective_agent_session_id,
-                            session_label=body.session_label,
-                            parent_pid=body.parent_pid,
-                            watcher_declared=body.watcher_declared,
-                        ),
-                    )
-                else:
-                    raise OperatorHostQualificationError(
-                        "operator tmux host is supported only for Codex or Claude",
-                    )
-            except (OperatorHostQualificationError, StateOperationError) as exc:
-                if implicit_claude_enrichment:
-                    logger.warning(
-                        "peer/register: Claude operator-host qualification "
-                        "failed; continuing ordinary registration (agi=%s): %s",
-                        agent_instance_id,
-                        exc,
-                    )
-                    operator_claude_host = {}
-                else:
-                    return _validation_error("operator_host_unqualified", str(exc))
+        if isinstance(hosts, JSONResponse):
+            return hosts
+        operator_host, operator_claude_host = hosts
         # Import here to avoid a circular import at module load time;
         # models is pulled in via TYPE_CHECKING for the type hints.
         from .models import BridgeBinding  # noqa: PLC0415
@@ -1144,6 +1341,11 @@ def _register_peer_routes(
         # The predicate is supplied here because the registry is a store
         # wrapper with no bridge manager; passing it explicitly is what makes
         # the knob real rather than a default nobody reaches.
+        refresh_evidence = capture_role_refresh_evidence(
+            peer_registry,
+            agent_session_id=effective_agent_session_id,
+            registering_parent_pid=body.parent_pid,
+        )
         effective_label = peer_registry.register(
             binding,
             is_live=lambda existing: binding_is_live(
@@ -1153,32 +1355,25 @@ def _register_peer_routes(
             ),
         )
         bridge.session_label = effective_label
+        bridge_manager.record_identity_bound(bridge_id, agent_instance_id)
         # D-IF7 sidecar populate (v4 §4) — bind the per-bridge inference
         # vertex AFTER peer_registry.register succeeds so the wrapper can
         # resolve a provider for this agent_instance_id on its next
         # process_error / process_results call. Best-effort try/except —
         # sidecar bind failures must not block the registration response.
-        if inference_provider_register is not None and body.provides_inference:
-            try:
-                inference_provider_register(
-                    bridge_id=bridge_id,
-                    agent_instance_id=agent_instance_id,
-                    agent_id=agent_id,
-                    session_label=effective_label,
-                )
-            except Exception:  # noqa: BLE001 — sidecar populate is best-effort
-                logger.warning(
-                    "inference_provider_register raised for bridge %s "
-                    "agent_instance_id=%s; registration kept; provider sidecar "
-                    "WILL be missing for this peer",
-                    bridge_id,
-                    agent_instance_id,
-                    exc_info=True,
-                )
+        _register_inference_sidecar(
+            inference_provider_register,
+            body,
+            bridge_id,
+            agent_instance_id,
+            agent_id,
+            effective_label,
+        )
         self_refresh_action = _state_table_self_refresh(
             state_service,
             agent_session_id=effective_agent_session_id,
             new_agent_instance_id=agent_instance_id,
+            evidence=refresh_evidence,
         )
         # D1 registration hook (§3.2/§5, Dawn ruling arm-11511b07) — fires
         # spawning->live and backfills agent_session_id/agent_id on this
@@ -1202,6 +1397,7 @@ def _register_peer_routes(
             state_service,
             session_role=body.session_role.strip(),
             agent_session_id=effective_agent_session_id,
+            agent_instance_id=agent_instance_id,
             self_refresh=self_refresh_action,
         )
         # INF-01 Trigger-1 (§D.9): fill a vacant / dead-holder sys:autonomic
@@ -1210,24 +1406,15 @@ def _register_peer_routes(
         # the S2 self-refresh (a reconnecting holder re-points its binding
         # first, so it reads back as live-held → no-op). Best-effort: the
         # registration response never fails on lifecycle policy.
-        autonomic_action = "disabled"
-        if autonomic_on_register is not None:
-            try:
-                autonomic_action = autonomic_on_register(
-                    agent_id=agent_id,
-                    agent_instance_id=agent_instance_id,
-                    agent_session_id=effective_agent_session_id,
-                    session_label=effective_label,
-                    provides_inference=body.provides_inference,
-                )
-            except Exception:  # noqa: BLE001 — lifecycle policy never blocks a registration
-                logger.warning(
-                    "autonomic_on_register raised for bridge %s agi=%s; registration kept",
-                    bridge_id,
-                    agent_instance_id,
-                    exc_info=True,
-                )
-                autonomic_action = "error"
+        autonomic_action = _register_autonomic(
+            autonomic_on_register,
+            body,
+            bridge_id,
+            agent_instance_id,
+            agent_id,
+            effective_agent_session_id,
+            effective_label,
+        )
         return JSONResponse(
             content={
                 "agent_id": agent_id,
@@ -1244,11 +1431,7 @@ def _register_peer_routes(
                 "session_role_held": session_role_held,
                 # Named so the registering peer can SEE the downgrade rather
                 # than infer it from an unexpectedly empty agent_session_id.
-                "session_id_downgrade": (
-                    ORPHAN_SESSION_ID_DOWNGRADE
-                    if orphan_session_id_downgraded
-                    else ""
-                ),
+                "session_id_downgrade": (ORPHAN_SESSION_ID_DOWNGRADE if orphan_session_id_downgraded else ""),
             },
             status_code=200,
         )
@@ -1259,22 +1442,36 @@ def _register_peer_routes(
         body: PeerRegisterBody,
     ) -> JSONResponse:
         # iss_87aa81c4: the body runs tmux/ps host probes and can fire an
-        # autonomic claim's handover notice (a full dispatch + drive) — off
-        # the loop, serialized against other registrations.
-        def _serialized() -> JSONResponse:
-            with _PEER_REGISTER_LOCK:
-                return _peer_register_blocking(bridge_id, body)
+        # autonomic claim's handover notice — off the loop, serialized against
+        # every other request-path registry write (iss_59a7f833). The
+        # label discovery and request-local OS observations run BEFORE the
+        # lock; effective-session validation and every registry/state write
+        # remain serialized. Handover drives are only scheduled under it.
+        record_handler_entry("route::agent_messaging_plugin::peer_register_route", "route")
 
-        return await asyncio.to_thread(_serialized)
+        def _serialized() -> JSONResponse:
+            probed = _probe_claude_host_ref(body)
+            prepared = _prepare_registration_host(body, probed)
+            with PEER_REGISTRATION_LOCK:
+                return _peer_register_blocking(bridge_id, body, probed, prepared)
+
+        return await run_bridge_work(_serialized)
 
     @app.get(f"{API_PREFIX}/{{bridge_id}}/peer/list")
     async def peer_list_route(bridge_id: str) -> JSONResponse:
+        record_handler_entry("route::agent_messaging_plugin::peer_list_route", "route")
         _ = bridge_id
-        snapshot = peer_registry.list_agent_ids()
+        # iss_5cf6184d: a full binding-table read.
+        snapshot = await run_bridge_work(peer_registry.list_agent_ids)
         return JSONResponse(content=serialize_peer_list(snapshot), status_code=200)
 
     @app.get(f"{API_PREFIX}/{{bridge_id}}/current_identity")
     async def current_identity_route(bridge_id: str) -> JSONResponse:
+        # iss_5cf6184d: binding read + roles-held read.
+        record_handler_entry("route::agent_messaging_plugin::current_identity_route", "route")
+        return await run_bridge_work(_current_identity_blocking, bridge_id)
+
+    def _current_identity_blocking(bridge_id: str) -> JSONResponse:
         bridge = bridge_manager.get(bridge_id)
         if bridge is None or bridge.closed:
             return _bridge_not_found(bridge_id)
@@ -1313,7 +1510,8 @@ def _register_peer_routes(
         body: PeerSendBody,
     ) -> JSONResponse:
         # iss_87aa81c4: dispatch + drive block; keep them off the loop.
-        return await asyncio.to_thread(
+        record_handler_entry("route::agent_messaging_plugin::peer_send_route", "route")
+        return await run_bridge_work(
             _peer_send_impl,
             bridge_id=bridge_id,
             body=body,
@@ -1329,7 +1527,8 @@ def _register_peer_routes(
         body: PeerClaimRoleBody,
     ) -> JSONResponse:
         # iss_87aa81c4: dispatch + drive block; keep them off the loop.
-        return await asyncio.to_thread(
+        record_handler_entry("route::agent_messaging_plugin::peer_claim_role_route", "route")
+        return await run_bridge_work(
             _peer_claim_role_impl,
             bridge_id=bridge_id,
             body=body,
@@ -1345,7 +1544,8 @@ def _register_peer_routes(
         body: PeerSendByNameBody,
     ) -> JSONResponse:
         # iss_87aa81c4: dispatch + drive block; keep them off the loop.
-        return await asyncio.to_thread(
+        record_handler_entry("route::agent_messaging_plugin::peer_send_by_name_route", "route")
+        return await run_bridge_work(
             _peer_send_by_name_impl,
             bridge_id=bridge_id,
             body=body,
@@ -1364,7 +1564,25 @@ def _register_peer_routes(
         role_after: str | None = None,
         observer: bool = False,
         since: str | None = None,
+        since_cursor: str | None = None,
     ) -> JSONResponse:
+        # iss_5cf6184d: binding read, inbox page and touch are DB work.
+        record_handler_entry("route::agent_messaging_plugin::peer_inbox_route", "route")
+        return await run_bridge_work(
+            _peer_inbox_blocking,
+            bridge_id,
+            _InboxQuery(
+                after=after,
+                limit=limit,
+                include_important=include_important,
+                role_after=role_after,
+                observer=observer,
+                since=since,
+                since_cursor=since_cursor,
+            ),
+        )
+
+    def _peer_inbox_blocking(bridge_id: str, query: _InboxQuery) -> JSONResponse:
         bridge = bridge_manager.get(bridge_id)
         if bridge is None or bridge.closed:
             return _bridge_not_found(bridge_id)
@@ -1375,11 +1593,15 @@ def _register_peer_routes(
                 "this bridge has not registered an agent_id; POST /peer/register first",
             )
         try:
-            after_dt = _parse_iso_after(after)
+            after_dt = _parse_iso_after(query.after)
         except ValueError as exc:
             return _validation_error("invalid_after", str(exc))
         try:
-            since_dt = parse_since_cursor(since)
+            since_dt = parse_since_cursor(query.since)
+        except InvalidInboxCursorError as exc:
+            return _validation_error(exc.code, str(exc))
+        try:
+            since_cursor = parse_since_continuation_cursor(query.since_cursor)
         except InvalidInboxCursorError as exc:
             return _validation_error(exc.code, str(exc))
         try:
@@ -1390,15 +1612,16 @@ def _register_peer_routes(
                     recipient_agent_session_id=sender_binding.agent_session_id,
                     after_created_at=after_dt,
                     since_created_at=since_dt,
-                    limit=max(1, min(limit, 100)),
-                    include_important=include_important,
+                    since_cursor=since_cursor,
+                    limit=max(1, min(query.limit, 100)),
+                    include_important=query.include_important,
                     # Opaque role-section cursor; the service validates it and
                     # raises AgentMessagingError on a malformed/forged token
                     # (caught below → error response). Fail-closed by design.
-                    role_after=role_after,
+                    role_after=query.role_after,
                     # Watch/status catch-up observes pending work; it does not
                     # claim successful display for a model turn.
-                    observer=observer or sender_binding.is_watcher,
+                    observer=query.observer or sender_binding.is_watcher,
                 ),
             )
         except AgentMessagingError as exc:
@@ -1434,6 +1657,11 @@ def _register_peer_routes(
         # successor, keyed on the recipient's own report_by promise. Role
         # consumption stays authoritative via /peer/delivered (the forwarder's
         # explicit confirm) and the watcher events-ack path — both untouched.
+        # iss_5cf6184d: binding read + undelivered page + touch are DB work.
+        record_handler_entry("route::agent_messaging_plugin::peer_drain_route", "route")
+        return await run_bridge_work(_peer_drain_blocking, bridge_id, body)
+
+    def _peer_drain_blocking(bridge_id: str, body: PeerDrainBody) -> JSONResponse:
         bridge = bridge_manager.get(bridge_id)
         if bridge is None or bridge.closed:
             return _bridge_not_found(bridge_id)
@@ -1475,6 +1703,14 @@ def _register_peer_routes(
         # deliveries) — ``flagged=false`` if the caller no longer holds the role.
         # REL-05: also records the emit bookkeeping (emit_count/last_emitted_at +
         # F3 emitted_to instance) inside the fenced confirm.
+        # iss_5cf6184d: binding read + fenced confirm are DB work.
+        record_handler_entry("route::agent_messaging_plugin::peer_delivered_route", "route")
+        return await run_bridge_work(_peer_delivered_blocking, bridge_id, body)
+
+    def _peer_delivered_blocking(
+        bridge_id: str,
+        body: PeerDeliveredBody,
+    ) -> JSONResponse:
         bridge = bridge_manager.get(bridge_id)
         if bridge is None or bridge.closed:
             return _bridge_not_found(bridge_id)
@@ -1611,6 +1847,31 @@ def _peer_send_impl(
     return JSONResponse(content=outcome.to_payload(), status_code=200)
 
 
+def _role_send_cli_binding(
+    bridge: BridgeSessionState,
+    peer_registry: PeerRegistry,
+) -> BridgeBinding | JSONResponse:
+    """Resolve the CLI's existing attribution key without registering its bridge."""
+    if bridge.client_id or not bridge.caller_agent_session_id:
+        return _validation_error(
+            "identity_not_registered",
+            "No registered sender or CLI session attribution. Remedy: run solet-bridge from your launcher session with its AGENT_SESSION_ID; do not borrow another session's identity. Use the documented queued report fallback if needed.",
+        )
+    try:
+        binding = peer_registry.resolve_by_agent_session_id(bridge.caller_agent_session_id)
+    except PeerSessionAmbiguousError:
+        return _validation_error(
+            "caller_session_ambiguous",
+            "The CLI session has multiple bindings. Remedy: ask the owning seat to reconcile its registrations; use the documented queued report fallback.",
+        )
+    if binding is None:
+        return _validation_error(
+            "caller_session_unregistered",
+            "The CLI session has no registered identity. Remedy: ask the owning seat to restore this session's watcher registration, or use the documented queued report fallback; do not substitute another session.",
+        )
+    return binding
+
+
 def _peer_send_by_name_sender(
     *,
     bridge_id: str,
@@ -1625,10 +1886,10 @@ def _peer_send_by_name_sender(
         return _bridge_not_found(bridge_id)
     sender_binding = _lookup_binding_for_bridge(peer_registry, bridge_id)
     if sender_binding is None:
-        return _validation_error(
-            "identity_not_registered",
-            "this bridge has not registered an agent_id; POST /peer/register first",
-        )
+        attributed = _role_send_cli_binding(bridge, peer_registry)
+        if isinstance(attributed, JSONResponse):
+            return attributed
+        sender_binding = attributed
     if not body.name.strip():
         return _validation_error(
             "missing_name",
@@ -1650,7 +1911,20 @@ def _resolve_role_for_send(
     state_service: Any,
     role_name: str,
 ) -> ResolvedRole | JSONResponse:
-    """Resolve ``role_name`` to a routable target, or return an error response."""
+    """Resolve ``role_name`` to a routable target, or return an error response.
+
+    A retired name is refused first (iss_d9c955a2), before resolve and before
+    the caller persists anything; 410 because the name existed and is gone.
+    """
+    try:
+        refuse_if_retired(state_service, role_name)
+    except RoleRetiredError as exc:
+        return JSONResponse(content=exc.to_public(), status_code=410)
+    except RetiredRoleRegistryError as exc:
+        return JSONResponse(
+            content={"code": exc.code, "message": exc.message, "name": role_name},
+            status_code=503,
+        )
     try:
         role = resolve_role_binding(state_service, role_name)
     except RoleBindingVacantError as exc:
@@ -1667,10 +1941,7 @@ def _resolve_role_for_send(
     if not role.agent_instance_id:
         return _validation_error(
             "peer_role_malformed",
-            (
-                f"role binding for {role_name!r} is missing agent_instance_id; "
-                "re-claim the role first"
-            ),
+            (f"role binding for {role_name!r} is missing agent_instance_id; re-claim the role first"),
         )
     return role
 
@@ -1685,6 +1956,9 @@ _CLAIM_ROLE_ERROR_STATUS: Final[dict[str, int]] = {
     # to 400, so an omission here would not fail loudly, it would just make the
     # wire status quietly wrong while the code stayed correct.
     "role_held_live": 409,
+    # iss_d9c955a2: the name is retired — gone, not merely unheld.
+    "peer_role_retired": 410,
+    "retired_role_registry_unavailable": 503,
     "state_service_unavailable": 503,
 }
 
@@ -1725,10 +1999,7 @@ def _peer_claim_role_impl(
     if binding is None:
         return _validation_error(
             "peer_identity_unregistered",
-            (
-                "this bridge has no registered peer identity; "
-                "call peer/register before claiming a role"
-            ),
+            ("this bridge has no registered peer identity; call peer/register before claiming a role"),
         )
     result = claim_role_for_session(
         origin=RoleClaimOrigin.INFRA,
@@ -1788,6 +2059,7 @@ def _peer_send_by_name_impl(
             sender_agent_instance_id=sender.agent_instance_id,
             sender_session_label=sender.session_label,
             sender_principal_kind=SENDER_PRINCIPAL_KIND_STDIO_AGENT,
+            sender_identity_trust=("stdio_bridge_registered" if sender.bridge_id == bridge_id else "one_shot_attributed"),
             sender_parent_pid=sender.parent_pid,
             content=[TextPart(type="text", text=body.content)],
             message_id=f"arm-{secrets.token_hex(16)}",
@@ -2071,10 +2343,7 @@ def _session_id_conflict(
         return JSONResponse(
             content={
                 "code": SESSION_ID_BOUND_TO_LIVE_SESSION,
-                "message": (
-                    f"agent_session_id {agent_session_id!r} already resolves to "
-                    f"more than one binding ({exc}); refusing to add another."
-                ),
+                "message": (f"agent_session_id {agent_session_id!r} already resolves to more than one binding ({exc}); refusing to add another."),
             },
             status_code=409,
         )
@@ -2128,6 +2397,34 @@ def _read_roles_held(
 # ---------------------------------------------------------------------------
 # Misc
 # ---------------------------------------------------------------------------
+
+
+def _record_poll_activity(
+    peer_registry: PeerRegistry,
+    agent_messaging_service: Any,
+    bridge_id: str,
+    acked: list[QueuedEvent],
+) -> None:
+    """The DB half of one ``/events`` long-poll answer (worker thread).
+
+    An actively long-polling registered client (the no-MCP watcher) is
+    alive — bump its binding so "last active" liveness agrees with the
+    delivery path, same as peer_inbox does. Without this, a watcher that
+    only ever long-polls looks inactive to binding-liveness consumers
+    while its bridge keeps answering, one half of the persisted_silent
+    black hole (field-observed on a live deployment).
+    """
+    binding = _lookup_binding_for_bridge(peer_registry, bridge_id)
+    if binding is None:
+        return
+    peer_registry.touch_binding(binding.agent_instance_id)
+    # A watcher's cursor ack proves the acked events streamed into its
+    # watch output — the pull equivalent of entering a turn. Stamps
+    # role rows consumed. MCP-transport bridges confirm via
+    # /peer/drain instead — never here (their forwarder drains events
+    # without the model having read them).
+    if binding.is_watcher and acked:
+        _consume_watcher_acked_events(agent_messaging_service, acked)
 
 
 def _lookup_binding_for_bridge(

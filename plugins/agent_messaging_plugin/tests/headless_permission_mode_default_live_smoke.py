@@ -59,18 +59,23 @@ def _check(condition: object, label: str) -> None:
 def _run_write_probe(*, permission_mode: str, tmp_dir: Path, filename: str) -> dict[str, object]:
     claude_bin = shutil.which("claude")
     assert claude_bin is not None, "claude binary not found on PATH -- cannot run this live smoke"
-    prompt = (
-        f"Use the Write tool to create a file named {filename} in the current "
-        "directory with the content OK. Do nothing else."
-    )
+    prompt = f"Use the Write tool to create a file named {filename} in the current directory with the content OK. Do nothing else."
     result = subprocess.run(  # noqa: S603 -- fixed argv, live smoke, opt-in only
         [
-            claude_bin, "-p", prompt,
-            "--permission-mode", permission_mode,
-            "--setting-sources", "project",
-            "--output-format", "json",
+            claude_bin,
+            "-p",
+            prompt,
+            "--permission-mode",
+            permission_mode,
+            "--setting-sources",
+            "project",
+            "--output-format",
+            "json",
         ],
-        capture_output=True, text=True, timeout=60, cwd=str(tmp_dir),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=str(tmp_dir),
     )
     _check(result.returncode == 0, f"claude -p exits 0 under --permission-mode {permission_mode}")
     return json.loads(result.stdout)
@@ -84,13 +89,14 @@ def test_default_mode_denies_the_mutating_write() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         payload = _run_write_probe(
-            permission_mode="default", tmp_dir=tmp_dir, filename="probe_default.txt",
+            permission_mode="default",
+            tmp_dir=tmp_dir,
+            filename="probe_default.txt",
         )
         denials = payload.get("permission_denials") or []
         _check(
-            len(denials) > 0 and any(d.get("tool_name") == "Write" for d in denials),
-            "RED: --permission-mode default denies the Write tool call "
-            f"(permission_denials={denials!r})",
+            len(denials) > 0 and any(d.get("tool_name") == "Write" for d in denials),  # pyright: ignore[reportArgumentType, reportGeneralTypeIssues]
+            f"RED: --permission-mode default denies the Write tool call (permission_denials={denials!r})",
         )
         _check(
             not (tmp_dir / "probe_default.txt").exists(),
@@ -105,7 +111,9 @@ def test_bypass_permissions_mode_allows_the_mutating_write() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         payload = _run_write_probe(
-            permission_mode="bypassPermissions", tmp_dir=tmp_dir, filename="probe_bypass.txt",
+            permission_mode="bypassPermissions",
+            tmp_dir=tmp_dir,
+            filename="probe_bypass.txt",
         )
         denials = payload.get("permission_denials") or []
         _check(
@@ -124,10 +132,10 @@ def test_bypass_permissions_mode_allows_the_mutating_write() -> None:
 def main() -> int:
     if os.environ.get("HEADLESS_PERMISSION_MODE_LIVE_SMOKE") != "1":
         print(
-            "  SKIP  set HEADLESS_PERMISSION_MODE_LIVE_SMOKE=1 to run; makes "
-            "real inference calls (non-trivial cost + wall time).",
+            "  SKIP  set HEADLESS_PERMISSION_MODE_LIVE_SMOKE=1 to run; makes real inference calls (non-trivial cost + wall time).",
         )
-        return 0
+        print('BORN_CLONE_SKIP_WITNESS={"reason":"opt_in_toggle_not_enabled","toggle":"HEADLESS_PERMISSION_MODE_LIVE_SMOKE"}')
+        return 77
 
     test_default_mode_denies_the_mutating_write()
     test_bypass_permissions_mode_allows_the_mutating_write()

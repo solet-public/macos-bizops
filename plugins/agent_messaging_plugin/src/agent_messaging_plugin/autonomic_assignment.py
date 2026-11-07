@@ -17,8 +17,10 @@ serve the lane, so claiming it would strand every organism turn in DEFER.
 
 The grace timer is in-process (``threading.Timer``, daemon; build decision
 D2): the succession check is deterministic plugin logic, not a model turn.
-A timer lost to restart is covered by Trigger-1 crash-heal on the next
-register plus the post-flip DEFER queue. A holder that reconnects inside
+A timer lost to restart can heal through Trigger-1 on the next register
+only when the stored session's native host probe confirms death. Missing
+transient providers never establish death; alive or unknown holders retain
+the slot while the post-flip DEFER queue holds work. A holder that reconnects inside
 the grace window is detected at expiry (live provider re-registered via the
 S2 self-refresh ride-along) and the check NO-OPs — the spec-allowed path.
 
@@ -35,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from ananta.llm.agent_messaging.role_binding import (
     HOLDER_KIND_SESSION,
     SYS_AUTONOMIC_SLOT,
+    role_binding_external_id,
 )
 from ananta.services.inference_service.deferred_vertex_queue import hard_delete_flows
 from ananta.services.inference_service.schema import (
@@ -54,12 +57,17 @@ from .role_binding_store import (
     HolderClaim,
     ResolvedRole,
     RoleBindingVacantError,
+    _attempt_claim_existing,
+    _prior_from_row,
+    _read_binding_row,
     claim_role_binding_v4,
     resolve_role_binding_v4,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from ananta.interfaces.state_management_interface import StateManagementInterface
 
     from .models import BridgeBinding
 
@@ -70,10 +78,7 @@ logger = logging.getLogger(__name__)
 _DRAIN_LOG_SAMPLE = 20
 
 _DRAIN_QUEUE_CEILING = 1_000_000
-_DRAIN_QUEUE_CEILING_REASON = (
-    "first-claim snapshot covers every live redrivable sys:autonomic vertex "
-    "before resubmit mutates the queue"
-)
+_DRAIN_QUEUE_CEILING_REASON = "first-claim snapshot covers every live redrivable sys:autonomic vertex before resubmit mutates the queue"
 
 
 class _LiveBridge(Protocol):
@@ -104,10 +109,7 @@ def select_newest_live(
     best: tuple[str, BridgeBinding] | None = None
     for bridge in bridges:
         for binding in bindings_for_bridge(bridge.bridge_id):
-            if (
-                exclude_agent_session_id
-                and binding.agent_session_id == exclude_agent_session_id
-            ) or binding.agent_instance_id == exclude_agent_instance_id:
+            if (exclude_agent_session_id and binding.agent_session_id == exclude_agent_session_id) or binding.agent_instance_id == exclude_agent_instance_id:
                 continue
             if not has_live_provider(binding.agent_instance_id):
                 continue
@@ -117,19 +119,57 @@ def select_newest_live(
 
 
 def _new_holder_prose() -> str:
-    return (
-        f"IMPORTANT: You now hold the {SYS_AUTONOMIC_SLOT!r} system slot — "
-        "this session is the platform's autonomic inference lane. Organism "
-        "error/result turns route to you until another session takes the slot."
-    )
+    return f"IMPORTANT: You now hold the {SYS_AUTONOMIC_SLOT!r} system slot — this session is the platform's autonomic inference lane. Organism error/result turns route to you until another session takes the slot."
 
 
 def _displaced_prose(new_agent_instance_id: str) -> str:
-    return (
-        f"IMPORTANT: You no longer hold the {SYS_AUTONOMIC_SLOT!r} system "
-        f"slot — it was re-bound to instance {new_agent_instance_id!r}. "
-        "Organism error/result turns no longer route to this session."
+    return f"IMPORTANT: You no longer hold the {SYS_AUTONOMIC_SLOT!r} system slot — it was re-bound to instance {new_agent_instance_id!r}. Organism error/result turns no longer route to this session."
+
+
+def _native_holder_presence(state: StateManagementInterface, agent_instance_id: str) -> tuple[str, str]:
+    """Read the exact managed row and probe its host without controlling it."""
+    # The verbs module initializes the existing control/store import cycle
+    # before exposing the control module's read-only native probe.
+    from .session_lifecycle_store import read_managed_session  # noqa: PLC0415
+    from .session_lifecycle_verbs import _probe_host_liveness  # noqa: PLC0415
+
+    return _probe_host_liveness(read_managed_session(state, agent_instance_id))
+
+
+def _holder_confirmed_dead(agent_instance_id: str, observe: Callable[[str], tuple[str, str]]) -> bool:
+    try:
+        presence, detail = observe(agent_instance_id)
+    except Exception as exc:  # noqa: BLE001 — unavailable presence never invents death
+        presence, detail = "unknown", f"{type(exc).__name__}: {exc}"
+    if presence == "dead":
+        return True
+    logger.warning(
+        "sys:autonomic Trigger-1 advisory: holder agi=%s presence=%s (%s) with no live provider — stored ownership preserved; registration proceeds",
+        agent_instance_id,
+        presence,
+        detail,
     )
+    return False
+
+
+def _claim_slot(
+    state: StateManagementInterface,
+    expected: ResolvedRole | None,
+    claim: HolderClaim,
+    has_live_provider: Callable[[str], bool],
+) -> dict[str, object]:
+    """Consume the store's single CAS; never retry death evidence on a new owner."""
+    if expected is None:
+        return claim_role_binding_v4(state, name=SYS_AUTONOMIC_SLOT, claim=claim)
+    row = _read_binding_row(state, role_binding_external_id(SYS_AUTONOMIC_SLOT))
+    if row is not None and _prior_from_row(SYS_AUTONOMIC_SLOT, row) == expected and not has_live_provider(expected.agent_instance_id):
+        outcome = _attempt_claim_existing(state, name=SYS_AUTONOMIC_SLOT, row=row, claim=claim)
+        if outcome is not None:
+            return outcome
+    logger.warning(
+        "sys:autonomic Trigger-1 advisory: holder changed during native presence check/claim — current ownership preserved; registration proceeds",
+    )
+    return {"action": "preserved"}
 
 
 class AutonomicAssignment:
@@ -157,12 +197,14 @@ class AutonomicAssignment:
         forward_serve_window_seconds: int,
         forward_attempts_cap: int,
         terminal_gc_after_seconds: int,
+        holder_presence: Callable[[str], tuple[str, str]] | None = None,
     ) -> None:
         self._state_service = state_service
         self._list_active_bridges = list_active_bridges
         self._bindings_for_bridge = bindings_for_bridge
         self._live_binding_for_session = live_binding_for_session
         self._has_live_provider = has_live_provider
+        self._holder_presence = holder_presence or (lambda agi: _native_holder_presence(self._state(), agi))
         self._send_notice = send_notice
         self._grace_seconds = grace_seconds
         # INF-06 reliability — the forwarded-vertex serve-timeout re-drive + GC
@@ -183,8 +225,7 @@ class AutonomicAssignment:
         self.completions = CompletionReconciler(
             state_service=self._state,
             forward_completion=forward_completion,
-            resolve_live_session_holder=lambda: live_session_holder_id(
-                self._resolve_slot, self._holder_is_live),
+            resolve_live_session_holder=lambda: live_session_holder_id(self._resolve_slot, self._holder_is_live),
             serve_window_seconds=serve_window_seconds,
         )
         self._timers_lock = threading.Lock()
@@ -214,20 +255,24 @@ class AutonomicAssignment:
             return "not_provider"
         try:
             holder = self._resolve_slot()
-            if holder is not None and self._holder_is_live(holder):
-                return "held"
+            if holder is not None:
+                if self._holder_is_live(holder) or not _holder_confirmed_dead(holder.agent_instance_id, self._holder_presence):
+                    return "held"
             reason = "vacancy_fill" if holder is None else "crash_heal"
-            self._claim_for(
+            outcome = self._claim_for(
                 agent_id=agent_id,
                 agent_instance_id=agent_instance_id,
                 agent_session_id=agent_session_id,
                 session_label=session_label,
                 reason=reason,
+                expected_holder=holder,
             )
+            if outcome.get("action") == "preserved":
+                return "held"
         except Exception:  # noqa: BLE001 — the register response must not fail on lifecycle policy
             logger.exception(
-                "sys:autonomic Trigger-1 FAULTED for agi=%s — registration "
-                "kept; the slot state is unchanged", agent_instance_id,
+                "sys:autonomic Trigger-1 FAULTED for agi=%s — registration kept; the slot state is unchanged",
+                agent_instance_id,
             )
             return "error"
         return reason
@@ -253,8 +298,7 @@ class AutonomicAssignment:
             self._schedule_succession(holder)
         except Exception:  # noqa: BLE001 — close must proceed regardless of lifecycle policy
             logger.exception(
-                "sys:autonomic Trigger-2 scheduling FAULTED for bridge=%s — "
-                "close proceeds; succession will heal on the next register",
+                "sys:autonomic Trigger-2 scheduling FAULTED for bridge=%s — close proceeds; succession will heal on the next register",
                 bridge_id,
             )
             return "error"
@@ -263,9 +307,7 @@ class AutonomicAssignment:
     def _holder_departs_with(self, holder: ResolvedRole, bridge_id: str) -> bool:
         """Is the slot holder among the bindings this closing bridge owns?"""
         for binding in self._bindings_for_bridge(bridge_id):
-            if holder.agent_session_id and (
-                binding.agent_session_id == holder.agent_session_id
-            ):
+            if holder.agent_session_id and (binding.agent_session_id == holder.agent_session_id):
                 return True
             if binding.agent_instance_id == holder.agent_instance_id:
                 return True
@@ -275,7 +317,9 @@ class AutonomicAssignment:
         """(Re)arm the grace timer for ``departed``; replaces a prior timer."""
         key = departed.agent_session_id or departed.agent_instance_id
         timer = threading.Timer(
-            self._grace_seconds, self._succession_check, args=(departed,),
+            self._grace_seconds,
+            self._succession_check,
+            args=(departed,),
         )
         timer.daemon = True
         with self._timers_lock:
@@ -285,9 +329,10 @@ class AutonomicAssignment:
             prior.cancel()
         timer.start()
         logger.info(
-            "sys:autonomic holder departed (session=%r agi=%s) — succession "
-            "check in %ds", departed.agent_session_id,
-            departed.agent_instance_id, self._grace_seconds,
+            "sys:autonomic holder departed (session=%r agi=%s) — succession check in %ds",
+            departed.agent_session_id,
+            departed.agent_instance_id,
+            self._grace_seconds,
         )
 
     def _succession_check(self, departed: ResolvedRole) -> str:
@@ -304,8 +349,7 @@ class AutonomicAssignment:
             return self._run_succession(departed)
         except Exception:  # noqa: BLE001 — timer thread: loud, never propagates
             logger.exception(
-                "sys:autonomic succession check FAULTED (departed session=%r) "
-                "— slot state unchanged; heals on the next register",
+                "sys:autonomic succession check FAULTED (departed session=%r) — slot state unchanged; heals on the next register",
                 departed.agent_session_id,
             )
             return "error"
@@ -326,9 +370,7 @@ class AutonomicAssignment:
         )
         if successor is None:
             logger.warning(
-                "sys:autonomic left VACANT after grace (departed session=%r, "
-                "no live provider-capable successor) — organism turns DEFER "
-                "to the durable queue until the next register fills the slot",
+                "sys:autonomic left VACANT after grace (departed session=%r, no live provider-capable successor) — organism turns DEFER to the durable queue until the next register fills the slot",
                 departed.agent_session_id,
             )
             return "vacant"
@@ -363,22 +405,14 @@ class AutonomicAssignment:
             return {
                 "success": False,
                 "code": "no_live_provider",
-                "message": (
-                    f"instance {agent_instance_id!r} has no live inference "
-                    "provider (not registered with provides_inference=True, "
-                    "or its bridge is closed) — binding it would strand the "
-                    "autonomic lane"
-                ),
+                "message": (f"instance {agent_instance_id!r} has no live inference provider (not registered with provides_inference=True, or its bridge is closed) — binding it would strand the autonomic lane"),
             }
         binding = self._binding_for_instance(agent_instance_id)
         if binding is None:
             return {
                 "success": False,
                 "code": "not_registered",
-                "message": (
-                    f"instance {agent_instance_id!r} has no live peer "
-                    "registration on any open bridge"
-                ),
+                "message": (f"instance {agent_instance_id!r} has no live peer registration on any open bridge"),
             }
         outcome = self._claim_for(
             agent_id=binding.agent_id,
@@ -413,6 +447,7 @@ class AutonomicAssignment:
         agent_session_id: str,
         session_label: str,
         reason: str,
+        expected_holder: ResolvedRole | None = None,
     ) -> dict[str, object]:
         """CAS the slot to the given session, notify, and drain a re-lit lane."""
         if not agent_session_id:
@@ -420,33 +455,34 @@ class AutonomicAssignment:
             # session id. A carrier-less session is claimable (better than a
             # vacant lane) but degrades those paths to agent_instance_id.
             logger.warning(
-                "sys:autonomic claim for agi=%s carries NO agent_session_id "
-                "(no AGENT_SESSION_ID carrier) — reconnect self-refresh "
-                "and sid-keyed succession degrade to instance identity",
+                "sys:autonomic claim for agi=%s carries NO agent_session_id (no AGENT_SESSION_ID carrier) — reconnect self-refresh and sid-keyed succession degrade to instance identity",
                 agent_instance_id,
             )
         prior_was_live = self._slot_serves_inference()
-        outcome = claim_role_binding_v4(
-            self._state(),
-            name=SYS_AUTONOMIC_SLOT,
-            claim=HolderClaim(
-                holder_kind=HOLDER_KIND_SESSION,
-                holder_identity={
-                    "agent_id": agent_id, "session_label": session_label,
-                },
-                agent_instance_id=agent_instance_id,
-                agent_session_id=agent_session_id,
-                session_label=session_label,
-            ),
+        claim = HolderClaim(
+            holder_kind=HOLDER_KIND_SESSION,
+            holder_identity={
+                "agent_id": agent_id,
+                "session_label": session_label,
+            },
+            agent_instance_id=agent_instance_id,
+            agent_session_id=agent_session_id,
+            session_label=session_label,
         )
+        outcome = _claim_slot(self._state(), expected_holder, claim, self._has_live_provider)
+        if outcome.get("action") == "preserved":
+            return outcome
         action = str(outcome.get("action") or "")
         logger.info(
             "sys:autonomic %s (%s): holder now agi=%s session=%r label=%r",
-            action, reason, agent_instance_id, agent_session_id, session_label,
+            action,
+            reason,
+            agent_instance_id,
+            agent_session_id,
+            session_label,
         )
         if action != "refreshed":
-            self._fire_notices(outcome, new_agent_id=agent_id,
-                               new_agent_instance_id=agent_instance_id)
+            self._fire_notices(outcome, new_agent_id=agent_id, new_agent_instance_id=agent_instance_id)
         if not prior_was_live:
             self._drain_deferred(reason)
         # INF-02 per-type completion handler — shared drain MECHANISM, its
@@ -473,9 +509,9 @@ class AutonomicAssignment:
         if isinstance(prior, ResolvedRole):
             if prior.holder_kind != HOLDER_KIND_SESSION:
                 logger.warning(
-                    "sys:autonomic re-bound away from a %r holder "
-                    "(identity=%s) — no wake target; audit only",
-                    prior.holder_kind, prior.holder_identity,
+                    "sys:autonomic re-bound away from a %r holder (identity=%s) — no wake target; audit only",
+                    prior.holder_kind,
+                    prior.holder_identity,
                 )
             else:
                 live = self._prior_live_binding(prior)
@@ -509,9 +545,9 @@ class AutonomicAssignment:
             live = self._live_binding_for_session(prior.agent_session_id)
         except Exception:  # noqa: BLE001 — ambiguous/faulted lookup → treat as not-live (no notice)
             logger.warning(
-                "sys:autonomic displaced-notice lookup failed for session=%r "
-                "— treating as genuinely ended (no notice)",
-                prior.agent_session_id, exc_info=True,
+                "sys:autonomic displaced-notice lookup failed for session=%r — treating as genuinely ended (no notice)",
+                prior.agent_session_id,
+                exc_info=True,
             )
             return None
         if live is None:
@@ -550,17 +586,19 @@ class AutonomicAssignment:
         ``(drained, remaining)``.
         """
         state = self._state()
-        redrivable = list(iter_table_rows(
-            state,
-            namespace=INFERENCE_DEFERRED_VERTEX_NAMESPACE,
-            table=TABLE_INFERENCE_DEFERRED_VERTEX,
-            filters={
-                COL_ROLE: SYS_AUTONOMIC_SLOT,
-                COL_STATE: [STATE_DEFERRED, STATE_FORWARDED],
-            },
-            ceiling=_DRAIN_QUEUE_CEILING,
-            reason=_DRAIN_QUEUE_CEILING_REASON,
-        ))
+        redrivable = list(
+            iter_table_rows(
+                state,
+                namespace=INFERENCE_DEFERRED_VERTEX_NAMESPACE,
+                table=TABLE_INFERENCE_DEFERRED_VERTEX,
+                filters={
+                    COL_ROLE: SYS_AUTONOMIC_SLOT,
+                    COL_STATE: [STATE_DEFERRED, STATE_FORWARDED],
+                },
+                ceiling=_DRAIN_QUEUE_CEILING,
+                reason=_DRAIN_QUEUE_CEILING_REASON,
+            )
+        )
         drained: list[str] = []
         for row in redrivable:
             flow_id = str(row.get(COL_FLOW_ID) or "")
@@ -573,23 +611,25 @@ class AutonomicAssignment:
 
     @staticmethod
     def _log_drain_outcome(
-        reason: str, *, rows: list[dict[str, object]], remaining: int,
+        reason: str,
+        *,
+        rows: list[dict[str, object]],
+        remaining: int,
     ) -> None:
         if remaining:
-            sample = [
-                str(row.get(COL_FLOW_ID) or "") for row in rows[:_DRAIN_LOG_SAMPLE]
-            ]
+            sample = [str(row.get(COL_FLOW_ID) or "") for row in rows[:_DRAIN_LOG_SAMPLE]]
             logger.warning(
-                "sys:autonomic first-claim drain (%s): %d deferred flow(s) "
-                "remain QUEUED (re-drive primitive is SUB-05; nothing is "
-                "lost — rows persist durably). Sample flow_ids: %s%s",
-                reason, remaining, sample,
+                "sys:autonomic first-claim drain (%s): %d deferred flow(s) remain QUEUED (re-drive primitive is SUB-05; nothing is lost — rows persist durably). Sample flow_ids: %s%s",
+                reason,
+                remaining,
+                sample,
                 " …" if remaining > _DRAIN_LOG_SAMPLE else "",
             )
         elif rows:
             logger.info(
-                "sys:autonomic first-claim drain (%s): all %d deferred "
-                "flow(s) re-driven and hard-deleted", reason, len(rows),
+                "sys:autonomic first-claim drain (%s): all %d deferred flow(s) re-driven and hard-deleted",
+                reason,
+                len(rows),
             )
 
     # ------------------------------------------------------------------
@@ -601,8 +641,7 @@ class AutonomicAssignment:
         state = self._state_service()
         if state is None:
             raise RuntimeError(
-                "state_service unbound — the sys:autonomic lifecycle cannot "
-                "resolve/claim the slot without it",
+                "state_service unbound — the sys:autonomic lifecycle cannot resolve/claim the slot without it",
             )
         return state
 

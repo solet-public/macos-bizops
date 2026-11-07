@@ -1,0 +1,5 @@
+# Deterministic proof for prb_351c9641: an operator-hosted seat has no driver
+# channel by design, and both the driver-channel refusal and the delivery
+# lookup's recorded detail now name the manual wake instruction. Registered in
+# its own fragment per quality_gates/gate_smokes.txt's header (prb_ae6d81ea).
+plugins/agent_messaging_plugin/tests/operator_seat_wake_smoke.py

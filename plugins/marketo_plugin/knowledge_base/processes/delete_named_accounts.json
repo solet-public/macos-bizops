@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::delete_named_accounts",
+  "display_name": "Marketo: Delete Named Accounts",
+  "description": "Permanently delete up to 300 Marketo named account records (POST /rest/v1/namedaccounts/delete.json). delete_by is dedupeFields (name, default) or idField (marketoGUID). Destructive async write: poll check_marketo_job_status for per-record deleted/skipped status and reasons.",
+  "embedding_description": "Permanently delete Marketo named accounts (ABM target accounts), up to 300 per batch, matched by name (dedupe) or marketoGUID. Destructive async write; returns per-record deleted or skipped status with vendor reasons such as record not found. Distinct from remove_named_account_list_members, which only takes an account off a list.",
+  "result_processor_customizations": {
+    "action_label": "Marketo named accounts delete job dispatched",
+    "result_type": "marketo_delete_named_accounts_result",
+    "result_description": "Dict with job_id and status 'queued'. The completed job result is Marketo's per-record results array (seq, marketoGUID or id, status, reasons), row_count and tallies (status -> count).",
+    "presentation_guidance": "This changes vendor state and is destructive: deleted records are not recoverable through the API. A queued job is not vendor success: poll check_marketo_job_status, then report the tallies and any skipped records with their reasons."
+  },
+  "error_processor_customizations": {
+    "action_context": "Delete Marketo named accounts on the configured instance.",
+    "error_interpretation": "marketo.invalid_params: refused at dispatch before any vendor call (missing or malformed parameters, more than 300 entries, an action/dedupe_by/delete_by value Marketo does not define). On the finished job: marketo.permission_denied (vendor 603 or HTTP 403) means the API user's Role lacks the Access API permission; marketo.auth_failed (601/602 after one re-mint, or HTTP 401) means the credential was rejected; marketo.validation_failed and other vendor codes carry Marketo's own message. A transport fault after dispatch may follow a vendor mutation.",
+    "recovery_guidance": "marketo.permission_denied: grant Read-Write Named Account under Admin > Users & Roles > Roles > the API role > Access API, then retry. Adobe documents some Lead Database object APIs as unavailable on subscriptions with a native CRM sync; that vendor error is reported as returned. Read the records back with get_named_accounts before retrying a write that ended in a transport fault."
+  }
+}

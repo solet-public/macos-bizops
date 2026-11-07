@@ -40,6 +40,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_ROOT))
+
 _TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "knowledge_base" / "hydration_templates"
 _TEMPLATE_VARS = _TEMPLATES_DIR / "TEMPLATE_VARS.md"
 
@@ -54,10 +57,11 @@ _RENDER_TOKENS = {
     # Deliberately NOT a literal unrelated to the name above — a fixture that let the
     # two drift would stop modelling the derivation the ruling requires.
     "{{MARKETPLACE_NAME}}": "iris",
-    # The ARMED render. The solo render is the same launcher with the whole
-    # GIT_CONTROLLER_NAME line deleted (absence is the exemption), which is a
-    # hydration edit rather than a token value, so it is checked separately
-    # below rather than modelled as a second fixture value here.
+    # The rendered controller label. The single-session render is the same launcher
+    # with the whole GIT_CONTROLLER_NAME line deleted, which is a hydration edit
+    # rather than a token value, so it is checked separately below rather than
+    # modelled as a second fixture value here. Neither render arms or exempts
+    # anything: the git-text gate that read this export was removed in 0.9.0.
     "{{GIT_CONTROLLER_NAME}}": "Git-Controller",
     # Existing-install managed-artifact templates (design section 6.1).
     "{{SHELL_FILE_ZSH}}": "'/Users/example/Workspace/iris/client/iris.zsh'",
@@ -134,7 +138,11 @@ def _check_refresh_classes_match_disk_and_bundle() -> None:
     declared = {Path(row["template_ref"]).name for row in json.loads(_BUNDLE.read_text(encoding="utf-8"))["managed_artifacts"]}
     managed = {name for name, refresh_class in classes.items() if refresh_class == "managed"}
     _check("the `managed` rows are exactly the templates existing_install_flow.json declares", bool(declared) and managed == declared, f"managed-only={sorted(managed - declared)} declared-only={sorted(declared - managed)}")
-    _check("the fleet file is `managed` only through the clone-exclude block that makes its destination ignored", classes["fleet_functions.zsh.template"] == "managed" and classes["clone_exclude_block.template"] == "managed", f"fleet class: {classes['fleet_functions.zsh.template']}, exclude class: {classes['clone_exclude_block.template']}")
+    _check(
+        "the fleet file is `managed` only through the clone-exclude block that makes its destination ignored",
+        classes["fleet_functions.zsh.template"] == "managed" and classes["clone_exclude_block.template"] == "managed",
+        f"fleet class: {classes['fleet_functions.zsh.template']}, exclude class: {classes['clone_exclude_block.template']}",
+    )
 
 
 def _check_no_surviving_tokens(name: str, rendered: str) -> None:
@@ -144,7 +152,11 @@ def _check_no_surviving_tokens(name: str, rendered: str) -> None:
 
 def _check_zsh_syntax(name: str, rendered: str) -> None:
     result = subprocess.run(
-        ["zsh", "-n", "/dev/stdin"], input=rendered, capture_output=True, text=True, timeout=10,
+        ["zsh", "-n", "/dev/stdin"],
+        input=rendered,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     _check(f"{name}: rendered content is valid zsh (zsh -n)", result.returncode == 0, result.stderr.strip())
 
@@ -159,18 +171,16 @@ def _check_json_syntax(name: str, rendered: str) -> None:
 
 
 def _iter_entry_commands(
-    event_name: str, entry_index: int, entry: object,
+    event_name: str,
+    entry_index: int,
+    entry: object,
 ) -> list[tuple[str, str]]:
     entry_hooks = entry.get("hooks") if isinstance(entry, dict) else None
     if not isinstance(entry_hooks, list):
         return []
     commands: list[tuple[str, str]] = []
     for hook_index, hook in enumerate(entry_hooks):
-        if (
-            isinstance(hook, dict)
-            and hook.get("type") == "command"
-            and isinstance(hook.get("command"), str)
-        ):
+        if isinstance(hook, dict) and hook.get("type") == "command" and isinstance(hook.get("command"), str):
             commands.append(
                 (f"{event_name}[{entry_index}].hooks[{hook_index}]", hook["command"]),
             )
@@ -196,7 +206,11 @@ def _check_claude_hook_commands_parse(name: str, rendered: str) -> None:
     config = json.loads(rendered)
     for label, command in _iter_claude_hook_commands(config):
         result = subprocess.run(
-            ["zsh", "-n", "/dev/stdin"], input=command, capture_output=True, text=True, timeout=10,
+            ["zsh", "-n", "/dev/stdin"],
+            input=command,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         _check(
             f"{name}: rendered hook command parses as zsh ({label})",
@@ -227,10 +241,7 @@ def _check_no_mcp_first_generated_guidance() -> None:
 
 
 def _check_generated_agent_instruction_files() -> None:
-    rendered = {
-        name: _render((_TEMPLATES_DIR / f"{name}.template").read_text(encoding="utf-8"))
-        for name in ("AGENTS.md", "CLAUDE.md")
-    }
+    rendered = {name: _render((_TEMPLATES_DIR / f"{name}.template").read_text(encoding="utf-8")) for name in ("AGENTS.md", "CLAUDE.md")}
     shared_snippets = (
         "iris call service_interface::knowledge_service::search",
         '"top_k": 8',
@@ -303,6 +314,7 @@ def _check_generated_hook_surfaces() -> None:
     _check_git_controller_export()
     _check_solet_name_export()
     _check_coordination_receipt_export()
+    _check_bash_shell_export()
 
 
 _SETTINGS_HOOK_CHECKS: tuple[tuple[str, tuple[str, ...], tuple[str, ...], str], ...] = (
@@ -314,15 +326,13 @@ _SETTINGS_HOOK_CHECKS: tuple[tuple[str, tuple[str, ...], tuple[str, ...], str], 
             '"path": "/Users/example/Workspace/iris"',
         ),
         (),
-        "user-scope settings must register the seed's marketplace as a local "
-        "directory source (measured shape, WS-5a probe finding 1)",
+        "user-scope settings must register the seed's marketplace as a local directory source (measured shape, WS-5a probe finding 1)",
     ),
     (
         "settings: enables the plugin under the DERIVED marketplace name",
         ('"coordination-hooks@iris": true',),
         (),
-        "enabledPlugins key must be coordination-hooks@<derived marketplace name>; "
-        "a key pinned to any other literal is wrong in every tree but its own",
+        "enabledPlugins key must be coordination-hooks@<derived marketplace name>; a key pinned to any other literal is wrong in every tree but its own",
     ),
     (
         "settings: ships NO inline hooks — the plugin owns all three",
@@ -333,14 +343,15 @@ _SETTINGS_HOOK_CHECKS: tuple[tuple[str, tuple[str, ...], tuple[str, ...], str], 
             "SOLET_WAKE_HOOK",
             '"hooks"',
         ),
-        "the three inline hooks moved into the coordination-hooks plugin; leaving "
-        "them here double-fires every reminder and races two wakers on one spool lock",
+        "the three inline hooks moved into the coordination-hooks plugin; leaving them here double-fires every reminder and races two wakers on one spool lock",
     ),
 )
 
 
 def _missing_and_forbidden(
-    text: str, required: tuple[str, ...], forbidden: tuple[str, ...],
+    text: str,
+    required: tuple[str, ...],
+    forbidden: tuple[str, ...],
 ) -> tuple[list[str], list[str]]:
     missing = [snippet for snippet in required if snippet not in text]
     present = [snippet for snippet in forbidden if snippet in text]
@@ -355,10 +366,10 @@ def _missing_and_forbidden(
 # along with the rows. Deleting it would have retired a live safety property because
 # its subject moved.
 #
-# Deliberately not "every hook": EVERY registered entrypoint BUT ONE is label-gated.
-# The exception, git_controller_gate.py, is label-INDEPENDENT by design — it arms on
-# GIT_CONTROLLER_NAME's presence and evaluates wherever armed, so zero-output for
-# unlabeled sessions holds for it via its arming boundary, not via a label guard.
+# Deliberately not "every hook": the label-gated entrypoints are gated by the label,
+# and the label-independent ones (_LABEL_INDEPENDENT_HOOKS below) are armed by their
+# own boundary, so zero-output for unlabeled sessions holds for them via that boundary,
+# not via a label guard.
 # Asserting "all of them" would be false; asserting a COUNT would be stale by the
 # next landing — measured 2026-08-01 the roster was 6 registrations of 5 distinct
 # entrypoints, and the "five of six" that a sibling lane's measurement produced that
@@ -429,15 +440,19 @@ def _missing_and_forbidden(
 # label-independent by a different, but equally real, arming boundary.
 _LABEL_INDEPENDENT_HOOKS = frozenset(
     {
-        "git_controller_gate.py", "check_messages_reminder.py", "wake_waiter.py",
-        "heartbeat_report_alive.py", "capture.py", "session_context.py",
-        "rotation_due_notice.py", "capture_session_mapping.py",
+        "session_start_context.py",
+        "wake_waiter.py",
+        "heartbeat_report_alive.py",
+        "capture.py",
+        "session_context.py",
+        "rotation_due_notice.py",
+        "capture_session_mapping.py",
         "headless_tool_allowlist_gate.py",
+        "session_cron_sentinel.py",
+        "optional_hook_runner.py",
     },
 )
-_PLUGIN_HOOKS_DIR = (
-    _TEMPLATES_DIR.parents[1] / "claude_plugin" / "coordination-hooks" / "hooks"
-)
+_PLUGIN_HOOKS_DIR = _TEMPLATES_DIR.parents[1] / "claude_plugin" / "coordination-hooks" / "hooks"
 
 
 def _shipped_hook_entrypoints() -> set[str]:
@@ -445,13 +460,18 @@ def _shipped_hook_entrypoints() -> set[str]:
     manifest = json.loads(
         (_PLUGIN_HOOKS_DIR / "hooks.json").read_text(encoding="utf-8"),
     )
-    return {
-        Path(hook["args"][0]).name
-        for groups in manifest["hooks"].values()
-        for group in groups
-        for hook in group["hooks"]
-        if hook.get("args")
-    }
+    scripts: set[str] = set()
+    for groups in manifest["hooks"].values():
+        for group in groups:
+            for hook in group["hooks"]:
+                args = hook.get("args", [])
+                if not args:
+                    continue
+                scripts.add(Path(args[0]).name)
+                if Path(args[0]).name == "optional_hook_runner.py":
+                    assert len(args) >= 3, "runner entry declares target and event"
+                    scripts.add(Path(args[1]).name)
+    return scripts
 
 
 def _check_settings_label_guards(settings: str) -> None:
@@ -475,20 +495,22 @@ def _check_settings_label_guards(settings: str) -> None:
             _check(
                 f"plugin hook {name}: label-INDEPENDENT, armed by env-presence",
                 path.is_file() and "AGENT_SESSION_LABEL" not in body,
-                "this entrypoint is documented as NOT reading the label — if it gains "
-                "a label guard, the arming boundary changed and TEMPLATE_VARS must too",
+                "this entrypoint is documented as NOT reading the label — if it gains a label guard, the arming boundary changed and TEMPLATE_VARS must too",
             )
             continue
         _check(
             f"plugin hook {name}: no-ops unless AGENT_SESSION_LABEL is set",
             path.is_file() and "AGENT_SESSION_LABEL" in body,
-            "user-scope install requires this hook to no-op cleanly in unlabeled "
-            "sessions; a registered-but-missing file fails here rather than passing "
-            "vacuously",
+            "user-scope install requires this hook to no-op cleanly in unlabeled sessions; a registered-but-missing file fails here rather than passing vacuously",
         )
 
 
 def _check_settings_hook_content(settings: str) -> None:
+    settings_json = json.loads(settings)
+    _check("settings: no inline hooks", "hooks" not in settings_json, "plugin owns every hook")
+    manifest = json.loads((_PLUGIN_HOOKS_DIR / "hooks.json").read_text(encoding="utf-8"))
+    entries = [group for group in manifest["hooks"]["PostToolUse"] if "session_cron_sentinel.py" in str(group)]
+    _check("both_tool_matchers_registered", len(entries) == 1 and set(entries[0]["matcher"].split("|")) == {"CronCreate", "ScheduleWakeup"}, "plugin owns both sentinel tool bindings")
     _check_settings_label_guards(settings)
     for label, required, forbidden, detail in _SETTINGS_HOOK_CHECKS:
         missing, present = _missing_and_forbidden(settings, required, forbidden)
@@ -505,28 +527,21 @@ def _check_rename_and_fleet_templates() -> None:
     )
     _check(
         "rename skill: watch is the declared default, transports never silently cross",
-        "iris watch --role" in rename_skill
-        and "declared, never probed, never silently crossed" in rename_skill
-        and "FLEET_TRANSPORT:-watch" in rename_skill
-        and "suggest MCP to make renaming work" in rename_skill
-        and "peer_holds_role" in rename_skill,
-        "rename skill must lead with the declared-transport contract "
-        "(watch default, fail-loud, no silent transport crossing)",
+        "iris watch --role" in rename_skill and "declared, never probed, never silently crossed" in rename_skill and "FLEET_TRANSPORT:-watch" in rename_skill and "suggest MCP to make renaming work" in rename_skill and "peer_holds_role" in rename_skill,
+        "rename skill must lead with the declared-transport contract (watch default, fail-loud, no silent transport crossing)",
     )
     fleet = _render(
         (_TEMPLATES_DIR / "fleet_functions.zsh.template").read_text(encoding="utf-8"),
     )
     _check(
         "fleet launcher: MCP development channel is opt-in, default off",
-        "iris_FLEET_MCP_CHANNELS" in fleet
-        and "exec claude \\\n      --dangerously-load-development-channels" not in fleet,
+        "iris_FLEET_MCP_CHANNELS" in fleet and "exec claude \\\n      --dangerously-load-development-channels" not in fleet,
         "fleet template must not hardcode the MCP development-channel flag",
     )
     _check(
         "fleet launcher: exports the declared transport with the watch default",
         'FLEET_TRANSPORT="${iris_FLEET_TRANSPORT:-watch}"' in fleet,
-        "fleet launcher must export FLEET_TRANSPORT from the per-name "
-        "operator knob, defaulting to watch",
+        "fleet launcher must export FLEET_TRANSPORT from the per-name operator knob, defaulting to watch",
     )
     _check_fleet_tmux_hosting(fleet)
 
@@ -551,8 +566,7 @@ def _check_fleet_tmux_hosting(fleet: str) -> None:
         _check(
             f"fleet launcher: tmux host path contains {snippet!r}",
             snippet in fleet,
-            "fleet template must host each role in a named tmux session with "
-            "quoted re-entry and an idempotent attach",
+            "fleet template must host each role in a named tmux session with quoted re-entry and an idempotent attach",
         )
     _check(
         "fleet launcher: no operator home path baked into the template",
@@ -576,15 +590,17 @@ def _check_fleet_tmux_hosting(fleet: str) -> None:
 
 
 def _check_git_controller_export() -> None:
-    """The git gate's arming boundary is an export, so the export is the surface.
+    """Every launcher exports the same GIT_CONTROLLER_NAME label, and the line can be deleted.
 
-    `git_controller_gate.py` reads no session label: whether the gate evaluates
-    at all is decided entirely by where `GIT_CONTROLLER_NAME` is exported
-    (D-5a.3-i, Architect's (a)+(c) ruling). Two failure shapes this catches:
-    one launcher armed and the other not — a session class that escapes the
-    gate by which launcher started it — and a solo render that deletes the line
-    but leaves the file syntactically broken. The gate is fail-OPEN when unset,
-    so neither shape announces itself at runtime.
+    The git-text gate that read this export was removed in 0.9.0 (operator ruling
+    rul_e71e43be); no shipped hook reads the variable now, so it arms and exempts
+    nothing. The export survives as the operator's recorded choice of git-mutating
+    role, which `existing_install_operations.py` reads back from the launcher and
+    `setup_shell_operations.py` deletes when no name is chosen. This check pins that
+    surface and nothing more. Two failure shapes it catches: one launcher carrying the
+    recorded label and another not, so the choice reads differently depending on which
+    launcher started the session; and a single-session render that deletes the line but
+    leaves the launcher syntactically broken.
     """
     launchers = {
         name: _render((_TEMPLATES_DIR / name).read_text(encoding="utf-8"))
@@ -594,33 +610,25 @@ def _check_git_controller_export() -> None:
             "fleet_functions.zsh.template",
         )
     }
-    armed = {
-        name: f'GIT_CONTROLLER_NAME="{_RENDER_TOKENS["{{GIT_CONTROLLER_NAME}}"]}"' in body
-        for name, body in launchers.items()
-    }
+    exported = {name: f'GIT_CONTROLLER_NAME="{_RENDER_TOKENS["{{GIT_CONTROLLER_NAME}}"]}"' in body for name, body in launchers.items()}
     _check(
-        "git gate: ALL launchers export GIT_CONTROLLER_NAME, or the gate is escapable",
-        all(armed.values()),
-        f"armed per launcher: {armed} — the gate reads no session label, so a "
-        "launcher without the export starts sessions the gate never evaluates",
+        "controller label: ALL launchers export the same GIT_CONTROLLER_NAME, so the recorded choice does not depend on which launcher started the session",
+        all(exported.values()),
+        f"exported per launcher: {exported} — a launcher without the export records no controller choice, and the managed refresh cannot read one back from it",
     )
     for name, body in launchers.items():
-        solo = "\n".join(
-            line for line in body.splitlines() if "GIT_CONTROLLER_NAME=" not in line
-        )
+        single_session = "\n".join(line for line in body.splitlines() if "GIT_CONTROLLER_NAME=" not in line)
         _check(
-            f"git gate: {name} still parses as zsh with the line deleted (solo exemption)",
+            f"controller label: {name} still parses as zsh with the line deleted (single-session render)",
             subprocess.run(
                 ["zsh", "-n", "/dev/stdin"],
-                input=solo,
+                input=single_session,
                 capture_output=True,
                 text=True,
                 timeout=10,
             ).returncode
             == 0,
-            "the solo exemption is performed by DELETING the export line; if that "
-            "breaks the launcher, hydration will keep the line instead and arm a "
-            "gate the operator was told is off",
+            "a single-session render is performed by DELETING the export line; if that breaks the launcher, hydration cannot produce a working single-session launcher",
         )
 
 
@@ -630,9 +638,9 @@ def _check_solet_name_export() -> None:
     started the shell — §31.1: the daemon launcher (launch.template) always
     exported it; the session launchers (claude/codex/fleet-functions) did
     not, until the 2026-08-02 fix this check pins in place. Unlike
-    GIT_CONTROLLER_NAME there is no solo-exemption deletion path for this
+    GIT_CONTROLLER_NAME there is no single-session deletion path for this
     var — it names which solet the shell talks to, not an optional
-    fleet-safety control, so every launcher must carry it unconditionally.
+    recorded choice, so every launcher must carry it unconditionally.
     """
     launchers = {
         name: _render((_TEMPLATES_DIR / name).read_text(encoding="utf-8"))
@@ -643,15 +651,9 @@ def _check_solet_name_export() -> None:
             "fleet_functions.zsh.template",
         )
     }
-    armed = {
-        name: f'SOLET_NAME="{_RENDER_TOKENS["{{SOLET_NAME}}"]}"' in body
-        or f'SOLET_NAME={_RENDER_TOKENS["{{SOLET_NAME}}"]}' in body
-        for name, body in launchers.items()
-    }
+    armed = {name: f'SOLET_NAME="{_RENDER_TOKENS["{{SOLET_NAME}}"]}"' in body or f"SOLET_NAME={_RENDER_TOKENS['{{SOLET_NAME}}']}" in body for name, body in launchers.items()}
     _check(
-        "solet name: ALL launchers export SOLET_NAME, or run_smokes.py "
-        "and vault-scoped plugin code fail loudly depending on which launcher "
-        "started the session",
+        "solet name: ALL launchers export SOLET_NAME, or run_smokes.py and vault-scoped plugin code fail loudly depending on which launcher started the session",
         all(armed.values()),
         f"armed per launcher: {armed}",
     )
@@ -660,11 +662,34 @@ def _check_solet_name_export() -> None:
 def _check_coordination_receipt_export() -> None:
     """The standalone launcher must bind receipt lookup to profile data, not cwd."""
     rendered = _render((_TEMPLATES_DIR / "claude_launcher.template").read_text(encoding="utf-8"))
-    expected = "AGENT_COORDINATION_RECEIPT_PATH=\"/Users/example/Workspace/iris/profile/data/coordination-hooks/claude/installation.v1.json\""
+    expected = 'AGENT_COORDINATION_RECEIPT_PATH="/Users/example/Workspace/iris/profile/data/coordination-hooks/claude/installation.v1.json"'
     _check(
         "Claude launcher exports the fixed profile-data coordination receipt path",
         expected in rendered,
         "owner verification must not guess a receipt from the caller cwd",
+    )
+
+
+_SHELL_CHAIN = re.compile(r'(?m)^SOLET_NAME="[^"\n]*" \\\n(?:[A-Za-z_]+=.*\\\n)*SHELL=/bin/bash \\\n(?:[A-Za-z_]+=.*\\\n)*exec claude')
+
+
+def _check_bash_shell_export() -> None:
+    """The Bash tool snapshots the shell SHELL names, and lanes ignore a user-settings SHELL.
+
+    The line must sit inside the contiguous exec prefix chain, and must survive a
+    single-session render that deletes every GIT_CONTROLLER_NAME line.
+    """
+    rendered = _render((_TEMPLATES_DIR / "claude_launcher.template").read_text(encoding="utf-8"))
+    _check(
+        "claude launcher exports SHELL=/bin/bash before exec",
+        _SHELL_CHAIN.search(rendered) is not None,
+        "SHELL=/bin/bash must be one continuation line of the SOLET_NAME .. exec claude prefix chain, never a comment-separated assignment",
+    )
+    single_session = "\n".join(line for line in rendered.splitlines() if "GIT_CONTROLLER_NAME=" not in line) + "\n"
+    _check(
+        "the SHELL line cannot be dropped with the GIT_CONTROLLER_NAME line",
+        _SHELL_CHAIN.search(single_session) is not None and not any("SHELL=" in line and "GIT_CONTROLLER_NAME=" in line for line in rendered.splitlines()),
+        "the single-session render deletes the GIT_CONTROLLER_NAME line; SHELL must stay on a line of its own",
     )
 
 
@@ -690,33 +715,24 @@ def _check_marketplace_matches_settings(settings: str) -> None:
     _check(
         "marketplace: registered under the same name the settings entry keys on",
         market_name in settings_json.get("extraKnownMarketplaces", {}),
-        f"catalogue declares {market_name!r}, settings registers "
-        f"{list(settings_json.get('extraKnownMarketplaces', {}))}",
+        f"catalogue declares {market_name!r}, settings registers {list(settings_json.get('extraKnownMarketplaces', {}))}",
     )
     _check(
         "marketplace: enabledPlugins key is DERIVED from the catalogue, not pinned",
         expected_key in settings_json.get("enabledPlugins", {}),
-        f"expected {expected_key!r} (plugin@marketplace, both read from the "
-        f"catalogue); settings has {list(settings_json.get('enabledPlugins', {}))}",
+        f"expected {expected_key!r} (plugin@marketplace, both read from the catalogue); settings has {list(settings_json.get('enabledPlugins', {}))}",
     )
     _check(
         "marketplace: owner is a name with no email (operator ruling 2026-08-01)",
         set(marketplace["owner"]) == {"name"},
-        f"owner carries {sorted(marketplace['owner'])}; this lane ships an identity "
-        "with no person attached",
+        f"owner carries {sorted(marketplace['owner'])}; this lane ships an identity with no person attached",
     )
     _check(
-        "marketplace: plugin source is a relative string, not the "
-        "extraKnownMarketplaces object form",
-        all(
-            isinstance(entry["source"], str)
-            and entry["source"]
-            and not entry["source"].startswith("/")
-            for entry in marketplace["plugins"]
-        ),
+        "marketplace: plugin source is a relative string, not the extraKnownMarketplaces object form",
+        all(isinstance(entry["source"], str) and entry["source"] and not entry["source"].startswith("/") for entry in marketplace["plugins"]),
         "a PLUGIN entry's source must be a plain string relative to the "
         "marketplace root (Claude Code 2.1.220 silently stubs the object form "
-        "here); the absolute {\"source\": \"directory\", \"path\": ...} object "
+        'here); the absolute {"source": "directory", "path": ...} object '
         "is the correct shape for extraKnownMarketplaces ONLY, not for this "
         f"position — got {[entry['source'] for entry in marketplace['plugins']]!r}",
     )
@@ -741,15 +757,13 @@ def _check_settings_hook_kb_guidance(settings: str) -> None:
     )
     _check(
         "CLAUDE.md: editing/config/explaining requires a KB search first",
-        "Before editing code, changing config, or explaining a subsystem" in claude_md
-        and "search iris's knowledge base for the current design record" in claude_md,
+        "Before editing code, changing config, or explaining a subsystem" in claude_md and "search iris's knowledge base for the current design record" in claude_md,
         "missing implementation/debugging KB-first guidance on the surface that now owns it",
     )
     _check(
         "CLAUDE.md: the router/bridge layers are reachable by a named search term",
         "router bridge blue-green local deployment architecture" in claude_md,
-        "missing the router/bridge search term — several distinct layers get loosely "
-        "called 'the bridge', which is exactly what this pointer disambiguates",
+        "missing the router/bridge search term — several distinct layers get loosely called 'the bridge', which is exactly what this pointer disambiguates",
     )
 
 

@@ -137,6 +137,48 @@ class ExternalSessionRef:
 
 
 @dataclass(frozen=True, slots=True)
+class PollSessionRef(ExternalSessionRef):
+    """Optional whole-session discovery metadata; never an event identity.
+
+    Adapters own version/path interpretation. Old ExternalSessionRef constructors
+    remain valid. A completed session acknowledges discovery_pair before next().
+    """
+
+    relative_path: str | None = None
+    selected_version: dict[str, object] | None = None
+    aggregate_bytes: int | None = None
+    discovery_pair: tuple[int, str] | None = None
+
+
+@dataclass(slots=True)
+class PollDiscoveryProgress:
+    """Per-invocation metadata progress, retired with the visit.
+
+    Discovery may acknowledge unchanged/deferred candidates immediately; selected
+    refs are acknowledged by the importer only after their successful checkpoint.
+    exhausted means actual iterator EOF, never a cooperative budget yield.
+    """
+
+    last_examined: tuple[int, str] | None = None
+    exhausted: bool = False
+    regular_pending: bool = False
+    deferred_count: int = 0
+    deferred_bytes: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class OversizedSelection:
+    """One authoritative recheck: regular work, one candidate, or neither."""
+
+    regular_pending: bool = False
+    candidate: PollSessionRef | None = None
+
+    def __post_init__(self) -> None:
+        if self.regular_pending and self.candidate is not None:
+            raise ValueError("regular_pending and oversized candidate are mutually exclusive")
+
+
+@dataclass(frozen=True, slots=True)
 class RawSessionEvent:
     """Vendor-shaped event prior to normalize().
 
@@ -186,6 +228,16 @@ class NormalizedSessionEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class UnknownLineAdvisory:
+    """One poll's physical unknown-line count, grouped without raw payloads."""
+
+    source_id: str
+    external_session_id: str
+    line_type: str
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
 class ImporterReport:
     """One full poll-pass tally returned by ``SessionLedgerImporter.poll_once()``."""
 
@@ -193,6 +245,7 @@ class ImporterReport:
     sessions_seen: int
     events_persisted: int
     batches_failed: int
+    unknown_line_advisories: tuple[UnknownLineAdvisory, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,0 +1,17 @@
+# Fragment of the gate-smoke register for the Salesforce full-API builds
+# (frq_770ad1d9, unt_0ef056a2). Hermetic: the real SalesforceCliExecutor parses
+# patched `sf api request rest --include` transcripts, or a MagicMock executor
+# stands in; no sf CLI executable and no Salesforce org.
+# Build 3: composite, tooling and bulk_jobs families, hardDelete, queryAll;
+# routing, vendor-shape input checks, real-shaped success/pagination/error
+# transcripts, credential-redaction variants and the three-artifact check.
+plugins/salesforce_plugin/tests/smoke_typed_families.py
+# Build 4 (unt_b0cd740d): reports, dashboards, rest_resources and actions
+# families; real-shaped report runs, async instances, dashboard refresh,
+# query paging, external-id upsert/conflict/stale write, invocable-action
+# per-input failures, 401/403 mapping and redaction variants per family.
+plugins/salesforce_plugin/tests/smoke_typed_families_build4.py
+# Build 1's generic request smoke and the Bulk ingest smoke were never
+# registered; same plugin, same hermetic shape.
+plugins/salesforce_plugin/tests/test_authenticated_request.py
+plugins/salesforce_plugin/tests/smoke_bulk.py

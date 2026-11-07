@@ -27,11 +27,7 @@ PLUGIN_VERSION: Final[str] = "3.0.0"
 # ---------------------------------------------------------------------------
 ADDRESS_BOOK_ENTRY_NAME: Final[str] = "salesforce_org"
 ADDRESS_BOOK_ENTRY_TYPE: Final[str] = "api"
-ADDRESS_BOOK_ENTRY_DESCRIPTION: Final[str] = (
-    "Salesforce org binding for salesforce_plugin: target_org (the sf CLI "
-    "alias or username every verb is invoked against) and instance_host (the "
-    "pinned my-domain host that alias must resolve to)."
-)
+ADDRESS_BOOK_ENTRY_DESCRIPTION: Final[str] = "Salesforce org binding for salesforce_plugin: target_org (the sf CLI alias or username every verb is invoked against) and instance_host (the pinned my-domain host that alias must resolve to)."
 ADDRESS_BOOK_FIELD_TARGET_ORG: Final[str] = "target_org"
 ADDRESS_BOOK_FIELD_INSTANCE_HOST: Final[str] = "instance_host"
 
@@ -44,6 +40,15 @@ ADDRESS_BOOK_FIELD_INSTANCE_HOST: Final[str] = "instance_host"
 CONFIG_KEY_SF_CLI_PATH: Final[str] = "sf_cli_path"
 DEFAULT_SF_CLI_PATH: Final[str] = "sf"
 SF_CLI_TIMEOUT_SECONDS: Final[float] = 30.0
+RESULT_TYPE_AUTHENTICATED_REQUEST: Final[str] = "salesforce_authenticated_request_result"
+# Sforce-Locator and Sforce-NumberOfRecords page Bulk API 2.0 query results.
+REQUEST_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset({"content-type", "retry-after", "sforce-limit-info", "x-request-id", "sforce-locator", "sforce-numberofrecords"})
+# Parsing evidence, never a request permission policy: an unfamiliar printed
+# field leaves the complete transcript in the body rather than guessing.
+CLI_RESPONSE_HEADER_NAMES: Final[frozenset[str]] = REQUEST_RESPONSE_HEADERS | frozenset(
+    {"content-length", "transfer-encoding", "connection", "keep-alive", "date", "server", "content-encoding", "cache-control", "etag", "last-modified", "vary", "location", "set-cookie", "authorization", "www-authenticate", "strict-transport-security"}
+)
+REDACTED: Final[str] = "[REDACTED]"
 
 # ---------------------------------------------------------------------------
 # API version pin (never floats — an operator override still resolves
@@ -88,12 +93,12 @@ CONFIG_KEY_EXPORT_ALLOWED_ROOTS: Final[str] = "export_allowed_roots"
 CONFIG_KEY_IMPORT_ALLOWED_ROOTS: Final[str] = "import_allowed_roots"
 
 # ---------------------------------------------------------------------------
-# Bulk v2 ingest — operation set (hardDelete is explicitly EXCLUDED: bypasses
-# the recycle bin, needs an org permission, and is not obviously inside the
-# RATIFY-2 acceptable-loss ratification — 2026-08-24 plan §1).
+# Bulk v2 ingest — the vendor's full operation set. hardDelete bypasses the
+# recycle bin; Salesforce itself requires the "Bulk API Hard Delete" system
+# permission for it, so vendor RBAC is the boundary (USER ruling rul_4c99a30d).
 # ---------------------------------------------------------------------------
-BULK_INGEST_OPERATIONS: Final[frozenset[str]] = frozenset({"insert", "update", "upsert", "delete"})
 BULK_INGEST_HARD_DELETE_OPERATION: Final[str] = "hardDelete"
+BULK_INGEST_OPERATIONS: Final[frozenset[str]] = frozenset({"insert", "update", "upsert", "delete", BULK_INGEST_HARD_DELETE_OPERATION})
 BULK_JOB_ABORT_STATE: Final[str] = "Aborted"
 
 # ---------------------------------------------------------------------------
@@ -102,6 +107,9 @@ BULK_JOB_ABORT_STATE: Final[str] = "Aborted"
 # ---------------------------------------------------------------------------
 PARAM_ACKNOWLEDGE_OVERRIDE: Final[str] = "acknowledge_default_limit_override"
 PARAM_ROW_LIMIT: Final[str] = "row_limit"
+# soql_query/export_soql: true selects the vendor queryAll resource (sf data
+# query --all-rows), which also returns deleted and archived records.
+PARAM_INCLUDE_DELETED: Final[str] = "include_deleted"
 
 # ---------------------------------------------------------------------------
 # Error codes (sf.* prefix — surfaced to callers of the verbs)
@@ -122,6 +130,10 @@ ERROR_API_ERROR: Final[str] = "sf.api_error"
 ERROR_EXPORT_PATH_REFUSED: Final[str] = "sf.export_path_refused"
 ERROR_IMPORT_PATH_REFUSED: Final[str] = "sf.import_path_refused"
 ERROR_PROVISION_CONSENT_REQUIRED: Final[str] = "sf.provision_consent_required"
+# Typed-family HTTP outcomes with no narrower sf.* class above.
+ERROR_BAD_REQUEST: Final[str] = "sf.bad_request"
+ERROR_CONFLICT: Final[str] = "sf.conflict"
+ERROR_PRECONDITION_FAILED: Final[str] = "sf.precondition_failed"
 
 # ---------------------------------------------------------------------------
 # Result types
@@ -141,3 +153,10 @@ RESULT_TYPE_BULK_INGEST_SUBMIT: Final[str] = "salesforce_bulk_ingest_submit_resu
 RESULT_TYPE_BULK_JOB_STATUS: Final[str] = "salesforce_bulk_job_status_result"
 RESULT_TYPE_BULK_JOB_RESULTS: Final[str] = "salesforce_bulk_job_results_result"
 RESULT_TYPE_BULK_JOB_ABORT: Final[str] = "salesforce_bulk_job_abort_result"
+RESULT_TYPE_COMPOSITE: Final[str] = "salesforce_composite_result"
+RESULT_TYPE_TOOLING: Final[str] = "salesforce_tooling_result"
+RESULT_TYPE_BULK_JOBS: Final[str] = "salesforce_bulk_jobs_result"
+RESULT_TYPE_REPORTS: Final[str] = "salesforce_reports_result"
+RESULT_TYPE_DASHBOARDS: Final[str] = "salesforce_dashboards_result"
+RESULT_TYPE_REST_RESOURCES: Final[str] = "salesforce_rest_resources_result"
+RESULT_TYPE_ACTIONS: Final[str] = "salesforce_actions_result"

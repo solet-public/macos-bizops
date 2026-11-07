@@ -1,0 +1,18 @@
+{
+  "process_key": "service_interface::scheduling_service::rebind_scheduled_action",
+  "display_name": "Rebind Scheduled Action",
+  "description": "Change only the selected destination at zero-based action_index in an existing nonterminal schedule at expected_revision, with a nonempty reason. target_kind must match the supported role, instance or session argument contract. All original action text and other values, cadence, context, id and status are preserved. A vacant, retired or unavailable holder is allowed with an advisory observation. The CAS revision, immutable history and registry epoch commit together. Corrections and reversals append events. The effective_revision is the dispatch boundary: work submitted earlier remains unchanged; later callbacks read the current target. Rebind never recovers an error schedule.",
+  "embedding_description": "Correct one supported schedule action destination at its current revision. Preserve all other action values, original text, context and cadence. Append immutable history and report owner target observations. Rebinding does not recover errors or retarget work that was already queued.",
+  "result_processor_customizations": {
+    "action_label": "Rebind Scheduled Action",
+    "result_type": "schedule_lifecycle",
+    "result_description": "Change only the selected destination at zero-based action_index in an existing nonterminal schedule at expected_revision, with a nonempty reason. target_kind must match the supported role, instance or session argument contract. All original action text and other values, cadence, context, id and status are preserved. A vacant, retired or unavailable holder is allowed with an advisory observation. The CAS revision, immutable history and registry epoch commit together. Corrections and reversals append events. The effective_revision is the dispatch boundary: work submitted earlier remains unchanged; later callbacks read the current target. Rebind never recovers an error schedule.",
+    "presentation_guidance": "Show completeness, holder observation, revision and activation advisories explicitly. A registered route is an observation, not a delivery guarantee.",
+    "output_action_guidance": "Read current revision before a mutation. Recovery is a separate explicit action. Pre-boundary queued work is unchanged."
+  },
+  "error_processor_customizations": {
+    "action_context": "rebind scheduled action",
+    "error_interpretation": "A stale revision or invalid lifecycle transition is a data-integrity refusal; unavailable observations are advisories.",
+    "recovery_guidance": "Read the current owner projection and history, then make an explicit correction with its current revision. Do not recreate a schedule to bypass a stale revision."
+  }
+}

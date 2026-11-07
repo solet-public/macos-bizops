@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import cast
 
 from .answer_validation import _INDEPENDENT_CARRIERS, validate_decision_selections
+from .condition_evaluator import condition_is_inactive
 from .config import CreateConfig
 from .contracts import ContractBundle, active_decision_ids, validate_normalized_answers
 from .decision_resolution import (
@@ -120,6 +121,7 @@ def build_setup_plan(
         operations,
         recorded_answers,
         prospective_consents,
+        decisions,
     )
     answers = _normalized_answers(
         bundle,
@@ -184,19 +186,11 @@ def _recorded_selection_evidence(
     recorded_answers: dict[str, JsonValue] | None,
     recorded_ids: set[str],
 ) -> list[JsonValue]:
-    raw = (
-        None
-        if recorded_answers is None
-        else recorded_answers.get("resolution_evidence")
-    )
+    raw = None if recorded_answers is None else recorded_answers.get("resolution_evidence")
     if not isinstance(raw, list):
         return []
     retained_ids = recorded_ids - {"setup_profile", "autostart"}
-    return [
-        item
-        for item in raw
-        if isinstance(item, dict) and item.get("id") in retained_ids
-    ]
+    return [item for item in raw if isinstance(item, dict) and item.get("id") in retained_ids]
 
 
 def _apply_explicit_selections(
@@ -210,9 +204,7 @@ def _apply_explicit_selections(
 ) -> None:
     unknown = sorted(set(selections) - set(bundle.decisions))
     if unknown:
-        raise ContractError(
-            f"decision overrides are not declared by the pinned flow: {unknown}"
-        )
+        raise ContractError(f"decision overrides are not declared by the pinned flow: {unknown}")
     prospective = _prospective_decisions(
         bundle,
         decisions,
@@ -221,17 +213,10 @@ def _apply_explicit_selections(
         sources,
         resolution_stage_ids,
     )
-    inactive = sorted(
-        decision_id
-        for decision_id in selections
-        if decision_id not in active_decision_ids(bundle, prospective)
-    )
+    inactive = sorted(decision_id for decision_id in selections if decision_id not in active_decision_ids(bundle, prospective))
     if inactive:
         profile = decisions.get("setup_profile")
-        raise ContractError(
-            f"decision_not_active: {inactive}; "
-            f"setup_profile {profile!r} does not activate them"
-        )
+        raise ContractError(f"decision_not_active: {inactive}; setup_profile {profile!r} does not activate them")
     for decision_id in decision_order(bundle):
         if decision_id in selections:
             _apply_one_selection(
@@ -287,9 +272,7 @@ def _apply_one_selection(
 ) -> None:
     definition = bundle.decisions.get(decision_id)
     if definition is None:
-        raise ContractError(
-            f"decision override {decision_id!r} is not declared by the pinned flow"
-        )
+        raise ContractError(f"decision override {decision_id!r} is not declared by the pinned flow")
     if decision_id in {"setup_profile", "autostart"}:
         raise ContractError(f"decision override {decision_id!r} is reserved")
     if not _resolves_in_stage(definition, resolution_stage_ids):
@@ -300,11 +283,7 @@ def _apply_one_selection(
         definition,
         source,
     )
-    evidence[:] = [
-        item
-        for item in evidence
-        if not isinstance(item, dict) or item.get("id") != decision_id
-    ]
+    evidence[:] = [item for item in evidence if not isinstance(item, dict) or item.get("id") != decision_id]
     evidence.append(_selection_evidence(decision_id, decisions[decision_id], source))
 
 
@@ -312,10 +291,7 @@ def _resolves_in_stage(
     definition: dict[str, JsonValue],
     resolution_stage_ids: set[str] | None,
 ) -> bool:
-    return (
-        resolution_stage_ids is None
-        or definition.get("resolution_stage_ref") in resolution_stage_ids
-    )
+    return resolution_stage_ids is None or definition.get("resolution_stage_ref") in resolution_stage_ids
 
 
 def _selection_evidence(
@@ -323,11 +299,7 @@ def _selection_evidence(
     selected: JsonValue,
     source: str,
 ) -> JsonValue:
-    summary = (
-        ",".join(str(item) for item in selected)
-        if isinstance(selected, list)
-        else str(selected)
-    )
+    summary = ",".join(str(item) for item in selected) if isinstance(selected, list) else str(selected)
     return {"id": decision_id, "source": source, "summary": summary}
 
 
@@ -362,18 +334,13 @@ def _resolve_flow_default_inputs(
         operation = bundle.operations[operation_id]
         input_ids = _string_tuple(operation.get("input_refs"), allow_missing=True)
         for input_id in input_ids:
-            if (
-                input_id in decision_controlled_inputs
-                and input_id not in activated_inputs
-            ):
+            if input_id in decision_controlled_inputs and input_id not in activated_inputs:
                 continue
             if input_id in public_inputs:
                 continue
             definition = bundle.inputs.get(input_id)
             if definition is None:
-                raise ContractError(
-                    f"operation {operation_id!r} references unknown input {input_id!r}"
-                )
+                raise ContractError(f"operation {operation_id!r} references unknown input {input_id!r}")
             if definition.get("sensitive") is True or "default" not in definition:
                 continue
             default = definition["default"]
@@ -390,15 +357,9 @@ def _resolve_flow_default_inputs(
 
 
 def _flow_default_summary(input_id: str, value: JsonValue) -> str:
-    summary = (
-        value
-        if isinstance(value, str)
-        else json.dumps(value, sort_keys=True, separators=(",", ":"))
-    )
+    summary = value if isinstance(value, str) else json.dumps(value, sort_keys=True, separators=(",", ":"))
     if len(summary) > 512:
-        raise ContractError(
-            f"flow default summary for input {input_id!r} exceeds 512 characters"
-        )
+        raise ContractError(f"flow default summary for input {input_id!r} exceeds 512 characters")
     return summary
 
 
@@ -434,11 +395,7 @@ def _plan_operations(
     operations = ordered_operations(bundle, selected, public_inputs, decisions)
     if operation_stage_ids is None:
         return operations
-    return tuple(
-        operation
-        for operation in operations
-        if operation.stage_id in operation_stage_ids
-    )
+    return tuple(operation for operation in operations if operation.stage_id in operation_stage_ids)
 
 
 def _plan_consents(
@@ -446,12 +403,12 @@ def _plan_consents(
     operations: tuple[PlannedOperation, ...],
     recorded_answers: dict[str, JsonValue] | None,
     prospective: bool,
+    decisions: dict[str, JsonValue],
 ) -> tuple[dict[str, JsonValue], list[JsonValue], tuple[str, ...]]:
-    referenced = _referenced_consents(bundle, operations)
-    recorded = (
-        None if recorded_answers is None else recorded_answers.get("consents")
-    )
-    consents = dict(recorded) if isinstance(recorded, dict) else {}
+    inactive_consents = _inactive_conditional_consents(bundle, decisions)
+    referenced = tuple(consent_id for consent_id in _referenced_consents(bundle, operations) if consent_id not in inactive_consents)
+    recorded = None if recorded_answers is None else recorded_answers.get("consents")
+    consents = {key: value for key, value in recorded.items() if key not in inactive_consents} if isinstance(recorded, dict) else {}
     if prospective:
         consents.update(dict.fromkeys(referenced, True))
     evidence: list[JsonValue] = (
@@ -470,6 +427,19 @@ def _plan_consents(
         else []
     )
     return consents, evidence, referenced
+
+
+def _inactive_conditional_consents(bundle: ContractBundle, decisions: dict[str, JsonValue]) -> set[str]:
+    inactive_decisions = frozenset(bundle.decisions) - active_decision_ids(bundle, decisions)
+    return {
+        consent_id
+        for consent_id, definition in bundle.consents.items()
+        if condition_is_inactive(
+            definition.get("required_when"),
+            decisions,
+            inactive_decision_ids=inactive_decisions,
+        )
+    }
 
 
 def _referenced_consents(
@@ -675,10 +645,7 @@ def _add_component_operations(
 
 
 def _is_required_bundled_plugin(plugin: dict[str, JsonValue]) -> bool:
-    return (
-        plugin.get("installation_policy") == "bundled_install_now"
-        and plugin.get("cardinality") == "exactly_one"
-    )
+    return plugin.get("installation_policy") == "bundled_install_now" and plugin.get("cardinality") == "exactly_one"
 
 
 def find_string_refs(value: JsonValue, key: str) -> set[str]:
@@ -704,9 +671,7 @@ def ordered_operations(
     stages = sorted(bundle.stages.items(), key=lambda item: _sequence(item[1]))
     planned: list[PlannedOperation] = []
     for stage_id, stage in stages:
-        for operation_id in _string_tuple(
-            stage.get("operation_refs"), allow_missing=False
-        ):
+        for operation_id in _string_tuple(stage.get("operation_refs"), allow_missing=False):
             if operation_id in selected_ids:
                 planned.append(
                     _planned_operation(
@@ -745,12 +710,8 @@ def _planned_operation(
         runner=str(definition["runner"]),
         risk=str(definition["risk"]),
         requires_confirmation=definition.get("requires_confirmation") is True,
-        precondition_probe_ids=_string_tuple(
-            idempotency.get("precondition_probe_refs"), allow_missing=True
-        ),
-        postcondition_probe_ids=_string_tuple(
-            idempotency.get("postcondition_probe_refs"), allow_missing=True
-        ),
+        precondition_probe_ids=_string_tuple(idempotency.get("precondition_probe_refs"), allow_missing=True),
+        postcondition_probe_ids=_string_tuple(idempotency.get("postcondition_probe_refs"), allow_missing=True),
         public_inputs=safe_inputs,
         apply_timeout_seconds=_apply_timeout_seconds(definition),
     )
@@ -775,10 +736,7 @@ def remediation_operations(
 
     unknown = sorted(set(operation_ids) - set(bundle.operations))
     if unknown:
-        raise ContractError(
-            "boundary remediation operations are not declared by the pinned flow: "
-            f"{unknown}"
-        )
+        raise ContractError(f"boundary remediation operations are not declared by the pinned flow: {unknown}")
     return tuple(
         _planned_operation(
             bundle,
@@ -829,9 +787,7 @@ def _operation_public_inputs(
     parameters = raw_parameters if isinstance(raw_parameters, dict) else {}
     collisions = sorted(set(input_ids) & set(parameters))
     if collisions:
-        raise ContractError(
-            f"operation {operation_id!r} parameter/input key collision: {collisions}"
-        )
+        raise ContractError(f"operation {operation_id!r} parameter/input key collision: {collisions}")
     resolved = {key: public_inputs[key] for key in input_ids if key in public_inputs}
     resolved.update(_resolved_decision_parameters(bundle, parameters, decisions))
     return resolved
@@ -846,11 +802,7 @@ def _resolved_decision_parameters(
     resolved: dict[str, JsonValue] = {}
     for parameter_id, source in parameters.items():
         decision_id = source.get("decision_ref") if isinstance(source, dict) else None
-        if (
-            isinstance(decision_id, str)
-            and _is_selection_eligible(active, decision_id)
-            and decision_id in decisions
-        ):
+        if isinstance(decision_id, str) and _is_selection_eligible(active, decision_id) and decision_id in decisions:
             resolved[parameter_id] = decisions[decision_id]
     return resolved
 

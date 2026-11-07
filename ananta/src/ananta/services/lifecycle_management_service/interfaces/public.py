@@ -764,22 +764,19 @@ class LifecycleManagementAPI(ABC):
         parameters={
             "new_manifest": ParameterMetadata(
                 description=(
-                    "Proposed manifest dict. v1 scope per Architect §15.1 "
-                    "(workbench/2026-05-30_plugin_lifecycle_architect_pass.md): "
-                    "only ``{plugins: list[str], profile_name?: str}`` is "
-                    "accepted. ``service_bindings`` and ``plugin_config_overrides`` "
-                    "in the payload are REJECTED with a stable "
-                    "``bindings_change_rejected_in_v1`` token before any disk "
-                    "write — full-bundle externalization is deferred to v2 "
-                    "(per Codex review #2 Finding 2, where cloud restart "
-                    "uploads only manifest.yaml to S3 and bindings changes "
-                    "would split-brain the new color). Operators who need "
-                    "binding mutations should edit the profile template + "
-                    "re-run launch.py for now; per-plugin config edits "
-                    "use ``reload_plugin_config``. The verb auto-synthesizes "
-                    "service_bindings from the currently-bound services so "
-                    "downstream validation + write still see a coherent "
-                    "manifest shape."
+                    "Proposed manifest dict. v1.1 accepts "
+                    "``{plugins: list[str], profile_name?: str, "
+                    "service_bindings?: dict[str, str]}``. When supplied, "
+                    "``service_bindings`` is merged over the currently-bound "
+                    "services: caller values replace matching services and "
+                    "omitted services keep their current bindings. This allows "
+                    "plugin renames and service rebinds. If omitted, bindings "
+                    "are synthesized from the current services. A non-object "
+                    "``service_bindings`` value is rejected before disk activity. "
+                    "``plugin_config_overrides`` remains rejected before disk "
+                    "activity with ``forbidden_v1_keys_present``; full config "
+                    "override externalization is deferred to v2. Per-plugin "
+                    "config edits use ``reload_plugin_config``."
                 ),
                 required=True,
                 type=ParameterType.OBJECT,
@@ -949,14 +946,17 @@ class LifecycleManagementAPI(ABC):
         """Validate, write, and restart with a new manifest.
 
         The verb is the platform-tier orchestrator of the manifest
-        lifecycle: it narrows the v1 payload (Architect §15.1 —
-        plugin-list-only externalization; ``service_bindings`` /
-        ``plugin_config_overrides`` in the payload are rejected before
-        any write), runs binding-satisfaction pre-flight against
-        ``binding_validator`` using the *currently-bound* services
-        (synthesized into the effective manifest), computes a set-level
-        diff, atomically writes ``service_bindings.json`` (unchanged
-        content in v1) followed by ``manifest.yaml`` under a sha256 CAS,
+        lifecycle. Its v1.1 payload accepts ``plugins``, optional
+        ``profile_name``, and optional ``service_bindings``. Caller-supplied
+        bindings are merged over the current bindings, so caller values
+        replace matching services while omitted services retain their
+        current bindings. When omitted, current bindings are synthesized
+        into the effective manifest. ``plugin_config_overrides`` remains
+        rejected before any write with ``forbidden_v1_keys_present``
+        (full config-override externalization is deferred to v2). The verb
+        runs binding-satisfaction pre-flight against ``binding_validator``,
+        computes a set-level diff, atomically writes the effective
+        ``service_bindings.json`` followed by ``manifest.yaml`` under a sha256 CAS,
         then delegates the actual restart to whichever plugin is
         currently bound to ``self_deployment_service``. Per Codex review #2
         Finding 1, the restart status is propagated into the response —
@@ -965,12 +965,13 @@ class LifecycleManagementAPI(ABC):
         ``"applied"``.
 
         Args:
-            new_manifest: Proposed manifest. v1 shape:
-                ``{plugins: list[str], profile_name?: str}``. Passing
-                ``service_bindings`` or ``plugin_config_overrides`` is
-                rejected with ``bindings_change_rejected_in_v1`` before
-                any disk activity (deferred to v2 — full-bundle
-                externalization).
+            new_manifest: Proposed v1.1 manifest:
+                ``{plugins: list[str], profile_name?: str,
+                service_bindings?: dict[str, str]}``. Supplied bindings
+                merge over current bindings; caller values win for matching
+                services and omitted services keep their current bindings.
+                ``plugin_config_overrides`` is rejected before disk activity
+                with ``forbidden_v1_keys_present`` and remains deferred to v2.
             reason: Operator-supplied audit string.
             expected_etag: CAS token from the caller's prior read.
                 When ``None``, the verb runs in unchecked mode (caller

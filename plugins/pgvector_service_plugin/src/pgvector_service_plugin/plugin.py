@@ -6,9 +6,15 @@ Provider machinery lives in pgvector_service_plugin.postgres_backend.vector.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import threading
+from collections import deque
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -56,9 +62,87 @@ _DB_ADDRESS_BOOK_ENTRY: str = "pgvector_service_db"
 logger = logging.getLogger(__name__)
 
 
-class PGVectorServicePlugin(
-    ServicePlugin, VectorServiceAPI, VectorProvider, VectorServiceInterface, StateAwarePlugin
-):
+# A single running operation and FIFO async turn reservations preserve ordering.
+# Waiting callers never occupy an executor worker or its submission queue.
+# The process owns this pool across plugin stop/restart; Python retires it at exit.
+_F5_WORKERS = 1
+_F5_PENDING_BOUND = 1
+_F5_EXECUTOR = ThreadPoolExecutor(max_workers=_F5_WORKERS, thread_name_prefix="pgvector_service-f5")
+_F5_SUBMISSION_LOCK = threading.RLock()
+_f5_in_flight: Future[object] | None = None
+_f5_turn: Future[None] | None = None
+_f5_waiters: deque[Future[None]] = deque()
+logging.getLogger(__name__).info("F5 executor pgvector_service-f5: workers=%s pending=%s", _F5_WORKERS, _F5_PENDING_BOUND)
+
+
+def _release_f5_turn(turn: Future[None]) -> None:
+    global _f5_turn
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is not turn:
+            return
+        if _f5_waiters:
+            next_turn = _f5_waiters.popleft()
+            _f5_turn = next_turn
+            next_turn.set_result(None)
+        else:
+            _f5_turn = None
+
+
+def _cancel_f5_waiter(turn: Future[None]) -> None:
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is turn:
+            _release_f5_turn(turn)
+        elif turn in _f5_waiters:
+            _f5_waiters.remove(turn)
+            turn.cancel()
+
+
+def _complete_f5_operation(turn: Future[None], done: Future[object]) -> None:
+    global _f5_in_flight
+    with _F5_SUBMISSION_LOCK:
+        if _f5_in_flight is done:
+            _f5_in_flight = None
+        _release_f5_turn(turn)
+
+
+def _report_f5_late_failure(done: Future[object]) -> None:
+    error = done.exception()
+    if error is not None:
+        logging.getLogger(__name__).error("F5 operation failed after its waiter cancelled: %s", error)
+
+
+async def _run_f5_blocking[T](operation: Callable[[], T]) -> T:
+    """Reserve FIFO order before waiting; cancellation retains active ownership."""
+    global _f5_in_flight, _f5_turn
+    turn = Future[None]()
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is None:
+            _f5_turn = turn
+            turn.set_result(None)
+        else:
+            _f5_waiters.append(turn)
+    try:
+        await asyncio.shield(asyncio.gather(asyncio.wrap_future(turn), return_exceptions=True))
+    except asyncio.CancelledError:
+        _cancel_f5_waiter(turn)
+        raise
+    try:
+        with _F5_SUBMISSION_LOCK:
+            future = _F5_EXECUTOR.submit(copy_context().run, operation)
+            _f5_in_flight = cast(Future[object], future)
+    except BaseException:
+        _release_f5_turn(turn)
+        raise
+    future.add_done_callback(lambda done: _complete_f5_operation(turn, cast(Future[object], done)))
+    try:
+        await asyncio.shield(asyncio.gather(asyncio.wrap_future(future), return_exceptions=True))
+    except asyncio.CancelledError:
+        future.add_done_callback(lambda done: _report_f5_late_failure(cast(Future[object], done)))
+        raise
+    return future.result()
+
+
+class PGVectorServicePlugin(ServicePlugin, VectorServiceAPI, VectorProvider, VectorServiceInterface, StateAwarePlugin):
     """PGVector service plugin for vector storage and similarity search."""
 
     def __init__(self) -> None:
@@ -145,8 +229,7 @@ class PGVectorServicePlugin(
             raise RuntimeError(f"{self.name}: address_book_service not available")
         if self._vault_service is None:
             raise RuntimeError(
-                f"{self.name}: vault_service proxy not injected "
-                "(set_vault_service runs before prepare_for_readiness)",
+                f"{self.name}: vault_service proxy not injected (set_vault_service runs before prepare_for_readiness)",
             )
         overrides = self._resolve_address_book_overrides(address_book)
         overrides["password"] = self._resolve_db_password(self._vault_service)
@@ -157,15 +240,10 @@ class PGVectorServicePlugin(
         resolved = address_book.resolve(name=_DB_ADDRESS_BOOK_ENTRY)
         if resolved.get("action_status") != "completed":
             raise RuntimeError(
-                f"{self.name}: failed to resolve address-book entry "
-                f"{_DB_ADDRESS_BOOK_ENTRY!r}: {resolved.get('error')}",
+                f"{self.name}: failed to resolve address-book entry {_DB_ADDRESS_BOOK_ENTRY!r}: {resolved.get('error')}",
             )
         entries = resolved.get("data", {}).get("entries", [])
-        overrides: dict[str, object] = {
-            str(entry["description"]): entry["value"]
-            for entry in entries
-            if entry.get("field_type") != "password"
-        }
+        overrides: dict[str, object] = {str(entry["description"]): entry["value"] for entry in entries if entry.get("field_type") != "password"}
         if "port" in overrides:
             overrides["port"] = int(cast(str, overrides["port"]))
         return overrides
@@ -175,28 +253,23 @@ class PGVectorServicePlugin(
         solet = os.environ.get("SOLET_NAME", "").strip()
         if not solet:
             raise RuntimeError(
-                f"{self.name}: SOLET_NAME required to resolve the vault "
-                "key for the database password.",
+                f"{self.name}: SOLET_NAME required to resolve the vault key for the database password.",
             )
         password_key = f"{solet}.{PLUGIN_NAMESPACE}.password"
         secret = vault_service.retrieve(key=password_key)
         if secret.get("action_status") != "completed":
             raise RuntimeError(
-                f"{self.name}: failed to retrieve DB password from vault key "
-                f"{password_key!r}: {secret.get('error')}",
+                f"{self.name}: failed to retrieve DB password from vault key {password_key!r}: {secret.get('error')}",
             )
         secret_data = secret.get("data")
         if not isinstance(secret_data, dict) or "value" not in secret_data:
             raise RuntimeError(
-                f"{self.name}: vault retrieve for {password_key!r} returned no "
-                "secret value in its result payload",
+                f"{self.name}: vault retrieve for {password_key!r} returned no secret value in its result payload",
             )
         return secret_data["value"]
 
     service_interfaces: tuple[type, ...] = (VectorServiceInterface,)
-    supported_interface_versions: dict[type, str] = {
-        VectorServiceInterface: VectorServiceInterface.INTERFACE_VERSION
-    }
+    supported_interface_versions: dict[type, str] = {VectorServiceInterface: VectorServiceInterface.INTERFACE_VERSION}
 
     def initialize(self, config: dict[str, object]) -> None:
         """Build the provider; resolve DB connection params at build time.
@@ -220,7 +293,8 @@ class PGVectorServicePlugin(
             # build to the start_services() call that runs after
             # prepare_for_readiness (when state_service + vault are available).
             logger.debug(
-                "%s: services not yet wired; deferring provider build", self.name,
+                "%s: services not yet wired; deferring provider build",
+                self.name,
             )
             return
         try:
@@ -245,6 +319,10 @@ class PGVectorServicePlugin(
     @service_lifecycle(operation="start")
     async def start_services(self) -> ActionResult:
         """Start the pgvector service."""
+        return await _run_f5_blocking(self._f5_start_services)
+
+    def _f5_start_services(self) -> ActionResult:
+        """Start the pgvector service."""
         if self._services_started:
             return {
                 "action_status": "completed",
@@ -259,9 +337,7 @@ class PGVectorServicePlugin(
         import os
         from pathlib import Path
 
-        config_path = (
-            Path(os.environ.get("APP_HOME", ".")) / "config" / "plugins" / f"{self.name}.json"
-        )
+        config_path = Path(os.environ.get("APP_HOME", ".")) / "config" / "plugins" / f"{self.name}.json"
 
         if not config_path.exists():
             return {
@@ -332,6 +408,10 @@ class PGVectorServicePlugin(
 
     @service_lifecycle(operation="stop")
     async def stop_services(self) -> ActionResult:
+        """Stop the pgvector service and release resources."""
+        return await _run_f5_blocking(self._f5_stop_services)
+
+    def _f5_stop_services(self) -> ActionResult:
         """Stop the pgvector service and release resources."""
         if not self._services_started:
             return {
@@ -411,12 +491,14 @@ class PGVectorServicePlugin(
                 ),
             },
         )
-        return [SchemaDefinition(
-            namespace=self.name,
-            tables={TABLE_EMBEDDINGS: embeddings_table},
-            version="1.0.0",
-            description="Vector storage schema for pgvector service",
-        )]
+        return [
+            SchemaDefinition(
+                namespace=self.name,
+                tables={TABLE_EMBEDDINGS: embeddings_table},
+                version="1.0.0",
+                description="Vector storage schema for pgvector service",
+            )
+        ]
 
     def set_state_service(self, state_service: StateServiceProtocol) -> None:
         self._state_service = state_service
@@ -547,24 +629,18 @@ class PGVectorServicePlugin(
             logger.error("Failed to delete by external_ids: %s", e)
             return self._create_error_result(str(e))
 
-    def find_missing_external_ids(
-        self, namespace: str, candidate_external_ids: list[str]
-    ) -> ActionResult:
+    def find_missing_external_ids(self, namespace: str, candidate_external_ids: list[str]) -> ActionResult:
         """Return the external_ids with no active vector (orphan-reconcile read)."""
         if not self._provider:
             return self._create_error_result("Vector provider not initialized")
         try:
-            result = self._provider.find_missing_external_ids(
-                namespace=namespace, candidate_external_ids=candidate_external_ids
-            )
+            result = self._provider.find_missing_external_ids(namespace=namespace, candidate_external_ids=candidate_external_ids)
             return self._create_success_result(result)
         except Exception as e:
             logger.error("Failed to find missing external_ids: %s", e)
             return self._create_error_result(str(e))
 
-    def update_metadata(
-        self, namespace: str, vector_id: str, metadata: dict[str, object]
-    ) -> ActionResult:
+    def update_metadata(self, namespace: str, vector_id: str, metadata: dict[str, object]) -> ActionResult:
         """Update vector metadata."""
         try:
             result = self._get_provider().update_metadata(namespace, vector_id, dict(metadata))
@@ -631,9 +707,7 @@ class PGVectorServicePlugin(
     def search_similar_action(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         """Search similar vectors - action handler."""
         distance_metric_str = params.get("distance_metric", "COSINE")
-        distance_metric = (
-            DistanceMetric[distance_metric_str] if distance_metric_str else DEFAULT_DISTANCE_METRIC
-        )
+        distance_metric = DistanceMetric[distance_metric_str] if distance_metric_str else DEFAULT_DISTANCE_METRIC
         result = self.search_similar(
             namespace=params.get("namespace", ""),
             query_vector=params.get("query_vector", []),
@@ -662,9 +736,7 @@ class PGVectorServicePlugin(
     )
     def delete_vectors_action(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         """Delete vectors - action handler."""
-        result = self.delete_vectors(
-            params.get("namespace", ""), params.get("vector_ids"), params.get("filters")
-        )
+        result = self.delete_vectors(params.get("namespace", ""), params.get("vector_ids"), params.get("filters"))
         return dict(result)
 
     @platform_process(
@@ -675,9 +747,7 @@ class PGVectorServicePlugin(
     )
     def update_metadata_action(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         """Update vector metadata - action handler."""
-        result = self.update_metadata(
-            params.get("namespace", ""), params.get("vector_id", ""), params.get("metadata", {})
-        )
+        result = self.update_metadata(params.get("namespace", ""), params.get("vector_id", ""), params.get("metadata", {}))
         return dict(result)
 
     @platform_process(

@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::g_suite_plugin::gmail_list_history",
+  "display_name": "Gmail: List History",
+  "description": "List mailbox changes since start_history_id (users.history.list): messages added and deleted and labels added and removed, with the current history_id and next_page_token. Get a starting history id from gmail_get_profile or any message. An expired start id returns gsuite.not_found; then re-sync from a fresh profile history id. Runs as a background job: returns a job_id at once and the result arrives as a follow-up message. Optional account (email or alias) picks the connected Google account; the result names the account used. Parameters: account, start_history_id, history_types, label_id, max, page_token.",
+  "embedding_description": "Find out what changed in a Gmail mailbox since a checkpoint: new and deleted messages and label changes, for efficient incremental sync instead of re-reading the whole inbox. Start from a history id taken from the profile.",
+  "result_processor_customizations": {
+    "action_label": "Gmail: List History queued",
+    "result_type": "g_suite_gmail_list_history_result",
+    "result_description": "Job queued; completion is delivered automatically and names the account used.",
+    "presentation_guidance": "",
+    "output_action_guidance": "Return exactly one action using the active IO plugin's post_message (process_key: plugin::<io_plugin>::post_message). Use the provided session_id. Keep the message short and friendly. Do NOT invent process identifiers (no present_result, no status actions)."
+  },
+  "error_processor_customizations": {
+    "action_context": "Dispatch a background Gmail job: Gmail: List History.",
+    "error_interpretation": "gsuite.not_connected: no Google account linked. gsuite.unknown_account: the account argument names no connected account (the message lists them). gsuite.invalid_params: a parameter broke a rule (the message names it) or Google rejected the request (400). gsuite.missing_scope: the account's grant lacks a scope this call needs (the message names it and the reconnect step). gsuite.auth_expired: Google rejected the token (Testing-mode OAuth apps expire refresh tokens after 7 days). gsuite.not_found: the id does not exist in this account. gsuite.rate_limited: Gmail quota hit. gsuite.permission_denied: Google refused for another reason.",
+    "recovery_guidance": "Follow the message: reconnect with connect_account for auth_expired or missing_scope (gmail_permanent_delete=true for permanent delete), pick a listed account for unknown_account, fix the named parameter for invalid_params, retry later for rate_limited."
+  }
+}

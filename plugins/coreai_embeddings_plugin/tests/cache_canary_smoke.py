@@ -26,13 +26,15 @@ import sys
 import tempfile
 import time
 import unittest
+from collections.abc import Callable
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT / "ananta" / "src"))
-sys.path.insert(0, str(ROOT / "plugins" / "coreai_embeddings_plugin" / "src"))
+_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_ROOT / "ananta" / "src"))
+sys.path.insert(0, str(_ROOT / "plugins" / "coreai_embeddings_plugin" / "src"))
 
 from coreai_embeddings_plugin import cache_canary  # noqa: E402
 from coreai_embeddings_plugin.cache_canary import CacheCanary, model_cache_key  # noqa: E402
@@ -41,7 +43,7 @@ from coreai_embeddings_plugin.runtime import EmbeddingRuntime  # noqa: E402
 
 GOOD = b"compiled-specialization-" * 64
 OTHER_MODEL = "0" * 64
-FAKE_CHILD = r'''
+FAKE_CHILD = r"""
 import json, os, signal, sys, time
 from pathlib import Path
 
@@ -62,6 +64,7 @@ if mode == "asset_missing":
     print(json.dumps({"code": "coreai_embeddings.asset_missing", "message": "asset absent"})); sys.exit(2)
 if mode == "hang":
     record("hang"); time.sleep(30)
+signal.signal(signal.SIGINT, signal.SIG_DFL)
 if mode.startswith("signal:"):
     record(mode); os.kill(os.getpid(), int(mode.split(":", 1)[1])); time.sleep(5)
 if not entry.exists():
@@ -77,7 +80,7 @@ if len(data) < len(GOOD):
 record("invalid")
 print(json.dumps({"code": "coreai_embeddings.invalid_output", "message": "Embedding is nonfinite or not normalized"}))
 sys.exit(3)
-'''
+"""
 
 
 class _ScratchCache(unittest.TestCase):
@@ -90,11 +93,16 @@ class _ScratchCache(unittest.TestCase):
         self.log = scratch / "child.log"
         self.child = scratch / "fake_child.py"
         self.child.write_text(FAKE_CHILD)
-        self.environment = patch.dict(os.environ, {
-            "HOME": str(scratch), "FAKE_COREAI_CACHE": str(self.cache),
-            "FAKE_COREAI_KEY": model_cache_key(), "FAKE_COREAI_LOG": str(self.log),
-            "FAKE_COREAI_MODE": "normal",
-        })
+        self.environment = patch.dict(
+            os.environ,
+            {
+                "HOME": str(scratch),
+                "FAKE_COREAI_CACHE": str(self.cache),
+                "FAKE_COREAI_KEY": model_cache_key(),
+                "FAKE_COREAI_LOG": str(self.log),
+                "FAKE_COREAI_MODE": "normal",
+            },
+        )
         self.environment.start()
         self.other_model = self._entry("CPU-SPEC", model=OTHER_MODEL)
         self.other_model.parent.mkdir(parents=True)
@@ -116,13 +124,15 @@ class _ScratchCache(unittest.TestCase):
 
     def _canary(self, preference: str = "cpu", timeout: float = 20.0) -> CacheCanary:
         return CacheCanary(
-            Path("/fixture/assets"), preference, cache_root=self.cache,
-            child_command=lambda: (sys.executable, str(self.child)), timeout_seconds=timeout,
+            Path("/fixture/assets"),
+            preference,
+            cache_root=self.cache,
+            child_command=lambda: (sys.executable, str(self.child)),
+            timeout_seconds=timeout,
         )
 
     def _events(self) -> list[str]:
         return self.log.read_text().splitlines() if self.log.exists() else []
-
 
 
 class CacheScenario(_ScratchCache):
@@ -169,8 +179,7 @@ class CacheScenario(_ScratchCache):
     def test_persistent_failure_fails_loudly_after_exactly_one_rebuild(self) -> None:
         self._seed("CPU-SPEC", GOOD)
         os.environ["FAKE_COREAI_MODE"] = "persistent"
-        with self.assertLogs("coreai_embeddings_plugin.cache_canary", "ERROR") as logs, \
-                self.assertRaises(EmbeddingError) as caught:
+        with self.assertLogs("coreai_embeddings_plugin.cache_canary", "ERROR") as logs, self.assertRaises(EmbeddingError) as caught:
             self._canary().ensure_healthy()
         self.assertEqual(caught.exception.code, ErrorCode.UNAVAILABLE)
         self.assertIn("invalid after purge and recompile: canary killed by signal 5 (SIGTRAP)", str(caught.exception))
@@ -211,6 +220,47 @@ class CacheScenario(_ScratchCache):
 class SignalClassification(_ScratchCache):
     """F3: only crash signals implicate the cache; a killed child never purges."""
 
+    def _with_ignored_parent_sigint(self, action: Callable[[], None]) -> None:
+        original = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            action()
+        finally:
+            signal.signal(signal.SIGINT, original)
+        self.assertIs(signal.getsignal(signal.SIGINT), original)
+
+    def _assert_ignored_sigint_child_fails(self) -> None:
+        entry = self._seed("CPU-SPEC", GOOD)
+        os.environ["FAKE_COREAI_MODE"] = f"signal:{int(signal.SIGINT)}"
+        try:
+            with self.assertRaises(EmbeddingError) as caught:
+                self._canary().ensure_healthy()
+        finally:
+            events = self._events()
+            self.assertTrue(events)
+            self.assertEqual(events[0], f"cpu:signal:{int(signal.SIGINT)}")
+        self.assertIn("not a cache fault", str(caught.exception))
+        self.assertEqual(entry.read_bytes(), GOOD)
+        self.assertEqual(len(self._events()), 1)
+
+    def test_ignored_sigint_still_fails(self) -> None:
+        self._with_ignored_parent_sigint(self._assert_ignored_sigint_child_fails)
+
+    def test_sigint_restored_after_failure(self) -> None:
+        original = signal.getsignal(signal.SIGINT)
+        sentinel = AssertionError("sentinel")
+
+        def fail() -> None:
+            raise sentinel
+
+        try:
+            with self.assertRaises(AssertionError) as caught:
+                self._with_ignored_parent_sigint(fail)
+            self.assertIs(caught.exception, sentinel)
+            self.assertIs(signal.getsignal(signal.SIGINT), original)
+        finally:
+            signal.signal(signal.SIGINT, original)
+
     def test_crash_signals_are_cache_suspect(self) -> None:
         for number in sorted(cache_canary.CRASH_SIGNALS):
             with self.subTest(signal=signal.Signals(number).name):
@@ -235,8 +285,13 @@ class SignalClassification(_ScratchCache):
                 entry = self._seed("CPU-SPEC", GOOD)
                 self.log.unlink(missing_ok=True)
                 os.environ["FAKE_COREAI_MODE"] = f"signal:{int(number)}"
-                with self.assertRaises(EmbeddingError) as caught:
-                    self._canary().ensure_healthy()
+                try:
+                    with self.assertRaises(EmbeddingError) as caught:
+                        self._canary().ensure_healthy()
+                finally:
+                    events = self._events()
+                    self.assertTrue(events)
+                    self.assertEqual(events[0], f"cpu:signal:{int(number)}")
                 self.assertIn("not a cache fault", str(caught.exception))
                 self.assertEqual(entry.read_bytes(), GOOD)
                 self.assertEqual(len(self._events()), 1)
@@ -278,7 +333,7 @@ class SymlinkSafety(_ScratchCache):
         self.assertTrue(self.precious.exists())
 
 
-CONCURRENT_PREPARE = r'''
+CONCURRENT_PREPARE = r"""
 import json, site, sys
 from pathlib import Path
 stdlib = list(sys.path)
@@ -292,7 +347,7 @@ try:
     print(json.dumps(canary.ensure_healthy().as_dict()))
 except EmbeddingError as exc:
     print(json.dumps({"outcome": "error", "message": str(exc), "purged": []}))
-'''
+"""
 
 
 class ConcurrentPrepare(_ScratchCache):
@@ -344,7 +399,10 @@ class HostileImportPath(_ScratchCache):
 
     def _assert_child_reached_its_own_report(self) -> None:
         canary = CacheCanary(
-            Path(self.directory.name) / "absent-assets", "cpu", cache_root=self.cache, timeout_seconds=40,
+            Path(self.directory.name) / "absent-assets",
+            "cpu",
+            cache_root=self.cache,
+            timeout_seconds=40,
         )
         with self.assertRaises(EmbeddingError) as caught:
             canary.ensure_healthy()
@@ -372,20 +430,66 @@ class HostileImportPath(_ScratchCache):
         command = cache_canary.default_child_command()
         self.assertEqual(command[:4], (sys.executable, "-I", "-S", "-c"))
         probe = subprocess.run(
-            [*command[:6], "json.tool"], input='{"ok": 1}', capture_output=True, text=True, check=True,
+            [*command[:6], "json.tool"],
+            input='{"ok": 1}',
+            capture_output=True,
+            text=True,
+            check=True,
         )
         self.assertEqual(json.loads(probe.stdout), {"ok": 1})
         inspect = command[4].replace(
-            "runpy.run_module(sys.argv.pop(1), run_name=\"__main__\", alter_sys=True)",
+            'runpy.run_module(sys.argv.pop(1), run_name="__main__", alter_sys=True)',
             "import canary_order_probe, types; print(canary_order_probe.WHO, types.__file__)",
         )
         self.assertNotEqual(inspect, command[4])
         completed = subprocess.run(
-            [*command[:4], inspect, command[5], "unused"], capture_output=True, text=True, check=True,
+            [*command[:4], inspect, command[5], "unused"],
+            capture_output=True,
+            text=True,
+            check=True,
         )
         who, types_file = completed.stdout.split()
         self.assertEqual(who, "first")
         self.assertTrue(Path(types_file).is_relative_to(Path(json.__file__).parent.parent), types_file)
+
+    def test_child_prefix_matches_parent(self) -> None:
+        command = cache_canary.default_child_command()
+        bootstrap_index = command.index("-c") + 1
+        bootstrap = command[bootstrap_index]
+        inspect = bootstrap.replace(
+            'runpy.run_module(sys.argv.pop(1), run_name="__main__", alter_sys=True)',
+            "print(sys.prefix)",
+        )
+        self.assertNotEqual(inspect, bootstrap)
+        completed = subprocess.run(
+            [*command[:bootstrap_index], inspect, *command[bootstrap_index + 1 :]],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(completed.stdout.strip(), sys.prefix)
+
+    def test_ambient_pythonpath_injection_is_ignored(self) -> None:
+        injection = Path(self.directory.name) / "ambient_injection"
+        injection.mkdir()
+        module_name = "canary_ambient_injection_probe"
+        (injection / f"{module_name}.py").write_text("INJECTED = True\n")
+        command = cache_canary.default_child_command()
+        bootstrap_index = command.index("-c") + 1
+        bootstrap = command[bootstrap_index]
+        inspect = bootstrap.replace(
+            'runpy.run_module(sys.argv.pop(1), run_name="__main__", alter_sys=True)',
+            f"import importlib.util; print(importlib.util.find_spec({module_name!r}) is not None)",
+        )
+        self.assertNotEqual(inspect, bootstrap)
+        with patch.dict(os.environ, {"PYTHONPATH": str(injection)}):
+            completed = subprocess.run(
+                [*command[:bootstrap_index], inspect, *command[bootstrap_index + 1 :]],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        self.assertEqual(completed.stdout.strip(), "False")
 
 
 class RuntimeWiring(unittest.TestCase):
@@ -396,9 +500,7 @@ class RuntimeWiring(unittest.TestCase):
         runtime = EmbeddingRuntime(Path("/fixture"), "gpu")
         self.assertEqual((runtime.canary.asset_root, runtime.canary.preference), (Path("/fixture"), "gpu"))
         report = cache_canary.CanaryReport("healthy", 0.4, "ok")
-        with patch.object(EmbeddingRuntime, "_verified_asset", lambda _self: calls.append("verify")), \
-                patch.object(EmbeddingRuntime, "_load", lambda _self, _asset: calls.append("load")), \
-                patch.object(CacheCanary, "ensure_healthy", lambda _self: calls.append("canary") or report):
+        with patch.object(EmbeddingRuntime, "_verified_asset", lambda _self: calls.append("verify")), patch.object(EmbeddingRuntime, "_load", lambda _self, _asset: calls.append("load")), patch.object(CacheCanary, "ensure_healthy", lambda _self: calls.append("canary") or report):
             try:
                 runtime.prepare()
                 self.assertEqual(calls, ["verify", "canary", "load"])
@@ -416,9 +518,7 @@ class RuntimeWiring(unittest.TestCase):
         def fail(_self: CacheCanary) -> cache_canary.CanaryReport:
             raise EmbeddingError(ErrorCode.UNAVAILABLE, "Core AI compiled cache invalid after purge and recompile: x")
 
-        with patch.object(EmbeddingRuntime, "_verified_asset", lambda _self: None), \
-                patch.object(EmbeddingRuntime, "_load", lambda _self, _asset: loads.append("load")), \
-                patch.object(CacheCanary, "ensure_healthy", fail):
+        with patch.object(EmbeddingRuntime, "_verified_asset", lambda _self: None), patch.object(EmbeddingRuntime, "_load", lambda _self, _asset: loads.append("load")), patch.object(CacheCanary, "ensure_healthy", fail):
             try:
                 with self.assertRaises(EmbeddingError):
                     runtime.prepare()
@@ -428,12 +528,12 @@ class RuntimeWiring(unittest.TestCase):
 
     def test_child_entry_exit_codes(self) -> None:
         for code, expected in ((ErrorCode.INVALID_OUTPUT, 3), (ErrorCode.ASSET_MISSING, 2)):
+
             def fail(_self: EmbeddingRuntime, code: ErrorCode = code) -> None:
                 raise EmbeddingError(code, "reported")
 
             output = io.StringIO()
-            with self.subTest(code=code), patch.object(EmbeddingRuntime, "prepare_in_process", fail), \
-                    redirect_stdout(output):
+            with self.subTest(code=code), patch.object(EmbeddingRuntime, "prepare_in_process", fail), redirect_stdout(output):
                 self.assertEqual(cache_canary.main(["/fixture", "cpu"]), expected)
                 self.assertEqual(json.loads(output.getvalue())["code"], code.value)
         with patch.object(EmbeddingRuntime, "prepare_in_process", lambda _self: None):

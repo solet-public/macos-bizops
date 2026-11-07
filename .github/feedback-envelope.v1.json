@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://solet.ai/schemas/feedback-envelope.v1.json",
+  "title": "Solet feedback envelope v1",
+  "description": "Scalar envelope contract. Trusted repository/tag/commit/roster equality, title and Markdown headings require the local validator and caller-resolved facts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "class",
+    "item",
+    "round",
+    "seed",
+    "release_tag",
+    "release_commit",
+    "manager",
+    "surface",
+    "content_gate"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "class": {
+      "type": "string",
+      "enum": [
+        "defect",
+        "question",
+        "feature-request",
+        "closure-confirmation",
+        "feedback-round"
+      ]
+    },
+    "item": {
+      "type": "string",
+      "maxLength": 64
+    },
+    "round": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    },
+    "seed": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?![\\s\\S])"
+    },
+    "release_tag": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\s\\u0000-\\u001f\\u007f]+(?![\\s\\S])"
+    },
+    "release_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}(?![\\s\\S])",
+      "maxLength": 40
+    },
+    "manager": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^(?=.*\\S)[^\\r\\n]+(?![\\s\\S])"
+    },
+    "surface": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^(core|manager|seed|unknown|seed:[A-Za-z0-9_.-]+|plugin:[A-Za-z0-9_][A-Za-z0-9_.-]*)(?![\\s\\S])"
+    },
+    "content_gate": {
+      "type": "string",
+      "const": "passed"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "class": {
+            "const": "feedback-round"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "item": {
+            "pattern": "^Part [1-9][0-9]*(?![\\s\\S])"
+          },
+          "round": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "item": {
+            "pattern": "^§[1-9][0-9]*\\.[1-9][0-9]*(?![\\s\\S])"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -8,9 +8,9 @@ CLI). Auth: OAuth 2.0 client-credentials against a LaunchPoint custom service
 
 ## Read/write posture — full CRUD, INCLUDING delete and merge
 
-Unlike `zuora_plugin` (create/update, no delete — billing records are voided
-through Zuora's own workflow) or `snowflake_plugin`/`external_postgres_plugin`
-(read-only hard), Marketo ships native `delete_leads` and `merge_leads` verbs.
+Unlike `zuora_plugin`'s typed billing-object workflow, Marketo ships native
+`delete_leads` and `merge_leads` verbs. Vendor RBAC controls which operations
+the registered Marketo role may perform.
 Marketo's REST API supports lead deletion directly
 (`POST /rest/v1/leads/delete.json`) and lead merging directly
 (`POST /rest/v1/leads/{winning_id}/merge.json`), and lead records don't carry
@@ -36,6 +36,50 @@ empty one, and are never populated from a losing record. Do not rely on
 Adobe's general "some value is better than no value" rule for a read-only
 field; it predicts the opposite of observed Marketo behavior.
 
+## Asset folders and My Tokens (build 4)
+
+All ten Adobe Folder/My Token endpoints have typed async verbs. Folder reads:
+`get_asset_folder` (numeric `folder_id`, `folder_type`),
+`get_asset_folder_by_name` (`name`, optional `root`/`folder_type`/`workspace`),
+`list_asset_folders` (optional JSON `root`, `max_depth`, `workspace`), and
+`get_asset_folder_content` (`folder_id`, `folder_type`). Reads require
+`output_tsv_path` under a configured export root. Browse/content accept every
+vendor paging parameter as `max_return`/`offset`, page internally to 500 rows
+by default (up to 5,000 with `acknowledge_default_limit_override` and
+`row_limit`), and return `next_offset` when truncated. Resume with that offset
+and the same filters; a partial last page is not skipped. Page metadata keeps
+vendor requestId, warnings and errors. Results remain TSV handles.
+
+`create_asset_folder` takes `name`, JSON `parent` (`id`, `type`) and optional
+`description`. `update_asset_folder` takes `folder_id`/`folder_type` and optional
+`name`, `description` (empty string clears), `is_archive` (true archives,
+false unarchives). `delete_asset_folder` takes `folder_id`/`folder_type`;
+Marketo decides whether it is an empty non-system folder. Programs returned
+by reads require the separate Program API for mutations. No published folder
+move, clone or approve operation is invented.
+
+`get_asset_tokens` takes `folder_id`, optional `folder_type` (vendor default
+Folder), and `output_tsv_path`. `set_asset_token` takes `folder_id`,
+`folder_type`, `name` (up to 50 characters), `token_type` (date, number,
+rich text, score, sfdc campaign, text), and string `value`. It creates or
+corrects an existing local My Token; an empty string clears its value.
+`delete_asset_token` takes the same key without `value`; recreate with
+`set_asset_token` and the saved value to reverse a deletion. Token reads export
+the vendor's nested folder/tokens structure. These tokens are asset content;
+OAuth bearer credentials remain in memory and are redacted from all results.
+
+Folder and token writes are form encoded; embedded references are serialized
+as JSON. Poll `check_marketo_job_status` after every dispatch. Asset write
+results preserve the vendor envelope, without fabricated batch tallies. They
+use the registered user's Read-Only Assets / Read-Write Assets and workspace
+permissions. `check_setup` performs no Asset probes and lists these writes
+as unverified. No plugin confirmation or read-only gate is added.
+
+There is no expected-version/ETag on these vendor endpoints. Concurrent writes
+are last-write-wins; serialize edits and read back before retrying an uncertain
+write. Job results retain each observation; they are not a vendor change log.
+For exact source verification and remaining families see `vendor_api_coverage.md`.
+
 ## Budgeting a batch — `get_api_usage`
 
 `get_api_usage` reads Marketo's current-day subscription usage summary from
@@ -54,6 +98,65 @@ instance's `searchable_fields`. Those names are the source of truth for
 the selected name and lets Marketo validate it. Do not constrain a caller to a
 static cross-instance list when the describe response exposes the real
 instance-specific contract.
+
+## Lead Database objects — companies, opportunities, opportunity roles, sales persons
+
+Each of the four objects has four typed, async verbs: `describe_<object>`,
+`get_<object>`, `sync_<object>` and `delete_<object>` (`<object>` is
+`companies`, `opportunities`, `opportunity_roles` or `sales_persons`). They
+share one vendor contract, verified against Adobe's Lead Database reference:
+
+| Operation | Method and path | Notes |
+|---|---|---|
+| describe | `GET /rest/v1/<base>/describe.json` | Field list to TSV; returns `id_field`, `dedupe_fields`, `searchable_fields`. |
+| get | `GET /rest/v1/<base>.json` | `filterType`, `filterValues` (≤300), `fields`, `batchSize=300`, `nextPageToken` paged internally to the same 500/5,000 row limit as `get_leads`. |
+| get (roles, compound key) | `POST /rest/v1/opportunities/roles.json?_method=GET` | `compound_keys`: each with `externalOpportunityId`, `leadId`, `role`. |
+| sync | `POST /rest/v1/<base>.json` | `action` createOrUpdate/createOnly/updateOnly, `dedupe_by` dedupeFields/idField, ≤300 `records`. Companies use this collection path too, not a `/sync.json` suffix. |
+| delete | `POST /rest/v1/<base>/delete.json` | `delete_by` dedupeFields/idField, ≤300 `keys`. Destructive. |
+
+`<base>` is `companies`, `opportunities`, `opportunities/roles` or
+`salespersons`. Keys: companies `externalCompanyId` / `id`; opportunities
+`externalOpportunityId` / `marketoGUID`; opportunity roles the compound
+`externalOpportunityId` + `leadId` + `role` / `marketoGUID`; sales persons
+`externalSalesPersonId` / `id`. Reads write a workspace TSV; writes and deletes
+return Marketo's per-record `result` array and tallies through
+`check_marketo_job_status`. A `skipped` record (for example `1013 Record not
+found`, or a sales person still linked to active leads) is data, not a job
+failure. Vendor RBAC is the boundary: there is no plugin-side confirmation or
+read-only gate on `sync_`/`delete_`. Adobe documents the opportunity-role API
+as unavailable on subscriptions with a native CRM sync; the vendor error is
+returned as-is. Every result and TSV is passed through the client's credential
+redaction (client secret and every minted bearer token, raw, percent-encoded
+and base64).
+
+## Named accounts, named account lists and custom objects
+
+Build 3 extends the same contract, verified on 2026-11-07 against Adobe's
+published OpenAPI document (`swagger-mapi.json`) and the Named Accounts,
+Named Account Lists and Custom Objects reference pages:
+
+| Verbs | Method and path | Notes |
+|---|---|---|
+| `describe_`/`get_`/`sync_`/`delete_named_accounts` | `/rest/v1/namedaccounts` (`/describe.json`, `.json`, `/delete.json`) | Keys `name` (dedupe) / `marketoGUID`. Sync takes createOrUpdate (default), createOnly or updateOnly. |
+| `get_`/`sync_`/`delete_named_account_lists` | `/rest/v1/namedAccountLists` (`.json`, `/delete.json`) | No describe endpoint, and the query takes no `fields`. Sync takes only createOnly (default) or updateOnly; `name` is the one updateable field. Lists with `type: external` are CRM-managed and `updateable: false`. |
+| `get_named_account_list_members` | `GET /rest/v1/namedAccountList/{list_id}/namedAccounts.json` | `fields`, `batchSize=300` and `nextPageToken`, paged internally to the 500/5,000 row limit. |
+| `add_`/`remove_named_account_list_members` | `POST /rest/v1/namedAccountList/{list_id}/namedAccounts.json` and `POST /rest/v1/namedAccountList/{list_id}/namedAccounts/remove.json` | ≤300 `named_account_ids` (marketoGUIDs). Removing a member does not delete the account. |
+| `list_custom_object_types` | `GET /rest/v1/customobjects.json` | Optional `names`. Returns `api_names` and a TSV of each type's id field, dedupe fields, searchable fields and relationships. |
+| `describe_`/`get_`/`sync_`/`delete_custom_objects` | `/rest/v1/customobjects/{api_name}` (`/describe.json`, `.json`, `/delete.json`) | `api_name` is the type's API name. `get_custom_objects` also takes `compound_keys`, sent as `POST ...?_method=GET`. Keys are the type's own dedupe fields / `marketoGUID`. |
+
+Compound-key queries (`get_opportunity_roles` and `get_custom_objects`) send
+`filterType` (default `dedupeFields`), `fields`, `input` and `batchSize` in the
+JSON body. They page on the `nextPageToken` returned in the body to the same
+row limit as every other read, so they never stop after one call. A caller's
+`api_name` and `list_id` are percent-encoded into a single path segment; `.`
+and `..` are refused because they would address a different endpoint.
+
+Writes and deletes are first-class, with no plugin-side confirmation. The
+vendor Role's Named Account, Named Account List and custom-object permissions
+decide what the API user may do. Custom object type schema management (the
+`/rest/v1/customobjects/schema...` endpoints) and the named account field
+schema browse remain reachable through `request` until a later build adds
+typed verbs.
 
 ## Paging contracts differ by verb — internal now, but still not one signal
 
@@ -228,32 +331,39 @@ agent-blind secret-ingestion procedure): `knowledge_base/hydration_guidance.md`.
 Because "does the Role have the right permissions" can't be answered just by
 minting a token (`test_connection` only proves the credentials are valid,
 not what they can do), this plugin ships a second diagnostic verb,
-`check_setup`, that runs six safe read-only probes
+`check_setup`, that runs six safe read probes
 (`describe_lead_fields`, `get_leads`, `list_activity_types`, `get_api_usage`,
 `list_campaigns`, `list_static_lists`)
 and reports, per probe, either `ok` or the exact missing Access API
-permission plus which admin screen fixes it. It is **read-only and
-side-effect-free by construction** — it never calls a write/execute verb, so
+permission plus which admin screen fixes it. It is **side-effect-free by
+construction** — it never calls a write/execute verb, so
 it cannot itself trigger a campaign or mutate a lead just to test a
 permission. Its `reads_verified` field is therefore a **partial** guarantee:
 write/execute permissions (`create_or_update_leads`, `delete_leads`,
 `merge_leads`, `add_leads_to_list`, `remove_leads_from_list`,
-`trigger_campaign`) are listed in `writes_unverified` and can only be
+`trigger_campaign`, every Lead Database object `sync_`/`delete_` verb, and
+`add_`/`remove_named_account_list_members`) are listed in `writes_unverified`
+and can only be
 confirmed by first real use — a missing one surfaces as
 `marketo.permission_denied` naming the gap.
 
-**`reads_verified` is partial in a second, less obvious way: an entire
-ENTITLEMENT CLASS is out of its reach.** Marketo gates the asset surface
-(`/rest/asset/v1/…` — programs, emails, landing pages, templates) behind a
-separate **Read-Only Asset** entitlement that is independent of the Access API
-permissions the six probes exercise. All six probes are Lead-API reads, so an
-instance can return `reads_verified: true` while holding no asset entitlement
-at all. There is no cheap API-side probe for it either: with no asset verb in
-this plugin there is nothing to 403, and the answer lives on an operator screen
-(Admin → Users & Roles), not in an API response. State it as **a requirement a
-consumer verifies before depending on it, never as an assurance from us** — if
-an asset verb is ever added, the gap surfaces as a 403 at first real use rather
-than at setup, which is the failure mode `check_setup` exists to prevent.
+**`reads_verified` is partial in a second, less obvious way: whole permission
+classes are out of its reach.** The Lead Database object verbs (companies,
+opportunities, opportunity roles, sales persons, named accounts, named account
+lists, custom objects) need the Role's Company, Opportunity, Sales Person,
+Named Account, Named Account List and custom-object permissions, which no
+probe exercises. Marketo
+also gates the asset surface (`/rest/asset/v1/…` — programs, smart campaigns,
+smart lists, emails, templates, landing pages, forms, files, tokens, folders,
+tags, channels) behind the separate **Read-Only Assets** and **Read-Write
+Assets** permissions, scoped by workspace. That surface is reachable today
+through the generic `request` verb, writes and deletes included; all six
+probes are Lead-API reads, so an instance can return `reads_verified: true`
+while holding no Assets permission at all. State it as **a permission a
+consumer verifies on Admin → Users & Roles before depending on it, never as an
+assurance from us**; a missing one surfaces as the vendor's `603 Access denied`
+(`marketo.permission_denied` on a typed verb, the raw envelope in a `request`
+job result) at first real use.
 
 ## Business-data limits + data-export migration (2026-08-02)
 
@@ -328,9 +438,7 @@ every fault class. **Marketo returns HTTP 200 with a JSON envelope**
 (`{"success": false, "errors": [{"code": "...", "message": "..."}]}`) for
 almost every API-level fault instead — only the identity/token endpoint and
 true transport faults (5xx, connection errors, non-JSON bodies) carry a
-meaningful HTTP status. `http_client.py::MarketoClient` decodes every
-response body and classifies on the envelope's `success`/`errors[].code`,
-not on `response.status_code`. See `errors.py` for the sourced
+meaningful HTTP status. `http_client.py::MarketoClient` typed JSON helpers decode response bodies and classify on the envelope's `success`/`errors[].code`, not on `response.status_code`; the generic `request` verb instead preserves HTTP status and vendor body/errors as data, with credential redaction. See `errors.py` for the sourced
 code -> (our error code, retryable) table (601/602/603/604/606/607/609/610/
 612/613/615/701/702/709/714/1001-1037), built from the official Adobe Marketo
 Engage REST API error-codes reference (2026-07-28).
@@ -344,6 +452,9 @@ Roles fix). 1008 (no access to partition) → `marketo.partition_access_denied`
 admin screen entirely — Users & Roles > Users, not Roles). Collapsing these
 into one generic "auth failed" bucket (the initial v1 design) sends the
 operator to the wrong screen for 603/1008, which is why they're split.
+A gateway-level HTTP 401 or 403 that carries no vendor `errors[]` keeps its
+status: queued typed verbs report it as `marketo.auth_failed` (401) or
+`marketo.permission_denied` (403) rather than a generic transport fault.
 
 **Partial-batch results are NOT errors.** `create_or_update_leads`,
 `delete_leads`, `add_leads_to_list`, and `remove_leads_from_list` can return
@@ -433,10 +544,10 @@ existing one's Role turns out to be missing a permission `check_setup` names.
    **Access API** permission tree, check:
    - `Read-Write Person` — covers lead read/write AND static-list membership
      add/remove (one permission gates both, per Marketo's own docs).
-   - `Read-Only Activity` — covers the activity type catalog and activity log
-     reads.
-   - `Read-Only Campaign` (campaign listing; use `Read-Write Campaign` instead
-     if campaign edits are wanted later — this plugin never writes one).
+   - Activity permissions needed for the activity type catalog and activity
+     log reads; grant the broader vendor permission if the work requires more.
+   - Campaign permissions needed for listing, and `Read-Write Campaign` if
+     campaign edits are wanted later.
    - `Execute Campaign` (required for `trigger_campaign` to actually fire).
 
    `list_static_lists` (plain enumeration, not membership writes) may need an
@@ -489,11 +600,13 @@ detail.
   of its own (`get_required_vault_keys`/`get_declared_vault_keys` both
   return `[]`). The re-minted bearer token is never vaulted.
 
-## Scope note — no async Bulk Extract job flow (v1)
+## Scope note — no typed Bulk Extract/Import job flow yet
 
-Marketo's Bulk Extract API (create job → enqueue → poll status → download
-file) is a materially different, multi-call control-flow shape from every
-other verb in this connector and is explicitly deferred out of v1.
+Marketo's Bulk Extract and Import APIs (create job → enqueue → poll status →
+download file) are a materially different, multi-call control-flow shape from
+every other verb in this connector. Each step is reachable now through the
+generic `request` verb (`/bulk/v1/…`); typed job-ledger flows are later builds
+in `vendor_api_coverage.md`.
 `get_leads`'s internal pagination up to its row_limit hard cap (see
 "Business-data limits + data-export migration" above) covers the common
 ad-hoc case without the async job machinery.
@@ -516,4 +629,6 @@ silent for this plugin — no allowlist entry needed anywhere in `src/` or
 | `src/marketo_plugin/errors.py` | Envelope-first error classification (`classify_marketo_envelope`) from the response body's `errors[]` list. |
 | `src/marketo_plugin/export_containment.py` | Own-copy workspace-root containment gate (`assert_export_path_allowed`) binding `export_allowed_roots` — admits `output_tsv_path` for the six data-export-migrated read verbs. |
 | `src/marketo_plugin/marketing_actions.py` | Pure verb implementations: `describe_lead_fields`, `get_leads`, `get_api_usage`, `list_activity_types`, `get_activities`, `create_or_update_leads`, `delete_leads`, `merge_leads`, `list_campaigns`, `trigger_campaign`, `list_static_lists`, `add_leads_to_list`, `remove_leads_from_list`, `check_setup` — the six-verb data-export set write to `output_tsv_path` under the §7.1 migration (see above). |
+| `plugins/marketo_plugin/src/marketo_plugin/lead_database_objects.py` | Typed company, opportunity, opportunity-role and sales-person verbs: verified vendor paths, validation, pagination, per-record write results, redaction. |
+| `plugins/marketo_plugin/src/marketo_plugin/lead_database_process_metadata.py` | Shared descriptions and parameter maps for those sixteen process declarations. |
 | `src/marketo_plugin/plugin.py` | The `MarketoPlugin` EDGE provider — client lifecycle, error mapping, EDGE registration, `_export_path_gate`. |

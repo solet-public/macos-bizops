@@ -8,9 +8,11 @@ import json
 import sys
 import tempfile
 import unittest
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC = REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"
@@ -20,6 +22,7 @@ sys.path.insert(0, str(SRC))
 from agent_messaging_plugin.usage_economics import (  # noqa: E402
     AllowancePool,
     FlatRateQuotaStrategy,
+    MeteredApiProfile,
     MeteredApiStrategy,
     ProjectedAction,
     RotationDecisionInput,
@@ -28,7 +31,7 @@ from agent_messaging_plugin.usage_economics import (  # noqa: E402
     load_usage_economics_profile_catalog,
 )
 
-AS_OF = datetime(2026, 9, 22, 12, 0, tzinfo=UTC)
+AS_OF = datetime(2026, 10, 3, 12, 0, tzinfo=UTC)
 
 
 def _action(
@@ -41,7 +44,7 @@ def _action(
     reasoning_tokens: int = 0,
     latency: float = 0.0,
     accepted_work: float = 10.0,
-    quota_by_pool: dict[str, float | None] | None = None,
+    quota_by_pool: Mapping[str, float | None] | None = None,
 ) -> ProjectedAction:
     return ProjectedAction(
         name=name,
@@ -93,12 +96,45 @@ class UsageEconomicsSmoke(unittest.TestCase):
         self.assertEqual(sonnet.cache_write_per_mtok, 2.5)
         self.assertEqual(sonnet.output_per_mtok, 10.0)
 
+    def test_gpt61_metered_prices_and_provenance(self) -> None:
+        profile = self.catalog.resolve("openai-metered-gpt-6.1-sol-2026-10-03")
+        self.assertIsInstance(profile, MeteredApiProfile)
+        assert isinstance(profile, MeteredApiProfile)
+        self.assertEqual((profile.provider, profile.runtime, profile.model), ("openai", "codex", "gpt-6.1-sol"))
+        self.assertEqual((profile.input_per_mtok, profile.cached_input_per_mtok, profile.cache_write_per_mtok, profile.output_per_mtok, profile.reasoning_output_per_mtok), (2.0, 0.1, 2.5, 10.0, 10.0))
+        self.assertEqual((profile.currency, profile.price_unit, profile.refresh_status), ("USD", "per_million_tokens", "current"))
+        self.assertEqual(profile.source_ref, "https://developers.openai.com/api/docs/models/gpt-6.1-sol")
+        self.assertEqual(profile.effective_at, datetime(2026, 10, 3, tzinfo=UTC))
+        self.assertEqual(profile.fetched_at.date(), profile.effective_at.date())
+
     def test_search_snippet_price_is_a_rejected_stale_fixture(self) -> None:
         raw = json.loads(self.path.read_text(encoding="utf-8"))
         stale = next(row for row in raw["profiles"] if row["profile_id"].endswith("stale-snippet"))
         self.assertEqual(stale["refresh_status"], "stale")
         with self.assertRaisesRegex(UsageEconomicsProfileValidationError, "refresh_status"):
             self.catalog.resolve(stale["profile_id"])
+
+    def test_terra_metered_prices_select_the_cheaper_action(self) -> None:
+        profile = self.catalog.resolve("openai-metered-gpt-5.6-terra-2026-10-03")
+        self.assertIsInstance(profile, MeteredApiProfile)
+        assert isinstance(profile, MeteredApiProfile)
+        self.assertEqual((profile.provider, profile.runtime, profile.model), ("openai", "codex", "gpt-5.6-terra"))
+        self.assertEqual((profile.input_per_mtok, profile.cached_input_per_mtok, profile.cache_write_per_mtok, profile.output_per_mtok, profile.reasoning_output_per_mtok), (2.0, 0.2, 2.5, 12.0, 12.0))
+        self.assertEqual((profile.currency, profile.price_unit, profile.refresh_status), ("USD", "per_million_tokens", "current"))
+        self.assertEqual(profile.source_ref, "https://developers.openai.com/api/docs/models/gpt-5.6-terra")
+        self.assertEqual(profile.effective_at, datetime(2026, 10, 3, tzinfo=UTC))
+        self.assertEqual(profile.fetched_at.date(), profile.effective_at.date())
+        inputs = RotationDecisionInput(
+            provider="openai", runtime="codex", model="gpt-5.6-terra", effort="high",
+            current_context_tokens=200_000, capacity_tokens=258_400,
+            expected_calls_after=10, quality_floor=0.9,
+            actions=(_action("compact", output_tokens=20_000), _action("clear", input_tokens=100_000)),
+        )
+        result = MeteredApiStrategy(profile).decide(inputs)
+        self.assertTrue(result.resolved)
+        self.assertEqual(result.profile_id, profile.profile_id)
+        self.assertEqual(result.chosen_action, "clear")
+        self.assertEqual(result.expected_cost, 0.2)
 
     def test_metered_and_flat_rate_can_choose_differently(self) -> None:
         pool_usage = {
@@ -360,7 +396,7 @@ class UsageEconomicsSmoke(unittest.TestCase):
         }
         for expected, mutate in mutations.items():
             with self.subTest(expected=expected), tempfile.TemporaryDirectory() as tmp:
-                raw = {"schema_version": 1, "profiles": [copy.deepcopy(current)]}
+                raw: dict[str, Any] = {"schema_version": 1, "profiles": [copy.deepcopy(current)]}
                 mutate(raw["profiles"][0])
                 path = Path(tmp) / "bad.json"
                 path.write_text(json.dumps(raw), encoding="utf-8")

@@ -38,6 +38,7 @@ installer.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from collections.abc import Callable
 
@@ -53,6 +54,21 @@ _REQUIRED_POSTGRES_MAJOR = 17
 _PIN_CHECK_ID = "doctor::postgres_major_pin_v1"
 
 _PROBE_TIMEOUT_S = 10
+#: psql with no database connects to one named after the OS user, which a server need not have (iss_c04d8e99);
+#: ``postgres`` is the administrative database the bootstrap adapter already probes.
+_ADMIN_DATABASE = "postgres"
+
+# Keep execution and advisory rendering tied to the same immutable argv.
+_PSQL_SERVER_VERSION_ARGV = (
+    "psql",
+    "--no-psqlrc",
+    "--tuples-only",
+    "--no-align",
+    "--dbname",
+    _ADMIN_DATABASE,
+    "--command",
+    "SHOW server_version_num",
+)
 
 ServerVersionReader = Callable[[], tuple[int, str, str]]
 
@@ -73,14 +89,7 @@ def _run_psql_server_version() -> tuple[int, str, str]:
 
     try:
         completed = subprocess.run(
-            [
-                "psql",
-                "--no-psqlrc",
-                "--tuples-only",
-                "--no-align",
-                "--command",
-                "SHOW server_version_num",
-            ],
+            list(_PSQL_SERVER_VERSION_ARGV),
             capture_output=True,
             text=True,
             timeout=_PROBE_TIMEOUT_S,
@@ -91,9 +100,7 @@ def _run_psql_server_version() -> tuple[int, str, str]:
     return completed.returncode, completed.stdout, completed.stderr
 
 
-def _postgres_major_pin_advisory(
-    record: InstanceRecord, reader: ServerVersionReader
-) -> dict[str, JsonValue]:
+def _postgres_major_pin_advisory(record: InstanceRecord, reader: ServerVersionReader) -> dict[str, JsonValue]:
     expected: dict[str, JsonValue] = {
         "postgres_major": _REQUIRED_POSTGRES_MAJOR,
         "instance_name": record.name,
@@ -102,7 +109,7 @@ def _postgres_major_pin_advisory(
         "postgres_major": None,
         "server_version_num": None,
     }
-    source = "psql --no-psqlrc --tuples-only --no-align --command 'SHOW server_version_num'"
+    source = shlex.join(_PSQL_SERVER_VERSION_ARGV)
 
     code, stdout, stderr = reader()
     if code != 0:
@@ -140,13 +147,7 @@ def _postgres_major_pin_advisory(
             observed,
             source,
             "postgres_major_unpinned",
-            (
-                "Install and start the pinned major explicitly (postgresql@"
-                f"{_REQUIRED_POSTGRES_MAJOR}); the layer-0 repair path installs the "
-                "unversioned Homebrew formula and reports success without re-probing "
-                "the major it installed, so a green install step does not mean the "
-                "pinned major is what is running."
-            ),
+            (f"Install and start the pinned major explicitly (postgresql@{_REQUIRED_POSTGRES_MAJOR}); the layer-0 repair path installs the unversioned Homebrew formula and reports success without re-probing the major it installed, so a green install step does not mean the pinned major is what is running."),
         )
 
     return advisory_verified(

@@ -24,8 +24,7 @@ def _solet_or_fail() -> str:
     name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "g_suite_plugin.constants: SOLET_NAME env var is required to "
-            "resolve scoped vault keys.",
+            "g_suite_plugin.constants: SOLET_NAME env var is required to resolve scoped vault keys.",
         )
     return name
 
@@ -58,11 +57,41 @@ GOOGLE_TOKEN_URI: Final[str] = "https://oauth2.googleapis.com/token"
 
 OAUTH_CALLBACK_PATH: Final[str] = "/oauth/google/callback"
 
+# Narrowest-scope rule (Operator ord 89, 2026-11-07): gmail.modify covers every
+# Gmail verb this plugin ships EXCEPT permanent delete; gmail.readonly, labels,
+# compose and send are strict subsets of it, so requesting them as well would
+# only lengthen the consent screen. Permanent delete (users.messages.delete,
+# users.messages.batchDelete, users.threads.delete) accepts ONLY the full
+# mailbox scope, so it is requested only when connect_account is called with
+# gmail_permanent_delete=true; without it those three verbs return
+# gsuite.missing_scope and every other verb works.
+GMAIL_MODIFY_SCOPE: Final[str] = "https://www.googleapis.com/auth/gmail.modify"
+GMAIL_FULL_MAILBOX_SCOPE: Final[str] = "https://mail.google.com/"
+
+# Consumer Gmail addresses; any other Gmail address belongs to a Workspace domain.
+CONSUMER_GMAIL_DOMAINS: Final[frozenset[str]] = frozenset({"gmail.com", "googlemail.com"})
+ACCOUNT_TIER_CONSUMER: Final[str] = "consumer"
+ACCOUNT_TIER_WORKSPACE_USER: Final[str] = "workspace_user"
+ACCOUNT_TIER_UNKNOWN: Final[str] = "unknown"
+
 # One consent set for the whole plugin (all five products), granted once at
 # connect time. Full read/write per operator decision (2026-07-08). Docs +
 # Slides scopes are included now so Phase 2 needs no re-consent.
 OAUTH_SCOPES: Final[tuple[str, ...]] = (
-    "https://www.googleapis.com/auth/gmail.modify",
+    GMAIL_MODIFY_SCOPE,
+    "https://www.googleapis.com/auth/drive.apps.readonly",
+    "https://www.googleapis.com/auth/contacts",
+    "https://www.googleapis.com/auth/contacts.other.readonly",
+    "https://www.googleapis.com/auth/user.addresses.read",
+    "https://www.googleapis.com/auth/user.birthday.read",
+    "https://www.googleapis.com/auth/user.emails.read",
+    "https://www.googleapis.com/auth/user.gender.read",
+    "https://www.googleapis.com/auth/user.organization.read",
+    "https://www.googleapis.com/auth/user.phonenumbers.read",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/directory.readonly",
+    "https://www.googleapis.com/auth/tasks",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/spreadsheets",
@@ -78,12 +107,28 @@ ACCESS_TOKEN_EARLY_REFRESH_SECONDS: Final[int] = 120
 DEFAULT_ACCESS_TTL_SECONDS: Final[int] = 3600
 ACCESS_TOKEN_VALUE_KEY_TOKEN: Final[str] = "token"
 ACCESS_TOKEN_VALUE_KEY_EXPIRES_AT: Final[str] = "expires_at"
+# Credential-recording seam (2026-11-07): what Google granted at the code
+# exchange and which account tier signed in, carried across every refresh.
+# Absent on envelopes written before the seam = "unknown", never a refusal.
+ACCESS_TOKEN_VALUE_KEY_GRANTED_SCOPES: Final[str] = "granted_scopes"
+ACCESS_TOKEN_VALUE_KEY_ACCOUNT_EMAIL: Final[str] = "account_email"
+ACCESS_TOKEN_VALUE_KEY_ACCOUNT_TIER: Final[str] = "account_tier"
 
 # ---------------------------------------------------------------------------
 # Vault keys — scoped ``<solet>.<plugin>.<credential>`` (single-account)
 # ---------------------------------------------------------------------------
 VAULT_KEY_REFRESH_TOKEN: Final[str] = f"{_SOLET}.g_suite_plugin.refresh_token"
 VAULT_KEY_ACCESS_TOKEN: Final[str] = f"{_SOLET}.g_suite_plugin.access_token"
+
+# Multiple accounts (Operator ord 90, 2026-11-07): one key pair per connected
+# Google account under this prefix, plus one index entry naming the accounts,
+# their aliases and the default. The two legacy keys above are the pre-ord-90
+# single-account pair, migrated to the first account on first use and kept
+# until that account is disconnected.
+VAULT_KEY_ACCOUNT_PREFIX: Final[str] = f"{_SOLET}.g_suite_plugin.account__"
+VAULT_KEY_ACCOUNTS_INDEX: Final[str] = f"{_SOLET}.g_suite_plugin.accounts_index"
+VAULT_TAG_ACCOUNTS_INDEX: Final[str] = "g_suite_accounts_index"
+GOOGLE_REVOKE_URI: Final[str] = "https://oauth2.googleapis.com/revoke"
 
 VAULT_TAG_REFRESH_TOKEN: Final[str] = "g_suite_refresh_token"
 VAULT_TAG_ACCESS_TOKEN: Final[str] = "g_suite_access_token"
@@ -96,19 +141,14 @@ VAULT_TAG_ACCESS_TOKEN: Final[str] = "g_suite_access_token"
 # caller. Therefore NOT declared in get_required_vault_keys /
 # get_declared_vault_keys. Canonical convention: VAULT_AND_ADDRESS_BOOK.md
 # §"Pattern: Plugin Configuration via Address Book + Vault".
-VAULT_KEY_CLIENT_SECRET: Final[str] = (
-    f"{_SOLET}.default_address_book_plugin.google_client_secret"
-)
+VAULT_KEY_CLIENT_SECRET: Final[str] = f"{_SOLET}.default_address_book_plugin.google_client_secret"
 
 # ---------------------------------------------------------------------------
 # Address book entry — OAuth identity (client_id, client_secret, redirect_uri)
 # ---------------------------------------------------------------------------
 ADDRESS_BOOK_ENTRY_NAME: Final[str] = "google_oauth_app"
 ADDRESS_BOOK_ENTRY_TYPE: Final[str] = "api"
-ADDRESS_BOOK_ENTRY_DESCRIPTION: Final[str] = (
-    "Google Workspace OAuth 2.0 application identity "
-    "(client_id, client_secret, redirect_uri) for g_suite_plugin."
-)
+ADDRESS_BOOK_ENTRY_DESCRIPTION: Final[str] = "Google Workspace OAuth 2.0 application identity (client_id, client_secret, redirect_uri) for g_suite_plugin."
 ADDRESS_BOOK_FIELD_CLIENT_ID: Final[str] = "client_id"
 ADDRESS_BOOK_FIELD_CLIENT_SECRET: Final[str] = "client_secret"
 ADDRESS_BOOK_FIELD_REDIRECT_URI: Final[str] = "redirect_uri"
@@ -133,6 +173,12 @@ ADDRESS_BOOK_FIELD_REDIRECT_URI: Final[str] = "redirect_uri"
 # ---------------------------------------------------------------------------
 GMAIL_DEFAULT_MAX_RESULTS: Final[int] = 500
 GMAIL_MAX_RESULTS_CAP: Final[int] = 500
+# Since Gmail build 1 (2026-11-07) every Gmail list verb pages with
+# page_token / next_page_token, so a caller walks a whole mailbox 500 per call.
+# users.messages.batchModify / batchDelete take at most 1,000 ids per call, and
+# a modify add or remove list at most 100 label ids.
+GMAIL_BATCH_IDS_CAP: Final[int] = 1000
+GMAIL_LABEL_IDS_CAP: Final[int] = 100
 
 PARAM_ACKNOWLEDGE_OVERRIDE: Final[str] = "acknowledge_default_limit_override"
 PARAM_ROW_LIMIT: Final[str] = "row_limit"
@@ -147,9 +193,7 @@ DRIVE_UPLOAD_DEFAULT_MIME: Final[str] = "application/octet-stream"
 DRIVE_SHARE_ROLE_READER: Final[str] = "reader"
 DRIVE_SHARE_ROLE_COMMENTER: Final[str] = "commenter"
 DRIVE_SHARE_ROLE_WRITER: Final[str] = "writer"
-DRIVE_SHARE_ALLOWED_ROLES: Final[frozenset[str]] = frozenset(
-    {DRIVE_SHARE_ROLE_READER, DRIVE_SHARE_ROLE_COMMENTER, DRIVE_SHARE_ROLE_WRITER}
-)
+DRIVE_SHARE_ALLOWED_ROLES: Final[frozenset[str]] = frozenset({DRIVE_SHARE_ROLE_READER, DRIVE_SHARE_ROLE_COMMENTER, DRIVE_SHARE_ROLE_WRITER})
 
 # ---------------------------------------------------------------------------
 # Export mime types — Google-native docs export via Drive's export_media, not
@@ -233,6 +277,13 @@ ERROR_RATE_LIMITED: Final[str] = "gsuite.rate_limited"
 ERROR_NOT_FOUND: Final[str] = "gsuite.not_found"
 ERROR_INVALID_PARAMS: Final[str] = "gsuite.invalid_params"
 ERROR_API_ERROR: Final[str] = "gsuite.api_error"
+# 403 insufficientPermissions / ACCESS_TOKEN_SCOPE_INSUFFICIENT: the connected
+# grant lacks a scope the call needs; the message names the scope and the
+# connect_account step instead of an opaque 403.
+ERROR_MISSING_SCOPE: Final[str] = "gsuite.missing_scope"
+# The `account` argument named no connected account, or several accounts are
+# connected and none is the default; the message lists the connected accounts.
+ERROR_UNKNOWN_ACCOUNT: Final[str] = "gsuite.unknown_account"
 # sheets_get_values' post-fetch fail-loud-over-cap (business-data limits,
 # 2026-08-02): the effective row limit was exceeded, never silently truncated.
 ERROR_RESULT_TOO_LARGE: Final[str] = "gsuite.result_too_large"
@@ -242,6 +293,9 @@ ERROR_RESULT_TOO_LARGE: Final[str] = "gsuite.result_too_large"
 # ---------------------------------------------------------------------------
 RESULT_TYPE_CONNECT: Final[str] = "g_suite_connect_account_result"
 RESULT_TYPE_TEST_CONNECTION: Final[str] = "g_suite_test_connection_result"
+RESULT_TYPE_LIST_ACCOUNTS: Final[str] = "g_suite_list_accounts_result"
+RESULT_TYPE_DISCONNECT_ACCOUNT: Final[str] = "g_suite_disconnect_account_result"
+RESULT_TYPE_SET_DEFAULT_ACCOUNT: Final[str] = "g_suite_set_default_account_result"
 RESULT_TYPE_INTERFACE_START: Final[str] = "g_suite_interface_start_result"
 RESULT_TYPE_INTERFACE_STOP: Final[str] = "g_suite_interface_stop_result"
 RESULT_TYPE_GMAIL_LIST: Final[str] = "g_suite_gmail_list_result"

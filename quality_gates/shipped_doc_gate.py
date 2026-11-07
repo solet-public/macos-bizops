@@ -110,15 +110,10 @@ _ROOT_INSTRUCTION_RELPATHS: Final[tuple[str, str]] = ("AGENTS.md", "CLAUDE.md")
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Shipped-document gate (GTE-10).")
-    parser.add_argument("--repo-root", type=Path, default=Path.cwd(),
-                        help="checkout root to measure (default: cwd)")
-    parser.add_argument("--allowlist", type=Path, default=None,
-                        help=f"tracked-debt register (default: <repo-root>/{_DEFAULT_ALLOWLIST_RELPATH})")
-    parser.add_argument("--baseline", type=Path, default=None,
-                        help=f"declared tolerated subjects (default: <repo-root>/{_DEFAULT_BASELINE_RELPATH})")
-    parser.add_argument("--profile", action="append", default=[], metavar="BUNDLE",
-                        help="capability bundle to measure; repeatable "
-                             "(default: every bundle in capability_bundles.yaml)")
+    parser.add_argument("--repo-root", type=Path, default=Path.cwd(), help="checkout root to measure (default: cwd)")
+    parser.add_argument("--allowlist", type=Path, default=None, help=f"tracked-debt register (default: <repo-root>/{_DEFAULT_ALLOWLIST_RELPATH})")
+    parser.add_argument("--baseline", type=Path, default=None, help=f"declared tolerated subjects (default: <repo-root>/{_DEFAULT_BASELINE_RELPATH})")
+    parser.add_argument("--profile", action="append", default=[], metavar="BUNDLE", help="capability bundle to measure; repeatable (default: every bundle in capability_bundles.yaml)")
     return parser.parse_args(list(argv))
 
 
@@ -132,13 +127,7 @@ def _print_not_applicable(manifest_path: Path) -> None:
 
 def _render_profile(report: ProfileReport) -> str:
     """One profile's measurement line."""
-    return (
-        f"    {report.profile:<22} files={report.file_count:>5}  "
-        f"markdown={report.markdown_count:>4}  "
-        f"sources={report.source_count:>4}  "
-        f"blocking={len(report.blocking):>3}  "
-        f"tolerated={report.tolerated_count:>4}"
-    )
+    return f"    {report.profile:<22} files={report.file_count:>5}  markdown={report.markdown_count:>4}  sources={report.source_count:>4}  blocking={len(report.blocking):>3}  tolerated={report.tolerated_count:>4}"
 
 
 def _render_subject(subject: ToleratedSubject) -> str:
@@ -147,7 +136,8 @@ def _render_subject(subject: ToleratedSubject) -> str:
 
 
 def _baseline_violations(
-    report: LintReport, declared: dict[str, frozenset[ToleratedSubject]],
+    report: LintReport,
+    declared: dict[str, frozenset[ToleratedSubject]],
 ) -> list[str]:
     """Tolerated-subject drift, in BOTH directions.
 
@@ -165,14 +155,8 @@ def _baseline_violations(
             continue
         unexpected = measured - declared[name]
         missing = declared[name] - measured
-        violations.extend(
-            f"{name}: unexpected tolerated subject {_render_subject(subject)}"
-            for subject in sorted(unexpected)
-        )
-        violations.extend(
-            f"{name}: declared tolerated subject missing {_render_subject(subject)}"
-            for subject in sorted(missing)
-        )
+        violations.extend(f"{name}: unexpected tolerated subject {_render_subject(subject)}" for subject in sorted(unexpected))
+        violations.extend(f"{name}: declared tolerated subject missing {_render_subject(subject)}" for subject in sorted(missing))
     return violations
 
 
@@ -194,10 +178,7 @@ def _identity_verdict_lines(report: LintReport) -> tuple[list[str], list[str]]:
 def _print_classified_identity(lines: Sequence[str]) -> None:
     if not lines:
         return
-    print(
-        f"\nℹ️  CLASSIFIED: reason-bearing reserved-identity findings "
-        f"({len(lines)})"
-    )
+    print(f"\nℹ️  CLASSIFIED: reason-bearing reserved-identity findings ({len(lines)})")
     for line in lines:
         print(f"    {line}")
 
@@ -209,11 +190,7 @@ def _checkout_census(repo_root: Path) -> frozenset[str]:
     so their citations must resolve against the checkout's actual content surface
     instead of any one profile's shipped surface.
     """
-    return frozenset(
-        path.relative_to(repo_root).as_posix()
-        for path in repo_root.rglob("*")
-        if path.is_file() and ".git" not in path.relative_to(repo_root).parts
-    )
+    return frozenset(path.relative_to(repo_root).as_posix() for path in repo_root.rglob("*") if path.is_file() and ".git" not in path.relative_to(repo_root).parts)
 
 
 def _root_instruction_findings(repo_root: Path) -> list[str]:
@@ -242,20 +219,77 @@ def _root_instruction_findings(repo_root: Path) -> list[str]:
     return [f"{finding.check_id} {finding.key}" for finding in blocking]
 
 
+def _hydration_drift_advisories(repo_root: Path) -> list[str]:
+    """Advisory lines for a root instruction file whose hydration block is stale against its template.
+
+    ADVISORY ONLY, never blocking. Pass condition: each root file's block equals the block its template
+    renders to; a file with no block is not checked. Shipped component: this gate, run by the pre-commit
+    battery. Test: quality_gates/tests/hydration_block_drift_smoke.py (pass path and deliberate drift fixture).
+    A stale block is not a security or integrity boundary, so a finding here never changes the exit code.
+
+    The render takes ``solet_name`` from root_manifest.yaml and the checkout root as CLONE_DIR. A block rendered
+    on another machine can differ in that one path, so a line here is a prompt to look, not a verdict.
+    """
+    try:
+        from solet_setup_contracts.agent_instruction_block import AGENT_INSTRUCTION_FILES
+
+        name = _solet_name_from_manifest(repo_root)
+        if not name:
+            return ["hydration drift not checked: root_manifest.yaml names no solet_name"]
+        advisories = [_file_hydration_advisory(repo_root, relpath, name) for relpath in AGENT_INSTRUCTION_FILES]
+        return [advisory for advisory in advisories if advisory is not None]
+    except ImportError as exc:
+        # An installed copy that lacks a name the helpers use (the battery runs against the editable install,
+        # which may be another checkout's) is an advisory, not a crash.
+        return [f"hydration drift not checked: solet_setup_contracts unavailable: {exc}"]
+    except (OSError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError is a ValueError, not an OSError: a non-UTF-8 root file must be an advisory too.
+        return [f"hydration drift not checked: {type(exc).__name__}: {exc}"]
+
+
+def _solet_name_from_manifest(repo_root: Path) -> str:
+    """The ``solet_name`` line of root_manifest.yaml, or ``""`` when the file or the line is absent."""
+    manifest = repo_root / "root_manifest.yaml"
+    if not manifest.is_file():
+        return ""
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        if line.startswith("solet_name:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def _file_hydration_advisory(repo_root: Path, relpath: str, name: str) -> str | None:
+    """One root file's advisory: its block against its template rendered for this checkout, or ``None``."""
+    from solet_setup_contracts.agent_instruction_block import (
+        agent_template_path,
+        hydration_drift,
+        render_agent_instructions,
+    )
+
+    local = repo_root / relpath
+    template = repo_root / agent_template_path(relpath)
+    if not local.is_file() or not template.is_file():
+        return None
+    rendered = render_agent_instructions(
+        template.read_text(encoding="utf-8"),
+        name=name,
+        clone_dir=str(repo_root),
+    )
+    finding = hydration_drift(local.read_text(encoding="utf-8"), rendered)
+    return None if finding is None else f"{relpath}: {finding}"
+
+
 def _verdict(
-    report: LintReport, declared: dict[str, frozenset[ToleratedSubject]],
+    report: LintReport,
+    declared: dict[str, frozenset[ToleratedSubject]],
     root_instruction_findings: Sequence[str],
 ) -> int:
     """Print the measurement, then the blocking policy's answer to it."""
-    print(f"📊 shipped_doc_gate — {len(report.profiles)} profile(s), "
-          f"{report.union_file_count} distinct shipped files")
+    print(f"📊 shipped_doc_gate — {len(report.profiles)} profile(s), {report.union_file_count} distinct shipped files")
     for profile_report in report.profiles:
         print(_render_profile(profile_report))
 
-    citations = [
-        f"[{profile_report.profile}] {line}"
-        for profile_report in report.profiles for line in profile_report.blocking
-    ]
+    citations = [f"[{profile_report.profile}] {line}" for profile_report in report.profiles for line in profile_report.blocking]
     identity, classified_identity = _identity_verdict_lines(report)
     _print_classified_identity(classified_identity)
     drift = _baseline_violations(report, declared)
@@ -271,10 +305,16 @@ def _verdict(
         if lines:
             _print_findings(header, lines)
 
-    if any((
-        citations, identity, report.identity_anchor_violations, report.operator_identity,
-        drift, root_instruction_findings,
-    )):
+    if any(
+        (
+            citations,
+            identity,
+            report.identity_anchor_violations,
+            report.operator_identity,
+            drift,
+            root_instruction_findings,
+        )
+    ):
         return EXIT_BLOCKING
     print("✅ shipped_doc_gate: no blocking findings; tolerated debt at declared baseline")
     return EXIT_OK
@@ -315,6 +355,8 @@ def run(argv: Sequence[str]) -> int:
         print(f"🛑 GATE CRASH: shipped_doc_gate produced NO VERDICT — {type(exc).__name__}: {exc}")
         return EXIT_GATE_CRASH
 
+    for advisory in _hydration_drift_advisories(repo_root):
+        print(f"⚠️  ADVISORY (non-blocking) hydration drift: {advisory}")
     return _verdict(report, declared, root_instruction_findings)
 
 

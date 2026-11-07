@@ -6,23 +6,30 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from solet_manager.config import CreateConfig  # noqa: E402
 from solet_manager.contracts import ContractBundle  # noqa: E402
 from solet_manager.errors import StateConflictError  # noqa: E402
+from solet_manager.models import JsonValue  # noqa: E402
 from solet_manager.resume_rules import assert_decision_revision_allowed  # noqa: E402
-from solet_manager.transaction import assert_resume_identity  # noqa: E402
+from solet_manager.transaction import Transaction, assert_resume_identity  # noqa: E402
 
 _REPO = Path(__file__).resolve().parents[2]
 _CONTRACTS = _REPO / "plugins" / "github_midwife_plugin" / "knowledge_base"
-_CHECKS = 0
+_checks = 0
+_DECISION_CHOICES: dict[str, tuple[JsonValue, JsonValue]] = {
+    "autostart": ("enabled", "disabled"),
+    "coding_agents": (["claude_code"], ["codex"]),
+    "session_sources": ([], ["claude_local"]),
+}
 
 
 def _check(condition: bool, label: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    global _checks
+    _checks += 1
     if not condition:
         raise AssertionError(label)
 
@@ -34,7 +41,7 @@ def _transaction(
     operation_stages: dict[str, str] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        answers={"decisions": {decision_id: "enabled"}},
+        answers={"decisions": {decision_id: _DECISION_CHOICES[decision_id][0]}},
         operation_attempts=({"stage_id": attempted_stage},),
         stage_probe_attempts=(),
         operation_stages=(
@@ -55,8 +62,8 @@ def _decision_change_refused(
 ) -> bool:
     try:
         assert_decision_revision_allowed(
-            transaction,
-            {"decisions": {decision_id: "disabled"}},
+            cast(Transaction, transaction),
+            {"decisions": {decision_id: _DECISION_CHOICES[decision_id][1]}},
             bundle,
         )
     except StateConflictError:
@@ -72,7 +79,7 @@ def _target_change_refused() -> bool:
     )
     try:
         assert_resume_identity(
-            retained,
+            cast(Transaction, retained),
             name="fixture",
             target=Path("/other"),
             input_fingerprint="sha256:" + "a" * 64,
@@ -90,8 +97,7 @@ def main() -> int:
         "autostart is a decision, not immutable transaction identity",
     )
     _check(
-        CreateConfig("fixture", Path("/other"), True).to_identity_dict()
-        != enabled.to_identity_dict(),
+        CreateConfig("fixture", Path("/other"), True).to_identity_dict() != enabled.to_identity_dict(),
         "target remains immutable transaction identity",
     )
     bundle = ContractBundle.load(source_revision="fixture", directory=_CONTRACTS)
@@ -100,14 +106,30 @@ def main() -> int:
         "safe-window control: stage 20 has not consumed autostart",
     )
     _check(
+        not _decision_change_refused(
+            _transaction("system_dependencies", decision_id="coding_agents"),
+            bundle,
+            "coding_agents",
+        ),
+        "coding-agent choice stays mutable before Genesis consumes it",
+    )
+    _check(
         _decision_change_refused(_transaction("genesis"), bundle),
         "frontier control: stage 30 consumed autostart and still refuses a flip",
     )
     _check(
-        not _decision_change_refused(
+        _decision_change_refused(
             _transaction("genesis", decision_id="coding_agents"),
             bundle,
             "coding_agents",
+        ),
+        "Genesis consumed the coding-agent choice and refuses a later flip",
+    )
+    _check(
+        not _decision_change_refused(
+            _transaction("genesis", decision_id="session_sources"),
+            bundle,
+            "session_sources",
         ),
         "never-consumed decision control remains mutable after an unrelated stage",
     )
@@ -129,7 +151,7 @@ def main() -> int:
         _target_change_refused(),
         "identity control: a target change remains refused after autostart projection changes",
     )
-    print(f"transaction_abandon_smoke: {_CHECKS} checks passed")
+    print(f"transaction_abandon_smoke: {_checks} checks passed")
     return 0
 
 

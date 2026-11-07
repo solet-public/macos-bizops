@@ -61,6 +61,7 @@ if str(_SRC) not in sys.path:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _real_state_fake import RealShapeState  # noqa: E402
+from _register_unit_double import fixture_assignment  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
     AGENT_ROLE_BINDING_NAMESPACE,
 )
@@ -148,7 +149,7 @@ def _spawn_live(
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id=agent_instance_id, lane_id="lane-x", brief_ref="",
+            agent_instance_id=agent_instance_id, lane_id="lane-x", assignment=fixture_assignment(),
             work_class=WORK_CLASS_READ_ONLY, budget_line="b1", host="operator",
             report_by_seconds=0, spawned_by_instance_id=spawned_by_instance_id,
         ),

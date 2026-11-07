@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::run_workflow",
+  "display_name": "Zuora: Run Workflow",
+  "description": "Start a workflow run (POST /workflows/{workflow_id}/run) with optional input parameters; Zuora's reserved words controller, action, id, user_email, user_token and format are refused. Completion carries the run id and status. Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "Start a Zuora Workflow run on demand, passing input parameters the workflow defines. Zuora reserves controller, action, id, user_email, user_token and format, which are refused. Returns the new run id and status to poll with get_workflow_run or halt with stop_workflow_run.",
+  "result_processor_customizations": {
+    "action_label": "Zuora workflow run started",
+    "result_type": "zuora_run_workflow_result",
+    "result_description": "Queued job envelope. Completion carries the run record (id, status, definitionId, createdAt) in data. Queued means the run request was accepted for dispatch, not that the run finished.",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential values never appear; [REDACTED] marks where Zuora echoed one."
+  },
+  "error_processor_customizations": {
+    "action_context": "Start a workflow run (POST /workflows/{workflow_id}/run) with optional input parameters; Zuora's reserved words controller, action, id, user_email, user_token and format are refused. Completion carries the run id and status.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape or an output/input path outside export_allowed_roots (zuora.export_path_refused). zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.object_not_found, zuora.validation_failed (vendor 4xx), zuora.query_failed (Data Query 4xx), zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the needed Workflow, Data Query or Files permission. Read current vendor state with the matching get or list verb before retrying a write. Back off on rate limits."
+  }
+}

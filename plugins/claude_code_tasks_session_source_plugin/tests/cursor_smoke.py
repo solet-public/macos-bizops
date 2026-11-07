@@ -59,7 +59,38 @@ def _make_task(path: Path, task_id: str, mtime: float | None = None) -> None:
         os.utime(path, (mtime, mtime))
 
 
+def test_new_snapshot_replays_before_task_index() -> None:
+    from ananta.llm.session_ledger.poll_budget import COMPLETED_VERSION_KEY
+    from ananta.llm.session_ledger.types import PollDiscoveryProgress
+
+    with tempfile.TemporaryDirectory(prefix="task_snapshot_") as scratch:
+        root = Path(scratch)
+        subdir = root / "session"
+        subdir.mkdir()
+        _make_task(subdir / "b.task", "b")
+        plugin = ClaudeCodeTasksSessionSourcePlugin()
+        plugin.initialize({"glob": "*.task"})
+        refs = list(plugin.discover_sessions_for_poll(str(root), None, read_event_cursor=lambda key: None, can_admit_next=lambda: True, progress=PollDiscoveryProgress()))
+        events = list(plugin.read_events(str(root), refs[0], None))
+        version = plugin.completed_session_fingerprint(str(root), refs[0])
+        assert version is not None
+        stored = {**plugin.event_read_cursor(str(root), refs[0], events[-1]), COMPLETED_VERSION_KEY: version}
+        _make_task(subdir / "a.task", "a")
+        # Inserting before the previous index must not skip the new first item.
+        current = list(plugin.discover_sessions_for_poll(str(root), None, read_event_cursor=lambda key: stored, can_admit_next=lambda: True, progress=PollDiscoveryProgress()))[0]
+        prepared = plugin.prepare_poll_event_cursor(str(root), current, stored)
+        replay = list(plugin.read_events(str(root), current, prepared))
+        assert [raw.payload["task_id"] for raw in replay] == ["a", "b"], "insert-before-index must retain the new task and existing stable IDs"
+        assert [raw.vendor_event_id for raw in replay] == ["task_session_a", "task_session_b"]
+        assert prepared is None, "new task snapshot must clear old task_index"
+        # A changed directory during the read cannot receive completion.
+        _make_task(subdir / "c.task", "c")
+        assert plugin.completed_session_fingerprint(str(root), current) is None, "unstable complete directory snapshot remains pending"
+    print("PASS configured task snapshot insertion and unstable-version replay")
+
+
 def main() -> int:
+    test_new_snapshot_replays_before_task_index()
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         sess_a = root / "uuid-a"
@@ -102,9 +133,7 @@ def main() -> int:
         per_session_cursors: dict[str, dict[str, object]] = {}
         for ref in sessions:
             events = list(plugin.read_events(root_uri, ref, None))
-            per_session_cursors[ref.external_session_id] = plugin.event_read_cursor(root_uri,
-                ref, events[-1] if events else None
-            )
+            per_session_cursors[ref.external_session_id] = plugin.event_read_cursor(root_uri, ref, events[-1] if events else None)
 
         # Pass 2: cold-start the discovery cursor to the MAX mtime across both subdirs,
         # then verify no sessions are yielded.

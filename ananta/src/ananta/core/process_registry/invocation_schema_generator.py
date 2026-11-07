@@ -328,6 +328,7 @@ class InvocationSchemaGenerator:
             "context_overrides": {},
             "metadata": {
                 "is_inference_capable": metadata.is_inference_capable,
+                "is_async": metadata.is_async,
                 "estimated_duration": "< 1s",  # Could be made configurable
                 "version": metadata.version,
             },

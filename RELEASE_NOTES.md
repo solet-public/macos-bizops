@@ -2,6 +2,356 @@
 
 Newest release first. Earlier releases follow below the divider.
 
+## 2026-11-07 — r72: a solet on stable r71 can update; connectors reach the full vendor surface; Codex is optional; no plugin work runs on the event loop; adopter-reported install and update fixes
+
+**Solet Manager manager-v0.1.0-r72.**
+
+- git-controller-commit names the direct holds-role route.
+- a missing or drifted coordination receipt is said at spawn and in the gauge notice.
+- solet-bridge inbox --since bounds the direct section and since bounds role_entries on every surface.
+- a seat or lane started by the operator launcher gets a verified coordination identity.
+- peer_inbox reports role_read_coverage and solet-bridge inbox --since reports since_applied.
+- stable r71 predecessor, stable publish refuses before any work unless the anchor table lists the live stable head, non-strict-v1 re-issue completes with a named reason.
+- the guest-validation transport carries a stable staged origin, so a stable publish gets its fresh-guest proof.
+- Core AI embeddings release each output so the GPU path no longer leaks one IOSurface per embed.
+- the shipped coordination-hooks directory is restored to the security-reviewed 0.8.2 bytes, tree b944da3f, undoing the unreviewed 0.8.3 change.
+- the step7 fixture seals r2 from the assembled seed and keys its cache on the builder code, so a cache built from a dirty tree no longer turns settled-preview leg (d) red.
+- peer and bridge async routes do no slow blocking work on the request path, delivery drives run on a bounded named executor, with async_route_blocking_class_smoke.
+- a stable re-issue runs the live-head supported-predecessor check before any public act.
+- the checkout git gate refuses git beside an evaluator word or an unreadable shell construct for every role and fails closed on untokenisable git, the skill runs Step 9 as step9.sh.
+- an authoritative versioned retired-role registry, retire_role and list_retired_roles verbs, and a retired name refused with peer_role_retired before anything persists.
+- corrective, retire_role and list_retired_roles declared in get_edge_process_definitions so the EDGE declaration parity holds after the batch-5 battery red.
+- inbox UTC comparison and runbook wording fixes.
+- gate registry and reconciliation fixture fixes.
+- update journaling, candidate-tree, and doctor fixes.
+- clear the small-fix battery reserved-identity blocker.
+- harden peer inbox continuation cursors.
+- guard stable publish paths for predecessor bridges.
+- share create-owned edits and preflight hydration carry.
+- remove copied renderer defaults from curation metadata.
+- cover tampered seed lock digest refusal.
+- fix executor failure diagnostics.
+- docs: use bridge notifications for async run-test results.
+- docs: document thinking completion resume contract.
+- Fix below-profile host gate refusal wording.
+- docs: correct session summary origin source references.
+- docs(lifecycle): correct apply_manifest binding contract.
+- docs: correct lifecycle unit dispatch example.
+- Continue release smoke checks after optional Ruby skip.
+- test: guard launchd PATH copies across packages.
+- Isolate blue-green smoke runtime state.
+- Add return schemas for role-read receipt actions.
+- fix: respect tracked Claude settings and linked worktrees.
+- test(smoke): make a2 hook pin assertion nonvacuous.
+- fix(messaging): replace stale interim overdue marker.
+- fix: enforce forbidden queries in retrieval companions.
+- docs(agent-messaging): clarify cross-session channel routing.
+- Accept healthy signal-terminated LaunchAgent restart.
+- Normalize signal exits across adapter envelopes.
+- Fix peer registry wrong-kind instance diagnostics.
+- Four units were withdrawn from bundle 2 (register bookkeeping only; no shipped change).
+- land fix-wave bundle 3.
+- fix-wave Bundle 4.
+- fix-wave Bundle5 R3.
+- compact heartbeat timeout reasons.
+- measured slow-smoke timeout budgets.
+- fail closed before unverified restart effects.
+- cap concurrent heavy solet_cli smokes at 4.
+- restore same-namespace schema union and canonical transactional job ids.
+- heartbeat git reads disable optional locks.
+- canonical async session-launch submission envelope.
+- executable companion bootstrap filing example.
+- fail-closed Git-Controller landing sequence and script fence repair.
+- truthful per-kind omission accounting.
+- provider-local hard-delete filter grammar.
+- post-registration step isolation.
+- fix(git-controller): the authorization hook's stop directive needs its target immediately after STOP/HOLD/RETRACT, and a first-party PROCEED-with-batch handoff lifts an earlier HOLD.
+- fix(git-controller): single-unit and release-batch pre-merge digests bind the --branch commit tree, and a single-unit authorization carries base_commit_sha and candidate_digest_sha256.
+- fix(agent-messaging): a managed dispatch's first turn is its charter, so lanes start their assigned work instead of waiting for a separate START.
+- fix(git-controller): landing intake authorizes from ticket status and typed register readiness, removing sender-role checks, operator delegation and the 14-day horizon.
+- fix(gates): slow smokes get measured, finite per-entry budgets and the coding-agent FSEvents watcher waits for real native readiness, so the landing battery's run_smokes entry stops timing out on base.
+- fix(quality-gates): Git-Controller gate re-homing handles setuptools finder-style editable installs, so a re-homed candidate venv provisions from the live shared venv.
+- fix(agent-messaging): detail-page score pattern no longer requires the Updated token.
+- fix(selector): stale capability readings are advisory, so dispatch is never blocked by data age.
+- feat(platform-health): daily model capability catalog refresh with a renewal guard that alerts the operator once per change of severity.
+- fix(agent-messaging): model capability refresh roster covers the available models.
+- fix(hooks): disable the checkout wiring of the git gate hook.
+- docs: CLAUDE.md and AGENTS.md agree that a landing is authorized by the landing-authorization receipt.
+- fix(agent-messaging): the platform launches a lane by unit id; brief_ref and brief_sha256 are removed, with a cancel-only path for historical dispatch rows, and the consumer docs, cards and census name the Unit.
+- docs(instructions): the two root instruction files say the git rules are written procedure that no hook checks in this checkout, and use plain wording for the destructive-form citation and the single-session exemption.
+- docs(skill): Step 7.5 runs the focused smoke register for text-only landings and the landing-sequence smoke pins the new skill sha.
+- docs(skills): correct the 2026-10-10 skills audit findings for author-kb-content, author-sfx-kb-article, create-process and options-report.
+- docs(skill): fix the 20 findings of the 2026-10-10 skills audit in git-controller-commit and run-test.
+- fix(model-catalog): catalog reads page and truncate with a named warning instead of raising at 100 rows.
+- fix(agent-messaging): the dispatch selector excludes and counts unknown-effort catalog rows instead of raising.
+- docs(skills): correct the 2026-10-10 skills audit findings for project-solet-steward, register-issue-grouping and register-backlog-reconciliation.
+- docs(skill): the liveness step 4 drain retries once from the first page and the cursor smoke pins the new operative section.
+- feat(agent-messaging): model_capability_harness reads the Codex and Claude harness model lists and holds the runtime adapters, the join key and the one alias row.
+- feat(agent-messaging): withdraw_model_capability_cell, reinstate_model_capability_cell and read_model_capability_history complete the capability cell lifecycle.
+- fix(gates): the Git-Controller authorization helper takes one --checkout per repository a unit spans, at Step 0 and at the pre-merge guard.
+- fix(fleet-maintenance): every psolet filed names a standing group, with a loud fallback.
+- feat(agent-messaging): the model catalog refresh learns which models exist from the harness lists and takes score and cost from the leaderboard rows; the hand-kept roster is deleted.
+- feat(agent-messaging): the model catalog refresh runs a harness pass: an absence clock, reversible automatic withdrawal and reinstatement, and a refresh never reverses a withdrawal.
+- Integrated release landing: git-text gate removal and hook interpreter pin carry across a changed hooks.json, one composed tree, one full battery.
+- fix(quality-gates): battery retries a failed smoke once, successor without the SKILL.md notes.
+- fix(agent-messaging): a peer send that stores the message but starts no recipient turn stays completed and gains send_status=stored_no_wake and a do-not-resend sender_notice.
+- fix(agent-messaging): a role peer_inbox read whose receipt refill spends its page budget returns the unserved rows it found, marked scan_truncated with a continuation cursor, instead of raising.
+- docs(root-instructions): a lane commits in its own worktree, only the shared checkout is Git-Controller-only.
+- docs(relay): promote native candidate handoff verbs.
+- fix(messaging): recover missed Codex inbox doorbells.
+- fix(messaging): assign native spawned Unit owner before first turn.
+- fix(oauth): forward record_oauth_client_token_use through VaultServiceProxy.
+- docs(controller): record gate verdicts before landing preflight.
+- fix(smoke): pin only the landing script the fixture executes.
+- Narrow LM Studio references in service smoke.
+- Document native landing commands for Git-Controller.
+- Reject missing unit id before evidence path creation.
+- Clarify inbox horizon option requirements.
+- Fix parser flags in fleet liveness inbox instructions.
+- Use a neutral directory name in the quoted hook pin fixture.
+- Move run-test and rename scratch files out of /tmp.
+- Show the command actually run in whole-tree rerun hints.
+- Report pyright no verdict in quality summary.
+- Reject noncanonical preserved-never bundle destinations.
+- Align service interface stubs with concrete signatures.
+- Add pg_hba atomic-write interruption coverage.
+- Fix autostart render smoke PATH assertion arguments.
+- test(coreai): verify canary child isolation.
+- Split seed verifier smoke bundle and minting roots.
+- Add forward peer inbox migration smoke coverage.
+- Document managed drive-on-delivery outcomes.
+- Tighten seed verifier smoke attribution checks.
+- Prove delivery drive queue slots release after completion.
+- Treat resolved issues as terminal when rendering goal items.
+- Remove redundant issue category follow-up.
+- Start lane worktrees from the integration head.
+- Include loaded factory source in Step7 fixture cache keys.
+- Prune expired Step7 cache and scratch directories on mint.
+- Retain per-smoke outcomes and bounded output in battery receipts.
+- Include moved Step7 helper code in fixture cache digests.
+- Scrub inherited GIT variables from quality gate fixtures.
+- Disable account Apps in managed Codex lanes.
+- fix: select real-root evaluator smokes for focused landings.
+- Replace stale running battery receipts with provenance.
+- Detach measured embedding and search actions from the serial poller.
+- Report explicit code-quality paths without narrowing whole-tree checks.
+- Authorize coordinator rotation through typed session continuity.
+- Run the Main pickup digest from the Project Solet root.
+- Split unusable-name notice coverage into a focused smoke.
+- Require fresh parity evidence for seed assembly authorization.
+- Key run-smokes receipts by candidate HEAD.
+- Include channel identity in driver error detail.
+- Protect Main pickup lesson storage guidance.
+- Format the Main notice waiter suppression candidate.
+- Move deploy smoke fixtures to support module.
+- Prove deploy receipt liveness with production flock tests.
+- Page past held embedding and search rows in bounded queue reads.
+- Bound latest-job retrieval to ordered pages.
+- Preserve CRLF tails when refreshing rendered sections.
+- Allow canceling failed-start managed dispatches.
+- Require confirmed poller completion writes before acknowledgement.
+- Clarify wrong-slot peer inbox identity errors.
+- Emit a non-refusing polling advisory from the Main-seat Stop hook.
+- Release a provably gone session-launch reservation owner on the next launch.
+- Retry deploy readiness within the restart deadline.
+- Pin that a custom armed label hand-off gets no pickup advisory.
+- Retry a malformed swap row during drain and read any holds reply as advisory.
+- Classify a permission prompt only from its live pane tail shape.
+- Release a NULL-pid terminal launch owner and read each owner's liveness once.
+- Record the consumed E2 verdict in the release manifest and reuse it on reissue only while live.
+- Add an attend command that registers an attended session through its OAuth client.
+- Add an advisory focused smoke selector that maps changed paths to their registered gate smokes.
+- Add a byte-identity smoke that fails when the two literal-census copies diverge.
+- Union the focused smoke selector register into the Step 7.5 focused register.
+- Back off the Claude heartbeat hook for one window after a recorded failure.
+- Register the two agent-messaging smokes so the registration gate passes.
+- Report an unreadable focused-selector input as an advisory and exit 0.
+- docs(gates): mark the landing-wave.v1 path retired in the gate procedure and point to the integrated release landing.
+- Add an evidence retention verb that removes lane evidence directories the register proves finished.
+- Refuse a raw send that names a bound role with a peer_send_by_name pointer.
+- Populate standard fields on the five transactional write_state callers and guard them with offline smokes.
+- Treat unreadable stdin as the empty SessionStart event and state only shipped coverage.
+- Admit every guest boot through a read-only preflight and stop every guest from inside.
+- Keep every failure marker in failing-smoke excerpts and run Pyright through a validated Node.
+- Inject the live register digest and inbox counts at SessionStart for the Claude plugin, hook ports and workers and make the heartbeat parity fixture Git-independent.
+- Type-check the .claude/hooks tree and its hook tests in whole-tree strict Pyright with one exact head_policy_smoke exclusion.
+- Make the coordination-hooks SECURITY.md and README describe the landed heartbeat bytes.
+- Scope the syntax and radon gates to the files a landing merge touched.
+- Cut the coordination-hooks Claude plugin to 0.9.1 and move the Codex twin stamp after R2 and C4.
+- Scope god_class and pyright to the touched files and their importers on landing merges.
+- Export SHELL=/bin/bash from the tmux lane, seat and hydrated launchers and install a guarded zshenv fallback from clone setup.
+- Scope the per-file landing gate to .claude/hooks with measured hook debt.
+- Capture Codex token usage and Claude message identity in the ledger.
+- Filter dispatch candidates by replayable selector constraints.
+- Select accepted pinned tiers and preserve receipt replay.
+- Guard optional session-source imports in the ledger smoke.
+- Record allowance history and expose deduplicated session usage totals.
+- Split unknown-model pricing smoke assertions into focused checks.
+- meet the embedding description bound for usage process reads.
+- Recover Codex usage ingestion and resolve runtime UUID totals.
+- Add guarded clearing of ledger session labels.
+- Register the scheduling list and routing regression smoke.
+- Guard optional session-source smoke fixtures in shipped profiles.
+- Register the scheduling private-PG rebind smoke.
+- Activate resumable filesystem polling and oversized selection.
+- Preserve Claude session suffixes across unknown line types.
+- Bound session status embedding text to 400 characters.
+- Allow verified coordinator role successors to resolve assigned dispatches.
+- Measure managed-dispatch uptake from initial worker ACK receipts.
+- Attribute MCP process failures without changing call behavior.
+- Bind smoke descendants to the runner import environment.
+- Verify milestone claims against accepted dispatch receipts.
+- Require effective typed verdicts for composite landing authorization.
+- Bootstrap the static review smoke for isolated execution.
+- Expose peer inbox page coverage and cursor safety.
+- Require managed dispatch acknowledgement before starting work.
+- Recognize recoverable lane bytes and empty runtime scaffolds before retirement.
+- Clarify detached deploy and dispatch starvation diagnostics.
+- Checkpoint failed ledger embedding sweeps and preserve outage retries.
+- Handle Core AI executor submission refusal safely.
+- Load retained plugins from transition fixture targets.
+- Keep optional Claude hooks usable after their files disappear.
+- Normalize fake-child SIGINT and prove signal-path restoration.
+- Share plugin registration metadata projection.
+- Check concrete service signatures with portable capture smokes.
+- Expose authorized immutable lane evidence preservation and readback.
+- Expose truthful battery summaries and bounded repeat-flaky advisories.
+- Use invoking interpreter in identity smoke.
+- Add transactional support to RealShapeState fake.
+- Annotate deploy joseki steps for deterministic continuation.
+- Exclude swap_orchestrator.py from Ruff formatting.
+- Admit apply, swap, rollback and stop through one per-solet owned-deploy lock.
+- Expose bounded memory corpus counts.
+- Expose session ledger corpus counts.
+- Move cloud backfills off dispatch under one shared local lock.
+- Report ledger and tmux metadata divergences without session actions.
+- Retire lanes only with explicitly pinned verified preservation.
+- Derive payload requirements from runtime readers and release code roots from the root manifest.
+- Provision private PostgreSQL for nine live smokes.
+- Enable operator model cells and remove quota admission.
+- Replace retired identity tokens in authorization fixtures.
+- Preserve idle single-line Codex drafts around the owned delivery doorbell.
+- Wire fleet maintenance startup and keep profile templates in lockstep.
+- Add verified deploy notices and bound hourly polling diagnostics.
+- Record append-only session cron observations.
+- Preserve retirement outcomes and verify host teardown.
+- Record causal managed-dispatch Unit observations.
+- Document native reviewer evidence preservation workflow.
+- fix(seed-factory): validate manager release note public text.
+- Require complete closing fences in feedback heading validation.
+- Check sealed seed release notes before public publication.
+- Render deterministic per-seed public release notes.
+- fix(feedback): bound runbook embedding description.
+- fix(messaging): defer peer ACK policy to bound task.
+- docs: shorten close-out checklist embedding description.
+- fix(quality): use neutral no-deadline smoke fixture token.
+- Use neutral environment names for the smoke process collector.
+- Observe session cron attempts and cover optional hook registrations.
+- Expose no-deadline quality gate metadata.
+- Run registered smokes to their natural exit through the owned-process collector.
+- style(ledger): format Claude block advisory regression fixtures.
+- Refresh unknown Claude metadata fixtures and guidance.
+- docs: correct issue lifecycle unit dispatch guidance.
+- Rewrite filing templates to typed parent form.
+- Design measured capability and expected-cost model selection.
+- Migrate fleet maintenance filing to typed parent flags.
+- Declare versioned catalog policy and source storage.
+- Migrate full smoke register calls to typed Problem verbs.
+- Permit unknown model capability windows.
+- Expose versioned catalog policy and source lifecycles.
+- Document model catalog policy lifecycle processes.
+- Declare catalog coordinator run and schedule records.
+- Add registration-selected model metadata adapter protocols.
+- Use policy windows for harness absence clocks.
+- Retarget register skills to typed parents.
+- Implement durable first-go enqueue before managed spawn release.
+- Read catalog freshness windows from live policy.
+- Document usage meters and flow policy guidance.
+- Extract tmux bypass confirmation from the host driver class.
+- Report ingestion freshness on session-ledger search results.
+- Rewrite the grooming skill around the six groomed expectations, theme scoring and rank.
+- Revise the grooming skill with landed-fix scoring, commit-to-Change tracing and canonical recording forms.
+- Revise the grooming skill with the wave-2 campaign rules, lane gaps and reviewer doubts.
+- Revise the grooming skill with W1 inside Step 3, the wave-3 grader items and the revision-2 reviewer doubts.
+- Normalize vendor tool events to accepted ledger shapes.
+- Let inbox reads wait for watcher registration recovery.
+- Preserve the autonomic holder across provider registration gaps.
+- Expose recurring wake owners with schedule history.
+- Use a neutral prefix for selected-test Pyright configs.
+- Keep Pyright custody lexical across linked packages.
+- Report working liveness from busy Codex watch panes.
+- Clarify grooming relation lifecycle guidance.
+- Update grooming skill for five expectations and bounded splits.
+- Reconcile grooming relation and duplicate workflows.
+- Document fixed closure for duplicates of closed tickets.
+- Clarify W1 exemptions and unknown-cause grooming evidence.
+- Document custody repositories for unidentified-client incidents.
+- Clarify landed-work proof and reviewed commits in the grooming skill.
+- Document composite Issue division in grooming skill.
+- Clarify grooming scores and cross-repository issue placement.
+- Sweep terminal lane worktrees when a lane retires.
+- Retire lanes whose assigned Unit is provably finished.
+- Let a candidate register a gate smoke in its own fragment file.
+- Make the tmux driver channel wait for an empty composer before it sends.
+- Let a candidate declare a shipped-smoke contract row and its manifest exclusion in its own fragment files.
+- Make a channel-absent delivery's finished drive outcome readable by message id.
+- Sync the profile template and stamp timestamp on six ActionResult envelopes.
+- Inventory the three retired git-gate bans in the coordination-hooks docs and correct the stale gate wording.
+- Expose the owning solet clone root as a refusing public query.
+- Keep the hydration advisory from crashing when the installed contracts lack a name.
+- Move the provider overlay host rule into its own module.
+- Name the manual wake instruction when an operator-hosted seat has no driver channel.
+- Correct stale gate references in the seed update runbook.
+- Use root Ruff formatting for the target adapter smoke.
+- Document Zuora vendor API coverage.
+- Document Marketo vendor API coverage.
+- Document Salesforce vendor API coverage and build gaps.
+- Document Codex-optional install and readiness inventory.
+- Add Snowflake vendor API coverage inventory.
+- Make Codex setup optional in operator documentation.
+- Remove the unverified macOS business-operations repository id.
+- Expose authenticated Marketo requests through the existing job ledger.
+- Add authenticated generic requests to Zuora.
+- Add a Claude-only E3 guest validation smoke.
+- Remove read-only posture from bizops connector guidance.
+- Add Salesforce authenticated requests through the pinned CLI.
+- Run wheel resource probes outside the editable finder.
+- Guard event-embedding drain loop responsiveness.
+- Resolve inactive carrier probe inputs without an LM Studio URL.
+- Exempt vendor query literals in declared connector plugins.
+- Report sanitized registry initialization failures during startup.
+- Measure event-loop lag across every solet runtime loop.
+- Fix event embedding checkpoint recovery and duplicate progress.
+- Expose enrolled inventory collisions before import approval.
+- Keep async facades and lifecycle hooks off the event loop.
+- Name changed seed identity fields when refusing setup resume.
+- Keep bridge and OAuth request loops responsive.
+- Keep poller state I/O off the runtime loop.
+- Keep standalone helper I/O off their event loops.
+- Add authenticated Snowflake REST requests with vendor RBAC.
+- Add per-thread CPU census and retain loop stall attribution.
+- Filter copied smoke register fragments during seed assembly.
+- Bound session polling and defer CoreAI profiler callbacks.
+- Compose bounded per-loop workers with bridge and action dispatch.
+- Record handler entry on event-loop threads with configurable limits.
+- Keep seed verification status reads off the action path.
+- Dispatch open_bridge body to bridge workers and declare it dispatch-only.
+- Classify serial-only smokes by measured contention.
+- Add typed Marketo company, opportunity, opportunity role and sales person verbs.
+- Make the importer and hook-pin smokes pass on a born seed.
+- Snapshot step7 cache sources with copy-on-write clones and one shared sealed base.
+- Add typed Snowflake SQL API, task, stream and dynamic table verbs.
+- Add typed Zuora Workflow, SQL Data Query and Files verbs.
+- Admit smoke batteries by capacity and prioritize serial smoke slots.
+- Add typed Snowflake database, schema, warehouse and stage REST verbs.
+- Embed only missing event chunks after a corrupt sweep checkpoint and drain new arrivals first.
+- Add typed Marketo named account, named account list and custom object verbs.
+- Add typed Zuora Orders, Subscriptions and Accounts verbs.
+- Bound the event-embedding drain's duty cycle, stop the Core AI profiler poll and report remaining work.
+- Add typed Salesforce composite, Tooling and Bulk API 2.0 job verbs.
+- Re-embed only the changed files when a stale knowledge base auto-installs.
+- Check public seed release notes at release preflight and draft them from the landings.
+
 ## 2026-10-02 — r71: an update changes an inherited Core AI `gpu` setting to `cpu`, a deploy no longer holds up queued actions, and the ledger embedding drain no longer stalls
 
 **Solet Manager manager-v0.1.0-r71.**
@@ -11,11 +361,11 @@ stable release that carries that change, so a solet on r69 is no longer refused 
 
 **What changes on a solet that updates.**
 
-- **An update changes a solet's Core AI compute preference from `gpu` to `cpu`.** r65 made `cpu` the default for Core AI configs it newly writes and said a solet that already had `gpu` keeps it; this supersedes that. Core AI's GPU path leaks one IOSurface per embedding and kills the solet's process at about 16.3k embeds (`iss_f3e65e52`), so a solet that took `gpu` from r64 still crashed under any large re-index (`iss_34f1e3c7`). When the Core AI config reads `compute_preference: gpu`, `solet-manager update <name> --dry-run` now lists one planned file write on that config, shown by its id `plugin_transition.embedding_service.openai_to_coreai.v1.compute_preference`, so the approval fingerprint covers it. The update then replaces only that value in place, after the Manager's backup, keeping formatting, every other key and the file mode. If the value cannot be safely replaced in place (the key is not matched exactly once, or the one match is not the top-level key), the update re-renders the file in the release's form, still keeping every other key and the file mode. A solet with an unused old embeddings plugin still listed gets the config write and the roster removal in one plan. A transition that is refused still writes nothing and defers. When a solet serving embeddings through Core AI is still on `gpu`, `solet-manager doctor` says so in plain words in its `plugin_transitions` row and names the crash risk. For a pending rewrite or cleanup it says the next update changes the config to `cpu`. For a refused transition it says the config becomes `cpu` once the refusal is resolved. The config cannot tell r64's default from a deliberate choice, so every `gpu` is rewritten, and an owner who wants `gpu` sets it again after the update. A solet already on r65 through r69 takes the change with the update that carries it.
+- **An update changes a solet's Core AI compute preference from `gpu` to `cpu`.** r65 made `cpu` the default for Core AI configs it newly writes and said a solet that already had `gpu` keeps it; this supersedes that. Core AI's GPU path leaks one IOSurface per embedding and kills the solet's process at about 16.3k embeds, so a solet that took `gpu` from r64 still crashed under any large re-index. When the Core AI config reads `compute_preference: gpu`, `solet-manager update <name> --dry-run` now lists one planned file write on that config, shown by its id `plugin_transition.embedding_service.openai_to_coreai.v1.compute_preference`, so the approval fingerprint covers it. The update then replaces only that value in place, after the Manager's backup, keeping formatting, every other key and the file mode. If the value cannot be safely replaced in place (the key is not matched exactly once, or the one match is not the top-level key), the update re-renders the file in the release's form, still keeping every other key and the file mode. A solet with an unused old embeddings plugin still listed gets the config write and the roster removal in one plan. A transition that is refused still writes nothing and defers. When a solet serving embeddings through Core AI is still on `gpu`, `solet-manager doctor` says so in plain words in its `plugin_transitions` row and names the crash risk. For a pending rewrite or cleanup it says the next update changes the config to `cpu`. For a refused transition it says the config becomes `cpu` once the refusal is resolved. The config cannot tell r64's default from a deliberate choice, so every `gpu` is rewritten, and an owner who wants `gpu` sets it again after the update. A solet already on r65 through r69 takes the change with the update that carries it.
 - **The session-ledger embedding drain no longer stops advancing because of one event.** An event that had to be embedded a second time, as
   happens when the embedding provider's chunk size changes, left a soft-deleted vector row holding its id. The embeddings table keeps one row
   per `external_id` whether or not it is deleted, so storing the replacement failed, the drain's cursor stopped on that page, and every
-  later heartbeat failed the same way (`iss_6aa96266`). The vector delete by `external_id` now removes the rows outright, so a replacement
+  later heartbeat failed the same way. The vector delete by `external_id` now removes the rows outright, so a replacement
   can be stored. This is a change to the pgvector service plugin and its RDS variant, and `actr_memory_plugin` uses the same delete, so a
   vector it removes by id is deleted rather than marked deleted. Separately, one event that still fails to embed is now skipped: the solet's log
   carries a WARNING that names its `event_id`, the drain's result counts it in the new `events_failed`, and the event stays un-embedded for
@@ -29,14 +379,14 @@ stable release that carries that change, so a solet on r69 is no longer refused 
   `error` and `timestamp`. The OpenAI and Titan embeddings verbs, the postgres and RDS state helpers, the Salesforce `probe_cli` result, the
   thinking plugin's planning results, the lifecycle hooks of the default knowledge and default thinking plugins, the LM Studio provider
   and inference plugin results, the Apple FM provider's results, and the `g_suite_plugin` start-service results built results without
-  some of them, and the ActionProcessor's plugin-contract check refused those (`iss_dae31745`). Each builder now fills all five. The default
+  some of them, and the ActionProcessor's plugin-contract check refused those. Each builder now fills all five. The default
   knowledge and default thinking plugins also answer a refused stop, while they are the active interface provider, with an error that carries
   the code `default_knowledge.stop_refused_active_interface` or `default_thinking.stop_refused_active_interface` and a message, where the
   result was a bare `error` status before.
 - **The bound embedding service's embed and dimension verbs can be found.** `service_interface::embedding_service::generate_embeddings` and
   `service_interface::embedding_service::get_embedding_dimension` were not discoverable, so a search over the platform's processes listed only
   the provider-named `plugin::openai_embeddings_plugin::*` actions, which reach the LM Studio path and not the provider the solet is bound
-  to (`iss_5fdedd1c`). Both are now discoverable, their descriptions and return schema name the model id, the vector dimension and the five
+  to. Both are now discoverable, their descriptions and return schema name the model id, the vector dimension and the five
   contract fields, and a refusal from the bound Core AI provider now carries a `data` field like every other result.
 
 **The solet runs better afterwards.**
@@ -52,7 +402,7 @@ stable release that carries that change, so a solet on r69 is no longer refused 
 - **A booting colour's starting actions are claimable only by that instance.** With the deploy running off the loop, the old colour could
   claim the candidate's `start_interface` and answer `bridge.already_running`, so the candidate never bound a bridge and the swap ended
   `register_timeout`, and the candidate, before the router named it active, could claim the live colour's `peer_inbox` and `deliver_result`
-  rows and fail them `bridge.not_running` (`iss_faf5802c`). A starting action now carries an `instance:<id>` entry in its existing
+  rows and fail them `bridge.not_running`. A starting action now carries an `instance:<id>` entry in its existing
   `excluded_versions` column, so no schema changes, and only the process whose id it names may claim it. A router-backed instance claims only
   rows pinned to itself until the router names it active, and the macOS deploy plugin releases that restriction at that point. A row pinned
   to another instance that is still queued after an hour is failed and logged as `PINNED_ROW_ABANDONED`. This fix exists because of the
@@ -74,7 +424,7 @@ stable release that carries that change, so a solet on r69 is no longer refused 
   cache is filled.
 - **`solet-bridge` reads a role inbox and a role's ownership on routes that do not wait for the action queue.** `peer_holds_role` and
   `peer_inbox` were reachable from a caller with no registered bridge only through the serial action queue, which a deploy can hold for
-  minutes (`iss_d97f6633`). `solet-bridge inbox` and the new `solet-bridge holds-role --name <role> --instance-id <id>` now read
+  minutes. `solet-bridge inbox` and the new `solet-bridge holds-role --name <role> --instance-id <id>` now read
   `GET peer/inbox_for_session` and `GET peer/holds_role` on the running solet's bridge. The verbs' results are unchanged, and `holds-role`
   adds `instance_registered` and `session_label`. A refusal or an unreachable bridge is an error and never an empty inbox or a "not held".
   The routes belong to the running solet, so a solet still running a process that predates the update answers 404 to these two commands. The
@@ -84,7 +434,7 @@ stable release that carries that change, so a solet on r69 is no longer refused 
   updated by hand and not restarted.
 - **`solet-bridge inbox --observer --include-covered --since <ISO-8601>` reads a role's inbox without its covered-mark floor.** The default
   read hid every row at or before the mark any reader had advanced, including the mark's own row, so a caller that must see every row, such
-  as an authorization check, missed rows (`iss_ac0625ee`). `include_covered` works only with
+  as an authorization check, missed rows. `include_covered` works only with
   `--observer`. It also requires `--since`, which stops the walk at the first row at or before that time so the read stays bounded as the
   role's history grows. The command reports a page that still comes back floored as a fault. The covered mark, the default drain and the
   pending count are unchanged. The `peer_inbox` process takes the same `include_covered` argument.
@@ -108,7 +458,7 @@ stable release that carries that change, so a solet on r69 is no longer refused 
 - **Building a release no longer starts a process for every file, and a stray repo-root file refuses before the build instead of after it.**
   The release builder started one `git check-ignore` per file it walked, one `cp -c` per file it copied and one `git show` per file it
   compared with HEAD. On this checkout that is 8,888, 7,287 and 7,288 processes. The r66 deploy spent 5,166 seconds in that build, holding
-  the solet's dispatch loop for the whole time, and then refused on root-manifest drift (`iss_f694ccef`, `iss_aca2ea39`). The builder now
+  the solet's dispatch loop for the whole time, and then refused on root-manifest drift. The builder now
   asks one long-lived `git check-ignore` about every path in the same order as before, reads every HEAD blob through one
   `git cat-file --batch`, and runs one `cp -c` per directory. What is selected, what is excluded and why, every refusal, the manifest
   bytes and the copied tree are identical to before. The cutover preflight also runs the root-manifest check against the source
@@ -128,11 +478,11 @@ stable release that carries that change, so a solet on r69 is no longer refused 
   the 256-token bucket and 6.4 s at the 2048-token bucket (measured on an idle M3 Ultra, macOS 27.0), so the ledger drain's sixteen full
   chunks already took about 100 s and a loaded host passed 120 s. The runtime then poisoned itself and the plugin stayed unavailable: knowledge
   search, `upsert_memory_by_tag` and the session-ledger event drain all failed with "Core AI operation exceeded 120 seconds" until
-  `reload_plugin_config` (`iss_a457a147`). Each input is now its own bounded operation, so a batch of any size never nears the bound, and a call
+  `reload_plugin_config`. Each input is now its own bounded operation, so a batch of any size never nears the bound, and a call
   that really hangs, in an embed or in a token count, is reported as `coreai_embeddings.operation_timeout` while the plugin prepares a new runtime
   once and logs it, so the next call is served. If that preparation fails, including by timing out itself, the plugin stays unavailable with that
   error, later calls report it at once and none prepares again, until a reload. A token count on another thread still waits for a whole batch,
-  because the plugin lock spans it (`iss_3b47dcc9`). A failed native call is still loud and still leaves the plugin unavailable with its own error.
+  because the plugin lock spans it. A failed native call is still loud and still leaves the plugin unavailable with its own error.
   Check: `python3 plugins/coreai_embeddings_plugin/tests/timeout_recovery_smoke.py` exits 0.
 
 This changes the Core AI plugin the seed ships, so an installed solet takes it with the update that carries r67.
@@ -143,25 +493,25 @@ This changes the Core AI plugin the seed ships, so an installed solet takes it w
 
 - **The seed no longer carries a frozen copy of the r64 plan codec.** The journals fixture folder held that copy, and a note explaining it,
   for one reader only: the plist-adopt update smoke, which the seed already excluded. Both shipped to every solet with nothing to run
-  them (`iss_b8792816`). Both are now in `seed_manifest.yaml` `exclude_paths` beside that smoke. The folder's `README.md` and
+  them. Both are now in `seed_manifest.yaml` `exclude_paths` beside that smoke. The folder's `README.md` and
   `bizopsb15_v1_pre_r12.json` still ship, because `journal_migration_smoke.py` still reads the JSON, and the README now describes only
   it. Check: `python3 plugins/seed_factory_plugin/tests/source_shipped_smoke_contract_smoke.py` prints `rows=0`, `rows=2`, `rows=0` for
   `macos-bizops`, `macos_free_minimal` and `macos_samantha` as before, and one fewer `shipped_files` for each.
 - **Three smokes now pin behaviour the r65 reviews found unpinned.** No product behaviour changes.
   `existing_install_plist_adopt_smoke.py` carries an uppercase `Bearer` header and an uppercase `--TOKEN=` argument, so dropping the
-  case-insensitive flag from the plist diff's secret-text filter fails it (`iss_84f5cf51`). `import_v1_already_managed_smoke.py`
+  case-insensitive flag from the plist diff's secret-text filter fails it. `import_v1_already_managed_smoke.py`
   imports a directory the Manager never created, kills the import after its journal is written, and expects the rerun to say
-  `already_managed`; an uninterrupted import of the same kind must say `imported` (`iss_71fa9729`). `existing_install_doctor_smoke.py`
+  `already_managed`; an uninterrupted import of the same kind must say `imported`. `existing_install_doctor_smoke.py`
   checks `runtime_process_identity` alone for a launchd pid whose command is not the target's argv, and that the command test is
-  the only thing refusing it (`iss_55306d03`). Check: `python3 plugins/github_midwife_plugin/tests/existing_install_plist_adopt_smoke.py`,
+  the only thing refusing it. Check: `python3 plugins/github_midwife_plugin/tests/existing_install_plist_adopt_smoke.py`,
   `python3 solet_cli/tests/import_v1_already_managed_smoke.py` and `python3 solet_cli/tests/existing_install_doctor_smoke.py` exit 0.
 
 This change is in the development checkout only. It does not change an installed solet, so there is no Manager upgrade or update step.
 
-- **A Claude session started without `--remote-control` now says so at session start.** Operator ruling `rul_4beb0d0a`:
+- **A Claude session started without `--remote-control` now says so at session start.** An operator ruling:
   every Claude session starts with Remote Control, so the whole fleet is visible on the operator's phone. The fleet
   launcher and the tmux host already passed the flag, but a session started by hand (a bare `claude --model ...`, or
-  `claude` by full path) did not, and four such sessions were invisible until fixed by hand (`iss_3084ad1c`). The
+  `claude` by full path) did not, and four such sessions were invisible until fixed by hand. The
   checkout's `SessionStart` hook `remote_control_guard`, wired in the checkout's tracked Claude project settings (so
   every worktree runs it, and the clone setup script reports it as already set), inspects the arguments of its own
   Claude process and, when the flag is absent, tells the session (and shows the person at the terminal) to run
@@ -172,7 +522,7 @@ This change is in the development checkout only. It does not change an installed
 - **`peer_inbox` can answer "what is new since T", and its tool text no longer calls a backward cursor a forward one.**
   The instance section's `after` cursor has walked backward, newest-first, since 2026-09-03: it returns messages older
   than the timestamp. The MCP tool text still described it as a forward, oldest-first cursor, so a caller polling with
-  `after=<last time I looked>` was handed history it had already handled, newest first (`iss_17aefd54`). `after` is
+  `after=<last time I looked>` was handed history it had already handled, newest first. `after` is
   unchanged, and every surface's text now says which way it runs. A new `since` cursor reads forward: messages strictly
   newer than the timestamp, oldest-first, with the page's `next_since_created_at` to echo and `instance_exhausted`
   true when nothing newer remains. A page carries only the cursor for its own direction, a time written with `Z` or
@@ -184,7 +534,7 @@ This change is in the development checkout only. It does not change an installed
 - **`retire_session` and `terminate_session` no longer return `completed` as if the process were gone.** A lane started by
   hand is hosted as `operator`, and the operator host driver cannot stop a process it did not start, so retiring it moved
   the ledger row and nothing else: the process kept running and `peer_list` kept listing it, while the verb answered
-  `completed` (`iss_7ee6fb98`, twenty lanes on 2026-09-30). That refusal to kill a process the ledger never started is
+  `completed` (twenty lanes on 2026-09-30). That refusal to kill a process the ledger never started is
   unchanged. The result now says what happened: `host_action` is `terminated` (the driver ended the process),
   `none_available` (only the ledger moved; `host_remedy` carries the driver's own instruction) or `not_attempted` (the
   row was already terminal). `retire_session` also returns `not_done`, one sentence per thing that retire left undone, and
@@ -197,7 +547,7 @@ This change is in the development checkout only. It does not change an installed
   exception types the Manager's readers caught: `ExpatError` (truncated or mismatched XML), `ValueError` (a bad `<integer>` or `<real>`, a key with
   no value, invalid UTF-8), `AttributeError` (a bad `<date>`), `LookupError`, `OverflowError`, `TypeError` and `RecursionError`. A hand-corrupted
   `~/Library/LaunchAgents/local.solet.<name>.plist` raised out of `solet-manager update <name> --dry-run` before any artifact was probed
-  (`iss_92735a39`). The Manager's launch-topology reader, the LM Studio login check and the doctor's launch-vector check, and the seed's rename
+ . The Manager's launch-topology reader, the LM Studio login check and the doctor's launch-vector check, and the seed's rename
   migration, now read every such plist as "not a plist": the update blocks with `managed_block_unknown_origin` and a repair, and the file is not
   touched. The Manager's list of those errors is a twin of the seed's `PLIST_PARSE_ERRORS` (the Manager never imports seed code), and a smoke holds
   the two equal and fails if any `plistlib` read in the Manager, the seed's migrations or `migrate_to_solet.py` is not inside a handler that
@@ -207,18 +557,18 @@ This change is in the development checkout only. It does not change an installed
   `python3 plugins/github_midwife_plugin/tests/existing_install_plist_robustness_smoke.py` exit 0.
 - **A managed file that is not UTF-8, such as a binary plist, blocks the update instead of raising `UnicodeDecodeError`.** A LaunchAgent plist
   converted with `plutil -convert binary1`, a non-UTF-8 `~/.zshrc` or a non-UTF-8 `root_manifest.yaml` aborted every seed probe that read it
-  (`iss_68bc97bb`). `read_text` now raises one typed error, and the seed's handler table turns it, for every existing-install operation (so also the export-root
+ . `read_text` now raises one typed error, and the seed's handler table turns it, for every existing-install operation (so also the export-root
   connector configs, `installed_plugins.json` and `~/.claude.json`), into a blocked result, `managed_block_unknown_origin`, whose repair names the
   file and, for a plist, `plutil -convert xml1`. A file that is not
   text is never read as absent and never rewritten. The update runbook says so in Part C, Step 5. The Manager's own read of the operator's plugin roster
   (the profile's manifest file) had the same shape: bytes that are not UTF-8 raised out of the preview, and now stop it as
   `profile_manifest_unreadable` with its repair.
 - **The runtime preview shows the seed's repair text for each blocked operation.** A blocked plist showed only its reason code under
-  `data.blocked` (`iss_285b99b1`); each row is now `{subject, reason, repair}` with the repair the seed gave for that blocked or failed operation (`null` when it gave none). The
+  `data.blocked`; each row is now `{subject, reason, repair}` with the repair the seed gave for that blocked or failed operation (`null` when it gave none). The
   fingerprint is unchanged: a blocked plan is never approved. Check: `python3 solet_cli/tests/update_plist_robustness_smoke.py` exits 0.
 - **An adopted plist is checked against the approval a second time, after the backup is taken.** The stage compared the digest of the bytes it
   probed with the approved one, then backed the file up. A file that changed in between was backed up and replaced without a second look
-  (`iss_c97969cb`). The digest of the bytes the backup holds is now compared with the approved one before the render is written; a mismatch is
+ . The digest of the bytes the backup holds is now compared with the approved one before the render is written; a mismatch is
   `probe_drift`, nothing is written over the file, and the backup stays as evidence. For the two to be comparable the seed now digests the raw
   bytes of a managed file, as the backup does, not the newline-translated text it decides on, so a valid plist with CRLF line endings is still
   adopted.
@@ -226,7 +576,7 @@ This change is in the development checkout only. It does not change an installed
 - **An update that stops with `source_transition_incomplete` because the target is not at the exact candidate release identity now says which of
   the seven facts failed, what was measured, and what it must be.** The refusal printed one fixed sentence and one fixed repair for any of
   `head_commit`, `head_tree`, `identity_status`, `anchor_kind`, `detached`, `branch` and `origins`, so the operator could not tell a moved HEAD from
-  a second `origin` remote (`iss_414f2f74`, Problem `wgr_a737ee5b`). The message keeps its opening phrase and now continues with one clause per failed
+  a second `origin` remote. The message keeps its opening phrase and now continues with one clause per failed
   fact, for example `head_commit is <measured>, expected <approved>; origins is 2 (<url>, <url>), expected exactly one, naming <canonical url>`. The
   repair keeps `Do not reset` and adds one sentence for each cause present: HEAD off the approved bytes, a sealed identity that no longer verifies
   (read it with `solet-manager doctor <name>`), HEAD detached or on another branch (a `git switch` to the branch the update started on), or an `origin`
@@ -239,7 +589,7 @@ This change is in the development checkout only. It does not change an installed
 - **A keg path, secret-shaped text or an oversize string in a seed adapter's text no longer makes the Manager refuse the whole result.**
   The Manager's `public_string` refuses a whole adapter result when any text in it holds a Homebrew keg path (`/Cellar/solet/`), text shaped
   like a secret, or is empty or over its field's limit. Two r65 lanes each shipped text that did, and only review caught it
-  (`iss_67472e3f`). A third producer did too and nothing had caught it: a failed command's stderr diagnostic kept the label and
+ . A third producer did too and nothing had caught it: a failed command's stderr diagnostic kept the label and
   separator of a redacted value (`password=<redacted>`), which the Manager still refuses; it now reads `password [redacted]`.
   Every text the seed adapters report (a repair, evidence, a planned action, a model candidate) now passes one helper,
   `setup_adapter_contract.public_text`, with a twin in `bootstrap_adapter` that a smoke holds equal. It replaces `[REDACTED]` for
@@ -253,7 +603,7 @@ This change is in the development checkout only. It does not change an installed
   with that hostile text through the Manager's real result parser, and fails if a producer builds a candidate, evidence, a planned action or a repair itself without the helper, or if the two helpers drift apart.
 - **A long repair is cut in the middle with a marker, not silently at 512 characters.** The adapter cut every repair at 512 characters with
   no marker, so a remedy written last, such as the command an operator is told to run, was the part a long path or CLI message
-  removed (`iss_49f37c32`). A repair over 512 characters now keeps its beginning and its end around
+  removed. A repair over 512 characters now keeps its beginning and its end around
   `[... <length> characters, middle cut ...]`, and the evidence summary, source and status and the planned-action text are cut the same way at
   their own limits. A repair that fits is unchanged. The bootstrap adapter, which never cut a repair, now holds one to the Manager's 2048.
   Check: the same smoke, which proves every statically known repair template, `REPAIR_CLAUDE_CLI`, `claude_plugin_list_failed` and the
@@ -268,36 +618,36 @@ To take this release, upgrade the Manager, then update the solet:
 1. `brew update && brew tab --installed-on-request python@3.13 && brew upgrade solet`, then `brew list --versions solet`. It prints `solet <release>_<formula revision>`, taken from the `solet-0.1.0-r<release>` archive name. The release part must be `65` or later.
 2. `solet-manager update <name> --dry-run`. Apply the plan with `solet-manager update <name> --yes --approval-fingerprint <fingerprint>`, using the fingerprint that dry run printed. Repeat both steps until the result is `promoted`.
 
-- **Core AI embeddings run on CPU until a recycled GPU worker lands.** Core AI's GPU inference leaks one IOSurface per embed call and only process exit frees it; after about 16.3k GPU embeds in one process the next allocation hits an uncatchable Swift `fatalError` (SIGTRAP) that killed a live host solet twice (`iss_f3e65e52`). A solet that moves onto `coreai_embeddings_plugin` re-indexes its knowledge base, which can pass 16k embeds in minutes. The three macOS profile templates, a fresh setup, the `openai_to_coreai` update and the plugin's own default now write or use `compute_preference: cpu` (about 8 embeds/s against about 100/s on GPU, with no leak); `gpu` is still accepted. A solet that already has `gpu` keeps it and is not refused by `solet doctor` or an update; to move it, set `"compute_preference": "cpu"` in the solet's Core AI plugin config file and restart. Check: `python3 plugins/coreai_embeddings_plugin/tests/native_contract_smoke.py`, `python3 plugins/github_midwife_plugin/tests/apple_setup_flow_smoke.py`, `python3 plugins/github_midwife_plugin/tests/apple_native_fresh_profile_smoke.py` and `python3 plugins/github_midwife_plugin/tests/plugin_transition_smoke.py` exit 0.
+- **Core AI embeddings run on CPU until a recycled GPU worker lands.** Core AI's GPU inference leaks one IOSurface per embed call and only process exit frees it; after about 16.3k GPU embeds in one process the next allocation hits an uncatchable Swift `fatalError` (SIGTRAP) that killed a live host solet twice. A solet that moves onto `coreai_embeddings_plugin` re-indexes its knowledge base, which can pass 16k embeds in minutes. The three macOS profile templates, a fresh setup, the `openai_to_coreai` update and the plugin's own default now write or use `compute_preference: cpu` (about 8 embeds/s against about 100/s on GPU, with no leak); `gpu` is still accepted. A solet that already has `gpu` keeps it and is not refused by `solet doctor` or an update; to move it, set `"compute_preference": "cpu"` in the solet's Core AI plugin config file and restart. Check: `python3 plugins/coreai_embeddings_plugin/tests/native_contract_smoke.py`, `python3 plugins/github_midwife_plugin/tests/apple_setup_flow_smoke.py`, `python3 plugins/github_midwife_plugin/tests/apple_native_fresh_profile_smoke.py` and `python3 plugins/github_midwife_plugin/tests/plugin_transition_smoke.py` exit 0.
 
 - **A solet on stable r64 can update to r65.** The r65 update flow listed stable seeds r43 through r63 as supported predecessors and not the r64 stable head `92321d42`, so a solet on r64 was refused with `predecessor_unsupported`. That head is now a supported predecessor and an anchor in the Manager's reviewed table, so a solet or a pre-Manager plain clone at r64 imports and updates to r65.
 - **Two `solet-manager` results no longer say the opposite of their own status.** `solet-manager import` answered
   `Existing Solet import is not yet enabled for target mutation.` for every result, including the `imported` and
-  `already_managed` ones it returns after import has written its Manager record (`iss_6a27a24b`). It now says
+  `already_managed` ones it returns after import has written its Manager record. It now says
   `Existing Solet import completed; the instance is now enrolled with the Manager.` for `imported` and
   `Existing Solet is already managed by the Manager; its enrollment is recorded and verified.` for `already_managed`. A second
   `solet-manager update <name> --dry-run` that reports `already_current` listed three `planned_actions` (acquire, fetch,
-  fast-forward) beside a `null` approval fingerprint (`iss_69dfc6ec`). It now lists none. A preview that is blocked
+  fast-forward) beside a `null` approval fingerprint. It now lists none. A preview that is blocked
   (`awaiting_user`) still lists the actions it would plan, and the approval fingerprint and the update journal are
   unchanged. Check: `python3 solet_cli/tests/import_result_message_smoke.py` and
   `python3 solet_cli/tests/update_promotion_smoke.py` exit 0.
 - **A solet create no longer plans a second, Homebrew `claude` when Claude Code's native install is already there.**
   Claude Code's native installer puts `claude` in `$HOME/.local/bin`. The create path's executable lookup searched PATH,
   `/opt/homebrew/bin` and `/usr/local/bin` only, so on a launchd job or solet session without that directory on PATH it
-  found nothing and planned `brew install --cask claude-code` (`iss_26fdde33`). It now searches `$HOME/.local/bin` last,
+  found nothing and planned `brew install --cask claude-code`. It now searches `$HOME/.local/bin` last,
   in the same order as the Manager's update preview and the seed adapter, and a single smoke holds all three equal.
   Check: `python3 solet_cli/tests/claude_native_location_smoke.py` exits 0.
 - **The external-app `issue_list` refuses the retired `track` filter, and its smoke no longer prints the child
   environment when it fails.** A request carrying `track` is refused as `external_app.unknown_filter_key` before any
-  argument list is built, and the committed example config no longer ships a track vocabulary (`iss_f750a59b`). The
+  argument list is built, and the committed example config no longer ships a track vocabulary. The
   smoke's failure messages no longer print the child process environment or the database DSN, and a guard fails if
-  they do (`iss_0a7cb185`). This was already landed on master at the start of r65.
+  they do. This was already landed on master at the start of r65.
 
-- **`solet status`, `start`, `doctor`, `attest` and `reconcile-*` no longer say "managed instance does not exist" or "review `solet create`" for a solet you imported, and `solet-manager doctor` no longer claims `update --dry-run` enrolls a create instance.** An imported solet has only a Manager inventory row, which the `solet` commands never read (`iss_33637918`, `iss_2d4061a9`, `iss_a6eabfbd`); they now refuse with `instance_imported` before writing anything and name `solet-manager doctor <name>`, and `start` names the launchd command that starts it, because the Manager has no start verb. The `instance_unmanaged_v2` repair for a create instance now says `update --dry-run` shows the plan and enrolls nothing, and the approved `--yes` enrolls. Check: `python3 solet_cli/tests/registry_owner_refusal_smoke.py` exits 0.
+- **`solet status`, `start`, `doctor`, `attest` and `reconcile-*` no longer say "managed instance does not exist" or "review `solet create`" for a solet you imported, and `solet-manager doctor` no longer claims `update --dry-run` enrolls a create instance.** An imported solet has only a Manager inventory row, which the `solet` commands never read; they now refuse with `instance_imported` before writing anything and name `solet-manager doctor <name>`, and `start` names the launchd command that starts it, because the Manager has no start verb. The `instance_unmanaged_v2` repair for a create instance now says `update --dry-run` shows the plan and enrolls nothing, and the approved `--yes` enrolls. Check: `python3 solet_cli/tests/registry_owner_refusal_smoke.py` exits 0.
 
 - **The `export_root_ambiguous` refusal names the connectors that disagree, and a failed Claude CLI step says how it failed.**
   When installed connectors held different `export_allowed_roots`, the update refused with one fixed sentence and no
-  connector name, so the operator had to read every connector's config by hand (`iss_67d2597e`, public #86). The repair
+  connector name, so the operator had to read every connector's config by hand (public #86). The repair
   now lists each installed connector with the roots it holds (`salesforce_plugin=/a, /b; jira_plugin=/a`; a connector
   with none prints `(none)`), names the files to edit, and is shortened with `…` to fit the 512-character limit of a
   repair, never by dropping a connector. The same class is closed in four more places where the update had the outcome
@@ -309,7 +659,7 @@ To take this release, upgrade the Manager, then update the solet:
 - **`source_transition_incomplete` for changed local state names every changed path, what kind of change it is, and how to
   put it right.** After `source_advanced`, the Manager checks the untracked and modified files it fingerprinted when
   you approved the source stage. It refused at the first changed path and gave one generic repair, so an adopter who had
-  moved displaced files back found the next one only after fixing the first (`iss_46de4f1d`, public #87). The message
+  moved displaced files back found the next one only after fixing the first (public #87). The message
   now lists every changed path (the first 20, then a count) with the same lead phrase as before plus its sub-case: an
   untracked local-only file leaves the checkout again (`mv`), a path now tracked at the new HEAD is restored from HEAD
   (`git restore`), a path now missing is put back, and a preserved edit that changed again gets the recorded bytes put
@@ -322,7 +672,7 @@ To take this release, upgrade the Manager, then update the solet:
 - **A solet that ran an in-process swap is no longer reported "offline", and an update no longer reports `promoted` while
   the old code still serves.** After a blue-green swap inside the running solet, the serving colour is a detached process
   and the LaunchAgent job is dormant, or has respawned an idle colour. The update's single-colour proof read only the
-  LaunchAgent's pid, so a healthy solet came back `service_offline_before_transition` (`iss_75b87670`, public #84), and a
+  LaunchAgent's pid, so a healthy solet came back `service_offline_before_transition` (public #84), and a
   restart beside a serving sidecar could publish `promoted` while the sidecar kept answering with the old release. The proof
   now reads the process table: the target's colours are the pids running `-m ananta.cli --app-home <target>/profile`, and
   single-colour is proven only when that set is exactly the LaunchAgent's pid. Otherwise the preview is blocked as
@@ -340,7 +690,7 @@ To take this release, upgrade the Manager, then update the solet:
   solet's profile from the `profile_name:` line of the profile's manifest.yaml. That line is a label, not an
   identity: templates renamed it several times, and a blue-green deploy or plugin add resets it to `local`. A solet with
   any other label was treated as having no declared plugin transition, so the r64 update promoted it `verified`, planned
-  nothing, and `solet-manager doctor` read "Embeddings keep using LM Studio on this solet's profile" (`iss_eb626338`, public
+  nothing, and `solet-manager doctor` read "Embeddings keep using LM Studio on this solet's profile" (public
   #75 and #78). The update now identifies the profile from the solet's sealed `PROVENANCE.json` bundle. It falls back to
   the manifest label only for a tree with no provenance, and only when that label names a profile template this release
   ships. A solet it still cannot identify, for example a provenance bundle this release does not know, is refused the
@@ -354,7 +704,7 @@ To take this release, upgrade the Manager, then update the solet:
 - **A replaced plugin reads as served once its replacement is bound, the unused old plugin is removed from the roster, and a
   conflict's wording fits its cause.** A solet whose `inference_service` was already bound to `macos_inference_plugin`
   while `default_inference_plugin` was still on the roster was read as `unsupported` or `conflict`, and the doctor printed
-  "Summaries keep using LM Studio" or "A switch of summaries ... was interrupted", both false (`iss_b3ccbf3b`, public #75).
+  "Summaries keep using LM Studio" or "A switch of summaries ... was interrupted", both false (public #75).
   It now says "Summaries run on Apple Foundation Models", and the update removes the unused `default_inference_plugin`
   roster entry (a normal managed write with its backup) when that plugin is bound to no service. The platform loads every
   listed plugin, so a leftover is not cosmetic: a crash after the binding moved leaves `openai_embeddings_plugin`
@@ -363,11 +713,11 @@ To take this release, upgrade the Manager, then update the solet:
   conflict used to say "its settings differ from the release defaults" and "restore the config"; a roster or profile
   conflict now names its own cause and repair, and its first words come from what the service is actually bound to: a
   service already bound to its replacement reads "Summaries run on Apple Foundation Models: ...", never "stay on LM Studio"
-  (`iss_da49cd98`). The embeddings declaration now matches the old plugin's `base_url` and
+ . The embeddings declaration now matches the old plugin's `base_url` and
   `model` only, so a `timeout_seconds` edit or an extra key no longer blocks the switch, and a different endpoint or model
   is still refused and deferred. Check: `python3 plugins/github_midwife_plugin/tests/plugin_transition_smoke.py` exits 0.
 
-- **A hand-made or hand-edited instance LaunchAgent plist no longer stops the update.** An instance LaunchAgent plist that matches no release's render (hand-made or hand-edited, `iss_d1f3371b`, seed issue #85) used to stop
+- **A hand-made or hand-edited instance LaunchAgent plist no longer stops the update.** An instance LaunchAgent plist that matches no release's render (hand-made or hand-edited, seed issue #85) used to stop
   the runtime preview with `instance_launchagent_plist` `unknown_origin` and `managed_block_unknown_origin`, and the update had no way past it. The
   preview now shows it as `unknown_origin` with `render_whole` and a diff of at most 80 lines, and the approved update backs it up and replaces it. The diff compares the two plists' parsed values with their keys sorted, so key order, indentation and comments are not shown; every value under a secret-named key, such as a token, a password or a `*_KEY`, and any string or data value equal to one, shows as `[REDACTED]`
   however the file spells it, a Homebrew keg path in a line reads `[keg path]` (the Manager refuses evidence that names one), and a plist that cannot be parsed shows no diff at all.
@@ -390,7 +740,7 @@ To take this release, upgrade the Manager, then update the solet:
 - **`solet doctor` no longer fails with "Static artifact changed while it was inspected" when unrelated files appear in a
   parent directory.** The static-artifact reader pinned every directory above the file it reads and compared each one's
   modification time, change time and link count before and after the read, so any other process creating a file in a
-  shared ancestor, such as the temporary directory, made the check report a change (`iss_695a82ac`). A pinned ancestor
+  shared ancestor, such as the temporary directory, made the check report a change. A pinned ancestor
   directory now has to keep its device, inode and type, so a directory that is replaced still fails; the file that is
   read keeps the full metadata comparison, so a file modified in place still fails. Check:
   `python3 solet_cli/tests/existing_solet_diagnostic_smoke.py` exits 0.
@@ -398,7 +748,7 @@ To take this release, upgrade the Manager, then update the solet:
 - **`solet doctor` and `solet start` keep working after an update changes the setup contract.** When `solet-manager update`
   promotes a release whose setup contract differs from the one the solet was created with, the promotion now moves the
   create record's pinned setup-contract digest to the new release's, after backing up both Manager files under the
-  update operation (`iss_0a10e6db`). Before this, both commands refused with `pinned setup contract identity mismatch`
+  update operation. Before this, both commands refused with `pinned setup contract identity mismatch`
   after any such update, for example r48 to r56, and `solet reconcile-contract` refuses a completed solet,
   so there was no repair. The pin moves only for a solet whose setup is complete. It moves only to the digest of the
   release's own committed contract files, and only from the contract of the create release or of the release the update
@@ -410,7 +760,7 @@ To take this release, upgrade the Manager, then update the solet:
 - **`solet reconcile-contract` works on a setup-incomplete solet after an update changes the setup contract.** An
   update moves the checkout's setup contract files to the new release's, but a setup-incomplete solet keeps its pin, so
   `reconcile-contract` read the new files against the old pin and refused with `pinned setup contract identity
-  mismatch`. The solet then had no repair (`iss_eaf1a6c3`). When the checkout's contract no longer matches the pin,
+  mismatch`. The solet then had no repair. When the checkout's contract no longer matches the pin,
   `reconcile-contract` now reads the pinned contract from the create release's committed files in the checkout's own
   Git history, and checks them against the pin. The checkout's contract must also be exactly the reconciliation
   destination, and the move still needs a declared migration. A contract file edited by hand still refuses and names
@@ -418,9 +768,9 @@ To take this release, upgrade the Manager, then update the solet:
   setup-contract change, `solet reconcile-contract <name> --dry-run` reports `preview_ready` instead of refusing, and
   `python3 solet_cli/tests/contract_reconciliation_after_update_smoke.py` exits 0.
 - **A pre-Manager plain clone of a stable seed can be imported, then updated.** Before this, the Manager's reviewed
-  anchor table held one synthetic test row (`fab22b6f`, a commit not in `solet-public/macos-bizops`,
-  `iss_3272e5f6`) and no real stable seed. So a clone was provable only at the channel's own release commit, and a
-  clone of r43 or r56 was `source_identity_unproven` with no way out (`iss_6494e624`). The table now lists every stable
+  anchor table held one synthetic test row (`fab22b6f`, a commit not in `solet-public/macos-bizops`)
+  and no real stable seed. So a clone was provable only at the channel's own release commit, and a
+  clone of r43 or r56 was `source_identity_unproven` with no way out. The table now lists every stable
   seed in `supported_predecessors` (r43 `8207c151` through r63 `a5732c9f`, now listed), each bound by commit, tree, provenance and
   seal stamp. `solet-manager inspect` classifies a clone at one of them as importable, and `solet-manager update` then
   runs every migration from that seed. A clone with a local commit or a hand `git merge` on top of a listed seed is
@@ -428,7 +778,7 @@ To take this release, upgrade the Manager, then update the solet:
   newest listed seed in HEAD's history and print one realign command. It keeps your commit on the branch
   `solet-pre-import-<HEAD[:12]>`, stops if that branch cannot be created, then runs `git reset --mixed <seed>`. That
   moves HEAD and the index and changes no working file. Every refused classification now carries a repair. An origin of
-  `git@github.com:solet-public/macos-bizops.git`, or the HTTPS form without `.git`, is the canonical repository for
+  the SSH form of `solet-public/macos-bizops` (with or without `.git`), or the HTTPS form without `.git`, is the canonical repository for
   inspect, update and doctor. A different owner or repository, a scheme-less URL and a relative path are still
   refused. Check: `solet-manager inspect --target <clone> --channel stable --json` on a clone at r56 `d81e014a`
   reports `data.classification.import_disposition` `allow`; on a hand-merged clone it reports a `repair` containing
@@ -438,7 +788,7 @@ To take this release, upgrade the Manager, then update the solet:
   restart, the running solet links the new plugin's knowledge base as `knowledge_bases/<plugin>`. When that link appeared
   while a post-restart step such as `plugin_cache_refresh` was running, `solet-manager update` blamed the step and
   stopped with `preservation_violated`, for example partway through the switch from LM Studio to Core AI embeddings
-  (`iss_d22db98a`). The check after each such step now accepts the same link it already accepted at the restart: a new
+ . The check after each such step now accepts the same link it already accepted at the restart: a new
   symlink directly under `knowledge_bases/`, named for its plugin and pointing at `../plugins/<plugin>/knowledge_base`.
   The update records the link as the solet's own write, not the step's. Any other change a step did not declare still
   fails, including a re-pointed link or a regular file under `knowledge_bases/`. A solet that already stopped this way
@@ -447,7 +797,7 @@ To take this release, upgrade the Manager, then update the solet:
 
 - **Setup no longer recommends LM Studio for inference.** The inference decision
   recommends `none`, `apple_foundation_models` and `llama_cpp`. `lm_studio` is still a
-  supported option that an owner can choose (`chg_04232fcc`, `iss_f510b5c9`). The wizard
+  supported option that an owner can choose. The wizard
   lists it after the recommended options. No flow default changes, because the wizard
   picks a default only when exactly one option is recommended. No runtime provider
   binding changes. Check: in `plugins/github_midwife_plugin/knowledge_base/macos_setup_flow.json`,
@@ -486,16 +836,16 @@ To take this release, upgrade the Manager, then update the solet:
 - **`solet-manager update` names a missing Claude Code CLI before it moves the source, and registers a missing
   coordination-hooks marketplace and installs its hooks the way `solet create` does.** An update needs the `claude` CLI for its plugin-cache refresh. Before, a host
   without it was refused only by the runtime preview, after `update --yes` had already fast-forwarded the checkout
-  (`iss_646b54b6`). The source `update <name> --dry-run` now refuses `claude_cli_missing` first. It adds a
+ . The source `update <name> --dry-run` now refuses `claude_cli_missing` first. It adds a
   `claude_cli_present` row to `data.host`, and the repair gives the install command, `brew install --cask claude-code`.
   The update never installs the CLI itself. It looks for `claude` on `PATH`, then in `/opt/homebrew/bin`,
   `/usr/local/bin` and `$HOME/.local/bin`, where Claude Code's native installer puts it, so a native install is found
   from a launchd job or a non-login shell whose `PATH` lacks that directory; the seed adapter's `claude` lookup searches
   the same directories, and the refusal and its repair name every one of them. A solet imported from a plain clone that never ran the coding-agent
   hydration step had no marketplace file (.claude-plugin/marketplace.json) and no marketplace under its name, so the runtime preview
-  refused `plugin_not_visible` with no command to fix it (`iss_c9a7b626`). When the clone ships its own
+  refused `plugin_not_visible` with no command to fix it. When the clone ships its own
   `coordination-hooks` plugin, the runtime preview now plans the steps and installs the plugin the way `solet create`
-  does (`iss_0744a64a`). It renders the file from the hydration template and pins every bare `python3` hook in the
+  does. It renders the file from the hydration template and pins every bare `python3` hook in the
   tracked `hooks.json` to `<clone>/.venv/bin/python3`, using create's own interpreter pin. It then runs
   `claude plugin marketplace add <clone>` and `claude plugin install coordination-hooks@<name>`, and publishes create's
   coordination receipt. Each step is disclosed, covered by the runtime fingerprint, and runs only when it is still
@@ -505,14 +855,14 @@ To take this release, upgrade the Manager, then update the solet:
   file the renderer did not write, a `.claude-plugin` symlink, an unreadable registry and a failed
   `claude plugin list` are each refused by their own reason, with the exact command. Nothing is written outside the
   clone. Known consequence: a later release that edits `hooks.json` refuses as `tracked_overlap_present` on these
-  solets, as it does on hydrated ones (`iss_c1a7df20`). After the update, in the clone:
+  solets, as it does on hydrated ones. After the update, in the clone:
   `grep -c '"command": "python3"' plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks/hooks.json`
   prints `0`, the receipt profile/data/coordination-hooks/claude/installation.v1.json exists, and the only new `git status` line
   is ` M` on that `hooks.json`. A solet that already has both, pinned and with a current receipt,
   previews exactly as before. Check: `python3 solet_cli/tests/update_runtime_prereqs_preview_smoke.py` exits 0.
 - **`solet-manager update` counts an installed coordination-hooks plugin as current only when its hooks are pinned
   and its receipt reads back.** Before, the plugin-cache refresh called an installed plugin current as soon as its
-  cache copy matched the clone. It never read the hook-interpreter pin or the coordination receipt (`iss_fa27466f`).
+  cache copy matched the clone. It never read the hook-interpreter pin or the coordination receipt.
   A plugin installed by hand with `claude plugin marketplace add` and `claude plugin install` therefore promoted
   with every hook still bare `python3` and with no receipt. A stale cache was reinstalled without a re-pin or a new
   receipt, and a receipt publish that failed was never retried. A release that changes a shipped hook file leaves
@@ -525,11 +875,11 @@ To take this release, upgrade the Manager, then update the solet:
   fingerprint. The pin is still admitted only as the installer's pin. A solet that is already pinned and has a
   current receipt plans nothing, and its fingerprint does not change. A `hooks.json` bound to another interpreter
   is refused as `hook_interpreter_foreign` and never rewritten. A release that edits `hooks.json` itself still
-  refuses as `tracked_overlap_present` on a pinned solet (`iss_c1a7df20`). Check the same three results as above.
+  refuses as `tracked_overlap_present` on a pinned solet. Check the same three results as above.
   Every `claude plugin list --json` read (create's plugin install probe, the receipt publish and read-back, the
   doctor's plugin probe and the update's cache check) now uses one 64 KiB output limit. Before, three of them used
   the 4 KiB default. On a host with more than about a dozen Claude plugins, the list was truncated, so create's probe
-  refused `output_truncated` and the receipt could not be published (`iss_8242b14c`).
+  refused `output_truncated` and the receipt could not be published.
   `solet doctor` admits the pin the update writes. Its seed-tree check accepts the Claude `hooks.json` only when its
   bytes are exactly the installer pin of the committed file and its mode is unchanged. This is the same byte check
   the Manager's local-state check uses. Before, a solet created with bare hooks warned `tracked_tree_deviation` after
@@ -550,7 +900,7 @@ To take this release, upgrade the Manager, then update the solet:
 2. `solet-manager update <name> --dry-run`. Apply the plan with `solet-manager update <name> --yes --approval-fingerprint <fingerprint>`, using the fingerprint that dry run printed. Repeat both steps until the result is `promoted`.
 
 - **An update no longer stops on the hydration block in `AGENTS.md` and
-  `CLAUDE.md`** (`iss_f89ab692`). Before, a release that changed either file
+  `CLAUDE.md`**. Before, a release that changed either file
   made `solet-manager update <name> --dry-run` return `update_blocked`
   with `tracked_overlap_present` naming them on every created solet, because
   `solet create` adds the hydration block to both. The preview now lists each
@@ -569,7 +919,7 @@ To take this release, upgrade the Manager, then update the solet:
   go is refused with the new reason `hydration_block_uncarriable`. Its repair
   names the file and gives the manual recovery. The Manager never drops the
   block and never overwrites your edit.
-- **A solet on stable r61 can update to r63.** The stable r61 seed head (commit `1e167174`) is now a listed supported predecessor in `existing_install_flow.json`, so `solet-manager update` accepts it as a starting point and the next stable publish no longer refuses it as an unlisted head (`iss_933eff4e`, `iss_16d3aa5a`).
+- **A solet on stable r61 can update to r63.** The stable r61 seed head (commit `1e167174`) is now a listed supported predecessor in `existing_install_flow.json`, so `solet-manager update` accepts it as a starting point and the next stable publish no longer refuses it as an unlisted head.
 
 ## 2026-09-29 — r62: a stable publish names its own predecessor row and resumes after its own push; a swap keeps the live bridge port; shipped text names the real embedding and inference defaults
 
@@ -577,7 +927,7 @@ To take this release, upgrade the Manager, then update the solet:
 
 The release factory (origin-only; it never ships in a seed) no longer leaves the
 previous stable head's `supported_predecessors` row to be worked out by hand
-each cut (`iss_16d3aa5a`). Nothing changes on an installed solet or in the
+each cut. Nothing changes on an installed solet or in the
 Manager.
 
 - **A stable publish emits its own head's row.** A `publish_release` run to
@@ -600,7 +950,7 @@ Manager.
 - **A stable run resumes after its own push.** A stable `publish_release` run
   that crashed at `tag_seed`, `tap_commit`, `manager_release`,
   `verify_published` or `record` now completes when resumed with its `run_id`
-  (`iss_5826b9ea`). Stage `predecessor` reports `outputs.resumed: true` with
+ . Stage `predecessor` reports `outputs.resumed: true` with
   its original `remote_head_before` when the live head is exactly the run's
   own `pushed_commit_sha`. Before, it re-read that commit and refused it as an
   unlisted head. Any other live head is still checked and refused when
@@ -617,19 +967,19 @@ Manager.
   `openai_embeddings_plugin` to its own llama.cpp server on macOS 26. Inference is
   `macos_inference_plugin` on `macos-bizops` at macOS 27, `default_inference_plugin` on
   `macos-bizops` at macOS 26 (llama.cpp) and on `macos-samantha-solet` (existing local
-  inference), and vacant on `macos-free-solet` (`iss_ba94a96d`). No binding or
+  inference), and vacant on `macos-free-solet`. No binding or
   operation changed. Check: no line of the
   architecture guide's service-architecture page starts `**Current implementation**:` with `openai_embeddings_plugin` or
   `default_inference_plugin`, and
   `python3 plugins/github_midwife_plugin/tests/embedding_default_doc_truth_smoke.py`
   exits 0.
 - **The `local` profile template header is true.** It no longer claims to be what the
-  solet runs as or that every plugin in the tree is loaded (`iss_aecf8d6a`). Check:
+  solet runs as or that every plugin in the tree is loaded. Check:
   the header of the `local` profile template contains neither
   `Every plugin in the tree is loaded` nor `This is what <name> runs as`; the smoke
   named above enforces it.
 
-- A blue-green swap candidate no longer deletes the live router's bridge-port file during its start-up scrub, so `solet-bridge` calls no longer fail with 'Is the solet running?' during a swap (iss_dec2b606). Check: during a swap, `solet-bridge health` keeps answering; after a crash with no router, the stale bridge-port file is still removed.
+- A blue-green swap candidate no longer deletes the live router's bridge-port file during its start-up scrub, so `solet-bridge` calls no longer fail with 'Is the solet running?' during a swap. Check: during a swap, `solet-bridge health` keeps answering; after a crash with no router, the stale bridge-port file is still removed.
 
 ## 2026-09-29 — r61: the Manager no longer forces a `python@3.13` upgrade
 
@@ -637,7 +987,7 @@ Manager.
 `solet-public/macos-bizops-daily`, with Manager artifacts in
 dwestgate/homebrew-tap-validate.
 
-This release is step two of two (`iss_d62aeab7`, `dec_b08cf4c7`). The Manager
+This release is step two of two. The Manager
 formula no longer declares `depends_on "python@3.13"`, so a working Python 3.13
 is no longer upgraded just because the Manager was installed or upgraded. r60
 was step one: it marks `python@3.13` installed on request, so Homebrew does not
@@ -1149,7 +1499,7 @@ Changes since r51 (source `396702a4d`):
 - Fix: a `verify`-mode update at the already-verified release now clears
   `needs_attention` when the final doctor passes; it used to leave the row
   stuck.
-- Fix (iss_9166af93): embedding inputs are sized to the provider's declared
+- Fix: embedding inputs are sized to the provider's declared
   token budget. Core AI refuses inputs over 2048 tokens, and about 10% of
   4-8K-character ledger messages exceeded that inside the old 8192-character
   window. Worse, the ledger drain halts at such an event, which stranded
@@ -1167,7 +1517,7 @@ Known limits:
 - If an update is interrupted during the switch and the retry reports a
   missing backup, run the `solet-manager reconcile` command it prints; your
   solet keeps working embeddings and LM Studio is untouched meanwhile
-  (iss_a6704735).
+ .
 
 ## 2026-09-28 — r51: existing solets can update again
 
@@ -1691,7 +2041,7 @@ or missing entries.
   two. A stale transaction, instance registry, or Keychain vault can still
   block or misdirect a reused instance name; follow the tap README's
   *Reinstalling on a machine that had a solet* sweep before reusing one.
-- **Known install-time transient:** `iss_b7b01bcc` tracks pgvector dependency
+- **Known install-time transient:** an open issue tracks pgvector dependency
   reconciliation that can leave the formula absent while the extension remains
   registered. If completion reports a vector-library load failure, run `brew
   install pgvector` and resume the same reviewed `solet create` transaction;
@@ -1731,7 +2081,7 @@ The same guidance ships in this tree as
 - **Solet Manager `manager-v0.1.0-r39`** (`solet 0.1.0_25`), pinned to seed
   release `release-2026-09-15-0551603bd674`.
 - **Fixed: a cold first boot now registers active before any
-  inference-dependent work runs** (`iss_7f240dbe`, commit `0551603bd`). The
+  inference-dependent work runs** (commit `0551603bd`). The
   embeddings plugin's readiness probe could crash-loop against a
   not-yet-serving LM Studio, and grammar pre-warm plus knowledge-base rebuild
   both ran before router registration and competed with it, so a cold
@@ -1740,13 +2090,13 @@ The same guidance ships in this tree as
   registration. Measured on the validation run below: 1.145 seconds from
   restart to active color.
 - **Fixed: the inference qualification probe is advisory, not a hard
-  blocker** (`iss_2e36a62e`, commit `257df2cb8`, shipped in r38). A slow or
+  blocker** (commit `257df2cb8`, shipped in r38). A slow or
   failing `qwen3-14b` probe answer no longer stops the install with
   `decision_qualification_failed`.
 - **Fixed: `install_launchagent` no longer refuses its own flow-declared
-  inputs at the adapter gate** (`iss_d0f9e899`, commit `3f8774534`).
+  inputs at the adapter gate** (commit `3f8774534`).
 - **Fixed: managed tmux-hosted Claude Code seats now preserve newline key
-  chords** (`iss_42ba8b2c`). The spawn path enables tmux extended-key
+  chords**. The spawn path enables tmux extended-key
   reporting (`extended-keys` and `xterm*:extkeys`); setup offers the matching
   `~/.tmux.conf` block and an iTerm2 dynamic profile where Option+Return sends
   Escape then Return. Restart iTerm2 and select **Solet Claude Code Return
@@ -1772,10 +2122,10 @@ The same guidance ships in this tree as
   That is round two. `solet create <name>` on a machine that once held a
   solet of that name can silently do the wrong thing instead of failing
   cleanly: it can resume a stale transaction pinned to the old seed
-  (`iss_50db7d43`), refuse with `state_conflict` against a stale instance
-  registry (`iss_6e520a72`), or have genesis refuse to re-birth the name over
+ , refuse with `state_conflict` against a stale instance
+  registry, or have genesis refuse to re-birth the name over
   leftover login-Keychain vault entries while the manager drops the failing
-  command's own stderr (`iss_74d70ef6`). The tap README's new *Reinstalling
+  command's own stderr. The tap README's new *Reinstalling
   on a machine that had a solet* section gives the manual sweep to run before
   trying a name again; there is no automated or supported upgrade path yet.
 - **The `models` stage still needs LM Studio and both models provisioned by

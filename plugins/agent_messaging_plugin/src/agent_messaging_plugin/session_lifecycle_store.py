@@ -47,7 +47,6 @@ import logging
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE
@@ -62,6 +61,7 @@ from ananta.services.state_service.bounded_read import (
     iter_table_rows,
 )
 
+from .register_unit_client import RegisterUnitClient, UnitAssignment, VerbError
 from .schema import (
     LIFECYCLE_IDLE,
     LIFECYCLE_LIVE,
@@ -98,10 +98,7 @@ _COL_IS_DELETED = "is_deleted"
 #: wants a filter rather than a longer walk.
 _MANAGED_SESSION_WALK_CEILING = 1_000_000
 
-_MANAGED_SESSION_CEILING_REASON = (
-    "one row per managed session ever spawned; the ledger is append-mostly and "
-    "is not pruned (106 live rows measured 2026-08-16)."
-)
+_MANAGED_SESSION_CEILING_REASON = "one row per managed session ever spawned; the ledger is append-mostly and is not pruned (106 live rows measured 2026-08-16)."
 _COL_LIFECYCLE_STATE = "lifecycle_state"
 
 # These deliberately mirror bounded_read's ordered cursor contract. Managed
@@ -154,8 +151,7 @@ class IllegalLifecycleTransitionError(Exception):
         self.from_state = from_state
         self.to_state = to_state
         super().__init__(
-            f"illegal_lifecycle_transition: {from_state!r} -> {to_state!r} is not "
-            "a legal edge in the §3.2 transition matrix.",
+            f"illegal_lifecycle_transition: {from_state!r} -> {to_state!r} is not a legal edge in the §3.2 transition matrix.",
         )
 
 
@@ -170,8 +166,7 @@ class StaleLifecycleStateError(Exception):
         self.from_state = from_state
         self.to_state = to_state
         super().__init__(
-            f"stale_lifecycle_state: {agent_instance_id!r} is no longer in "
-            f"{from_state!r} (requested {from_state!r} -> {to_state!r}).",
+            f"stale_lifecycle_state: {agent_instance_id!r} is no longer in {from_state!r} (requested {from_state!r} -> {to_state!r}).",
         )
 
 
@@ -181,11 +176,10 @@ class ManagedSessionSpec:
 
     agent_instance_id: str
     lane_id: str
-    brief_ref: str
+    assignment: UnitAssignment | None
     work_class: str
     budget_line: str
     host: str
-    unit_id: str = ""
     dispatch_id: str = ""
     agent_runtime: str = DEFAULT_AGENT_RUNTIME
     spawned_by_instance_id: str = ""
@@ -221,6 +215,17 @@ class ManagedSessionSpec:
     selection_receipt: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
+def _session_assignment(spec: ManagedSessionSpec) -> dict[str, Any]:
+    if spec.assignment is not None:
+        return {"assignment": spec.assignment.to_record(), "assignment_sha256": spec.assignment.sha256, "unit_id": spec.assignment.unit_id}
+    if (spec.host, spec.provisioning_mode) not in {
+        (OPERATOR_HOST, "operator_existing_checkout"),
+        ("synthetic", "synthetic_no_process"),
+    }:
+        raise VerbError("unit_assignment_required", "A spawned session requires a registered assignment.")
+    return {"assignment": None, "assignment_sha256": None, "unit_id": ""}
+
+
 def insert_managed_session(
     state: StateManagementInterface,
     spec: ManagedSessionSpec,
@@ -234,8 +239,7 @@ def insert_managed_session(
     record: dict[str, Any] = {
         _COL_AGENT_INSTANCE_ID: spec.agent_instance_id,
         "lane_id": spec.lane_id,
-        "brief_ref": spec.brief_ref,
-        "unit_id": spec.unit_id,
+        **_session_assignment(spec),
         "work_class": spec.work_class,
         "budget_line": spec.budget_line,
         "host": spec.host,
@@ -292,9 +296,7 @@ def insert_managed_session(
         effective_report_by_seconds = DEFAULT_REPORT_BY_SECONDS
     record["report_by_seconds"] = effective_report_by_seconds
     if effective_report_by_seconds:
-        record["report_by"] = (
-            datetime.now(UTC) + timedelta(seconds=effective_report_by_seconds)
-        ).isoformat()
+        record["report_by"] = (datetime.now(UTC) + timedelta(seconds=effective_report_by_seconds)).isoformat()
     require_completed(
         state.write_state(
             AGENT_ROLE_BINDING_NAMESPACE,
@@ -332,7 +334,8 @@ class LaneCharterSpec:
     lane_id: str
     charter_text: str
     captured_at: str
-    brief_ref: str = ""
+    unit_id: str
+    revision_id: str
     directed_by: str = ""
 
 
@@ -351,10 +354,13 @@ def capture_lane_charter(
         raise ValueError("capture_lane_charter requires a non-empty lane_id.")
     if not spec.charter_text:
         raise ValueError("capture_lane_charter requires non-empty charter_text.")
+    if not spec.unit_id or not spec.revision_id:
+        raise VerbError("unit_assignment_required", "Charter capture requires a registered Unit and revision identity.")
     record: dict[str, Any] = {
         "lane_id": spec.lane_id,
         "charter_text": spec.charter_text,
-        "brief_ref": spec.brief_ref,
+        "unit_id": spec.unit_id,
+        "revision_id": spec.revision_id,
         "captured_at": spec.captured_at,
         "directed_by": spec.directed_by,
     }
@@ -373,12 +379,13 @@ class LaneCharterRecord:
     """The latest captured charter for a lane, as :func:`resolve_lane_charter`
     resolves it — widened beyond a bare ``charter_text`` string (2026-08-06,
     phase-3 charter-rider provenance framing) so a caller can build the
-    provenance frame (captured_at + brief_ref) around the verbatim body
+    provenance frame (captured_at + Unit/revision identity) around the verbatim body
     without a second read."""
 
     charter_text: str
     captured_at: str
-    brief_ref: str
+    unit_id: str
+    revision_id: str
 
 
 def resolve_lane_charter(
@@ -407,10 +414,13 @@ def resolve_lane_charter(
     if not records:
         return None
     row = records[0]
+    if not row.get("unit_id") or not row.get("revision_id"):
+        raise VerbError("unit_assignment_historical", "This captured charter is read-only historical evidence.")
     return LaneCharterRecord(
         charter_text=str(row.get("charter_text") or ""),
         captured_at=str(row.get("captured_at") or ""),
-        brief_ref=str(row.get("brief_ref") or ""),
+        unit_id=str(row["unit_id"]),
+        revision_id=str(row["revision_id"]),
     )
 
 
@@ -448,9 +458,7 @@ def _iter_managed_session_rows(
             seen += 1
             if seen > ceiling:
                 raise ReadCeilingError(
-                    f"paged walk of table {TABLE_MANAGED_SESSION!r} passed its declared ceiling "
-                    f"of {ceiling} rows, so it was refused rather than run to completion. "
-                    f"The ceiling was justified as: {reason}",
+                    f"paged walk of table {TABLE_MANAGED_SESSION!r} passed its declared ceiling of {ceiling} rows, so it was refused rather than run to completion. The ceiling was justified as: {reason}",
                 )
             yield record
         if len(records) < _MANAGED_SESSION_PAGE_ROWS:
@@ -458,9 +466,7 @@ def _iter_managed_session_rows(
         last = records[-1]
         if _COL_CREATED_AT not in last or _COL_ID not in last:
             raise PagedReadError(
-                f"paged read of table {TABLE_MANAGED_SESSION!r}: a row is missing the cursor "
-                f"columns {_COL_CREATED_AT!r}/{_COL_ID!r}, so the walk cannot advance "
-                f"without risking skipped or repeated rows: {last!r}",
+                f"paged read of table {TABLE_MANAGED_SESSION!r}: a row is missing the cursor columns {_COL_CREATED_AT!r}/{_COL_ID!r}, so the walk cannot advance without risking skipped or repeated rows: {last!r}",
             )
         after = [last[_COL_CREATED_AT], last[_COL_ID]]
 
@@ -470,8 +476,7 @@ def _complete_managed_session_page(result: object) -> list[dict[str, Any]]:
     records = _managed_session_page_records(result)
     if not all(_managed_session_cursor_is_complete(record) for record in records):
         raise PagedReadError(
-            f"paged read of table {TABLE_MANAGED_SESSION!r}: "
-            f"a row has missing cursor values {_COL_CREATED_AT!r}/{_COL_ID!r}: {records!r}",
+            f"paged read of table {TABLE_MANAGED_SESSION!r}: a row has missing cursor values {_COL_CREATED_AT!r}/{_COL_ID!r}: {records!r}",
         )
     return records
 
@@ -480,25 +485,21 @@ def _managed_session_page_records(result: object) -> list[dict[str, Any]]:
     """Require the completed result envelope and its homogeneous row list."""
     if not isinstance(result, dict):
         raise PagedReadError(
-            f"paged read of table {TABLE_MANAGED_SESSION!r}: "
-            f"state result is not a dict: {result!r}",
+            f"paged read of table {TABLE_MANAGED_SESSION!r}: state result is not a dict: {result!r}",
         )
     if str(result.get("action_status", "")) != "completed":
         raise PagedReadError(
-            f"paged read of table {TABLE_MANAGED_SESSION!r} did not complete "
-            f"(action_status={result.get('action_status')!r}): {result!r}",
+            f"paged read of table {TABLE_MANAGED_SESSION!r} did not complete (action_status={result.get('action_status')!r}): {result!r}",
         )
     data = result.get("data")
     records = data.get("records") if isinstance(data, dict) else None
     if not isinstance(records, list):
         raise PagedReadError(
-            f"paged read of table {TABLE_MANAGED_SESSION!r}: "
-            f"data.records is not a list: {records!r}",
+            f"paged read of table {TABLE_MANAGED_SESSION!r}: data.records is not a list: {records!r}",
         )
     if not all(isinstance(record, dict) for record in records):
         raise PagedReadError(
-            f"paged read of table {TABLE_MANAGED_SESSION!r}: "
-            f"data.records contains a non-row: {records!r}",
+            f"paged read of table {TABLE_MANAGED_SESSION!r}: data.records contains a non-row: {records!r}",
         )
     return records
 
@@ -545,10 +546,7 @@ def list_managed_sessions(
     ``iter_table_rows``' default live-row predicate.
     """
     if not filters:
-        raise ManagedSessionFilterRequiredError(
-            "list_managed_sessions requires a non-empty filter; use "
-            "iter_managed_sessions_unbounded with a reason for a deliberate full-ledger walk"
-        )
+        raise ManagedSessionFilterRequiredError("list_managed_sessions requires a non-empty filter; use iter_managed_sessions_unbounded with a reason for a deliberate full-ledger walk")
     return list(
         _iter_managed_session_rows(
             state,
@@ -567,18 +565,13 @@ def list_managed_sessions_bounded(
 ) -> list[dict[str, Any]]:
     """Return at most ``limit`` matches, refusing when match ``limit + 1`` exists."""
     if not filters:
-        raise ManagedSessionFilterRequiredError(
-            "list_managed_sessions_bounded requires a non-empty filter"
-        )
+        raise ManagedSessionFilterRequiredError("list_managed_sessions_bounded requires a non-empty filter")
     return list(
         _iter_managed_session_rows(
             state,
             filters=filters,
             ceiling=limit,
-            reason=(
-                f"list_sessions has a hard result limit of {limit}; the caller must narrow "
-                "its fleet predicate rather than receive a truncated roster."
-            ),
+            reason=(f"list_sessions has a hard result limit of {limit}; the caller must narrow its fleet predicate rather than receive a truncated roster."),
         )
     )
 
@@ -599,9 +592,7 @@ def read_managed_sessions_page(
     a page boundary.
     """
     if not filters:
-        raise ManagedSessionFilterRequiredError(
-            "read_managed_sessions_page requires a non-empty filter"
-        )
+        raise ManagedSessionFilterRequiredError("read_managed_sessions_page requires a non-empty filter")
     query: dict[str, Any] = {
         "table": TABLE_MANAGED_SESSION,
         "filters": filters,
@@ -614,12 +605,7 @@ def read_managed_sessions_page(
     }
     if after is not None:
         query["after"] = after
-    rows = [
-        dict(row)
-        for row in require_records(
-            state.query_ordered(AGENT_ROLE_BINDING_NAMESPACE, query)
-        )
-    ]
+    rows = [dict(row) for row in require_records(state.query_ordered(AGENT_ROLE_BINDING_NAMESPACE, query))]
     return rows[:limit], len(rows) > limit
 
 
@@ -703,10 +689,7 @@ def backfill_registration(
             return False
         if str(row.get(_COL_LIFECYCLE_STATE) or "") != LIFECYCLE_SPAWNING:
             logger.warning(
-                "backfill_registration: %s registered with agent_session_id %s, "
-                "which recovers spawn id %s -- but that row is no longer "
-                "'spawning' (lifecycle_state=%s). Refusing to re-key a "
-                "completed lineage; row left untouched.",
+                "backfill_registration: %s registered with agent_session_id %s, which recovers spawn id %s -- but that row is no longer 'spawning' (lifecycle_state=%s). Refusing to re-key a completed lineage; row left untouched.",
                 agent_instance_id,
                 agent_session_id,
                 recovered_id,
@@ -729,9 +712,7 @@ def backfill_registration(
     # the next reader needs to be able to tell them apart.
     if row.get("registration_overdue_at"):
         logger.warning(
-            "registration watchdog: %s registered LATE -- it was marked "
-            "registration-overdue at %s (%s) and has now completed "
-            "registration. Clearing the mark; the delay itself was real.",
+            "registration watchdog: %s registered LATE -- it was marked registration-overdue at %s (%s) and has now completed registration. Clearing the mark; the delay itself was real.",
             matched_instance_id,
             row.get("registration_overdue_at"),
             row.get("registration_overdue_reason"),
@@ -761,8 +742,7 @@ def backfill_registration(
         # landed) -- the identity backfill above already happened; the
         # lifecycle edge is this function's second job, not its only one.
         logger.info(
-            "backfill_registration: %s lost the spawning->live race (already "
-            "moved on) -- identity columns still backfilled.",
+            "backfill_registration: %s lost the spawning->live race (already moved on) -- identity columns still backfilled.",
             matched_instance_id,
         )
     return True
@@ -896,6 +876,18 @@ def mark_registration_overdue(
     )
 
 
+_OBSERVATION_FIELDS = frozenset({"host", "host_ref", "lifecycle_state", "last_transition_at", "last_heartbeat_at"})
+
+
+def _transition_filters(instance: str, from_state: str, observation: Mapping[str, object] | None) -> dict[str, Any]:
+    filters: dict[str, Any] = {_COL_AGENT_INSTANCE_ID: instance, _COL_LIFECYCLE_STATE: from_state, _COL_IS_DELETED: 0}
+    if observation is not None:
+        if frozenset(observation) != _OBSERVATION_FIELDS or observation["lifecycle_state"] != from_state:
+            raise ValueError("expected observation must cover the exact host, lifecycle and heartbeat snapshot")
+        filters.update({key: {"op": "is_null"} if value is None else value for key, value in observation.items()})
+    return filters
+
+
 def transition_lifecycle_state(
     state: StateManagementInterface,
     *,
@@ -905,6 +897,7 @@ def transition_lifecycle_state(
     directed_by: str,
     reason: str = "",
     recorded_fields: Mapping[str, object] | None = None,
+    expected_observation: Mapping[str, object] | None = None,
 ) -> None:
     """Predicated ``lifecycle_state`` write (§3.2 matrix) + the AMEND-2a
     append-only audit insert. Raises :class:`IllegalLifecycleTransitionError`
@@ -928,11 +921,7 @@ def transition_lifecycle_state(
             AGENT_ROLE_BINDING_NAMESPACE,
             {
                 "table": TABLE_MANAGED_SESSION,
-                "filters": {
-                    _COL_AGENT_INSTANCE_ID: agent_instance_id,
-                    _COL_LIFECYCLE_STATE: from_state,
-                    _COL_IS_DELETED: 0,
-                },
+                "filters": _transition_filters(agent_instance_id, from_state, expected_observation),
             },
             transition_record,
         ),
@@ -1005,11 +994,7 @@ def _completion_obligation(item: object) -> tuple[str, frozenset[str]]:
 
 def _validate_completion_verdicts(contract: Mapping[str, Any]) -> None:
     verdicts = contract.get("allowed_verdicts")
-    if (
-        not isinstance(verdicts, list)
-        or not verdicts
-        or not all(isinstance(value, str) and value.strip() for value in verdicts)
-    ):
+    if not isinstance(verdicts, list) or not verdicts or not all(isinstance(value, str) and value.strip() for value in verdicts):
         raise _dispatch_error(
             "completion_contract_invalid",
             "completion_contract.allowed_verdicts must be a non-empty string list.",
@@ -1090,8 +1075,8 @@ _REQUIRED_DISPATCH_SPEC_TEXT = (
     "role_class",
     "work_class",
     "budget_line",
-    "brief_ref",
-    "brief_sha256",
+    "unit_id",
+    "dispatch_kind",
     "expected_path",
     "model",
     "effort",
@@ -1143,30 +1128,8 @@ def _validate_dispatch_digest(value: str, field: str) -> None:
         ) from exc
 
 
-def _validate_dispatch_brief(spec: Any) -> tuple[Path, str]:
-    from .managed_dispatch import _file_sha256  # noqa: PLC0415
-
-    _validate_dispatch_digest(spec.brief_sha256, "brief_sha256")
-    brief = Path(spec.brief_ref)
-    if not brief.is_file():
-        raise _dispatch_error(
-            "brief_not_found",
-            f"brief_ref does not exist: {brief}",
-        )
-    measured = _file_sha256(brief)
-    if measured != spec.brief_sha256:
-        raise _dispatch_error(
-            "brief_digest_mismatch",
-            "brief_ref does not match brief_sha256.",
-        )
-    return brief, measured
-
-
 def _validate_dispatch_deadlines(spec: Any, now: datetime) -> None:
-    deadlines = {
-        field: _dispatch_deadline({field: getattr(spec, field)}, field)
-        for field in ("uptake_due_at", "report_by", "watchdog_due_at")
-    }
+    deadlines = {field: _dispatch_deadline({field: getattr(spec, field)}, field) for field in ("uptake_due_at", "report_by", "watchdog_due_at")}
     if any(value <= now for value in deadlines.values()):
         raise _dispatch_error(
             "deadline_not_future",
@@ -1174,11 +1137,9 @@ def _validate_dispatch_deadlines(spec: Any, now: datetime) -> None:
         )
 
 
-def validate_dispatch_spec(spec: Any, now: datetime) -> tuple[Path, str]:
+def validate_dispatch_spec(spec: Any, now: datetime) -> None:
     _validate_required_dispatch_spec(spec)
-    brief = _validate_dispatch_brief(spec)
     _validate_dispatch_deadlines(spec, now)
-    return brief
 
 
 # Coordination-efficiency supervision lives beside the lifecycle persistence
@@ -1194,9 +1155,7 @@ def _dispatch_deadline(row: Mapping[str, Any], field: str) -> datetime:
     return _parse_persisted_utc(row[field], field)
 
 
-def _failed_start_dispatch_condition(
-    row: Mapping[str, Any], _now: datetime
-) -> _SupervisionCondition | None:
+def _failed_start_dispatch_condition(row: Mapping[str, Any], _now: datetime) -> _SupervisionCondition | None:
     if str(row["state"]) == "failed_start":
         return (
             "failed_start_decision_required",
@@ -1206,9 +1165,7 @@ def _failed_start_dispatch_condition(
     return None
 
 
-def _unknown_liveness_dispatch_condition(
-    row: Mapping[str, Any], now: datetime
-) -> _SupervisionCondition | None:
+def _unknown_liveness_dispatch_condition(row: Mapping[str, Any], now: datetime) -> _SupervisionCondition | None:
     if str(row.get("host_liveness") or "") != "unknown":
         return None
     escalation = str(row.get("liveness_escalation_due_at") or "")
@@ -1234,9 +1191,7 @@ def _unknown_liveness_dispatch_condition(
     return None
 
 
-def _watchdog_dispatch_condition(
-    row: Mapping[str, Any], now: datetime
-) -> _SupervisionCondition | None:
+def _watchdog_dispatch_condition(row: Mapping[str, Any], now: datetime) -> _SupervisionCondition | None:
     if str(row["state"]) != "active":
         return None
     if row.get("watchdog_fired_at"):
@@ -1250,14 +1205,8 @@ def _watchdog_dispatch_condition(
     return None
 
 
-def _blocker_dispatch_condition(
-    row: Mapping[str, Any], now: datetime
-) -> _SupervisionCondition | None:
-    if (
-        str(row["state"]) == "blocked_internal"
-        and row.get("decision_due_at")
-        and now >= _dispatch_deadline(row, "decision_due_at")
-    ):
+def _blocker_dispatch_condition(row: Mapping[str, Any], now: datetime) -> _SupervisionCondition | None:
+    if str(row["state"]) == "blocked_internal" and row.get("decision_due_at") and now >= _dispatch_deadline(row, "decision_due_at"):
         return (
             "blocker_decision_overdue",
             "resolve_internal_blocker",
@@ -1266,9 +1215,7 @@ def _blocker_dispatch_condition(
     return None
 
 
-def _completion_dispatch_condition(
-    row: Mapping[str, Any], _now: datetime
-) -> _SupervisionCondition | None:
+def _completion_dispatch_condition(row: Mapping[str, Any], _now: datetime) -> _SupervisionCondition | None:
     if str(row["state"]) == "completion_reported":
         return (
             "completion_acceptance_pending",
@@ -1278,9 +1225,7 @@ def _completion_dispatch_condition(
     return None
 
 
-def _uptake_dispatch_condition(
-    row: Mapping[str, Any], now: datetime
-) -> _SupervisionCondition | None:
+def _uptake_dispatch_condition(row: Mapping[str, Any], now: datetime) -> _SupervisionCondition | None:
     if str(row["state"]) in {
         "preparing",
         "uptake_pending",
@@ -1294,9 +1239,7 @@ def _uptake_dispatch_condition(
     return None
 
 
-def _milestone_dispatch_condition(
-    row: Mapping[str, Any], now: datetime
-) -> _SupervisionCondition | None:
+def _milestone_dispatch_condition(row: Mapping[str, Any], now: datetime) -> _SupervisionCondition | None:
     if str(row["state"]) == "active" and now >= _dispatch_deadline(row, "report_by"):
         return (
             "milestone_overdue",
@@ -1317,16 +1260,15 @@ _DISPATCH_CONDITION_DETECTORS = (
 )
 
 
-def managed_dispatch_condition(
-    row: Mapping[str, Any], now: datetime
-) -> _SupervisionCondition | None:
+def managed_dispatch_condition(row: Mapping[str, Any], now: datetime) -> _SupervisionCondition | None:
     conditions = _managed_dispatch_conditions(row, now)
     return conditions[0] if conditions else None
 
 
-def _managed_dispatch_conditions(
-    row: Mapping[str, Any], now: datetime
-) -> tuple[_SupervisionCondition, ...]:
+def _managed_dispatch_conditions(row: Mapping[str, Any], now: datetime) -> tuple[_SupervisionCondition, ...]:
+    # Pre-assignment rows are read-only historical inventory, never resumed.
+    if not row.get("assignment"):
+        return ()
     terminal_states = {"completed", "cancelled", "expired", "failed_start"}
     if str(row["state"]) in terminal_states - {"failed_start"}:
         return ()
@@ -1405,11 +1347,7 @@ def _apply_dispatch_supervision_condition(
             attempt_agent_instance_id=str(current.get("current_agent_instance_id") or ""),
             actor_role="platform-supervisor",
             actor_instance_id="",
-            prior_version=(
-                int(current["version"]) - 1
-                if name == "watchdog_overdue"
-                else int(current["version"])
-            ),
+            prior_version=(int(current["version"]) - 1 if name == "watchdog_overdue" else int(current["version"])),
             observed_at=clock,
             payload={
                 "condition": name,
@@ -1457,6 +1395,184 @@ def _supervision_projections(
             notice_emitted,
         )
     return [applied[condition[0]] for condition in conditions]
+
+
+def _claim_version(value: Any) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError("version and attempt_number must be nonnegative integers")
+    return value
+
+
+def _claim_time(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        parsed = datetime.fromisoformat(value)
+    else:
+        raise ValueError("claim time must be an aware timestamp")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("claim time must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+def _claim_evidence(
+    baseline: Mapping[str, Any],
+    event: Mapping[str, Any],
+    outcome: Mapping[str, Any],
+    requested_at: Any,
+) -> list[str]:
+    """Compare only stored receipt evidence to the caller-held request baseline."""
+    event_at = _claim_time(event["event_at"])
+    milestone_at = _claim_time(outcome["last_milestone_at"])
+    previous_at = baseline["last_milestone_at"]
+    version = _claim_version(baseline["version"])
+    checks = {
+        "event_before_request": event_at >= _claim_time(requested_at),
+        "event_prior_version_before_baseline": _claim_version(event["prior_version"]) >= version,
+        "outcome_version_not_advanced": _claim_version(outcome["version"]) > version,
+        "outcome_milestone_time_mismatch": milestone_at == event_at,
+        "milestone_time_not_advanced": previous_at is None or milestone_at > _claim_time(previous_at),
+        "report_deadline_not_advanced": _claim_time(outcome["report_by"]) > _claim_time(baseline["report_by"]),
+    }
+    return [reason for reason, passed in checks.items() if not passed]
+
+
+def _claim_attempt_reasons(
+    row: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+    event: Mapping[str, Any],
+    outcome: Mapping[str, Any],
+) -> list[str]:
+    instance = row["current_agent_instance_id"]
+    checks = {
+        "baseline_dispatch_mismatch": baseline["dispatch_id"] == row["dispatch_id"],
+        "baseline_attempt_superseded": baseline["current_agent_instance_id"] == instance,
+        "baseline_attempt_number_mismatch": _claim_version(baseline["attempt_number"]) == row["attempt_number"],
+        "event_dispatch_mismatch": event["dispatch_id"] == row["dispatch_id"],
+        "event_attempt_mismatch": event["attempt_agent_instance_id"] == instance,
+        "event_actor_mismatch": event["actor_instance_id"] == instance,
+        "outcome_dispatch_mismatch": outcome["dispatch_id"] == row["dispatch_id"],
+        "outcome_attempt_mismatch": outcome["current_agent_instance_id"] == instance,
+        "outcome_attempt_number_mismatch": _claim_version(outcome["attempt_number"]) == row["attempt_number"],
+    }
+    return [reason for reason, passed in checks.items() if not passed]
+
+
+def _claim_text(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError("claim identity must be nonempty text")
+    return value
+
+
+def _claim_baseline(claim: Any) -> tuple[Mapping[str, Any], str]:
+    if not isinstance(claim, Mapping) or not isinstance(claim.get("baseline"), Mapping):
+        raise ValueError("claim and baseline must be objects")
+    baseline = claim["baseline"]
+    _claim_version(baseline["version"])
+    _claim_version(baseline["attempt_number"])
+    _claim_time(baseline["report_by"])
+    _claim_time(claim["requested_at"])
+    if baseline["last_milestone_at"] is not None:
+        _claim_time(baseline["last_milestone_at"])
+    _claim_text(baseline["current_agent_instance_id"])
+    _claim_text(baseline["dispatch_id"])
+    return baseline, _claim_text(claim["event_id"])
+
+
+def _claim_event_identity(event: Mapping[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if event.get("accepted") is not True:
+        reasons.append("event_not_accepted")
+    if event.get("event_kind") != "milestone":
+        reasons.append("event_not_milestone")
+    return reasons
+
+
+def verify_milestone_claim(
+    row: Mapping[str, Any],
+    events: list[dict[str, Any]],
+    claim: Any,
+) -> dict[str, Any]:
+    """Read-only advisory; immutable accepted outcomes alone can prove satisfaction."""
+    result: dict[str, Any] = {
+        "status": "unverifiable",
+        "reasons": [],
+        "advisory": True,
+        "request": claim,
+        "event": None,
+        "post_transition": None,
+        "current": {
+            "version": row.get("version"),
+            "report_by": row.get("report_by"),
+            "last_milestone_at": row.get("last_milestone_at"),
+            "current_agent_instance_id": row.get("current_agent_instance_id"),
+            "attempt_number": row.get("attempt_number"),
+        },
+    }
+    if row.get("assignment") is None:
+        result["reasons"] = ["historical_assignment"]
+        return result
+    try:
+        baseline, event_id = _claim_baseline(claim)
+        event = next((event for event in events if event.get("event_id") == event_id), None)
+        result["event"] = event
+        if event is None:
+            result.update(status="mismatch", reasons=["event_not_found"])
+            return result
+        identity_reasons = _claim_event_identity(event)
+        if identity_reasons:
+            result.update(status="mismatch", reasons=identity_reasons)
+            return result
+        payload = event.get("payload")
+        outcome = payload.get("_managed_dispatch_accepted_outcome") if isinstance(payload, Mapping) else None
+        if not isinstance(outcome, Mapping):
+            result["reasons"] = ["accepted_outcome_missing"]
+            return result
+        result["post_transition"] = dict(outcome)
+        reasons = _claim_attempt_reasons(row, baseline, event, outcome)
+        reasons.extend(_claim_evidence(baseline, event, outcome, claim["requested_at"]))
+        result.update(status="mismatch" if reasons else "satisfied", reasons=reasons, advisory=bool(reasons))
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        result.update(status="unverifiable", reasons=["malformed_claim_or_receipt"], detail=str(exc))
+    return result
+
+
+def native_managed_dispatch_status(
+    state: StateManagementInterface,
+    row: Mapping[str, Any],
+    clock: datetime,
+    *,
+    milestone_claim: Any = None,
+) -> dict[str, Any]:
+    from .managed_dispatch import DISPATCH_TERMINAL_STATES, _parse_persisted_utc  # noqa: PLC0415
+    from .managed_dispatch_bridge import all_managed_dispatch_events  # noqa: PLC0415
+    from .session_lifecycle_verbs import dispatch_event_age_seconds  # noqa: PLC0415
+
+    events = all_managed_dispatch_events(state, str(row["dispatch_id"]))
+    condition = managed_dispatch_condition(row, clock)
+    aggregate = dict(row)
+    deadline_overdue = {name: clock >= _parse_persisted_utc(row[name], name) for name in ("uptake_due_at", "report_by", "watchdog_due_at")}
+    aggregate.update(
+        {
+            "state": str(row["state"]),
+            "ledger_state": str(row["state"]),
+            "state_consistent": str(row.get("host_liveness") or "unknown") != "dead" or str(row["state"]) in DISPATCH_TERMINAL_STATES,
+            "rejected_event_count": sum(not bool(event.get("accepted")) for event in events),
+            "event_count": len(events),
+            "raw_receipts": [event for event in events if event.get("event_kind") == "first_turn"],
+            "deadline_overdue": deadline_overdue,
+            "last_ack_age_seconds": dispatch_event_age_seconds(row.get("last_ack_at"), clock),
+            "last_milestone_age_seconds": dispatch_event_age_seconds(row.get("last_milestone_at"), clock),
+            "plan_projection_warning": ("human coordinator plans are unverified projections; durable dispatch state and append-only events remain authoritative"),
+        },
+    )
+    if condition is not None:
+        aggregate["overdue_condition"] = condition[0]
+        aggregate["next_required_action"] = condition[1]
+        aggregate["responsible_role"] = condition[2]
+    if milestone_claim is not None:
+        aggregate["milestone_claim_verification"] = verify_milestone_claim(row, events, milestone_claim)
+    return aggregate
 
 
 def supervise_managed_dispatches(
@@ -1522,6 +1638,7 @@ def _reconcile_managed_attempt(
     row: Mapping[str, Any],
     *,
     now: datetime,
+    register: RegisterUnitClient | None,
 ) -> str:
     from .managed_dispatch import (  # noqa: PLC0415
         DispatchError,
@@ -1578,6 +1695,7 @@ def _reconcile_managed_attempt(
             agent_instance_id=agent_instance_id,
             observed_at=now,
             detail=detail,
+            register=register,
         )
     except DispatchError as exc:
         logger.info(
@@ -1591,6 +1709,7 @@ def _reconcile_managed_attempt(
 def sweep_managed_dispatches(
     state: StateManagementInterface,
     *,
+    register: RegisterUnitClient | None,
     peer_registry: PeerRegistry | None = None,
     bridge_manager: BridgeSessionManager | None = None,
     now: datetime | None = None,
@@ -1616,7 +1735,7 @@ def sweep_managed_dispatches(
             if not row.get("dispatch_id"):
                 continue
             evaluated += 1
-            outcome = _reconcile_managed_attempt(state, row, now=clock)
+            outcome = _reconcile_managed_attempt(state, row, now=clock, register=register)
             counts[outcome] += 1
             if outcome == "dead" and notify_steward_of_managed_dispatch(
                 state,
@@ -1651,6 +1770,7 @@ def sweep_managed_dispatches(
 
 
 __all__ = [
+    "_validate_dispatch_digest",
     "IllegalLifecycleTransitionError",
     "LaneCharterRecord",
     "LaneCharterSpec",

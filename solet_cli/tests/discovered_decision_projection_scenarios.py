@@ -34,11 +34,7 @@ MODEL_OPERATION_INPUTS = {
 
 
 def _planned_model_operation_inputs(plan: SetupPlan) -> dict[str, object]:
-    return {
-        operation.operation_id: operation.public_inputs
-        for operation in plan.operations
-        if operation.operation_id in MODEL_OPERATION_INPUTS
-    }
+    return {operation.operation_id: operation.public_inputs for operation in plan.operations if operation.operation_id in MODEL_OPERATION_INPUTS}
 
 
 def _build_projection_plan(
@@ -76,7 +72,7 @@ def _build_projection_plan(
         config=config,
         seed=seed,
         journal_path=root / f"projection-{profile}.journal.json",
-        decision_selections=selected,
+        decision_selections={**selected},
         decision_sources=dict.fromkeys(selected, "flag"),
         operation_stage_ids=operation_stage_ids,
     )
@@ -122,13 +118,7 @@ def _flow_default_projection_scenario(
     )
     changed_inputs = _planned_model_operation_inputs(changed_plan)
     _check(
-        canonical_sha256(model_plan.answers) != canonical_sha256(changed_plan.answers)
-        and set(changed_inputs) == set(MODEL_OPERATION_INPUTS)
-        and all(
-            isinstance(value, dict)
-            and value.get("lm_studio_base_url") == changed_url
-            for value in changed_inputs.values()
-        ),
+        canonical_sha256(model_plan.answers) != canonical_sha256(changed_plan.answers) and set(changed_inputs) == set(MODEL_OPERATION_INPUTS) and all(isinstance(value, dict) and value.get("lm_studio_base_url") == changed_url for value in changed_inputs.values()),
         "changed reviewed default changes normalized fingerprint and operation requests",
     )
 
@@ -137,9 +127,7 @@ def _unreferenced_default_projection_scenario(root: Path) -> None:
     unreferenced_contracts = root / "projection-unreferenced-default"
     shutil.copytree(_CONTRACTS, unreferenced_contracts)
     unreferenced_flow_path = unreferenced_contracts / "macos_setup_flow.json"
-    unreferenced_flow = json.loads(
-        unreferenced_flow_path.read_text(encoding="utf-8")
-    )
+    unreferenced_flow = json.loads(unreferenced_flow_path.read_text(encoding="utf-8"))
     unreferenced_flow["inputs"]["future_public_default"] = {
         "label": "Future public default",
         "description": "Fixture default not referenced by a selected operation.",
@@ -163,8 +151,7 @@ def _unreferenced_default_projection_scenario(root: Path) -> None:
         operation_stage_ids={"models"},
     )
     _check(
-        "UNREFERENCED-PUBLIC-MARKER"
-        not in json.dumps(unreferenced_plan.to_dict(), sort_keys=True),
+        "UNREFERENCED-PUBLIC-MARKER" not in json.dumps(unreferenced_plan.to_dict(), sort_keys=True),
         "unreferenced public default stays out of frontier answers and requests",
     )
 
@@ -176,9 +163,7 @@ def _secret_default_projection_scenario(
     secret_marker = "SECRET-PROJECTION-MARKER"
     secret_flow = json.loads(json.dumps(bundle.flow))
     secret_flow["inputs"]["jira_api_token"]["default"] = secret_marker
-    secret_flow["operations"]["configure_lm_studio_embeddings"]["input_refs"].append(
-        "jira_api_token"
-    )
+    secret_flow["operations"]["configure_lm_studio_embeddings"]["input_refs"].append("jira_api_token")
     secret_bundle = replace(bundle, flow=secret_flow)
     secret_plan = _build_projection_plan(
         secret_bundle,
@@ -192,10 +177,7 @@ def _secret_default_projection_scenario(
         secret_plan.answers["resolution_evidence"],
     )
     _check(
-        all(
-            secret_marker not in json.dumps(surface, sort_keys=True)
-            for surface in secret_surfaces
-        ),
+        all(secret_marker not in json.dumps(surface, sort_keys=True) for surface in secret_surfaces),
         "schema-impossible secret default stays out of answers, requests, preview, and evidence",
     )
     leaked_answers = json.loads(json.dumps(secret_plan.answers))
@@ -220,9 +202,7 @@ def _collision_projection_scenario(root: Path) -> None:
         "prompt_timing": "before_stage",
         "storage": "generated_config",
     }
-    collision_flow["operations"]["configure_lm_studio_embeddings"]["input_refs"].append(
-        "model"
-    )
+    collision_flow["operations"]["configure_lm_studio_embeddings"]["input_refs"].append("model")
     collision_flow_path.write_text(
         json.dumps(collision_flow, indent=2),
         encoding="utf-8",
@@ -255,11 +235,7 @@ def _check_genesis_profile_projection(
         root,
         operation_stage_ids={"genesis"},
     )
-    genesis_operation = next(
-        operation
-        for operation in genesis_plan.operations
-        if operation.operation_id == "run_genesis"
-    )
+    genesis_operation = next(operation for operation in genesis_plan.operations if operation.operation_id == "run_genesis")
     _check(
         genesis_operation.public_inputs
         == {
@@ -267,11 +243,12 @@ def _check_genesis_profile_projection(
             "clone_directory": str((root / "projection-macos-bizops").resolve()),
             "setup_profile": "macos-bizops",
             "autostart": "enabled",
+            "selected_coding_agents": ["claude_code"],
             # Genesis resolves its roster from the implementation decisions (iss_3a2a74ea).
             "embeddings_implementation": "lm_studio",
             "inference_implementation": "lm_studio",
         },
-        "genesis carries its resolved profile, autostart and implementation decisions",
+        "genesis carries its resolved profile, autostart, coding-agent and implementation decisions",
     )
 
 
@@ -291,18 +268,9 @@ def _frontier_projection_scenario(
         operation_stage_ids=set(),
     )
     _check(
-        cast(dict[str, object], prospective.answers["public_inputs"]).get(
-            "lm_studio_base_url"
-        )
-        == MODEL_BASE_URL
-        and any(
-            isinstance(item, dict)
-            and item.get("id") == "lm_studio_base_url"
-            and item.get("source") == "flow_default"
-            for item in cast(list[object], prospective.answers["resolution_evidence"])
-        )
-        and "lm_studio_base_url"
-        not in cast(dict[str, object], empty_frontier.answers["public_inputs"])
+        cast(dict[str, object], prospective.answers["public_inputs"]).get("lm_studio_base_url") == MODEL_BASE_URL
+        and any(isinstance(item, dict) and item.get("id") == "lm_studio_base_url" and item.get("source") == "flow_default" for item in cast(list[object], prospective.answers["resolution_evidence"]))
+        and "lm_studio_base_url" not in cast(dict[str, object], empty_frontier.answers["public_inputs"])
         and not empty_frontier.operations,
         "absent operation frontier projects prospective defaults while explicit empty projects none",
     )
@@ -316,11 +284,7 @@ def _frontier_projection_scenario(
     )
     free_decisions = cast(dict[str, object], free_plan.answers["decisions"])
     _check(
-        "inference_model" not in free_decisions
-        and "configure_lm_studio_inference"
-        not in _planned_model_operation_inputs(free_plan)
-        and MODEL_SELECTIONS["inference_model"]
-        not in json.dumps(free_plan.to_dict(), sort_keys=True),
+        "inference_model" not in free_decisions and "configure_lm_studio_inference" not in _planned_model_operation_inputs(free_plan) and MODEL_SELECTIONS["inference_model"] not in json.dumps(free_plan.to_dict(), sort_keys=True),
         "inactive inference-model decision is neither persisted nor projected",
     )
 

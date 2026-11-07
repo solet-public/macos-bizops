@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from ananta.interfaces.state_management_interface import StateManagementInterface
@@ -31,6 +31,9 @@ from .models import (
     AgentThreadMessagesPage,
     AgentThreadRow,
     AgentThreadsPage,
+    InboxReadCoverage,
+    InboxReturnedKey,
+    InboxSectionCoverage,
     ListAgentThreadsRequest,
     MessageContent,
     MessageKind,
@@ -44,9 +47,16 @@ from .models import (
     ReadThreadMessagesRequest,
     RoleCoveredMark,
     RoleMessagePersisted,
+    RoleReadCoverage,
     RoleSectionStatus,
     RoleTruncationReason,
     ThreadStatus,
+)
+from .peer_inbox_cursor import (
+    PeerInboxCursorRejectedError,
+    PeerInboxSinceCursor,
+    decode_peer_inbox_since_cursor,
+    encode_peer_inbox_since_cursor,
 )
 from .repository import (
     AgentMessagingRepository,
@@ -105,9 +115,55 @@ from .thread_cursor import decode_thread_cursor, encode_thread_cursor
 
 logger = logging.getLogger(__name__)
 
+
+def _inbox_iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _inbox_key(entries: tuple[PeerInboxEntry, ...], index: int) -> InboxReturnedKey | None:
+    if not entries:
+        return None
+    message = entries[index].message
+    return InboxReturnedKey(message.created_at.isoformat(), message.id)
+
+
+def _inbox_mode(continuation: PeerInboxSinceCursor | None, *, forward: bool) -> tuple[str, str, str | None]:
+    if continuation is not None:
+        return "since_cursor", "tie_safe", None
+    if forward:
+        return "since", "horizon_only", "Use next_since_cursor; timestamp reuse can skip tied rows."
+    return "after", "timestamp_only", "Timestamp-only backward paging can skip tied rows."
+
+
+def _role_page_coverage(direct: InboxSectionCoverage, page: PeerInbox) -> InboxSectionCoverage:
+    role_ok = page.role_section_status is RoleSectionStatus.OK
+    return replace(
+        direct,
+        status=page.role_section_status.value,
+        effective_since=direct.effective_since if role_ok else None,
+        direction="backward",
+        cursor_mode="role_after",
+        continuation_safety="tie_safe" if role_ok else "unknown",
+        advisory=None if role_ok else page.role_section_error,
+        continuation_after=None,
+        first=_inbox_key(page.role_entries, 0),
+        last=_inbox_key(page.role_entries, -1),
+        count=len(page.role_entries) if role_ok else None,
+        next_cursor=page.next_role_cursor,
+        exhausted=(page.next_role_cursor is None) if role_ok else None,
+        role_floor_applied=page.role_floor_applied if role_ok else None,
+        role_history_cursor=page.role_history_cursor,
+        role_read_coverage=page.role_read_coverage,
+        scope="role_rows_with_existing_floor_and_receipt_rules",
+    )
+
+
 # Receipt filtering may need to scan past a fully acknowledged prefix.  Keep
 # that repair bounded; an exhausted budget is an explicit incomplete read, not
-# a false "no older rows" answer that strands unserved mail.
+# a false "no older rows" answer that strands unserved mail.  The read returns
+# the visible rows it already holds and marks the scan truncated
+# (``RoleReadCoverage.scan_truncated`` plus a continuation cursor); it never
+# raises, because a raise discards the unserved rows the budget was spent on.
 _ROLE_RECEIPT_REFILL_MAX_PAGES = 100
 
 
@@ -162,7 +218,9 @@ class AgentMessagingConfig:
 
 
 def role_message_external_id(
-    recipient_kind: str, recipient_key: str, message_id: str,
+    recipient_kind: str,
+    recipient_key: str,
+    message_id: str,
 ) -> str:
     """Deterministic idempotency key for a role-addressed envelope.
 
@@ -203,7 +261,8 @@ def _role_row_key(record: dict[str, object]) -> tuple[str, str]:
 
 
 def _apply_role_floor(
-    records: list[dict[str, object]], mark: tuple[str, str] | None,
+    records: list[dict[str, object]],
+    mark: tuple[str, str] | None,
 ) -> tuple[list[dict[str, object]], bool]:
     """Drop rows at/below ``mark`` (design §5b.i — a post-fetch filter, not a
     query-level ``after`` bound; see the design doc for why those are NOT the
@@ -284,7 +343,9 @@ def _as_int(value: object) -> int:
 
 
 def _within_reemit_window(
-    last_emitted_at: object, now: datetime, re_emit_window_s: float,
+    last_emitted_at: object,
+    now: datetime,
+    re_emit_window_s: float,
 ) -> bool:
     """True iff an emission happened too recently to re-emit yet.
 
@@ -351,7 +412,8 @@ class AgentMessagingService:
     # ------------------------------------------------------------------
 
     def list_threads(
-        self, request: ListAgentThreadsRequest,
+        self,
+        request: ListAgentThreadsRequest,
     ) -> AgentThreadsPage:
         """Enumerate threads globally, cursor-paginated by ``(created_at, id)``.
 
@@ -364,11 +426,7 @@ class AgentMessagingService:
         page is short or empty).
         """
         self._require_enabled()
-        after = (
-            decode_thread_cursor(request.after_cursor)
-            if request.after_cursor is not None
-            else None
-        )
+        after = decode_thread_cursor(request.after_cursor) if request.after_cursor is not None else None
         rows = self._repo.list_threads(
             after=after,
             limit=request.limit,
@@ -388,7 +446,8 @@ class AgentMessagingService:
         )
 
     def read_thread_messages(
-        self, request: ReadThreadMessagesRequest,
+        self,
+        request: ReadThreadMessagesRequest,
     ) -> AgentThreadMessagesPage:
         """Unscoped per-thread message read (no bridge-ownership gate).
 
@@ -446,13 +505,9 @@ class AgentMessagingService:
         # either side currently advertises (e.g. after a manual
         # peer_register that mutated agent_id).  Same-kind cross-instance
         # sends (codex_A -> codex_B) are valid.
-        if (
-            request.sender_agent_instance_id
-            == request.peer_agent_instance_id
-        ):
+        if request.sender_agent_instance_id == request.peer_agent_instance_id:
             raise AgentRequestInvalidError(
-                "cannot peer_send to your own instance "
-                f"({request.sender_agent_instance_id})",
+                f"cannot peer_send to your own instance ({request.sender_agent_instance_id})",
             )
         self._validate_content(request.content)
 
@@ -472,9 +527,7 @@ class AgentMessagingService:
                 metadata={
                     "peer": True,
                     "sender_agent_id": request.sender_agent_id,
-                    "sender_agent_instance_id": (
-                        request.sender_agent_instance_id
-                    ),
+                    "sender_agent_instance_id": (request.sender_agent_instance_id),
                     "sender_session_label": request.sender_session_label,
                     "peer_agent_id": request.peer_agent_id,
                     "peer_agent_instance_id": request.peer_agent_instance_id,
@@ -518,24 +571,30 @@ class AgentMessagingService:
         back on the next call. Both direct and role sections return
         newest-first pages and walk toward older rows.
 
-        ``since_created_at`` is the opposite, forward cursor for the instance
-        section only: rows strictly newer than it, oldest-first, continued by
-        echoing ``next_since_created_at``. The role section is unaffected (its
-        own opaque ``role_after`` cursor). Naming both instance cursors is a
-        contradiction and is refused rather than resolved by guessing.
+        ``since_created_at`` is the opposite, first-page forward horizon for
+        the instance section: rows strictly newer than it, oldest-first,
+        continued by echoing ``next_since_cursor`` as ``since_cursor``. The
+        opaque token carries the original horizon and last emitted
+        ``(created_at, id)`` pair. The horizon also bounds the role
+        section, which keeps its own newest-first ``role_after`` paging but
+        returns only rows strictly newer than it, so a row created before the
+        horizon never comes back as new on either section and
+        ``role_since_created_at`` says the role section applied it. Naming both
+        instance cursors is a contradiction and is refused rather than
+        resolved by guessing.
         """
         self._require_enabled()
         self._validate_peer_inbox_request(request)
+        effective_request, since_cursor = self._effective_peer_inbox_request(request)
         rows, instance_exhausted = self._repo.list_peer_messages_for(
-            recipient_agent_id=request.recipient_agent_id,
-            recipient_agent_instance_id=(
-                request.recipient_agent_instance_id
-            ),
-            recipient_agent_session_id=request.recipient_agent_session_id,
-            after_created_at=request.after_created_at,
-            since_created_at=request.since_created_at,
-            limit=request.limit,
-            silent_only=not request.include_important,
+            recipient_agent_id=effective_request.recipient_agent_id,
+            recipient_agent_instance_id=(effective_request.recipient_agent_instance_id),
+            recipient_agent_session_id=effective_request.recipient_agent_session_id,
+            after_created_at=effective_request.after_created_at,
+            since_created_at=effective_request.since_created_at,
+            since_after=((since_cursor.after_created_at, since_cursor.after_id) if since_cursor is not None else None),
+            limit=effective_request.limit,
+            silent_only=not effective_request.include_important,
         )
         entries = tuple(
             PeerInboxEntry(
@@ -553,7 +612,10 @@ class AgentMessagingService:
             )
             for message in rows
         )
-        next_at, next_since = self._instance_cursors(request, rows)
+        next_at, next_since, next_since_cursor = self._instance_cursors(
+            effective_request,
+            rows,
+        )
         # v10 Control #1a: the role section is ADDITIVE — the instance section
         # above (entries + next_after_created_at + its raw-SQL read) is
         # untouched, so existing peer messaging is byte-for-byte unaffected.
@@ -570,25 +632,30 @@ class AgentMessagingService:
         # response. A genuine SHARED fault (state store down) still fails the
         # instance read above first, so this never masks a total outage.
         (
-            role_entries, next_role_cursor, role_floor_applied,
-            role_history_cursor, role_status, role_error,
-        ) = self._collect_role_section(request)
-        role_page_truncated = (
-            role_status is RoleSectionStatus.OK and next_role_cursor is not None
-        )
+            role_entries,
+            next_role_cursor,
+            role_floor_applied,
+            role_history_cursor,
+            role_status,
+            role_error,
+            role_read_coverage,
+        ) = self._collect_role_section(effective_request)
+        role_page_truncated = role_status is RoleSectionStatus.OK and next_role_cursor is not None
         role_truncation_reason: RoleTruncationReason | None = None
         role_byte_ceiling: int | None = None
         if role_page_truncated:
-            if len(role_entries) < request.limit:
+            if len(role_entries) < effective_request.limit:
                 role_truncation_reason = RoleTruncationReason.BYTE_CEILING
                 role_byte_ceiling = ROLE_SECTION_BYTE_CEILING
             else:
                 role_truncation_reason = RoleTruncationReason.ROW_LIMIT
         role_read_page_token, role_read_page_status = self._role_read_page_outcome(
-            request=request, role_status=role_status, role_entries=role_entries,
+            request=effective_request,
+            role_status=role_status,
+            role_entries=role_entries,
         )
-        return PeerInbox(
-            recipient_agent_id=request.recipient_agent_id,
+        page = PeerInbox(
+            recipient_agent_id=effective_request.recipient_agent_id,
             entries=entries,
             next_after_created_at=next_at,
             instance_exhausted=instance_exhausted,
@@ -598,14 +665,58 @@ class AgentMessagingService:
             role_section_error=role_error,
             role_floor_applied=role_floor_applied,
             role_history_cursor=role_history_cursor,
-            role_limit=request.limit,
+            role_limit=effective_request.limit,
             role_page_truncated=role_page_truncated,
             role_truncation_reason=role_truncation_reason,
             role_byte_ceiling=role_byte_ceiling,
             role_read_page_token=role_read_page_token,
             role_read_page_status=role_read_page_status,
             next_since_created_at=next_since,
+            next_since_cursor=next_since_cursor,
+            role_since_created_at=(effective_request.since_created_at if role_status is RoleSectionStatus.OK else None),
+            role_read_coverage=role_read_coverage,
         )
+        return replace(page, read_coverage=self._inbox_read_coverage(request, effective_request, since_cursor, page))
+
+    @staticmethod
+    def _inbox_read_coverage(
+        request: PeerInboxRequest,
+        effective: PeerInboxRequest,
+        continuation: PeerInboxSinceCursor | None,
+        page: PeerInbox,
+    ) -> InboxReadCoverage:
+        """Describe returned rows and input provenance without further reads."""
+        forward = effective.since_created_at is not None
+        horizon = _inbox_iso(effective.since_created_at)
+        mode, safety, advisory = _inbox_mode(continuation, forward=forward)
+        common = InboxSectionCoverage(
+            status="ok",
+            direction="forward" if forward else "backward",
+            cursor_mode=mode,
+            continuation_safety=safety,
+            advisory=advisory,
+            requested_since=_inbox_iso(request.since_created_at),
+            effective_since=horizon,
+            after=_inbox_iso(request.after_created_at),
+            since_cursor=request.since_cursor,
+            role_after=request.role_after,
+            continuation_after=(InboxReturnedKey(continuation.after_created_at.isoformat(), continuation.after_id) if continuation is not None else None),
+            first=None,
+            last=None,
+            count=len(page.entries),
+            limit=effective.limit,
+            next_cursor=page.next_since_cursor if forward else _inbox_iso(page.next_after_created_at),
+            exhausted=page.instance_exhausted,
+            observer=request.observer,
+            include_covered=request.include_covered,
+            include_important=request.include_important,
+            role_floor_applied=None,
+            role_history_cursor=None,
+            role_read_coverage=(),
+        )
+
+        direct = replace(common, first=_inbox_key(page.entries, 0), last=_inbox_key(page.entries, -1))
+        return InboxReadCoverage(direct=direct, role=_role_page_coverage(direct, page))
 
     @staticmethod
     def _validate_peer_inbox_request(request: PeerInboxRequest) -> None:
@@ -615,26 +726,54 @@ class AgentMessagingService:
             raise AgentRequestInvalidError(
                 "recipient_agent_instance_id is required",
             )
-        if (
-            request.after_created_at is not None
-            and request.since_created_at is not None
-        ):
+        if request.after_created_at is not None and (request.since_created_at is not None or request.since_cursor is not None):
             raise AgentRequestInvalidError(
-                "after (backward, newest-first) and since (forward, "
-                "oldest-first) are opposite cursors; send one",
+                "after (backward, newest-first) and since (forward, oldest-first) are opposite cursors; send one",
+            )
+        if request.since_created_at is not None and request.since_cursor is not None:
+            raise AgentRequestInvalidError(
+                "since and since_cursor are the first-page and continuation forms of the same forward read; send one",
             )
 
     @staticmethod
+    def _effective_peer_inbox_request(
+        request: PeerInboxRequest,
+    ) -> tuple[PeerInboxRequest, PeerInboxSinceCursor | None]:
+        """Decode a continuation and restore its fixed role/direct horizon."""
+        if request.since_cursor is None:
+            return request, None
+        try:
+            decoded = decode_peer_inbox_since_cursor(request.since_cursor)
+        except PeerInboxCursorRejectedError as exc:
+            raise AgentRequestInvalidError(str(exc)) from exc
+        return replace(request, since_created_at=decoded.horizon), decoded
+
+    @staticmethod
     def _instance_cursors(
-        request: PeerInboxRequest, rows: list[AgentMessageRow],
-    ) -> tuple[datetime | None, datetime | None]:
-        """``(next_after, next_since)``: only the request's own direction is set."""
+        request: PeerInboxRequest,
+        rows: list[AgentMessageRow],
+    ) -> tuple[datetime | None, datetime | None, str | None]:
+        """Return backward mark, timestamp observation, and tie-safe cursor."""
         if request.since_created_at is not None:
-            return None, rows[-1].created_at if rows else request.since_created_at
-        return rows[-1].created_at if rows else request.after_created_at, None
+            if not rows:
+                return None, request.since_created_at, request.since_cursor
+            last = rows[-1]
+            return (
+                None,
+                last.created_at,
+                encode_peer_inbox_since_cursor(
+                    horizon=request.since_created_at,
+                    after_created_at=last.created_at,
+                    after_id=last.id,
+                ),
+            )
+        return rows[-1].created_at if rows else request.after_created_at, None, None
 
     def _role_read_page_outcome(
-        self, *, request: PeerInboxRequest, role_status: RoleSectionStatus,
+        self,
+        *,
+        request: PeerInboxRequest,
+        role_status: RoleSectionStatus,
         role_entries: tuple[PeerInboxEntry, ...],
     ) -> tuple[str | None, str]:
         """Issue a pending page only for a successful non-observer role page."""
@@ -672,43 +811,60 @@ class AgentMessagingService:
         return history
 
     def _collect_role_section(
-        self, request: PeerInboxRequest,
+        self,
+        request: PeerInboxRequest,
     ) -> tuple[
-        tuple[PeerInboxEntry, ...], str | None, bool, str | None,
-        RoleSectionStatus, str | None,
+        tuple[PeerInboxEntry, ...],
+        str | None,
+        bool,
+        str | None,
+        RoleSectionStatus,
+        str | None,
+        tuple[RoleReadCoverage, ...],
     ]:
         """Compute the role section inside the Q1 fault-domain boundary.
 
         Returns ``(role_entries, next_role_cursor, role_floor_applied,
-        role_history_cursor, status, error)``. On success: the merged page +
-        cursor + the pull-surface-boundary floor signal (design §3/§5b) +
-        ``OK`` + ``None``. On ANY role-side failure: empty page, no cursor, no
-        floor signal, ``ERROR`` + ``repr(exc)`` (logged at ERROR with
-        traceback). The broad ``except`` is the deliberate fault-domain boundary
+        role_history_cursor, status, error, role_read_coverage)``. On success:
+        the merged page + cursor + the pull-surface-boundary floor signal
+        (design §3/§5b) + ``OK`` + ``None`` + the per-role read coverage. On ANY
+        role-side failure: empty page, no cursor, no floor signal, ``ERROR`` +
+        ``repr(exc)`` (logged at ERROR with traceback), no coverage. The broad ``except`` is the deliberate fault-domain boundary
         — its scope is this one seam, so it cannot hide a fault anywhere else.
         """
         try:
-            role_entries, next_role_cursor, role_floor_applied, role_history_cursor = (
-                self.list_silent_for_roles(
-                    agent_instance_id=request.recipient_agent_instance_id,
-                    include_important=request.include_important,
-                    limit=request.limit,
-                    role_after=request.role_after,
-                    observer=request.observer,
-                    include_covered=request.include_covered,
-                )
+            (
+                (
+                    role_entries,
+                    next_role_cursor,
+                    role_floor_applied,
+                    role_history_cursor,
+                ),
+                role_read_coverage,
+            ) = self._read_role_section(
+                agent_instance_id=request.recipient_agent_instance_id,
+                include_important=request.include_important,
+                limit=request.limit,
+                role_after=request.role_after,
+                observer=request.observer,
+                include_covered=request.include_covered,
+                since=request.since_created_at,
             )
         except Exception as exc:  # noqa: BLE001 — the Q1 fault-domain boundary
             logger.exception(
-                "peer_inbox role section failed for instance %s (role_after=%r); "
-                "serving instance section only",
+                "peer_inbox role section failed for instance %s (role_after=%r); serving instance section only",
                 request.recipient_agent_instance_id,
                 request.role_after,
             )
-            return (), None, False, None, RoleSectionStatus.ERROR, repr(exc)
+            return (), None, False, None, RoleSectionStatus.ERROR, repr(exc), ()
         return (
-            role_entries, next_role_cursor, role_floor_applied,
-            role_history_cursor, RoleSectionStatus.OK, None,
+            role_entries,
+            next_role_cursor,
+            role_floor_applied,
+            role_history_cursor,
+            RoleSectionStatus.OK,
+            None,
+            role_read_coverage,
         )
 
     # ------------------------------------------------------------------
@@ -755,7 +911,9 @@ class AgentMessagingService:
         """
         self._require_enabled()
         external_id = role_message_external_id(
-            recipient_kind, recipient_key, message_id,
+            recipient_kind,
+            recipient_key,
+            message_id,
         )
         record: dict[str, object] = {
             "external_id": external_id,
@@ -802,15 +960,16 @@ class AgentMessagingService:
             # would silently stop advancing the watcher mark, which is a wake
             # storm rather than a visible error.
             raise AgentMessagingError(
-                f"role message {external_id!r} not readable immediately after "
-                "its own upsert reported success",
+                f"role message {external_id!r} not readable immediately after its own upsert reported success",
             )
         created_at = normalize_sort_value(row.get("created_at"))
         role_row_id = str(row.get("id", ""))
         if not role_row_id:
             raise AgentMessagingError("role message row omitted its durable envelope id")
         return RoleMessagePersisted(
-            message_id=message_id, created_at=created_at, role_row_id=role_row_id,
+            message_id=message_id,
+            created_at=created_at,
+            role_row_id=role_row_id,
         )
 
     def list_undelivered_for(
@@ -1065,7 +1224,9 @@ class AgentMessagingService:
     # follow-on debt, not dropped this slice.
 
     def _read_owed_row(
-        self, table: str, external_id: str,
+        self,
+        table: str,
+        external_id: str,
     ) -> dict[str, object] | None:
         """Read one row by ``external_id`` from ``table`` (or ``None``)."""
         result = self._state.query_state(
@@ -1084,8 +1245,39 @@ class AgentMessagingService:
         role_after: str | None,
         observer: bool = False,
         include_covered: bool = False,
+        since: datetime | None = None,
     ) -> tuple[tuple[PeerInboxEntry, ...], str | None, bool, str | None]:
         """The role-inbox section — a global ``(created_at, id)`` k-way merge.
+
+        The page, cursor, floor signal and history cursor of
+        :meth:`_read_role_section`, which also returns the per-role coverage
+        ``peer_inbox`` reports.
+        """
+        return self._read_role_section(
+            agent_instance_id=agent_instance_id,
+            include_important=include_important,
+            limit=limit,
+            role_after=role_after,
+            observer=observer,
+            include_covered=include_covered,
+            since=since,
+        )[0]
+
+    def _read_role_section(
+        self,
+        *,
+        agent_instance_id: str,
+        include_important: bool,
+        limit: int,
+        role_after: str | None,
+        observer: bool = False,
+        include_covered: bool = False,
+        since: datetime | None = None,
+    ) -> tuple[
+        tuple[tuple[PeerInboxEntry, ...], str | None, bool, str | None],
+        tuple[RoleReadCoverage, ...],
+    ]:
+        """The role-inbox section and its per-role coverage.
 
         Enumerates the roles ``agent_instance_id`` currently holds from
         ``agent_role_binding`` (NOT ``resolve_role``, which is per-name and
@@ -1105,14 +1297,21 @@ class AgentMessagingService:
         any reader advanced; it is observer-only because it is a read of rows
         the caller may already have been shown.
         ``include_important=False`` is an explicit silent-only status view.
-        Returns ``((), None, False, None)`` for a holder with no roles.
+        ``since`` is the time horizon: a strict ``created_at`` range on the
+        per-role query, so a row at or before it is never read and the page
+        cursor and exhaustion stay truthful inside the window. It is independent
+        of the covered-mark floor, and a row newer than both is returned.
+        Returns ``(((), None, False, None), ())`` for a holder with no roles.
+        The coverage names every role read and counts, per role, the rows the
+        floor and a read receipt hid inside the window this call scanned (no
+        extra query: the counts fall out of the floor and receipt steps below).
         Re-readable + durable (rows are never consumed on read).
         """
         if include_covered and not observer:
             raise AgentRequestInvalidError("include_covered requires observer")
         held_roles = self._enumerate_held_roles(agent_instance_id)
         if not held_roles:
-            return (), None, False, None
+            return ((), None, False, None), ()
         scope = RoleCursorScope(
             include_important=include_important,
             held_roles=tuple(held_roles),
@@ -1123,56 +1322,95 @@ class AgentMessagingService:
         marks = {} if skip_floor else self._read_role_covered_marks(held_roles)
         per_role_records: list[list[dict[str, object]]] = []
         any_floor_truncated = False
+        coverage: list[RoleReadCoverage] = []
+        truncated_scans: list[tuple[object, ...] | None] = []
         for role in held_roles:
-            records = self._query_visible_role_page(
+            records, receipt_hidden, truncated_at = self._query_visible_role_page(
                 recipient_key=role,
                 include_important=include_important,
                 limit=limit,
                 after=after,
                 agent_instance_id=agent_instance_id,
                 filter_receipts=not observer and not skip_floor,
+                since=since,
             )
+            visible_count = len(records)
             records, truncated = _apply_role_floor(records, marks.get(role))
             any_floor_truncated = any_floor_truncated or truncated
             per_role_records.append(records)
+            truncated_scans.append(truncated_at)
+            coverage.append(
+                RoleReadCoverage(
+                    role=role,
+                    covered_mark_present=role in marks,
+                    floor_hidden=visible_count - len(records),
+                    receipt_hidden=receipt_hidden,
+                    scan_truncated=truncated_at is not None,
+                )
+            )
         resume_seed = _max_role_key(marks.values()) if marks else None
-        return build_role_section(
+        section = build_role_section(
             per_role_records,
             scope=scope,
             limit=limit,
+            history_read=history_read,
             any_floor_truncated=any_floor_truncated,
             resume_seed=resume_seed,
+            truncated_scans=tuple(truncated_scans),
         )
+        return section, tuple(coverage)
 
     def _query_visible_role_page(
-        self, *, recipient_key: str, include_important: bool, limit: int,
-        after: tuple[object, ...] | None, agent_instance_id: str,
+        self,
+        *,
+        recipient_key: str,
+        include_important: bool,
+        limit: int,
+        after: tuple[object, ...] | None,
+        agent_instance_id: str,
         filter_receipts: bool,
-    ) -> list[dict[str, object]]:
-        """Refill through acknowledged rows without crossing an unserved row."""
+        since: datetime | None = None,
+    ) -> tuple[list[dict[str, object]], int, tuple[object, ...] | None]:
+        """Refill through acknowledged rows without crossing an unserved row.
+
+        Returns ``(visible, receipt_hidden, truncated_at)``: the second is how
+        many scanned rows a read receipt hid, counted in the loop that already
+        tests each row for one. ``truncated_at`` is ``None`` unless the scan
+        spent ``_ROLE_RECEIPT_REFILL_MAX_PAGES`` pages before it held
+        ``limit + 1`` visible rows; then it is the ``(created_at, id)`` the scan
+        stopped after, so the caller can mark the read incomplete and continue
+        from it. The rows already found are returned, never discarded.
+        """
         visible: list[dict[str, object]] = []
+        receipt_hidden = 0
         scan_after = after
         scanned_pages = 0
         while len(visible) < limit + 1:
             if scanned_pages >= _ROLE_RECEIPT_REFILL_MAX_PAGES:
-                raise AgentMessagingError("role receipt refill exceeded bounded scan budget")
+                return visible, receipt_hidden, scan_after
             raw = self._query_role_page(
-                recipient_key=recipient_key, include_important=include_important,
-                limit=limit, after=scan_after,
+                recipient_key=recipient_key,
+                include_important=include_important,
+                limit=limit,
+                after=scan_after,
+                since=since,
             )
             scanned_pages += 1
             for record in raw:
                 if not filter_receipts or not self._has_role_read_receipt(
-                    recipient_key=recipient_key, agent_instance_id=agent_instance_id,
+                    recipient_key=recipient_key,
+                    agent_instance_id=agent_instance_id,
                     role_row_id=str(record.get("id", "")),
                 ):
                     visible.append(record)
                     if len(visible) == limit + 1:
-                        return visible
+                        return visible, receipt_hidden, None
+                else:
+                    receipt_hidden += 1
             if len(raw) < limit + 1:
-                return visible
+                return visible, receipt_hidden, None
             scan_after = (raw[-1].get("created_at"), raw[-1].get("id"))
-        return visible
+        return visible, receipt_hidden, None
 
     def _enumerate_held_roles(self, agent_instance_id: str) -> list[str]:
         """Roles currently bound to ``agent_instance_id`` (single state read).
@@ -1197,7 +1435,11 @@ class AgentMessagingService:
         return roles
 
     def _has_role_read_receipt(
-        self, *, recipient_key: str, agent_instance_id: str, role_row_id: str,
+        self,
+        *,
+        recipient_key: str,
+        agent_instance_id: str,
+        role_row_id: str,
     ) -> bool:
         """Receipt existence is the sole weak-suppression authority."""
         if not role_row_id:
@@ -1232,31 +1474,47 @@ class AgentMessagingService:
         digest = token_digest(token)
         external_id = page_external_id(digest)
         now = self._clock().isoformat()
-        require_completed(self._state.upsert_state(
-            _ROLE_NAMESPACE,
-            {"table": TABLE_ROLE_READ_PAGE, "record": {
-                "external_id": external_id, "token_hash": digest,
-                "agent_session_id": agent_session_id,
-                "agent_instance_id": agent_instance_id,
-                "held_role_scope_hash": held_role_scope_hash(held_roles),
-                "include_important": include_important, "status": "pending",
-                "expected_item_count": len(item_specs),
-                "item_digest": page_item_digest(item_specs),
-                "issued_at": now,
-            }, "conflict_columns": ["external_id"]},
-        ), "issue role_read_page")
-        for recipient_key, role_row_id, message_id, created_at in item_specs:
-            require_completed(self._state.upsert_state(
+        require_completed(
+            self._state.upsert_state(
                 _ROLE_NAMESPACE,
-                {"table": TABLE_ROLE_READ_PAGE_ITEM, "record": {
-                    "external_id": page_item_external_id(external_id, role_row_id),
-                    "page_external_id": external_id,
-                    "recipient_key": recipient_key,
-                    "role_row_id": role_row_id,
-                    "role_message_id": message_id,
-                    "role_created_at": created_at,
-                }, "conflict_columns": ["external_id"]},
-            ), "issue role_read_page_item")
+                {
+                    "table": TABLE_ROLE_READ_PAGE,
+                    "record": {
+                        "external_id": external_id,
+                        "token_hash": digest,
+                        "agent_session_id": agent_session_id,
+                        "agent_instance_id": agent_instance_id,
+                        "held_role_scope_hash": held_role_scope_hash(held_roles),
+                        "include_important": include_important,
+                        "status": "pending",
+                        "expected_item_count": len(item_specs),
+                        "item_digest": page_item_digest(item_specs),
+                        "issued_at": now,
+                    },
+                    "conflict_columns": ["external_id"],
+                },
+            ),
+            "issue role_read_page",
+        )
+        for recipient_key, role_row_id, message_id, created_at in item_specs:
+            require_completed(
+                self._state.upsert_state(
+                    _ROLE_NAMESPACE,
+                    {
+                        "table": TABLE_ROLE_READ_PAGE_ITEM,
+                        "record": {
+                            "external_id": page_item_external_id(external_id, role_row_id),
+                            "page_external_id": external_id,
+                            "recipient_key": recipient_key,
+                            "role_row_id": role_row_id,
+                            "role_message_id": message_id,
+                            "role_created_at": created_at,
+                        },
+                        "conflict_columns": ["external_id"],
+                    },
+                ),
+                "issue role_read_page_item",
+            )
         return RoleReadPage(token=token, status="pending_ack", item_count=len(item_specs))
 
     @staticmethod
@@ -1270,7 +1528,11 @@ class AgentMessagingService:
         return recipient_key, role_row_id, entry.message.id, created_at
 
     def acknowledge_role_read_page(
-        self, *, agent_session_id: str, agent_instance_id: str, token: str,
+        self,
+        *,
+        agent_session_id: str,
+        agent_instance_id: str,
+        token: str,
     ) -> RoleReadAck:
         """Convert immutable server-issued items to exact display receipts."""
         if not token:
@@ -1278,8 +1540,7 @@ class AgentMessagingService:
         page = self._read_owed_row(TABLE_ROLE_READ_PAGE, page_external_id(token_digest(token)))
         if page is None:
             raise AgentRequestInvalidError("unknown role read page token")
-        if (page.get("agent_session_id") != agent_session_id
-                or page.get("agent_instance_id") != agent_instance_id):
+        if page.get("agent_session_id") != agent_session_id or page.get("agent_instance_id") != agent_instance_id:
             raise AgentRequestInvalidError("role read page token belongs to another session or instance")
         current_roles = tuple(self._enumerate_held_roles(agent_instance_id))
         if page.get("held_role_scope_hash") != held_role_scope_hash(current_roles):
@@ -1291,34 +1552,50 @@ class AgentMessagingService:
             recipient_key = str(item.get("recipient_key", ""))
             row_id = str(item.get("role_row_id", ""))
             if not self._has_role_read_receipt(
-                recipient_key=recipient_key, agent_instance_id=agent_instance_id,
+                recipient_key=recipient_key,
+                agent_instance_id=agent_instance_id,
                 role_row_id=row_id,
             ):
-                require_completed(self._state.upsert_state(
-                    _ROLE_NAMESPACE,
-                    {"table": TABLE_ROLE_READ_RECEIPT, "record": {
-                        "external_id": receipt_external_id(recipient_key, agent_instance_id, row_id),
-                        "recipient_key": recipient_key, "agent_instance_id": agent_instance_id,
-                        "role_row_id": row_id,
-                        "role_message_id": str(item.get("role_message_id", "")),
-                        "role_created_at": str(item.get("role_created_at", "")),
-                        "acknowledged_at": self._clock().isoformat(),
-                    }, "conflict_columns": ["external_id"], "on_conflict": "do_nothing"},
-                ), "insert role_read_receipt")
+                require_completed(
+                    self._state.upsert_state(
+                        _ROLE_NAMESPACE,
+                        {
+                            "table": TABLE_ROLE_READ_RECEIPT,
+                            "record": {
+                                "external_id": receipt_external_id(recipient_key, agent_instance_id, row_id),
+                                "recipient_key": recipient_key,
+                                "agent_instance_id": agent_instance_id,
+                                "role_row_id": row_id,
+                                "role_message_id": str(item.get("role_message_id", "")),
+                                "role_created_at": str(item.get("role_created_at", "")),
+                                "acknowledged_at": self._clock().isoformat(),
+                            },
+                            "conflict_columns": ["external_id"],
+                            "on_conflict": "do_nothing",
+                        },
+                    ),
+                    "insert role_read_receipt",
+                )
             self._advance_role_read_watermark(
-                recipient_key=recipient_key, agent_instance_id=agent_instance_id,
-                created_at=str(item.get("role_created_at", "")), row_id=row_id,
+                recipient_key=recipient_key,
+                agent_instance_id=agent_instance_id,
+                created_at=str(item.get("role_created_at", "")),
+                row_id=row_id,
                 message_id=str(item.get("role_message_id", "")),
             )
-        require_completed(self._state.update_state(
-            _ROLE_NAMESPACE,
-            {"table": TABLE_ROLE_READ_PAGE, "filters": {"external_id": str(page.get("external_id", "")), "status": "pending"}},
-            {"status": "acked", "acked_at": self._clock().isoformat()},
-        ), "ack role_read_page")
+        require_completed(
+            self._state.update_state(
+                _ROLE_NAMESPACE,
+                {"table": TABLE_ROLE_READ_PAGE, "filters": {"external_id": str(page.get("external_id", "")), "status": "pending"}},
+                {"status": "acked", "acked_at": self._clock().isoformat()},
+            ),
+            "ack role_read_page",
+        )
         return RoleReadAck(status="acked", receipt_count=len(items))
 
     def _read_complete_role_read_page_items(
-        self, page: dict[str, object],
+        self,
+        page: dict[str, object],
     ) -> list[dict[str, object]]:
         expected_count = page.get("expected_item_count")
         expected_digest = page.get("item_digest")
@@ -1326,25 +1603,25 @@ class AgentMessagingService:
             raise AgentMessagingError("role read page is missing completeness metadata")
         if expected_count < 0 or expected_count > 1000:
             raise AgentMessagingError("role read page item count is out of bounds")
-        items = require_records(self._state.query_ordered(
-            _ROLE_NAMESPACE,
-            {"table": TABLE_ROLE_READ_PAGE_ITEM,
-             "filters": {"page_external_id": str(page.get("external_id", ""))},
-             "order_by": [("role_row_id", "asc"), ("external_id", "asc")],
-             "limit": 1001, "unbounded": True},
-        ))
-        item_specs = [
-            (str(item.get("recipient_key", "")), str(item.get("role_row_id", "")),
-             str(item.get("role_message_id", "")), str(item.get("role_created_at", "")))
-            for item in items
-        ]
+        items = require_records(
+            self._state.query_ordered(
+                _ROLE_NAMESPACE,
+                {"table": TABLE_ROLE_READ_PAGE_ITEM, "filters": {"page_external_id": str(page.get("external_id", ""))}, "order_by": [("role_row_id", "asc"), ("external_id", "asc")], "limit": 1001, "unbounded": True},
+            )
+        )
+        item_specs = [(str(item.get("recipient_key", "")), str(item.get("role_row_id", "")), str(item.get("role_message_id", "")), str(item.get("role_created_at", ""))) for item in items]
         if len(items) != expected_count or page_item_digest(item_specs) != expected_digest:
             raise AgentMessagingError("role read page items are incomplete or malformed")
         return items
 
     def _advance_role_read_watermark(
-        self, *, recipient_key: str, agent_instance_id: str, created_at: str,
-        row_id: str, message_id: str,
+        self,
+        *,
+        recipient_key: str,
+        agent_instance_id: str,
+        created_at: str,
+        row_id: str,
+        message_id: str,
     ) -> None:
         """Bounded compare-and-swap update; receipts remain authoritative."""
         external_id = watermark_external_id(recipient_key, agent_instance_id)
@@ -1352,15 +1629,26 @@ class AgentMessagingService:
         for _ in range(8):
             old = self._read_owed_row(TABLE_ROLE_READ_WATERMARK, external_id)
             if old is None:
-                require_completed(self._state.upsert_state(
-                    _ROLE_NAMESPACE,
-                    {"table": TABLE_ROLE_READ_WATERMARK, "record": {
-                        "external_id": external_id, "recipient_key": recipient_key,
-                        "agent_instance_id": agent_instance_id, "read_created_at": created_at,
-                        "read_id": row_id, "read_message_id": message_id,
-                        "observed_at": self._clock().isoformat(),
-                    }, "conflict_columns": ["external_id"], "on_conflict": "do_nothing"},
-                ), "insert role_read_watermark")
+                require_completed(
+                    self._state.upsert_state(
+                        _ROLE_NAMESPACE,
+                        {
+                            "table": TABLE_ROLE_READ_WATERMARK,
+                            "record": {
+                                "external_id": external_id,
+                                "recipient_key": recipient_key,
+                                "agent_instance_id": agent_instance_id,
+                                "read_created_at": created_at,
+                                "read_id": row_id,
+                                "read_message_id": message_id,
+                                "observed_at": self._clock().isoformat(),
+                            },
+                            "conflict_columns": ["external_id"],
+                            "on_conflict": "do_nothing",
+                        },
+                    ),
+                    "insert role_read_watermark",
+                )
                 # A lower concurrent writer may have won the insert. Re-read
                 # before deciding the proposed boundary is already stored.
                 old = self._read_owed_row(TABLE_ROLE_READ_WATERMARK, external_id)
@@ -1369,20 +1657,29 @@ class AgentMessagingService:
             current = (str(old.get("read_created_at", "")), str(old.get("read_id", "")))
             if current >= proposed:
                 return
-            updated = require_updated(self._state.update_state(
-                _ROLE_NAMESPACE,
-                {"table": TABLE_ROLE_READ_WATERMARK, "filters": {
-                    "external_id": external_id, "read_created_at": current[0], "read_id": current[1],
-                }},
-                {"read_created_at": created_at, "read_id": row_id,
-                 "read_message_id": message_id, "observed_at": self._clock().isoformat()},
-            ))
+            updated = require_updated(
+                self._state.update_state(
+                    _ROLE_NAMESPACE,
+                    {
+                        "table": TABLE_ROLE_READ_WATERMARK,
+                        "filters": {
+                            "external_id": external_id,
+                            "read_created_at": current[0],
+                            "read_id": current[1],
+                        },
+                    },
+                    {"read_created_at": created_at, "read_id": row_id, "read_message_id": message_id, "observed_at": self._clock().isoformat()},
+                )
+            )
             if updated == 1:
                 return
         raise AgentMessagingError("role read watermark compare-and-swap exhausted")
 
     def role_read_receipts(
-        self, *, agent_instance_id: str, candidates: list[tuple[str, str]],
+        self,
+        *,
+        agent_instance_id: str,
+        candidates: list[tuple[str, str]],
     ) -> tuple[RoleReadReceiptResult, ...]:
         """Read-only exact receipt lookup for a caller's currently held roles."""
         held = set(self._enumerate_held_roles(agent_instance_id))
@@ -1394,17 +1691,23 @@ class AgentMessagingService:
         for recipient_key, role_row_id in candidates:
             if recipient_key not in held:
                 raise AgentRequestInvalidError("receipt candidate is outside the caller's held roles")
-            results.append(RoleReadReceiptResult(
-                recipient_key=recipient_key, role_row_id=role_row_id,
-                served=self._has_role_read_receipt(
-                    recipient_key=recipient_key, agent_instance_id=agent_instance_id,
+            results.append(
+                RoleReadReceiptResult(
+                    recipient_key=recipient_key,
                     role_row_id=role_row_id,
-                ),
-            ))
+                    served=self._has_role_read_receipt(
+                        recipient_key=recipient_key,
+                        agent_instance_id=agent_instance_id,
+                        role_row_id=role_row_id,
+                    ),
+                )
+            )
         return tuple(results)
 
     def _decode_role_after(
-        self, role_after: str | None, scope: RoleCursorScope,
+        self,
+        role_after: str | None,
+        scope: RoleCursorScope,
     ) -> tuple[tuple[object, ...] | None, bool]:
         """Decode the inbound ``role_after`` cursor against the current scope.
 
@@ -1441,12 +1744,15 @@ class AgentMessagingService:
         include_important: bool,
         limit: int,
         after: tuple[object, ...] | None,
+        since: datetime | None = None,
     ) -> list[dict[str, object]]:
         """One per-role newest-first page plus a truthful-exhaustion lookahead."""
         filters: dict[str, object] = {
             "recipient_kind": RECIPIENT_KIND_ROLE,
             "recipient_key": recipient_key,
         }
+        if since is not None:
+            filters["created_at"] = {"op": "gt", "value": since}
         if not include_important:
             # Silent bucket only. include_important=True omits BOTH the
             # important and delivered filters (catch-up resurfaces delivered
@@ -1469,7 +1775,8 @@ class AgentMessagingService:
         return _result_records(result)
 
     def _read_role_covered_marks(
-        self, held_roles: list[str],
+        self,
+        held_roles: list[str],
     ) -> dict[str, tuple[str, str]]:
         """Point-lookup of the covered mark for each held role, by
         ``external_id`` (the design §1 index: one row per role, point
@@ -1485,7 +1792,8 @@ class AgentMessagingService:
         marks: dict[str, tuple[str, str]] = {}
         for role in held_roles:
             row = self._read_owed_row(
-                TABLE_ROLE_COVERED_MARK, role_covered_mark_external_id(role),
+                TABLE_ROLE_COVERED_MARK,
+                role_covered_mark_external_id(role),
             )
             if row is None:
                 continue
@@ -1527,13 +1835,14 @@ class AgentMessagingService:
         registered-route-only fence and the live role-ownership re-check.
         """
         external_id = role_message_external_id(
-            RECIPIENT_KIND_ROLE, recipient_key, message_id,
+            RECIPIENT_KIND_ROLE,
+            recipient_key,
+            message_id,
         )
         row = self._read_owed_row(TABLE_AGENT_ROLE_MESSAGE, external_id)
         if row is None:
             raise AgentRequestInvalidError(
-                f"no role message {message_id!r} found for role "
-                f"{recipient_key!r} — cannot attest a row that does not exist",
+                f"no role message {message_id!r} found for role {recipient_key!r} — cannot attest a row that does not exist",
             )
         new_key = (
             normalize_sort_value(row.get("created_at")),
@@ -1597,12 +1906,8 @@ class AgentMessagingService:
         NEVER repeated on append_message. A later ``/rename`` on either
         endpoint does NOT propagate to historical rows.
         """
-        sender_label = (
-            request.sender_session_label or request.sender_agent_id
-        )
-        peer_label = (
-            request.peer_session_label or request.peer_agent_id
-        )
+        sender_label = request.sender_session_label or request.sender_agent_id
+        peer_label = request.peer_session_label or request.peer_agent_id
         return self._repo.create_thread(
             originator_type=OriginatorType.MCP_BRIDGE,
             originator_bridge_id=request.sender_bridge_id,
@@ -1617,27 +1922,18 @@ class AgentMessagingService:
             },
             recipient_agent_instance_id=request.peer_agent_instance_id,
             recipient_agent_session_id=request.peer_agent_session_id,
-            originator_session_label=(
-                request.sender_session_label or None
-            ),
-            originator_agent_instance_id=(
-                request.sender_agent_instance_id or None
-            ),
-            recipient_session_label=(
-                request.peer_session_label or None
-            ),
+            originator_session_label=(request.sender_session_label or None),
+            originator_agent_instance_id=(request.sender_agent_instance_id or None),
+            recipient_session_label=(request.peer_session_label or None),
         )
 
     def _validate_content(self, content: MessageContent) -> None:
         if not content:
             raise AgentRequestInvalidError("content must contain at least one part")
-        size = sum(
-            len(part.text.encode("utf-8")) for part in content
-        )
+        size = sum(len(part.text.encode("utf-8")) for part in content)
         if size > self._config.max_message_bytes:
             raise AgentRequestInvalidError(
-                f"content exceeds max_message_bytes "
-                f"({size} > {self._config.max_message_bytes})",
+                f"content exceeds max_message_bytes ({size} > {self._config.max_message_bytes})",
             )
 
 

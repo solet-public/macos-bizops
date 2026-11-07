@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import cast
 
 from .attest_environment import environment_facts, probe_runtime
+from .create_applied_edits import accepted_edit_paths
 from .errors import SourceError
 from .maintenance_inventory import read_maintenance_inventory_v2
 from .maintenance_journal import utc_now
@@ -210,11 +211,17 @@ def _records(request: AttestRequest) -> tuple[InstanceRecord, ...]:
 def _attest_instance(paths: ManagerPaths, record: InstanceRecord, manifest: dict[str, JsonValue] | None, seams: AttestSeams) -> dict[str, JsonValue]:
     target = Path(record.target)
     observed, reason = probe_runtime(target, seams.runner)
+    transaction = load_transaction(paths.transaction_path(record.name))
+    accepted = (
+        frozenset()
+        if transaction is None
+        else accepted_edit_paths(paths, name=record.name, target=target, create_operation_id=transaction.operation_id)
+    )
     return {
         "name": record.name,
         "target": record.target,
         "lifecycle_state": record.lifecycle_state,
-        "seed_checkout": compare_seed_checkout(target, manifest, seams.runner),
+        "seed_checkout": compare_seed_checkout(target, manifest, seams.runner, accepted),
         "runtime": compare_runtime(observed, reason, manifest),
         "journal": _journal_identity(paths, record),
     }

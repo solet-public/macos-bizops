@@ -273,7 +273,10 @@ def main() -> int:
                 peer_registry=_peer_registry(),
                 platform_surface=cast(Any, object()),
                 agent_messaging_service=service,
-                state_service=cast(Any, object()),
+                # The send-by-name path reads the retired-role registry before
+                # resolving (iss_d9c955a2), so it needs a real-shape state; an
+                # empty registry table reads as "Coordinator is not retired".
+                state_service=cast(Any, state),
             ),
         )
     finally:

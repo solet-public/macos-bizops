@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::list_accounts",
+  "display_name": "Google Workspace: List Connected Accounts",
+  "description": "List every Google account connected to this solet: email, alias, tier (consumer for @gmail.com, workspace_user for a Workspace domain, unknown if never recorded), the OAuth scopes Google granted, which account is the default, and token health (access_token_fresh, refreshes_on_next_call, missing_refresh_token). Reads the local vault only; no Google call. legacy_pending_migration is true while a pre-multi-account credential exists that no listed account was migrated from; the next Google verb or connect_account migrates it.",
+  "embedding_description": "Show which Google accounts (work, home, personal Gmail) are linked to this assistant, with each account's alias, consumer or Workspace tier, granted OAuth scopes, default flag and token health. Use before choosing the account argument for a Gmail or Workspace verb, or to check whether reconnecting is needed.",
+  "result_processor_customizations": {
+    "action_label": "Connected Google accounts listed",
+    "result_type": "g_suite_list_accounts_result",
+    "result_description": "accounts list of {email, alias, tier, granted_scopes, default, token_health, migrated_from_legacy}, count, legacy_pending_migration.",
+    "presentation_guidance": "Show each account as email (alias) with its tier and mark the default; mention token health only when it is not access_token_fresh."
+  },
+  "error_processor_customizations": {
+    "action_context": "List the Google accounts connected to this solet.",
+    "error_interpretation": "vault_service_not_available: the plugin could not reach the vault.",
+    "recovery_guidance": "Retry after platform startup completes."
+  }
+}

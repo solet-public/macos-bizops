@@ -81,9 +81,7 @@ def _session_source_preview(
     # case. Only a root that exists and cannot be read is a permission problem.
     _absent, unreadable = partition_session_roots([path for _kind, path in absolute_rows])
     if unreadable:
-        return _blocked(
-            request, "session_roots_unreadable", "Approved session roots are not readable."
-        )
+        return _blocked(request, "session_roots_unreadable", "Approved session roots are not readable.")
     roots = sorted({str(path) for _kind, path in absolute_rows})
     configured = read_json_object(config_path)
     if configured is not None and configured.get("ledger_allowed_roots") == roots:
@@ -113,9 +111,7 @@ def _session_source_preview(
             evidence_ref="session_source_not_verified",
         ),
     ]
-    return result(
-        request, status="pending", actions=actions, repair="Approve only the displayed roots."
-    )
+    return result(request, status="pending", actions=actions, repair="Approve only the displayed roots.")
 
 
 def _apply_session_source(
@@ -128,9 +124,7 @@ def _apply_session_source(
     roots = sorted({str(path) for _kind, path in absolute_rows})
     updated = dict(current)
     updated["ledger_allowed_roots"] = cast(JsonValue, roots)
-    runtime.atomic_write(
-        config_path, json.dumps(updated, indent=2, sort_keys=True) + "\n", mode=0o600
-    )
+    runtime.atomic_write(config_path, json.dumps(updated, indent=2, sort_keys=True) + "\n", mode=0o600)
     started = _kickstart(request, runtime)
     if not started.ok:
         return _failed_outcome(request, started, "session_source_restart_failed")
@@ -140,11 +134,7 @@ def _apply_session_source(
             status="failed",
             error_kind="session_source_restart_not_ready",
             retry_safe=True,
-            repair=(
-                "The restarted target did not report healthy within "
-                f"{_KICKSTART_HEALTH_BUDGET_SECONDS}s. Retry setup once the platform "
-                "LaunchAgent has finished starting."
-            ),
+            repair=(f"The restarted target did not report healthy within {_KICKSTART_HEALTH_BUDGET_SECONDS}s. Retry setup once the platform LaunchAgent has finished starting."),
         )
     listed = solet_call(
         request,
@@ -152,9 +142,24 @@ def _apply_session_source(
         "service_interface::session_ledger_service::list_sources",
         {},
     )
+    if _solet_success_payload(listed) is None:
+        return _failed_outcome(request, listed, "session_source_register_failed")
     source_ids = _registered_source_ids(listed, absolute_rows)
     if source_ids is None:
-        return _failed_outcome(request, listed, "session_source_register_failed")
+        return result(
+            request,
+            status="failed",
+            error_kind="session_source_register_failed",
+            retry_safe=True,
+            repair=(
+                "The restarted target has no enabled "
+                f"{', '.join(kind for kind, _path in absolute_rows)} source at the "
+                "approved root. Boot registers a filesystem session root only when "
+                "ledger_allowed_roots in profile/config/plugins/session_ledger_service.json "
+                "contains it, and logs every root it skips. Confirm the approved root "
+                "is listed there, then retry."
+            ),
+        )
     for source_id in source_ids:
         backfill = solet_call(
             request,
@@ -185,10 +190,7 @@ def _registered_source_ids(
     if not isinstance(sources, list):
         return None
     source_ids: dict[tuple[str, str], str] = {}
-    expected = [
-        (source_kind, canonicalize_root_uri_for_storage(str(root)))
-        for source_kind, root in absolute_rows
-    ]
+    expected = [(source_kind, canonicalize_root_uri_for_storage(str(root))) for source_kind, root in absolute_rows]
     for source in sources:
         entry = _source_entry_id(source)
         if entry is None:

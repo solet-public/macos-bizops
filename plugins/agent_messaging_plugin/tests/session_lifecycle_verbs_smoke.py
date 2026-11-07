@@ -28,6 +28,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
@@ -37,7 +38,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
+import native_spawn_owner_postgres_smoke as owner_smoke  # noqa: E402
 from _real_state_fake import RealShapeState  # noqa: E402
+from _register_unit_double import (  # noqa: E402
+    FIXTURE_UNIT_ID,
+    RegisterUnitDouble,
+    fixture_assignment,
+    fixture_assignment_record,  # noqa: E402
+)
 from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
     AGENT_ROLE_BINDING_NAMESPACE,
     ROLE_CLASS_EPHEMERAL,
@@ -57,6 +65,7 @@ from agent_messaging_plugin.headless_adapter import (  # noqa: E402
     _WORKER_INJECTED_HOOK_FILENAMES,
     HeadlessHostDriver,
 )
+from agent_messaging_plugin.register_unit_client import RegisterActor  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
     CONDITION_SESSION_TERMINAL,
     LIFECYCLE_IDLE,
@@ -97,8 +106,10 @@ from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
     resolve_local_name,
     retire_session,
     session_status,
-    spawn_session,
     terminate_session,
+)
+from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
+    spawn_session as native_spawn_session,
 )
 from agent_messaging_plugin.session_role_claim_store import (  # noqa: E402
     CardinalityGatedClaim,
@@ -122,6 +133,20 @@ def _check(condition: object, label: str) -> None:
 
 def _state() -> StateManagementInterface:
     return cast("StateManagementInterface", RealShapeState())
+
+
+def _legislate_principal_role(state: StateManagementInterface, role_name: str) -> None:
+    state.write_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {
+            "table": TABLE_ROLE,
+            "record": {
+                "external_id": role_binding_external_id(role_name),
+                "role": role_name,
+                "role_class": ROLE_CLASS_PRINCIPAL,
+            },
+        },
+    )
 
 
 def test_lane_worktree_root_requires_app_home() -> None:
@@ -150,11 +175,20 @@ def test_lane_worktree_root_requires_app_home() -> None:
                 os.environ["APP_HOME"] = previous_app_home
 
 
+def spawn_session(state: StateManagementInterface, req: SpawnSessionRequest) -> dict[str, Any]:
+    register = RegisterUnitDouble()
+    register.add_unit(req.unit_id)
+    # Ordinary unmanaged spawns pass the configured client/actor through the
+    # shared first-turn release path without producing managed annotations.
+    return native_spawn_session(state, req, register=register, actor=RegisterActor("agi-main", "ases-main", req.spawned_by_role, req.lane_id))
+
+
 def _spawn_req(**overrides: object) -> SpawnSessionRequest:
     base: dict[str, object] = {
         "role_class": "ephemeral",
         "lane_id": "lane-1",
-        "brief_ref": "fixtures/brief.md",
+        "unit_id": FIXTURE_UNIT_ID,
+        "assignment": fixture_assignment(),
         "work_class": WORK_CLASS_ANALYSIS_DELIVERABLE,
         "budget_line": "budget-1",
         "host": "operator",
@@ -190,8 +224,8 @@ def _prepared_project_req(
                 "role_class": req.role_class,
                 "work_class": req.work_class,
                 "budget_line": req.budget_line,
-                "brief_ref": req.brief_ref,
-                "brief_sha256": "",
+                "assignment": fixture_assignment(req.unit_id).to_record(),
+                "assignment_sha256": fixture_assignment(req.unit_id).sha256,
                 "repository_root": req.repository_root,
                 "agent_runtime": req.agent_runtime,
                 "host": str(req.host or ""),
@@ -199,7 +233,6 @@ def _prepared_project_req(
                 "model": req.model,
                 "effort": req.effort,
                 "report_by_seconds": req.report_by_seconds,
-
                 "allowed_hosts": [str(req.host or "headless")],
                 "allowed_tools": list(req.allowed_tools),
                 "permission_mode": req.permission_mode,
@@ -277,8 +310,7 @@ def test_spawn_errors() -> None:
         headless_cannot_spawn = exc.code
     _check(
         headless_cannot_spawn == "host_cannot_spawn",
-        "spawn_session(host='headless') in an unconfigured environment -> "
-        f"host_cannot_spawn (got {headless_cannot_spawn!r})",
+        f"spawn_session(host='headless') in an unconfigured environment -> host_cannot_spawn (got {headless_cannot_spawn!r})",
     )
 
     tmux_cannot_spawn = None
@@ -288,8 +320,7 @@ def test_spawn_errors() -> None:
         tmux_cannot_spawn = exc.code
     _check(
         tmux_cannot_spawn == "host_cannot_spawn",
-        "spawn_session(host='tmux') in an unconfigured environment -> "
-        f"host_cannot_spawn (got {tmux_cannot_spawn!r})",
+        f"spawn_session(host='tmux') in an unconfigured environment -> host_cannot_spawn (got {tmux_cannot_spawn!r})",
     )
 
     # host_cannot_spawn: operator is degenerate, and the ledger row is left
@@ -306,8 +337,7 @@ def test_spawn_errors() -> None:
     rows = list_sessions(state, {"lane_id": "lane-1"})["sessions"]
     _check(
         len(rows) == 1 and rows[0]["lifecycle_state"] == LIFECYCLE_TERMINATED,
-        "a known-doomed dispatch (host_cannot_spawn) transitions the ledger "
-        "row straight to terminated, not left stuck in 'spawning'",
+        "a known-doomed dispatch (host_cannot_spawn) transitions the ledger row straight to terminated, not left stuck in 'spawning'",
     )
 
 
@@ -338,7 +368,9 @@ def test_model_dispatch_policy_refusals_and_allowances() -> None:
         spawn_session(
             state,
             _spawn_req(
-                dispatch_kind="infrastructure", agent_runtime="claude_code", model="claude-sonnet-5",
+                dispatch_kind="infrastructure",
+                agent_runtime="claude_code",
+                model="claude-sonnet-5",
                 scope_tags=("state_schema",),
             ),
         )
@@ -361,13 +393,16 @@ def test_model_dispatch_policy_refusals_and_allowances() -> None:
 
     _install_fake_hosts()
     codex_host_key = (session_hosts.AGENT_RUNTIME_CODEX, _TEST_HOST)
-    session_hosts._REGISTRY[codex_host_key] = _FakeDriverWithChannel()  # noqa: SLF001
+    session_hosts._REGISTRY[codex_host_key] = _FakeDriverWithChannel()  # noqa: SLF001  # pyright: ignore[reportArgumentType]
     try:
         fixed = spawn_session(
             state,
             _spawn_req(
-                host=_TEST_HOST, lane_id="policy-fix", dispatch_kind="fix",
-                agent_runtime="codex", model="gpt-5.6-terra",
+                host=_TEST_HOST,
+                lane_id="policy-fix",
+                dispatch_kind="fix",
+                agent_runtime="codex",
+                model="gpt-5.6-terra",
             ),
         )
         _check(bool(fixed.get("agent_instance_id")), "fix with gpt-5.6-terra passes")
@@ -381,8 +416,12 @@ def test_model_dispatch_policy_refusals_and_allowances() -> None:
                 same_vendor_inactive_override = spawn_session(
                     state,
                     _spawn_req(
-                        host=_TEST_HOST, lane_id="policy-review-same-inactive", dispatch_kind="review",
-                        agent_runtime="codex", model="gpt-5.6-terra", reviewed_report_vendor="codex",
+                        host=_TEST_HOST,
+                        lane_id="policy-review-same-inactive",
+                        dispatch_kind="review",
+                        agent_runtime="codex",
+                        model="gpt-5.6-terra",
+                        reviewed_report_vendor="codex",
                     ),
                 )
                 _check(
@@ -395,8 +434,12 @@ def test_model_dispatch_policy_refusals_and_allowances() -> None:
         same_vendor = spawn_session(
             state,
             _spawn_req(
-                host=_TEST_HOST, lane_id="policy-review-same-active", dispatch_kind="review",
-                agent_runtime="codex", model="gpt-5.6-terra", reviewed_report_vendor="codex",
+                host=_TEST_HOST,
+                lane_id="policy-review-same-active",
+                dispatch_kind="review",
+                agent_runtime="codex",
+                model="gpt-5.6-terra",
+                reviewed_report_vendor="codex",
             ),
         )
         _check(
@@ -407,8 +450,12 @@ def test_model_dispatch_policy_refusals_and_allowances() -> None:
         review = spawn_session(
             state,
             _spawn_req(
-                host=_TEST_HOST, lane_id="policy-review-cross", dispatch_kind="review",
-                agent_runtime="codex", model="gpt-5.6-terra", reviewed_report_vendor="claude_code",
+                host=_TEST_HOST,
+                lane_id="policy-review-cross",
+                dispatch_kind="review",
+                agent_runtime="codex",
+                model="gpt-5.6-terra",
+                reviewed_report_vendor="claude_code",
             ),
         )
         _check(bool(review.get("agent_instance_id")), "cross-vendor review passes")
@@ -416,8 +463,11 @@ def test_model_dispatch_policy_refusals_and_allowances() -> None:
         infrastructure = spawn_session(
             state,
             _spawn_req(
-                host=_TEST_HOST, lane_id="policy-infrastructure", dispatch_kind="infrastructure",
-                agent_runtime="claude_code", model="unprofiled-fixture-model",
+                host=_TEST_HOST,
+                lane_id="policy-infrastructure",
+                dispatch_kind="infrastructure",
+                agent_runtime="claude_code",
+                model="unprofiled-fixture-model",
             ),
         )
         _check(bool(infrastructure.get("agent_instance_id")), "infrastructure accepts any model")
@@ -444,14 +494,14 @@ def test_spawn_role_class_conflict() -> None:
     conflict = None
     try:
         spawn_session(
-            state, _spawn_req(role_class=ROLE_CLASS_PROJECT, role_name="Some-Office"),
+            state,
+            _spawn_req(role_class=ROLE_CLASS_PROJECT, role_name="Some-Office"),
         )
     except VerbError as exc:
         conflict = exc.code
     _check(
         conflict == "role_class_conflict",
-        "spawning a 'project' claim against an already-principal-legislated "
-        "name -> role_class_conflict",
+        "spawning a 'project' claim against an already-principal-legislated name -> role_class_conflict",
     )
 
 
@@ -459,19 +509,24 @@ def test_local_name_defaults_by_role_class() -> None:
     """W6: role_name for a PROJECT-class role, lane_id for everything else."""
     _check(
         resolve_local_name(
-            role_class=ROLE_CLASS_PROJECT, role_name="Git-Controller", lane_id="lane-1",
-        ) == "Git-Controller",
+            role_class=ROLE_CLASS_PROJECT,
+            role_name="Git-Controller",
+            lane_id="lane-1",
+        )
+        == "Git-Controller",
         "a project-class role is named for the ROLE (it IS the role)",
     )
     _check(
         resolve_local_name(
-            role_class=ROLE_CLASS_EPHEMERAL, role_name="Helper", lane_id="lane-1",
-        ) == "lane-1",
+            role_class=ROLE_CLASS_EPHEMERAL,
+            role_name="Helper",
+            lane_id="lane-1",
+        )
+        == "lane-1",
         "a non-project role stays lane-named (no behaviour change for lane work)",
     )
     _check(
-        resolve_local_name(role_class=ROLE_CLASS_PROJECT, role_name="", lane_id="lane-1")
-        == "lane-1",
+        resolve_local_name(role_class=ROLE_CLASS_PROJECT, role_name="", lane_id="lane-1") == "lane-1",
         "a project spawn with no role_name falls back to lane_id",
     )
 
@@ -484,7 +539,9 @@ def test_spawn_refuses_second_session_under_a_live_local_name() -> None:
         spawn_session(
             state,
             _prepared_project_req(
-                state, host=_TEST_HOST, role_name="Git-Controller",
+                state,
+                host=_TEST_HOST,
+                role_name="Git-Controller",
             ),
         )
         code, message = None, ""
@@ -492,7 +549,9 @@ def test_spawn_refuses_second_session_under_a_live_local_name() -> None:
             spawn_session(
                 state,
                 _prepared_project_req(
-                    state, host=_TEST_HOST, role_name="Git-Controller",
+                    state,
+                    host=_TEST_HOST,
+                    role_name="Git-Controller",
                 ),
             )
         except VerbError as exc:
@@ -518,16 +577,22 @@ def test_spawn_allows_replacement_after_incumbent_terminated() -> None:
         first = spawn_session(
             state,
             _prepared_project_req(
-                state, host=_TEST_HOST, role_name="Git-Controller",
+                state,
+                host=_TEST_HOST,
+                role_name="Git-Controller",
             ),
         )
         terminate_session(
-            state, agent_instance_id=first["agent_instance_id"], directed_by="operator:none",
+            state,
+            agent_instance_id=first["agent_instance_id"],
+            directed_by="operator:none",
         )
         replaced = spawn_session(
             state,
             _prepared_project_req(
-                state, host=_TEST_HOST, role_name="Git-Controller",
+                state,
+                host=_TEST_HOST,
+                role_name="Git-Controller",
             ),
         )
         _check(
@@ -548,7 +613,9 @@ def test_spawn_does_not_claim_the_role_binding() -> None:
         result = spawn_session(
             state,
             _prepared_project_req(
-                state, host=_TEST_HOST, role_name="Git-Controller",
+                state,
+                host=_TEST_HOST,
+                role_name="Git-Controller",
             ),
         )
         rows = require_records(
@@ -596,8 +663,12 @@ def test_list_and_status() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-x", lane_id="lane-x", brief_ref="", work_class="read_only",
-            budget_line="b1", host="operator",
+            agent_instance_id="agi-x",
+            lane_id="lane-x",
+            assignment=fixture_assignment(),
+            work_class="read_only",
+            budget_line="b1",
+            host="operator",
         ),
     )
     row = session_status(state, "agi-x")
@@ -711,7 +782,7 @@ class _FakeDriverNoChannel:
 
 
 def _install_fake_hosts() -> None:
-    session_hosts._REGISTRY[_TEST_HOST] = _FakeDriverWithChannel()  # noqa: SLF001 -- test-only monkeypatch
+    session_hosts._REGISTRY[_TEST_HOST] = _FakeDriverWithChannel()  # noqa: SLF001 -- test-only monkeypatch  # pyright: ignore[reportArgumentType]
     session_hosts._REGISTRY[_TEST_HOST_NO_CHANNEL] = _FakeDriverNoChannel()  # noqa: SLF001
 
 
@@ -727,7 +798,7 @@ def test_omitted_host_resolves_to_tmux_before_spawn() -> None:
     original_driver = session_hosts._REGISTRY[key]  # noqa: SLF001 -- test seam
     previous_env_host = os.environ.pop("FLEET_SESSION_HOST", None)
     fake_driver = _FakeDriverWithChannel()
-    session_hosts._REGISTRY[key] = fake_driver  # noqa: SLF001 -- test seam
+    session_hosts._REGISTRY[key] = fake_driver  # noqa: SLF001 -- test seam  # pyright: ignore[reportArgumentType]
     try:
         result = spawn_session(
             state,
@@ -843,7 +914,10 @@ class _FakeDriverRaisingChannel:
 
 
 def _arm_session_terminal(
-    state: StateManagementInterface, *, waiter_instance_id: str, dying_instance_id: str,
+    state: StateManagementInterface,
+    *,
+    waiter_instance_id: str,
+    dying_instance_id: str,
 ) -> None:
     armed = arm_session_dependency(
         state,
@@ -869,27 +943,43 @@ def test_terminate_fires_and_delivers_session_terminal_edge() -> None:
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-dying-1", lane_id="lane-term", brief_ref="",
-                work_class="read_only", budget_line="b1", host="operator",
+                agent_instance_id="agi-dying-1",
+                lane_id="lane-term",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host="operator",
             ),
         )
         transition_lifecycle_state(
-            state, agent_instance_id="agi-dying-1", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-dying-1",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-waiter-1", lane_id="lane-term", brief_ref="",
-                work_class="read_only", budget_line="b1", host=_TEST_HOST,
+                agent_instance_id="agi-waiter-1",
+                lane_id="lane-term",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host=_TEST_HOST,
             ),
         )
         transition_lifecycle_state(
-            state, agent_instance_id="agi-waiter-1", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-waiter-1",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         _arm_session_terminal(
-            state, waiter_instance_id="agi-waiter-1", dying_instance_id="agi-dying-1",
+            state,
+            waiter_instance_id="agi-waiter-1",
+            dying_instance_id="agi-dying-1",
         )
         driver = session_hosts._REGISTRY[_TEST_HOST]  # noqa: SLF001
 
@@ -922,42 +1012,54 @@ def test_retire_composes_terminate_no_double_delivery() -> None:
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-dying-2", lane_id="lane-retire", brief_ref="",
-                work_class="read_only", budget_line="b1", host="operator",
+                agent_instance_id="agi-dying-2",
+                lane_id="lane-retire",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host="operator",
             ),
         )
         transition_lifecycle_state(
-            state, agent_instance_id="agi-dying-2", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-dying-2",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-waiter-2", lane_id="lane-retire", brief_ref="",
-                work_class="read_only", budget_line="b1", host=_TEST_HOST,
+                agent_instance_id="agi-waiter-2",
+                lane_id="lane-retire",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host=_TEST_HOST,
             ),
         )
         transition_lifecycle_state(
-            state, agent_instance_id="agi-waiter-2", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-waiter-2",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         _arm_session_terminal(
-            state, waiter_instance_id="agi-waiter-2", dying_instance_id="agi-dying-2",
+            state,
+            waiter_instance_id="agi-waiter-2",
+            dying_instance_id="agi-dying-2",
         )
         driver = session_hosts._REGISTRY[_TEST_HOST]  # noqa: SLF001
 
         result = retire_session(state, agent_instance_id="agi-dying-2", directed_by="operator:none")
         _check(
-            result["already_retired"] is False
-            and result["dependencies_fired"] == 1
-            and result["host_action"] == "none_available",
-            f"retire_session reports exactly 1 edge fired via composition, and that the "
-            f"operator-hosted process was not stopped (got {result})",
+            result["already_retired"] is False and result["dependencies_fired"] == 1 and result["host_action"] == "none_available",
+            f"retire_session reports exactly 1 edge fired via composition, and that the operator-hosted process was not stopped (got {result})",
         )
         _check(
             len(driver.channel.sent) == 1,
-            f"the waiter's channel receives exactly ONE notice, not two, under composition "
-            f"(got {driver.channel.sent})",
+            f"the waiter's channel receives exactly ONE notice, not two, under composition (got {driver.channel.sent})",
         )
     finally:
         _remove_fake_hosts()
@@ -970,33 +1072,49 @@ def test_terminate_delivery_fault_is_contained() -> None:
     failing mutation: removing drive_on_delivery's own internal try/except
     (session_lifecycle_verbs.py) would let this RuntimeError propagate and
     red this entire test with an unhandled exception."""
-    session_hosts._REGISTRY[_TEST_HOST_RAISING] = _FakeDriverRaisingChannel()  # noqa: SLF001
+    session_hosts._REGISTRY[_TEST_HOST_RAISING] = _FakeDriverRaisingChannel()  # noqa: SLF001  # pyright: ignore[reportArgumentType]
     try:
         state = _state()
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-dying-3", lane_id="lane-fault", brief_ref="",
-                work_class="read_only", budget_line="b1", host="operator",
+                agent_instance_id="agi-dying-3",
+                lane_id="lane-fault",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host="operator",
             ),
         )
         transition_lifecycle_state(
-            state, agent_instance_id="agi-dying-3", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-dying-3",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-waiter-3", lane_id="lane-fault", brief_ref="",
-                work_class="read_only", budget_line="b1", host=_TEST_HOST_RAISING,
+                agent_instance_id="agi-waiter-3",
+                lane_id="lane-fault",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host=_TEST_HOST_RAISING,
             ),
         )
         transition_lifecycle_state(
-            state, agent_instance_id="agi-waiter-3", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-waiter-3",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         _arm_session_terminal(
-            state, waiter_instance_id="agi-waiter-3", dying_instance_id="agi-dying-3",
+            state,
+            waiter_instance_id="agi-waiter-3",
+            dying_instance_id="agi-dying-3",
         )
         raised = False
         result: dict[str, Any] = {}
@@ -1006,8 +1124,7 @@ def test_terminate_delivery_fault_is_contained() -> None:
             raised = True
         _check(not raised, "a raising waiter driver channel does not propagate out of terminate_session")
         _check(
-            result.get("already_terminal") is False
-            and result.get("session_terminal_edges_fired") == 1,
+            result.get("already_terminal") is False and result.get("session_terminal_edges_fired") == 1,
             f"terminate_session still succeeds and still reports the edge fired (got {result})",
         )
     finally:
@@ -1029,13 +1146,20 @@ def test_already_terminal_catches_orphaned_edge() -> None:
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-dying-4", lane_id="lane-orphan", brief_ref="",
-                work_class="read_only", budget_line="b1", host="operator",
+                agent_instance_id="agi-dying-4",
+                lane_id="lane-orphan",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host="operator",
             ),
         )
         transition_lifecycle_state(
-            state, agent_instance_id="agi-dying-4", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-dying-4",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         # Terminate FIRST, with no edge armed yet -- nothing to fire.
         first = terminate_session(state, agent_instance_id="agi-dying-4", directed_by="operator:none")
@@ -1047,17 +1171,26 @@ def test_already_terminal_catches_orphaned_edge() -> None:
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-waiter-4", lane_id="lane-orphan", brief_ref="",
-                work_class="read_only", budget_line="b1", host=_TEST_HOST,
+                agent_instance_id="agi-waiter-4",
+                lane_id="lane-orphan",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host=_TEST_HOST,
             ),
         )
         transition_lifecycle_state(
-            state, agent_instance_id="agi-waiter-4", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-waiter-4",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         # Arm the edge AFTER the target already died -- the orphan case.
         _arm_session_terminal(
-            state, waiter_instance_id="agi-waiter-4", dying_instance_id="agi-dying-4",
+            state,
+            waiter_instance_id="agi-waiter-4",
+            dying_instance_id="agi-dying-4",
         )
         driver = session_hosts._REGISTRY[_TEST_HOST]  # noqa: SLF001
 
@@ -1081,16 +1214,13 @@ def test_already_terminal_catches_orphaned_edge() -> None:
 def test_capture_lane_charter_validation_errors() -> None:
     state = _state()
     for kwargs, code in [
-        ({"lane_id": "", "charter_text": "text", "captured_at": "2026-08-06T00:00:00Z"},
-         "missing_lane_id"),
-        ({"lane_id": "lane-1", "charter_text": "", "captured_at": "2026-08-06T00:00:00Z"},
-         "missing_charter_text"),
-        ({"lane_id": "lane-1", "charter_text": "text", "captured_at": ""},
-         "missing_captured_at"),
+        ({"lane_id": "", "charter_text": "text", "captured_at": "2026-08-06T00:00:00Z"}, "missing_lane_id"),
+        ({"lane_id": "lane-1", "charter_text": "", "captured_at": "2026-08-06T00:00:00Z"}, "missing_charter_text"),
+        ({"lane_id": "lane-1", "charter_text": "text", "captured_at": ""}, "missing_captured_at"),
     ]:
         raised_code = None
         try:
-            capture_lane_charter(state, CaptureLaneCharterRequest(**kwargs))  # type: ignore[arg-type]
+            capture_lane_charter(state, CaptureLaneCharterRequest(unit_id=FIXTURE_UNIT_ID, revision_id="drv_fixture-revision", **kwargs))  # type: ignore[arg-type]
         except VerbError as exc:
             raised_code = exc.code
         _check(raised_code == code, f"capture_lane_charter({kwargs}) -> {code} (got {raised_code!r})")
@@ -1109,19 +1239,16 @@ def test_capture_lane_charter_is_insert_only_and_supersedes_by_recency() -> None
             lane_id="lane-charter-supersede",
             charter_text="First charter text.",
             captured_at="2026-08-06T00:00:00+00:00",
-            brief_ref="workbench/first.md",
+            unit_id=FIXTURE_UNIT_ID,
+            revision_id="drv_fixture-revision",
             directed_by="operator:none",
         ),
     )
     _check(first["charter_text"] == "First charter text.", "the first capture stores its own text")
     resolved_after_first = resolve_lane_charter(state, "lane-charter-supersede")
     _check(
-        resolved_after_first is not None
-        and resolved_after_first.charter_text == "First charter text."
-        and resolved_after_first.brief_ref == "workbench/first.md"
-        and resolved_after_first.captured_at == "2026-08-06T00:00:00+00:00",
-        f"resolve_lane_charter returns the only row on file, full record "
-        f"(got {resolved_after_first!r})",
+        resolved_after_first is not None and resolved_after_first.charter_text == "First charter text." and resolved_after_first.unit_id == FIXTURE_UNIT_ID and resolved_after_first.captured_at == "2026-08-06T00:00:00+00:00",
+        f"resolve_lane_charter returns the only row on file, full record (got {resolved_after_first!r})",
     )
 
     second = capture_lane_charter(
@@ -1130,7 +1257,8 @@ def test_capture_lane_charter_is_insert_only_and_supersedes_by_recency() -> None
             lane_id="lane-charter-supersede",
             charter_text="Second, superseding charter text.",
             captured_at="2026-08-06T00:01:00+00:00",
-            brief_ref="workbench/second.md",
+            unit_id=FIXTURE_UNIT_ID,
+            revision_id="drv_fixture-revision",
             directed_by="operator:none",
         ),
     )
@@ -1140,11 +1268,8 @@ def test_capture_lane_charter_is_insert_only_and_supersedes_by_recency() -> None
     )
     resolved_after_second = resolve_lane_charter(state, "lane-charter-supersede")
     _check(
-        resolved_after_second is not None
-        and resolved_after_second.charter_text == "Second, superseding charter text.",
-        f"RED-vs-GREEN: resolve_lane_charter follows the LATEST captured_at, superseding "
-        f"the first row rather than editing it or picking arbitrarily (got "
-        f"{resolved_after_second!r})",
+        resolved_after_second is not None and resolved_after_second.charter_text == "Second, superseding charter text.",
+        f"RED-vs-GREEN: resolve_lane_charter follows the LATEST captured_at, superseding the first row rather than editing it or picking arbitrarily (got {resolved_after_second!r})",
     )
 
 
@@ -1179,21 +1304,22 @@ def test_spawn_session_drives_charter_as_first_turn_byte_exact() -> None:
                 lane_id="lane-charter-spawn",
                 charter_text=charter_text,
                 captured_at="2026-08-06T00:00:00+00:00",
-                brief_ref="workbench/brief.md",
+                unit_id=FIXTURE_UNIT_ID,
+                revision_id="drv_fixture-revision",
                 directed_by="operator:none",
             ),
         )
         result = spawn_session(
             state,
             _spawn_req(
-                host=_TEST_HOST, lane_id="lane-charter-spawn",
+                host=_TEST_HOST,
+                lane_id="lane-charter-spawn",
                 spawned_by_role="watch-migration-impl",
             ),
         )
         _check(
             result["first_turn_source"] == FIRST_TURN_SOURCE_CHARTER,
-            f"spawn_session reports first_turn_source='charter' when a lane_charter row "
-            f"is on file (got {result['first_turn_source']!r})",
+            f"spawn_session reports first_turn_source='charter' when a lane_charter row is on file (got {result['first_turn_source']!r})",
         )
         _check(result["first_turn_delivered"] is True, "the first turn was delivered")
         _check(result["first_turn_error"] == "", "no error on a successful delivery")
@@ -1201,21 +1327,12 @@ def test_spawn_session_drives_charter_as_first_turn_byte_exact() -> None:
         _check(len(driver.channel.sent) == 1, "exactly one first-turn send")
         driven_text = driver.channel.sent[0] if driver.channel.sent else ""
         _check(
-            driven_text.endswith(captured["charter_text"]) and driven_text.endswith(charter_text),
-            f"RED-vs-GREEN: the driven text ENDS WITH the exact stored charter_text, "
-            f"byte-exact — no mangling anywhere in capture -> resolve -> drive (got "
-            f"{driven_text!r})",
+            captured["charter_text"] in driven_text and charter_text in driven_text,
+            f"RED-vs-GREEN: the driven text ENDS WITH the exact stored charter_text, byte-exact — no mangling anywhere in capture -> resolve -> drive (got {driven_text!r})",
         )
         _check(
-            "NOT a live conversation" in driven_text
-            and "not yet registered" in driven_text
-            and result["agent_instance_id"] in driven_text
-            and "watch-migration-impl" in driven_text
-            and "workbench/brief.md" in driven_text
-            and "2026-08-06T00:00:00+00:00" in driven_text,
-            f"the provenance frame (not-live-conversation + not-yet-registered + agent_instance_id "
-            f"+ spawned_by_role + brief_ref + captured_at) wraps the charter body (got "
-            f"{driven_text!r})",
+            "NOT a live conversation" in driven_text and "not yet registered" in driven_text and result["agent_instance_id"] in driven_text and "watch-migration-impl" in driven_text and "drv_fixture-revision" in driven_text and "2026-08-06T00:00:00+00:00" in driven_text,
+            f"the provenance frame (not-live-conversation + not-yet-registered + agent_instance_id + spawned_by_role + unit_id + captured_at) wraps the charter body (got {driven_text!r})",
         )
     finally:
         _remove_fake_hosts()
@@ -1249,16 +1366,22 @@ def test_charter_frame_ships_instruments_and_the_claim_first_instruction() -> No
         capture_lane_charter(
             state,
             CaptureLaneCharterRequest(
-                lane_id="lane-lif05", charter_text=charter_text,
-                captured_at="2026-08-19T00:00:00+00:00", brief_ref="workbench/brief.md",
+                lane_id="lane-lif05",
+                charter_text=charter_text,
+                captured_at="2026-08-19T00:00:00+00:00",
+                unit_id=FIXTURE_UNIT_ID,
+                revision_id="drv_fixture-revision",
                 directed_by="operator:none",
             ),
         )
+        _legislate_principal_role(state, "lane-lif05")
         spawn_session(
             state,
-            _prepared_project_req(
-                state,
-                host=_TEST_HOST, lane_id="lane-lif05", role_name="lane-lif05",
+            _spawn_req(
+                role_class=ROLE_CLASS_PRINCIPAL,
+                host=_TEST_HOST,
+                lane_id="lane-lif05",
+                role_name="lane-lif05",
                 spawned_by_role="coordinator-seat",
             ),
         )
@@ -1270,18 +1393,15 @@ def test_charter_frame_ships_instruments_and_the_claim_first_instruction() -> No
         )
         _check(
             "session_status" in driven and "peer_list" in driven,
-            "the frame names the checks the lane can run first-party, instead of "
-            "asserting the frame and expecting belief",
+            "the frame names the checks the lane can run first-party, instead of asserting the frame and expecting belief",
         )
         _check(
             "not the ruling itself" in driven,
-            "the frame CONCEDES the one thing the lane genuinely cannot verify: an "
-            "operator sentence quoted inside the charter",
+            "the frame CONCEDES the one thing the lane genuinely cannot verify: an operator sentence quoted inside the charter",
         )
         _check(
             "Declining this work is a legitimate outcome" in driven,
-            "ANTI-SUPPRESSION: the frame says standing down is legitimate — a version "
-            "that buys compliance instead fails here",
+            "ANTI-SUPPRESSION: the frame says standing down is legitimate — a version that buys compliance instead fails here",
         )
         _check(
             "CLAIM YOUR ROLE BINDING FIRST" in driven,
@@ -1289,13 +1409,11 @@ def test_charter_frame_ships_instruments_and_the_claim_first_instruction() -> No
         )
         _check(
             "'lane-lif05'" in driven and "cannot evict anyone" in driven,
-            "...and names the row's OWN role_name, plus why claiming it evicts nobody "
-            "(peer_claim_role refuses a live incumbent — the 2026-08-14 ruling stands)",
+            "...and names the row's OWN role_name, plus why claiming it evicts nobody (peer_claim_role refuses a live incumbent — the 2026-08-14 ruling stands)",
         )
         _check(
             "reach you BY NAME" in driven,
-            "the frame states the CONSEQUENCE of not claiming — the addressability trap "
-            "itself, which is what made the incident unrecoverable by message",
+            "the frame states the CONSEQUENCE of not claiming — the addressability trap itself, which is what made the incident unrecoverable by message",
         )
     finally:
         _remove_fake_hosts()
@@ -1309,13 +1427,17 @@ def test_ephemeral_charter_frame_never_requests_a_role() -> None:
         capture_lane_charter(
             state,
             CaptureLaneCharterRequest(
-                lane_id="lane-lif05-noname", charter_text="body",
-                captured_at="2026-08-19T00:00:00+00:00", brief_ref="workbench/brief.md",
+                lane_id="lane-lif05-noname",
+                charter_text="body",
+                captured_at="2026-08-19T00:00:00+00:00",
+                unit_id=FIXTURE_UNIT_ID,
+                revision_id="drv_fixture-revision",
                 directed_by="operator:none",
             ),
         )
         spawn_session(
-            state, _spawn_req(host=_TEST_HOST, lane_id="lane-lif05-noname"),
+            state,
+            _spawn_req(host=_TEST_HOST, lane_id="lane-lif05-noname"),
         )
         driver = cast("_FakeDriverWithChannel", session_hosts._REGISTRY[_TEST_HOST])  # noqa: SLF001
         driven = driver.channel.sent[0] if driver.channel.sent else ""
@@ -1324,8 +1446,7 @@ def test_ephemeral_charter_frame_never_requests_a_role() -> None:
             "an ephemeral charter states that no durable role will be assigned",
         )
         _check(
-            "CLAIM YOUR ROLE BINDING FIRST" not in driven
-            and "ask rather than inventing one" not in driven,
+            "CLAIM YOUR ROLE BINDING FIRST" not in driven and "ask rather than inventing one" not in driven,
             "an ephemeral charter neither claims nor asks for a role name",
         )
         _check(
@@ -1343,12 +1464,12 @@ def test_spawn_session_drives_fallback_when_no_charter_on_file() -> None:
     _install_fake_hosts()
     try:
         result = spawn_session(
-            state, _spawn_req(host=_TEST_HOST, lane_id="lane-charter-none-spawn"),
+            state,
+            _spawn_req(host=_TEST_HOST, lane_id="lane-charter-none-spawn"),
         )
         _check(
             result["first_turn_source"] == FIRST_TURN_SOURCE_FALLBACK,
-            f"spawn_session reports first_turn_source='fallback' when no lane_charter row "
-            f"is on file (got {result['first_turn_source']!r})",
+            f"spawn_session reports first_turn_source='fallback' when no lane_charter row is on file (got {result['first_turn_source']!r})",
         )
         _check(result["first_turn_delivered"] is True, "the fallback turn was delivered")
         driver = cast("_FakeDriverWithChannel", session_hosts._REGISTRY[_TEST_HOST])  # noqa: SLF001
@@ -1356,12 +1477,11 @@ def test_spawn_session_drives_fallback_when_no_charter_on_file() -> None:
             spawned_by_role="",
             role_class="ephemeral",
             role_name="",
-            brief_ref="fixtures/brief.md",
+            assignment=fixture_assignment(),
         )
         _check(
             driver.channel.sent == [expected],
-            f"the exact rendered fallback text is driven, unmodified (got "
-            f"{driver.channel.sent!r})",
+            f"the exact rendered fallback text is driven, unmodified (got {driver.channel.sent!r})",
         )
         _check(
             "{" not in expected and "}" not in expected,
@@ -1390,7 +1510,7 @@ def test_spawn_session_first_turn_preserves_agent_runtime() -> None:
     prior_codex = session_hosts._REGISTRY.get(codex_key)  # noqa: SLF001
     prior_claude = session_hosts._REGISTRY.get(claude_key)  # noqa: SLF001
     codex_driver = _FakeDriverWithChannel()
-    session_hosts._REGISTRY[codex_key] = codex_driver  # noqa: SLF001
+    session_hosts._REGISTRY[codex_key] = codex_driver  # noqa: SLF001  # pyright: ignore[reportArgumentType]
     session_hosts._REGISTRY[claude_key] = _FakeDriverNoChannel()  # noqa: SLF001
     try:
         result = spawn_session(
@@ -1422,81 +1542,92 @@ def test_spawn_session_first_turn_preserves_agent_runtime() -> None:
 
 def test_fallback_first_turn_hands_off_to_the_spawner() -> None:
     """SPN-01 — measured 2026-08-19 (wave-2 dispatch): two of four freshly
-    spawned lanes sat idle ~30 minutes on one bootstrap turn each, and the
-    only difference from the two that started was a post-spawn driving
+    spawned bare lanes sat idle ~30 minutes on one bootstrap turn each. The
+    observed difference from the lanes that started was a post-spawn driving
     message (confirmed by intervention, 2/2).
 
-    The mechanism is in the TEXT, not the transport. The old fallback said
+    The mechanism is in the TEXT, not the transport. The former fallback said
     "acknowledge, then stop; your work dispatch arrives separately over the
-    peer channel" — a handoff to NOBODY. It names a dispatch that exists only
-    if a seat remembers, and it ends the turn with the lane holding nothing
-    and having told no one it is waiting. The turn now hands off to the
-    SPAWNER, which is the only side of the gap this module controls.
+    peer channel" — a handoff to nobody. It named work that existed only if a
+    seat remembered, so the lane ended the turn without a stated assignment or
+    a report to its spawner. The fallback now states that its verified
+    assignment is the lane's work, and GO or a Unit start message begins
+    substantive work. Without either message at read completion, it reports
+    ready to the spawner and stops. Managed dispatch starts from its bound
+    Unit brief.
 
-    Also pins the guard the original text existed to satisfy: small,
-    completing in ONE turn, never a question and never a wait — so a "fix"
-    that tells the lane to poll or block for its dispatch fails here.
+    The fake driver exposes the rendered first-turn text. This test pins the
+    assignment, start signal, and ready/no-wait branch. Later assertions
+    preserve the original one-turn, no-question, and no-wait guard: a fix that
+    asks the lane to poll or block for its dispatch fails here.
     """
     state = _state()
     _install_fake_hosts()
     try:
+        _legislate_principal_role(state, "lane-spn01")
         spawn_session(
             state,
-            _prepared_project_req(
-                state,
-                host=_TEST_HOST, lane_id="lane-spn01", role_name="lane-spn01",
-                brief_ref="fixtures/spn01-brief.md", spawned_by_role="coordinator-seat",
+            _spawn_req(
+                role_class=ROLE_CLASS_PRINCIPAL,
+                host=_TEST_HOST,
+                lane_id="lane-spn01",
+                role_name="lane-spn01",
+                assignment=fixture_assignment(text="assigned bootstrap brief"),
+                spawned_by_role="coordinator-seat",
             ),
         )
         driver = cast("_FakeDriverWithChannel", session_hosts._REGISTRY[_TEST_HOST])  # noqa: SLF001
         driven = driver.channel.sent[0] if driver.channel.sent else ""
         _check(
-            "coordinator-seat" in driven and "awaiting dispatch" in driven,
-            "the bootstrap turn ends by TELLING THE SPAWNER it is up and waiting — the "
-            "handoff the old text did not have",
+            all(
+                required in driven
+                for required in (
+                    "This assignment is your work.",
+                    "A GO or start message for this Unit is the start signal for substantive work.",
+                    "If neither is queued when reading finishes, report ready to coordinator-seat.",
+                    "Do not wait or poll.",
+                )
+            ),
+            "FALLBACK_ASSIGNMENT_IS_THE_WORK",
         )
         _check(
             "Do not skip this one" in driven,
-            "...and says why, in the words of the measurement: a turn that ends without "
-            "telling anyone is how a lane sits idle while its dispatcher believes it started",
+            "the no-GO path tells the spawner that the bootstrap read is complete",
         )
         _check(
             "'lane-spn01'" in driven and "report_alive" in driven,
-            "the turn claims the row's OWN role name and arms the heartbeat contract — "
-            "addressable and visible to the overdue sweep, not merely awake",
+            "the turn claims the row's OWN role name and arms the heartbeat contract — addressable and visible to the overdue sweep, not merely awake",
         )
         _check(
-            "fixtures/spn01-brief.md" in driven,
-            "the turn points the lane at its own recorded brief_ref",
+            "assigned bootstrap brief" in driven,
+            "the turn points the lane at its own registered brief",
         )
         _check(
             "none is a wait" in driven and "Then stop." in driven,
-            "ORDERING GUARD: the turn still completes in one turn and ends in a stop — a "
-            "version that tells the lane to poll or block for its dispatch reds here",
+            "ORDERING GUARD: the turn still completes in one turn and ends in a stop — a version that tells the lane to poll or block for its dispatch reds here",
         )
         _check(
             "?" not in driven,
-            "...and asks the lane NO question (the guard's other half — a question turn "
-            "strands a worker that has nobody to answer it)",
+            "...and asks the lane NO question (the guard's other half — a question turn strands a worker that has nobody to answer it)",
         )
     finally:
         _remove_fake_hosts()
 
 
-def test_ephemeral_fallback_preserves_an_absolute_brief_ref() -> None:
-    """An out-of-scope absolute ref retains the pre-snapshot fallback behavior."""
+def test_ephemeral_fallback_preserves_registered_brief_bytes() -> None:
+    """The registered revision body is delivered without a filesystem lookup."""
     state = _state()
     _install_fake_hosts()
     try:
-        brief_ref = "/tmp/briefs/codex-bootstrap.md sha256 deadbeef"
+        text = "registered brief body with exact unicode λ\r\nno final newline"
         spawn_session(
             state,
-            _spawn_req(host=_TEST_HOST, lane_id="lane-spn01-bare", brief_ref=brief_ref),
+            _spawn_req(host=_TEST_HOST, lane_id="lane-spn01-bare", assignment=fixture_assignment(text=text)),
         )
         driver = cast("_FakeDriverWithChannel", session_hosts._REGISTRY[_TEST_HOST])  # noqa: SLF001
         _check(
-            len(driver.channel.sent) == 1 and brief_ref in driver.channel.sent[0],
-            "an absolute non-workbench brief_ref retains the literal fallback behavior",
+            len(driver.channel.sent) == 1 and text in driver.channel.sent[0],
+            "registered revision bytes reach the first turn unchanged",
         )
     finally:
         _remove_fake_hosts()
@@ -1510,7 +1641,8 @@ def test_spawn_session_first_turn_failure_is_visible_not_blocking() -> None:
     _install_fake_hosts()
     try:
         result = spawn_session(
-            state, _spawn_req(host=_TEST_HOST_NO_CHANNEL, lane_id="lane-charter-no-channel"),
+            state,
+            _spawn_req(host=_TEST_HOST_NO_CHANNEL, lane_id="lane-charter-no-channel"),
         )
         _check(
             result["first_turn_delivered"] is False,
@@ -1518,8 +1650,7 @@ def test_spawn_session_first_turn_failure_is_visible_not_blocking() -> None:
         )
         _check(
             result["first_turn_error"] != "",
-            f"RED-vs-GREEN: the failure is surfaced in the spawn result, never silent "
-            f"(got first_turn_error={result['first_turn_error']!r})",
+            f"RED-vs-GREEN: the failure is surfaced in the spawn result, never silent (got first_turn_error={result['first_turn_error']!r})",
         )
         _check(
             result["lifecycle_state"] == LIFECYCLE_SPAWNING,
@@ -1531,10 +1662,11 @@ def test_spawn_session_first_turn_failure_is_visible_not_blocking() -> None:
 
 def test_spawn_session_first_turn_send_raising_is_contained() -> None:
     state = _state()
-    session_hosts._REGISTRY[_TEST_HOST_RAISING] = _FakeDriverRaisingChannel()  # noqa: SLF001
+    session_hosts._REGISTRY[_TEST_HOST_RAISING] = _FakeDriverRaisingChannel()  # noqa: SLF001  # pyright: ignore[reportArgumentType]
     try:
         result = spawn_session(
-            state, _spawn_req(host=_TEST_HOST_RAISING, lane_id="lane-charter-raising"),
+            state,
+            _spawn_req(host=_TEST_HOST_RAISING, lane_id="lane-charter-raising"),
         )
         _check(
             result["first_turn_delivered"] is False,
@@ -1559,24 +1691,37 @@ def test_clear_session_sends_and_can_park() -> None:
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-clear-1", lane_id="lane-clear", brief_ref="",
-                work_class="read_only", budget_line="b1", host=_TEST_HOST,
+                agent_instance_id="agi-clear-1",
+                lane_id="lane-clear",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host=_TEST_HOST,
             ),
         )
         transition_lifecycle_state(
-            state, agent_instance_id="agi-clear-1", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-clear-1",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         driver = session_hosts._REGISTRY[_TEST_HOST]  # noqa: SLF001
 
         result = clear_session(
-            state, agent_instance_id="agi-clear-1", park=False, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-clear-1",
+            park=False,
+            directed_by="operator:none",
         )
         _check(driver.channel.sent == ["/clear"], "clear_session sends '/clear' over the channel")
         _check(
-            result == {
-                "lifecycle_state": LIFECYCLE_LIVE, "parked": False,
-                "dispatched": True, "cleared": None,
+            result
+            == {
+                "lifecycle_state": LIFECYCLE_LIVE,
+                "parked": False,
+                "dispatched": True,
+                "cleared": None,
                 "clear_verification": "unsupported_on_driver",
             },
             "clear_session(park=False) does not transition lifecycle_state",
@@ -1596,16 +1741,22 @@ def test_clear_session_sends_and_can_park() -> None:
         )
 
         parked_result = clear_session(
-            state, agent_instance_id="agi-clear-1", park=True, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-clear-1",
+            park=True,
+            directed_by="operator:none",
         )
         _check(
             driver.channel.sent == ["/clear", "/clear"],
             "clear_session(park=True) still sends '/clear' before parking",
         )
         _check(
-            parked_result == {
-                "lifecycle_state": LIFECYCLE_PARKED, "parked": True,
-                "dispatched": True, "cleared": None,
+            parked_result
+            == {
+                "lifecycle_state": LIFECYCLE_PARKED,
+                "parked": True,
+                "dispatched": True,
+                "cleared": None,
                 "clear_verification": "unsupported_on_driver",
             },
             "clear_session(park=True) drives live -> parked",
@@ -1625,13 +1776,20 @@ def test_compact_session_sends_no_park() -> None:
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-compact-1", lane_id="lane-compact", brief_ref="",
-                work_class="read_only", budget_line="b1", host=_TEST_HOST,
+                agent_instance_id="agi-compact-1",
+                lane_id="lane-compact",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host=_TEST_HOST,
             ),
         )
         transition_lifecycle_state(
-            state, agent_instance_id="agi-compact-1", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-compact-1",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         driver = session_hosts._REGISTRY[_TEST_HOST]  # noqa: SLF001
         result = compact_session(state, agent_instance_id="agi-compact-1")
@@ -1659,8 +1817,12 @@ def test_drive_session_dispatches_and_unparks() -> None:
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-drive-1", lane_id="lane-drive", brief_ref="",
-                work_class="read_only", budget_line="b1", host=_TEST_HOST,
+                agent_instance_id="agi-drive-1",
+                lane_id="lane-drive",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host=_TEST_HOST,
             ),
         )
         driver = session_hosts._REGISTRY[_TEST_HOST]  # noqa: SLF001
@@ -1670,7 +1832,9 @@ def test_drive_session_dispatches_and_unparks() -> None:
         # still owns the spawning->live edge, so no transition here.
         report_by_before_first = read_managed_session(state, "agi-drive-1").get("report_by")
         spawning_result = drive_session(
-            state, agent_instance_id="agi-drive-1", text="Brief: build the tmux driver.",
+            state,
+            agent_instance_id="agi-drive-1",
+            text="Brief: build the tmux driver.",
             directed_by="steward:none",
         )
         _check(
@@ -1678,9 +1842,12 @@ def test_drive_session_dispatches_and_unparks() -> None:
             "drive_session sends the text over the channel",
         )
         _check(
-            spawning_result == {
-                "lifecycle_state": LIFECYCLE_SPAWNING, "unparked": False,
-                "dispatched": True, "submitted": None,
+            spawning_result
+            == {
+                "lifecycle_state": LIFECYCLE_SPAWNING,
+                "unparked": False,
+                "dispatched": True,
+                "submitted": None,
                 "drive_verification": "unsupported_on_driver",
                 "drive_on_delivery_detail": None,
             },
@@ -1695,17 +1862,25 @@ def test_drive_session_dispatches_and_unparks() -> None:
         # parked -> live: the §3.2 "new dispatch through the driver channel"
         # edge, owned by this verb alone.
         transition_lifecycle_state(
-            state, agent_instance_id="agi-drive-1", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-drive-1",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         transition_lifecycle_state(
-            state, agent_instance_id="agi-drive-1", from_state=LIFECYCLE_LIVE,
-            to_state=LIFECYCLE_PARKED, directed_by="steward:none",
+            state,
+            agent_instance_id="agi-drive-1",
+            from_state=LIFECYCLE_LIVE,
+            to_state=LIFECYCLE_PARKED,
+            directed_by="steward:none",
         )
         driver.channel = _FakeParkInterruptingVerifyingChannel()
         report_by_before_confirmed = read_managed_session(state, "agi-drive-1").get("report_by")
         unpark_result = drive_session(
-            state, agent_instance_id="agi-drive-1", text="Follow-up: land it.",
+            state,
+            agent_instance_id="agi-drive-1",
+            text="Follow-up: land it.",
             directed_by="steward:none",
         )
         _check(
@@ -1721,9 +1896,12 @@ def test_drive_session_dispatches_and_unparks() -> None:
             "a parked drive reports the measured interrupt recovery detail",
         )
         _check(
-            unpark_result == {
-                "lifecycle_state": LIFECYCLE_LIVE, "unparked": True,
-                "dispatched": True, "submitted": True,
+            unpark_result
+            == {
+                "lifecycle_state": LIFECYCLE_LIVE,
+                "unparked": True,
+                "dispatched": True,
+                "submitted": True,
                 "drive_verification": "confirmed",
                 "drive_on_delivery_detail": "interrupted_park",
             },
@@ -1735,8 +1913,7 @@ def test_drive_session_dispatches_and_unparks() -> None:
         )
         confirmed_row = read_managed_session(state, "agi-drive-1")
         _check(
-            confirmed_row.get("report_by") != report_by_before_confirmed
-            and confirmed_row.get("report_by_source") == "confirmed_drive",
+            confirmed_row.get("report_by") != report_by_before_confirmed and confirmed_row.get("report_by_source") == "confirmed_drive",
             "only a confirmed drive re-arms report_by with confirmed-drive provenance",
         )
     finally:
@@ -1751,7 +1928,10 @@ def test_drive_session_errors() -> None:
         not_found = None
         try:
             drive_session(
-                state, agent_instance_id="agi-nonexistent", text="work", directed_by="x",
+                state,
+                agent_instance_id="agi-nonexistent",
+                text="work",
+                directed_by="x",
             )
         except VerbError as exc:
             not_found = exc.code
@@ -1760,8 +1940,12 @@ def test_drive_session_errors() -> None:
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-drive-err", lane_id="lane-drive-err", brief_ref="",
-                work_class="read_only", budget_line="b1", host=_TEST_HOST,
+                agent_instance_id="agi-drive-err",
+                lane_id="lane-drive-err",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host=_TEST_HOST,
             ),
         )
         driver = session_hosts._REGISTRY[_TEST_HOST]  # noqa: SLF001
@@ -1777,8 +1961,11 @@ def test_drive_session_errors() -> None:
         )
 
         transition_lifecycle_state(
-            state, agent_instance_id="agi-drive-err", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_TERMINATED, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-drive-err",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_TERMINATED,
+            directed_by="operator:none",
         )
         conflict = None
         try:
@@ -1793,14 +1980,21 @@ def test_drive_session_errors() -> None:
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-drive-nochan", lane_id="lane-drive-nochan", brief_ref="",
-                work_class="read_only", budget_line="b1", host=_TEST_HOST_NO_CHANNEL,
+                agent_instance_id="agi-drive-nochan",
+                lane_id="lane-drive-nochan",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host=_TEST_HOST_NO_CHANNEL,
             ),
         )
         unsupported = None
         try:
             drive_session(
-                state, agent_instance_id="agi-drive-nochan", text="work", directed_by="x",
+                state,
+                agent_instance_id="agi-drive-nochan",
+                text="work",
+                directed_by="x",
             )
         except VerbError as exc:
             unsupported = exc.code
@@ -1837,13 +2031,20 @@ def test_clear_and_compact_errors() -> None:
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-terminal", lane_id="lane-terminal", brief_ref="",
-                work_class="read_only", budget_line="b1", host=_TEST_HOST,
+                agent_instance_id="agi-terminal",
+                lane_id="lane-terminal",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host=_TEST_HOST,
             ),
         )
         transition_lifecycle_state(
-            state, agent_instance_id="agi-terminal", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_TERMINATED, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-terminal",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_TERMINATED,
+            directed_by="operator:none",
         )
         conflict = None
         try:
@@ -1867,13 +2068,20 @@ def test_clear_and_compact_errors() -> None:
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-no-channel", lane_id="lane-no-channel", brief_ref="",
-                work_class="read_only", budget_line="b1", host=_TEST_HOST_NO_CHANNEL,
+                agent_instance_id="agi-no-channel",
+                lane_id="lane-no-channel",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host=_TEST_HOST_NO_CHANNEL,
             ),
         )
         transition_lifecycle_state(
-            state, agent_instance_id="agi-no-channel", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-no-channel",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         unsupported = None
         try:
@@ -1889,13 +2097,20 @@ def test_clear_and_compact_errors() -> None:
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-operator", lane_id="lane-operator", brief_ref="",
-                work_class="read_only", budget_line="b1", host="operator",
+                agent_instance_id="agi-operator",
+                lane_id="lane-operator",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host="operator",
             ),
         )
         transition_lifecycle_state(
-            state, agent_instance_id="agi-operator", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-operator",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         try:
             compact_session(state, agent_instance_id="agi-operator")
@@ -1914,13 +2129,20 @@ def test_terminate_idempotent() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-t", lane_id="lane-t", brief_ref="", work_class="read_only",
-            budget_line="b1", host="operator",
+            agent_instance_id="agi-t",
+            lane_id="lane-t",
+            assignment=fixture_assignment(),
+            work_class="read_only",
+            budget_line="b1",
+            host="operator",
         ),
     )
     transition_lifecycle_state(
-        state, agent_instance_id="agi-t", from_state=LIFECYCLE_SPAWNING,
-        to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+        state,
+        agent_instance_id="agi-t",
+        from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_LIVE,
+        directed_by="operator:none",
     )
     first = terminate_session(state, agent_instance_id="agi-t", directed_by="operator:none")
     _check(first["already_terminal"] is False, "first terminate_session lands the transition")
@@ -1950,9 +2172,7 @@ def test_terminate_idempotent() -> None:
     # assertion just makes the "why" explicit for a future reader.
     _check(
         first["lifecycle_state"] == LIFECYCLE_TERMINATED and not first["already_terminal"],
-        "an operator-hosted row still reaches 'terminated' without the verb "
-        "raising -- the degenerate driver's HostCannotSpawnError is "
-        "tolerated, not propagated",
+        "an operator-hosted row still reaches 'terminated' without the verb raising -- the degenerate driver's HostCannotSpawnError is tolerated, not propagated",
     )
 
 
@@ -1963,7 +2183,10 @@ def _real_short_lived_popen_fn(*_a: object, **_k: object) -> subprocess.Popen[st
     ``headless_adapter_smoke.py``'s pattern)."""
     return subprocess.Popen(  # noqa: S603 -- fixed harmless argv, test-only
         [sys.executable, "-c", "import time; time.sleep(30)"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
 
 
@@ -1989,9 +2212,12 @@ def test_terminate_session_kills_the_real_headless_process() -> None:
         for _hook_name in _WORKER_INJECTED_HOOK_FILENAMES:
             (hooks_dir / _hook_name).write_text("#!/usr/bin/env python3\n")
         real_driver = HeadlessHostDriver(
-            claude_bin=sys.executable, solet_name="testhom",
-            permission_mode="bypassPermissions", mcp_config_path=mcp_config,
-            cwd=Path(tmp), popen_fn=_real_short_lived_popen_fn,
+            claude_bin=sys.executable,
+            solet_name="testhom",
+            permission_mode="bypassPermissions",
+            mcp_config_path=mcp_config,
+            cwd=Path(tmp),
+            popen_fn=_real_short_lived_popen_fn,
         )
         prior = session_hosts._REGISTRY.get("headless")  # noqa: SLF001 -- test-only monkeypatch
         session_hosts._REGISTRY["headless"] = real_driver  # noqa: SLF001
@@ -2001,16 +2227,23 @@ def test_terminate_session_kills_the_real_headless_process() -> None:
             insert_managed_session(
                 state,
                 ManagedSessionSpec(
-                    agent_instance_id=agent_instance_id, lane_id="lane-reap", brief_ref="",
-                    work_class="read_only", budget_line="b1", host="headless",
+                    agent_instance_id=agent_instance_id,
+                    lane_id="lane-reap",
+                    assignment=fixture_assignment(),
+                    work_class="read_only",
+                    budget_line="b1",
+                    host="headless",
                 ),
             )
             transition_lifecycle_state(
-                state, agent_instance_id=agent_instance_id, from_state=LIFECYCLE_SPAWNING,
-                to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+                state,
+                agent_instance_id=agent_instance_id,
+                from_state=LIFECYCLE_SPAWNING,
+                to_state=LIFECYCLE_LIVE,
+                directed_by="operator:none",
             )
             host_ref = real_driver.spawn(
-                {"agent_instance_id": agent_instance_id, "lane_id": "lane-reap"},
+                {**fixture_assignment_record(), "agent_instance_id": agent_instance_id, "lane_id": "lane-reap"},
             )
             set_host_ref(state, agent_instance_id=agent_instance_id, host_ref=host_ref)
             _check(
@@ -2019,7 +2252,9 @@ def test_terminate_session_kills_the_real_headless_process() -> None:
             )
 
             result = terminate_session(
-                state, agent_instance_id=agent_instance_id, directed_by="operator:none",
+                state,
+                agent_instance_id=agent_instance_id,
+                directed_by="operator:none",
                 grace_seconds=2,
             )
             _check(
@@ -2036,8 +2271,7 @@ def test_terminate_session_kills_the_real_headless_process() -> None:
                 time.sleep(0.1)
             _check(
                 dead,
-                "terminate_session actually killed the real OS process, not "
-                "just the ledger row",
+                "terminate_session actually killed the real OS process, not just the ledger row",
             )
         finally:
             if prior is not None:
@@ -2051,8 +2285,12 @@ def test_retire_idempotent_and_redrivable() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-r", lane_id="lane-r", brief_ref="",
-            work_class="read_only", budget_line="b1", host="operator",
+            agent_instance_id="agi-r",
+            lane_id="lane-r",
+            assignment=fixture_assignment(),
+            work_class="read_only",
+            budget_line="b1",
+            host="operator",
         ),
     )
     # ManagedSessionSpec has no agent_session_id field (it arrives later, at
@@ -2063,8 +2301,11 @@ def test_retire_idempotent_and_redrivable() -> None:
         {"agent_session_id": "ases-r"},
     )
     win_cardinality_gate(
-        state, CardinalityGatedClaim(
-            agent_session_id="ases-r", requested_role="Some-Lane", agent_instance_id="agi-r",
+        state,
+        CardinalityGatedClaim(
+            agent_session_id="ases-r",
+            requested_role="Some-Lane",
+            agent_instance_id="agi-r",
         ),
     )
     _check(
@@ -2079,16 +2320,12 @@ def test_retire_idempotent_and_redrivable() -> None:
     )
     _check(
         read_session_role_claim(state, "ases-r") is None,
-        "retire_session's step 2 (populated agent_session_id path) actually "
-        "prunes the session_role_claim cardinality row -- this path is only "
-        "reachable with agent_session_id populated, which is exactly what "
-        "the registration hook now does for every real spawn",
+        "retire_session's step 2 (populated agent_session_id path) actually prunes the session_role_claim cardinality row -- this path is only reachable with agent_session_id populated, which is exactly what the registration hook now does for every real spawn",
     )
     second = retire_session(state, agent_instance_id="agi-r", directed_by="operator:none")
     _check(
         second["already_retired"] is True,
-        "re-running retire_session on an already-retired row is a no-op "
-        "(re-drivable by construction, never wedged)",
+        "re-running retire_session on an already-retired row is a no-op (re-drivable by construction, never wedged)",
     )
 
 
@@ -2097,19 +2334,29 @@ def test_report_alive() -> None:
 
     def _report(status: str) -> dict[str, object]:
         return report_alive(
-            state, agent_instance_id="agi-a", status=status, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-a",
+            status=status,
+            directed_by="operator:none",
         )
 
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-a", lane_id="lane-a", brief_ref="", work_class="read_only",
-            budget_line="b1", host="operator",
+            agent_instance_id="agi-a",
+            lane_id="lane-a",
+            assignment=fixture_assignment(),
+            work_class="read_only",
+            budget_line="b1",
+            host="operator",
         ),
     )
     transition_lifecycle_state(
-        state, agent_instance_id="agi-a", from_state=LIFECYCLE_SPAWNING,
-        to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+        state,
+        agent_instance_id="agi-a",
+        from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_LIVE,
+        directed_by="operator:none",
     )
     before = read_managed_session(state, "agi-a").get("report_by")
     result = _report("idle")
@@ -2125,32 +2372,31 @@ def test_report_alive() -> None:
     after2 = read_managed_session(state, "agi-a")
     _check(
         after2["report_by"] != after["report_by"],
-        "report_alive re-arms report_by even when NO transition occurs "
-        "(the same-status branch)",
+        "report_alive re-arms report_by even when NO transition occurs (the same-status branch)",
     )
     heartbeat = _report("heartbeat")
     after_heartbeat = read_managed_session(state, "agi-a")
     _check(
-        heartbeat["lifecycle_state"] == LIFECYCLE_IDLE
-        and after_heartbeat["lifecycle_state"] == LIFECYCLE_IDLE,
+        heartbeat["lifecycle_state"] == LIFECYCLE_IDLE and after_heartbeat["lifecycle_state"] == LIFECYCLE_IDLE,
         "a passive heartbeat preserves an explicit idle status",
     )
     _check(
-        after_heartbeat.get("last_heartbeat_at") is not None
-        and after_heartbeat.get("report_by") == after2.get("report_by"),
+        after_heartbeat.get("last_heartbeat_at") is not None and after_heartbeat.get("report_by") == after2.get("report_by"),
         "a passive heartbeat records liveness without rearming report_by",
     )
     later = _report("working")
     _check(
-        later["lifecycle_state"] == LIFECYCLE_LIVE
-        and read_managed_session(state, "agi-a").get("status_source") == "explicit_self_report",
+        later["lifecycle_state"] == LIFECYCLE_LIVE and read_managed_session(state, "agi-a").get("status_source") == "explicit_self_report",
         "a later explicit working report supersedes idle with explicit provenance",
     )
 
     # overdue recovery
     transition_lifecycle_state(
-        state, agent_instance_id="agi-a", from_state=LIFECYCLE_LIVE,
-        to_state=LIFECYCLE_OVERDUE, directed_by="sweep:none",
+        state,
+        agent_instance_id="agi-a",
+        from_state=LIFECYCLE_LIVE,
+        to_state=LIFECYCLE_OVERDUE,
+        directed_by="sweep:none",
     )
     recovered = _report("working")
     _check(recovered["recovered"] is True, "a late report from 'overdue' is flagged recovered=True")
@@ -2158,8 +2404,11 @@ def test_report_alive() -> None:
 
     # parked/terminal conflict
     transition_lifecycle_state(
-        state, agent_instance_id="agi-a", from_state=LIFECYCLE_LIVE,
-        to_state="parked", directed_by="steward:none",
+        state,
+        agent_instance_id="agi-a",
+        from_state=LIFECYCLE_LIVE,
+        to_state="parked",
+        directed_by="steward:none",
     )
     conflict = None
     try:
@@ -2203,7 +2452,9 @@ def test_report_alive_parked_refusal_is_distinct_from_the_terminal_one() -> None
     def _refusal(agent_instance_id: str) -> VerbError | None:
         try:
             report_alive(
-                state, agent_instance_id=agent_instance_id, status="working",
+                state,
+                agent_instance_id=agent_instance_id,
+                status="working",
                 directed_by="operator:none",
             )
         except VerbError as exc:
@@ -2214,16 +2465,25 @@ def test_report_alive_parked_refusal_is_distinct_from_the_terminal_one() -> None
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id=instance_id, lane_id="lane-lif04", brief_ref="",
-                work_class="read_only", budget_line="b1", host="operator",
+                agent_instance_id=instance_id,
+                lane_id="lane-lif04",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host="operator",
             ),
         )
         transition_lifecycle_state(
-            state, agent_instance_id=instance_id, from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id=instance_id,
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         transition_lifecycle_state(
-            state, agent_instance_id=instance_id, from_state=LIFECYCLE_LIVE,
+            state,
+            agent_instance_id=instance_id,
+            from_state=LIFECYCLE_LIVE,
             to_state=LIFECYCLE_TERMINATED if terminal else LIFECYCLE_PARKED,
             directed_by="steward:none",
         )
@@ -2235,8 +2495,7 @@ def test_report_alive_parked_refusal_is_distinct_from_the_terminal_one() -> None
         "both a parked row and a terminal row still refuse report_alive",
     )
     _check(
-        parked is not None and dead is not None
-        and parked.code == "lifecycle_state_conflict" == dead.code,
+        parked is not None and dead is not None and parked.code == "lifecycle_state_conflict" == dead.code,
         "the error TOKEN is unchanged on both — LIF-04 moves the message, not the code",
     )
     parked_message = parked.message if parked is not None else ""
@@ -2248,8 +2507,7 @@ def test_report_alive_parked_refusal_is_distinct_from_the_terminal_one() -> None
     lowered = parked_message.lower()
     _check(
         "state skew" not in lowered,
-        "the parked refusal drops the 'state skew' framing — a parked lane's row is "
-        "RIGHT, and telling it otherwise is what sends it retrying",
+        "the parked refusal drops the 'state skew' framing — a parked lane's row is RIGHT, and telling it otherwise is what sends it retrying",
     )
     _check(
         "not evidence that you are dead" in lowered,
@@ -2291,22 +2549,27 @@ def test_rearm_report_by_honors_spawn_window() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-window", lane_id="lane-window", brief_ref="",
-            work_class="read_only", budget_line="b1", host="operator",
+            agent_instance_id="agi-window",
+            lane_id="lane-window",
+            assignment=fixture_assignment(),
+            work_class="read_only",
+            budget_line="b1",
+            host="operator",
             report_by_seconds=900,
         ),
     )
     transition_lifecycle_state(
-        state, agent_instance_id="agi-window", from_state=LIFECYCLE_SPAWNING,
-        to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+        state,
+        agent_instance_id="agi-window",
+        from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_LIVE,
+        directed_by="operator:none",
     )
     report_alive(state, agent_instance_id="agi-window", status="idle", directed_by="operator:none")
     delta = _report_by_delta_seconds(read_managed_session(state, "agi-window"))
     _check(
         delta > DEFAULT_REPORT_BY_SECONDS + 100,
-        f"RED-vs-GREEN: report_alive re-arms a 900s-window row to ~900s out "
-        f"(got {delta:.0f}s), not silently shortened to the {DEFAULT_REPORT_BY_SECONDS}s "
-        "default",
+        f"RED-vs-GREEN: report_alive re-arms a 900s-window row to ~900s out (got {delta:.0f}s), not silently shortened to the {DEFAULT_REPORT_BY_SECONDS}s default",
     )
 
     # Fallback case: a row that never requested a custom window (0/absent,
@@ -2315,20 +2578,26 @@ def test_rearm_report_by_honors_spawn_window() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-nowindow", lane_id="lane-nowindow", brief_ref="",
-            work_class="read_only", budget_line="b1", host="operator",
+            agent_instance_id="agi-nowindow",
+            lane_id="lane-nowindow",
+            assignment=fixture_assignment(),
+            work_class="read_only",
+            budget_line="b1",
+            host="operator",
         ),
     )
     transition_lifecycle_state(
-        state, agent_instance_id="agi-nowindow", from_state=LIFECYCLE_SPAWNING,
-        to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+        state,
+        agent_instance_id="agi-nowindow",
+        from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_LIVE,
+        directed_by="operator:none",
     )
     report_alive(state, agent_instance_id="agi-nowindow", status="idle", directed_by="operator:none")
     fallback_delta = _report_by_delta_seconds(read_managed_session(state, "agi-nowindow"))
     _check(
         DEFAULT_REPORT_BY_SECONDS - 30 < fallback_delta <= DEFAULT_REPORT_BY_SECONDS + 5,
-        f"GREEN: a row with no custom window still falls back to the "
-        f"{DEFAULT_REPORT_BY_SECONDS}s default (got {fallback_delta:.0f}s)",
+        f"GREEN: a row with no custom window still falls back to the {DEFAULT_REPORT_BY_SECONDS}s default (got {fallback_delta:.0f}s)",
     )
 
 
@@ -2348,8 +2617,12 @@ def test_insert_managed_session_arms_report_by_for_non_operator_hosts() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-op-nowindow", lane_id="lane-op", brief_ref="",
-            work_class="read_only", budget_line="b1", host="operator",
+            agent_instance_id="agi-op-nowindow",
+            lane_id="lane-op",
+            assignment=fixture_assignment(),
+            work_class="read_only",
+            budget_line="b1",
+            host="operator",
         ),
     )
     op_row = read_managed_session(state, "agi-op-nowindow")
@@ -2363,8 +2636,12 @@ def test_insert_managed_session_arms_report_by_for_non_operator_hosts() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-headless-nowindow", lane_id="lane-headless", brief_ref="",
-            work_class="read_only", budget_line="b1", host="headless",
+            agent_instance_id="agi-headless-nowindow",
+            lane_id="lane-headless",
+            assignment=fixture_assignment(),
+            work_class="read_only",
+            budget_line="b1",
+            host="headless",
         ),
     )
     headless_row = read_managed_session(state, "agi-headless-nowindow")
@@ -2375,21 +2652,23 @@ def test_insert_managed_session_arms_report_by_for_non_operator_hosts() -> None:
     headless_delta = _report_by_delta_seconds(headless_row)
     _check(
         DEFAULT_REPORT_BY_SECONDS - 30 < headless_delta <= DEFAULT_REPORT_BY_SECONDS + 5,
-        f"headless default-armed report_by lands ~{DEFAULT_REPORT_BY_SECONDS}s out "
-        f"(got {headless_delta:.0f}s)",
+        f"headless default-armed report_by lands ~{DEFAULT_REPORT_BY_SECONDS}s out (got {headless_delta:.0f}s)",
     )
     _check(
         headless_row.get("report_by_seconds") == DEFAULT_REPORT_BY_SECONDS,
-        "the resolved default is written back into report_by_seconds -- the row "
-        "stays self-describing for the next _rearm_report_by call",
+        "the resolved default is written back into report_by_seconds -- the row stays self-describing for the next _rearm_report_by call",
     )
 
     # Tmux host, no report_by_seconds: same coverage, different host string.
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-tmux-nowindow", lane_id="lane-tmux", brief_ref="",
-            work_class="read_only", budget_line="b1", host="tmux",
+            agent_instance_id="agi-tmux-nowindow",
+            lane_id="lane-tmux",
+            assignment=fixture_assignment(),
+            work_class="read_only",
+            budget_line="b1",
+            host="tmux",
         ),
     )
     tmux_row = read_managed_session(state, "agi-tmux-nowindow")
@@ -2402,8 +2681,12 @@ def test_insert_managed_session_arms_report_by_for_non_operator_hosts() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-headless-window", lane_id="lane-headless-w", brief_ref="",
-            work_class="read_only", budget_line="b1", host="headless",
+            agent_instance_id="agi-headless-window",
+            lane_id="lane-headless-w",
+            assignment=fixture_assignment(),
+            work_class="read_only",
+            budget_line="b1",
+            host="headless",
             report_by_seconds=900,
         ),
     )
@@ -2411,8 +2694,7 @@ def test_insert_managed_session_arms_report_by_for_non_operator_hosts() -> None:
     explicit_delta = _report_by_delta_seconds(explicit_row)
     _check(
         explicit_delta > DEFAULT_REPORT_BY_SECONDS + 100,
-        f"an explicit report_by_seconds=900 is honored, not overridden by the "
-        f"{DEFAULT_REPORT_BY_SECONDS}s default (got {explicit_delta:.0f}s)",
+        f"an explicit report_by_seconds=900 is honored, not overridden by the {DEFAULT_REPORT_BY_SECONDS}s default (got {explicit_delta:.0f}s)",
     )
     _check(
         explicit_row.get("report_by_seconds") == 900,
@@ -2423,29 +2705,37 @@ def test_insert_managed_session_arms_report_by_for_non_operator_hosts() -> None:
 def test_drive_session_rearm_honors_spawn_window() -> None:
     """Same fix, the drive_session call site."""
     state = _state()
-    session_hosts._REGISTRY[_TEST_HOST] = _FakeDriverWithChannel()  # noqa: SLF001 -- test-only monkeypatch
+    session_hosts._REGISTRY[_TEST_HOST] = _FakeDriverWithChannel()  # noqa: SLF001 -- test-only monkeypatch  # pyright: ignore[reportArgumentType]
     try:
         insert_managed_session(
             state,
             ManagedSessionSpec(
-                agent_instance_id="agi-drive-window", lane_id="lane-drive-window", brief_ref="",
-                work_class="read_only", budget_line="b1", host=_TEST_HOST,
+                agent_instance_id="agi-drive-window",
+                lane_id="lane-drive-window",
+                assignment=fixture_assignment(),
+                work_class="read_only",
+                budget_line="b1",
+                host=_TEST_HOST,
                 report_by_seconds=900,
             ),
         )
         transition_lifecycle_state(
-            state, agent_instance_id="agi-drive-window", from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id="agi-drive-window",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         drive_session(
-            state, agent_instance_id="agi-drive-window", text="hello",
+            state,
+            agent_instance_id="agi-drive-window",
+            text="hello",
             directed_by="steward:none",
         )
         delta = _report_by_delta_seconds(read_managed_session(state, "agi-drive-window"))
         _check(
             delta > DEFAULT_REPORT_BY_SECONDS + 100,
-            f"drive_session re-arms a 900s-window row to ~900s out (got "
-            f"{delta:.0f}s), not the {DEFAULT_REPORT_BY_SECONDS}s default",
+            f"drive_session re-arms a 900s-window row to ~900s out (got {delta:.0f}s), not the {DEFAULT_REPORT_BY_SECONDS}s default",
         )
     finally:
         session_hosts._REGISTRY.pop(_TEST_HOST, None)  # noqa: SLF001
@@ -2482,12 +2772,16 @@ def test_provision_surfaces_typed_dirty_stale_worktree_warning() -> None:
         lifecycle_verbs._resolve_lane_repo_root = lambda _root="": repo_root  # type: ignore[assignment]  # noqa: SLF001
         lifecycle_verbs._active_lane_worktree_inventory = (  # type: ignore[assignment]  # noqa: SLF001
             lambda _state, _repo: lane_worktrees.ActiveLaneWorktreeInventory(
-                paths=(), terminal_paths=(), cleanup_safe=True, incomplete_rows=(),
+                paths=(),
+                terminal_paths=(),
+                cleanup_safe=True,
+                incomplete_rows=(),
             )
         )
         lifecycle_verbs.sweep_orphaned_lane_worktrees = (  # type: ignore[assignment]  # noqa: SLF001
             lambda *_args, **_kwargs: lane_worktrees.LaneWorktreeSweep(
-                removed=(), skipped=(warning,),
+                removed=(),
+                skipped=(warning,),
             )
         )
         lifecycle_verbs.lane_worktree_for = (  # type: ignore[assignment]  # noqa: SLF001
@@ -2500,7 +2794,9 @@ def test_provision_surfaces_typed_dirty_stale_worktree_warning() -> None:
             )
         )
         result = lifecycle_verbs._provision_spawn_worktree(  # noqa: SLF001
-            _state(), role_name="fresh", agent_instance_id="agi-fresh",
+            _state(),
+            role_name="fresh",
+            agent_instance_id="agi-fresh",
         )
     finally:
         lifecycle_verbs.logger.removeHandler(handler)  # noqa: SLF001
@@ -2511,10 +2807,7 @@ def test_provision_surfaces_typed_dirty_stale_worktree_warning() -> None:
         lifecycle_verbs.provision_lane_worktree = original_provision  # type: ignore[assignment]  # noqa: SLF001
     _check(result == requested, "the requested lane is returned after the stale-tree warning")
     _check(
-        emitted == [
-            "dirty_stale_worktree_skipped: path=/fixture-lanes/stale--agi-stale "
-            "git_diagnostic=git worktree remove refused dirty tracked.txt"
-        ],
+        emitted == ["dirty_stale_worktree_skipped: path=/fixture-lanes/stale--agi-stale git_diagnostic=git worktree remove refused dirty tracked.txt"],
         "typed warning carries the exact stale path and Git diagnostic",
     )
 
@@ -2545,12 +2838,16 @@ def test_active_worktree_inventory_preserves_drift_and_refuses_unknown_owner() -
                 )
             return lifecycle_verbs._active_lane_worktree_inventory(state, repo_root)  # noqa: SLF001
 
-        drift = inventory([
-            row(agent_instance_id="agi-drift", role_name="new-role", local_name="old-local"),
-        ])
+        drift = inventory(
+            [
+                row(agent_instance_id="agi-drift", role_name="new-role", local_name="old-local"),
+            ]
+        )
         drift_paths = {
             lane_worktrees.lane_worktree_for(
-                repo_root, role_name=name, agent_instance_id="agi-drift",
+                repo_root,
+                role_name=name,
+                agent_instance_id="agi-drift",
             ).path
             for name in ("new-role", "old-local")
         }
@@ -2558,90 +2855,152 @@ def test_active_worktree_inventory_preserves_drift_and_refuses_unknown_owner() -
             drift.cleanup_safe and drift_paths.issubset(drift.paths),
             "active role/local-name drift preserves both possible lane paths",
         )
-        protected = inventory([
-            row(agent_instance_id="", role_name="", local_name=""),
-            row(agent_instance_id="agi-bad-root", lane_repo_root=""),
-            row(agent_instance_id="agi-bad-mode", provisioning_mode="unknown"),
-        ])
+        protected = inventory(
+            [
+                row(agent_instance_id="", role_name="", local_name=""),
+                row(agent_instance_id="agi-bad-root", lane_repo_root=""),
+                row(agent_instance_id="agi-bad-mode", provisioning_mode="unknown"),
+            ]
+        )
         _check(
             not protected.cleanup_safe and protected.incomplete_rows,
             "incomplete active ownership disables automatic cleanup",
         )
-        terminal = inventory([
-            row(
-                agent_instance_id="agi-terminal",
-                role_name="terminal-role",
-                lifecycle_state=LIFECYCLE_TERMINATED,
-            ),
-        ])
+        terminal = inventory(
+            [
+                row(
+                    agent_instance_id="agi-terminal",
+                    role_name="terminal-role",
+                    lifecycle_state=LIFECYCLE_TERMINATED,
+                ),
+            ]
+        )
         terminal_path = lane_worktrees.lane_worktree_for(
-            repo_root, role_name="terminal-role", agent_instance_id="agi-terminal",
+            repo_root,
+            role_name="terminal-role",
+            agent_instance_id="agi-terminal",
         ).path
         _check(
             terminal.cleanup_safe and terminal.terminal_paths == (terminal_path,),
             "only a complete terminal worktree row supplies cleanup eligibility",
         )
-        supported_modes = inventory([
-            row(
-                agent_instance_id="agi-terminal-supported-mode",
-                role_name="terminal-supported-mode",
-                lifecycle_state=LIFECYCLE_TERMINATED,
-            ),
-            row(
-                agent_instance_id="agi-operator-existing",
-                provisioning_mode="operator_existing_checkout",
-                role_name="",
-            ),
-            row(
-                agent_instance_id="agi-synthetic",
-                provisioning_mode="synthetic_no_worktree",
-                role_name="",
-            ),
-        ])
+        supported_modes = inventory(
+            [
+                row(
+                    agent_instance_id="agi-terminal-supported-mode",
+                    role_name="terminal-supported-mode",
+                    lifecycle_state=LIFECYCLE_TERMINATED,
+                ),
+                row(
+                    agent_instance_id="agi-operator-existing",
+                    provisioning_mode="operator_existing_checkout",
+                    role_name="",
+                ),
+                row(
+                    agent_instance_id="agi-synthetic",
+                    provisioning_mode="synthetic_no_worktree",
+                    role_name="",
+                ),
+            ]
+        )
         supported_terminal = lane_worktrees.lane_worktree_for(
             repo_root,
             role_name="terminal-supported-mode",
             agent_instance_id="agi-terminal-supported-mode",
         ).path
         _check(
-            supported_modes.cleanup_safe
-            and supported_modes.terminal_paths == (supported_terminal,),
+            supported_modes.cleanup_safe and supported_modes.terminal_paths == (supported_terminal,),
             "supported non-worktree rows preserve unrelated terminal cleanup eligibility",
         )
-        overlap = inventory([
-            row(agent_instance_id="agi-shared", role_name="shared-role"),
-            row(
-                agent_instance_id="agi-shared",
-                role_name="shared-role",
-                lifecycle_state=LIFECYCLE_TERMINATED,
-            ),
-            row(
-                agent_instance_id="agi-invalid-terminal",
-                lifecycle_state=LIFECYCLE_TERMINATED,
-                local_name="../invalid",
-            ),
-        ])
+        overlap = inventory(
+            [
+                row(agent_instance_id="agi-shared", role_name="shared-role"),
+                row(
+                    agent_instance_id="agi-shared",
+                    role_name="shared-role",
+                    lifecycle_state=LIFECYCLE_TERMINATED,
+                ),
+                row(
+                    agent_instance_id="agi-invalid-terminal",
+                    lifecycle_state=LIFECYCLE_TERMINATED,
+                    local_name="../invalid",
+                ),
+            ]
+        )
         _check(
-            overlap.cleanup_safe
-            and len(overlap.paths) == 1
-            and not overlap.terminal_paths,
+            overlap.cleanup_safe and len(overlap.paths) == 1 and not overlap.terminal_paths,
             "active ownership overrides and malformed terminal identity cannot authorize removal",
         )
-        paged = inventory([
-            row(
-                agent_instance_id=f"agi-page-{index}",
-                role_name=f"page-{index}",
-                lifecycle_state=LIFECYCLE_PARKED,
-            )
-            for index in range(101)
-        ])
+        paged = inventory(
+            [
+                row(
+                    agent_instance_id=f"agi-page-{index}",
+                    role_name=f"page-{index}",
+                    lifecycle_state=LIFECYCLE_PARKED,
+                )
+                for index in range(101)
+            ]
+        )
         final_path = lane_worktrees.lane_worktree_for(
-            repo_root, role_name="page-100", agent_instance_id="agi-page-100",
+            repo_root,
+            role_name="page-100",
+            agent_instance_id="agi-page-100",
         ).path
         _check(
             paged.cleanup_safe and final_path in paged.paths,
             "a protected owner beyond the first page remains protected",
         )
+
+
+def test_spawn_owner_transfer_uses_current_history_version() -> None:
+    """An unrelated observation must leave transfer eligible.
+
+    The helper uses the production register client through the existing CLI
+    double and checks its explicit CAS argv and write-free assigned replay.
+    A locally caught transfer error keeps this named killer reachable on base
+    code and M1. Owner readback is independent of the returned receipt.
+    Scaffolding lives in the other fenced smoke to keep this module maintainable.
+    Its callback contributes each secondary assertion to this smoke's totals.
+    An unexpected fixture exception propagates rather than counting as a kill.
+    No private database is needed to reach the actual production CAS algorithm.
+    """
+    with patch.object(owner_smoke, "_check", _check):
+        error, result, current_owner, receipt = owner_smoke._exercise_current_history()  # noqa: SLF001
+    _check(error is None and result.get("ownership_status") == "assigned" and current_owner == receipt["owner_actor_id"], "OWNER_TRANSFER_UNRELATED_EVENT_SUCCEEDS")
+
+
+def test_spawn_owner_transfer_preserves_prepared_owner() -> None:
+    """An aligned ordinal must not authorize stealing a changed predecessor.
+
+    The helper also checks old receipts, cleared/multiple owners, immutable
+    observation reuse, absent or inconsistent evidence, released-child replay,
+    higher attempts and a recoverable post-snapshot race. The primary case
+    aligns the old receipt ordinal so base code reaches the unsafe write.
+    Command counts prove the final guard refuses before set-owner is invoked.
+    The expected predecessor always originates in production preparation.
+    The replacement itself uses the double's existing assignment/event surface.
+    Neither the shared double nor the live register is changed by these cases.
+    """
+    with patch.object(owner_smoke, "_check", _check):
+        error, active_owner_after, replacement_owner, set_owner_calls_after, set_owner_calls_before = owner_smoke._exercise_prepared_owner()  # noqa: SLF001
+    _check(error is not None and active_owner_after == replacement_owner and set_owner_calls_after == set_owner_calls_before, "OWNER_TRANSFER_CHANGED_PREDECESSOR_REFUSED")
+
+
+def test_spawn_owner_overdue_pending_reuses_host() -> None:
+    """Exact overdue recovery releases one first turn through the retained host.
+
+    The helper injects one explicit transfer error and uses valid lifecycle
+    transitions spawning to live to overdue. It verifies ownership before send,
+    pinned identity/assignment/attempt and absence of a new observation or host.
+    Independent fixtures cover terminal, dead, mismatched and delivered rows.
+    An intervening owner is also protected by the original persisted anchor.
+    Expected verb refusals are captured locally so this assertion is reachable.
+    The alive driver counts launches independently of first-turn deliveries.
+    The recovery receipt is read from the failed attempt's retained ledger row.
+    """
+    with patch.object(owner_smoke, "_check", _check):
+        error, recovered, retained_id, driver = owner_smoke._exercise_overdue_owner()  # noqa: SLF001
+    _check(error is None and recovered.get("agent_instance_id") == retained_id and driver.spawns == 1 and len(driver.channel.sent) == 1, "OWNER_TRANSFER_OVERDUE_SAME_HOST_FIRSTTURN")
 
 
 def main() -> int:
@@ -2658,22 +3017,29 @@ def main() -> int:
     cleanup_calls: list[lifecycle_verbs.LaneWorktree] = []
 
     def fixture_provision(
-        state: StateManagementInterface, *, role_name: str, agent_instance_id: str, repository_root: str,
+        state: StateManagementInterface,
+        *,
+        role_name: str,
+        agent_instance_id: str,
+        repository_root: str,
     ) -> lifecycle_verbs.LaneWorktree:
         del state, repository_root
         worktree = lifecycle_verbs.LaneWorktree(
-            repo_root=fixture_root, root=fixture_root, path=fixture_root,
+            repo_root=fixture_root,
+            root=fixture_root,
+            path=fixture_root,
             branch=f"fixture/{role_name}/{agent_instance_id}",
         )
         provisioning_calls.append((role_name, agent_instance_id, worktree))
         return worktree
 
-    def fixture_retire(row: dict[str, object]) -> str:
+    def fixture_retire(row: dict[str, object], custody: object = None) -> str:
+        del custody
         retirement_calls.append(row)
         return "removed"
 
-    def fixture_adjudicate(row: dict[str, object]) -> None:
-        del row
+    def fixture_adjudicate(row: dict[str, object], custody: object = None) -> None:
+        del row, custody
 
     def fixture_cleanup(worktree: lifecycle_verbs.LaneWorktree) -> None:
         cleanup_calls.append(worktree)
@@ -2683,6 +3049,9 @@ def main() -> int:
     lifecycle_verbs._retire_lane_worktree = fixture_retire  # type: ignore[assignment]  # noqa: SLF001
     lifecycle_verbs.remove_lane_worktree = fixture_cleanup  # type: ignore[assignment]  # noqa: SLF001
     try:
+        test_spawn_owner_transfer_uses_current_history_version()
+        test_spawn_owner_transfer_preserves_prepared_owner()
+        test_spawn_owner_overdue_pending_reuses_host()
         test_lane_worktree_root_requires_app_home()
         test_spawn_errors()
         test_omitted_host_resolves_to_tmux_before_spawn()
@@ -2722,18 +3091,11 @@ def main() -> int:
         test_spawn_session_drives_fallback_when_no_charter_on_file()
         test_spawn_session_first_turn_preserves_agent_runtime()
         test_fallback_first_turn_hands_off_to_the_spawner()
-        test_ephemeral_fallback_preserves_an_absolute_brief_ref()
+        test_ephemeral_fallback_preserves_registered_brief_bytes()
         test_spawn_session_first_turn_failure_is_visible_not_blocking()
         test_spawn_session_first_turn_send_raising_is_contained()
         _check(
-            bool(provisioning_calls)
-            and all(
-                worktree.root == fixture_root
-                and worktree.repo_root == fixture_root
-                and worktree.path == fixture_root
-                and worktree.branch == f"fixture/{role_name}/{agent_instance_id}"
-                for role_name, agent_instance_id, worktree in provisioning_calls
-            ),
+            bool(provisioning_calls) and all(worktree.root == fixture_root and worktree.repo_root == fixture_root and worktree.path == fixture_root and worktree.branch == f"fixture/{role_name}/{agent_instance_id}" for role_name, agent_instance_id, worktree in provisioning_calls),
             "fixture provisioning records every spawn's expected lane branch and root",
         )
         _check(

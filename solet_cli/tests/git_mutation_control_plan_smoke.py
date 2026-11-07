@@ -14,12 +14,12 @@ from solet_manager.models import JsonValue  # noqa: E402
 from solet_manager.release_lock import SeedLock  # noqa: E402
 
 _CONTRACTS = Path(__file__).resolve().parents[2] / "plugins" / "github_midwife_plugin" / "knowledge_base"
-_CHECKS = 0
+_checks = 0
 
 
 def _check(condition: object, label: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    global _checks
+    _checks += 1
     if not condition:
         raise AssertionError(label)
 
@@ -59,24 +59,19 @@ def _shell_inputs(git_mutation_control: str) -> dict[str, JsonValue]:
         decision_selections=config.decisions,
         decision_sources=config.decision_sources,
     )
-    return next(
-        operation.public_inputs
-        for operation in plan.operations
-        if operation.operation_id == "install_shell_integration"
-    )
+    return next(operation.public_inputs for operation in plan.operations if operation.operation_id == "install_shell_integration")
 
 
 def main() -> int:
     _check(
-        _shell_inputs("designated_controller")
-        == {"git_controller_name": "Git-Controller"},
+        _shell_inputs("designated_controller") == {"git_controller_name": "Git-Controller", "selected_coding_agents": ["claude_code"]},
         "designated Git controller reaches the shell-integration plan step",
     )
     _check(
-        _shell_inputs("single_session") == {},
+        _shell_inputs("single_session") == {"selected_coding_agents": ["claude_code"]},
         "single-session Git control leaves the shell-integration gate unarmed",
     )
-    print(f"git_mutation_control_plan_smoke OK: {_CHECKS} checks passed")
+    print(f"git_mutation_control_plan_smoke OK: {_checks} checks passed")
     return 0
 
 

@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::delete_usage",
+  "display_name": "Zuora: Delete Usage Record",
+  "description": "Delete a usage record (DELETE /v1/object/usage/{id}); Zuora refuses records of a dynamic pricing usage charge. Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "Remove a usage record that should never be billed, for example a duplicate or test event, before it is rated on an invoice. Records tied to dynamic pricing usage charges cannot be removed this way. Use after a metering system sent a bad event or during test clean-up.",
+  "result_processor_customizations": {
+    "action_label": "Zuora usage record deleted",
+    "result_type": "zuora_delete_usage_result",
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+  },
+  "error_processor_customizations": {
+    "action_context": "Delete a usage record (DELETE /v1/object/usage/{id}); Zuora refuses records of a dynamic pricing usage charge.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape: a bad identifier, header value or query pairing, a body missing a required field, or an unreadable or wrongly typed upload file. zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.validation_failed is a vendor 4xx or an HTTP 200 carrying success false, with Zuora's reasons. zuora.object_not_found, zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the Billing permission the reason names (bill runs, usage import or usage records). Read current state with get_bill_run or get_usage before retrying a write; pass an idempotency_key where offered. Back off on rate limits."
+  }
+}

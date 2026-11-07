@@ -21,8 +21,8 @@ the mutation that turns it red:
                                     ``peer_direct_reads.build_peer_inbox_request``
 - CLI sends it on the role fetch only, refuses it without ``--observer``, requires and
   honours ``--since``, refuses a floored page, and transmits it to the server
-- (the authorization helper's frontier argv is pinned in
-  ``.claude/hooks/tests/git_controller_authorization_smoke.py``, which ships with the hook)
+- (the Git-Controller authorization helper no longer reads the inbox at all since
+  iss_ffee3a36; it authorizes from register readiness)
 
 Run:
     SOLET_NAME=<name>-test .venv/bin/python3 \
@@ -78,22 +78,36 @@ def _seeded_state(*, mark_row: str = "f02") -> ris._FakeState:
     ris._seed_binding(state, _ROLE)
     for index, row_id in enumerate(("f01", "f02", "f03", "f04")):
         ris._seed_role_msg(
-            state, row_id=row_id, role=_ROLE, created_at=f"2026-09-25T13:0{index}:00",
+            state,
+            row_id=row_id,
+            role=_ROLE,
+            created_at=f"2026-09-25T13:0{index}:00",
         )
     created = {"f01": "13:00", "f02": "13:01", "f03": "13:02", "f04": "13:03"}[mark_row]
     ris._seed_mark(
-        state, role=_ROLE, covered_created_at=f"2026-09-25T{created}:00", covered_id=mark_row,
+        state,
+        role=_ROLE,
+        covered_created_at=f"2026-09-25T{created}:00",
+        covered_id=mark_row,
     )
     return state
 
 
 def _read(
-    state: ris._FakeState, *, observer: bool, include_covered: bool,
-    limit: int = 10, role_after: str | None = None,
+    state: ris._FakeState,
+    *,
+    observer: bool,
+    include_covered: bool,
+    limit: int = 10,
+    role_after: str | None = None,
 ) -> tuple[Any, ...]:
     return ris._make_service(state).list_silent_for_roles(
-        agent_instance_id=ris._INSTANCE, include_important=True, limit=limit,
-        role_after=role_after, observer=observer, include_covered=include_covered,
+        agent_instance_id=ris._INSTANCE,
+        include_important=True,
+        limit=limit,
+        role_after=role_after,
+        observer=observer,
+        include_covered=include_covered,
     )
 
 
@@ -104,28 +118,30 @@ def test_service_reads_past_the_floor_including_the_mark_row() -> None:
         ris._page_ids(entries) == ["msg-f04", "msg-f03", "msg-f02", "msg-f01"],
         "include_covered: every row is returned, the mark's own row f02 included",
     )
-    _check(cursor is None and floor_applied is False and history is None,
-           "include_covered: exhausted, no floor applied, no history cursor")
+    _check(cursor is None and floor_applied is False and history is None, "include_covered: exhausted, no floor applied, no history cursor")
 
     default, _, default_floor, default_history = _read(state, observer=True, include_covered=False)
-    _check(ris._page_ids(default) == ["msg-f04", "msg-f03"] and default_floor is True,
-           "control: the default observer read still honours the floor (pending count)")
+    _check(ris._page_ids(default) == ["msg-f04", "msg-f03"] and default_floor is True, "control: the default observer read still honours the floor (pending count)")
     assert default_history is not None
     via_history, _, _, _ = _read(
-        state, observer=True, include_covered=False, role_after=default_history,
+        state,
+        observer=True,
+        include_covered=False,
+        role_after=default_history,
     )
-    _check("msg-f02" not in ris._page_ids(via_history),
-           "control: the history cursor cannot return the mark's own row")
+    _check("msg-f02" not in ris._page_ids(via_history), "control: the history cursor cannot return the mark's own row")
 
 
 def test_service_default_is_floored_and_observer_only() -> None:
     state = _seeded_state()
     service = ris._make_service(state)
     entries, _, floor_applied, _ = service.list_silent_for_roles(
-        agent_instance_id=ris._INSTANCE, include_important=True, limit=10, role_after=None,
+        agent_instance_id=ris._INSTANCE,
+        include_important=True,
+        limit=10,
+        role_after=None,
     )
-    _check(ris._page_ids(entries) == ["msg-f04", "msg-f03"] and floor_applied is True,
-           "default read without the argument is floored")
+    _check(ris._page_ids(entries) == ["msg-f04", "msg-f03"] and floor_applied is True, "default read without the argument is floored")
     try:
         _read(state, observer=False, include_covered=True)
     except AgentRequestInvalidError:
@@ -135,12 +151,13 @@ def test_service_default_is_floored_and_observer_only() -> None:
     _check(refused, "include_covered without observer is refused")
     section = ris._make_service(state)._collect_role_section(
         PeerInboxRequest(
-            recipient_agent_id="claude_code", recipient_agent_instance_id=ris._INSTANCE,
-            limit=10, include_covered=True,
+            recipient_agent_id="claude_code",
+            recipient_agent_instance_id=ris._INSTANCE,
+            limit=10,
+            include_covered=True,
         ),
     )
-    _check(section[4] is RoleSectionStatus.ERROR and section[0] == (),
-           "the refused read surfaces as a role-section error, never an empty ok page")
+    _check(section[4] is RoleSectionStatus.ERROR and section[0] == (), "the refused read surfaces as a role-section error, never an empty ok page")
 
 
 def test_service_paging_keeps_the_floor_off() -> None:
@@ -149,41 +166,50 @@ def test_service_paging_keeps_the_floor_off() -> None:
     role_after: str | None = None
     for _ in range(10):
         entries, cursor, _, _ = _read(
-            state, observer=True, include_covered=True, limit=2, role_after=role_after,
+            state,
+            observer=True,
+            include_covered=True,
+            limit=2,
+            role_after=role_after,
         )
         seen.extend(ris._page_ids(entries))
         if cursor is None:
             break
         role_after = cursor
-    _check(seen == ["msg-f04", "msg-f03", "msg-f02", "msg-f01"],
-           "include_covered pages through every row when the mark is the newest row")
+    _check(seen == ["msg-f04", "msg-f03", "msg-f02", "msg-f01"], "include_covered pages through every row when the mark is the newest row")
 
 
 def test_read_does_not_move_the_mark() -> None:
     state = _seeded_state()
     before = state.query_state(
-        ris.ROLE_NAMESPACE, {"table": TABLE_ROLE_COVERED_MARK, "filters": {}},
+        ris.ROLE_NAMESPACE,
+        {"table": TABLE_ROLE_COVERED_MARK, "filters": {}},
     )
     _read(state, observer=True, include_covered=True)
     after = state.query_state(
-        ris.ROLE_NAMESPACE, {"table": TABLE_ROLE_COVERED_MARK, "filters": {}},
+        ris.ROLE_NAMESPACE,
+        {"table": TABLE_ROLE_COVERED_MARK, "filters": {}},
     )
     _check(before == after, "an include_covered read leaves the stored mark byte-identical")
 
 
 def test_process_builder_carries_the_flag() -> None:
     binding = BridgeBinding(
-        bridge_id="agc-1", agent_id="claude_code", agent_instance_id=ris._INSTANCE,
-        session_label=_ROLE, parent_pid=1, agent_session_id="sess-x",
+        bridge_id="agc-1",
+        agent_id="claude_code",
+        agent_instance_id=ris._INSTANCE,
+        session_label=_ROLE,
+        parent_pid=1,
+        agent_session_id="sess-x",
     )
     on = build_peer_inbox_request({"observer": True, "include_covered": True}, binding)
     off = build_peer_inbox_request({"observer": True}, binding)
-    _check(on.include_covered is True and off.include_covered is False,
-           "peer_inbox process request carries include_covered, default False")
+    _check(on.include_covered is True and off.include_covered is False, "peer_inbox process request carries include_covered, default False")
 
 
 def _cli_calls(
-    args: list[str], role_pages: list[dict[str, Any]] | None = None,
+    args: list[str],
+    role_pages: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, list[dict[str, Any]]]:
     """Run ``solet-bridge inbox`` with the page fetch replaced by a recorder.
 
@@ -197,7 +223,8 @@ def _cli_calls(
     def recorder(_client: Any, _session: str, _limit: int, **kwargs: Any) -> dict[str, Any]:
         calls.append(kwargs)
         if kwargs.get("include_covered"):
-            return next(served, empty)
+            # A server that applies ``since`` echoes it back as the role horizon.
+            return {**next(served, empty), "role_since_created_at": kwargs.get("since")}
         return empty
 
     handler, _ = cli_smoke._ack_pages_handler()
@@ -215,24 +242,18 @@ def test_cli_sends_it_on_the_role_fetch_only() -> None:
     result, calls = _cli_calls(["inbox", "--observer", "--include-covered", "--since", _SINCE])
     role_calls = [c for c in calls if c.get("include_covered")]
     other_calls = [c for c in calls if not c.get("include_covered")]
-    _check(result.exit_code == 0 and len(role_calls) == 1 and len(other_calls) == 1,
-           "inbox --observer --include-covered: the role fetch asks past the floor, "
-           "the direct-section fetch does not")
+    _check(result.exit_code == 0 and len(role_calls) == 1 and len(other_calls) == 1, "inbox --observer --include-covered: the role fetch asks past the floor, the direct-section fetch does not")
     result, calls = _cli_calls(["inbox", "--observer"])
-    _check(result.exit_code == 0 and not any(c.get("include_covered") for c in calls),
-           "inbox --observer alone never asks past the floor (pending-count callers)")
+    _check(result.exit_code == 0 and not any(c.get("include_covered") for c in calls), "inbox --observer alone never asks past the floor (pending-count callers)")
     result, calls = _cli_calls(["inbox", "--include-covered", "--since", _SINCE])
-    _check(result.exit_code != 0 and calls == [],
-           "inbox --include-covered without --observer is refused before any fetch")
+    _check(result.exit_code != 0 and calls == [], "inbox --include-covered without --observer is refused before any fetch")
 
 
 def test_cli_horizon_is_required_and_valid() -> None:
     result, calls = _cli_calls(["inbox", "--observer", "--include-covered"])
-    _check(result.exit_code != 0 and calls == [],
-           "--include-covered without --since is refused before any fetch")
+    _check(result.exit_code != 0 and calls == [], "--include-covered without --since is refused before any fetch")
     result, calls = _cli_calls(["inbox", "--observer", "--since", _SINCE])
-    _check(result.exit_code != 0 and calls == [],
-           "--since without --include-covered is refused before any fetch")
+    _check(result.exit_code != 0 and calls == [], "--since without --include-covered is refused before any fetch")
     result, calls = _cli_calls(["inbox", "--observer", "--include-covered", "--since", "yesterday"])
     _check(result.exit_code != 0 and calls == [], "a malformed --since is refused before any fetch")
 
@@ -243,14 +264,12 @@ def test_cli_horizon_bounds_the_walk() -> None:
     page = cli_smoke._role_addressed_inbox_page(role_entries=[recent, older])
     page["next_role_cursor"] = "more-history"
     result, calls = _cli_calls(
-        ["inbox", "--observer", "--include-covered", "--since", _SINCE], [page],
+        ["inbox", "--observer", "--include-covered", "--since", _SINCE],
+        [page],
     )
     payload = json.loads(result.output) if result.exit_code == 0 else {}
     ids = [m["message"]["id"] for m in payload.get("messages", []) if m["section"] == "role"]
-    _check(ids == ["recent"] and payload.get("complete") is True
-           and len([c for c in calls if c.get("include_covered")]) == 1,
-           "within the horizon the row is found; the walk stops at the horizon, "
-           "reports complete, and fetches no older page")
+    _check(ids == ["recent"] and payload.get("complete") is True and len([c for c in calls if c.get("include_covered")]) == 1, "within the horizon the row is found; the walk stops at the horizon, reports complete, and fetches no older page")
 
 
 def test_cli_refuses_a_floored_include_covered_page() -> None:
@@ -259,15 +278,15 @@ def test_cli_refuses_a_floored_include_covered_page() -> None:
     )
     page["role_floor_applied"] = True
     result, _ = _cli_calls(
-        ["inbox", "--observer", "--include-covered", "--since", _SINCE], [page],
+        ["inbox", "--observer", "--include-covered", "--since", _SINCE],
+        [page],
     )
     text = result.output.lstrip()
     payload = json.JSONDecoder().raw_decode(text)[0] if text.startswith("{") else {}
-    _check(result.exit_code != 0 and payload.get("complete") is False
-           and payload.get("role_section_status") == "error"
-           and "needs a deploy" in str(payload.get("role_section_error")),
-           "an include_covered page that comes back floored is a loud role fault, "
-           "naming a server that predates the fix or a route that dropped the parameter")
+    _check(
+        result.exit_code != 0 and payload.get("complete") is False and payload.get("role_section_status") == "error" and "needs a deploy" in str(payload.get("role_section_error")),
+        "an include_covered page that comes back floored is a loud role fault, naming a server that predates the fix or a route that dropped the parameter",
+    )
 
 
 class _CapturingClient:
@@ -284,20 +303,30 @@ class _CapturingClient:
 def test_cli_transmits_include_covered_to_the_server() -> None:
     client = _CapturingClient()
     cli_mod._one_shot_peer_inbox_page(
-        cast("Any", client), "ases-x", 100, after=None, role_after=None,
-        observer=True, include_covered=True,
+        cast("Any", client),
+        "ases-x",
+        100,
+        after=None,
+        role_after=None,
+        observer=True,
+        include_covered=True,
     )
     on = dict(client.arguments)
     cli_mod._one_shot_peer_inbox_page(
-        cast("Any", client), "ases-x", 100, after=None, role_after=None, observer=True,
+        cast("Any", client),
+        "ases-x",
+        100,
+        after=None,
+        role_after=None,
+        observer=True,
     )
-    _check(on.get("include_covered") is True and client.arguments.get("include_covered") is False,
-           "the direct inbox route call carries include_covered=True exactly when asked")
+    _check(on.get("include_covered") is True and client.arguments.get("include_covered") is False, "the direct inbox route call carries include_covered=True exactly when asked")
 
 
 def test_models_default_is_floored() -> None:
     request = PeerInboxRequest(
-        recipient_agent_id="claude_code", recipient_agent_instance_id=ris._INSTANCE,
+        recipient_agent_id="claude_code",
+        recipient_agent_instance_id=ris._INSTANCE,
     )
     _check(request.include_covered is False, "PeerInboxRequest.include_covered defaults to False")
 

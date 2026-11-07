@@ -182,6 +182,20 @@ def receipt_is_well_formed(path: Path) -> bool:
         return False
 
 
+def receipt_has_plugin_cache_surface(path: Path) -> bool:
+    """Whether the receipt at ``path`` binds an installed plugin cache.
+
+    Only setup's install step publishes such a receipt; an unreadable or absent
+    one is not evidence of an install, and never blocks a repair."""
+    try:
+        surfaces = _strict_object(path.read_text(encoding="utf-8")).get("surfaces")
+    except (OSError, ValueError):
+        return False
+    return isinstance(surfaces, list) and any(
+        isinstance(surface, dict) and surface.get("kind") == "plugin_cache" for surface in surfaces
+    )
+
+
 def _surface_matches_hook_root(surface: object, hook_root: Path) -> bool:
     if not isinstance(surface, dict) or surface.get("hook_root") != str(hook_root):
         return False

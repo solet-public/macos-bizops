@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::dynamic_table",
+  "display_name": "Snowflake: Dynamic Tables",
+  "description": "Manage Snowflake dynamic tables under /api/v2/databases/{database}/schemas/{schema}/dynamic-tables. Operations: list (like, startsWith, showLimit, fromName, deep), create (body with name, target_lag, warehouse and query; createMode), get, delete (ifExists), clone (body with the new name; createMode, copyGrants, targetDatabase, targetSchema), undrop, suspend, resume, refresh, suspend_recluster, resume_recluster (ifExists), swap_with (targetName required), set_tags and unset_tags (tags), get_tags and fetch_result. Vendor RBAC alone decides. Returns job_id/status queued.",
+  "embedding_description": "Create, refresh, suspend, resume, clone, swap, undrop and drop Snowflake dynamic tables through the Dynamic Table REST API, list them with dependency detail, and manage reclustering and tags. Use for declarative incremental pipelines; vendor role grants decide every operation.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake dynamic table operation queued",
+    "result_type": "snowflake_dynamic_table_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: family, operation, method, status (HTTP), headers, body (DynamicTable objects with scheduling_state, rows and bytes, or the vendor's status message), body_encoding, correlation_id, error_code for 4xx/5xx, and pagination: next_from_name when a list filled showLimit, Link relations, location and result_handler for 202 responses.",
+    "presentation_guidance": "This operation may have changed vendor state. Queued means the job was accepted, not that Snowflake completed the operation. Report the HTTP status, error_code and body faithfully. refresh asks Snowflake to refresh now; read get for the resulting state. swap_with exchanges two tables in place and delete removes the table until undrop restores it within retention. To page a list, repeat it with query.fromName set to pagination.next_from_name. Report mutations from the vendor status."
+  },
+  "error_processor_customizations": {
+    "action_context": "Manage Snowflake dynamic tables with the registered role's grants.",
+    "error_interpretation": "snowflake.invalid_params is raised before any vendor call when the operation, identifiers, query parameter names or types, createMode, resultLimit range or required body members do not match the documented vendor shape. Vendor HTTP errors are completion data with status, body and error_code: auth_failed (401), permission_denied (403), object_not_found (404), timeout (408), conflict (409), rate_limited (429), statement_failed (422, SQL API only), api_error otherwise. snowflake.api_error without a status is a transport or configuration failure.",
+    "recovery_guidance": "Read the vendor status and body before retrying. A 403 means the registered role lacks the grant: grant it in Snowflake, the plugin adds no gate of its own. Double-quote identifiers that contain other characters. For a 202, call the same verb with operation fetch_result and the pagination.result_handler. Never silently retry a mutation after a transport error: read the object first."
+  }
+}

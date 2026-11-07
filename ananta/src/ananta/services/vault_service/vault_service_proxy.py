@@ -78,6 +78,7 @@ _LAYER_2_ONLY_METHODS: frozenset[str] = frozenset({
 _LAYER_3_HELPERS: frozenset[str] = frozenset({
     "lookup_oauth_client", "verify_oauth_client_credentials",
     "issue_oauth_refresh_token", "consume_oauth_refresh_token",
+    "record_oauth_client_token_use",
 })
 
 # Methods that admin/operator principal kinds must be allowed to call;
@@ -386,6 +387,22 @@ class VaultServiceProxy:
     ) -> dict[str, Any] | None:
         return self._vault_service.consume_oauth_refresh_token(
             cleartext, call_context=self._call_context,
+        )
+
+    def record_oauth_client_token_use(
+        self,
+        client_id: str,
+        *,
+        client_ip: str = "",
+        user_agent: str = "",
+        transport: str = "",
+    ) -> bool:
+        return self._vault_service.record_oauth_client_token_use(
+            client_id,
+            client_ip=client_ip,
+            user_agent=user_agent,
+            transport=transport,
+            call_context=self._call_context,
         )
 
     # ─────────────────────────────────────────────────────────────────────

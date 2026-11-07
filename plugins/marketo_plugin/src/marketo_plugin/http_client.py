@@ -32,8 +32,10 @@ durable credential) is a secret; the token is trivially re-mintable.
 from __future__ import annotations
 
 import collections
+import logging
 import threading
 import time
+import uuid
 from typing import Any
 
 import httpx
@@ -49,8 +51,10 @@ from .constants import (
     TOKEN_REFRESH_MARGIN_SECONDS,
 )
 from .errors import MarketoEnvelopeError, MarketoTransportError, is_retryable_auth_code
+from .request import CredentialLogFilter, audit_path, decode_body, first_error_code, prepare_request, redact_value, response_data, validate_target
 
 _HTTP_OK: int = 200
+_HTTP_AUTH_REFUSALS: frozenset[int] = frozenset({401, 403})
 
 # Write methods that must still declare a content type when they carry no body.
 _BODYLESS_CONTENT_TYPE_METHODS: frozenset[str] = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -110,6 +114,8 @@ class MarketoClient:
     ) -> None:
         self._config = config
         self._http = httpx.Client(base_url=config.base_url, timeout=timeout_seconds)
+        self._credential_log_filter = CredentialLogFilter(config.client_secret)
+        logging.getLogger("httpx").addFilter(self._credential_log_filter)
         self._token: str | None = None
         self._expires_at_monotonic: float = 0.0
         # D0.3 section 7 named constraint: the bearer-token cache below was a
@@ -125,10 +131,88 @@ class MarketoClient:
 
     def close(self) -> None:
         self._http.close()
+        logging.getLogger("httpx").removeFilter(self._credential_log_filter)
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        query: dict[str, Any] | None = None,
+        json_body: Any = None,
+        form_body: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Return vendor status/body as data; only explicit token expiry may retry."""
+        correlation_id = str(uuid.uuid4())
+        started = time.monotonic()
+        status: int | None = None
+        audit_target = path
+        try:
+            prepared = prepare_request({"method": method, "path": path, "headers": headers})
+            for attempt in range(2):
+                response = self._generic_request_once(method, path, query, json_body, form_body, prepared["headers"])
+                status = response.status_code
+                audit_target = response.request.url.raw_path.decode("ascii")
+                body = decode_body(response)
+                if attempt == 0 and is_retryable_auth_code(first_error_code(body)):
+                    self._invalidate_token()
+                    continue
+                return response_data(response, body, self._credential_log_filter.secrets, correlation_id)
+            raise AssertionError("request retry loop exhausted")
+        finally:
+            secrets = self._credential_log_filter.secrets
+            logging.getLogger(__name__).info(
+                "Marketo request method=%s path=%s status=%s duration_ms=%.3f correlation_id=%s",
+                redact_value(method, secrets),
+                audit_path(audit_target, secrets),
+                status,
+                (time.monotonic() - started) * 1000,
+                correlation_id,
+            )
+
+    def _generic_request_once(
+        self,
+        method: str,
+        path: str,
+        query: dict[str, Any] | None,
+        json_body: Any,
+        form_body: dict[str, Any] | None,
+        headers: dict[str, str],
+    ) -> httpx.Response:
+        origin = httpx.URL(self._config.base_url)
+        target = httpx.URL(path)
+        if query is not None:
+            target = target.copy_merge_params(query)
+        validate_target(origin, self._http.base_url.join(target), headers)
+        token = self._bearer()
+        if "\r" in token or "\n" in token:
+            raise ValueError("request headers must not contain CR/LF")
+        if token not in self._credential_log_filter.secrets:
+            self._credential_log_filter.secrets += (token,)
+        request_headers = {**headers, "Authorization": f"Bearer {token}"}
+        if json_body is None and form_body is None and method.upper() in _BODYLESS_CONTENT_TYPE_METHODS:
+            request_headers.setdefault("Content-Type", MIME_JSON)
+        request = self._http.build_request(method, target, json=json_body, data=form_body, headers=request_headers)
+        validate_target(origin, request.url, request_headers)
+        self._rate_limiter.acquire()
+        try:
+            return self._http.send(request, follow_redirects=False)
+        finally:
+            self._rate_limiter.release()
 
     def ensure_authenticated(self) -> None:
         """Mint (or reuse the cached) bearer token — used by test_connection to prove reachability."""
         self._bearer()
+
+    def _remember_secret(self, token: str) -> None:
+        """Every issued token is redacted from logs and typed results, not only generic-request ones."""
+        if token not in self._credential_log_filter.secrets:
+            self._credential_log_filter.secrets += (token,)
+
+    def redact(self, value: Any) -> Any:
+        """Redact the client secret and every minted token, in raw, percent and base64 forms."""
+        return redact_value(value, self._credential_log_filter.secrets)
 
     def get_json(self, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self._request_json("GET", path, params=params, json=None)
@@ -179,6 +263,9 @@ class MarketoClient:
         except ValueError as exc:
             raise MarketoTransportError(response.status_code) from exc
         if not isinstance(payload, dict):
+            raise MarketoTransportError(response.status_code)
+        if response.status_code in _HTTP_AUTH_REFUSALS and not payload.get("errors"):
+            # A gateway-level 401/403 without a vendor errors[] keeps its HTTP status for classification.
             raise MarketoTransportError(response.status_code)
         return payload
 
@@ -235,6 +322,7 @@ class MarketoClient:
             if not isinstance(token, str) or not token:
                 raise MarketoAuthError("Marketo OAuth token response carried no access_token")
             ttl = float(expires_in) if isinstance(expires_in, (int, float)) else DEFAULT_TOKEN_TTL_SECONDS
+            self._remember_secret(token)
             self._token = token
             self._expires_at_monotonic = time.monotonic() + max(0.0, ttl - TOKEN_REFRESH_MARGIN_SECONDS)
             return token

@@ -1,8 +1,28 @@
 name: zuora_plugin
 description: >
-  Zuora subscription-billing connector — Data Query (ZOQL) reads, typed
-  object CRUD (Account/Subscription/Invoice/Payment/Product; no delete verb),
-  and bulk export. REST API (no official Zuora SDK, no CLI) via a plain
+  Zuora subscription-billing connector — typed Workflow verbs (definitions,
+  export/import backups, versions, runs, tasks, usage, callout auth
+  providers), typed SQL Data Query jobs with result download, typed Files
+  download/status/restore, typed Orders (preview, create, list, correct,
+  activate, cancel, delete, async jobs), typed Subscriptions (preview,
+  create, read, amend, renew, suspend, resume, cancel, delete, metrics),
+  typed Accounts (create, read, summary, correct, delete, payment methods,
+  cascading), typed Payment Methods (create, wallet-token create, read,
+  correct, verify, balance, scrub, delete, stored credential profiles,
+  wallet domains, payment sessions), typed Payments (create, list, read,
+  parts, correct, apply, unapply, transfer, refund, cancel, delete), typed
+  Custom Objects (definitions, records, batch, CSV bulk jobs), typed Object
+  Query for every standard and custom object, typed Billing Documents and
+  Invoices (list, generate, standalone create, correct, post, unpost, split,
+  email, PDF files, items, taxes, reverse, write off, cancel, delete), typed
+  Credit and Debit Memos (create, correct, post, unpost, apply, unapply,
+  refund, collect, reverse, write off, cancel, delete, files, items, parts),
+  typed Bill Runs (create, read, post, cancel, delete, email) and Usage
+  (import, create, read, correct, delete, rate detail), ZOQL data query and
+  bulk export, typed object create/update and billing reads, and a generic
+  authenticated request verb
+  for any other tenant path. Reads, writes and deletes are first-class.
+  REST API (no official Zuora SDK, no CLI) via a plain
   synchronous httpx client. Auth: OAuth 2.0 client-credentials against a
   Connected client, resolved from the address book entry "zuora_tenant" via
   chain-consumed vault:: references — the simplest of the platform's
@@ -13,13 +33,13 @@ description: >
   Foreign-target invariant (SQL-lockdown honesty condition, umbrella design
   §3): this plugin reaches ONLY the Zuora tenant resolved from the
   operator-registered "zuora_tenant" address-book entry — no base_url
-  parameter on any verb. It never imports or touches the platform state DB,
-  and (being a pure REST connector with no SQL-shaped strings) trips no
-  SQL-lockdown gate class at all.
+  parameter on any verb — plus the pre-signed result URL Zuora itself issues
+  for a completed SQL Data Query job, fetched without the bearer token. It
+  never imports or touches the platform state DB.
 
-  No delete verb exists in v1 (billing records are voided/cancelled through
-  Zuora's own workflow, not deleted through this tool) — create_object and
-  update_object cover the write surface.
+  Vendor RBAC on the registered OAuth client is the only operation boundary;
+  the plugin adds no read-only gate, allowlist or confirmation prompt. Billing
+  records Zuora voids or cancels keep that vendor-defined terminal state.
 optional: true
 
 implements:

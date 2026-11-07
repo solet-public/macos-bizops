@@ -28,15 +28,22 @@ from __future__ import annotations
 
 import contextlib
 import sys
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
+import codex_eventual_pickup_smoke as pickup  # noqa: E402
+from composer_tmux_fixture import FixtureSession, report_tmux_unmeasured, tmux_missing  # noqa: E402
+
 from agent_messaging_plugin import tmux_adapter as tmux_module  # noqa: E402
 from agent_messaging_plugin.codex_tmux import _CodexTmuxDriverChannel  # noqa: E402
+from agent_messaging_plugin.park_drive import send_delivery_notice  # noqa: E402
 from agent_messaging_plugin.session_hosts import DriverChannelSendError  # noqa: E402
 
 _passed = 0
@@ -53,10 +60,9 @@ def _check(condition: object, label: str) -> None:
         print(f"  FAIL  {label}")
 
 
-class _FakeCompletedProcess:
+class _FakeCompletedProcess(SimpleNamespace):
     def __init__(self, stdout: str = "", returncode: int = 0) -> None:
-        self.stdout = stdout
-        self.returncode = returncode
+        super().__init__(stdout=stdout, returncode=returncode)
 
 
 class _FakeTmuxRunner:
@@ -65,8 +71,11 @@ class _FakeTmuxRunner:
     exhausted, simulating a pane that settles and stays settled)."""
 
     def __init__(
-        self, *, capture_pane_sequence: list[str] | None = None,
-        fail_payload_insert: bool = False, fail_enter_send: bool = False,
+        self,
+        *,
+        capture_pane_sequence: list[str] | None = None,
+        fail_payload_insert: bool = False,
+        fail_enter_send: bool = False,
     ) -> None:
         self.calls: list[list[str]] = []
         self.payloads: list[str] = []
@@ -155,16 +164,19 @@ def test_enter_sent_only_after_n_consecutive_stable_samples() -> None:
     """
     runner = _FakeTmuxRunner(capture_pane_sequence=["A", "B", "B", "B", "B"])
     channel = tmux_module._TmuxSendKeysDriverChannel(  # noqa: SLF001
-        tmux_bin="tmux", session="s1", run_fn=runner,
-        stable_samples_required=3, stable_timeout_seconds=100.0,
-        sleep_fn=_fake_sleep, now_fn=_FakeClock(step=0.1),
+        tmux_bin="tmux",
+        session="s1",
+        run_fn=runner,
+        stable_samples_required=3,
+        stable_timeout_seconds=100.0,
+        sleep_fn=_fake_sleep,
+        now_fn=_FakeClock(step=0.1),
     )
     channel.send("hello")
     _check(runner.payload_inserted(), "the payload is inserted into the composer")
     _check(
         runner.capture_pane_call_count() == 5,
-        "5 capture-pane reads for a 3-sample streak (1 baseline + 1 transition "
-        f"sample + 3 confirmations), got {runner.capture_pane_call_count()}",
+        f"5 capture-pane reads for a 3-sample streak (1 baseline + 1 transition sample + 3 confirmations), got {runner.capture_pane_call_count()}",
     )
     _check(runner.enter_sent(), "Enter is sent once the pane stabilizes")
     literal_idx = runner.payload_insert_index()
@@ -183,15 +195,18 @@ def test_non_matching_sample_resets_the_consecutive_counter() -> None:
     -- kills a mutation that forgets to reset on mismatch."""
     runner = _FakeTmuxRunner(capture_pane_sequence=["A", "B", "B", "B"])
     channel = tmux_module._TmuxSendKeysDriverChannel(  # noqa: SLF001
-        tmux_bin="tmux", session="s1", run_fn=runner,
-        stable_samples_required=3, stable_timeout_seconds=100.0,
-        sleep_fn=_fake_sleep, now_fn=_FakeClock(step=0.1),
+        tmux_bin="tmux",
+        session="s1",
+        run_fn=runner,
+        stable_samples_required=3,
+        stable_timeout_seconds=100.0,
+        sleep_fn=_fake_sleep,
+        now_fn=_FakeClock(step=0.1),
     )
     channel.send("hello")
     _check(
         runner.capture_pane_call_count() == 5,
-        f"a mismatch resets the streak -- needs 5 samples (baseline, then a mismatch that "
-        f"becomes the new baseline, then 3 confirmations), got {runner.capture_pane_call_count()}",
+        f"a mismatch resets the streak -- needs 5 samples (baseline, then a mismatch that becomes the new baseline, then 3 confirmations), got {runner.capture_pane_call_count()}",
     )
     _check(runner.enter_sent(), "Enter is still eventually sent once the pane genuinely stabilizes")
 
@@ -203,9 +218,13 @@ def test_timeout_still_sends_enter_fail_open() -> None:
     ever_changing = [f"frame-{i}" for i in range(1000)]
     runner = _FakeTmuxRunner(capture_pane_sequence=ever_changing)
     channel = tmux_module._TmuxSendKeysDriverChannel(  # noqa: SLF001
-        tmux_bin="tmux", session="s1", run_fn=runner,
-        stable_samples_required=3, stable_timeout_seconds=2.0,
-        sleep_fn=_fake_sleep, now_fn=_FakeClock(step=1.0),
+        tmux_bin="tmux",
+        session="s1",
+        run_fn=runner,
+        stable_samples_required=3,
+        stable_timeout_seconds=2.0,
+        sleep_fn=_fake_sleep,
+        now_fn=_FakeClock(step=1.0),
     )
     channel.send("hello")
     _check(runner.enter_sent(), "Enter is still sent (fail-open) after a stability timeout")
@@ -214,9 +233,13 @@ def test_timeout_still_sends_enter_fail_open() -> None:
 def test_payload_insert_failure_never_attempts_enter() -> None:
     runner = _FakeTmuxRunner(fail_payload_insert=True)
     channel = tmux_module._TmuxSendKeysDriverChannel(  # noqa: SLF001
-        tmux_bin="tmux", session="s1", run_fn=runner,
-        stable_samples_required=3, stable_timeout_seconds=100.0,
-        sleep_fn=_fake_sleep, now_fn=_FakeClock(step=0.1),
+        tmux_bin="tmux",
+        session="s1",
+        run_fn=runner,
+        stable_samples_required=3,
+        stable_timeout_seconds=100.0,
+        sleep_fn=_fake_sleep,
+        now_fn=_FakeClock(step=0.1),
     )
     channel.send("hello")  # must not raise -- fire-and-forget contract
     _check(
@@ -235,9 +258,13 @@ def test_submit_after_settling_insert_never_reinserts_text() -> None:
         capture_pane_sequence=["before", "after", "after", "after", "after"],
     )
     channel = tmux_module._TmuxSendKeysDriverChannel(  # noqa: SLF001
-        tmux_bin="tmux", session="s1", run_fn=runner,
-        stable_samples_required=3, stable_timeout_seconds=100.0,
-        sleep_fn=_fake_sleep, now_fn=_FakeClock(step=0.1),
+        tmux_bin="tmux",
+        session="s1",
+        run_fn=runner,
+        stable_samples_required=3,
+        stable_timeout_seconds=100.0,
+        sleep_fn=_fake_sleep,
+        now_fn=_FakeClock(step=0.1),
     )
     channel.insert("large\\npaste")
     channel.submit()
@@ -268,9 +295,13 @@ def test_payload_insert_uses_bracketed_paste_never_send_keys_literal() -> None:
     """
     runner = _FakeTmuxRunner(capture_pane_sequence=["A", "B", "B", "B", "B"])
     channel = tmux_module._TmuxSendKeysDriverChannel(  # noqa: SLF001
-        tmux_bin="tmux", session="s1", run_fn=runner,
-        stable_samples_required=3, stable_timeout_seconds=100.0,
-        sleep_fn=_fake_sleep, now_fn=_FakeClock(step=0.1),
+        tmux_bin="tmux",
+        session="s1",
+        run_fn=runner,
+        stable_samples_required=3,
+        stable_timeout_seconds=100.0,
+        sleep_fn=_fake_sleep,
+        now_fn=_FakeClock(step=0.1),
     )
     payload = "line one\nline two\nline three"
     channel.send(payload)
@@ -300,15 +331,18 @@ def test_payload_insert_uses_bracketed_paste_never_send_keys_literal() -> None:
     )
     other = _FakeTmuxRunner(capture_pane_sequence=["A", "B", "B", "B", "B"])
     tmux_module._TmuxSendKeysDriverChannel(  # noqa: SLF001
-        tmux_bin="tmux", session="s2", run_fn=other,
-        stable_samples_required=3, stable_timeout_seconds=100.0,
-        sleep_fn=_fake_sleep, now_fn=_FakeClock(step=0.1),
+        tmux_bin="tmux",
+        session="s2",
+        run_fn=other,
+        stable_samples_required=3,
+        stable_timeout_seconds=100.0,
+        sleep_fn=_fake_sleep,
+        now_fn=_FakeClock(step=0.1),
     ).send("a different lane's brief")
     other_load = next(c for c in other.calls if "load-buffer" in c)
     _check(
         other_load[other_load.index("-b") + 1] != load_buffer_name,
-        "two concurrent drives never share a buffer name (one lane cannot paste "
-        "another lane's payload)",
+        "two concurrent drives never share a buffer name (one lane cannot paste another lane's payload)",
     )
 
 
@@ -326,8 +360,11 @@ def test_insert_raises_when_the_payload_buffer_load_fails() -> None:
     """
     runner = _FakeTmuxRunner(fail_payload_insert=True)
     channel = tmux_module._TmuxSendKeysDriverChannel(  # noqa: SLF001
-        tmux_bin="tmux", session="s1", run_fn=runner,
-        sleep_fn=_fake_sleep, now_fn=_FakeClock(step=0.1),
+        tmux_bin="tmux",
+        session="s1",
+        run_fn=runner,
+        sleep_fn=_fake_sleep,
+        now_fn=_FakeClock(step=0.1),
     )
     raised = False
     try:
@@ -339,8 +376,11 @@ def test_insert_raises_when_the_payload_buffer_load_fails() -> None:
 
     fire_and_forget = _FakeTmuxRunner(fail_payload_insert=True)
     tmux_module._TmuxSendKeysDriverChannel(  # noqa: SLF001
-        tmux_bin="tmux", session="s1", run_fn=fire_and_forget,
-        sleep_fn=_fake_sleep, now_fn=_FakeClock(step=0.1),
+        tmux_bin="tmux",
+        session="s1",
+        run_fn=fire_and_forget,
+        sleep_fn=_fake_sleep,
+        now_fn=_FakeClock(step=0.1),
     ).send("some work")  # must not raise
     _check(
         not fire_and_forget.enter_sent(),
@@ -419,16 +459,12 @@ def test_stable_failure_rolls_back_to_verified_idle_composer() -> None:
     except DriverChannelSendError as exc:
         failure = str(exc)
     _check(
-        failure == (
-            "Codex tmux pane 'codex-wedge-proof' did not stabilize before Enter; "
-            "submission was not attempted."
-        ),
+        failure == ("Codex tmux pane 'codex-wedge-proof' did not stabilize before Enter; submission was not attempted."),
         "stable-gate failure retains its original DriverChannelSendError message",
     )
     _check(
         runner.composer == "" and "Ask Codex to do anything" in runner._capture(),
-        "RED proof 1: failed post-literal insert leaves the composer empty "
-        "with its idle placeholder",
+        "RED proof 1: failed post-literal insert leaves the composer empty with its idle placeholder",
     )
     _check(runner.clear_sent(), "rollback clears only the failed call's confirmed composer text")
     _check(not runner.enter_sent(), "rollback never sends Enter")
@@ -480,8 +516,260 @@ def test_ready_gate_busy_pane_remains_a_benign_no_paste_failure() -> None:
     )
 
 
+class _DrainFailurePane(pickup._Pane):
+    def __init__(self, mode: str) -> None:
+        super().__init__()
+        self.mode, self.idle, self.notice = mode, self.visible, ""
+        self.literal_attempts = 0
+        self.cleared = False
+        self.capture_trace: list[str] = []
+
+    def run(self, argv: list[str], **_kwargs: Any) -> _FakeCompletedProcess:
+        self.calls.append(list(argv))
+        if "display-message" in argv:  # act-time pane identity for the per-pane doorbell lock
+            return _FakeCompletedProcess(stdout=f"1:$1:%{id(self)} 0 99 200 0\n")
+        if "capture-pane" in argv:
+            if (bool(self.literal_attempts), self.mode, self.cleared) in {
+                (True, "unknown", False),
+                (True, "unknown", True),
+                (True, "unknown_after_clear", True),
+            }:
+                self.capture_trace.append("unavailable")
+                return _FakeCompletedProcess(returncode=1)
+            if self.literal_attempts:
+                frame = len(self.capture_trace)
+                self.visible = {
+                    (True, False): f"{self.idle}\nframe-{frame}\n› foreign draft",
+                    (True, True): f"{self.idle}\nframe-{frame}\n› foreign draft",
+                    (False, True): self.idle,
+                    (False, False): f"frame-{frame}\n› {self.notice}",
+                }[(self.mode == "foreign", self.cleared)]
+            current = self.visible
+            self.capture_trace.append(current)
+            return _FakeCompletedProcess(stdout=current)
+        if "send-keys" in argv and "-l" in argv:
+            self.literal_attempts += 1
+            self.notice = argv[-1]
+            self.visible = f"› {self.notice}"
+            return _FakeCompletedProcess(returncode=int(self.mode == "literal_nonzero"))
+        if argv[-1] == "C-u":
+            self.cleared = self.mode != "clear_failure"
+            self.visible = (self.visible, self.idle)[self.cleared]
+            return _FakeCompletedProcess(returncode=int(not self.cleared))
+        return _FakeCompletedProcess()
+
+
+def test_drain_failed_capture_records_stranded_possible() -> None:
+    fixture, pane = pickup._PickupFixture(), _DrainFailurePane("unknown")
+    try:
+        fixture.setUp()
+        fixture.addCleanup(fixture.tearDown)
+        fixture.panes["pane-a"] = pane
+        fixture._send("arm-partial")
+        fixture.executor.flush()
+        row, evidence = fixture._read("arm-partial"), fixture.store.history("arm-partial")[-1]["evidence"]
+        print("TRACE", pane.literal_attempts, pane.capture_trace, row["reason"])
+        _check("pending_partial:stranded_possible" in str(row["reason"]), "DRAIN_FAILED_CAPTURE_HAS_STRANDED_POSSIBLE_RECEIPT")
+        _check(row["pending"] is True and row["phase"] == "driver_error", "unknown failed capture remains pending driver_error")
+        _check(pane.literal_attempts == 1 and not any(k[-1] in {"C-u", "Enter"} for k in pane.keys()), "unknown capture never clears or submits")
+        _check(isinstance(evidence, dict) and evidence.get("reason") == row["reason"] and evidence.get("attempts") == 1, "failed-capture receipt is in immutable history")
+    finally:
+        fixture.doCleanups()
+
+
+def test_drain_owned_cleanup_and_foreign_preservation() -> None:
+    cases = [("owned", "cleanup_verified", "empty", 1), ("foreign", "stranded_possible", "foreign", 0), ("unknown_after_clear", "stranded_possible", "empty", 1), ("clear_failure", "stranded_possible", "own", 1), ("literal_nonzero", "cleanup_verified", "empty", 1)]
+    fixture = pickup._PickupFixture()
+    try:
+        fixture.setUp()
+        fixture.addCleanup(fixture.tearDown)
+        for mode, receipt, composer, clears in cases:
+            message, pane = f"arm-{mode}", _DrainFailurePane(mode)
+            fixture.panes["pane-a"] = pane
+            fixture._send(message)
+            fixture.executor.flush()
+            row, evidence = fixture._read(message), fixture.store.history(message)[-1]["evidence"]
+            visible = pane.visible.endswith({"empty": pane.idle, "foreign": "› foreign draft", "own": f"› {pane.notice}"}[composer])
+            _check(f"pending_partial:{receipt}" in str(row["reason"]), f"{message} records {receipt}: {row['reason']}")
+            _check(visible, f"{message} preserves or verifies expected composer: {pane.visible!r}")
+            _check(sum(k[-1] == "C-u" for k in pane.keys()) == clears and not any(k[-1] == "Enter" for k in pane.keys()), f"{message} clear/Enter counts are safe")
+            _check(row["pending"] is True and row["phase"] == "driver_error" and isinstance(evidence, dict) and evidence.get("reason") == row["reason"], f"{message} history retains pending driver_error")
+    finally:
+        fixture.doCleanups()
+
+
+def test_drain_receptive_delivers_once() -> None:
+    fixture = pickup._PickupFixture()
+    try:
+        fixture.setUp()
+        fixture.addCleanup(fixture.tearDown)
+        message, pane = "arm-receptive", fixture.panes["pane-a"]
+        fixture._send(message)
+        fixture.executor.flush()
+        row = fixture._read(message)
+        _check(sum("-l" in keys for keys in pane.keys()) == 1 and pane.enters == 1 and row["phase"] == "driver_turn_observed", "receptive drain pastes and submits once")
+        page = fixture._service([fixture._message(message)]).peer_inbox(pickup.PeerInboxRequest(recipient_agent_id="codex", recipient_agent_instance_id="agi-a"))
+        _check(row["pending"] is True and [entry.message.id for entry in page.entries] == [message] and fixture._read(message)["phase"] == "inbox_returned" and fixture._read(message)["pending"] is False, "only exact recipient inbox return settles pickup")
+        keys = pane.keys()
+        pickup.drives.sweep_codex_pickups(fixture.state)
+        fixture.executor.flush()
+        _check(pane.keys() == keys and fixture._read(message)["phase"] == "inbox_returned", "terminal inbox return is not redriven")
+    finally:
+        fixture.doCleanups()
+
+
+_NOTICE = "delivery waiting from Coordinator \u2014 drain peer_inbox"
+_DRAFT = "my half-typed draft"
+
+
+@contextlib.contextmanager
+def _claude_like_pane(*options: str) -> Any:
+    """A REAL tmux pane on a private socket drawing a Claude-shaped composer."""
+    fixture = FixtureSession(options=("--claude-like", "--busy-seconds", "0.2", *options))
+    try:
+        yield fixture
+    finally:
+        fixture.close()
+
+
+def _real_channel(fixture: FixtureSession, *, boundary_seconds: float | None = None, **kwargs: Any) -> tmux_module._TmuxSendKeysDriverChannel:  # noqa: SLF001
+    """The base (blind-send) channel, or the shipped boundary channel with an explicit bound."""
+    if boundary_seconds is None:
+        return tmux_module._TmuxSendKeysDriverChannel(tmux_bin=fixture.tmux, session=fixture.name, run_fn=fixture.run, **kwargs)  # noqa: SLF001
+    channel = tmux_module._BoundarySendKeysDriverChannel(tmux_bin=fixture.tmux, session=fixture.name, run_fn=fixture.run, **kwargs)  # noqa: SLF001
+    channel._send_boundary_timeout_seconds = boundary_seconds  # noqa: SLF001
+    return channel
+
+
+def _pastes(fixture: FixtureSession) -> list[str]:
+    return [str(event["pasted"]) for event in fixture.events() if event["kind"] == "paste"]
+
+
+def _screen(fixture: FixtureSession) -> str:
+    return str(fixture.run([fixture.tmux, "capture-pane", "-t", fixture.name, "-p"]).stdout)
+
+
+def test_real_pane_send_waits_for_the_composer_to_empty_then_submits_exactly_once() -> None:
+    """Acceptance (a)+(d): the production adapter's ``driver_channel()`` (which
+    carries the shipped bound) drives a REAL pane whose composer holds a human
+    draft; nothing is inserted while it is occupied; once the composer is
+    emptied inside the bound the text is inserted and submitted exactly once."""
+    with _claude_like_pane() as fixture:
+        driver = tmux_module.TmuxHostDriver(tmux_bin=fixture.tmux, run_fn=fixture.run)
+        channel = driver.driver_channel(fixture.name)
+        _check(channel is not None, "driver_channel() resolves the real pane")
+        assert channel is not None
+        fixture.human(_DRAFT)
+        errors: list[BaseException] = []
+
+        def _drive() -> None:
+            try:
+                channel.send(_NOTICE)
+            except BaseException as exc:  # noqa: BLE001 -- surfaced to the main thread
+                errors.append(exc)
+
+        worker = threading.Thread(target=_drive)
+        worker.start()
+        time.sleep(1.5)
+        _check(worker.is_alive(), "send() is still waiting while the composer is occupied")
+        _check(_pastes(fixture) == [] and fixture.submissions() == [], "nothing was pasted or submitted into the occupied composer")
+        _check(fixture.state()["text"] == _DRAFT, "the human draft is untouched while send() waits")
+        fixture.human_key("C-u")
+        worker.join(30)
+        _check(not worker.is_alive() and not errors, f"send() returned without error once the composer emptied ({errors})")
+        _check(_pastes(fixture) == [_NOTICE], f"exactly one copy reached the pane ({_pastes(fixture)})")
+        _check(fixture.submissions() == [_NOTICE], f"the text was submitted exactly once ({fixture.submissions()})")
+        _check(fixture.state()["text"] == "", "the composer is empty afterwards")
+
+
+def test_real_pane_send_into_an_already_empty_composer_does_not_wait() -> None:
+    """Already-idle case: the boundary is found on the first sample."""
+    with _claude_like_pane() as fixture:
+        channel = _real_channel(fixture, boundary_seconds=10.0)
+        started = time.monotonic()
+        channel.send(_NOTICE)
+        elapsed = time.monotonic() - started
+        _check(_pastes(fixture) == [_NOTICE] and fixture.submissions() == [_NOTICE], "an empty composer gets the text pasted and submitted exactly once")
+        _check(elapsed < 8.0, f"no boundary wait was spent on an empty composer ({elapsed:.1f}s)")
+
+
+def test_real_pane_deadline_sends_nothing_and_reports_not_delivered() -> None:
+    """Acceptance (b): an occupied composer for longer than the bound gets NO
+    paste and NO key; the pane is byte-for-byte what it was, and the existing
+    delivery-notice mapping reports ``driver_error`` -- never sent/scheduled."""
+    with _claude_like_pane() as fixture:
+        channel = _real_channel(fixture, boundary_seconds=1.5)
+        fixture.human(_DRAFT)
+        screen_before, events_before = _screen(fixture), fixture.events()
+        raised: list[Exception] = []
+        try:
+            channel.send(_NOTICE)
+        except DriverChannelSendError as exc:
+            raised.append(exc)
+        _check(len(raised) == 1 and "nothing was sent" in str(raised[0]), f"send() raises the existing DriverChannelSendError ({raised})")
+        _check(fixture.events() == events_before, "the pane received no paste and no key (event log unchanged)")
+        _check(_screen(fixture) == screen_before, "the rendered pane is byte-for-byte unchanged")
+        _check(fixture.state()["text"] == _DRAFT and fixture.buffers() == [], "the draft is intact and no tmux buffer was even loaded")
+        details: list[str] = []
+        outcome = send_delivery_notice(
+            channel,
+            row={"agent_instance_id": "agi-real-pane"},
+            recipient_agent_instance_id="agi-real-pane",
+            notice=_NOTICE,
+            detail_sink=details.append,
+            park_detail=None,
+            driver_sent="driver_sent",
+            driver_error="driver_error",
+            record_error_detail=lambda sink, exc: sink and sink(str(exc)),
+            logger=tmux_module.logger,
+        )
+        _check(outcome == "driver_error" and fixture.events() == events_before, f"the delivery layer reports driver_error and the pane is still untouched ({outcome})")
+
+
+def test_driver_channel_carries_the_shipped_bound_and_direct_channels_do_not_wait() -> None:
+    """The wiring: only ``driver_channel()`` enables the wait; a directly
+    constructed channel keeps the legacy blind send (bound 0)."""
+    with _claude_like_pane() as fixture:
+        driver = tmux_module.TmuxHostDriver(tmux_bin=fixture.tmux, run_fn=fixture.run)
+        shipped = driver.driver_channel(fixture.name)
+        assert shipped is not None
+        _check(type(shipped) is tmux_module._BoundarySendKeysDriverChannel and shipped._send_boundary_timeout_seconds == tmux_module.DEFAULT_SEND_BOUNDARY_TIMEOUT_SECONDS > 0, "driver_channel() returns the boundary channel with DEFAULT_SEND_BOUNDARY_TIMEOUT_SECONDS")  # noqa: SLF001
+        _check(not isinstance(_real_channel(fixture), tmux_module._BoundarySendKeysDriverChannel), "a directly constructed base channel keeps the legacy blind send (no wait)")  # noqa: SLF001
+
+
+def test_real_pane_no_resend_invariant_and_drive_classification_are_unchanged() -> None:
+    """Acceptance (c) on a REAL pane: a positively stranded composer is still
+    ``False`` (distinct from a could-not-determine ``None``), a confirmed
+    submit is still ``True``, and verification never sends another key."""
+    with _claude_like_pane("--lose-enters", "100") as fixture:
+        channel = _real_channel(fixture, boundary_seconds=5.0, drive_verify_timeout_seconds=10.0)
+        channel.send(_NOTICE)
+        _check(channel.verify_driven(_NOTICE) is False, "text left in the composer is POSITIVELY stranded (False)")
+        _check(_pastes(fixture) == [_NOTICE] and sum(e["kind"] == "enter_lost" for e in fixture.events()) == 1, "verification re-sent nothing: one paste, one Enter attempt")
+    with _claude_like_pane() as fixture:
+        channel = _real_channel(fixture, drive_verify_timeout_seconds=2.0)
+        events_before = fixture.events()
+        _check(channel.verify_driven(_NOTICE) is None, "idle pane where the text never landed is could-not-determine (None), not False")
+        _check(fixture.events() == events_before, "the UNVERIFIED path sent no key")
+    with _claude_like_pane("--claude-text-sgr", "0") as fixture:
+        channel = _real_channel(fixture, drive_verify_timeout_seconds=20.0)
+        _check(channel._insert(_NOTICE), "the text lands in the composer")  # noqa: SLF001
+        result: list[bool | None] = []
+        worker = threading.Thread(target=lambda: result.append(channel.verify_driven(_NOTICE)))
+        worker.start()
+        time.sleep(1.2)
+        fixture.human_key("Enter")
+        worker.join(30)
+        _check(result == [True] and fixture.submissions() == [_NOTICE], f"landed-then-gone is a confirmed submit (True) ({result})")
+
+
 def main() -> int:
+    from codex_eventual_pickup_smoke import run_checks  # noqa: PLC0415
+
     print("=== tmux driver channel smoke ===")
+    test_drain_failed_capture_records_stranded_possible()
+    test_drain_owned_cleanup_and_foreign_preservation()
+    test_drain_receptive_delivers_once()
     test_enter_sent_only_after_n_consecutive_stable_samples()
     test_non_matching_sample_resets_the_consecutive_counter()
     test_timeout_still_sends_enter_fail_open()
@@ -492,11 +780,21 @@ def main() -> int:
     test_stable_failure_rolls_back_to_verified_idle_composer()
     test_stable_failure_does_not_wedge_the_next_ready_gate()
     test_ready_gate_busy_pane_remains_a_benign_no_paste_failure()
+    real_pane_unmeasured = tmux_missing()
+    if not real_pane_unmeasured:
+        test_real_pane_send_waits_for_the_composer_to_empty_then_submits_exactly_once()
+        test_real_pane_send_into_an_already_empty_composer_does_not_wait()
+        test_real_pane_deadline_sends_nothing_and_reports_not_delivered()
+        test_driver_channel_carries_the_shipped_bound_and_direct_channels_do_not_wait()
+        test_real_pane_no_resend_invariant_and_drive_classification_are_unchanged()
+    _check(run_checks(), "Codex eventual-pickup driver and sweep regressions")
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:
             print(f"  FAILED: {label}")
         return 1
+    if real_pane_unmeasured:
+        return report_tmux_unmeasured(f"the five real-pane tests did not run; the {_passed} stub-driven checks ran and passed")
     return 0
 
 

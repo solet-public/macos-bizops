@@ -65,10 +65,14 @@ Scope boundary (deliberate, not an oversight):
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE
+from ananta.llm.agent_messaging.role_binding import (
+    AGENT_ROLE_BINDING_NAMESPACE,
+    RESERVED_PRIMARY_NAME_SUFFIX,
+)
 from ananta.llm.agent_messaging.state_results import (
     require_deleted,
     require_records,
@@ -77,6 +81,7 @@ from ananta.llm.agent_messaging.state_results import (
 from ananta.services.state_service.bounded_read import iter_table_rows
 
 from . import rotation_thresholds
+from .coordination_receipt import receipt_finding
 from .gauge_notice_emit import deliver_and_record_gauge_notice
 from .managed_dispatch import (
     EVENT_MANAGED_DISPATCH_NOTICE,
@@ -84,6 +89,7 @@ from .managed_dispatch import (
 )
 from .overdue_notice import EVENT_SESSION_OVERDUE_NOTICE, _notify_steward_of_overdue
 from .peer_registry import PeerAmbiguousError, PeerSessionAmbiguousError, PeerUnreachableError
+from .role_binding_store import UNCLAIMED_SESSION_ID, resolve_role_binding
 from .schema import (
     CONDITION_DEADLINE,
     CONDITION_LANE_CLOSED,
@@ -340,7 +346,8 @@ def _parse_iso(value: object) -> datetime | None:
 
 
 def _managed_sessions_in_state(
-    state: StateManagementInterface, lifecycle_state: str,
+    state: StateManagementInterface,
+    lifecycle_state: str,
 ) -> list[dict[str, Any]]:
     return list_managed_sessions(state, {"lifecycle_state": lifecycle_state})
 
@@ -385,32 +392,35 @@ def _notify_steward_of_spawn_orphaned(
     if not spawner_instance_id:
         return
     binding = resolve_steward_binding(
-        state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
+        state=state,
+        peer_registry=peer_registry,
+        spawner_instance_id=spawner_instance_id,
     )
     if binding is None:
         logger.warning(
-            "session %s spawn-orphaned: spawner %s not resolvable to a live "
-            "binding (checked the peer registry directly and via its "
-            "managed_session row) — marked terminated, steward not notified",
-            agent_instance_id, spawner_instance_id,
+            "session %s spawn-orphaned: spawner %s not resolvable to a live binding (checked the peer registry directly and via its managed_session row) — marked terminated, steward not notified",
+            agent_instance_id,
+            spawner_instance_id,
         )
         return
-    prose = (
-        f"session_spawn_orphaned_notice: {agent_instance_id} (lane_id="
-        f"{row.get('lane_id')!r}) never registered; native host observation "
-        "confirmed its process is dead, so it was marked terminated."
-    )
+    prose = f"session_spawn_orphaned_notice: {agent_instance_id} (lane_id={row.get('lane_id')!r}) never registered; native host observation confirmed its process is dead, so it was marked terminated."
     meta: dict[str, object] = {"flow_id": f"session-spawn-orphaned-{agent_instance_id}"}
     try:
         bridge_manager.append_event(
-            binding.bridge_id, EVENT_SESSION_SPAWN_ORPHANED_NOTICE, prose, meta,
+            binding.bridge_id,
+            EVENT_SESSION_SPAWN_ORPHANED_NOTICE,
+            prose,
+            meta,
         )
     except Exception:  # noqa: BLE001 — best-effort notify; the row is already terminated
         logger.warning(
-            "session %s spawn-orphaned notice append failed", agent_instance_id, exc_info=True,
+            "session %s spawn-orphaned notice append failed",
+            agent_instance_id,
+            exc_info=True,
         )
     drive_on_delivery(
-        state, recipient_agent_instance_id=spawner_instance_id,
+        state,
+        recipient_agent_instance_id=spawner_instance_id,
         sender_label="session_spawn_orphaned_notice",
     )
 
@@ -434,7 +444,8 @@ def _spawning_host_liveness(row: dict[str, Any]) -> bool | None:
     except Exception:  # noqa: BLE001 — a probe that raises is a non-observation, not a sweep failure
         logger.warning(
             "spawning row %s host-liveness probe raised; treating as unobserved",
-            agent_instance_id, exc_info=True,
+            agent_instance_id,
+            exc_info=True,
         )
         return None
 
@@ -456,13 +467,15 @@ def _notify_steward_of_spawn_unregistered(
     if not spawner_instance_id:
         return
     binding = resolve_steward_binding(
-        state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
+        state=state,
+        peer_registry=peer_registry,
+        spawner_instance_id=spawner_instance_id,
     )
     if binding is None:
         logger.warning(
-            "session %s spawn-unregistered: spawner %s not resolvable to a live "
-            "binding — deadline re-armed, steward not notified",
-            agent_instance_id, spawner_instance_id,
+            "session %s spawn-unregistered: spawner %s not resolvable to a live binding — deadline re-armed, steward not notified",
+            agent_instance_id,
+            spawner_instance_id,
         )
         return
     prose = (
@@ -475,14 +488,20 @@ def _notify_steward_of_spawn_unregistered(
     meta: dict[str, object] = {"flow_id": f"session-spawn-unregistered-{agent_instance_id}"}
     try:
         bridge_manager.append_event(
-            binding.bridge_id, EVENT_SESSION_SPAWN_UNREGISTERED_NOTICE, prose, meta,
+            binding.bridge_id,
+            EVENT_SESSION_SPAWN_UNREGISTERED_NOTICE,
+            prose,
+            meta,
         )
     except Exception:  # noqa: BLE001 — best-effort notify; the deadline is already re-armed
         logger.warning(
-            "session %s spawn-unregistered notice append failed", agent_instance_id, exc_info=True,
+            "session %s spawn-unregistered notice append failed",
+            agent_instance_id,
+            exc_info=True,
         )
     drive_on_delivery(
-        state, recipient_agent_instance_id=spawner_instance_id,
+        state,
+        recipient_agent_instance_id=spawner_instance_id,
         sender_label="session_spawn_unregistered_notice",
     )
 
@@ -499,14 +518,17 @@ def _extend_observed_alive_spawning_row(
     re-arm the row's deadline from its own window, then best-effort notify the
     steward. Split out to keep the caller under the radon cc threshold."""
     _rearm_report_by(
-        state, agent_instance_id,
+        state,
+        agent_instance_id,
         report_by_seconds=int(row.get("report_by_seconds") or 0),
         source=REPORT_BY_SOURCE_OBSERVED_SPAWNING,
     )
     if peer_registry is not None and bridge_manager is not None:
         _notify_steward_of_spawn_unregistered(
-            state=state, peer_registry=peer_registry,
-            bridge_manager=bridge_manager, row=row,
+            state=state,
+            peer_registry=peer_registry,
+            bridge_manager=bridge_manager,
+            row=row,
         )
 
 
@@ -537,13 +559,19 @@ def _mark_one_spawning_orphaned(
         return False
     if alive:
         _extend_observed_alive_spawning_row(
-            state, row, agent_instance_id=agent_instance_id,
-            peer_registry=peer_registry, bridge_manager=bridge_manager,
+            state,
+            row,
+            agent_instance_id=agent_instance_id,
+            peer_registry=peer_registry,
+            bridge_manager=bridge_manager,
         )
         return False
     return _terminate_observed_dead_spawn(
-        state, row, agent_instance_id=agent_instance_id,
-        peer_registry=peer_registry, bridge_manager=bridge_manager,
+        state,
+        row,
+        agent_instance_id=agent_instance_id,
+        peer_registry=peer_registry,
+        bridge_manager=bridge_manager,
     )
 
 
@@ -560,13 +588,17 @@ def _terminate_observed_dead_spawn(
         terminate_session(state, agent_instance_id=agent_instance_id, directed_by="sweep:platform")
     except VerbError:
         logger.warning(
-            "spawning row %s with a definitively dead host could not be "
-            "terminated by the sweep", agent_instance_id, exc_info=True,
+            "spawning row %s with a definitively dead host could not be terminated by the sweep",
+            agent_instance_id,
+            exc_info=True,
         )
         return False
     if peer_registry is not None and bridge_manager is not None:
         _notify_steward_of_spawn_orphaned(
-            state=state, peer_registry=peer_registry, bridge_manager=bridge_manager, row=row,
+            state=state,
+            peer_registry=peer_registry,
+            bridge_manager=bridge_manager,
+            row=row,
         )
     return True
 
@@ -608,14 +640,21 @@ def sweep_overdue_sessions(
     for lifecycle_state in (LIFECYCLE_LIVE, LIFECYCLE_IDLE):
         for row in _managed_sessions_in_state(state, lifecycle_state):
             if _mark_one_overdue(
-                state, row, from_state=lifecycle_state, clock=clock,
-                peer_registry=peer_registry, bridge_manager=bridge_manager,
+                state,
+                row,
+                from_state=lifecycle_state,
+                clock=clock,
+                peer_registry=peer_registry,
+                bridge_manager=bridge_manager,
             ):
                 marked += 1
     for row in _managed_sessions_in_state(state, LIFECYCLE_SPAWNING):
         if _mark_one_spawning_orphaned(
-            state, row, clock=clock,
-            peer_registry=peer_registry, bridge_manager=bridge_manager,
+            state,
+            row,
+            clock=clock,
+            peer_registry=peer_registry,
+            bridge_manager=bridge_manager,
             host_alive_probe=host_alive_probe,
         ):
             marked += 1
@@ -671,8 +710,12 @@ def sweep_unregistered_spawning_sessions(
     marked = 0
     for row in _managed_sessions_in_state(state, LIFECYCLE_SPAWNING):
         if _mark_one_registration_overdue(
-            state, row, clock=clock, registration_bound_s=registration_bound_s,
-            peer_registry=peer_registry, bridge_manager=bridge_manager,
+            state,
+            row,
+            clock=clock,
+            registration_bound_s=registration_bound_s,
+            peer_registry=peer_registry,
+            bridge_manager=bridge_manager,
         ):
             marked += 1
     return marked
@@ -701,26 +744,29 @@ def _mark_one_registration_overdue(
     if spawned_at is None or (clock - spawned_at).total_seconds() < registration_bound_s:
         return False
     acknowledged = bool(row.get("degraded_hooks_acknowledged"))
-    reason = (
-        f"still 'spawning' {int((clock - spawned_at).total_seconds())}s after spawn "
-        f"(registration bound {int(registration_bound_s)}s) — the spawned process has "
-        "not registered, so its registration hook has not run. Its hooks may have been "
-        "stripped by host policy, failed to load, or never fired."
-    )
+    reason = f"still 'spawning' {int((clock - spawned_at).total_seconds())}s after spawn (registration bound {int(registration_bound_s)}s) — the spawned process has not registered, so its registration hook has not run. Its hooks may have been stripped by host policy, failed to load, or never fired."
     if acknowledged:
         reason += " This spawn ACKNOWLEDGED degraded hooks, so this was an accepted risk."
     mark_registration_overdue(
-        state, agent_instance_id=agent_instance_id, reason=reason, observed_at=clock,
+        state,
+        agent_instance_id=agent_instance_id,
+        reason=reason,
+        observed_at=clock,
     )
     logger.warning(
-        "registration watchdog: session %s (lane_id=%r, host=%r) is %s. This row "
-        "would otherwise sit in 'spawning' with nothing said about why.",
-        agent_instance_id, row.get("lane_id"), row.get("host"), reason,
+        "registration watchdog: session %s (lane_id=%r, host=%r) is %s. This row would otherwise sit in 'spawning' with nothing said about why.",
+        agent_instance_id,
+        row.get("lane_id"),
+        row.get("host"),
+        reason,
     )
     if peer_registry is not None and bridge_manager is not None:
         _notify_steward_of_registration_overdue(
-            state=state, peer_registry=peer_registry, bridge_manager=bridge_manager,
-            row=row, reason=reason,
+            state=state,
+            peer_registry=peer_registry,
+            bridge_manager=bridge_manager,
+            row=row,
+            reason=reason,
         )
     return True
 
@@ -742,13 +788,15 @@ def _notify_steward_of_registration_overdue(
     if not spawner_instance_id:
         return
     binding = resolve_steward_binding(
-        state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
+        state=state,
+        peer_registry=peer_registry,
+        spawner_instance_id=spawner_instance_id,
     )
     if binding is None:
         logger.warning(
-            "session %s registration-overdue: spawner %s not resolvable to a live "
-            "binding — row marked, steward not notified",
-            agent_instance_id, spawner_instance_id,
+            "session %s registration-overdue: spawner %s not resolvable to a live binding — row marked, steward not notified",
+            agent_instance_id,
+            spawner_instance_id,
         )
         return
     prose = (
@@ -761,12 +809,16 @@ def _notify_steward_of_registration_overdue(
     meta: dict[str, object] = {"flow_id": f"session-registration-overdue-{agent_instance_id}"}
     try:
         bridge_manager.append_event(
-            binding.bridge_id, EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE, prose, meta,
+            binding.bridge_id,
+            EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE,
+            prose,
+            meta,
         )
     except (PeerAmbiguousError, PeerSessionAmbiguousError, PeerUnreachableError):
         logger.warning(
             "session %s registration-overdue: steward notice could not be delivered",
-            agent_instance_id, exc_info=True,
+            agent_instance_id,
+            exc_info=True,
         )
 
 
@@ -801,8 +853,12 @@ def _mark_one_overdue(
         return False
     if peer_registry is not None and bridge_manager is not None:
         _notify_steward_of_overdue(
-            state=state, peer_registry=peer_registry, bridge_manager=bridge_manager, row=row,
-            clock=clock, report_by=report_by,
+            state=state,
+            peer_registry=peer_registry,
+            bridge_manager=bridge_manager,
+            row=row,
+            clock=clock,
+            report_by=report_by,
         )
     return True
 
@@ -857,35 +913,37 @@ def _deliver_dependency_wake(
     waiter_instance_id = str(edge.get("waiter_instance_id") or "")
     if not waiter_instance_id:
         logger.warning(
-            "session_dependency %s is lane-scoped (waiter_lane_id=%r): "
-            "lane-scoped wake delivery has no defined mapping in this "
-            "slice — the edge is fired but nobody was notified",
-            edge.get("id"), edge.get("waiter_lane_id"),
+            "session_dependency %s is lane-scoped (waiter_lane_id=%r): lane-scoped wake delivery has no defined mapping in this slice — the edge is fired but nobody was notified",
+            edge.get("id"),
+            edge.get("waiter_lane_id"),
         )
         return
     binding = _resolve_dependency_waiter(
-        state=state, peer_registry=peer_registry, waiter_instance_id=waiter_instance_id,
+        state=state,
+        peer_registry=peer_registry,
+        waiter_instance_id=waiter_instance_id,
     )
     if binding is None:
         logger.warning(
-            "session_dependency %s: waiter %s not resolvable to a live "
-            "binding (checked the peer registry directly and via its "
-            "managed_session row) — condition fired, nobody woken",
-            edge.get("id"), waiter_instance_id,
+            "session_dependency %s: waiter %s not resolvable to a live binding (checked the peer registry directly and via its managed_session row) — condition fired, nobody woken",
+            edge.get("id"),
+            waiter_instance_id,
         )
         return
-    prose = (
-        f"session_dependency fired: condition_kind={edge.get('condition_kind')} "
-        f"condition_ref={edge.get('condition_ref')!r} is now satisfied."
-    )
+    prose = f"session_dependency fired: condition_kind={edge.get('condition_kind')} condition_ref={edge.get('condition_ref')!r} is now satisfied."
     meta: dict[str, object] = {"flow_id": f"session-dependency-{edge.get('id')}"}
     try:
         bridge_manager.append_event(
-            binding.bridge_id, EVENT_SESSION_DEPENDENCY_WAKE, prose, meta,
+            binding.bridge_id,
+            EVENT_SESSION_DEPENDENCY_WAKE,
+            prose,
+            meta,
         )
     except Exception:  # noqa: BLE001 — best-effort notify; the edge is already fired
         logger.warning(
-            "session_dependency %s wake append failed", edge.get("id"), exc_info=True,
+            "session_dependency %s wake append failed",
+            edge.get("id"),
+            exc_info=True,
         )
     # Drive-on-delivery (2026-08-04, slice 2): ALONGSIDE the append_event
     # above, never instead of it — a managed waiter's driver channel gets an
@@ -893,7 +951,8 @@ def _deliver_dependency_wake(
     # unmanaged waiter (the SessionNotFoundError path), so this is safe to
     # call unconditionally for every resolved binding.
     drive_on_delivery(
-        state, recipient_agent_instance_id=waiter_instance_id,
+        state,
+        recipient_agent_instance_id=waiter_instance_id,
         sender_label="session_dependency wake",
     )
 
@@ -949,7 +1008,10 @@ def _fire_armed_dependencies(
             continue
         fired += 1
         _deliver_dependency_wake(
-            state=state, peer_registry=peer_registry, bridge_manager=bridge_manager, edge=edge,
+            state=state,
+            peer_registry=peer_registry,
+            bridge_manager=bridge_manager,
+            edge=edge,
         )
     return fired
 
@@ -969,8 +1031,12 @@ def sweep_deadline_dependencies(
         return deadline is not None and deadline < clock
 
     return _fire_armed_dependencies(
-        state, condition_kind=CONDITION_DEADLINE, is_due=_is_due,
-        peer_registry=peer_registry, bridge_manager=bridge_manager, now=clock,
+        state,
+        condition_kind=CONDITION_DEADLINE,
+        is_due=_is_due,
+        peer_registry=peer_registry,
+        bridge_manager=bridge_manager,
+        now=clock,
     )
 
 
@@ -982,10 +1048,7 @@ def _lane_is_closed(state: StateManagementInterface, lane_id: str) -> bool:
     rows = list_managed_sessions(state, {"lane_id": lane_id})
     if not rows:
         return False
-    return all(
-        row.get("lifecycle_state") in (LIFECYCLE_TERMINATED, LIFECYCLE_RETIRED)
-        for row in rows
-    )
+    return all(row.get("lifecycle_state") in (LIFECYCLE_TERMINATED, LIFECYCLE_RETIRED) for row in rows)
 
 
 def sweep_lane_closed_dependencies(
@@ -1006,8 +1069,12 @@ def sweep_lane_closed_dependencies(
         return _lane_is_closed(state, str(edge.get("condition_ref") or ""))
 
     return _fire_armed_dependencies(
-        state, condition_kind=CONDITION_LANE_CLOSED, is_due=_is_due,
-        peer_registry=peer_registry, bridge_manager=bridge_manager, now=clock,
+        state,
+        condition_kind=CONDITION_LANE_CLOSED,
+        is_due=_is_due,
+        peer_registry=peer_registry,
+        bridge_manager=bridge_manager,
+        now=clock,
     )
 
 
@@ -1050,7 +1117,10 @@ class SessionRoleClaimPruner:
         self._first_absent_at: dict[str, datetime] = {}
 
     def sweep(
-        self, state: StateManagementInterface, *, peer_registry: PeerRegistry,
+        self,
+        state: StateManagementInterface,
+        *,
+        peer_registry: PeerRegistry,
     ) -> int:
         now = self._clock()
         pruned = 0
@@ -1061,10 +1131,7 @@ class SessionRoleClaimPruner:
             table=TABLE_SESSION_ROLE_CLAIM,
             filters={},
             ceiling=1_000_000,
-            reason=(
-                "one live role-claim row per session is required by the pruner; "
-                "135 rows measured on 2026-09-14"
-            ),
+            reason=("one live role-claim row per session is required by the pruner; 135 rows measured on 2026-09-14"),
         ):
             agent_session_id = str(row.get("agent_session_id") or "")
             if not agent_session_id:
@@ -1099,7 +1166,8 @@ class SessionRoleClaimPruner:
         managed_rows = list_managed_sessions(state, {"agent_session_id": agent_session_id})
         if managed_rows:
             if managed_rows[0].get("lifecycle_state") in (
-                LIFECYCLE_TERMINATED, LIFECYCLE_RETIRED,
+                LIFECYCLE_TERMINATED,
+                LIFECYCLE_RETIRED,
             ):
                 return True
             # A non-terminal managed_session row is ledger-authoritative
@@ -1304,7 +1372,10 @@ def _live_age_seconds(row: dict[str, Any], *, clock: datetime) -> float | None:
 
 
 def _gauge_dark_session(
-    state: StateManagementInterface, row: dict[str, Any], *, clock: datetime,
+    state: StateManagementInterface,
+    row: dict[str, Any],
+    *,
+    clock: datetime,
 ) -> tuple[str, str] | None:
     """``(agent_instance_id, steward_instance_id)`` when this LIVE row has no
     gauge row at all, else ``None``.
@@ -1332,6 +1403,33 @@ def _rotation_prose(agent_instance_id: str, row: dict[str, Any]) -> str:
     return f"context is {current_tokens:,} — make sure everything is durable."
 
 
+def _primary_main_role_name(solet_name: str) -> str:
+    """Build the primary-seat shape using the role contract's reserved suffix."""
+    return f"{solet_name.title()}{RESERVED_PRIMARY_NAME_SUFFIX}"
+
+
+def _notice_recipient_is_current_main(
+    state: StateManagementInterface,
+    peer_registry: PeerRegistry,
+    binding: BridgeBinding,
+) -> bool:
+    """Read role authority afresh; uncertain identity keeps the existing drive route."""
+    try:
+        solet_name = os.environ.get("SOLET_NAME", "").strip()
+        if not solet_name:
+            raise ValueError("the primary Main seat requires a non-empty solet name")
+        main = resolve_role_binding(state, _primary_main_role_name(solet_name))
+        if main.holder_kind != "session" or not main.agent_session_id or main.agent_session_id == UNCLAIMED_SESSION_ID:
+            raise ValueError("the primary Main seat has no current session identity")
+        current = peer_registry.resolve_by_agent_session_id(main.agent_session_id)
+        if current is None or current.agent_instance_id != main.agent_instance_id or current.agent_id != main.agent_id:
+            raise ValueError("the primary Main seat binding disagrees with current registered session")
+    except Exception:  # noqa: BLE001 — uncertainty must never refuse or lose a notice
+        logger.warning("ADVISORY: the primary Main seat notice binding uncertain; retaining direct drive", exc_info=True)
+        return False
+    return current.bridge_id == binding.bridge_id
+
+
 def _notify_rotation_due(
     *,
     state: StateManagementInterface,
@@ -1347,30 +1445,23 @@ def _notify_rotation_due(
     inherits its posture: a delivery fault must never raise back into the sweep
     loop or block the OTHER rows in this tick.
 
-    ★ THIS LEG STILL DOES NOT REACH AN OPERATOR-PRESENT SEAT, and that is
-    structural rather than a gap to fix HERE. It is reached from
-    ``spawned_by_instance_id`` on a ``managed_session`` row; a seat has neither.
-    ``drive_on_delivery`` also no-ops for exactly this case (no
-    ``managed_session`` row, degenerate ``operator`` host driver). So this leg
-    serves MANAGED WORKERS' stewards and that is the whole of its job.
-
-    WHAT CHANGED 2026-08-17, so the next reader does not build around a
-    limitation that has since been covered elsewhere: the sentence that used to
-    end this docstring said the seat "is served by a separate surface... and
-    until that lands this notice fires into a void for seats." That surface has
-    landed — :func:`sweep_rotation_self_notice`, the third leg on the same
-    rider, which scans the gauge table directly and appends to the measured
-    session's own bridge. The void is closed, but it was closed BESIDE this
-    function, not inside it. Nothing about this leg's own reach changed.
+    The steward can be a managed Main seat with a real driver channel. Keep
+    the event append for every recipient, but suppress its local bridge waiter
+    signal and the extra driver doorbell only when current register and peer
+    identity confirm the primary Main seat. Unknown identity retains both
+    signals with an ADVISORY. The independent frozen UserPromptSubmit
+    self-notice hook is unchanged.
     """
     binding = resolve_steward_binding(
-        state=state, peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
+        state=state,
+        peer_registry=peer_registry,
+        spawner_instance_id=spawner_instance_id,
     )
     if binding is None:
         logger.warning(
-            "session %s is rotation-due: steward %s not resolvable to a live binding "
-            "-- notice not delivered",
-            agent_instance_id, spawner_instance_id,
+            "session %s is rotation-due: steward %s not resolvable to a live binding -- notice not delivered",
+            agent_instance_id,
+            spawner_instance_id,
         )
         return False
     meta: dict[str, object] = {"flow_id": f"rotation-due-{agent_instance_id}"}
@@ -1383,22 +1474,36 @@ def _notify_rotation_due(
     # the wrong cause. A notice family whose whole purpose is to be the thing
     # that speaks up must not be able to eat its own message bug.
     prose = _rotation_prose(agent_instance_id, row)
+    is_current_main = _notice_recipient_is_current_main(state, peer_registry, binding)
     try:
-        bridge_manager.append_event(
-            binding.bridge_id,
-            EVENT_ROTATION_DUE_NOTICE,
-            prose,
-            meta,
-        )
+        if is_current_main:
+            bridge_manager.append_event(
+                binding.bridge_id,
+                EVENT_ROTATION_DUE_NOTICE,
+                prose,
+                meta,
+                signal_waiter=False,
+            )
+        else:
+            bridge_manager.append_event(
+                binding.bridge_id,
+                EVENT_ROTATION_DUE_NOTICE,
+                prose,
+                meta,
+            )
     except Exception:  # noqa: BLE001 — best-effort notify, never fails the sweep
         logger.warning(
-            "session %s rotation-due notice append failed", agent_instance_id, exc_info=True,
+            "session %s rotation-due notice append failed",
+            agent_instance_id,
+            exc_info=True,
         )
         return False
-    drive_on_delivery(
-        state, recipient_agent_instance_id=spawner_instance_id,
-        sender_label=EVENT_ROTATION_DUE_NOTICE,
-    )
+    if not is_current_main:
+        drive_on_delivery(
+            state,
+            recipient_agent_instance_id=spawner_instance_id,
+            sender_label=EVENT_ROTATION_DUE_NOTICE,
+        )
     return True
 
 
@@ -1412,7 +1517,8 @@ def _rotation_notice_subject(row: dict[str, Any]) -> tuple[str, str] | None:
 
 
 def _rotation_notice_gauge(
-    state: StateManagementInterface, agent_instance_id: str,
+    state: StateManagementInterface,
+    agent_instance_id: str,
 ) -> tuple[dict[str, Any], int, int] | None:
     """Read one usable gauge and its denominator, without guessing either."""
     gauge = read_session_context_status(state, agent_instance_id)
@@ -1426,7 +1532,8 @@ def _rotation_notice_gauge(
 
 
 def _rotation_due_row(
-    state: StateManagementInterface, row: dict[str, Any],
+    state: StateManagementInterface,
+    row: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Return one due gauge, enriched only with centralized notice evidence."""
     subject = _rotation_notice_subject(row)
@@ -1455,12 +1562,14 @@ def _rotation_due_row(
     if not verdict.due:
         return None
     enriched = dict(gauge)
-    enriched.update({
-        "fraction": current / ceiling,
-        "rotation_notice_at_tokens": verdict.notice_at_tokens,
-        "rotation_notice_window_source": verdict.window_source,
-        "rotation_notice_unrecognized_model": verdict.unrecognized_model,
-    })
+    enriched.update(
+        {
+            "fraction": current / ceiling,
+            "rotation_notice_at_tokens": verdict.notice_at_tokens,
+            "rotation_notice_window_source": verdict.window_source,
+            "rotation_notice_unrecognized_model": verdict.unrecognized_model,
+        }
+    )
     return enriched
 
 
@@ -1515,8 +1624,11 @@ def sweep_rotation_due_sessions(
         if gate.suppressed(agent_instance_id):
             continue
         if _notify_rotation_due(
-            state=state, peer_registry=peer_registry, bridge_manager=bridge_manager,
-            row=enriched, agent_instance_id=agent_instance_id,
+            state=state,
+            peer_registry=peer_registry,
+            bridge_manager=bridge_manager,
+            row=enriched,
+            agent_instance_id=agent_instance_id,
             spawner_instance_id=spawner_instance_id,
         ):
             notified += 1
@@ -1528,8 +1640,33 @@ def sweep_rotation_due_sessions(
     return notified
 
 
+def _receipt_refusal_finding() -> str | None:
+    """Whether the receipt the hooks will check is refused, asked of the same
+    hook root, solet name and guard a spawn uses (see ``coordination_receipt``).
+
+    A hook root that cannot be resolved is reported as the finding it is: the
+    spawn would have refused for the same reason."""
+    from .headless_adapter import (  # noqa: PLC0415 -- avoid module-load cycle risk
+        WorkerHookResolutionError,
+        _resolve_default_cwd,
+        _resolve_worker_hook_path,
+    )
+
+    solet_name = os.environ.get("SOLET_NAME", "").strip()
+    if not solet_name:
+        return None
+    try:
+        reporter = _resolve_worker_hook_path(_resolve_default_cwd(), "rotation_due_watch.py")
+    except WorkerHookResolutionError as exc:
+        return str(exc)
+    return receipt_finding(solet_name, reporter)
+
+
 def _gauge_coverage_prose(
-    *, agent_instance_id: str, row: dict[str, Any], clock: datetime,
+    *,
+    agent_instance_id: str,
+    row: dict[str, Any],
+    clock: datetime,
 ) -> str:
     """The notice text: WHAT WAS MEASURED, and nothing this leg cannot see.
 
@@ -1559,44 +1696,17 @@ def _gauge_coverage_prose(
       branch.
     """
     age_s = _live_age_seconds(row, clock=clock)
-    measured = (
-        f"{age_s:,.0f}s after it went live"
-        if age_s is not None
-        else "for an unknown duration (its transition timestamp is unreadable)"
-    )
-    lead = (
-        f"gauge_coverage_notice: {agent_instance_id} is LIVE and has NO "
-        f"session_context_status row at all, {measured} "
-        f"(the startup grace is {GAUGE_COVERAGE_GRACE_S:,.0f}s)."
-    )
+    measured = f"{age_s:,.0f}s after it went live" if age_s is not None else "for an unknown duration (its transition timestamp is unreadable)"
+    lead = f"gauge_coverage_notice: {agent_instance_id} is LIVE and has NO session_context_status row at all, {measured} (the startup grace is {GAUGE_COVERAGE_GRACE_S:,.0f}s)."
     ticked = _first_tick_landed(row)
     if ticked is True:
-        detail = (
-            " report_alive HAS landed for it since it went live, so its "
-            "PostToolUse hooks do fire and its solet path does resolve — which "
-            "narrows this to the gauge reporter specifically. Check that "
-            "session's rotation_due_watch hook: its transcript_path, its marker "
-            "directory, and its solet invocation."
-        )
+        detail = " report_alive HAS landed for it since it went live, so its PostToolUse hooks do fire and its solet path does resolve — which narrows this to the gauge reporter specifically. Check that session's rotation_due_watch hook: its transcript_path, its marker directory, and its solet invocation."
     elif ticked is False:
-        detail = (
-            " There is also no report_alive from it since it went live, so this "
-            "session has produced NO reporter output at all. A spawned worker "
-            "whose first WORK turn has not arrived yet looks exactly like this "
-            "and is not faulty — check whether it has been given work before "
-            "reading this as a fault."
-        )
+        detail = " There is also no report_alive from it since it went live, so this session has produced NO reporter output at all. A spawned worker whose first WORK turn has not arrived yet looks exactly like this and is not faulty — check whether it has been given work before reading this as a fault."
     else:
-        detail = (
-            " Whether report_alive has landed since then is not determinable "
-            "from this row (it carries no report_by window), so which reporter "
-            "is failing is not established here."
-        )
-    return lead + detail + (
-        " Both reporters are non-fatal by design and warn only to stderr, so "
-        "neither can surface its own failure; this notice reports the absence "
-        "it measured, not a cause it inferred."
-    )
+        detail = " Whether report_alive has landed since then is not determinable from this row (it carries no report_by window), so which reporter is failing is not established here."
+    receipt = _receipt_refusal_finding()
+    return lead + detail + (f" MEASURED: {receipt}" if receipt else "") + (" Both reporters are non-fatal by design and warn only to stderr, so neither can surface its own failure; this notice reports the absence it measured, not a cause it inferred.")
 
 
 def _notify_gauge_coverage(
@@ -1615,20 +1725,21 @@ def _notify_gauge_coverage(
         state,
         bridge_manager=bridge_manager,
         binding=resolve_steward_binding(
-            state=state, peer_registry=peer_registry,
+            state=state,
+            peer_registry=peer_registry,
             spawner_instance_id=spawner_instance_id,
         ),
         agent_instance_id=agent_instance_id,
         notice_type=EVENT_GAUGE_COVERAGE_NOTICE,
         prose=lambda: _gauge_coverage_prose(
-            agent_instance_id=agent_instance_id, row=row, clock=clock,
+            agent_instance_id=agent_instance_id,
+            row=row,
+            clock=clock,
         ),
         flow_id=f"gauge-coverage-{agent_instance_id}",
         clock=clock,
         threshold_s=GAUGE_COVERAGE_GRACE_S,
-        observed_s=(
-            0.0 if became_live is None else (clock - became_live).total_seconds()
-        ),
+        observed_s=(0.0 if became_live is None else (clock - became_live).total_seconds()),
     )
 
 
@@ -1696,9 +1807,13 @@ def sweep_gauge_coverage(
         if gate.suppressed(agent_instance_id):
             continue
         if _notify_gauge_coverage(
-            state=state, peer_registry=peer_registry, bridge_manager=bridge_manager,
-            agent_instance_id=agent_instance_id, spawner_instance_id=spawner_instance_id,
-            row=row, clock=clock,
+            state=state,
+            peer_registry=peer_registry,
+            bridge_manager=bridge_manager,
+            agent_instance_id=agent_instance_id,
+            spawner_instance_id=spawner_instance_id,
+            row=row,
+            clock=clock,
         ):
             notified += 1
             gate.record_sent(agent_instance_id)
@@ -1710,7 +1825,10 @@ def sweep_gauge_coverage(
 
 
 def _in_rotation_grace(
-    row: dict[str, Any], *, measured_at: datetime, clock: datetime,
+    row: dict[str, Any],
+    *,
+    measured_at: datetime,
+    clock: datetime,
 ) -> bool:
     """GAU-22(c) -- split out of :func:`_gauge_stale_session` to keep it
     under the radon cc threshold. True iff this row's ``last_transition_at``
@@ -1727,7 +1845,10 @@ def _in_rotation_grace(
 
 
 def _gauge_stale_session(
-    state: StateManagementInterface, row: dict[str, Any], *, clock: datetime,
+    state: StateManagementInterface,
+    row: dict[str, Any],
+    *,
+    clock: datetime,
 ) -> tuple[str, str, datetime, datetime] | None:
     """``(agent_instance_id, steward_instance_id, last_alive, measured_at)`` when
     this LIVE row is TICKING while its gauge row has ARRESTED, else ``None``.
@@ -1867,18 +1988,9 @@ def _gauge_stale_prose(
     minutes = lag_s / 60.0
     heartbeat_failures = int(row.get("heartbeat_failures_since_last") or 0)
     if heartbeat_failures:
-        liveness_evidence = (
-            f"Its last successful passive heartbeat landed at {last_alive.isoformat()}, "
-            f"after carrying forward {heartbeat_failures} heartbeat failure(s) "
-            f"since {row.get('heartbeat_failure_first_at')!r}; this is a "
-            "heartbeat-FAILING diagnosis, not evidence that the gauge reporter alone froze."
-        )
+        liveness_evidence = f"Its last successful passive heartbeat landed at {last_alive.isoformat()}, after carrying forward {heartbeat_failures} heartbeat failure(s) since {row.get('heartbeat_failure_first_at')!r}; this is a heartbeat-FAILING diagnosis, not evidence that the gauge reporter alone froze."
     else:
-        liveness_evidence = (
-            f"Its last report_alive derives to {last_alive.isoformat()}; the "
-            "independently-written liveness row advanced while the gauge did not, "
-            "narrowing this to that session's gauge reporter."
-        )
+        liveness_evidence = f"Its last report_alive derives to {last_alive.isoformat()}; the independently-written liveness row advanced while the gauge did not, narrowing this to that session's gauge reporter."
     return (
         f"gauge_stale_notice: {agent_instance_id} (lane_id={row.get('lane_id')!r}) "
         f"is LIVE and STILL REPORTING, but its context-gauge row has STOPPED "
@@ -1910,18 +2022,24 @@ def _notify_gauge_stale(
     clock: datetime,
 ) -> bool:
     """Tell the steward one live session's gauge has arrested."""
+    binding = resolve_steward_binding(
+        state=state,
+        peer_registry=peer_registry,
+        spawner_instance_id=spawner_instance_id,
+    )
+    signal_waiter = binding is None or not _notice_recipient_is_current_main(state, peer_registry, binding)
     return deliver_and_record_gauge_notice(
         state,
         bridge_manager=bridge_manager,
-        binding=resolve_steward_binding(
-            state=state, peer_registry=peer_registry,
-            spawner_instance_id=spawner_instance_id,
-        ),
+        binding=binding,
         agent_instance_id=agent_instance_id,
         notice_type=EVENT_GAUGE_STALE_NOTICE,
         prose=lambda: _gauge_stale_prose(
-            agent_instance_id=agent_instance_id, row=row,
-            last_alive=last_alive, measured_at=measured_at, clock=clock,
+            agent_instance_id=agent_instance_id,
+            row=row,
+            last_alive=last_alive,
+            measured_at=measured_at,
+            clock=clock,
         ),
         flow_id=f"gauge-stale-{agent_instance_id}",
         clock=clock,
@@ -1929,6 +2047,7 @@ def _notify_gauge_stale(
         observed_s=(last_alive - measured_at).total_seconds(),
         last_report_alive_at=last_alive,
         gauge_measured_at=measured_at,
+        signal_waiter=signal_waiter,
     )
 
 
@@ -1995,9 +2114,15 @@ def sweep_gauge_staleness(
         if gate.suppressed(agent_instance_id):
             continue
         if _notify_gauge_stale(
-            state=state, peer_registry=peer_registry, bridge_manager=bridge_manager,
-            agent_instance_id=agent_instance_id, spawner_instance_id=spawner_instance_id,
-            row=row, last_alive=last_alive, measured_at=measured_at, clock=clock,
+            state=state,
+            peer_registry=peer_registry,
+            bridge_manager=bridge_manager,
+            agent_instance_id=agent_instance_id,
+            spawner_instance_id=spawner_instance_id,
+            row=row,
+            last_alive=last_alive,
+            measured_at=measured_at,
+            clock=clock,
         ):
             notified += 1
             gate.record_sent(agent_instance_id)

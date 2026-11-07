@@ -31,9 +31,10 @@ from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, TypeVar
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "ananta" / "src"))
 sys.path.insert(0, str(ROOT / "plugins" / "coreai_embeddings_plugin" / "src"))
 
@@ -42,6 +43,7 @@ from coreai_embeddings_plugin.contracts import DIMENSION, EmbeddingError, ErrorC
 from coreai_embeddings_plugin.plugin import CoreAIEmbeddingsPlugin  # noqa: E402
 from coreai_embeddings_plugin.runtime import EmbeddingRuntime  # noqa: E402
 from coreai_embeddings_plugin.tokenization import EncodedInput  # noqa: E402
+from runtime_contract_smoke import _Call, _count_error, _LeaseTestCase, _release  # noqa: E402
 
 T = TypeVar("T")
 BOUND_SECONDS = 1.0
@@ -205,9 +207,12 @@ class TimeoutRecoveryTests(unittest.TestCase):
 
     def test_a_hung_token_count_prepares_a_new_runtime_once(self) -> None:
         FakeTokenizer.count_hangs_left = 1
-        with self.assertLogs("coreai_embeddings_plugin.plugin", level="WARNING") as logged, self.assertRaises(
-            EmbeddingError,
-        ) as raised:
+        with (
+            self.assertLogs("coreai_embeddings_plugin.plugin", level="WARNING") as logged,
+            self.assertRaises(
+                EmbeddingError,
+            ) as raised,
+        ):
             self.plugin._count_tokens("hang")
         self.assertEqual(raised.exception.code.value, TIMEOUT_CODE)
         self.assertTrue(any("prepared again after a timed-out" in line for line in logged.output), logged.output)
@@ -260,6 +265,74 @@ class TimeoutRecoveryTests(unittest.TestCase):
         self.assertEqual(self.plugin.generate_embeddings(["one", "two"])["action_status"], "completed")
         self.assertEqual(self.plugin._count_tokens("one two"), 2)
         self.assertEqual(FixtureRuntime.nested, 0)
+
+
+class PoisonedFollowerTests(_LeaseTestCase):
+    """Mixed TIMEOUT/UNAVAILABLE arbitration over the real poisoned-runtime guard."""
+
+    def test_poisoned_follower(self) -> None:
+        """A real poisoned-runtime guard follows TIMEOUT and reserves recovery before its leader drains."""
+        plugin = self.plugin
+        self.runtime.close()
+        runtime = EmbeddingRuntime(Path("/fixture"), "cpu")
+        plugin._runtime = runtime
+        poisoned = threading.Event()
+        leader_release = threading.Event()
+        follower_leased = threading.Event()
+        follower_draining = threading.Event()
+        original_generate = runtime.generate
+        original_count = runtime.count_tokens
+        original_wait = plugin._condition.wait
+        future = Mock()
+        future.result.side_effect = TimeoutError("armed native timeout")
+
+        def generate(inputs: list[str]) -> list[list[float]]:
+            try:
+                return original_generate(inputs)
+            except EmbeddingError as error:
+                assert error.code is ErrorCode.TIMEOUT
+                with plugin._condition:
+                    assert plugin._active_calls == 2, "both callers must already hold leases"
+                poisoned.set()
+                assert leader_release.wait(5), "fixture leader barrier expired"
+                raise
+
+        def count_tokens(text: str) -> int:
+            follower_leased.set()
+            assert poisoned.wait(5), "the native timeout must precede the follower guard"
+            return original_count(text)
+
+        def wait(timeout: float | None = None) -> bool:
+            if threading.current_thread().name == "lease-follower":
+                follower_draining.set()
+            return original_wait(timeout)
+
+        leader: _Call[Any] | None = None
+        with (
+            patch.object(runtime._executor, "submit", return_value=future),
+            patch.object(runtime, "generate", generate),
+            patch.object(runtime, "count_tokens", count_tokens),
+            patch.object(plugin._condition, "wait", wait),
+        ):
+            follower = _Call(lambda: _count_error(plugin), "lease-follower")
+            try:
+                self.assertTrue(follower_leased.wait(2), "follower did not acquire its lease")
+                leader = _Call(lambda: plugin.generate_embeddings(["leader"]), "lease-leader")
+                self.assertTrue(poisoned.wait(2), "real runtime timeout path was not reached")
+                self.assertTrue(runtime._failed, "the timeout must poison the real runtime")
+                future.cancel.assert_called_once_with()
+                self.assertTrue(follower_draining.wait(2), "UNAVAILABLE follower must reserve transition first")
+                leader_release.set()
+                self.assertEqual(leader.finish(self)["error"]["code"], ErrorCode.TIMEOUT)
+                self.assertEqual(follower.finish(self).code, ErrorCode.UNAVAILABLE)
+                self.assertEqual(self.factory.call_count, 2, "poisoned follower must honor one timeout replacement")
+                self.assertIs(plugin._runtime, self.prepared[1])
+                self.assertEqual(self.prepared[1].close_count, 0)
+                self.assertTrue(plugin.is_ready())
+            finally:
+                leader_release.set()
+                _release(self.runtime, leader, follower)
+                runtime.close()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,4 @@
+# Per-spawn provider overlay: request parsing, host applicability, host spec,
+# and one end-to-end spawn through the lifecycle harness. Registered in its own
+# fragment per quality_gates/gate_smokes.txt's header.
+plugins/agent_messaging_plugin/tests/spawn_provider_env_smoke.py

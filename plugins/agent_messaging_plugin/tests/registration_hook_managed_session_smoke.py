@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
+from _register_unit_double import fixture_assignment  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
 from ananta.llm.agent_messaging.state_results import require_records  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
@@ -152,7 +153,7 @@ def test_first_registration_fires_spawning_to_live_and_backfills() -> None:
         ManagedSessionSpec(
             agent_instance_id="agi-hook-1",
             lane_id="lane-hook",
-            brief_ref="",
+            assignment=fixture_assignment(),
             work_class="read_only",
             budget_line="budget-hook",
             host="headless",
@@ -188,7 +189,7 @@ def test_reconnect_does_not_refire_edge_or_clobber_later_state() -> None:
         ManagedSessionSpec(
             agent_instance_id="agi-hook-2",
             lane_id="lane-hook",
-            brief_ref="",
+            assignment=fixture_assignment(),
             work_class="read_only",
             budget_line="budget-hook",
             host="headless",

@@ -54,6 +54,8 @@ extend-exclude = [
 ]
 force-exclude = true
 
+[tool.ruff.format]
+
 # ⚠️  IMPORTANT: `ruff check <path>` without `--config` silently discovers
 # plugin-local pyproject.toml files instead of this root config, applying
 # weak defaults instead of the explicit select = [...] below. Always use
@@ -120,6 +122,7 @@ venv = ".venv"
 # Allow plugins to resolve ananta.* imports
 extraPaths = [
     "ananta/src",
+    "solet_cli/src",
     "solet_setup_contracts/src",
     "plugins/actr_memory_plugin/src",
     "plugins/agent_messaging_plugin/src",
@@ -197,9 +200,12 @@ extraPaths = [
     "plugins/zuora_plugin/src",
 ]
 
-include = ["ananta/src", "plugins", "initialization/src", "quality_gates", "bootstrap_adapter"]
+include = ["ananta/src", "plugins", "initialization/src", "quality_gates", "bootstrap_adapter", ".claude/hooks"]
 exclude = [
-    "**/tests",
+    # Main arm-661c1e0: exact test cleanup debt iss_843e9301-eabb-43ea-b073-2e367a7e8a62.
+    ".claude/hooks/memory_passthrough/tests/head_policy_smoke.py",
+    "ananta/**/tests", "plugins/**/tests", "initialization/**/tests",
+    "quality_gates/tests", "solet_cli/tests", "bootstrap_adapter/tests",
     # RULING (reviewing seat, 2026-08-08):
     # stays OUT — gates protect code that runs or ships, and disabled code
     # does neither. CONDITION, the exemption's only exit: re-enabling ANY

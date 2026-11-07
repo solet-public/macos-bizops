@@ -152,7 +152,7 @@ def _unavailable_reason(label: str, profile: HostProfile, host: HostPlatform, op
     running = f"this Mac runs macOS {host.product_version} ({host.machine})"
     if operator == "meets":
         return f"{running}; {label} requires {profile.describe()}"
-    return f"{running}; {label} is for Macs below {profile.describe()}, which take the Apple-native option instead"
+    return f"{running}; this Mac meets the {profile.describe()} profile and uses the Apple-native option instead of {label}"
 
 
 def _host_conditions(flow: Mapping[str, JsonValue]) -> Iterator[tuple[str, str, JsonObject]]:

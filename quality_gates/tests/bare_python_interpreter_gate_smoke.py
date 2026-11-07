@@ -37,7 +37,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-_CHECKS = 0
+_checks = 0
 
 # Directories this census covers: quality_gates itself (script-invoked, no
 # src/ layout) plus every shipped plugin's own src/ tree, which is where a
@@ -52,6 +52,7 @@ _SCANNED_ROOTS: tuple[str, ...] = ("quality_gates", "plugins")
 _EXCLUDED_PATH_SEGMENTS: tuple[str, ...] = (
     "tests", "test", ".venv", "venv", "__pycache__",
 )
+_BUNDLED_ENVIRONMENT_PREFIX = ".venv"
 
 _BARE_NAMES: frozenset[str] = frozenset({"python3", "python"})
 _SUBPROCESS_ATTRS: frozenset[str] = frozenset(
@@ -103,7 +104,11 @@ def _iter_python_files(root: Path, rel_dir: str) -> Iterator[Path]:
         return
     for path in base.rglob("*.py"):
         rel_parts = path.relative_to(root).parts
-        if any(segment in _EXCLUDED_PATH_SEGMENTS for segment in rel_parts):
+        if any(
+            segment in _EXCLUDED_PATH_SEGMENTS
+            or segment.startswith(_BUNDLED_ENVIRONMENT_PREFIX)
+            for segment in rel_parts
+        ):
             continue
         yield path
 
@@ -144,8 +149,8 @@ def _load_allowlist(path: Path) -> set[str]:
 
 
 def _check(condition: object, label: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    global _checks
+    _checks += 1
     if not condition:
         raise AssertionError(label)
 
@@ -201,6 +206,30 @@ def _check_detector_ignores_test_fixture_data() -> None:
     _check(found == [], "tests/ paths are excluded from the census")
 
 
+def _check_detector_excludes_named_vendor_environment_but_scans_source() -> None:
+    """The exact-name-only mutation must expose vendored environment code."""
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        quality_gates = root / "quality_gates"
+        vendor = quality_gates / ".venv_cosyvoice" / "lib" / "site-packages"
+        vendor.mkdir(parents=True)
+        (vendor / "generated.py").write_text(
+            "import subprocess\n"
+            "subprocess.run(['python3', 'generated.py'])\n",
+            encoding="utf-8",
+        )
+        (quality_gates / "real_gate.py").write_text(
+            "import subprocess\n"
+            "subprocess.run(['python3', 'real_gate.py'])\n",
+            encoding="utf-8",
+        )
+        found = scan_repository(root)
+    _check(
+        [violation.path for violation in found] == ["quality_gates/real_gate.py"],
+        "bundled .venv_cosyvoice is excluded while real source remains scanned",
+    )
+
+
 def _check_live_repository_census_is_allowlist_clean() -> None:
     """The real census against THIS checkout: every finding must be covered
     by the tracked allowlist, or this smoke reds -- this is the actual
@@ -219,8 +248,9 @@ def main() -> int:
     _check_detector_catches_the_named_defect_shape()
     _check_detector_does_not_flag_validated_interpreters()
     _check_detector_ignores_test_fixture_data()
+    _check_detector_excludes_named_vendor_environment_but_scans_source()
     _check_live_repository_census_is_allowlist_clean()
-    print(f"✅ bare_python_interpreter_gate_smoke: {_CHECKS} checks passed")
+    print(f"✅ bare_python_interpreter_gate_smoke: {_checks} checks passed")
     return 0
 
 

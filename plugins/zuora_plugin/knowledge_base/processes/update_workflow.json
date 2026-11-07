@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::update_workflow",
+  "display_name": "Zuora: Update Workflow",
+  "description": "Correct a workflow definition (PATCH /workflows/{workflow_id}): rename, set or clear (empty string) the description, set status Active or Inactive, or roll the active version to another version id. Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "Change a Zuora Workflow definition's settings: rename it, set or clear its description, deactivate it (Inactive) or reactivate it (Active), or roll back by making another version id the active version. Use it to correct, close or reopen a workflow without re-importing it.",
+  "result_processor_customizations": {
+    "action_label": "Zuora workflow updated",
+    "result_type": "zuora_update_workflow_result",
+    "result_description": "Queued job envelope. Completion carries the updated workflow definition in data. Zuora applies last-writer-wins; there is no version precondition.",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential values never appear; [REDACTED] marks where Zuora echoed one."
+  },
+  "error_processor_customizations": {
+    "action_context": "Correct a workflow definition (PATCH /workflows/{workflow_id}): rename, set or clear (empty string) the description, set status Active or Inactive, or roll the active version to another version id.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape or an output/input path outside export_allowed_roots (zuora.export_path_refused). zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.object_not_found, zuora.validation_failed (vendor 4xx), zuora.query_failed (Data Query 4xx), zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the needed Workflow, Data Query or Files permission. Read current vendor state with the matching get or list verb before retrying a write. Back off on rate limits."
+  }
+}

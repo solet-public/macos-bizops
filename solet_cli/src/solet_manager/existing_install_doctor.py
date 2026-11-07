@@ -237,16 +237,11 @@ def run_doctor(request: UpdateRequest) -> CommandResult:
 
 def _require_identity(record: InstanceInventoryRecordV2) -> None:
     """Section 3.1 step 2: the pinned target identity is re-proved before any other read (A6: invalid on mismatch)."""
-    target = Path(record.target.canonical_path)
-    try:
-        info, parent = target.stat(), target.parent.stat()
-    except OSError as exc:
-        raise ManagedIdentityDriftError("the enrolled target no longer exists", repair="Re-inspect the target; the enrolled path no longer names a directory.") from exc
-    expected = record.target
-    # ``device`` is not compared: st_dev is renumbered across boots; the canonical path plus both inodes name the directory (iss_2ea57f17).
-    same = info.st_ino == expected.filesystem_identity.inode and parent.st_ino == expected.parent_filesystem_identity.inode
-    if not same or target.is_symlink():
-        raise ManagedIdentityDriftError("target filesystem identity differs from the enrolled record", repair="Re-inspect the target; the enrolled path no longer names the same directory.")
+    from .enrolled_target import identity_drift_message, identity_repair, observe_identity_mismatches  # noqa: PLC0415
+
+    reasons = observe_identity_mismatches(record)
+    if reasons:
+        raise ManagedIdentityDriftError(identity_drift_message(record, reasons), repair=identity_repair(record))
 
 
 def _load_record(paths: ManagerPaths, name: str) -> InstanceInventoryRecordV2:
@@ -258,11 +253,7 @@ def _load_record(paths: ManagerPaths, name: str) -> InstanceInventoryRecordV2:
     if paths.registry_path.exists() and InstanceRegistry(paths.registry_path).get(name) is not None:
         raise InstanceUnmanagedV2Error(
             f"{name!r} is a v1 create instance",
-            repair=(
-                f"Run `solet doctor {name}` now. `solet-manager doctor {name}` applies after the first approved update: "
-                f"`solet-manager update {name} --dry-run` shows the plan (it enrolls nothing), and "
-                "`--yes --approval-fingerprint <fingerprint>` enrolls it and advances it."
-            ),
+            repair=(f"Run `solet doctor {name}` now. `solet-manager doctor {name}` applies after the first approved update: `solet-manager update {name} --dry-run` shows the plan (it enrolls nothing), and `--yes --approval-fingerprint <fingerprint>` enrolls it and advances it."),
         )
     raise InstanceUnmanagedError(f"no v2 inventory record is named {name!r}", repair=f"Run `solet-manager import {name} --target <path> --channel <channel> --dry-run`.")
 
@@ -378,8 +369,20 @@ def _probe(request: UpdateRequest, selection: DoctorSelection, context: PlanCont
     candidate, metadata, context = _bindings(request, selection, context, registry, seams)
     inspection = inspect_with_metadata(request, record, metadata)
     return DoctorProbe(
-        selection.contract, record, selection.expected_source, selection.expected_runtime, inspection, seams, registry, target, selection.journal, candidate, context,
-        _cached_bundle(paths, record), _installed_release(request, record), paths=paths,
+        selection.contract,
+        record,
+        selection.expected_source,
+        selection.expected_runtime,
+        inspection,
+        seams,
+        registry,
+        target,
+        selection.journal,
+        candidate,
+        context,
+        _cached_bundle(paths, record),
+        _installed_release(request, record),
+        paths=paths,
     )
 
 
@@ -438,10 +441,7 @@ def _unresolved(selection: DoctorSelection) -> tuple[str, str]:
     """An update stopped at its source half is unresolved because its runtime half has not run: name that step (iss_f81e71d3)."""
     if selection.journal is not None and selection.journal["status"] == "source_advanced":
         name = selection.record.name
-        return "update_in_progress", (
-            f"The update stopped after its source half; finish it: run `solet-manager update {name} --dry-run`, then "
-            f"`solet-manager update {name} --yes --approval-fingerprint <runtime_approval_fingerprint>` with the fingerprint it prints."
-        )
+        return "update_in_progress", (f"The update stopped after its source half; finish it: run `solet-manager update {name} --dry-run`, then `solet-manager update {name} --yes --approval-fingerprint <runtime_approval_fingerprint>` with the fingerprint it prints.")
     return "required_check_unresolved", "Resolve the missing or unknown required checks, then run the doctor again."
 
 
@@ -454,7 +454,13 @@ def doctor_result(selection: DoctorSelection, run: DoctorRun) -> CommandResult:
         error_kind, repair = _unresolved(selection)
     data: dict[str, JsonValue] = {
         "instance": {"instance_id": record.instance_id, "name": record.name, "canonical_target": record.target.canonical_path, "management_state": record.management_state.value},
-        "contract": {"kind": selection.contract.value, "bundle_digest": selection.bundle_digest, "update_operation_id": selection.update_operation_id, "expected_source": _release_dict(selection.expected_source), "expected_runtime": None if selection.expected_runtime is None else _release_dict(selection.expected_runtime)},
+        "contract": {
+            "kind": selection.contract.value,
+            "bundle_digest": selection.bundle_digest,
+            "update_operation_id": selection.update_operation_id,
+            "expected_source": _release_dict(selection.expected_source),
+            "expected_runtime": None if selection.expected_runtime is None else _release_dict(selection.expected_runtime),
+        },
         "active_operation": None if record.active_operation is None else {"kind": record.active_operation.kind.value, "operation_id": record.active_operation.operation_id, "notes": list(selection.notes)},
         "head_observed": selection.head,
         "sections": list(run.sections),
@@ -500,4 +506,3 @@ def _required_for_start(check_id: str) -> bool:
 
 def _release_dict(release: ReleaseIdentity) -> dict[str, JsonValue]:
     return {"repository": release.repository, "commit": release.commit, "tree": release.tree, "tag": release.tag}
-

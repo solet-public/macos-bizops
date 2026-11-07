@@ -36,11 +36,11 @@ EVENT_SESSION_OVERDUE_NOTICE = "session_overdue_notice"
 EVENT_SESSION_OVERDUE_QUIET_NOTICE = "session_overdue_quiet_notice"
 """Visible, low-priority line for a deadline lapse with fresh heartbeat evidence."""
 
-# INTERIM, iss_8126960b / D-4.8 (2026-09-04): the report_by state remains
-# authoritative and is NEVER re-armed by a heartbeat.  Until R3-U2 supplies
-# its produced-work predicate, only this NOTICE consumer distinguishes a
-# lapsed row whose server-stamped heartbeat is fresh from one whose heartbeat
-# is stale.  The 180s threshold is the shipped hook's own
+# Notice-routing behavior is tracked by iss_a07c576f-0820-4d53-a3bb-01780bc23e18.
+# The report_by state remains authoritative and is never re-armed by a
+# heartbeat. This notice consumer uses the server-stamped heartbeat only to
+# distinguish a lapsed row whose heartbeat is fresh from one whose heartbeat
+# is stale. The 180s threshold is the shipped hook's own
 # ``heartbeat_report_alive.py::_THROTTLE_SECONDS`` cadence, not a new policy
 # knob or a second deadline.
 HEARTBEAT_FRESHNESS_SECONDS = 180.0
@@ -176,9 +176,9 @@ def _overdue_notice_prose(
         return (
             prefix + "missed report_by and remains marked overdue, but its server-stamped "
             f"heartbeat is fresh within the {HEARTBEAT_FRESHNESS_SECONDS:.0f}s hook cadence. "
-            "INTERIM under D-4.8 / iss_8126960b: this quiet low-priority line is "
-            "visible but sends no direct wake; heartbeat never re-arms report_by. "
-            "R3-U2's produced-work predicate replaces this routing distinction."
+            "Current notice routing is tracked by "
+            "iss_a07c576f-0820-4d53-a3bb-01780bc23e18: this quiet low-priority "
+            "line is visible but sends no direct wake; heartbeat never re-arms report_by."
         )
     return prefix + "missed its report_by deadline and was marked overdue while its heartbeat is stale. This is the report-or-die contract firing — silence is detectable by construction. Check the session's status; direct a recovery report, park, or terminate it."
 

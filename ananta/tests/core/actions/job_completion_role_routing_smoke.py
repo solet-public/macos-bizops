@@ -76,6 +76,7 @@ from ananta.core.state.job_completion_route import (  # noqa: E402
     COMPLETION_DELIVERY_PROCESS_KEY,
     COMPLETION_ROUTE_ROLE_KEY,
 )
+from async_job_fixture_support import JobState  # noqa: E402
 
 _RESULT_HANDLER_KEY = "plugin::_smoke_only::noop_result"  # wint:negative-fixture
 _ERROR_HANDLER_KEY = "plugin::_smoke_only::noop_error"  # wint:negative-fixture
@@ -130,74 +131,22 @@ class _FakeFlowRuntimeGraph:
         self.complete_token_calls.append(token_id)
 
 
-class _FakeStateService:
-    """Job + flow reads, with the flow row carrying real `trigger_data` JSON.
-
-    `trigger_data` is a TEXT column holding JSON (written via json.dumps by
-    FlowManager), so the fake stores it as a STRING — a dict here would let a
-    decode bug pass.
-    """
+class _FakeStateService(JobState):
+    """Persist job and flow rows, including the real JSON trigger-data shape."""
 
     def __init__(self, *, route_role: str | None, flow_token_id: str | None = _TOKEN) -> None:
-        self._route_role = route_role
-        self._flow_token_id = flow_token_id
-        self.update_state_calls: list[dict[str, object]] = []
-
-    def _trigger_data(self) -> str:
+        super().__init__()
         trigger: dict[str, object] = {"source_namespace": "agent_messaging_plugin"}
-        if self._route_role is not None:
-            trigger[COMPLETION_ROUTE_ROLE_KEY] = self._route_role
-        return json.dumps(trigger)
-
-    def read_state(self, namespace: str, query: dict[str, object]) -> dict[str, object]:
-        table = query.get("table")
-        filters = query.get("filters")
-        row_id = filters.get("id") if isinstance(filters, dict) else None
-        if table == "job_payload":
-            return {"action_status": "completed", "data": {"records": []}}
-        if table == "flows":
-            return {
-                "action_status": "completed",
-                "data": {
-                    "records": [
-                        {
-                            "id": row_id,
-                            "trigger_type": "bridge_process_call",
-                            "trigger_data": self._trigger_data(),
-                        }
-                    ]
-                },
-            }
-        if table == "job":
-            return {
-                "action_status": "completed",
-                "data": {
-                    "records": [
-                        {
-                            "id": row_id,
-                            "metadata": _metadata(),
-                            "provider_name": _PROVIDER,
-                            "flow_token_id": self._flow_token_id,
-                        }
-                    ]
-                },
-            }
-        raise AssertionError(f"unexpected read_state table: {table!r}")
-
-    def write_state(
-        self,
-        namespace: str,
-        data: dict[str, object],
-        calling_service: str | None = None,
-        calling_namespace: str | None = None,
-    ) -> dict[str, object]:
-        return {"action_status": "completed"}
-
-    def update_state(
-        self, namespace: str, query: dict[str, object], updates: dict[str, object]
-    ) -> dict[str, object]:
-        self.update_state_calls.append(updates)
-        return {"action_status": "completed"}
+        if route_role is not None:
+            trigger[COMPLETION_ROUTE_ROLE_KEY] = route_role
+        self.rows["flows"] = [{
+            "id": "flow-smoke-1", "trigger_type": "bridge_process_call",
+            "trigger_data": json.dumps(trigger),
+        }]
+        self.rows["job"] = [{
+            "id": f"job-{index}", "status": "queued", "metadata": _metadata(),
+            "provider_name": _PROVIDER, "flow_token_id": flow_token_id,
+        } for index in range(1, 8)]
 
 
 def _metadata() -> dict[str, object]:

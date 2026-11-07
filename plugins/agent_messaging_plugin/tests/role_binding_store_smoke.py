@@ -32,9 +32,11 @@ Run:
 
 from __future__ import annotations
 
+import inspect
 import sys
 from pathlib import Path
 from typing import Any, cast
+from unittest import TestCase
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
@@ -124,10 +126,104 @@ class _PersistentUpsertFault(RealShapeState):
 
 def _binding_rows(fake: RealShapeState) -> list[dict[str, object]]:
     return [
-        r
+        dict(r)
         for r in fake.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_ROLE_BINDING)
         if r.get("is_deleted", 0) != 1
     ]
+
+
+def _evidence(expected: str | None, previous: int | None = 123, incoming: int | None = 123) -> Any:
+    # Lazy so these smoke bytes can exercise the actual BASE store unchanged.
+    from agent_messaging_plugin._role_refresh_evidence import RoleRefreshEvidence
+
+    return RoleRefreshEvidence(expected, previous, incoming)
+
+
+def _observed_refresh(state: StateManagementInterface, expected: str) -> int:
+    kwargs: dict[str, Any] = {"agent_session_id": "S", "new_agent_instance_id": "agi-new"}
+    if "evidence" in inspect.signature(refresh_role_binding_cas).parameters:
+        kwargs["evidence"] = _evidence(expected)
+    return refresh_role_binding_cas(state, **kwargs)
+
+
+def _stable_bindings(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [{k: v for k, v in r.items() if k not in {"agent_instance_id", "claimed_at"}} for r in rows]
+
+
+def test_cas_expected_holder_mismatch() -> None:
+    fake, state = _state()
+    claim_role_binding_v4(state, name="Architect", claim=_session_claim("c", "agi-current", "S", "Architect"))
+    before = _binding_rows(fake)
+    affected = _observed_refresh(state, "agi-old")
+    current_instance = _binding_rows(fake)[0][COL_AGENT_INSTANCE_ID]
+    print(f"  REACHED real CAS: affected={affected} current_instance={current_instance}")
+    _check(affected == 0 and current_instance == 'agi-current', 'CAS_EXPECTED_HOLDER_MISMATCH_LEAVES_CURRENT_HOLDER')
+    _check(_observed_refresh(state, "agi-current") == 1, "corrected expectation rotates on SAME state")
+    _check(_observed_refresh(state, "agi-old") == 0, "stale expectation cannot reverse correction")
+    after = _binding_rows(fake)
+    _check(_stable_bindings(before) == _stable_bindings(after), "correction preserves row count, epoch and holder identity")
+
+
+def _policy_rotation(expected: str | None, previous: int | None, incoming: int | None) -> None:
+    fake, state = _state()
+    claim_role_binding_v4(state, name="Architect", claim=_session_claim("c", "agi-old", "S", "Architect"))
+    with TestCase().assertLogs("agent_messaging_plugin", level="ERROR") as logs:
+        affected = refresh_role_binding_cas(
+            state, agent_session_id="S", new_agent_instance_id="agi-new",
+            evidence=_evidence(expected, previous, incoming),
+        )
+    message = " ".join(logs.output)
+    _check(affected == 1 and _binding_rows(fake)[0][COL_AGENT_INSTANCE_ID] == "agi-new", "absent evidence still rotates")
+    _check(all(s in message for s in ("role=Architect", "session=S", "new=agi-new", "unverified", "missing=")),
+           "absence emits ERROR role/session/new-instance attribution advisory")
+
+
+def _diagnostic_fault_policy() -> None:
+    fake, state = _state()
+    claim_role_binding_v4(state, name="Architect", claim=_session_claim("c", "agi-old", "S", "Architect"))
+    fake.fail_next("query")
+    with TestCase().assertLogs("agent_messaging_plugin", level="ERROR") as logs:
+        affected = refresh_role_binding_cas(
+            state, agent_session_id="S", new_agent_instance_id="agi-new", evidence=_evidence(None),
+        )
+    _check(affected == 1 and "role=<unread>" in " ".join(logs.output), "diagnostic read fault advises and still rotates")
+    fake.fail_next("update")
+    with TestCase().assertLogs("agent_messaging_plugin", level="ERROR"), TestCase().assertRaises(StateOperationError):
+        refresh_role_binding_cas(state, agent_session_id="S", new_agent_instance_id="agi-next", evidence=_evidence(None))
+    _check(True, "missing-evidence advisory does not mask UPDATE failure")
+    with TestCase().assertLogs("agent_messaging_plugin", level="ERROR") as logs:
+        affected = refresh_role_binding_cas(state, agent_session_id="nobody", new_agent_instance_id="agi-new", evidence=_evidence(None))
+    _check(affected == 0 and "role=<none>" in " ".join(logs.output), "empty diagnostic set is explicit and remains no-op")
+
+
+def _excluded_binding_policy() -> None:
+    fake, state = _state()
+    for role in ("matching", "other-instance", "provider", "deleted"):
+        claim_role_binding_v4(state, name=role, claim=_session_claim("c", "agi-old", "S", role))
+    rows = fake.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_ROLE_BINDING)
+    rows[1][COL_AGENT_INSTANCE_ID] = "agi-unrelated"
+    rows[2]["holder_kind"] = "inference_provider"
+    rows[3]["is_deleted"] = 1
+    before = [dict(row) for row in rows]
+    affected = refresh_role_binding_cas(state, agent_session_id="S", new_agent_instance_id="agi-new", evidence=_evidence("agi-old"))
+    _check(affected == 1 and rows[0][COL_AGENT_INSTANCE_ID] == "agi-new", "matching observed session holder rotates")
+    _check(rows[1:] == before[1:], "other-instance/provider/tombstone rows stay untouched")
+    _check(_stable_bindings(rows) == _stable_bindings(before), "multi-row refresh preserves row count/epoch/identity")
+
+
+def test_cas_evidence_policy() -> None:
+    fake, state = _state()
+    claim_role_binding_v4(state, name="Architect", claim=_session_claim("c", "agi-old", "S", "Architect"))
+    before = _binding_rows(fake)
+    _check(refresh_role_binding_cas(state, agent_session_id="S", new_agent_instance_id="agi-new",
+                                  evidence=_evidence("agi-old", 123, 456)) == 0
+           and before == _binding_rows(fake), "known unequal parents refuse without mutation")
+    _check(refresh_role_binding_cas(state, agent_session_id="S", new_agent_instance_id="agi-old",
+                                  evidence=_evidence("agi-old", 123, 456)) == 1, "same-instance rearm succeeds")
+    for expected, previous, incoming in ((None, 123, 123), ("agi-old", None, 123), ("agi-old", 123, None)):
+        _policy_rotation(expected, previous, incoming)
+    _diagnostic_fault_policy()
+    _excluded_binding_policy()
 
 
 def test_resolve_found_and_vacant() -> None:
@@ -204,9 +300,10 @@ def test_cas_refresh_repoints_all_held_roles() -> None:
     )
     affected = refresh_role_binding_cas(
         state, agent_session_id="sess-X", new_agent_instance_id="agi-new",
+        evidence=_evidence("agi-old"),
     )
     # Reads the NESTED data.result.updated — flat data.updated would read 0 here.
-    _check(affected == 2, "CAS on session id alone re-points BOTH held roles (returns 2)")
+    _check(affected == 2, "CAS on matching session and predecessor re-points BOTH held roles (returns 2)")
     repointed = {
         str(r[COL_ROLE]): str(r[COL_AGENT_INSTANCE_ID]) for r in _binding_rows(fake)
     }
@@ -227,18 +324,21 @@ def test_cas_no_match_and_fail_closed() -> None:
     _check(
         refresh_role_binding_cas(
             state, agent_session_id="sess-NOBODY", new_agent_instance_id="agi-x",
+            evidence=_evidence("agi-1"),
         ) == 0,
         "CAS with an unheld session id → 0 (no-op → caller re-claims)",
     )
     _check(
         refresh_role_binding_cas(
             state, agent_session_id="", new_agent_instance_id="agi-x",
+            evidence=_evidence(None),
         ) == 0,
         "CAS with EMPTY session id → 0 fail-closed",
     )
     _check(
         refresh_role_binding_cas(
             state, agent_session_id=UNCLAIMED_SESSION_ID, new_agent_instance_id="agi-x",
+            evidence=_evidence(None),
         ) == 0,
         "CAS with UNCLAIMED sentinel → 0 fail-closed",
     )
@@ -277,6 +377,7 @@ def test_fail_loud_on_provider_error() -> None:
     try:
         refresh_role_binding_cas(
             state, agent_session_id="sess-A", new_agent_instance_id="agi-2",
+            evidence=_evidence("agi-1"),
         )
         _check(False, "failed update → StateOperationError (not silent 0)")
     except StateOperationError:
@@ -303,6 +404,8 @@ def test_fail_loud_on_provider_error() -> None:
 
 def main() -> int:
     print("=== v4 role_binding store smoke (REAL shapes) ===")
+    test_cas_expected_holder_mismatch()
+    test_cas_evidence_policy()
     test_resolve_found_and_vacant()
     test_claim_displaces_in_place()
     test_claim_displaces_unclaimed_incumbent()

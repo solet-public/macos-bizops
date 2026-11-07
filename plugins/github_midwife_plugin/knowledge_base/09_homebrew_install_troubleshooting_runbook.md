@@ -16,8 +16,10 @@ Use this when a solet is being created on a Mac through the Homebrew path
 (`HOMEBREW_NO_INSTALL_UPGRADE=1 brew install python@3.13 solet-public/tap/solet` followed by `solet create <name>`) and
 a `solet create` pass has stopped, refused, or asked for something. It is
 written to the coding agent driving the install, the same audience as the
-genesis section of the seed README, and applies equally to Claude Code and
-Codex. It does not cover the seed-native `bootstrap.py` path (that is the
+genesis section of the seed README, and applies to Claude Code and, when
+selected, Codex. Codex is optional: when it is not selected, skip its cask,
+plugin, launcher, and configuration work; Claude Code alone completes this
+path. It does not cover the seed-native `bootstrap.py` path (that is the
 seed README's Genesis section), updating a live solet (the seed-update
 runbook), or the operator-environment work after creation (the hydration
 runbook).
@@ -32,7 +34,8 @@ runbook).
   `sysctl -n hw.memsize` (bytes) before starting and say so plainly if the
   machine is under the floor.
 - About 15 GB of free disk for the two local models and the instance.
-- An account that can install Homebrew casks (LM Studio, Claude Code, Codex).
+- An account that can install Homebrew casks (LM Studio and Claude Code; Codex
+  only when selected).
 
 ## Before `solet create`: the Homebrew trust check
 
@@ -147,10 +150,10 @@ The stages, in sequence, with what each installs or verifies:
 |---|---|---|
 | `preflight` | git checkout valid, Python 3.13 present | `python_version_valid` |
 | `decision_review` | resolve profile, implementations, coding agents, topology, autostart | `decisions_resolved` |
-| `system_dependencies` | Homebrew, Python, instance venv, Codex and Claude Code clients, Node, PostgreSQL, pgvector, tmux | `postgres_ready`, `postgres_role_policy_valid`, `pgvector_ready` |
+| `system_dependencies` | Homebrew, Python, instance venv, selected coding-agent clients (Claude Code and Codex only when selected), Node, PostgreSQL, pgvector, tmux | `postgres_ready`, `postgres_role_policy_valid`, `pgvector_ready` |
 | `genesis` | create the instance, database role, Keychain entries, `<name>` command, shell integration | `genesis_artifacts_valid`, fresh-shell PATH and Python probes |
 | `models` | discover and qualify the embedding and inference models, install the LaunchAgent | `embedding_request_succeeds`, `launchagent_running`, `router_ready` |
-| `coding_agents` | install the solet's Claude Code and Codex plugins | `coding_agent_plugins_visible`, `fresh_session_hooks_active`, `peer_identity_valid` |
+| `coding_agents` | install the solet's selected coding-agent plugins (Claude Code and Codex only when selected) | `coding_agent_plugins_visible`, `fresh_session_hooks_active`, `peer_identity_valid` |
 | `optional_accounts` | business connectors, deferred to first use by default | connector validity probes |
 | `session_sources` | register which local coding-agent histories may be indexed | `session_sources_retrievable` |
 | `completion` | end-to-end verification | `knowledge_retrieval_succeeds`, `install_state_projection_matches` |
@@ -347,9 +350,10 @@ stop, not a broken install. Provision by hand, then re-preview:
    needs no window:
 
    ```console
-   curl -fsSL https://lmstudio.ai/install.sh -o /tmp/lms_install.sh
-   sed 's/^APP_VERSION="[^"]*"/APP_VERSION="0.0.23-1"/' /tmp/lms_install.sh > /tmp/lms_install_pinned.sh
-   sh /tmp/lms_install_pinned.sh --quiet
+   curl -fsSL https://lmstudio.ai/install.sh -o "$HOME/.lms_install.sh"
+   sed 's/^APP_VERSION="[^"]*"/APP_VERSION="0.0.23-1"/' "$HOME/.lms_install.sh" > "$HOME/.lms_install_pinned.sh"
+   sh "$HOME/.lms_install_pinned.sh" --quiet
+   rm -f "$HOME/.lms_install.sh" "$HOME/.lms_install_pinned.sh"
    ```
 
    **Do not run the plain `curl … | sh` one-liner unpinned.** As of
@@ -453,9 +457,11 @@ Homebrew, then pgvector is installed after the server is up. If a probe
 still reports `postgres_ready` or `pgvector_ready` false: `brew services
 list`, `psql -U $(whoami) -d postgres -c 'select 1'`, `brew list --versions
 pgvector`; start the service Homebrew installed (`brew services start
-postgresql@<version>`) and re-preview. The Codex and Claude Code clients are
-casks; if the cask step is refused, install them yourself with `brew install
---cask claude-code codex` under the operator's approval and re-preview.
+postgresql@<version>`) and re-preview. The selected coding-agent clients are
+casks: Claude Code, and Codex only when the operator selects Codex. If the
+cask step is refused, install the selected clients yourself under the
+operator's approval (for example, `brew install --cask claude-code codex`
+when Codex is selected) and re-preview.
 
 **`genesis`.** Genesis refuses a fresh instance paired with leftover Keychain
 entries from an earlier attempt under the same name, so the newborn does not

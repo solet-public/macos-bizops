@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::sequence",
+  "display_name": "Snowflake: Sequences",
+  "description": "Manage Snowflake sequences under /api/v2/databases/{database}/schemas/{schema}/sequences. Operations: list (like), create (body Sequence with name, optional start, increment, ordered, comment; createMode), get, delete (ifExists), clone (body Sequence with the new name; createMode, targetDatabase, targetSchema), rename (required targetName; ifExists, targetDatabase, targetSchema) and fetch_result (result_handler, page). Vendor RBAC alone decides. Returns job_id/status queued.",
+  "embedding_description": "Create, clone, rename, inspect and drop Snowflake sequences, the number generators behind surrogate keys and identity columns, through the Sequence REST API, with start value, increment and ordering. Use to manage key generators in a database schema; vendor role grants decide every write, rename and delete.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake sequence operation queued",
+    "result_type": "snowflake_sequence_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: family, operation, method, status (HTTP), headers, body (Sequence objects with start, increment, ordered and owner, the vendor's status message or a SuccessAcceptedResponse), body_encoding, correlation_id, error_code for 4xx/5xx, and pagination: Link relations, location and result_handler for 202 responses; list takes only like and returns every match.",
+    "presentation_guidance": "This operation may have changed vendor state. Queued means the job was accepted, not that Snowflake completed the operation. Report the HTTP status, error_code and body faithfully. Report deletes, renames and swaps from the vendor status, never from job completion alone."
+  },
+  "error_processor_customizations": {
+    "action_context": "Manage Snowflake sequences with the registered role's grants.",
+    "error_interpretation": "snowflake.invalid_params is raised before any vendor call when the operation, identifiers, query parameter names or types (boolean ifExists), a missing targetName for rename, createMode or required body members (name for create and clone) do not match the documented vendor shape. Vendor HTTP errors are completion data with status, body and error_code: auth_failed (401), permission_denied (403), object_not_found (404), timeout (408), conflict (409), rate_limited (429), api_error otherwise. snowflake.api_error without a status is a transport or configuration failure.",
+    "recovery_guidance": "Read the vendor status and body before retrying. A 403 means the registered role lacks the grant: grant it in Snowflake, the plugin adds no gate of its own. Double-quote identifiers that contain other characters. For a 202, call the same verb with operation fetch_result and the pagination.result_handler. Never silently retry a mutation after a transport error: read the object first."
+  }
+}

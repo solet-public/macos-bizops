@@ -13,6 +13,7 @@ import logging
 from datetime import UTC, datetime
 
 from ananta.constants import FRAMEWORK_ACTION_EXECUTIONS_TABLE, FRAMEWORK_NAMESPACE
+from ananta.core.actions._measured_action_lane import run_blocking
 from ananta.core.plugins.plugin_contracts import ActionStatus
 from ananta.interfaces.state_provider_interface import ActionExecutionRecord
 
@@ -45,6 +46,17 @@ class ExecutionTrackingManager:
         self.state_service = state_service
 
     async def track_action_execution_start(
+        self,
+        execution_id: str,
+        action_name: str,
+        parameters: dict[str, object],
+        start_time: datetime,
+        source_context: dict[str, object] | None = None,
+    ) -> None:
+        """Persist execution start off the runtime loop."""
+        await run_blocking(self._track_action_execution_start, execution_id, action_name, parameters, start_time, source_context)
+
+    def _track_action_execution_start(
         self,
         execution_id: str,
         action_name: str,
@@ -107,9 +119,11 @@ class ExecutionTrackingManager:
         except Exception as e:
             logger.error(f"Error starting execution tracking for {execution_id}: {e}")
 
-    async def update_execution_provider(
-        self, execution_id: str, provider_type: str, provider: str
-    ) -> None:
+    async def update_execution_provider(self, execution_id: str, provider_type: str, provider: str) -> None:
+        """Persist execution provider off the runtime loop."""
+        await run_blocking(self._update_execution_provider, execution_id, provider_type, provider)
+
+    def _update_execution_provider(self, execution_id: str, provider_type: str, provider: str) -> None:
         """
         Update provider information for an execution record.
 
@@ -141,6 +155,17 @@ class ExecutionTrackingManager:
             logger.error(f"Error updating provider for execution {execution_id}: {e}")
 
     async def track_action_execution_end(
+        self,
+        execution_id: str,
+        start_time: datetime,
+        success: bool,
+        result: dict[str, object] | None = None,
+        error: dict[str, object] | None = None,
+    ) -> None:
+        """Persist execution completion off the runtime loop."""
+        await run_blocking(self._track_action_execution_end, execution_id, start_time, success, result, error)
+
+    def _track_action_execution_end(
         self,
         execution_id: str,
         start_time: datetime,
@@ -199,9 +224,7 @@ class ExecutionTrackingManager:
             if update_result and update_result.get("action_status") == ActionStatus.COMPLETED.value:
                 pass
             else:
-                logger.error(
-                    f"Failed to complete execution tracking for {execution_id}: {update_result}"
-                )
+                logger.error(f"Failed to complete execution tracking for {execution_id}: {update_result}")
 
         except Exception as e:
             logger.error(f"Error completing execution tracking for {execution_id}: {e}")

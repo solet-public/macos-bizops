@@ -1,0 +1,216 @@
+{
+  "schema_version": 1,
+  "multiplier": 3,
+  "round_up_seconds": 15,
+  "maximum_seconds": 900,
+  "measurements": [
+    {
+      "entry": "deployment/scripts/tests/claude_seat_launcher_smoke.py",
+      "base_seconds": 90.84412304195575,
+      "observed_seconds": 179.9,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "ca5829a7532d5b89972f03d7a07490966d3929d80f7ed02ec2d350917101d769",
+      "observation_sha256": "535a08371bb7957ca8db85cec0121d502ff8be276175b1257d747d167ef5c87a"
+    },
+    {
+      "entry": "quality_gates/tests/sql_access_gate_smoke.py",
+      "base_seconds": 95.01659012492746,
+      "observed_seconds": 118.5,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "03743c5b39ce1495a4aa9b75f67dece0854eeb97e774445e58fd9f05098dbd82",
+      "observation_sha256": "7c2befc0394b38b32066743ef84e0bcbff7cc69ab4ac67ed0e5075260cc67a0d"
+    },
+    {
+      "entry": "solet_cli/tests/cold_host_matrix_3_smoke.py",
+      "base_seconds": 78.47766112512909,
+      "observed_seconds": 113.8,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "751e439852c574bf26f5364c2f1b7d4973aed6061a6abd9cb9c9255af97e3195",
+      "observation_sha256": "4930232a8408996f6ec682c3028552f6f24ed186d5ffb682bb4f2e92d485a4b3"
+    },
+    {
+      "entry": "solet_cli/tests/cold_host_matrix_smoke.py",
+      "base_seconds": 61.31038925005123,
+      "observed_seconds": 108.7,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "e8baac11c6357d2e0252c802a90c66610055977cb48dd47abebe804992da3356",
+      "observation_sha256": "535a08371bb7957ca8db85cec0121d502ff8be276175b1257d747d167ef5c87a"
+    },
+    {
+      "entry": "solet_cli/tests/discovered_decision_lifecycle_smoke.py",
+      "base_seconds": 43.04814604087733,
+      "observed_seconds": 93.1,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "318673d6a1af955714eab0df53222f9fe65ec003da70572c93b0ac8713eabe1f",
+      "observation_sha256": "7c2befc0394b38b32066743ef84e0bcbff7cc69ab4ac67ed0e5075260cc67a0d"
+    },
+    {
+      "entry": "solet_cli/tests/doctor_installer_pin_seed_tree_smoke.py",
+      "base_seconds": 34.99465104192495,
+      "observed_seconds": 90.3,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "28cc592f3cd5f0c76aa97d5634523f87826b8879ad0ba7bd26cd7bd4edffd5b9",
+      "observation_sha256": "535a08371bb7957ca8db85cec0121d502ff8be276175b1257d747d167ef5c87a"
+    },
+    {
+      "entry": "solet_cli/tests/doctor_promoted_seed_identity_smoke.py",
+      "base_seconds": 38.35361654101871,
+      "observed_seconds": 109.8,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "d2fc90552e2af4c6e1f5f0f2cbb77650204ff531da3366d6a52d5ec2c9be3b95",
+      "observation_sha256": "535a08371bb7957ca8db85cec0121d502ff8be276175b1257d747d167ef5c87a"
+    },
+    {
+      "entry": "solet_cli/tests/existing_install_doctor_smoke.py",
+      "base_seconds": 46.73444449994713,
+      "observed_seconds": 98.8,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "6c7b647dc764637c536da4ffac585c1544b78c39169dae0defc7aad729929a40",
+      "observation_sha256": "535a08371bb7957ca8db85cec0121d502ff8be276175b1257d747d167ef5c87a"
+    },
+    {
+      "entry": "solet_cli/tests/existing_install_runtime_faults_smoke.py",
+      "base_seconds": 59.580112624913454,
+      "observed_seconds": 113.3,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "0a8ea1dd43440e5e07a90088386f69d2afe888bcb379e6d16d1a37c3c9e56358",
+      "observation_sha256": "535a08371bb7957ca8db85cec0121d502ff8be276175b1257d747d167ef5c87a"
+    },
+    {
+      "entry": "solet_cli/tests/hook_interpreter_pin_update_smoke.py",
+      "base_seconds": 35.6,
+      "observed_seconds": 57.8,
+      "base_commit_sha": "cf8e869582e65310e5c4053be21f699cd3a945cf",
+      "base_receipt_sha256": "5e12fe0d49d5410973ce3b6a2b4f066cffe11cf495c5724bed6ef878da911737",
+      "observation_sha256": "4dafe08b42f1840ea783e1419535b0c54046047572d1569f45a80f7b40b3f788"
+    },
+    {
+      "entry": "solet_cli/tests/real_style_sweep_applies_smoke.py",
+      "base_seconds": 131.50664920802228,
+      "observed_seconds": 173.8,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "cf211a1a0d29698650792a01a0c3b67284032582b34d0ba4466619be9177ed51",
+      "observation_sha256": "535a08371bb7957ca8db85cec0121d502ff8be276175b1257d747d167ef5c87a"
+    },
+    {
+      "entry": "solet_cli/tests/real_style_sweep_writes_1_smoke.py",
+      "base_seconds": 133.19091458409093,
+      "observed_seconds": 230.0,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "345596136fac89798009d1421d6c5bcc3ec055d2c4e2d6c4aadf9e8d939ffcd6",
+      "observation_sha256": "830535dc44b0387f22950b0ba2e90ddfbd9735bc9b944edb03f31529a5e5a566"
+    },
+    {
+      "entry": "solet_cli/tests/real_style_sweep_writes_3_smoke.py",
+      "base_seconds": 115.97129187500104,
+      "observed_seconds": 116.0,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "3821e130dfe4512f9d438fb9189d6e88868f7004c05ad02f1f95aeba872e77b1",
+      "observation_sha256": "7e0cc72613b795fda3a1329237b9171d44151888390cd418a1a191eae5e4334f"
+    },
+    {
+      "entry": "solet_cli/tests/real_style_sweep_writes_4_smoke.py",
+      "base_seconds": 129.14019508403726,
+      "observed_seconds": 129.14019508403726,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "d07a4bcbf55621ca7f6d350c56fe506d5e45cc8050b060af5bd9b9b56a635e1c",
+      "observation_sha256": "d07a4bcbf55621ca7f6d350c56fe506d5e45cc8050b060af5bd9b9b56a635e1c"
+    },
+    {
+      "entry": "solet_cli/tests/real_style_sweep_writes_6_smoke.py",
+      "base_seconds": 128.82739341584966,
+      "observed_seconds": 128.82739341584966,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "fd3d657116ce580864aadd292baa92f9ede851fe1c284b6858c7ed33b724826c",
+      "observation_sha256": "fd3d657116ce580864aadd292baa92f9ede851fe1c284b6858c7ed33b724826c"
+    },
+    {
+      "entry": "solet_cli/tests/real_style_sweep_writes_7_smoke.py",
+      "base_seconds": 116.50901912502013,
+      "observed_seconds": 116.50901912502013,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "e8ff43adf06f960d054b684be8d99899a2cd2ccbc5e76f90e8b59fd5a5248648",
+      "observation_sha256": "e8ff43adf06f960d054b684be8d99899a2cd2ccbc5e76f90e8b59fd5a5248648"
+    },
+    {
+      "entry": "solet_cli/tests/real_style_sweep_writes_8_smoke.py",
+      "base_seconds": 107.00546508398838,
+      "observed_seconds": 116.7,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "13ef8f065afdeec9bfd707dc853ee67df4f62fb2e982c31c282294c135d934f6",
+      "observation_sha256": "830535dc44b0387f22950b0ba2e90ddfbd9735bc9b944edb03f31529a5e5a566"
+    },
+    {
+      "entry": "solet_cli/tests/real_style_tree_5_smoke.py",
+      "base_seconds": 94.21204383322038,
+      "observed_seconds": 116.7,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "af09d78c92a4bff20a9872e0c2976adb03ad63d365a3d0be6be36bd470bc21bd",
+      "observation_sha256": "c5c419ea8b5b7ab5093ea4e2fc0b3f0ffb5cad6e3fc93aa0fcc5979be3ea3eff"
+    },
+    {
+      "entry": "solet_cli/tests/target_git_hardening_smoke.py",
+      "base_seconds": 28.195747333811596,
+      "observed_seconds": 114.0,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "bb719c61d570d6875d8286518760d682f9f7f557e224433f10d93919db69c4d8",
+      "observation_sha256": "535a08371bb7957ca8db85cec0121d502ff8be276175b1257d747d167ef5c87a"
+    },
+    {
+      "entry": "solet_cli/tests/update_crash_sweep_smoke.py",
+      "base_seconds": 54.26916787493974,
+      "observed_seconds": 95.5,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "afc378f6c7ad6aadf9dcdd1b42067292a7571f29a6afb12aad3a043e69dfe069",
+      "observation_sha256": "f9909b282bb75e3bc995a84cda5a6d60de36fbe4f102046c1b1e150a413227f0"
+    },
+    {
+      "entry": "solet_cli/tests/update_plist_adopt_smoke.py",
+      "base_seconds": 105.68940049991943,
+      "observed_seconds": 220.1,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "ec09e2f4d0d7ebcfb3ac68862809db0423cb3e3afe3985b3a74fdca38aad8ee5",
+      "observation_sha256": "c5c419ea8b5b7ab5093ea4e2fc0b3f0ffb5cad6e3fc93aa0fcc5979be3ea3eff"
+    },
+    {
+      "entry": "solet_cli/tests/update_plist_robustness_smoke.py",
+      "base_seconds": 61.70616016583517,
+      "observed_seconds": 61.70616016583517,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "99ecb57ddcd420eb63527126eb208d7476a4182756531c85a4d085aca3a5438f",
+      "observation_sha256": "99ecb57ddcd420eb63527126eb208d7476a4182756531c85a4d085aca3a5438f"
+    },
+    {
+      "entry": "solet_cli/tests/update_promotion_smoke.py",
+      "base_seconds": 40.93367970804684,
+      "observed_seconds": 92.9,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "bd78443a0af6575fa69655e94470af478dba4feb7bce3fb3a77234124ccc1ebf",
+      "observation_sha256": "7c2befc0394b38b32066743ef84e0bcbff7cc69ab4ac67ed0e5075260cc67a0d"
+    },
+    {
+      "entry": "solet_cli/tests/update_runtime_execution_smoke.py",
+      "base_seconds": 98.03276312514208,
+      "observed_seconds": 232.4,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "dbc750d7404344f13fde2495a23a43920b066345c2114243d2845a8ff39f0c35",
+      "observation_sha256": "7c2befc0394b38b32066743ef84e0bcbff7cc69ab4ac67ed0e5075260cc67a0d"
+    },
+    {
+      "entry": "solet_cli/tests/update_single_colour_census_smoke.py",
+      "base_seconds": 202.78945924993604,
+      "observed_seconds": 224.9,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "4a00e74e01a2f500e90851abaffac8241602d5239775c0b8adf50f08397fd26b",
+      "observation_sha256": "535a08371bb7957ca8db85cec0121d502ff8be276175b1257d747d167ef5c87a"
+    },
+    {
+      "entry": "solet_cli/tests/update_transition_bundle_candidates_smoke.py",
+      "base_seconds": 162.90222633397207,
+      "observed_seconds": 212.8,
+      "base_commit_sha": "e8c70c0a0e23c7f4fa283117264d9256d06891ea",
+      "base_receipt_sha256": "85143f2c654818b6d07949a0d84ff9057b084a52188a578dc94d910deec0b388",
+      "observation_sha256": "c5c419ea8b5b7ab5093ea4e2fc0b3f0ffb5cad6e3fc93aa0fcc5979be3ea3eff"
+    }
+  ]
+}

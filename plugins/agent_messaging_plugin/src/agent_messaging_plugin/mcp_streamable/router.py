@@ -35,7 +35,6 @@ phone's mDNS hostname which won't send Origin).
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import binascii
 import hashlib
@@ -43,9 +42,11 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any, Final
 
+from ananta.core.runtime.loop_executors import ExecutorFamily, run_blocking
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from ..platform_surface import log_mcp_failure, mcp_failure_scope
 from .auth import BearerAuthError, BearerVerifier
 from .dispatch import (
     INTERNAL_ERROR,
@@ -57,6 +58,7 @@ from .dispatch import (
     parse_envelope,
 )
 from .notifications import stream_session_events
+from .tools import TOOLS
 
 if TYPE_CHECKING:
     from ..bridge_sessions import BridgeSessionManager
@@ -216,13 +218,8 @@ def _mount_streamable_handlers(
             return Response(status_code=204)
         response = Response(status_code=204)
         _apply_cors_headers(response, request, cors_origins)
-        response.headers["Access-Control-Allow-Methods"] = (
-            "GET, POST, DELETE, OPTIONS"
-        )
-        response.headers["Access-Control-Allow-Headers"] = (
-            "Authorization, Content-Type, Accept, Mcp-Session-Id, "
-            "Last-Event-ID"
-        )
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, Accept, Mcp-Session-Id, Last-Event-ID"
         response.headers["Access-Control-Max-Age"] = "86400"
         return response
 
@@ -255,19 +252,39 @@ async def _handle_post(
     if isinstance(pre, Response):
         return pre
     claim, envelope = pre
+    # iss_87aa81c4 / iss_5cf6184d: session resolution registers a peer binding
+    # on ``initialize`` (a DB write), and tools/call reaches the state service
+    # and dispatch. Inline, either stalled this server's loop and every open
+    # stream on it; both are worker-thread safe (the dispatch path already
+    # runs on the action-queue thread via the plugin verbs).
+    return await run_blocking(
+        ExecutorFamily.STREAMABLE,
+        _resolve_and_dispatch,
+        request,
+        envelope,
+        claim,
+        session_manager,
+        dispatch_ctx,
+    )
+
+
+def _resolve_and_dispatch(
+    request: Request,
+    envelope: JsonRpcRequest,
+    claim: Any,
+    session_manager: StreamableSessionManager,
+    dispatch_ctx: DispatchContext,
+) -> Response:
+    """Resolve the MCP session, then dispatch (worker thread)."""
     session_or_err = _resolve_session(
-        request, envelope, claim=claim, session_manager=session_manager,
+        request,
+        envelope,
+        claim=claim,
+        session_manager=session_manager,
     )
     if isinstance(session_or_err, Response):
         return session_or_err
-    # iss_87aa81c4: tools/call reaches dispatch_peer_send / dispatch_role_send,
-    # whose drive_on_delivery blocks (tmux paste-stability wait, up to 10 s per
-    # Claude wake). Inline, that stalled this server's loop and every open
-    # stream on it; the dispatch path is worker-thread safe (it already runs
-    # on the action-queue thread via the plugin verbs).
-    return await asyncio.to_thread(
-        _dispatch_and_build_response, envelope, session_or_err, dispatch_ctx,
-    )
+    return _dispatch_and_build_response(envelope, session_or_err, dispatch_ctx)
 
 
 async def _validate_post_preconditions(
@@ -286,7 +303,7 @@ async def _validate_post_preconditions(
     origin_err = _check_origin(request, allowed_origins)
     if origin_err is not None:
         return origin_err
-    auth_err = _authorize_or_response(
+    auth_err = await _authorize_off_loop(
         request,
         bearer_verifier,
         resource_metadata_url=resource_metadata_url,
@@ -359,6 +376,24 @@ def _resolve_session(
     return session
 
 
+def _log_dispatch_failure(
+    envelope: JsonRpcRequest,
+    session: StreamableSession,
+    error: Exception,
+) -> None:
+    """Extract only tools/call identity, including translated BridgeError cases."""
+    params = envelope.params if type(envelope.params) is dict else {}
+    log_mcp_failure(
+        logger,
+        tool=params.get("name") if envelope.method == "tools/call" else None,
+        arguments=params.get("arguments") if envelope.method == "tools/call" else None,
+        recognized_tools=tuple(str(tool["name"]) for tool in TOOLS),
+        stage="tool_dispatch",
+        error=error,
+        bridge_id=session.bridge_id,
+    )
+
+
 def _dispatch_and_build_response(
     envelope: JsonRpcRequest,
     session: StreamableSession,
@@ -370,26 +405,31 @@ def _dispatch_and_build_response(
     Accepted per spec; ``initialize`` responses include the freshly
     allocated ``Mcp-Session-Id`` header.
     """
-    try:
-        response = dispatch_request(
-            envelope, session=session, context=dispatch_ctx,
-        )
-    except JsonRpcError as exc:
-        error_response = _jsonrpc_error_response(exc, http_status=200)
-        error_response.headers[_SESSION_HEADER] = session.mcp_session_id
-        return error_response
-    except Exception as exc:  # noqa: BLE001 — last-resort safety net
-        logger.exception("streamable dispatch failed: %s", envelope.method)
-        error_response = _jsonrpc_error_response(
-            JsonRpcError(
-                INTERNAL_ERROR,
-                f"internal error during {envelope.method}: {exc}",
-                request_id=envelope.id,
-            ),
-            http_status=500,
-        )
-        error_response.headers[_SESSION_HEADER] = session.mcp_session_id
-        return error_response
+    with mcp_failure_scope("streamable", envelope.id):
+        try:
+            response = dispatch_request(
+                envelope,
+                session=session,
+                context=dispatch_ctx,
+            )
+        except JsonRpcError as exc:
+            _log_dispatch_failure(envelope, session, exc)
+            error_response = _jsonrpc_error_response(exc, http_status=200)
+            error_response.headers[_SESSION_HEADER] = session.mcp_session_id
+            return error_response
+        except Exception as exc:  # noqa: BLE001 — last-resort safety net
+            _log_dispatch_failure(envelope, session, exc)
+            logger.exception("streamable dispatch failed: %s", envelope.method)
+            error_response = _jsonrpc_error_response(
+                JsonRpcError(
+                    INTERNAL_ERROR,
+                    f"internal error during {envelope.method}: {exc}",
+                    request_id=envelope.id,
+                ),
+                http_status=500,
+            )
+            error_response.headers[_SESSION_HEADER] = session.mcp_session_id
+            return error_response
     if response is None:
         return Response(status_code=202)
     response_headers: dict[str, str] = {}
@@ -414,7 +454,7 @@ async def _handle_get(
     origin_err = _check_origin(request, allowed_origins)
     if origin_err is not None:
         return origin_err
-    auth_err = _authorize_or_response(
+    auth_err = await _authorize_off_loop(
         request,
         bearer_verifier,
         resource_metadata_url=resource_metadata_url,
@@ -446,7 +486,8 @@ async def _handle_get(
             )
     return StreamingResponse(
         stream_session_events(
-            session=session, bridge_manager=bridge_manager,
+            session=session,
+            bridge_manager=bridge_manager,
         ),
         media_type=_SSE_MEDIA_TYPE,
         headers={"Cache-Control": "no-cache"},
@@ -465,7 +506,7 @@ async def _handle_delete(
     origin_err = _check_origin(request, allowed_origins)
     if origin_err is not None:
         return origin_err
-    auth_err = _authorize_or_response(
+    auth_err = await _authorize_off_loop(
         request,
         bearer_verifier,
         resource_metadata_url=resource_metadata_url,
@@ -482,7 +523,8 @@ async def _handle_delete(
         return _session_not_found_response(request_id=None)
     if session.agent_instance_id != claim.agent_instance_id:
         return _bearer_session_mismatch_response(request_id=None)
-    session_manager.close(session_header)
+    # iss_5cf6184d: closing unregisters the session's binding (a DB write).
+    await run_blocking(ExecutorFamily.STREAMABLE, session_manager.close, session_header)
     return Response(status_code=204)
 
 
@@ -493,7 +535,8 @@ async def _handle_delete(
 
 
 def _check_origin(
-    request: Request, allowed_origins: tuple[str, ...],
+    request: Request,
+    allowed_origins: tuple[str, ...],
 ) -> Response | None:
     """Reject requests whose ``Origin`` header is not in the allow list.
 
@@ -514,13 +557,33 @@ def _check_origin(
         return JSONResponse(
             content={
                 "code": "origin_not_allowed",
-                "message": (
-                    f"Origin {origin!r} is not in the configured allow-list"
-                ),
+                "message": (f"Origin {origin!r} is not in the configured allow-list"),
             },
             status_code=403,
         )
     return None
+
+
+async def _authorize_off_loop(
+    request: Request,
+    bearer_verifier: BearerVerifier,
+    *,
+    resource_metadata_url: str,
+    solet_name: str,
+) -> Any:
+    """:func:`_authorize_or_response` on a worker thread.
+
+    iss_5cf6184d: the production verifier's revoked-client check reads the
+    vault's OAuth client registry (a state-service query) on every request.
+    """
+    return await run_blocking(
+        ExecutorFamily.STREAMABLE,
+        _authorize_or_response,
+        request,
+        bearer_verifier,
+        resource_metadata_url=resource_metadata_url,
+        solet_name=solet_name,
+    )
 
 
 def _authorize_or_response(
@@ -546,6 +609,7 @@ def _authorize_or_response(
     """
     from .oauth import OAUTH_PROTECTED_RESOURCE_PATH  # noqa: PLC0415 — break import cycle
     from .tools import build_server_name  # noqa: PLC0415 — break import cycle
+
     header = request.headers.get(_AUTH_HEADER)
     try:
         return bearer_verifier.verify(header)
@@ -555,9 +619,7 @@ def _authorize_or_response(
         challenge = f'Bearer realm="{_quote_auth_param(realm)}"'
         if challenge_error:
             challenge += f', error="{challenge_error}"'
-            challenge += (
-                f', error_description="{_quote_auth_param(exc.code)}"'
-            )
+            challenge += f', error_description="{_quote_auth_param(exc.code)}"'
         # A pinned issuer supplies a static resource_metadata URL. Under
         # the dynamic origin-following surface (local tunnel) none is
         # configured, so derive it from the request origin — the same
@@ -566,17 +628,11 @@ def _authorize_or_response(
         # cold-start MCP client (fresh ChatGPT/claude.ai connect after the
         # enforcement cutover severed its session) cannot rediscover the
         # authorization server.
-        effective_metadata_url = resource_metadata_url or (
-            str(request.base_url).rstrip("/") + OAUTH_PROTECTED_RESOURCE_PATH
-        )
+        effective_metadata_url = resource_metadata_url or (str(request.base_url).rstrip("/") + OAUTH_PROTECTED_RESOURCE_PATH)
         if effective_metadata_url:
-            challenge += (
-                ', resource_metadata="'
-                f'{_quote_auth_param(effective_metadata_url)}"'
-            )
+            challenge += f', resource_metadata="{_quote_auth_param(effective_metadata_url)}"'
         logger.warning(
-            "streamable bearer auth rejected: path=%s code=%s "
-            "challenge_error=%s token_profile=%s",
+            "streamable bearer auth rejected: path=%s code=%s challenge_error=%s token_profile=%s",
             request.url.path,
             exc.code,
             challenge_error or "",
@@ -622,11 +678,13 @@ def _authorization_header_profile(header: str | None) -> dict[str, Any]:
         profile["token"] = "absent"
         return profile
     token = parts[1].strip()
-    profile.update({
-        "token_chars": len(token),
-        "sha256_12": hashlib.sha256(token.encode("utf-8")).hexdigest()[:12],
-        "dot_count": token.count("."),
-    })
+    profile.update(
+        {
+            "token_chars": len(token),
+            "sha256_12": hashlib.sha256(token.encode("utf-8")).hexdigest()[:12],
+            "dot_count": token.count("."),
+        }
+    )
     segments = token.split(".")
     if len(segments) == 3:
         profile["jwt_header"] = _unverified_jwt_header_profile(segments[0])
@@ -643,11 +701,7 @@ def _unverified_jwt_header_profile(segment: str) -> dict[str, str] | str:
         return "unparseable"
     if not isinstance(parsed, dict):
         return "non_object"
-    return {
-        key: str(parsed[key])
-        for key in ("alg", "typ", "kid")
-        if key in parsed
-    }
+    return {key: str(parsed[key]) for key in ("alg", "typ", "kid") if key in parsed}
 
 
 # ---------------------------------------------------------------------
@@ -657,7 +711,8 @@ def _unverified_jwt_header_profile(segment: str) -> dict[str, str] | str:
 
 
 def _cors_origin_allowed(
-    request: Request, cors_origins: tuple[str, ...],
+    request: Request,
+    cors_origins: tuple[str, ...],
 ) -> bool:
     """True iff the request's Origin is in the configured allow-list."""
     if not cors_origins:

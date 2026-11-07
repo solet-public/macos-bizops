@@ -10,6 +10,7 @@ import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -19,7 +20,7 @@ sys.path.insert(0, str(_ROOT / "solet_cli" / "tests"))
 
 from operation_probe_adapter_checks import _operation, _result, _transaction  # noqa: E402
 from solet_manager import contracts, operation_executor  # noqa: E402
-from solet_manager.adapters import OperationRequest, OperationResult  # noqa: E402
+from solet_manager.adapters import AdapterRegistry, OperationRequest, OperationResult  # noqa: E402
 from solet_manager.contracts import ContractBundle  # noqa: E402
 from solet_manager.models import CheckpointStatus  # noqa: E402
 
@@ -32,25 +33,18 @@ from bootstrap_adapter.models import AdapterRuntime  # noqa: E402
 
 
 def _homebrew_plan_is_exact(output: str, *, kind: str, package: str) -> bool:
-    return _inspect_homebrew_plan(output, kind=kind, package=package).exact
+    return _inspect_homebrew_plan(output, kind=kind, package=package, reviewed_dependencies=frozenset({"krb5"})).exact
 
 
 _CONTRACTS = _ROOT / "plugins/github_midwife_plugin/knowledge_base"
-_LEGACY_FLOW = (
-    _ROOT
-    / "solet_cli/tests/fixtures/contracts/reconcile_contract_legacy_4ff38b3d"
-    / "macos_setup_flow.json"
-)
+_LEGACY_FLOW = _ROOT / "solet_cli/tests/fixtures/contracts/reconcile_contract_legacy_4ff38b3d" / "macos_setup_flow.json"
 _LEGACY_DIGEST = "sha256:67c903ea332287f2c73f036ff055b793f50072ed3af0784d68a505801c040540"
 _EXPECTED_PRE_PROBES = (
     "postgres_binary_version_valid",
     "postgres_ready",
     "pgvector_ready",
 )
-_INSTALLED_WARNING = (
-    "Warning: pgvector 0.8.6 is already installed and up-to-date.\n"
-    "To reinstall 0.8.6, run:\n  brew reinstall pgvector\n"
-)
+_INSTALLED_WARNING = "Warning: pgvector 0.8.6 is already installed and up-to-date.\nTo reinstall 0.8.6, run:\n  brew reinstall pgvector\n"
 _VERSIONED_POSTGRESQL_PLAN = """\
 ==> Would install 1 formula:
 postgresql@17 17.11
@@ -71,9 +65,7 @@ def _check(condition: bool, label: str) -> None:
         raise AssertionError(label)
 
 
-def _completed(
-    command: list[str], code: int = 0, stdout: str = "", stderr: str = ""
-) -> subprocess.CompletedProcess[str]:
+def _completed(command: list[str], code: int = 0, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(command, code, stdout, stderr)
 
 
@@ -107,8 +99,7 @@ def _check_fresh_install() -> None:
     )
     install_environment = calls[-1][1].get("env")
     _check(
-        isinstance(install_environment, dict)
-        and install_environment.get("HOMEBREW_NO_INSTALL_CLEANUP") == "1",
+        isinstance(install_environment, dict) and install_environment.get("HOMEBREW_NO_INSTALL_CLEANUP") == "1",
         "fresh package mutation disables implicit Homebrew cleanup",
     )
 
@@ -128,8 +119,7 @@ def _check_nonzero_dry_run_warning_is_refused() -> None:
         run_homebrew_install_required(_runtime(run), "/fixture/brew", "pgvector", "pgvector")
     except HomebrewInstallError as exc:
         _check(
-            exc.outcome.returncode == 1
-            and exc.outcome.stderr == _INSTALLED_WARNING,
+            exc.outcome.returncode == 1 and exc.outcome.stderr == _INSTALLED_WARNING,
             "nonzero dry-run warning is not a verified no-op",
         )
     else:
@@ -238,9 +228,7 @@ def _check_versioned_postgresql_dry_run_plan() -> None:
     )
     _check(
         not _homebrew_plan_is_exact(
-            _VERSIONED_POSTGRESQL_PLAN.replace(
-                "postgresql@17 17.11", "postgresql@17 17.11 unexpected", 1
-            ),
+            _VERSIONED_POSTGRESQL_PLAN.replace("postgresql@17 17.11", "postgresql@17 17.11 unexpected", 1),
             kind="formula",
             package="postgresql@17",
         ),
@@ -252,6 +240,8 @@ def _check_versioned_postgresql_dry_run_applies() -> None:
     commands: list[list[str]] = []
 
     def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[1:3] == ["deps", "--formula"]:
+            return _completed(command, stdout="krb5\n")
         commands.append(list(command))
         if "--dry-run" in command:
             return _completed(command, stdout=_VERSIONED_POSTGRESQL_PLAN)
@@ -318,13 +308,12 @@ def _check_false_probe_does_not_preverify(
                 bundle=bundle,
                 operation=operation,
                 transaction=transaction,
-                registry=object(),
+                registry=cast(AdapterRegistry, object()),
                 purpose="pre_apply",
                 attempt=1,
             )
     _check(
-        result.checkpoint_status is CheckpointStatus.BLOCKED
-        and observed == list(expected_observed),
+        result.checkpoint_status is CheckpointStatus.BLOCKED and observed == list(expected_observed),
         f"{scenario} does not pre-verify install_postgresql",
     )
 
@@ -350,7 +339,12 @@ def main() -> int:
     )
     legacy_flow = json.loads(_LEGACY_FLOW.read_text(encoding="utf-8"))
     normalized = contracts._normalize_legacy_resume_flow_v1(_LEGACY_DIGEST, legacy_flow)
-    legacy = normalized["operations"]["install_postgresql"]["idempotency"]
+    operations = normalized["operations"]
+    assert isinstance(operations, dict)
+    installer = operations["install_postgresql"]
+    assert isinstance(installer, dict)
+    legacy = installer["idempotency"]
+    assert isinstance(legacy, dict)
     _check(
         legacy["precondition_probe_refs"] == list(_EXPECTED_PRE_PROBES),
         "digest-pinned legacy resume strengthens the installer pre-probe",

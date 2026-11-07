@@ -42,6 +42,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from .mcp_ingress import ROUTER_IO
 from .router_mgmt import MgmtServer
 from .router_state import (
     DEFAULT_DRAIN_WINDOW_SECONDS,
@@ -89,7 +90,9 @@ def mgmt_socket_path(solet: str, runtime_dir: Path | None = None) -> Path:
 
 
 def _write_port_discovery_files(
-    solet: str, port: int, runtime_dir: Path | None = None,
+    solet: str,
+    port: int,
+    runtime_dir: Path | None = None,
 ) -> None:
     """Write ``<name>.router.port`` and ``<name>.bridge.port`` to runtime dir.
 
@@ -220,7 +223,9 @@ async def _read_request_head(
 
 
 async def _open_upstream(
-    binding: ColorBinding, *, port: int,
+    binding: ColorBinding,
+    *,
+    port: int,
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     return await asyncio.open_connection("127.0.0.1", port)
 
@@ -338,13 +343,7 @@ async def _write_503(writer: asyncio.StreamWriter, reason: str) -> None:
         "LaunchAgent once more to re-trigger cold-start activation. Leave "
         "the router itself running.\r\n"
     ).encode()
-    response = (
-        b"HTTP/1.1 503 Service Unavailable\r\n"
-        b"Content-Type: text/plain; charset=utf-8\r\n"
-        b"Content-Length: " + str(len(body)).encode() + b"\r\n"
-        b"Connection: close\r\n"
-        b"\r\n"
-    ) + body
+    response = (b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n") + body
     try:
         writer.write(response)
         await writer.drain()
@@ -394,7 +393,9 @@ async def _prepare_proxy_route(
         return None
 
     binding = await _wait_for_route(
-        state, parsed.mcp_session_id, buffer_timeout=buffer_timeout,
+        state,
+        parsed.mcp_session_id,
+        buffer_timeout=buffer_timeout,
     )
     if binding is None:
         await _write_503(writer, no_route_reason)
@@ -409,7 +410,9 @@ async def _prepare_proxy_route(
     except (ConnectionRefusedError, OSError) as exc:
         logger.warning(
             "public: upstream %s:%d connect failed: %s",
-            binding.color, upstream_port, exc,
+            binding.color,
+            upstream_port,
+            exc,
         )
         await _write_503(writer, "upstream_connect_failed")
         return None
@@ -429,7 +432,9 @@ async def _drain_pending(pending: set[asyncio.Task[None]]) -> None:
         task.cancel()
     for task in pending:
         with contextlib.suppress(
-            asyncio.CancelledError, ConnectionResetError, BrokenPipeError,
+            asyncio.CancelledError,
+            ConnectionResetError,
+            BrokenPipeError,
         ):
             await task
 
@@ -471,7 +476,8 @@ async def _proxy_streams(
         name="public_downstream",
     )
     upstream_task = asyncio.create_task(
-        _pump(reader, up_writer), name="public_upstream",
+        _pump(reader, up_writer),
+        name="public_upstream",
     )
     done, pending = await asyncio.wait(
         {downstream_task, upstream_task},
@@ -490,7 +496,10 @@ async def _handle_public_request(
     buffer_timeout: float,
 ) -> None:
     route = await _prepare_proxy_route(
-        reader, writer, state=state, buffer_timeout=buffer_timeout,
+        reader,
+        writer,
+        state=state,
+        buffer_timeout=buffer_timeout,
     )
     if route is None:
         return
@@ -520,8 +529,12 @@ async def _handle_streamable_public_request(
     503s here exactly like "no active color" does on the main proxy.
     """
     route = await _prepare_proxy_route(
-        reader, writer, state=state, buffer_timeout=buffer_timeout,
-        port_selector=_streamable_port, no_route_reason="no_streamable_route",
+        reader,
+        writer,
+        state=state,
+        buffer_timeout=buffer_timeout,
+        port_selector=_streamable_port,
+        no_route_reason="no_streamable_route",
     )
     if route is None:
         return
@@ -560,16 +573,13 @@ async def _heartbeat_gc(
         await asyncio.sleep(interval)
         now = state.now()
         timeout = state.heartbeat_timeout_seconds
-        stale = [
-            iid
-            for iid, b in state.bindings.items()
-            if now - b.last_heartbeat > timeout
-        ]
+        stale = [iid for iid, b in state.bindings.items() if now - b.last_heartbeat > timeout]
         for iid in stale:
             is_active = iid == state.active_instance_id
             logger.info(
                 "hb-gc: dropping stale binding instance=%s active=%s",
-                iid, is_active,
+                iid,
+                is_active,
             )
             state.unregister(iid)
 
@@ -604,7 +614,7 @@ async def _bridge_port_watchdog(
     while True:
         await asyncio.sleep(interval)
         try:
-            _write_port_discovery_files(solet, public_port, runtime_dir)
+            await ROUTER_IO.run(_write_port_discovery_files, solet, public_port, runtime_dir)
         except OSError as exc:
             logger.warning(
                 "bridge-port-watchdog: re-write failed (will retry next tick): %s",
@@ -773,9 +783,7 @@ async def run_router(
         writer: asyncio.StreamWriter,
     ) -> None:
         try:
-            await _handle_public_request(
-                reader, writer, state=state, buffer_timeout=buffer_timeout
-            )
+            await _handle_public_request(reader, writer, state=state, buffer_timeout=buffer_timeout)
         finally:
             try:
                 writer.close()
@@ -788,9 +796,7 @@ async def run_router(
         writer: asyncio.StreamWriter,
     ) -> None:
         try:
-            await _handle_streamable_public_request(
-                reader, writer, state=state, buffer_timeout=buffer_timeout
-            )
+            await _handle_streamable_public_request(reader, writer, state=state, buffer_timeout=buffer_timeout)
         finally:
             try:
                 writer.close()
@@ -798,13 +804,13 @@ async def run_router(
             except (ConnectionResetError, BrokenPipeError, OSError):
                 pass
 
-    public_server = await asyncio.start_server(
-        _public_client, host=public_host, port=public_port
-    )
+    public_server = await asyncio.start_server(_public_client, host=public_host, port=public_port)
     streamable_server: asyncio.Server | None = None
     if streamable_public_port is not None:
         streamable_server = await asyncio.start_server(
-            _streamable_client, host=streamable_public_host, port=streamable_public_port,
+            _streamable_client,
+            host=streamable_public_host,
+            port=streamable_public_port,
         )
         logger.info(
             "streamable: listening on %s:%d (solet=%s)",
@@ -812,7 +818,15 @@ async def run_router(
             streamable_public_port,
             solet,
         )
-    _write_port_discovery_files(solet, public_port, runtime_dir)
+    try:
+        await ROUTER_IO.run(_write_port_discovery_files, solet, public_port, runtime_dir)
+    except BaseException:
+        public_server.close()
+        await public_server.wait_closed()
+        if streamable_server is not None:
+            streamable_server.close()
+            await streamable_server.wait_closed()
+        raise
     logger.info(
         "public: listening on %s:%d (solet=%s)",
         public_host,
@@ -829,7 +843,9 @@ async def run_router(
     hb_task = asyncio.create_task(_heartbeat_gc(state), name="heartbeat_gc")
     bridge_port_task = asyncio.create_task(
         _bridge_port_watchdog(
-            solet, public_port, interval=bridge_port_watchdog_interval,
+            solet,
+            public_port,
+            interval=bridge_port_watchdog_interval,
             runtime_dir=runtime_dir,
         ),
         name="bridge_port_watchdog",
@@ -847,7 +863,8 @@ async def run_router(
             if streamable_server is not None:
                 serve_tasks.append(
                     asyncio.create_task(
-                        streamable_server.serve_forever(), name="streamable_serve",
+                        streamable_server.serve_forever(),
+                        name="streamable_serve",
                     ),
                 )
             try:
@@ -860,7 +877,10 @@ async def run_router(
         bridge_port_task.cancel()
         with _SuppressCancel():
             await asyncio.gather(
-                drain_task, hb_task, bridge_port_task, return_exceptions=True,
+                drain_task,
+                hb_task,
+                bridge_port_task,
+                return_exceptions=True,
             )
         await mgmt.stop()
 
@@ -880,51 +900,52 @@ def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
     )
     parser.add_argument("--solet", required=True, help="Solet name (e.g. 'iris').")
     parser.add_argument(
-        "--public-port", type=int, default=DEFAULT_PUBLIC_PORT,
+        "--public-port",
+        type=int,
+        default=DEFAULT_PUBLIC_PORT,
         help=f"Public bridge port (default {DEFAULT_PUBLIC_PORT}).",
     )
     parser.add_argument(
-        "--public-host", default="127.0.0.1",
+        "--public-host",
+        default="127.0.0.1",
         help="Bind host (default 127.0.0.1).",
     )
     parser.add_argument(
-        "--socket-path", default=None,
-        help=(
-            "Override mgmt socket path "
-            "(default ~/.ananta/runtime/<solet>.router.sock)."
-        ),
+        "--socket-path",
+        default=None,
+        help=("Override mgmt socket path (default ~/.ananta/runtime/<solet>.router.sock)."),
     )
     parser.add_argument(
-        "--runtime-dir", default=None,
-        help=(
-            "Override the runtime dir for the port-discovery files "
-            "(default ~/.ananta/runtime; install_router passes its own "
-            "--runtime-dir here so a sandboxed smoke never writes the real one)."
-        ),
+        "--runtime-dir",
+        default=None,
+        help=("Override the runtime dir for the port-discovery files (default ~/.ananta/runtime; install_router passes its own --runtime-dir here so a sandboxed smoke never writes the real one)."),
     )
     parser.add_argument(
-        "--drain-window-seconds", type=int, default=DEFAULT_DRAIN_WINDOW_SECONDS,
+        "--drain-window-seconds",
+        type=int,
+        default=DEFAULT_DRAIN_WINDOW_SECONDS,
         help="Drain window for old colors after activate.",
     )
     parser.add_argument(
-        "--buffer-timeout-seconds", type=float, default=DEFAULT_BUFFER_TIMEOUT_SECONDS,
+        "--buffer-timeout-seconds",
+        type=float,
+        default=DEFAULT_BUFFER_TIMEOUT_SECONDS,
         help="Hold incoming requests for this long when no active color exists.",
     )
     parser.add_argument(
-        "--log-level", default="INFO",
+        "--log-level",
+        default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
     )
     parser.add_argument(
-        "--streamable-public-port", type=int, default=None,
-        help=(
-            "BLG-04: external stable port for the streamable HTTP MCP "
-            "transport, proxied to whichever color has reported a "
-            "streamable port. Omitted (default) = no streamable listener, "
-            "today's behaviour."
-        ),
+        "--streamable-public-port",
+        type=int,
+        default=None,
+        help=("BLG-04: external stable port for the streamable HTTP MCP transport, proxied to whichever color has reported a streamable port. Omitted (default) = no streamable listener, today's behaviour."),
     )
     parser.add_argument(
-        "--streamable-public-host", default="0.0.0.0",  # noqa: S104
+        "--streamable-public-host",
+        default="0.0.0.0",  # noqa: S104
         help="Streamable bind host (default 0.0.0.0 — external reachability).",
     )
     return parser.parse_args(list(argv))

@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::query_objects",
+  "display_name": "Zuora: Object Query List",
+  "description": "List records of any standard or custom object through Object Query (GET /object-query/{object}) with filter[], expand[], sort[] and field lists, one page per call; next_cursor is the cursor to pass back, null at the end. Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "Search any Zuora object such as accounts, invoices, invoice items, payments, subscriptions, usage or a custom object with filters like currency equals CAD, related-object expansion, sorting and chosen fields, page by page. Use for flexible reporting reads without writing ZOQL.",
+  "result_processor_customizations": {
+    "action_label": "Zuora objects queried",
+    "result_type": "zuora_query_objects_result",
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id, data (Zuora's response body, redacted) and pagination {cursor, next_cursor, returned, vendor, hint}; pass next_cursor back as cursor, null on the last page.",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+  },
+  "error_processor_customizations": {
+    "action_context": "List records of any standard or custom object through Object Query (GET /object-query/{object}) with filter[], expand[], sort[] and field lists, one page per call; next_cursor is the cursor to pass back, null at the end.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape: a bad identifier, header value or query pairing, a body missing a required field, or an unreadable upload file. zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.validation_failed is a vendor 4xx or an HTTP 200 carrying success false, with Zuora's reasons. zuora.object_not_found, zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the needed Object Query read permission or enable the vendor feature the reason names (for example Invoice Settlement). Read current vendor state with the matching get or list verb before retrying a write; pass an idempotency_key where offered. Back off on rate limits."
+  }
+}

@@ -47,7 +47,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -71,6 +70,8 @@ from quality_gates.candidate_tree import (  # noqa: E402
     read_rename_file,
     read_scope_file,
 )
+from quality_gates.editable_finder import copy_finder, finder_name  # noqa: E402
+from quality_gates.git_environment import scrubbed_git_environment  # noqa: E402
 
 
 class CandidateRepoError(RuntimeError):
@@ -92,19 +93,14 @@ class SharedRepoProof:
         # Two different counts, never conflated: every tracked file the index
         # holds, and the far smaller set staged AGAINST HEAD -- the protected
         # surface a landing must leave alone.
-        return (
-            f"HEAD={self.head} index_entries={self.index_entries} "
-            f"protected_paths={self.protected_paths} "
-            f"staged_digest={self.staged_digest[:16]} "
-            f"protected_digest={self.protected_digest[:16]} "
-            f"config_digest={self.config_digest[:16]}"
-        )
+        return f"HEAD={self.head} index_entries={self.index_entries} protected_paths={self.protected_paths} staged_digest={self.staged_digest[:16]} protected_digest={self.protected_digest[:16]} config_digest={self.config_digest[:16]}"
 
 
 def _git(repo_root: Path, *arguments: str) -> bytes:
     result = subprocess.run(
         ("git", *arguments),
         cwd=repo_root,
+        env=scrubbed_git_environment(),
         check=False,
         capture_output=True,
     )
@@ -145,6 +141,7 @@ def _head_pointer(repo_root: Path) -> tuple[str, str]:
     symbolic = subprocess.run(
         ("git", "symbolic-ref", "--quiet", "HEAD"),
         cwd=repo_root,
+        env=scrubbed_git_environment(),
         check=False,
         capture_output=True,
     )
@@ -172,10 +169,7 @@ def measure_shared_repo(repo_root: Path) -> SharedRepoProof:
 def assert_shared_repo_untouched(before: SharedRepoProof, after: SharedRepoProof) -> None:
     if before == after:
         return
-    raise CandidateRepoError(
-        "the shared repository changed while building the candidate — "
-        f"before: {before.render()} after: {after.render()}"
-    )
+    raise CandidateRepoError(f"the shared repository changed while building the candidate — before: {before.render()} after: {after.render()}")
 
 
 def _assert_physical(path: Path, *, label: str) -> Path:
@@ -192,9 +186,7 @@ def _assert_physical(path: Path, *, label: str) -> Path:
 
     resolved = path.resolve()
     if str(path) != str(resolved):
-        raise CandidateRepoError(
-            f"{label} must be its own physical path: {path} resolves to {resolved}"
-        )
+        raise CandidateRepoError(f"{label} must be its own physical path: {path} resolves to {resolved}")
     return resolved
 
 
@@ -208,14 +200,31 @@ def _assert_physical(path: Path, *, label: str) -> Path:
 # second parent it never reviewed.  Enumerated as a class, not at the one site
 # the ladder hit.
 _TRANSIENT_GITDIR_SUFFIX = ".lock"
-_TRANSIENT_GITDIR_TOP_LEVEL = frozenset({
-    "MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "MERGE_RR", "MERGE_AUTOSTASH",
-    "AUTO_MERGE", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "SQUASH_MSG",
-    "BISECT_LOG", "BISECT_START", "BISECT_TERMS", "BISECT_EXPECT", "BISECT_RUN",
-    "BISECT_ANCESTORS_OK", "BISECT_NAMES",
-    "sequencer", "rebase-merge", "rebase-apply",
-    "gc.pid",
-})
+_TRANSIENT_GITDIR_TOP_LEVEL = frozenset(
+    {
+        "MERGE_HEAD",
+        "MERGE_MSG",
+        "MERGE_MODE",
+        "MERGE_RR",
+        "MERGE_AUTOSTASH",
+        "AUTO_MERGE",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "REBASE_HEAD",
+        "SQUASH_MSG",
+        "BISECT_LOG",
+        "BISECT_START",
+        "BISECT_TERMS",
+        "BISECT_EXPECT",
+        "BISECT_RUN",
+        "BISECT_ANCESTORS_OK",
+        "BISECT_NAMES",
+        "sequencer",
+        "rebase-merge",
+        "rebase-apply",
+        "gc.pid",
+    }
+)
 _TRANSIENT_OBJECTS_PREFIX = "tmp_"
 
 
@@ -238,9 +247,7 @@ def is_transient_gitdir_entry(relative_directory: Path, name: str) -> bool:
     return parts[0] == "objects" and name.startswith(_TRANSIENT_OBJECTS_PREFIX)
 
 
-def provision_private_git(
-    repo_root: Path, candidate: CandidateTree, *, base_ref: str, scope: tuple[str, ...]
-) -> Path:
+def provision_private_git(repo_root: Path, candidate: CandidateTree, *, base_ref: str, scope: tuple[str, ...]) -> Path:
     """Give the candidate its own Git directory, coherent with its own worktree.
 
     Returns the candidate's ``.git`` path.  The inherited index is deleted and
@@ -265,25 +272,16 @@ def provision_private_git(
 
     def _skip_admin_and_transient(directory: str, names: list[str]) -> set[str]:
         relative_directory = Path(directory).relative_to(source_git_dir)
-        skipped = {
-            name for name in names
-            if is_transient_gitdir_entry(relative_directory, name)
-        }
-        skipped_transient.extend(
-            str(relative_directory / name) for name in sorted(skipped)
-        )
+        skipped = {name for name in names if is_transient_gitdir_entry(relative_directory, name)}
+        skipped_transient.extend(str(relative_directory / name) for name in sorted(skipped))
         if not relative_directory.parts:
             skipped |= {name for name in names if name == "worktrees"}
         return skipped
 
-    shutil.copytree(
-        source_git_dir, git_dir, symlinks=True, ignore=_skip_admin_and_transient
-    )
+    shutil.copytree(source_git_dir, git_dir, symlinks=True, ignore=_skip_admin_and_transient)
     if skipped_transient:
         print(
-            "candidate_repo: shared Git directory is mid-operation; "
-            f"{len(skipped_transient)} transient control file(s) not copied "
-            f"into the candidate: {', '.join(skipped_transient)}",
+            f"candidate_repo: shared Git directory is mid-operation; {len(skipped_transient)} transient control file(s) not copied into the candidate: {', '.join(skipped_transient)}",
             file=sys.stderr,
         )
 
@@ -295,15 +293,14 @@ def provision_private_git(
 
     alternates = git_dir / "objects" / "info" / "alternates"
     if alternates.exists():
-        raise CandidateRepoError(
-            "the candidate Git directory carries an alternates file pointing outside itself"
-        )
+        raise CandidateRepoError("the candidate Git directory carries an alternates file pointing outside itself")
 
-    environment = {
-        **os.environ,
-        "GIT_DIR": str(git_dir),
-        "GIT_WORK_TREE": str(candidate.root),
-    }
+    environment = scrubbed_git_environment(
+        {
+            "GIT_DIR": str(git_dir),
+            "GIT_WORK_TREE": str(candidate.root),
+        }
+    )
 
     def candidate_git(*arguments: str) -> bytes:
         result = subprocess.run(
@@ -320,9 +317,7 @@ def provision_private_git(
 
     absolute_git_dir = candidate_git("rev-parse", "--absolute-git-dir").decode().strip()
     if Path(absolute_git_dir).resolve() != git_dir.resolve():
-        raise CandidateRepoError(
-            f"candidate git dir resolved outside the candidate: {absolute_git_dir}"
-        )
+        raise CandidateRepoError(f"candidate git dir resolved outside the candidate: {absolute_git_dir}")
     worktree_setting = subprocess.run(
         ("git", "config", "--get", "core.worktree"),
         cwd=candidate.root,
@@ -331,9 +326,7 @@ def provision_private_git(
         capture_output=True,
     )
     if worktree_setting.returncode == 0 and worktree_setting.stdout.strip():
-        raise CandidateRepoError(
-            "the candidate Git directory pins core.worktree and would escape the candidate"
-        )
+        raise CandidateRepoError("the candidate Git directory pins core.worktree and would escape the candidate")
 
     # The copy carries the COMMON directory's HEAD, which in a linked worktree
     # belongs to the main checkout, so it is re-pointed at this tree's own —
@@ -391,10 +384,7 @@ def _write_provenance(
 
     provenance = candidate.manifest.parent / "candidate-provenance.txt"
     provenance.write_text(
-        f"source_head_kind={source_head_kind}\n"
-        f"source_head_value={source_head_value}\n"
-        f"base_ref={base_ref}\n"
-        f"base_commit={base_commit}\n",
+        f"source_head_kind={source_head_kind}\nsource_head_value={source_head_value}\nbase_ref={base_ref}\nbase_commit={base_commit}\n",
         encoding="utf-8",
     )
 
@@ -402,9 +392,7 @@ def _write_provenance(
 def _site_packages(venv: Path) -> Path:
     matches = sorted(venv.glob("lib/python3.*/site-packages"))
     if len(matches) != 1:
-        raise CandidateRepoError(
-            f"expected exactly one site-packages under {venv}, found {len(matches)}"
-        )
+        raise CandidateRepoError(f"expected exactly one site-packages under {venv}, found {len(matches)}")
     return matches[0]
 
 
@@ -477,9 +465,7 @@ def _venv_source_root(shared_venv: Path, repo_root: Path) -> Path:
     if owner == repo_root:
         return owner
     if not (owner / ".venv").is_dir():
-        raise CandidateRepoError(
-            f"shared virtualenv at {shared_venv} resolves outside any checkout: {owner}"
-        )
+        raise CandidateRepoError(f"shared virtualenv at {shared_venv} resolves outside any checkout: {owner}")
     return owner
 
 
@@ -490,19 +476,45 @@ def _validate_editable_pointers(payload: str, candidate_root: Path, entry_name: 
         if not pointer.strip():
             continue
         if not Path(pointer).is_absolute():
-            raise CandidateRepoError(
-                f"editable pointer {pointer!r} is not an absolute path in {entry_name}"
-            )
+            raise CandidateRepoError(f"editable pointer {pointer!r} is not an absolute path in {entry_name}")
         if not Path(pointer).resolve().is_relative_to(candidate_resolved):
-            raise CandidateRepoError(
-                f"editable pointer {pointer!r} does not resolve inside the candidate root "
-                f"{candidate_root}: {entry_name}"
-            )
+            raise CandidateRepoError(f"editable pointer {pointer!r} does not resolve inside the candidate root {candidate_root}: {entry_name}")
 
 
-def _install_site_packages(
-    shared: Path, candidate: Path, source_root: Path, candidate_root: Path
-) -> int:
+def _install_editable_pointer(entry: Path, candidate: Path, source_root: Path, candidate_root: Path) -> None:
+    """Install path pointers or validated finder imports, preserving import bytes."""
+    original = entry.read_bytes().decode("utf-8")
+    lines: list[str] = []
+    for line in original.splitlines(keepends=True):
+        name = finder_name(line)
+        if name is None:
+            rewritten = _rehome(line, source_root, candidate_root)
+            _validate_editable_pointers(rewritten, candidate_root, entry.name)
+            lines.append(rewritten)
+            continue
+        try:
+            copy_finder(entry.parent / f"{name}.py", candidate / f"{name}.py", source_root, candidate_root)
+        except ValueError as exc:
+            raise CandidateRepoError(f"{entry.name}: {exc}") from exc
+        lines.append(line)
+    destination = candidate / entry.name
+    destination.unlink(missing_ok=True)
+    destination.write_text("".join(lines), encoding="utf-8")
+
+
+def _editable_names_owner(entry: Path, source_root: Path) -> bool:
+    """Distinguish project pointers from independent third-party editables."""
+    payload = entry.read_text(encoding="utf-8")
+    if _root_pattern(source_root).search(payload):
+        return True
+    for line in payload.splitlines():
+        name = finder_name(line)
+        if name and _root_pattern(source_root).search((entry.parent / f"{name}.py").read_text(encoding="utf-8")):
+            return True
+    return False
+
+
+def _install_site_packages(shared: Path, candidate: Path, source_root: Path, candidate_root: Path, *, project_only: bool = False) -> int:
     """Share third-party libraries, but re-home every editable pointer.
 
     An editable install's pointer file carries an ABSOLUTE path into the shared
@@ -511,6 +523,11 @@ def _install_site_packages(
     copy of the same package sits at the candidate root — one module, two
     directories, so the same class loads as two distinct types and a static
     analyser reports that a type is not assignable to itself.
+
+    Setuptools finder imports retain their pth bytes. Their sibling modules
+    are copied with literal MAPPING paths validated and re-homed, including
+    package roots outside src. No write follows a prior candidate symlink.
+    Unrecognized imports and malformed or escaping mappings fail closed.
     """
 
     rehomed = 0
@@ -518,21 +535,18 @@ def _install_site_packages(
         if entry.name == "__pycache__":
             continue
         destination = candidate / entry.name
-        if destination.exists() or destination.is_symlink():
-            continue
-        if entry.suffix == ".pth" and entry.name.startswith("__editable__"):
-            payload = _rehome(entry.read_text(encoding="utf-8"), source_root, candidate_root)
-            _validate_editable_pointers(payload, candidate_root, entry.name)
-            destination.write_text(payload, encoding="utf-8")
+        editable = entry.suffix == ".pth" and entry.name.startswith("__editable__")
+        if editable and (not project_only or _editable_names_owner(entry, source_root)):
+            _install_editable_pointer(entry, candidate, source_root, candidate_root)
             rehomed += 1
+            continue
+        if destination.exists() or destination.is_symlink():
             continue
         destination.symlink_to(entry)
     return rehomed
 
 
-def _install_console_scripts(
-    shared_venv: Path, candidate_venv: Path, source_root: Path, candidate_root: Path
-) -> None:
+def _install_console_scripts(shared_venv: Path, candidate_venv: Path, source_root: Path, candidate_root: Path) -> None:
     """Symlink native binaries; COPY text scripts with their shebang re-homed.
 
     `ruff` is a Mach-O binary and must be symlinked.  `pyright` and `radon` are
@@ -554,21 +568,18 @@ def _install_console_scripts(
         if not payload.startswith("#!"):
             destination.symlink_to(entry)
             continue
-        destination.write_text(_rehome(payload, source_root, candidate_root), encoding="utf-8")
+        rehomed = _rehome(payload, shared_venv.resolve(), candidate_venv)
+        destination.write_text(_rehome(rehomed, source_root, candidate_root), encoding="utf-8")
         destination.chmod(0o755)
 
 
 def _shared_root_intruders(paths: list[str], roots: set[str]) -> list[str]:
     """Return interpreter paths that still reach either shared checkout."""
 
-    return [
-        entry for entry in paths if any(entry.startswith(f"{root}/") for root in roots)
-    ]
+    return [entry for entry in paths if any(entry.startswith(f"{root}/") for root in roots)]
 
 
-def _assert_venv_spelling(
-    candidate_root: Path, candidate_venv: Path, repo_root: Path, source_root: Path
-) -> None:
+def _assert_venv_spelling(candidate_root: Path, candidate_venv: Path, repo_root: Path, source_root: Path) -> None:
     """Assert SPELLING consistency, which runtime views cannot see.
 
     CPython resolves symlinks, so `sys.prefix` and `__file__` report the
@@ -578,10 +589,7 @@ def _assert_venv_spelling(
     every path agrees with its own realpath — not that the interpreter is happy.
     """
 
-    probe = (
-        "import json,sys,site\n"
-        "print(json.dumps({'prefix': sys.prefix, 'path': [p for p in sys.path if p]}))\n"
-    )
+    probe = "import json,sys,site\nprint(json.dumps({'prefix': sys.prefix, 'path': [p for p in sys.path if p]}))\n"
     result = subprocess.run(
         (str(candidate_venv / "bin" / "python3"), "-c", probe),
         cwd=candidate_root,
@@ -599,23 +607,24 @@ def _assert_venv_spelling(
     # directories.  Checking only `repo_root` is what let an under-homed
     # candidate pass: the pointers named the venv's owner, which a worktree run
     # never mentions, so the one path that could reach out went unexamined.
-    outsiders = {str(repo_root), str(source_root)}
+    outsiders = {str(root) for root in (repo_root, source_root) if root.resolve() != candidate_root.resolve()}
     intruders = _shared_root_intruders(view["path"], outsiders)
     if intruders:
         raise CandidateRepoError(f"candidate sys.path reaches the shared checkout: {intruders}")
-    unstable = [
-        entry
-        for entry in view["path"]
-        if Path(entry).exists() and str(Path(entry).resolve()) != entry
-    ]
+    unstable = [entry for entry in view["path"] if Path(entry).exists() and str(Path(entry).resolve()) != entry]
     if unstable:
-        raise CandidateRepoError(
-            f"candidate sys.path entries disagree with their own realpath: {unstable}"
-        )
+        raise CandidateRepoError(f"candidate sys.path entries disagree with their own realpath: {unstable}")
 
 
-def provision_candidate_venv(repo_root: Path, candidate_root: Path) -> Path:
-    """Give the candidate a REAL virtualenv co-located with its own tree.
+def provision_private_venv(
+    repo_root: Path,
+    target_source: Path,
+    environment: Path,
+    *,
+    shared_venv: Path | None = None,
+    require_editable: bool = True,
+) -> Path:
+    """Mirror dependencies into an independent environment for explicit sources.
 
     This reproduces the post-merge topology — venv beside checkout — so it
     raises fidelity rather than lowering a bar.  Symlinking the shared venv, or
@@ -625,10 +634,12 @@ def provision_candidate_venv(repo_root: Path, candidate_root: Path) -> Path:
     interpreter that was actually invoked.
     """
 
-    shared_venv = repo_root / ".venv"
+    shared_venv = shared_venv or repo_root / ".venv"
     if not shared_venv.is_dir():
         raise CandidateRepoError(f"no shared virtualenv to mirror at {shared_venv}")
-    candidate_venv = candidate_root / ".venv"
+    if environment.is_symlink() or environment.resolve().is_relative_to(shared_venv.resolve()):
+        raise CandidateRepoError(f"private environment would mutate the shared virtualenv: {environment}")
+    candidate_venv = environment
 
     shared_interpreter = _shared_interpreter(shared_venv)
     result = subprocess.run(
@@ -643,22 +654,20 @@ def provision_candidate_venv(repo_root: Path, candidate_root: Path) -> Path:
     shared_version = _interpreter_version(shared_interpreter)
     candidate_version = _interpreter_version(candidate_venv / "bin" / "python3")
     if shared_version != candidate_version:
-        raise CandidateRepoError(
-            f"candidate interpreter {candidate_version} does not match "
-            f"the shared interpreter {shared_version}"
-        )
+        raise CandidateRepoError(f"candidate interpreter {candidate_version} does not match the shared interpreter {shared_version}")
 
     source_root = _venv_source_root(shared_venv, repo_root)
-    rehomed = _install_site_packages(
-        _site_packages(shared_venv), _site_packages(candidate_venv), source_root, candidate_root
-    )
-    if not rehomed:
-        raise CandidateRepoError(
-            "no editable pointers were re-homed; the shared venv's layout is not what this expects"
-        )
-    _install_console_scripts(shared_venv, candidate_venv, source_root, candidate_root)
-    _assert_venv_spelling(candidate_root, candidate_venv, repo_root, source_root)
+    rehomed = _install_site_packages(_site_packages(shared_venv), _site_packages(candidate_venv), source_root, target_source, project_only=not require_editable)
+    if require_editable and not rehomed:
+        raise CandidateRepoError("no editable pointers were re-homed; the shared venv's layout is not what this expects")
+    _install_console_scripts(shared_venv, candidate_venv, source_root, target_source)
+    _assert_venv_spelling(target_source, candidate_venv, repo_root, source_root)
     return candidate_venv
+
+
+def provision_candidate_venv(repo_root: Path, candidate_root: Path) -> Path:
+    """Keep the candidate API and strict checks, with its venv beside its tree."""
+    return provision_private_venv(repo_root, candidate_root, candidate_root / ".venv")
 
 
 def prepare_wave_integration_candidate(
@@ -712,9 +721,7 @@ def build(
             raise CandidateRepoError("a staged candidate takes its content from the index, not renames")
         candidate = materialize_staged_tree(root, out, scope, base_ref=base_ref)
     else:
-        candidate = materialize_candidate_tree(
-            root, out, scope, renames=renames, base_ref=base_ref
-        )
+        candidate = materialize_candidate_tree(root, out, scope, renames=renames, base_ref=base_ref)
     if with_git:
         provision_private_git(root, candidate, base_ref=base_ref, scope=scope)
     if with_venv:

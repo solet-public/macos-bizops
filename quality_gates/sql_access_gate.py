@@ -32,7 +32,9 @@ Categories (initial — SQL lockdown):
                         ON CONFLICT/RETURNING/AS/USING), or carries the standalone
                         ON CONFLICT marker. Docstrings are skipped and a bare verb
                         without a companion is ignored — both were prose FPs in
-                        the WARN baseline (601→142 after tuning).
+                        the WARN baseline (601→142 after tuning). Declared vendor
+                        connector roots skip S2 only when the module contains no
+                        existing S1 sink; S0/S1/S3 retain their normal behavior.
   S3  hand-DDL        the DDL subset of S2 (CREATE/ALTER/DROP TABLE, CREATE/DROP
                         INDEX) — bypasses the metadata-driven DDL lifecycle.
 
@@ -109,9 +111,16 @@ CAT_DDL = "S3"
 _CONTENT_ANCHOR_PREFIX = "sql:"
 
 # --- S0: Postgres driver roots (top dotted segment) ---
-_DRIVER_ROOTS = frozenset({
-    "psycopg", "psycopg2", "psycopg_pool", "asyncpg", "pg8000", "sqlalchemy",
-})
+_DRIVER_ROOTS = frozenset(
+    {
+        "psycopg",
+        "psycopg2",
+        "psycopg_pool",
+        "asyncpg",
+        "pg8000",
+        "sqlalchemy",
+    }
+)
 
 # --- S1: raw-SQL call method names. Two deliberate exclusions:
 #   * bare ``execute`` (N1) — collides with PluginBase.execute / the prompt
@@ -124,26 +133,54 @@ _DRIVER_ROOTS = frozenset({
 #     still fire. So a block doing real raw SQL is still caught, while a block
 #     using only typed ops (write_state/update_state/delete_records/query_state)
 #     is correctly clean. ---
-_SQL_CALL_METHODS = frozenset({
-    "execute_sql", "executemany", "fetch_one", "fetch_all",
-})
+_SQL_CALL_METHODS = frozenset(
+    {
+        "execute_sql",
+        "executemany",
+        "fetch_one",
+        "fetch_all",
+    }
+)
 
 # --- S2/S3: SQL verb prefixes (matched as "<verb> ", so a bare keyword token
 # never trips) + DDL prefixes (the S3 subset) + substring markers. ---
 _SQL_VERBS = (
-    "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER",
-    "DROP", "WITH", "TRUNCATE", "GRANT", "REVOKE",
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "CREATE",
+    "ALTER",
+    "DROP",
+    "WITH",
+    "TRUNCATE",
+    "GRANT",
+    "REVOKE",
 )
 _DDL_PREFIXES = (
-    "CREATE TABLE", "ALTER TABLE", "DROP TABLE",
-    "CREATE UNIQUE INDEX", "CREATE INDEX", "DROP INDEX",
+    "CREATE TABLE",
+    "ALTER TABLE",
+    "DROP TABLE",
+    "CREATE UNIQUE INDEX",
+    "CREATE INDEX",
+    "DROP INDEX",
 )
 # v1-WARN tuning (against the inventory's 222): a verb prefix alone over-counts
 # ~3x on prose docstrings ("Create the directory", "Update the record"). A real
 # SQL statement also carries a structural companion keyword — require one.
 _SQL_COMPANIONS = (
-    " FROM ", " INTO ", " SET ", " VALUES", " WHERE ", " TABLE ",
-    " INDEX ", " JOIN ", " ON CONFLICT", " RETURNING", " AS ", " USING ",
+    " FROM ",
+    " INTO ",
+    " SET ",
+    " VALUES",
+    " WHERE ",
+    " TABLE ",
+    " INDEX ",
+    " JOIN ",
+    " ON CONFLICT",
+    " RETURNING",
+    " AS ",
+    " USING ",
 )
 # Standalone fragment markers (SQL-specific, low prose risk). " RETURNING" is
 # intentionally NOT standalone (English "returning the value" trips it) — it
@@ -173,14 +210,47 @@ _SUBSTR_MARKERS = (" ON CONFLICT",)
 # exhaustive Postgres grammar; a truly exotic object whose leader is absent
 # would classify as None, but such statements are owner-only DBA operations that
 # never appear in non-owner feature code (current real-violation count: 0).
-_OBJECT_KEYWORDS = frozenset({
-    "TABLE", "INDEX", "UNIQUE", "VIEW", "MATERIALIZED", "SEQUENCE", "SCHEMA",
-    "EXTENSION", "FUNCTION", "PROCEDURE", "TRIGGER", "TYPE", "DOMAIN", "ROLE",
-    "USER", "DATABASE", "AGGREGATE", "OPERATOR", "POLICY", "RULE", "TEMP",
-    "TEMPORARY", "UNLOGGED", "COLUMN", "CONSTRAINT", "PARTITION", "COLLATION",
-    "PUBLICATION", "SUBSCRIPTION", "STATISTICS", "FOREIGN", "LANGUAGE", "CAST",
-    "SERVER", "EVENT", "OR", "IF",
-})
+_OBJECT_KEYWORDS = frozenset(
+    {
+        "TABLE",
+        "INDEX",
+        "UNIQUE",
+        "VIEW",
+        "MATERIALIZED",
+        "SEQUENCE",
+        "SCHEMA",
+        "EXTENSION",
+        "FUNCTION",
+        "PROCEDURE",
+        "TRIGGER",
+        "TYPE",
+        "DOMAIN",
+        "ROLE",
+        "USER",
+        "DATABASE",
+        "AGGREGATE",
+        "OPERATOR",
+        "POLICY",
+        "RULE",
+        "TEMP",
+        "TEMPORARY",
+        "UNLOGGED",
+        "COLUMN",
+        "CONSTRAINT",
+        "PARTITION",
+        "COLLATION",
+        "PUBLICATION",
+        "SUBSCRIPTION",
+        "STATISTICS",
+        "FOREIGN",
+        "LANGUAGE",
+        "CAST",
+        "SERVER",
+        "EVENT",
+        "OR",
+        "IF",
+    }
+)
 _CLOSED_FOLLOWERS: dict[str, frozenset[str]] = {
     "INSERT": frozenset({"INTO"}),
     "DELETE": frozenset({"FROM"}),
@@ -201,6 +271,21 @@ _OWNER_PREFIXES = (
     # R-phase TODO (pending operator GAP-3): if the ledger's search backend is
     # ruled a sanctioned search-primitive owner, add its src/ prefix here. Do
     # NOT add it yet — until GAP-3 resolves, the ledger search SQL stays flagged.
+)
+
+# Vendor SQL/SOQL is not platform persistence. This declaration covers exactly
+# the seven connector roots (src AND tests), not every plugin or SQL category.
+# S2 retains its full scan when any existing S1 sink is present in the module;
+# this conservatively covers indirect/aliased queries without claiming dataflow
+# analysis or mistaking the foreign adapters' bare .execute() for a new S1 sink.
+_VENDOR_QUERY_PREFIXES = (
+    "plugins/salesforce_plugin/",
+    "plugins/snowflake_plugin/",
+    "plugins/zuora_plugin/",
+    "plugins/marketo_plugin/",
+    "plugins/jira_plugin/",
+    "plugins/external_postgres_plugin/",
+    "plugins/g_suite_plugin/",
 )
 
 _SCAN_ROOTS = (
@@ -291,8 +376,7 @@ class Allowlist:
                 continue
             if entry.specifier in ("*", str(finding.line)):
                 return entry
-            if (entry.specifier.startswith(_CONTENT_ANCHOR_PREFIX)
-                    and entry.specifier[len(_CONTENT_ANCHOR_PREFIX):] == finding.detail):
+            if entry.specifier.startswith(_CONTENT_ANCHOR_PREFIX) and entry.specifier[len(_CONTENT_ANCHOR_PREFIX) :] == finding.detail:
                 return entry
         return None
 
@@ -343,8 +427,7 @@ def _docstring_constant_ids(module: ast.Module) -> set[int]:
         if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         first = node.body[0] if node.body else None
-        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) \
-                and isinstance(first.value.value, str):
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
             ids.add(id(first.value))
     return ids
 
@@ -467,6 +550,8 @@ def _snippet(text: str) -> str:
 
 
 def detect_raw_sql(module: ast.Module, path: str) -> Iterator[Finding]:
+    if path.startswith(_VENDOR_QUERY_PREFIXES) and not any(detect_sql_call(module, path)):
+        return
     for line, text in _iter_string_literals(module):
         if classify_sql(text) == CAT_RAW_SQL:
             yield Finding(CAT_RAW_SQL, path, line, _snippet(text))
@@ -497,7 +582,7 @@ def _plugin_in_scope(parts: tuple[str, ...]) -> bool:
     idx = parts.index("plugins")
     if idx + 2 >= len(parts) or parts[idx + 2] not in _PLUGIN_SCOPE_SEGMENTS:
         return False
-    return not any(seg in _OPERATOR_TOOLING_SEGMENTS for seg in parts[idx + 3:])
+    return not any(seg in _OPERATOR_TOOLING_SEGMENTS for seg in parts[idx + 3 :])
 
 
 def _is_in_scope(path: Path) -> bool:
@@ -574,13 +659,14 @@ def load_allowlist(path: Path) -> Allowlist:
         if len(parts) < 3:
             print(f"WARN: malformed allowlist line: {line!r}", file=sys.stderr)
             continue
-        entries.append(AllowEntry(
-            category_id=parts[0].strip(),
-            path_suffix=parts[1].strip(),
-            specifier=parts[2].strip(),
-            is_permanent=("false-positive" in note.lower()
-                          or "sanctioned-exempt" in note.lower()),
-        ))
+        entries.append(
+            AllowEntry(
+                category_id=parts[0].strip(),
+                path_suffix=parts[1].strip(),
+                specifier=parts[2].strip(),
+                is_permanent=("false-positive" in note.lower() or "sanctioned-exempt" in note.lower()),
+            )
+        )
     return Allowlist(tuple(entries))
 
 
@@ -606,8 +692,7 @@ def render_report(findings: list[Finding], allowlist: Allowlist) -> tuple[int, i
         group = by_category.get(category.category_id, [])
         if not group:
             continue
-        print(f"\n=== {category.category_id} {label[category.category_id]} "
-              f"({len(group)} finding(s)) ===")
+        print(f"\n=== {category.category_id} {label[category.category_id]} ({len(group)} finding(s)) ===")
         for finding in sorted(group, key=lambda f: (f.path, f.line)):
             entry = allowlist.match(finding)
             marker = " [allowlisted]" if entry else ""
@@ -633,7 +718,9 @@ def _per_file_summary(findings: list[Finding], allowlist: Allowlist) -> None:
 
 
 def _require_clean_violations(
-    findings: list[Finding], allowlist: Allowlist, prefixes: list[str],
+    findings: list[Finding],
+    allowlist: Allowlist,
+    prefixes: list[str],
 ) -> list[Finding]:
     """Findings under a --require-clean prefix that are NOT permanent FPs (N3)."""
     out: list[Finding] = []
@@ -654,13 +741,9 @@ def _require_clean_violations(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SQL-access quality gate (#0 lockdown).")
-    parser.add_argument("--allowlist", type=Path, default=None,
-                        help="Path to the category-keyed tracked-debt allowlist.")
-    parser.add_argument("--warn-only", action="store_true",
-                        help="Always exit 0 (WARN phase); findings still print.")
-    parser.add_argument("--require-clean", action="append", default=[], metavar="PREFIX",
-                        help="Assert a migrated subtree has zero non-FP findings; "
-                             "repeatable. Fails (exit 1) even under --warn-only.")
+    parser.add_argument("--allowlist", type=Path, default=None, help="Path to the category-keyed tracked-debt allowlist.")
+    parser.add_argument("--warn-only", action="store_true", help="Always exit 0 (WARN phase); findings still print.")
+    parser.add_argument("--require-clean", action="append", default=[], metavar="PREFIX", help="Assert a migrated subtree has zero non-FP findings; repeatable. Fails (exit 1) even under --warn-only.")
     return parser
 
 
@@ -689,14 +772,10 @@ def run(argv: list[str]) -> int:
     _per_file_summary(findings, allowlist)
 
     require_clean: list[str] = list(args.require_clean)
-    rc_violations = (
-        _require_clean_violations(findings, allowlist, require_clean)
-        if require_clean else []
-    )
+    rc_violations = _require_clean_violations(findings, allowlist, require_clean) if require_clean else []
 
     total = len(findings)
-    print(f"\nSUMMARY: {total} finding(s) — {blocking} non-allowlisted, "
-          f"{allowlisted} allowlisted.")
+    print(f"\nSUMMARY: {total} finding(s) — {blocking} non-allowlisted, {allowlisted} allowlisted.")
     if require_clean:
         print(f"--require-clean {require_clean}: {len(rc_violations)} violation(s).")
         for finding in sorted(rc_violations, key=lambda f: (f.path, f.line))[:20]:

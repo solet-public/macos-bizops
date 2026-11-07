@@ -1,6 +1,7 @@
 """Synchronous ownership boundary around the asynchronous Core AI runtime."""
 
 import asyncio
+import logging
 import platform
 import threading
 from collections.abc import Callable
@@ -10,13 +11,14 @@ from typing import TYPE_CHECKING, TypeVar
 
 from .cache_canary import CacheCanary, CanaryReport
 from .contracts import EmbeddingError, ErrorCode
-from .native import NativeModel
+from .native import PINNED_OUTPUT_BUDGET, NativeModel, PinnedOutputs
 from .tokenization import EncodedInput, NomicTokenizer
 
 if TYPE_CHECKING:
     from .assets import InstalledAsset
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 #: The oldest macOS this runtime serves on. 27 for now (rul_5cc2910c): Core AI Nomic has only been run on 27, so a
 #: macOS 26 update keeps LM Studio; lowering it after the macOS 26 measurement (iss_c6abab0d) is a data change here
 #: and in the release flow's host_profiles.apple_embeddings.macos_major_min, pinned equal by embedding_token_budget_smoke.
@@ -43,7 +45,14 @@ class EmbeddingRuntime:
         with self._lock:
             if self._closed or self._failed:
                 raise EmbeddingError(ErrorCode.UNAVAILABLE, "Runtime closed or failed; prepare again")
-            future = self._executor.submit(operation)
+            try:
+                future = self._executor.submit(operation)
+            except RuntimeError as exc:
+                self._failed = True
+                raise EmbeddingError(
+                    ErrorCode.UNAVAILABLE,
+                    f"Core AI executor rejected operation submission: {exc}",
+                ) from exc
             try:
                 return future.result(timeout=120)
             except TimeoutError as exc:
@@ -117,10 +126,12 @@ class EmbeddingRuntime:
     def diagnostics(self) -> dict[str, object]:
         """Distinguish configured preference from measured execution evidence."""
         canary = {"cache_canary": self._canary_report.as_dict()} if self._canary_report else {}
+        pinned = {"pinned_gpu_outputs": PinnedOutputs.count, "pinned_gpu_output_budget": PINNED_OUTPUT_BUDGET}
         if self._native is None:
-            return {"compute_preference": self.preference, "observed_compute_unit": "unknown", **canary}
+            return {"compute_preference": self.preference, "observed_compute_unit": "unknown", **canary, **pinned}
         return {
             **canary,
+            **pinned,
             "compute_preference": self.preference,
             "selected_compute_preference": self._native.compute_preference,
             "observed_compute_unit": self._native.observed_compute_unit,
@@ -134,8 +145,12 @@ class EmbeddingRuntime:
             if self._closed:
                 return
             self._closed = True
-            self._executor.submit(self._close_native)
-            self._executor.shutdown(wait=False)
+            try:
+                self._executor.submit(self._close_native)
+            except RuntimeError as exc:
+                logger.warning("Core AI runtime could not schedule native cleanup: %s", exc)
+            finally:
+                self._executor.shutdown(wait=False)
 
     def _close_native(self) -> None:
         self._native = None

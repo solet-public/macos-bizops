@@ -17,9 +17,9 @@ other difference -- an extra edit, another interpreter, malformed JSON, a
 manifest the transform leaves unchanged -- stays an executed-code modification.
 A recognized pin is then an ordinary Class-T preserved tracked path: it is
 committed by digest, and a fast-forward that does not touch it carries it to
-the new tree byte-for-byte.  A candidate that changes a pinned manifest is still
-``tracked_overlap_present``; carrying the pin across a changed manifest is a
-Manager capability this release does not have (iss_c1a7df20).
+the new tree byte-for-byte. When a candidate changes a pinned manifest,
+``update_hook_pin_carry`` plans an approval-bound restore/fast-forward/re-pin
+transition and rebaselines its digest as a declared Manager write (iss_c1a7df20).
 
 The installation doctor's seed-tree check admits the Claude manifest by the same
 byte-exact predicate, ``is_installer_pin``, through ``worktree_installer_pins``

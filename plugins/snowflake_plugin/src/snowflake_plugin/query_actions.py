@@ -11,24 +11,24 @@ inline-return/``INLINE_BYTE_CAP`` branch is deleted, not lowered). The
 effective row ceiling is DEFAULT_ROW_LIMIT unless the caller supplies BOTH
 ``acknowledge_default_limit_override=true`` and an explicit ``row_limit`` (up
 to the verb's hard cap) — see ``_resolve_effective_limit``. Invalid params
-raise ``ValueError`` (-> snowflake.invalid_params); guard violations raise
+raise ``ValueError`` (-> snowflake.invalid_params); malformed SQL raises
 ``StatementGuardError``; driver errors propagate to the plugin's
 ``classify_snowflake_error``.
 
-``run_statement`` is this module's WRITE verb (operator ruling 2026-08-09 +
+``run_statement`` is this module's statement verb (operator ruling 2026-08-09 +
 Amendment 1, "vendor RBAC is the control plane"): it performs NO statement
-classification of any kind — ``assert_read_statement`` (the read/write
-ACCESS-CONTROL decision) never appears on this path, and unlike
+classification of any kind — ``assert_read_statement`` (input validation)
+never appears on this path, and unlike
 external_postgres_plugin's ``run_statement`` there is no
 ``assert_single_statement`` SHAPE guard to reuse either: Snowflake's
 ``MULTI_STATEMENT_COUNT`` session parameter defaults to 1 and this connector
 never calls ``execute_string``, so a two-statement string is refused natively
 by the driver (verified live against the operator's own account, 2026-08-10 —
-a harmless read-only ``"SELECT 1; SELECT 2"`` probe through ``run_query``
+a harmless two-statement ``"SELECT 1; SELECT 2"`` probe through ``run_query``
 failed at the driver rather than silently running both). What the statement
 is actually allowed to do is decided entirely by the server-side role grants
-on the registered credential. Snowflake also has no session-level read-only
-CONNECTION characteristic (connection.py) and — unlike psycopg3 — defaults
+on the registered credential. Snowflake also has no session-level authorization
+characteristic (connection.py) and — unlike psycopg3 — defaults
 every session to ``AUTOCOMMIT=TRUE`` (each statement commits or rolls back on
 its own the instant it finishes; verified against the installed
 ``snowflake-connector-python`` source and Snowflake's own transactions
@@ -72,14 +72,17 @@ PathGate = Callable[[str], str]
 
 
 def run_query(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
-    """Run one read-only statement; write the result to output_tsv_path, return a handle.
+    """Run one statement; write the result to output_tsv_path, return a handle.
 
     Defaults to DEFAULT_ROW_LIMIT rows; an acknowledged override may request
     up to MAX_ROWS_HARD_CAP. For pulls beyond that ceiling, use export_query
     (up to EXPORT_ROW_CAP with the same override).
     """
     effective_limit = _resolve_effective_limit(
-        params, default=DEFAULT_ROW_LIMIT, hard_cap=MAX_ROWS_HARD_CAP, verb="run_query",
+        params,
+        default=DEFAULT_ROW_LIMIT,
+        hard_cap=MAX_ROWS_HARD_CAP,
+        verb="run_query",
     )
     sql = _require_str(params, "sql")
     output_tsv_path = _require_str(params, "output_tsv_path")
@@ -112,12 +115,12 @@ def run_statement(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dic
         resolved_path = path_gate(output_tsv_path)
         parent_dir = os.path.dirname(resolved_path)
         if not os.path.isdir(parent_dir):
-            raise ValueError(
-                f"the parent directory of output_tsv_path does not exist ({parent_dir}); "
-                "create it first — this verb writes one file, it does not create directories"
-            )
+            raise ValueError(f"the parent directory of output_tsv_path does not exist ({parent_dir}); create it first — this verb writes one file, it does not create directories")
     effective_limit = _resolve_effective_limit(
-        params, default=DEFAULT_ROW_LIMIT, hard_cap=MAX_ROWS_HARD_CAP, verb="run_statement",
+        params,
+        default=DEFAULT_ROW_LIMIT,
+        hard_cap=MAX_ROWS_HARD_CAP,
+        verb="run_statement",
     )
     conn.autocommit(False)
     with conn.cursor() as cur:
@@ -129,12 +132,7 @@ def run_statement(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dic
             return {"rowcount": rowcount, "has_result_set": False}
         if resolved_path is None:
             conn.rollback()
-            raise ValueError(
-                "the statement produced a result set (e.g. a RETURNING clause) but no "
-                "output_tsv_path was supplied; rows are never returned inline — pass "
-                "output_tsv_path to receive them as a TSV, the same always-export contract "
-                "as run_query"
-            )
+            raise ValueError("the statement produced a result set (e.g. a RETURNING clause) but no output_tsv_path was supplied; rows are never returned inline — pass output_tsv_path to receive them as a TSV, the same always-export contract as run_query")
         columns = [d[0] for d in cur.description]
         rows = cur.fetchmany(effective_limit)
         rowcount = cur.rowcount
@@ -178,18 +176,12 @@ def list_tables(conn: Any, params: dict[str, Any]) -> dict[str, Any]:
     database = _require_str(params, "database")
     schema = _require_str(params, "schema")
     with conn.cursor() as cur:
-        cur.execute(
-            f'SHOW TABLES IN SCHEMA "{_quote_ident(database)}"."{_quote_ident(schema)}"'
-        )
+        cur.execute(f'SHOW TABLES IN SCHEMA "{_quote_ident(database)}"."{_quote_ident(schema)}"')
         rows = cur.fetchall()
         columns = [d[0] for d in cur.description] if cur.description else []
     name_idx = _column_index(columns, "name")
     kind_idx = _column_index(columns, "kind")
-    return {
-        "tables": [
-            {"name": _cell(r, name_idx), "kind": _cell(r, kind_idx)} for r in rows
-        ]
-    }
+    return {"tables": [{"name": _cell(r, name_idx), "kind": _cell(r, kind_idx)} for r in rows]}
 
 
 def describe_table(conn: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -198,10 +190,7 @@ def describe_table(conn: Any, params: dict[str, Any]) -> dict[str, Any]:
     schema = _require_str(params, "schema")
     table = _require_str(params, "table")
     with conn.cursor() as cur:
-        cur.execute(
-            f'DESCRIBE TABLE "{_quote_ident(database)}"."{_quote_ident(schema)}".'
-            f'"{_quote_ident(table)}"'
-        )
+        cur.execute(f'DESCRIBE TABLE "{_quote_ident(database)}"."{_quote_ident(schema)}"."{_quote_ident(table)}"')
         rows = cur.fetchall()
         columns = [d[0] for d in cur.description] if cur.description else []
     name_idx = _column_index(columns, "name")
@@ -224,10 +213,7 @@ def describe_table(conn: Any, params: dict[str, Any]) -> dict[str, Any]:
 def test_connection(conn: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Confirm the connection: account, user, role, warehouse, server version."""
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT CURRENT_ACCOUNT(), CURRENT_USER(), CURRENT_ROLE(), "
-            "CURRENT_WAREHOUSE(), CURRENT_VERSION()"
-        )
+        cur.execute("SELECT CURRENT_ACCOUNT(), CURRENT_USER(), CURRENT_ROLE(), CURRENT_WAREHOUSE(), CURRENT_VERSION()")
         row = cur.fetchone()
     return {
         "ok": True,
@@ -240,7 +226,7 @@ def test_connection(conn: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def export_query(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
-    """Export a read-only query's result as a workspace TSV — the N>>500 route.
+    """Export a query's result as a workspace TSV — the N>>500 route.
 
     Same caller-supplied-path destination and override mechanism as
     run_query; only the override's hard cap differs (EXPORT_ROW_CAP, not
@@ -250,7 +236,10 @@ def export_query(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dict
     statement executes, so a refused path never sends the query.
     """
     effective_limit = _resolve_effective_limit(
-        params, default=DEFAULT_ROW_LIMIT, hard_cap=EXPORT_ROW_CAP, verb="export_query",
+        params,
+        default=DEFAULT_ROW_LIMIT,
+        hard_cap=EXPORT_ROW_CAP,
+        verb="export_query",
     )
     sql = _require_str(params, "sql")
     output_tsv_path = _require_str(params, "output_tsv_path")
@@ -264,7 +253,11 @@ def export_query(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dict
 
 
 def _resolve_effective_limit(
-    params: dict[str, Any], *, default: int, hard_cap: int, verb: str,
+    params: dict[str, Any],
+    *,
+    default: int,
+    hard_cap: int,
+    verb: str,
 ) -> int:
     """Resolve the effective fetch ceiling from the §5 override pair.
 
@@ -279,25 +272,22 @@ def _resolve_effective_limit(
     override_present = override is True
     row_limit_present = row_limit is not None
     if override_present != row_limit_present:
-        raise ValueError(
-            f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be "
-            f"given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, "
-            f"{PARAM_ROW_LIMIT}={row_limit!r}"
-        )
+        raise ValueError(f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, {PARAM_ROW_LIMIT}={row_limit!r}")
     if not override_present:
         return default
     if not isinstance(row_limit, int) or isinstance(row_limit, bool) or row_limit < 1:
         raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}' must be a positive integer")
     if row_limit > hard_cap:
-        raise ValueError(
-            f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of "
-            f"{hard_cap}; refusing rather than silently clamping"
-        )
+        raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of {hard_cap}; refusing rather than silently clamping")
     return row_limit
 
 
 def _execute_and_write_tsv(
-    conn: Any, sql: str, cap: int, path_gate: PathGate, output_tsv_path: str,
+    conn: Any,
+    sql: str,
+    cap: int,
+    path_gate: PathGate,
+    output_tsv_path: str,
 ) -> dict[str, Any]:
     """Admit the path, fetch up to ``cap`` rows, write a TSV, return a handle.
 
@@ -308,10 +298,7 @@ def _execute_and_write_tsv(
     resolved_path = path_gate(output_tsv_path)
     parent_dir = os.path.dirname(resolved_path)
     if not os.path.isdir(parent_dir):
-        raise ValueError(
-            f"the parent directory of output_tsv_path does not exist ({parent_dir}); "
-            "create it first — this verb writes one file, it does not create directories"
-        )
+        raise ValueError(f"the parent directory of output_tsv_path does not exist ({parent_dir}); create it first — this verb writes one file, it does not create directories")
     columns, rows = _execute_fetch(conn, sql, cap)
     row_lists = [_row_to_list(r) for r in rows]
     with open(resolved_path, "wb") as handle:

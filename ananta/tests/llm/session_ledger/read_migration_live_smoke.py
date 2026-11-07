@@ -325,7 +325,8 @@ def main() -> int:
             "needs the live solet DB "
             "(read-only, non-destructive).",
         )
-        return 0
+        print('BORN_CLONE_SKIP_WITNESS={"reason":"opt_in_toggle_not_enabled","toggle":"LEDGER_READ_LIVE_SMOKE"}')
+        return 77
     print("=== read_migration_live_smoke ===")
     provider = PostgresProvider(_load_pg_config())
     provider.initialize()

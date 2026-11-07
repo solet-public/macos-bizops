@@ -139,6 +139,11 @@ class MemoryServiceInterface(ABC):
         ...
 
     @abstractmethod
+    def corpus_counts(self) -> dict[str, Any]:
+        """Return one bounded scalar count for the stored memory corpus."""
+        ...
+
+    @abstractmethod
     def list_memories(
         self,
         memory_type: str | None = None,
@@ -528,9 +533,7 @@ class MemoryServiceInterface(ABC):
         ...
 
     @abstractmethod
-    def cleanup_orphaned_vectors(
-        self, dry_run: bool = False, confirm: bool = False
-    ) -> dict[str, Any]:
+    def cleanup_orphaned_vectors(self, dry_run: bool = False, confirm: bool = False) -> dict[str, Any]:
         """Rebuild the memory-vector namespace (clear then reindex every memory).
 
         Cascade-vector-first makes orphan-vectors unreachable-by-construction, so

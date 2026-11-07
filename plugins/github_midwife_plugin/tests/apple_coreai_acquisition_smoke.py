@@ -13,12 +13,13 @@ Run directly::
 from __future__ import annotations
 
 import hashlib
+import http.client
 import io
 import json
 import sys
 import tempfile
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import cast
@@ -33,25 +34,33 @@ sys.path.insert(0, str(_ROOT / "plugins" / "coreai_embeddings_plugin" / "src"))
 from coreai_embeddings_plugin.assets import acquisition, archive  # noqa: E402
 from github_midwife_plugin import apple_setup_adapter as apple  # noqa: E402
 from github_midwife_plugin import setup_adapter  # noqa: E402
-from github_midwife_plugin.setup_adapter_contract import AdapterRequest, JsonObject  # noqa: E402
+from github_midwife_plugin.setup_adapter_contract import AdapterRequest, JsonObject, JsonValue  # noqa: E402
+from github_midwife_plugin.setup_adapter_runtime import CommandOutcome  # noqa: E402
 from github_midwife_plugin.setup_operations import coreai_autostart_deferral  # noqa: E402
 
 _REFERENCE = "setup::apple.acquire_coreai_asset"
-_CHECKS = 0
+_checks = 0
 
 
 def _check(condition: object, label: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    global _checks
+    _checks += 1
     if not condition:
         raise AssertionError(label)
 
 
 class _Response:
-    def __init__(self, data: bytes, *, status: int = 200) -> None:
+    def __init__(
+        self,
+        data: bytes,
+        *,
+        status: int = 200,
+        read_error: http.client.HTTPException | None = None,
+    ) -> None:
         self.status = status
         self.headers: Mapping[str, str] = {"Content-Length": str(len(data))}
         self._stream = io.BytesIO(data)
+        self._read_error = read_error
 
     def __enter__(self) -> _Response:
         return self
@@ -60,6 +69,9 @@ class _Response:
         return None
 
     def read(self, size: int = -1) -> bytes:
+        if self._read_error is not None:
+            error, self._read_error = self._read_error, None
+            raise error
         return self._stream.read(size)
 
 
@@ -78,7 +90,24 @@ class _Opener:
             raise URLError("fixture network unreachable")
         if self.failure == "http":
             return _Response(b"", status=503)
+        if self.failure == "incomplete_read":
+            return _Response(self.archive_bytes, read_error=http.client.IncompleteRead(b"partial", 10))
+        if self.failure == "bad_status_line":
+            return _Response(self.archive_bytes, read_error=http.client.BadStatusLine("fixture bad status line"))
         return _Response(self.archive_bytes)
+
+
+class _ArchiveSink:
+    """Provide the keyword-compatible write shape expected by the archive."""
+
+    def __init__(self) -> None:
+        self._buffer = io.BytesIO()
+
+    def write(self, data: bytes) -> int:
+        return self._buffer.write(data)
+
+    def getvalue(self) -> bytes:
+        return self._buffer.getvalue()
 
 
 class _NoHost:
@@ -86,10 +115,25 @@ class _NoHost:
 
     home = Path("/nonexistent-home")
 
-    def run(self, argv: tuple[str, ...], **_: object) -> object:
+    def run(
+        self,
+        argv: tuple[str, ...],
+        *,
+        timeout_seconds: int,
+        cwd: Path | None = None,
+        extra_env: dict[str, str] | None = None,
+        input_text: str | None = None,
+        output_limit: int = 4096,
+    ) -> CommandOutcome:
         raise AssertionError(f"acquisition ran a host command: {argv}")
 
-    def http_json(self, url: str, **_: object) -> object:
+    def http_json(
+        self,
+        url: str,
+        *,
+        timeout_seconds: int,
+        payload: JsonObject | None = None,
+    ) -> tuple[int, JsonValue]:
         raise AssertionError(f"acquisition called an endpoint: {url}")
 
     def atomic_write(self, path: Path, content: str, *, mode: int) -> None:
@@ -120,7 +164,7 @@ def _status(value: JsonObject) -> tuple[str, object]:
 
 
 @contextmanager
-def _fixture_pins(root: Path) -> Iterator[tuple[bytes, dict[str, object]]]:
+def _fixture_pins(root: Path) -> Generator[tuple[bytes, dict[str, object]]]:
     """Patch the pins to a small real archive and yield it with its v1 manifest."""
     contents = {
         "model.aimodel/main.mlirb": b"fixture-graph-bytes",
@@ -139,7 +183,7 @@ def _fixture_pins(root: Path) -> Iterator[tuple[bytes, dict[str, object]]]:
         model.mkdir()
         for relative, data in contents.items():
             (tokenizer if relative == "tokenizer.json" else model / Path(relative).name).write_bytes(data)
-        stream = io.BytesIO()
+        stream = _ArchiveSink()
         archive.stream_archive(model, tokenizer, stream)
         archive_bytes = stream.getvalue()
         archive_pin = acquisition.FilePin("archive", "fixture-nomic.tar", hashlib.sha256(archive_bytes).hexdigest(), len(archive_bytes))
@@ -211,9 +255,14 @@ def _failure_matrix(target: Path, opener: _Opener) -> None:
     _check(_status(apple.acquire_coreai_asset(_request(target, "probe"), runtime)) == ("pending", None), "an absent asset is a planned download")
     _check(not opener.requests and not (target / "profile/data/model-assets").exists(), "the probe phase never downloads")
     _check(coreai_autostart_deferral(target) is not None, "the LaunchAgent is held before acquisition")
-    for failure in ("offline", "http"):
+    for failure in ("offline", "http", "incomplete_read", "bad_status_line"):
         opener.failure = failure
-        outcome = apple.acquire_coreai_asset(_request(target, "apply"), runtime, opener=opener)
+        try:
+            outcome = apple.acquire_coreai_asset(_request(target, "apply"), runtime, opener=opener)
+        except http.client.HTTPException as exc:
+            raise AssertionError(
+                f"{failure} read failure must be translated to blocked coreai_asset_download_failed"
+            ) from exc
         _check(_status(outcome) == ("blocked", "coreai_asset_download_failed"), f"{failure} download is blocked, never success")
         _check(_status(apple.asset_verified(_request(target, "probe"), runtime))[0] == "blocked", f"{failure} leaves the asset unverified")
         _check(coreai_autostart_deferral(target) is not None, f"{failure} keeps the LaunchAgent held")
@@ -268,7 +317,7 @@ def main() -> int:
                 _failure_matrix(target, opener)
                 _success_and_reuse(target, opener)
                 _corrupt_and_tampered(target, opener)
-    print(f"apple_coreai_acquisition_smoke OK: {_CHECKS} checks passed")
+    print(f"apple_coreai_acquisition_smoke OK: {_checks} checks passed")
     return 0
 
 

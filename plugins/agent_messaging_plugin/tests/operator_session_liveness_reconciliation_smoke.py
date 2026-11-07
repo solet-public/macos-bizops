@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
+from _register_unit_double import fixture_assignment  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
 from ananta.services.store import Store, open_store  # noqa: E402
 
@@ -109,7 +110,7 @@ def _operator_row(
         ManagedSessionSpec(
             agent_instance_id=agent_instance_id,
             lane_id="r3-u1-fixture",
-            brief_ref="",
+            assignment=fixture_assignment(),
             work_class="production_mutation",
             budget_line="r3-u1",
             host="operator",

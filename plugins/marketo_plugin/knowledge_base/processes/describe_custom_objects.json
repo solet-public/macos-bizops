@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::describe_custom_objects",
+  "display_name": "Marketo: Describe Custom Objects",
+  "description": "Dispatch an async read of Marketo's custom object description (GET /rest/v1/customobjects/{api_name}/describe.json). The finished job writes the field descriptors to output_tsv_path and returns id_field, dedupe_fields and searchable_fields, which are the valid filter_type values for get_custom_objects. Poll check_marketo_job_status.",
+  "embedding_description": "Describe one Marketo custom object type by its api_name: field names, data types, the marketoGUID id field, its dedupe fields, searchable fields and relationships to leads or companies. Async job writes the field list to a workspace TSV. Use it before querying or writing records. Distinct from list_custom_object_types.",
+  "result_processor_customizations": {
+    "action_label": "Marketo custom object describe job dispatched",
+    "result_type": "marketo_describe_custom_objects_result",
+    "result_description": "Dict with job_id and status 'queued'. The completed job result is a TSV handle of the field descriptors (path, columns, row_count) plus object_name, id_field, dedupe_fields and searchable_fields, and relationships when the type declares them.",
+    "presentation_guidance": "Confirm the job was dispatched and give the job_id. Once completed, name the id_field and dedupe_fields and point at the TSV for the full field list; searchable_fields are the valid filter_type values."
+  },
+  "error_processor_customizations": {
+    "action_context": "Read one Marketo custom object type's description from the configured instance.",
+    "error_interpretation": "marketo.invalid_params: refused at dispatch before any vendor call (missing or malformed parameters, more than 300 entries, an action/dedupe_by/delete_by value Marketo does not define, an api_name that is empty or a relative path segment). On the finished job: marketo.permission_denied (vendor 603 or HTTP 403) means the API user's Role lacks the Access API permission; marketo.auth_failed (601/602 after one re-mint, or HTTP 401) means the credential was rejected; marketo.validation_failed and other vendor codes carry Marketo's own message.",
+    "recovery_guidance": "marketo.permission_denied: grant the Role's read permission for custom objects under Admin > Users & Roles > Roles > the API role > Access API (Adobe's Custom Objects page names no checkbox; look for Read-Only Custom Object or Read-Write Custom Object and confirm the label on that screen), then retry. Custom objects also require a subscription that includes them."
+  }
+}

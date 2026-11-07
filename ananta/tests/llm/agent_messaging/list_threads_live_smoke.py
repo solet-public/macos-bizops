@@ -34,15 +34,13 @@ The schema is the REAL standardized ``get_agent_messaging_schema`` rendered via
 the production DDL into a throwaway pg-schema (DROPped in ``finally``), so
 ``created_at`` carries its true ``DEFAULT NOW()`` + ``is_deleted`` its default.
 
-Needs Postgres up; env-gated behind ``AGENT_MESSAGING_LIST_THREADS_LIVE_SMOKE=1``. Run::
-
-    AGENT_MESSAGING_LIST_THREADS_LIVE_SMOKE=1 \\
-      .venv/bin/python3 ananta/tests/llm/agent_messaging/list_threads_live_smoke.py
+Private fixture: run under quality_gates/provision_test_pg.py using the
+explicit the private manifest variable contract. Without it, exit 77; legacy enable flags
+never select a live profile. See quality_gates/private_postgres.md.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import secrets
 import sys
@@ -51,10 +49,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, LiteralString, cast
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+_ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(_ROOT))
+REPO_ROOT = _ROOT
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(
-    0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
+    0,
+    str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 
 from ananta.llm.agent_messaging.models import (  # noqa: E402
@@ -82,6 +83,8 @@ from postgres_state_management_plugin.postgres_backend.provider import (  # noqa
     PostgresProvider,
 )
 
+from quality_gates.private_test_pg import MANIFEST_ENV, load_fixture, skip_fixture  # noqa: E402
+
 _passed = 0
 _failed: list[str] = []
 
@@ -104,16 +107,8 @@ def _check(condition: object, label: str) -> None:
         print(f"  FAIL  {label}")
 
 
-_PROFILE_PG_CONFIG = (
-    REPO_ROOT / "profile" / "config" / "plugins"
-    / "postgres_state_management_plugin.json"
-)
-
-
 def _load_pg_config(schema_name: str) -> PostgresConfig:
-    config = PostgresConfig(**json.loads(_PROFILE_PG_CONFIG.read_text(encoding="utf-8")))
-    config.pg_schema = schema_name
-    return config
+    return PostgresConfig(**load_fixture("messaging_threads").connection_config(schema_name))
 
 
 def _envelope(data: dict[str, Any]) -> dict[str, Any]:
@@ -162,17 +157,15 @@ def _create_schema_tables(provider: PostgresProvider) -> None:
     PRODUCTION DDL renderer (real ``created_at`` DEFAULT + ``is_deleted``)."""
     schema = SchemaStandardizer().standardize_schema(get_agent_messaging_schema())
     schema_name = provider.config.schema_name
-    ops = [
-        op
-        for table in schema.tables.values()
-        for op in emit_create_table_ops(NAMESPACE, table, schema_name)
-    ]
+    ops = [op for table in schema.tables.values() for op in emit_create_table_ops(NAMESPACE, table, schema_name)]
     with provider.get_transactional_connection() as conn, conn.cursor() as cur:
         provider.apply_schema_change_ops(cur, schema, ops)
 
 
 def _seed_group(
-    provider: PostgresProvider, schema: str, rows: tuple[tuple[str, int], ...],
+    provider: PostgresProvider,
+    schema: str,
+    rows: tuple[tuple[str, int], ...],
 ) -> None:
     """Insert ``rows`` (id, is_deleted) in ONE transaction so they SHARE the
     transaction-stable ``NOW()`` ``created_at`` default — the platform-faithful
@@ -183,14 +176,16 @@ def _seed_group(
             cur.execute(
                 cast(
                     LiteralString,
-                    f'INSERT INTO "{schema}"."{_THREAD_TABLE}" '
-                    "(id, namespace, originator_type, target_backend, "
-                    "target_plugin_name, status, is_deleted) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    f'INSERT INTO "{schema}"."{_THREAD_TABLE}" (id, namespace, originator_type, target_backend, target_plugin_name, status, is_deleted) VALUES (%s, %s, %s, %s, %s, %s, %s)',
                 ),
                 (
-                    thread_id, "core", "mcp_bridge", "peer:claude_code",
-                    "agent_messaging_plugin", "open", is_deleted,
+                    thread_id,
+                    "core",
+                    "mcp_bridge",
+                    "peer:claude_code",
+                    "agent_messaging_plugin",
+                    "open",
+                    is_deleted,
                 ),
             )
 
@@ -201,7 +196,8 @@ def _seed(provider: PostgresProvider, schema: str) -> None:
     # microsecond clock resolution, so this is deterministic, not a flake).
     time.sleep(0.01)
     _seed_group(
-        provider, schema,
+        provider,
+        schema,
         tuple((tid, 1 if tid == _DELETED_ID else 0) for tid in _T2_IDS),
     )
 
@@ -214,7 +210,10 @@ def _ids(service: AgentMessagingService, *, limit: int, include_deleted: bool) -
 
 
 def _collect_pages(
-    service: AgentMessagingService, *, limit: int, include_deleted: bool,
+    service: AgentMessagingService,
+    *,
+    limit: int,
+    include_deleted: bool,
 ) -> list[str]:
     """Page through list_threads feeding the verb's OWN returned OPAQUE cursor
     back verbatim, until a short page. Returns the flat id list."""
@@ -253,8 +252,7 @@ def test_seed_tie_structure(service: AgentMessagingService) -> None:
 def test_first_page_ordering(service: AgentMessagingService) -> None:
     _check(
         _ids(service, limit=10, include_deleted=False) == _LIVE_ORDER,
-        f"unscoped enumeration, (created_at,id) asc, soft-deleted excluded; got "
-        f"{_ids(service, limit=10, include_deleted=False)}",
+        f"unscoped enumeration, (created_at,id) asc, soft-deleted excluded; got {_ids(service, limit=10, include_deleted=False)}",
     )
 
 
@@ -274,8 +272,7 @@ def test_pagination_roundtrip_across_tie(service: AgentMessagingService) -> None
     collected = _collect_pages(service, limit=2, include_deleted=False)
     _check(
         collected == _LIVE_ORDER,
-        f"limit=2 cursor round-trip returns all live threads once, in order, with "
-        f"NO drop across the t02|t03 same-created_at boundary; got {collected}",
+        f"limit=2 cursor round-trip returns all live threads once, in order, with NO drop across the t02|t03 same-created_at boundary; got {collected}",
     )
     _check(len(collected) == len(set(collected)), "no duplicate thread across page boundaries")
 
@@ -300,13 +297,8 @@ def test_malformed_cursor_rejected(service: AgentMessagingService) -> None:
 
 
 def main() -> int:
-    if os.environ.get("AGENT_MESSAGING_LIST_THREADS_LIVE_SMOKE") != "1":
-        print("=== list_threads_live_smoke ===")
-        print(
-            "  SKIP  set AGENT_MESSAGING_LIST_THREADS_LIVE_SMOKE=1 to run; "
-            "needs the live solet DB."
-        )
-        return 0
+    if not os.environ.get(MANIFEST_ENV):
+        return skip_fixture()
     print("=== list_threads_live_smoke ===")
     schema_name = f"example_test_listthreads_{secrets.token_hex(3)}"
     provider = PostgresProvider(_load_pg_config(schema_name))
@@ -330,6 +322,7 @@ def main() -> int:
         for label in _failed:
             print(f"  FAILED: {label}")
         return 1
+    print("PRIVATE_PG_BODY messaging_threads")
     return 0
 
 

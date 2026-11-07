@@ -37,6 +37,7 @@ from .janitor import (
     RETENTION_CEILING_BYTES,
     RETENTION_CEILING_SECONDS,
     RETIREMENT_THRESHOLD_SECONDS,
+    SpoolSlices,
     list_spool_files,
     run_janitor,
 )
@@ -112,7 +113,9 @@ class SpoolDrainer:
         line one. Returns (new cursor position, files drained)."""
         new_position = position
         drained = 0
+        budget = SpoolSlices()
         for spool_file in list_spool_files(self._spool_dir):
+            budget.checkpoint()
             if spool_file.name <= position:
                 continue
             if not self._drain_file(spool_file, memory_service):
@@ -170,14 +173,8 @@ class SpoolDrainer:
 
     @staticmethod
     def _audit_content(record: SpoolRecord) -> str:
-        return (
-            f"{record.event} session={record.session_id} task={record.task_id} "
-            f"@{record.received_at} | {record.summary} | payload={record.payload_json}"
-        )
+        return f"{record.event} session={record.session_id} task={record.task_id} @{record.received_at} | {record.summary} | payload={record.payload_json}"
 
     @staticmethod
     def _in_flight_content(record: SpoolRecord) -> str:
-        return (
-            f"{record.session_id} in flight: task={record.task_id} "
-            f"{record.summary} since @{record.received_at}"
-        )
+        return f"{record.session_id} in flight: task={record.task_id} {record.summary} since @{record.received_at}"

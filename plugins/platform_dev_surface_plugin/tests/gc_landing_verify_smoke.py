@@ -36,7 +36,12 @@ def _check(condition: object, label: str) -> None:
 
 def _git(root: Path, *args: str) -> str:
     result = subprocess.run(
-        ["git", *args], cwd=root, check=False, capture_output=True, text=True, timeout=30,
+        ["git", *args],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr}")
@@ -69,7 +74,9 @@ def _test_hash_verify(ops: QualityOperations, root: Path) -> None:
         (root / ".venv").symlink_to(external_venv, target_is_directory=True)
         digest = hashlib.sha256(payload.read_bytes()).hexdigest()
         result = ops.verify_hash_manifest(
-            "unt-gc-smoke", str(root), {"payload.txt": digest, "missing.txt": digest},
+            "unt-gc-smoke",
+            str(root),
+            {"payload.txt": digest, "missing.txt": digest},
         )
     finally:
         shutil.rmtree(external_venv, ignore_errors=True)
@@ -82,7 +89,10 @@ def _test_hash_verify(ops: QualityOperations, root: Path) -> None:
 def _test_merge_predict(ops: QualityOperations, root: Path, base_ref: str, register: Path) -> None:
     before = _git(root, "status", "--porcelain")
     result = ops.predict_gate_smokes_merge(
-        base_ref, str(root), "main", str(register.relative_to(root)),
+        base_ref,
+        str(root),
+        "main",
+        str(register.relative_to(root)),
     )
     after = _git(root, "status", "--porcelain")
     _check(before == after, "merge prediction leaves the real lane worktree unchanged")
@@ -94,14 +104,16 @@ def _test_merge_predict(ops: QualityOperations, root: Path, base_ref: str, regis
 
 
 def _test_scope_gaps(ops: QualityOperations) -> None:
-    result = ops.detect_scope_regex_gaps([
-        "quality_gates/run_smokes.py",
-        "plugins/platform_dev_surface_plugin/src/platform_dev_surface_plugin/plugin.py",
-        ".claude/hooks/rotation_due_watch.py",
-    ])
+    result = ops.detect_scope_regex_gaps(
+        [
+            "quality_gates/run_smokes.py",
+            "plugins/platform_dev_surface_plugin/src/platform_dev_surface_plugin/plugin.py",
+            "plugins/default_inference_plugin/research/prompt_engineering/nonexistent_scope_gap_fixture.py",
+        ]
+    )
     _check("quality_gates/run_smokes.py" in result["in_scope"], "scope verb recognises quality_gates source")
     _check("plugins/platform_dev_surface_plugin/src/platform_dev_surface_plugin/plugin.py" in result["in_scope"], "scope verb recognises plugin source")
-    _check(result["out_of_scope"] == [".claude/hooks/rotation_due_watch.py"], "scope verb exposes a real known scope gap")
+    _check(result["out_of_scope"] == ["plugins/default_inference_plugin/research/prompt_engineering/nonexistent_scope_gap_fixture.py"], "scope verb exposes a real known scope gap")
     _check(result["manual_static_analysis_needed"] is True, "scope gap requires manual static analysis")
 
 

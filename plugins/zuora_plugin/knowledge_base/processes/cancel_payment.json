@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::cancel_payment",
+  "display_name": "Zuora: Cancel Payment",
+  "description": "Cancel a payment (PUT /v1/payments/{paymentKey}/cancel): Zuora's terminal Canceled status, required before delete_payment; an overpayment applied to credit balance cannot be cancelled. Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "Cancel a payment in Zuora so it no longer counts toward the customer's balance, moving it to the final Canceled status. Use for a bounced check or a payment recorded in error; cancel is required before deleting a payment.",
+  "result_processor_customizations": {
+    "action_label": "Zuora payment cancelled",
+    "result_type": "zuora_cancel_payment_result",
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+  },
+  "error_processor_customizations": {
+    "action_context": "Cancel a payment (PUT /v1/payments/{paymentKey}/cancel): Zuora's terminal Canceled status, required before delete_payment; an overpayment applied to credit balance cannot be cancelled.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape: a bad identifier, header value or query pairing, a body missing a required field, or an unreadable upload file. zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.validation_failed is a vendor 4xx or an HTTP 200 carrying success false, with Zuora's reasons. zuora.object_not_found, zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the needed Payments or Payment Methods permission or enable the vendor feature the reason names (for example Invoice Settlement). Read current vendor state with the matching get or list verb before retrying a write; pass an idempotency_key where offered. Back off on rate limits."
+  }
+}

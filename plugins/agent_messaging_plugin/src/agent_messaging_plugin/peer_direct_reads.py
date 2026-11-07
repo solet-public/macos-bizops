@@ -30,6 +30,7 @@ from ananta.llm.agent_messaging.service import AgentMessagingError
 
 from .peer_inbox_view import (
     InvalidInboxCursorError,
+    parse_since_continuation_cursor,
     parse_since_cursor,
     serialize_peer_inbox_page,
 )
@@ -124,18 +125,17 @@ def read_holds_role(
     A malformed role row propagates :class:`RoleBindingMalformedError` out of
     ``holds_role`` on purpose: a data fault must surface, not read as "not held".
     """
-    binding = (
-        peer_registry.resolve_by_agent_instance_id(agent_instance_id)
-        if peer_registry is not None
-        else None
-    )
+    binding = peer_registry.resolve_by_agent_instance_id(agent_instance_id) if peer_registry is not None else None
     agent_session_id = binding.agent_session_id if binding is not None else ""
     return HoldsRoleRead(
         holds=holds_role(state_service, name, agent_session_id),
         name=name,
         agent_session_id=agent_session_id,
         delivery_route_attached=role_delivery_route_attached(
-            state_service, peer_registry, bridge_manager, name,
+            state_service,
+            peer_registry,
+            bridge_manager,
+            name,
         ),
         instance_registered=binding is not None,
         session_label=binding.session_label if binding is not None else "",
@@ -238,16 +238,25 @@ def read_peer_inbox_for_session(
     if not agent_session_id:
         raise PeerInboxReadRefusedError(
             "missing_argument",
-            "peer_inbox requires the caller's own non-empty 'agent_session_id' "
-            "(the launcher exports it as $AGENT_SESSION_ID).",
+            "peer_inbox requires the caller's own non-empty 'agent_session_id' (the launcher exports it as $AGENT_SESSION_ID).",
         )
     try:
         binding = peer_registry.resolve_by_agent_session_id(agent_session_id)
     except PeerSessionAmbiguousError as exc:
         raise PeerInboxReadRefusedError(
-            "peer_session_ambiguous", str(exc), _HTTP_CONFLICT,
+            "peer_session_ambiguous",
+            str(exc),
+            _HTTP_CONFLICT,
         ) from exc
     if binding is None:
+        instance_binding = peer_registry.resolve_by_agent_instance_id(agent_session_id)
+        if instance_binding is not None:
+            correct_session_id = instance_binding.agent_session_id
+            if correct_session_id:
+                message = f"{agent_session_id!r} is an agent_instance_id, not an agent_session_id. Use the bound agent_session_id {correct_session_id!r}."
+            else:
+                message = f"{agent_session_id!r} is an agent_instance_id, not an agent_session_id; its binding has no agent_session_id."
+            raise PeerInboxReadRefusedError("identity_not_registered", message)
         raise PeerInboxReadRefusedError(
             "identity_not_registered",
             f"no live peer_binding for agent_session_id {agent_session_id!r}. "
@@ -267,7 +276,9 @@ def read_peer_inbox_for_session(
         page = service.peer_inbox(request)
     except AgentMessagingError as exc:
         raise PeerInboxReadRefusedError(
-            "peer_inbox_rejected", str(exc), exc.http_status,
+            "peer_inbox_rejected",
+            str(exc),
+            exc.http_status,
         ) from exc
     # The caller proved liveness by reading; keep "last active" in step with
     # the delivery path, exactly as the /peer/inbox route does.
@@ -291,14 +302,9 @@ def build_peer_inbox_request(
     """
     after_raw = raw.get("after")
     try:
-        after_created_at = (
-            datetime.fromisoformat(str(after_raw)) if after_raw not in (None, "") else None
-        )
+        after_created_at = datetime.fromisoformat(str(after_raw)) if after_raw not in (None, "") else None
     except ValueError as exc:
-        message = (
-            f"'after' must be an ISO-8601 datetime (the previous newest-first page's "
-            f"next_after_created_at): {exc}"
-        )
+        message = f"'after' must be an ISO-8601 datetime (the previous newest-first page's next_after_created_at): {exc}"
         raise InvalidInboxCursorError("after", message) from exc
     role_after_raw = raw.get("role_after")
     return PeerInboxRequest(
@@ -307,6 +313,7 @@ def build_peer_inbox_request(
         recipient_agent_session_id=binding.agent_session_id,
         after_created_at=after_created_at,
         since_created_at=parse_since_cursor(raw.get("since")),
+        since_cursor=parse_since_continuation_cursor(raw.get("since_cursor")),
         limit=clamp_peer_inbox_limit(raw.get("limit")),
         # A4 (2026-08-04): the silent/important split at send time is
         # retired, so the catch-up view is the only meaningful one — never

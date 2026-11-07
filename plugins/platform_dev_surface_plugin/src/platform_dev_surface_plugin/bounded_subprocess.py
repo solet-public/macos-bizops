@@ -47,11 +47,14 @@ def _bound_output(combined: str, max_output_chars: int) -> tuple[str, bool, int]
 def run_bounded(
     argv: list[str],
     cwd: Path,
-    timeout: int,
+    timeout: int | None,
     extra_env: dict[str, str] | None = None,
     max_output_chars: int = _DEFAULT_MAX_OUTPUT_CHARS,
 ) -> SubprocessResult:
-    """Run ``argv`` under ``cwd`` with a hard ``timeout``; return a bounded result.
+    """Run ``argv`` with an explicit deadline or ``None`` for no deadline.
+
+    Output remains bounded in both modes; finite timeouts retain their kill
+    and failure-result behavior.
 
     ``extra_env`` is overlaid on the inherited environment (used to pass
     ``SOLET_NAME`` through explicitly for the gate runs). On timeout the

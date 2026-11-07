@@ -34,7 +34,7 @@ from agent_messaging_plugin.schema import CELL_ACCEPTANCE_ACCEPTED, TABLE_MODEL_
 
 _passed = 0
 _failed: list[str] = []
-_NOW = datetime(2026, 9, 24, 12, tzinfo=UTC)
+_NOW = datetime(2026, 10, 3, 12, tzinfo=UTC)
 _SCORE = 40.0
 _PARAMS: dict[str, Any] = {"required_score": _SCORE, "cost_tolerance": 0}
 
@@ -130,9 +130,9 @@ def test_receipt_tampering_is_refused() -> None:
     state = _state()
     receipt = verbs.select_dispatch_tier(state, {**_PARAMS, "runtime": "claude_code"}, now=_NOW)["selection_receipt"]
     stripped = {**receipt, "runtime_constraint": None}
-    _check(_refusal(lambda: _verify(state, stripped, stripped["selected"]))[0] == "selection_receipt_mismatch", "(d) constraint stripped: refused")
+    _check(_refusal(lambda: _verify(state, stripped, cast(dict[str, str], stripped["selected"])))[0] == "selection_receipt_mismatch", "(d) constraint stripped: refused")
     changed = {**receipt, "runtime_constraint": "codex"}
-    _check(_refusal(lambda: _verify(state, changed, changed["selected"]))[0] == "selection_receipt_mismatch", "(d) constraint changed: refused")
+    _check(_refusal(lambda: _verify(state, changed, cast(dict[str, str], changed["selected"])))[0] == "selection_receipt_mismatch", "(d) constraint changed: refused")
     missing = {key: value for key, value in receipt.items() if key != "runtime_constraint"}
     _check(_refusal(lambda: _verify(state, missing, missing["selected"]))[0] == "selection_receipt_invalid", "(e) receipt missing runtime_constraint: refused")
     codex_tuple = verbs.select_dispatch_tier(state, dict(_PARAMS), now=_NOW)["selection_receipt"]["selected"]

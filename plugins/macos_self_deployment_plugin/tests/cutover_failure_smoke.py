@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
+from collections.abc import Callable
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, cast
@@ -147,9 +149,10 @@ class _CutoverRaisingReleaseManager:
     def build_candidate(
         self, *, manifest_etag: str = "",
         manifest_plugins: tuple[str, ...] | None = None,
-        schema_snapshot_fn: object = None,
+        schema_snapshot_fn: Callable[[Path], dict[str, object]] | None = None,
+        reconciliation_provenance: dict[str, str] | None = None,
     ) -> CandidatePaths:
-        del manifest_etag, manifest_plugins, schema_snapshot_fn
+        del manifest_etag, manifest_plugins, schema_snapshot_fn, reconciliation_provenance
         base = Path("/nonexistent/rel-cutover-fail")
         return CandidatePaths(
             release_id="rel-cutover-fail",
@@ -219,6 +222,8 @@ def _run_case(*, cutover_exc: Exception, rollback_mode: str) -> dict[str, Any]:
     action_factory = _RecordingActionFactory()
     release_mgr = _CutoverRaisingReleaseManager(cutover_exc)
     child = _spawn_sleep_child()
+    runtime_temp = tempfile.TemporaryDirectory(prefix="cutover-failure-smoke-runtime-")
+    runtime_dir = Path(runtime_temp.name)
 
     def fake_spawn(
         app_home: Path, next_color: str, next_instance_id: str,
@@ -244,9 +249,12 @@ def _run_case(*, cutover_exc: Exception, rollback_mode: str) -> dict[str, Any]:
             preflight_probe=_smoke_green_probe,
             set_color_active=lambda _active: None,
             spawn_fn=fake_spawn,
+            runtime_dir=runtime_dir,
             ready_timeout_seconds=2,
             ready_poll_interval_seconds=0.01,
         )
+        if orch._executor._pending_finisher_path.resolve().parent != runtime_dir.resolve():  # noqa: SLF001
+            raise AssertionError("cutover smoke pending-finisher path escaped temporary runtime")
         result = orch.restart(
             reason="cutover-fail-smoke",
             expected_etag="etag-x",
@@ -269,6 +277,7 @@ def _run_case(*, cutover_exc: Exception, rollback_mode: str) -> dict[str, Any]:
         candidate_alive = True
         child.kill()
         child.wait()
+    runtime_temp.cleanup()
     return {
         "status": result.status.value,
         "reason_code": result.reason_code,

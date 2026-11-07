@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::stop_workflow_run",
+  "display_name": "Zuora: Stop Workflow Run",
+  "description": "Stop a running workflow run (PUT /workflows/workflow_runs/{workflow_run_id}/stop); the run's terminal action. Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "Stop an in-progress Zuora Workflow run by run id; this is the run's terminal action and pending tasks do not execute. Use it to halt a run started by mistake or one that is misbehaving. Confirm the outcome afterwards with get_workflow_run.",
+  "result_processor_customizations": {
+    "action_label": "Zuora workflow run stopped",
+    "result_type": "zuora_stop_workflow_run_result",
+    "result_description": "Queued job envelope. Completion carries Zuora's {success} answer in data.",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential values never appear; [REDACTED] marks where Zuora echoed one."
+  },
+  "error_processor_customizations": {
+    "action_context": "Stop a running workflow run (PUT /workflows/workflow_runs/{workflow_run_id}/stop); the run's terminal action.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape or an output/input path outside export_allowed_roots (zuora.export_path_refused). zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.object_not_found, zuora.validation_failed (vendor 4xx), zuora.query_failed (Data Query 4xx), zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the needed Workflow, Data Query or Files permission. Read current vendor state with the matching get or list verb before retrying a write. Back off on rate limits."
+  }
+}

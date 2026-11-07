@@ -1,11 +1,11 @@
 name: platform_dev_surface_plugin
 description: >
-  Platform dev-surface plugin. Serves two READ-ONLY service interfaces over
+  Platform dev-surface plugin. Serves quality-proof and read-only repo service interfaces over
   the local platform repo + toolchain so an external MCP client (ChatGPT) or
   the run_joseki driver's live e2e run can inspect the tree and run the
   platform's own quality gates:
 
-    - quality_service (GTE-02): list_gates / run_gate / run_test — three thin,
+    - quality_service (GTE-02): list_gates / run_gate / run_test plus frozen selection, clean proof lifecycle and scheduled full-battery production —
       allowlist-only verbs wrapping quality_gates/*.py + run_smokes.py with
       canonical argv baked server-side. Callers pick a gate/smoke by NAME; no
       free-form path, argv, or flag ever reaches the shell.

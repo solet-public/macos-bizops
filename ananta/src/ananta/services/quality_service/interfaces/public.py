@@ -52,11 +52,7 @@ _GATE_PARAM = ParameterMetadata(
     type=ParameterType.STRING,
 )
 _SMOKE_PARAM = ParameterMetadata(
-    description=(
-        "Optional repo-relative path of ONE smoke to run; it must be present in "
-        "the gate register (quality_gates/gate_smokes.txt) or the verb rejects "
-        "it. Omit to run the full gate-eligible smoke suite."
-    ),
+    description=("Optional repo-relative path of ONE smoke to run; it must be present in the gate register -- quality_gates/gate_smokes.txt OR any fragment under quality_gates/gate_smokes.d/, which count equally -- or the verb rejects it. Omit to run the full gate-eligible smoke suite."),
     required=False,
     type=ParameterType.STRING,
 )
@@ -71,15 +67,13 @@ def _list_return_schema() -> ReturnValueSchema:
         properties={
             "gates": ParameterMetadata(
                 type=ParameterType.LIST,
-                description="Per-gate rows: name, kind, description, timeout_seconds, directly_runnable, run_via.",
+                description=("Per-gate rows: name, kind, description, timeout_seconds (always null; no per-gate execution deadline), directly_runnable, run_via."),
             ),
             "smokes": ParameterMetadata(
                 type=ParameterType.LIST,
                 description="Repo-relative smoke paths from the tracked register.",
             ),
-            "smoke_count": ParameterMetadata(
-                type=ParameterType.INTEGER, description="Number of registered smokes."
-            ),
+            "smoke_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of registered smokes."),
         },
     )
 
@@ -89,12 +83,8 @@ def _run_return_schema(target_field: str, target_desc: str) -> ReturnValueSchema
         type=ParameterType.OBJECT,
         description="Execution verdict with bounded output.",
         properties={
-            target_field: ParameterMetadata(
-                type=ParameterType.STRING, description=target_desc
-            ),
-            "passed": ParameterMetadata(
-                type=ParameterType.BOOLEAN, description="True iff exit_code == 0."
-            ),
+            target_field: ParameterMetadata(type=ParameterType.STRING, description=target_desc),
+            "passed": ParameterMetadata(type=ParameterType.BOOLEAN, description="True iff exit_code == 0."),
             "skipped": ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 description=(
@@ -110,21 +100,11 @@ def _run_return_schema(target_field: str, target_desc: str) -> ReturnValueSchema
                 type=ParameterType.INTEGER,
                 description="Process exit code (77 = disclosed skip, 124 = timeout).",
             ),
-            "timed_out": ParameterMetadata(
-                type=ParameterType.BOOLEAN, description="True iff the hard timeout fired."
-            ),
-            "summary": ParameterMetadata(
-                type=ParameterType.STRING, description="Last meaningful line of output."
-            ),
-            "output": ParameterMetadata(
-                type=ParameterType.STRING, description="Captured stdout+stderr (tail, bounded)."
-            ),
-            "truncated": ParameterMetadata(
-                type=ParameterType.BOOLEAN, description="True iff output was size-capped."
-            ),
-            "output_chars_total": ParameterMetadata(
-                type=ParameterType.INTEGER, description="True total output length before capping."
-            ),
+            "timed_out": ParameterMetadata(type=ParameterType.BOOLEAN, description="True iff the hard timeout fired."),
+            "summary": ParameterMetadata(type=ParameterType.STRING, description="Last meaningful line of output."),
+            "output": ParameterMetadata(type=ParameterType.STRING, description="Captured stdout+stderr (tail, bounded)."),
+            "truncated": ParameterMetadata(type=ParameterType.BOOLEAN, description="True iff output was size-capped."),
+            "output_chars_total": ParameterMetadata(type=ParameterType.INTEGER, description="True total output length before capping."),
         },
     )
 
@@ -180,7 +160,220 @@ def _scope_gap_return_schema() -> ReturnValueSchema:
     )
 
 
-class QualityServicePublicAPI(ABC):
+class QualitySmokeProofPublicAPI(ABC):
+    """The coherent frozen-selection, proof and campaign contract."""
+
+    @service_interface_process(
+        name="select_smokes",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={
+            "request": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="request for select_smokes."),
+        },
+        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Compute immutable focused selection and current clean proof reuse."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="select_smokes_result"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def select_smokes(self, request: dict[str, Any], *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Compute immutable focused selection and current clean proof reuse."""
+        ...
+
+    @service_interface_process(
+        name="run_selected_smokes",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={
+            "request": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="request for run_selected_smokes."),
+        },
+        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Execute the complete computed selection and append honest per-smoke attempts."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="run_selected_smokes_result"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+        is_long_running=True,
+    )
+    @abstractmethod
+    def run_selected_smokes(self, request: dict[str, Any], *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Execute the complete computed selection and append honest per-smoke attempts."""
+        ...
+
+    @service_interface_process(
+        name="get_smoke_proof",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={
+            "key": ParameterMetadata(type=ParameterType.STRING, required=True, description="key for get_smoke_proof."),
+            "as_of": ParameterMetadata(type=ParameterType.INTEGER, required=False, description="as of for get_smoke_proof."),
+        },
+        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Read the current or historical smoke proof projection."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="get_smoke_proof_result"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def get_smoke_proof(self, key: str, as_of: int | None = None, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Read the current or historical smoke proof projection."""
+        ...
+
+    @service_interface_process(
+        name="list_smoke_proofs",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={},
+        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="List current smoke proof projections without modifying history."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="list_smoke_proofs_result"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def list_smoke_proofs(self, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """List current smoke proof projections without modifying history."""
+        ...
+
+    @service_interface_process(
+        name="get_smoke_proof_history",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={
+            "key": ParameterMetadata(type=ParameterType.STRING, required=True, description="key for get_smoke_proof_history."),
+            "as_of": ParameterMetadata(type=ParameterType.INTEGER, required=False, description="as of for get_smoke_proof_history."),
+        },
+        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Read immutable smoke proof history, optionally through one version."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="get_smoke_proof_history_result"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def get_smoke_proof_history(self, key: str, as_of: int | None = None, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Read immutable smoke proof history, optionally through one version."""
+        ...
+
+    @service_interface_process(
+        name="correct_smoke_proof",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={
+            "key": ParameterMetadata(type=ParameterType.STRING, required=True, description="key for correct_smoke_proof."),
+            "metadata": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="metadata for correct_smoke_proof."),
+            "expected_version": ParameterMetadata(type=ParameterType.INTEGER, required=True, description="expected version for correct_smoke_proof."),
+            "reason": ParameterMetadata(type=ParameterType.STRING, required=True, description="reason for correct_smoke_proof."),
+        },
+        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Set or correct optional proof links with current-version authorization."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="correct_smoke_proof_result"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def correct_smoke_proof(self, key: str, metadata: dict[str, Any], expected_version: int, reason: str, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Set or correct optional proof links with current-version authorization."""
+        ...
+
+    @service_interface_process(
+        name="clear_smoke_proof",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={
+            "key": ParameterMetadata(type=ParameterType.STRING, required=True, description="key for clear_smoke_proof."),
+            "fields": ParameterMetadata(type=ParameterType.LIST, required=True, description="fields for clear_smoke_proof."),
+            "clear_reuse": ParameterMetadata(type=ParameterType.BOOLEAN, required=True, description="clear reuse for clear_smoke_proof."),
+            "expected_version": ParameterMetadata(type=ParameterType.INTEGER, required=True, description="expected version for clear_smoke_proof."),
+            "reason": ParameterMetadata(type=ParameterType.STRING, required=True, description="reason for clear_smoke_proof."),
+        },
+        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Clear optional metadata or active reuse while retaining all observations."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="clear_smoke_proof_result"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def clear_smoke_proof(self, key: str, fields: list[str], clear_reuse: bool, expected_version: int, reason: str, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Clear optional metadata or active reuse while retaining all observations."""
+        ...
+
+    @service_interface_process(
+        name="retire_smoke_proof",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={
+            "key": ParameterMetadata(type=ParameterType.STRING, required=True, description="key for retire_smoke_proof."),
+            "expected_version": ParameterMetadata(type=ParameterType.INTEGER, required=True, description="expected version for retire_smoke_proof."),
+            "reason": ParameterMetadata(type=ParameterType.STRING, required=True, description="reason for retire_smoke_proof."),
+        },
+        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Retire a proof from reuse with append-only versioned history."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="retire_smoke_proof_result"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def retire_smoke_proof(self, key: str, expected_version: int, reason: str, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Retire a proof from reuse with append-only versioned history."""
+        ...
+
+    @service_interface_process(
+        name="reinstate_smoke_proof",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={
+            "key": ParameterMetadata(type=ParameterType.STRING, required=True, description="key for reinstate_smoke_proof."),
+            "request": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="request for reinstate_smoke_proof."),
+            "expected_version": ParameterMetadata(type=ParameterType.INTEGER, required=True, description="expected version for reinstate_smoke_proof."),
+            "reason": ParameterMetadata(type=ParameterType.STRING, required=True, description="reason for reinstate_smoke_proof."),
+        },
+        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Revalidate a current frozen input key before reinstating a clean proof."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="reinstate_smoke_proof_result"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def reinstate_smoke_proof(self, key: str, request: dict[str, Any], expected_version: int, reason: str, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Revalidate a current frozen input key before reinstating a clean proof."""
+        ...
+
+    @service_interface_process(
+        name="ensure_full_smoke_schedule",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={},
+        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Ensure the six-hour full battery and five-minute durable retry schedules."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="ensure_full_smoke_schedule_result"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def ensure_full_smoke_schedule(self, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Ensure the six-hour full battery and five-minute durable retry schedules."""
+        ...
+
+    @service_interface_process(
+        name="trigger_full_smoke_battery",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={
+            "trigger": ParameterMetadata(type=ParameterType.STRING, required=False, description="trigger for trigger_full_smoke_battery."),
+        },
+        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Queue a full battery or retry pending work off the action queue."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="trigger_full_smoke_battery_result"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def trigger_full_smoke_battery(self, trigger: str = "schedule", *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Queue a full battery or retry pending work off the action queue."""
+        ...
+
+
+class QualityServicePublicAPI(QualitySmokeProofPublicAPI):
     """AI-discoverable quality-gate + smoke execution surface.
 
     Access via: ``service_interface::quality_service::{verb}``
@@ -200,9 +393,7 @@ class QualityServicePublicAPI(ABC):
         requires_call_context=True,
     )
     @abstractmethod
-    def list_gates(
-        self, *, call_context: CallContext | None = None
-    ) -> dict[str, Any]:
+    def list_gates(self, *, call_context: CallContext | None = None) -> dict[str, Any]:
         """Read-only enumeration of the server-side gate registry + smoke register."""
 
     @service_interface_process(
@@ -220,9 +411,7 @@ class QualityServicePublicAPI(ABC):
         requires_call_context=True,
     )
     @abstractmethod
-    def run_gate(
-        self, gate: str, *, call_context: CallContext | None = None
-    ) -> dict[str, Any]:
+    def run_gate(self, gate: str, *, call_context: CallContext | None = None) -> dict[str, Any]:
         """Run ONE gate by allowlisted name; report pass/fail + bounded output."""
 
     @service_interface_process(
@@ -240,9 +429,7 @@ class QualityServicePublicAPI(ABC):
         requires_call_context=True,
     )
     @abstractmethod
-    def run_test(
-        self, smoke: str | None = None, *, call_context: CallContext | None = None
-    ) -> dict[str, Any]:
+    def run_test(self, smoke: str | None = None, *, call_context: CallContext | None = None) -> dict[str, Any]:
         """Run the gate-eligible smoke suite, or one registered smoke by path."""
 
     @service_interface_process(
@@ -262,7 +449,11 @@ class QualityServicePublicAPI(ABC):
     )
     @abstractmethod
     def verify_hash_manifest(
-        self, unit_id: str, root_path: str, manifest: dict[str, str], *,
+        self,
+        unit_id: str,
+        root_path: str,
+        manifest: dict[str, str],
+        *,
         call_context: CallContext | None = None,
     ) -> dict[str, Any]:
         """Rehash a declared manifest under one root; never changes Git or files."""
@@ -275,7 +466,7 @@ class QualityServicePublicAPI(ABC):
             "base_ref": ParameterMetadata(type=ParameterType.STRING, required=True, description="Common base Git revision."),
             "lane_root_path": ParameterMetadata(type=ParameterType.STRING, required=True, description="Existing absolute lane worktree root."),
             "current_master": ParameterMetadata(type=ParameterType.STRING, required=True, description="Current master revision in that worktree."),
-            "register_path": ParameterMetadata(type=ParameterType.STRING, required=False, default="quality_gates/gate_smokes.txt", description="Repo-relative append-only tracked-debt register."),
+            "register_path": ParameterMetadata(type=ParameterType.STRING, required=False, default="quality_gates/gate_smokes.txt", description="Repo-relative append-only tracked-debt register; its fragment directory (quality_gates/gate_smokes.d/) is resolved beside it and merged in."),
         },
         return_value_schema=_merge_predict_return_schema(),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
@@ -285,8 +476,12 @@ class QualityServicePublicAPI(ABC):
     )
     @abstractmethod
     def predict_gate_smokes_merge(
-        self, base_ref: str, lane_root_path: str, current_master: str,
-        register_path: str = "quality_gates/gate_smokes.txt", *,
+        self,
+        base_ref: str,
+        lane_root_path: str,
+        current_master: str,
+        register_path: str = "quality_gates/gate_smokes.txt",
+        *,
         call_context: CallContext | None = None,
     ) -> dict[str, Any]:
         """Predict a no-write merge of one append-only tracked-debt register."""
@@ -306,6 +501,9 @@ class QualityServicePublicAPI(ABC):
     )
     @abstractmethod
     def detect_scope_regex_gaps(
-        self, paths: list[str], *, call_context: CallContext | None = None,
+        self,
+        paths: list[str],
+        *,
+        call_context: CallContext | None = None,
     ) -> dict[str, Any]:
         """Report paths not covered by the exact per-file static-gate predicate."""

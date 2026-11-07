@@ -1,4 +1,5 @@
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ananta.core.domain.error_codes import ErrorCode
@@ -17,7 +18,7 @@ class SchemaManager:
         self,
         state_service: "StateService",
         plugin_schema_service: Any,
-    ):
+    ) -> None:
         """SchemaManager orchestrates startup schema initialization.
 
         Args:
@@ -53,9 +54,25 @@ class SchemaManager:
                     details={"namespace": standardized_schema.namespace, "errors": errors},
                 )
 
+            registered_schema = self._merge_registered_schema(standardized_schema)
             self._install_via_lifecycle(standardized_schema)
+            self._schema_registry[standardized_schema.namespace] = registered_schema
 
-            self._schema_registry[standardized_schema.namespace] = standardized_schema
+    def _merge_registered_schema(self, schema_def: SchemaDefinition) -> SchemaDefinition:
+        """Union piecewise declarations; reject conflicting tables before install."""
+        existing = self._schema_registry.get(schema_def.namespace)
+        if existing is None:
+            return replace(schema_def, tables=dict(schema_def.tables))
+        tables = dict(existing.tables)
+        for name, table in schema_def.tables.items():
+            if name in tables and tables[name] != table:
+                raise FrameworkError(
+                    message=f"Conflicting schema declaration for '{schema_def.namespace}.{name}'",
+                    error_code=ErrorCode.VALIDATION_ERROR,
+                    details={"namespace": schema_def.namespace, "table": name},
+                )
+            tables[name] = table
+        return replace(existing, tables=tables)
 
     def _install_via_lifecycle(self, schema_def: SchemaDefinition) -> None:
         """Install one namespace via the plugin-schema lifecycle service.

@@ -28,6 +28,17 @@ _ADMIN_ROLE = getpass.getuser()
 _POSTGRES_BINARIES = ("psql", "pg_isready", "createuser", "createdb")
 _HOST_HBA_TYPES = frozenset(("host", "hostgssenc", "hostnogssenc", "hostnossl", "hostssl"))
 _COMMAND_OUTPUT_LIMIT = 16_384
+
+
+def _bounded_output(stream: str | bytes | None) -> str:
+    """Bounded text of one captured stream; a timed-out child may leave bytes or nothing."""
+
+    if stream is None:
+        return ""
+    text = stream.decode(errors="replace") if isinstance(stream, bytes) else stream
+    return text[:_COMMAND_OUTPUT_LIMIT]
+
+
 _POSTGRES_READY_TIMEOUT_SECONDS = 10
 _POSTGRES_READY_POLL_SECONDS = 0.1
 type HbaRecord = tuple[str, str, str, str | None, str]
@@ -708,8 +719,8 @@ def run_required(
                 None,
                 True,
                 max(0, int((time.monotonic() - started) * 1000)),
-                "",
-                "",
+                _bounded_output(exc.stdout),
+                _bounded_output(exc.stderr),
             ),
         ) from exc
     except OSError as exc:

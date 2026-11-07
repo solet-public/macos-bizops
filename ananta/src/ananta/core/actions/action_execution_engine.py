@@ -19,6 +19,7 @@ from ananta.constants import (
     FRAMEWORK_NAMESPACE,
     ProviderType,
 )
+from ananta.core.actions._measured_action_lane import run_blocking
 from ananta.core.actions.action_definition_service import ActionDefinitionService
 from ananta.core.actions.action_process_key_service import ActionProcessKeyService
 from ananta.core.actions.action_stats_service import ActionStatsService
@@ -28,6 +29,7 @@ from ananta.core.domain.status import is_status_match
 from ananta.core.plugins.plugin_contracts import ActionStatus, ErrorCode
 from ananta.core.process_registry.key_resolver import ProcessKeyResolver
 from ananta.core.providers.provider_manager import ProviderManager
+from ananta.core.runtime.loop_invariant import record_handler_entry
 from ananta.core.validation.validation_service import ValidationService
 from ananta.error_handling import FrameworkError
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
@@ -97,14 +99,10 @@ class ActionExecutionEngine:
         execution_id = str(uuid.uuid4())[:8]
         start_time = datetime.now(UTC)
 
-        action_parameters, prepared_action_def, is_prepared_action = self._parse_action_parameters(
-            action_name, action_def_or_parameters
-        )
+        action_parameters, prepared_action_def, is_prepared_action = self._parse_action_parameters(action_name, action_def_or_parameters)
 
         source_context = self._create_source_context(state, execution_id)
-        await self.stats_service.track_action_execution_start(
-            execution_id, action_name, action_parameters, start_time, source_context
-        )
+        await self.stats_service.track_action_execution_start(execution_id, action_name, action_parameters, start_time, source_context)
 
         try:
             # Resolve process_key using helper method
@@ -133,27 +131,19 @@ class ActionExecutionEngine:
             )
 
             # Validate the prepared action
-            await self.validation_service.validate_prepared_action(
-                action_name, action_def, {}, None, None
-            )
+            await self.validation_service.validate_prepared_action(action_name, action_def, {}, None, None)
 
             # Execute the action based on provider type
-            result = await self._execute_action_by_provider(
-                action_name, process_key, merged_params, state, plugin_override, execution_id
-            )
+            result = await self._execute_action_by_provider(action_name, process_key, merged_params, state, plugin_override, execution_id)
 
             # Track successful execution
-            await self.stats_service.track_action_execution_end(
-                execution_id, ActionStatus.COMPLETED, result, None, start_time
-            )
+            await self.stats_service.track_action_execution_end(execution_id, ActionStatus.COMPLETED, result, None, start_time)
 
             return result
 
         except Exception as e:
             # Track failed execution
-            await self.stats_service.track_action_execution_end(
-                execution_id, ActionStatus.ERROR, {}, str(e), start_time
-            )
+            await self.stats_service.track_action_execution_end(execution_id, ActionStatus.ERROR, {}, str(e), start_time)
             raise
 
     def execute_plugin(
@@ -170,17 +160,11 @@ class ActionExecutionEngine:
         """
         self.validation_service.validate_plugin_execution_prerequisites(plugin, action_name)
 
-        plugin_function = self.validation_service.validate_and_get_plugin_function(
-            plugin, function_name, action_name
-        )
+        plugin_function = self.validation_service.validate_and_get_plugin_function(plugin, function_name, action_name)
 
-        return self.validation_service.execute_and_validate_plugin_result(
-            plugin_function, action_name, action_object
-        )
+        return self.validation_service.execute_and_validate_plugin_result(plugin_function, action_name, action_object)
 
-    def _parse_action_parameters(
-        self, action_name: str, action_def_or_parameters: dict[str, object]
-    ) -> tuple[dict[str, object], dict[str, object] | None, bool]:
+    def _parse_action_parameters(self, action_name: str, action_def_or_parameters: dict[str, object]) -> tuple[dict[str, object], dict[str, object] | None, bool]:
         """Parse action parameters and determine action definition format.
 
         Returns:
@@ -202,9 +186,7 @@ class ActionExecutionEngine:
 
         return action_parameters, prepared_action_def, is_prepared_action
 
-    def _create_source_context(
-        self, state: dict[str, object], execution_id: str
-    ) -> dict[str, object]:
+    def _create_source_context(self, state: dict[str, object], execution_id: str) -> dict[str, object]:
         """Create source context for action tracking."""
         return {
             "execution_id": execution_id,
@@ -212,9 +194,11 @@ class ActionExecutionEngine:
             "timestamp": datetime.now(UTC).isoformat(),
         }
 
-    async def _update_execution_provider(
-        self, execution_id: str, provider_type: str, provider: str
-    ) -> None:
+    async def _update_execution_provider(self, execution_id: str, provider_type: str, provider: str) -> None:
+        """Persist provider tracking off the runtime loop."""
+        await run_blocking(self._write_execution_provider, execution_id, provider_type, provider)
+
+    def _write_execution_provider(self, execution_id: str, provider_type: str, provider: str) -> None:
         """Update execution record with provider information."""
         try:
             if not self.state_service:
@@ -238,9 +222,7 @@ class ActionExecutionEngine:
         except Exception as e:
             logger.error(f"Error updating execution provider for {execution_id}: {e}")
 
-    async def get_action_performance_stats(
-        self, action_name: str | None = None
-    ) -> dict[str, object]:
+    async def get_action_performance_stats(self, action_name: str | None = None) -> dict[str, object]:
         """
         Get performance statistics for actions.
 
@@ -251,9 +233,7 @@ class ActionExecutionEngine:
     async def _prepare_action_definition(
         self,
         action_name: str,
-        _action_def_or_parameters: dict[
-            str, object
-        ],  # Contains top-level context (session_id, flow_id)
+        _action_def_or_parameters: dict[str, object],  # Contains top-level context (session_id, flow_id)
         prepared_action_def: dict[str, object] | None,
         is_prepared_action: bool,
         action_parameters: dict[str, object],
@@ -272,15 +252,11 @@ class ActionExecutionEngine:
             merged_params = dict(arguments)  # Create copy to avoid mutating original
 
             # Validate that the action is complete before execution
-            await self.validation_service.validate_action_completeness(
-                action_def, action_name, is_prepared_action, False, execution_id, start_time
-            )
+            await self.validation_service.validate_action_completeness(action_def, action_name, is_prepared_action, False, execution_id, start_time)
         else:
             # Get action definition and merge parameters
             action_def = await self._get_action_definition_for_execution(action_name, process_key)
-            merged_params = self.definition_service.extract_merged_parameters(
-                action_def, action_parameters
-            )
+            merged_params = self.definition_service.extract_merged_parameters(action_def, action_parameters)
 
             # Create complete action definition for execution
             action_def = {
@@ -316,9 +292,7 @@ class ActionExecutionEngine:
 
         return params
 
-    async def _get_action_definition_for_execution(
-        self, action_name: str, process_key: str
-    ) -> dict[str, object]:
+    async def _get_action_definition_for_execution(self, action_name: str, process_key: str) -> dict[str, object]:
         """Get action definition for execution, with fallback to legacy format."""
         # Try to get from registry first
         action_def = await self.definition_service.get_action_definition_from_registry(action_name)
@@ -326,9 +300,7 @@ class ActionExecutionEngine:
             return action_def
 
         # Fallback to legacy action definition format
-        return self.definition_service.get_legacy_action_definition(
-            action_name, process_key, self.process_key_service.parse_process_key
-        )
+        return self.definition_service.get_legacy_action_definition(action_name, process_key, self.process_key_service.parse_process_key)
 
     async def _execute_action_by_provider(
         self,
@@ -340,9 +312,7 @@ class ActionExecutionEngine:
         execution_id: str,
     ) -> dict[str, object]:
         """Execute action based on provider type."""
-        provider_type, provider, function_name = self.process_key_service.parse_process_key(
-            process_key, action_name
-        )
+        provider_type, provider, function_name = self.process_key_service.parse_process_key(process_key, action_name)
 
         # Update execution tracking with provider info
         await self._update_execution_provider(execution_id, provider_type, provider)
@@ -353,18 +323,12 @@ class ActionExecutionEngine:
             "provider": provider,
             "function_name": function_name,
         }
-        self.validation_service.validate_action_execution_parameters(
-            action_name, provider_type, provider, function_name, process
-        )
+        self.validation_service.validate_action_execution_parameters(action_name, provider_type, provider, function_name, process)
 
         if provider_type == ProviderType.SERVICE_INTERFACE.value:
-            return await self._execute_service_interface_action(
-                action_name, provider, function_name, merged_params, state
-            )
+            return await self._execute_service_interface_action(action_name, provider, function_name, merged_params, state)
         else:  # plugin
-            return await self._execute_plugin_action(
-                action_name, provider, function_name, merged_params, state, plugin_override
-            )
+            return await self._execute_plugin_action(action_name, provider, function_name, merged_params, state, plugin_override)
 
     async def _execute_service_interface_action(
         self,
@@ -375,9 +339,7 @@ class ActionExecutionEngine:
         _state: dict[str, object],  # Reserved for interface compatibility
     ) -> dict[str, object]:
         """Execute action using service interface."""
-        service = self.provider_manager.get_service_instance(
-            service_interface, action_name, _function_name
-        )
+        service = self.provider_manager.get_service_instance(service_interface, action_name, _function_name)
         if not service:
             raise FrameworkError(
                 message=f"Service interface '{service_interface}' not found for action '{action_name}'",
@@ -385,9 +347,7 @@ class ActionExecutionEngine:
                 details={"action_name": action_name, "service_interface": service_interface},
             )
 
-        service_function_obj = self.validation_service.validate_service_function(
-            service, _function_name, action_name
-        )
+        service_function_obj = self.validation_service.validate_service_function(service, _function_name, action_name)
         if not callable(service_function_obj):
             raise FrameworkError(
                 message=f"Service function '{_function_name}' is not callable",
@@ -403,9 +363,7 @@ class ActionExecutionEngine:
         prepared_params = self._prepare_action_execution(action_parameters, _state)
 
         # Execute service function - pass the callable directly with service_interface for parameter filtering
-        result = await self._execute_service_function(
-            service, service_function_obj, _function_name, prepared_params, service_interface
-        )
+        result = await self._execute_service_function(service, service_function_obj, _function_name, prepared_params, service_interface)
 
         # Format service result
         return self._format_service_result(result, datetime.now(UTC).isoformat())
@@ -421,9 +379,7 @@ class ActionExecutionEngine:
     ) -> dict[str, object]:
         """Execute action using plugin."""
         # Apply plugin override if provided
-        effective_plugin_name = self._apply_plugin_override(
-            plugin_name, plugin_override, action_name
-        )
+        effective_plugin_name = self._apply_plugin_override(plugin_name, plugin_override, action_name)
 
         plugin_base = self.provider_manager.plugin_manager.get_plugin(effective_plugin_name)
         if not plugin_base:
@@ -441,9 +397,7 @@ class ActionExecutionEngine:
         result = await plugin_base.execute(action_name, prepared_params)
         return result
 
-    def _apply_plugin_override(
-        self, original_plugin: str, plugin_override: str | None, action_name: str
-    ) -> str:
+    def _apply_plugin_override(self, original_plugin: str, plugin_override: str | None, action_name: str) -> str:
         """Apply plugin override if provided and valid."""
         if not plugin_override:
             return original_plugin
@@ -452,32 +406,20 @@ class ActionExecutionEngine:
         if self.provider_manager.plugin_manager.get_plugin(plugin_override):
             return plugin_override
         else:
-            logger.error(
-                f"Plugin override '{plugin_override}' not found for action '{action_name}', using original '{original_plugin}'"
-            )
+            logger.error(f"Plugin override '{plugin_override}' not found for action '{action_name}', using original '{original_plugin}'")
             return original_plugin
 
-    def _prepare_action_execution(
-        self, action_parameters: dict[str, object], state: dict[str, object]
-    ) -> dict[str, object]:
+    def _prepare_action_execution(self, action_parameters: dict[str, object], state: dict[str, object]) -> dict[str, object]:
         """Prepare parameters for action execution."""
         return {**action_parameters, "state": state}
 
-    def _validate_action_parameters(
-        self, action_name: str, action_parameters: dict[str, object], action_def: dict[str, object]
-    ) -> None:
+    def _validate_action_parameters(self, action_name: str, action_parameters: dict[str, object], action_def: dict[str, object]) -> None:
         """Validate action parameters against action definition."""
-        self.validation_service.validate_action_parameters(
-            action_name, action_parameters, action_def
-        )
+        self.validation_service.validate_action_parameters(action_name, action_parameters, action_def)
 
-    async def execute_service(
-        self, service_interface: str, function_name: str, parameters: dict[str, object]
-    ) -> dict[str, object]:
+    async def execute_service(self, service_interface: str, function_name: str, parameters: dict[str, object]) -> dict[str, object]:
         """Execute a service interface function directly."""
-        service = self.provider_manager.get_service_instance(
-            service_interface, f"{service_interface}.{function_name}", function_name
-        )
+        service = self.provider_manager.get_service_instance(service_interface, f"{service_interface}.{function_name}", function_name)
         if not service:
             raise FrameworkError(
                 message=f"Service interface '{service_interface}' not found",
@@ -485,9 +427,7 @@ class ActionExecutionEngine:
                 details={"service_interface": service_interface, "function_name": function_name},
             )
 
-        service_function_obj = self.validation_service.validate_service_function(
-            service, function_name, f"{service_interface}.{function_name}"
-        )
+        service_function_obj = self.validation_service.validate_service_function(service, function_name, f"{service_interface}.{function_name}")
         if not callable(service_function_obj):
             raise FrameworkError(
                 message=f"Service function '{function_name}' is not callable",
@@ -495,9 +435,7 @@ class ActionExecutionEngine:
                 details={"service_interface": service_interface, "function_name": function_name},
             )
 
-        result = await self._execute_service_function(
-            service, service_function_obj, function_name, parameters, service_interface
-        )
+        result = await self._execute_service_function(service, service_function_obj, function_name, parameters, service_interface)
         return self._format_service_result(result, datetime.now(UTC).isoformat())
 
     async def _execute_service_function(
@@ -533,11 +471,12 @@ class ActionExecutionEngine:
                 )
 
             # Handle both sync and async functions
+            record_handler_entry(f"service_interface::{_service_interface}::{function_name}", "handler")
             if inspect.iscoroutinefunction(function):
                 result = await function(**filtered_params)
                 return result
             else:
-                result = function(**filtered_params)
+                result = await run_blocking(function, **filtered_params)
                 return result
 
         except Exception as e:

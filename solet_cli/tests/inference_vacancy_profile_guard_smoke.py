@@ -13,9 +13,7 @@ from typing import cast
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "plugins/github_midwife_plugin/tests"))
 
-from setup_flow_schema_smoke import _projection_transaction  # noqa: E402
 from solet_manager.answer_validation import (  # noqa: E402
     static_option_available,
     validate_normalized_answers,
@@ -33,8 +31,32 @@ from solet_manager.plan_builder import (  # noqa: E402
 )
 from solet_manager.probe_input_projection import probe_public_inputs  # noqa: E402
 from solet_manager.release_lock import SeedLock  # noqa: E402
+from solet_manager.transaction import Transaction  # noqa: E402
 
 _CONTRACTS = Path(__file__).resolve().parents[2] / "plugins/github_midwife_plugin/knowledge_base"
+
+
+def _lm_transaction(bundle: ContractBundle) -> Transaction:
+    seed = SeedLock("example/seed", "v1", "a" * 40, "b" * 40, "c" * 64, "macos-bizops")
+    plan = build_setup_plan(
+        bundle=bundle,
+        config=CreateConfig(name="vacancy-guard", target=Path("/tmp/vacancy-guard"), autostart=True),
+        seed=seed,
+        journal_path=Path("/tmp/vacancy-guard.json"),
+        decision_selections={"embeddings_implementation": "lm_studio", "inference_implementation": "lm_studio"},
+    )
+    return Transaction.create(
+        name="vacancy-guard",
+        target=Path("/tmp/vacancy-guard"),
+        input_fingerprint="sha256:" + "d" * 64,
+        answers=plan.answers,
+        seed=seed,
+        flow_id=bundle.flow_id,
+        flow_source_revision=bundle.source_revision,
+        flow_contract_digest=bundle.contract_digest,
+        stage_ids=tuple(bundle.stages),
+        completion_probe_ids=(),
+    )
 
 
 class InferenceVacancyProfileGuard(unittest.TestCase):
@@ -63,12 +85,9 @@ class InferenceVacancyProfileGuard(unittest.TestCase):
         for profile in ("macos-bizops", "custom"):
             with self.subTest(profile=profile):
                 prompts = static_decision_prompts(self.bundle, self._plan(profile))
-                prompt = next(
-                    item for item in prompts
-                    if isinstance(item, dict) and item["id"] == "inference_implementation"
-                )
+                prompt = next(item for item in prompts if isinstance(item, dict) and item["id"] == "inference_implementation")
                 candidates = cast(list[dict[str, JsonValue]], prompt["candidates"])
-                values = {item["value"] for item in candidates}
+                values = {cast(str, item["value"]) for item in candidates}
                 self.assertNotIn("none", values)
                 self.assertNotIn("alternative_plugin", values)
                 self.assertIn("lm_studio", values)
@@ -76,9 +95,7 @@ class InferenceVacancyProfileGuard(unittest.TestCase):
     def test_explicit_vacancy_rejected_before_operation_planning(self) -> None:
         for profile in ("macos-bizops", "custom"):
             for source in ("flag", "config", "interactive"):
-                with self.subTest(profile=profile, source=source), patch(
-                    "solet_manager.plan_builder._plan_operations"
-                ) as operations:
+                with self.subTest(profile=profile, source=source), patch("solet_manager.plan_builder._plan_operations") as operations:
                     with self.assertRaisesRegex(ContractError, "inference_implementation.*none"):
                         self._plan(profile, {"inference_implementation": "none"}, source=source)
                     operations.assert_not_called()
@@ -100,15 +117,13 @@ class InferenceVacancyProfileGuard(unittest.TestCase):
         for profile in ("macos-bizops", "custom"):
             with self.subTest(profile=profile):
                 with self.assertRaisesRegex(ContractError, "inference_implementation.*none"):
-                    selected_operation_ids(
-                        self.bundle, {"setup_profile": profile, "inference_implementation": "none"}
-                    )
+                    selected_operation_ids(self.bundle, {"setup_profile": profile, "inference_implementation": "none"})
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "projection-target"
             directory = target_contract_directory(target)
             shutil.copytree(_CONTRACTS, directory)
             contract = ContractBundle.load(source_revision="a" * 40, directory=directory)
-            transaction = _projection_transaction(contract.flow)
+            transaction = _lm_transaction(self.bundle)
             for profile in ("macos-bizops", "custom"):
                 with self.subTest(profile=profile):
                     answers = copy.deepcopy(
@@ -167,6 +182,9 @@ class InferenceVacancyProfileGuard(unittest.TestCase):
                 "setup::lm_studio.server_ready",
             )
             self.assertEqual(projected["inference_implementation"], "none")
+            self.assertEqual(projected["embeddings_implementation"], free_decisions["embeddings_implementation"])
+            self.assertNotEqual(projected["embeddings_implementation"], "lm_studio")
+            self.assertIsNone(projected["lm_studio_base_url"])
 
     def test_planned_options_rejected_across_selection_paths(self) -> None:
         for decision_id, option_id in (
@@ -210,12 +228,11 @@ class InferenceVacancyProfileGuard(unittest.TestCase):
     def test_real_inference_retains_model_and_readiness_plan(self) -> None:
         for profile in ("macos-bizops", "custom"):
             with self.subTest(profile=profile):
-                plan = self._plan(profile, {
-                    "inference_implementation": "lm_studio", "inference_model": "qwen3-14b"
-                })
+                plan = self._plan(profile, {"inference_implementation": "lm_studio", "inference_model": "qwen3-14b"})
                 operations = {item.operation_id: item for item in plan.operations}
                 for operation_id in (
-                    "configure_lm_studio_inference", "pull_lm_studio_inference_model",
+                    "configure_lm_studio_inference",
+                    "pull_lm_studio_inference_model",
                     "load_lm_studio_inference_model",
                 ):
                     self.assertIn(operation_id, operations)
@@ -232,10 +249,7 @@ class InferenceVacancyProfileGuard(unittest.TestCase):
         self.assertNotIn("inference_implementation", decisions)
         self.assertNotIn("inference_implementation", plan.unresolved_decisions)
         self.assertFalse(any("inference" in item.operation_id for item in plan.operations))
-        self.assertFalse(any(
-            isinstance(item, dict) and item["id"] == "inference_implementation"
-            for item in static_decision_prompts(self.bundle, plan)
-        ))
+        self.assertFalse(any(isinstance(item, dict) and item["id"] == "inference_implementation" for item in static_decision_prompts(self.bundle, plan)))
 
     def _vacancy_option(self) -> dict[str, JsonValue]:
         source = cast(dict[str, JsonValue], self.bundle.decisions["inference_implementation"]["option_source"])
@@ -243,9 +257,7 @@ class InferenceVacancyProfileGuard(unittest.TestCase):
         return cast(dict[str, JsonValue], options["none"])
 
     def test_condition_inputs_must_be_resolved_even_under_negation(self) -> None:
-        option: JsonValue = {"available_when": {"not": {
-            "decision_ref": "setup_profile", "operator": "equals", "value": "free"
-        }}}
+        option: JsonValue = {"available_when": {"not": {"decision_ref": "setup_profile", "operator": "equals", "value": "free"}}}
         self.assertFalse(static_option_available(option, {}))
         self.assertFalse(static_option_available(option, {"setup_profile": "free"}))
         self.assertTrue(static_option_available(option, {"setup_profile": "custom"}))
@@ -257,9 +269,7 @@ class InferenceVacancyProfileGuard(unittest.TestCase):
             }
         }
         self.bundle.validate()
-        answers = copy.deepcopy(
-            self._plan("macos-bizops", {"inference_implementation": "lm_studio"}).answers
-        )
+        answers = copy.deepcopy(self._plan("macos-bizops", {"inference_implementation": "lm_studio"}).answers)
         decisions = cast(dict[str, JsonValue], answers["decisions"])
         decisions["session_sources"] = declined_answer(
             decided_at="2026-09-13T00:00:00+00:00",
@@ -270,31 +280,35 @@ class InferenceVacancyProfileGuard(unittest.TestCase):
             validate_normalized_answers(self.bundle, answers)
 
     def test_recursive_conditions_use_normalized_selections(self) -> None:
-        self._vacancy_option()["available_when"] = {"all": [
-            {"decision_ref": "autostart", "operator": "equals", "value": "enabled"},
-            {"any": [
-                {"decision_ref": "setup_profile", "operator": "equals", "value": "free"},
-                {"not": {"decision_ref": "setup_profile", "operator": "equals", "value": "custom"}},
-            ]},
-        ]}
+        self._vacancy_option()["available_when"] = {
+            "all": [
+                {"decision_ref": "autostart", "operator": "equals", "value": "enabled"},
+                {
+                    "any": [
+                        {"decision_ref": "setup_profile", "operator": "equals", "value": "free"},
+                        {"not": {"decision_ref": "setup_profile", "operator": "equals", "value": "custom"}},
+                    ]
+                },
+            ]
+        }
         self.bundle.validate()
-        self.assertTrue(static_option_available(self._vacancy_option(), {
-            "setup_profile": "macos-bizops", "autostart": "enabled"
-        }))
-        self.assertFalse(static_option_available(self._vacancy_option(), {
-            "setup_profile": "custom", "autostart": "enabled"
-        }))
+        self.assertTrue(static_option_available(self._vacancy_option(), {"setup_profile": "macos-bizops", "autostart": "enabled"}))
+        self.assertFalse(static_option_available(self._vacancy_option(), {"setup_profile": "custom", "autostart": "enabled"}))
 
     def test_contract_rejects_malformed_conditions(self) -> None:
-        leaf: dict[str, JsonValue] = {
-            "decision_ref": "setup_profile", "operator": "equals", "value": "free"
-        }
-        for condition in (
-            None, True, {}, {"all": []}, {"not": leaf, "any": [leaf]},
-            {**leaf, "operator": "matches"}, {**leaf, "value": []},
+        leaf: dict[str, JsonValue] = {"decision_ref": "setup_profile", "operator": "equals", "value": "free"}
+        conditions: tuple[JsonValue, ...] = (
+            None,
+            True,
+            {},
+            {"all": []},
+            {"not": leaf, "any": [leaf]},
+            {**leaf, "operator": "matches"},
+            {**leaf, "value": []},
             {**leaf, "unexpected": True},
             {"fact_ref": "host_memory_mb", "operator": "equals", "value": 24576},
-        ):
+        )
+        for condition in conditions:
             with self.subTest(condition=condition):
                 self._vacancy_option()["available_when"] = condition
                 with self.assertRaisesRegex(ContractError, "available_when"):
@@ -303,9 +317,7 @@ class InferenceVacancyProfileGuard(unittest.TestCase):
     def test_contract_rejects_unknown_later_self_and_same_stage_cycles(self) -> None:
         for reference in ("not_a_decision", "inference_model", "inference_implementation"):
             with self.subTest(reference=reference):
-                self._vacancy_option()["available_when"] = {
-                    "not": {"decision_ref": reference, "operator": "equals", "value": "none"}
-                }
+                self._vacancy_option()["available_when"] = {"not": {"decision_ref": reference, "operator": "equals", "value": "none"}}
                 with self.assertRaisesRegex(ContractError, "available_when"):
                     self.bundle.validate()
         cycle_bundle = ContractBundle.load(source_revision="a" * 40, directory=_CONTRACTS)
@@ -315,7 +327,7 @@ class InferenceVacancyProfileGuard(unittest.TestCase):
         ):
             source = cast(dict[str, JsonValue], cycle_bundle.decisions[decision_id]["option_source"])
             options = cast(dict[str, JsonValue], source["options"])
-            options["lm_studio"]["available_when"] = {
+            cast(dict[str, JsonValue], options["lm_studio"])["available_when"] = {
                 "decision_ref": prerequisite,
                 "operator": "equals",
                 "value": "lm_studio",
@@ -331,17 +343,46 @@ class InferenceVacancyProfileGuard(unittest.TestCase):
         self.assertIn("inference_implementation", plan.unresolved_decisions)
 
     def test_declared_condition_controls_both_rendering_and_validation(self) -> None:
-        self._vacancy_option()["available_when"] = {
-            "decision_ref": "setup_profile", "operator": "equals", "value": "custom"
-        }
+        self._vacancy_option()["available_when"] = {"decision_ref": "setup_profile", "operator": "equals", "value": "custom"}
         self.bundle.validate()
         plan = self._plan("custom", {"inference_implementation": "none"})
         validate_normalized_answers(self.bundle, plan.answers)
         prompts = static_decision_prompts(self.bundle, self._plan("custom"))
         prompt = next(item for item in prompts if isinstance(item, dict) and item["id"] == "inference_implementation")
-        self.assertIn("none", {item["value"] for item in cast(list[dict[str, JsonValue]], prompt["candidates"])})
+        self.assertIn("none", {cast(str, item["value"]) for item in cast(list[dict[str, JsonValue]], prompt["candidates"])})
         with self.assertRaisesRegex(ContractError, "inference_implementation.*none"):
             self._plan("macos-bizops", {"inference_implementation": "none"})
+
+
+class LmStudioProbeProjectionGuard(unittest.TestCase):
+    def setUp(self) -> None:
+        bundle = ContractBundle.load(source_revision="a" * 40, directory=_CONTRACTS)
+        self.transaction = _lm_transaction(bundle)
+
+    def test_active_lm_studio_projection_requires_loopback_url(self) -> None:
+        transaction = self.transaction
+        for embedding, inference, profile in (("lm_studio", "lm_studio", "macos-bizops"), ("coreai", "lm_studio", "macos-bizops"), ("lm_studio", "none", "free")):
+            for url in (None, ""):
+                with self.subTest(embedding=embedding, inference=inference, url=url):
+                    answers = copy.deepcopy(transaction.answers)
+                    cast(dict[str, JsonValue], answers["decisions"]).update({"setup_profile": profile, "embeddings_implementation": embedding, "inference_implementation": inference})
+                    cast(dict[str, JsonValue], answers["public_inputs"])["lm_studio_base_url"] = url
+                    with self.assertRaisesRegex(StateConflictError, "loopback URL is unresolved"):
+                        probe_public_inputs(transaction.with_answers(answers), "setup::lm_studio.server_ready")
+        projected = probe_public_inputs(transaction, "setup::lm_studio.server_ready")
+        self.assertEqual(projected["lm_studio_base_url"], "http://localhost:1234/v1")
+
+    def test_inactive_lm_studio_projection_does_not_require_url(self) -> None:
+        transaction = self.transaction
+        for embedding in ("none", "coreai", "llama_cpp"):
+            with self.subTest(embedding=embedding):
+                answers = copy.deepcopy(transaction.answers)
+                cast(dict[str, JsonValue], answers["decisions"]).update({"setup_profile": "free", "embeddings_implementation": embedding, "inference_implementation": "none"})
+                cast(dict[str, JsonValue], answers["public_inputs"]).pop("lm_studio_base_url")
+                projected = probe_public_inputs(transaction.with_answers(answers), "setup::lm_studio.server_ready")
+                self.assertEqual(projected["embeddings_implementation"], embedding)
+                self.assertEqual(projected["inference_implementation"], "none")
+                self.assertIsNone(projected["lm_studio_base_url"])
 
 
 if __name__ == "__main__":

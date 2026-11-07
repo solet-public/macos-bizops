@@ -23,6 +23,7 @@ Run:
 from __future__ import annotations
 
 import sys
+import warnings
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -151,6 +152,52 @@ def test_unknown_model_resolves_to_conservative_fallback() -> None:
     _check(
         rt.resolve_ceiling("some-model-nobody-populated-yet") == rt.DEFAULT_CONSERVATIVE_CEILING,
         "unknown model resolves to DEFAULT_CONSERVATIVE_CEILING, never a guess or KeyError",
+    )
+
+
+def test_fable_51_is_recognized_but_its_window_is_unverified() -> None:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", rt.UnverifiedModelWindowWarning)
+        ceiling = rt.resolve_ceiling("claude-fable-5-1")
+    _check(
+        ceiling == rt.DEFAULT_CONSERVATIVE_CEILING,
+        "unverified Fable 5.1 ceiling uses conservative value, not Fable 5 data",
+    )
+    _check(
+        rt.resolve_ceiling_with_provenance("claude-fable-5-1")
+        == (rt.DEFAULT_CONSERVATIVE_CEILING, "unverified-model-window"),
+        "ceiling resolver returns an explicit unverified provenance marker",
+    )
+    _check(
+        rt.resolve_ceiling_with_provenance("some-future-model")
+        == (rt.DEFAULT_CONSERVATIVE_CEILING, "unknown-model-conservative-fallback"),
+        "unknown models retain a distinct conservative-fallback provenance",
+    )
+    _check(
+        len(caught) == 1 and isinstance(caught[0].message, rt.UnverifiedModelWindowWarning),
+        "unverified Fable 5.1 ceiling emits its named warning",
+    )
+    _check(
+        rt.resolve_notice_window(
+            model="claude-fable-5-1", effort="high", runtime_window_tokens=None,
+        ) == (None, "unverified-model-window", False),
+        "unverified Fable 5.1 window is recognized and explicitly unverified",
+    )
+    verdict = rt.rotation_notice_verdict(
+        model="claude-fable-5-1", effort="high", current_tokens=0,
+        runtime_window_tokens=None, configured_hard_clear_tokens=400_000,
+    )
+    _check(
+        verdict.window_source == "unverified-model-window"
+        and not verdict.unrecognized_model and verdict.window_tokens is None,
+        "notice verdict carries the named unverified state without calling model unknown",
+    )
+    measured = rt.resolve_notice_window(
+        model="claude-fable-5-1", effort="high", runtime_window_tokens=750_000,
+    )
+    _check(
+        measured == (750_000, "runtime-reported", False),
+        "a supplied runtime measurement supersedes the unverified static window",
     )
 
 
@@ -413,7 +460,7 @@ def test_the_superseded_fraction_survives_as_a_hint_only() -> None:
     _check(isinstance(rt.ROTATION_THRESHOLD_FRACTION, float),
            "the legacy hint is still a FRACTION, not a token count")
     _check(rt.ROTATION_THRESHOLD_FRACTION == 0.5, "the hint is unchanged at 0.5")
-    _check(isinstance(rt.WARM_BAND_KEEP_WORKING_TOKENS, int)
+    _check(type(rt.WARM_BAND_KEEP_WORKING_TOKENS) is int
            and rt.WARM_BAND_KEEP_WORKING_TOKENS > 1_000,
            "the policy bands are absolute token counts, not fractions")
 
@@ -848,6 +895,7 @@ def main() -> int:
     test_real_aliases_resolve_to_their_measured_ceilings()
     test_plausible_future_model_still_falls_back_conservative()
     test_unknown_model_resolves_to_conservative_fallback()
+    test_fable_51_is_recognized_but_its_window_is_unverified()
     test_known_model_resolves_to_its_own_ceiling_not_the_fallback()
     test_watch_threshold_constants_match_ratified_values()
     test_poke_threshold_is_strictly_below_rotate_threshold()

@@ -26,6 +26,7 @@ Exits 0 on success, 1 on first failure.
 from __future__ import annotations
 
 import sys
+import unittest
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -35,6 +36,7 @@ import httpx
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "zuora_plugin" / "src"))
 
+from smoke_request import CredentialEncodingTests, RequestTests  # noqa: E402
 from zuora_plugin.app_config import AppConfigError, AppConfigLoader  # noqa: E402
 from zuora_plugin.http_client import ZuoraAuthError, ZuoraClient  # noqa: E402
 from zuora_plugin.plugin import ZuoraPlugin  # noqa: E402
@@ -168,7 +170,10 @@ def test_edge_parity() -> None:
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 9 verbs discovered", len(actions) == 9, str(len(actions)))
+    from zuora_plugin.typed_verbs import TYPED_HANDLERS
+
+    expected = 10 + len(TYPED_HANDLERS)  # original verbs + generic request, plus typed build-2 verbs
+    _assert(f"all {expected} verbs discovered", len(actions) == expected, str(len(actions)))
 
 
 def main() -> int:
@@ -181,9 +186,16 @@ def main() -> int:
     test_401_triggers_one_refetch_and_retry()
     test_failed_token_mint_raises()
     test_edge_parity()
+    request_suite = unittest.TestSuite(
+        (
+            unittest.defaultTestLoader.loadTestsFromTestCase(RequestTests),
+            unittest.defaultTestLoader.loadTestsFromTestCase(CredentialEncodingTests),
+        )
+    )
+    request_result = unittest.TextTestRunner(verbosity=2).run(request_suite)
     print()
     print(f"Results: {_passed} passed, {len(_failed)} failed")
-    if _failed:
+    if _failed or not request_result.wasSuccessful():
         print("FAILED:", _failed)
         return 1
     print("All tenant-config + auth smoke tests passed.")

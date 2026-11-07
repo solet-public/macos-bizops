@@ -15,7 +15,7 @@ from dataclasses import asdict
 from typing import Any, Protocol
 
 from .model_dispatch_policy import AppliedFloor, DispatchPolicyError, validate_spawn_dispatch
-from .workbench_brief_snapshot import BriefSnapshot, VerbError
+from .register_unit_client import RegisteredRevision, VerbError
 
 
 class SpawnPolicyFields(Protocol):
@@ -36,12 +36,12 @@ class SpawnPolicyFields(Protocol):
 
 
 def validate_spawn_policy(
-    req: SpawnPolicyFields, brief_snapshot: BriefSnapshot | None,
+    req: SpawnPolicyFields, revision: RegisteredRevision | None,
 ) -> tuple[AppliedFloor, ...]:
     """The model-dispatch policy as a named verb refusal; returns the floors applied.
 
     Called twice per spawn: once before anything else (declared ``scope_tags``
-    only, ``brief_snapshot=None``) and once more after the workbench brief is
+    only, ``revision=None``) and once more after the registered revision is
     read. A configured floor may use the brief text; the retired state_schema
     floor does not. Both calls precede every host side effect and ledger write.
     """
@@ -53,7 +53,7 @@ def validate_spawn_policy(
             reviewed_report_vendor=req.reviewed_report_vendor,
             pair_id=req.pair_id,
             scope_tags=req.scope_tags,
-            brief_text=brief_snapshot.text if brief_snapshot is not None else "",
+            brief_text=revision.text if revision is not None else "",
         )
     except DispatchPolicyError as exc:
         raise VerbError(exc.code, exc.message) from exc

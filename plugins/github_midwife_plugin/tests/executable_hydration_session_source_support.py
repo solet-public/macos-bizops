@@ -81,12 +81,13 @@ def run_session_source_boot_registration_regression(
         disabled["checkpoint_status"] != "applied",
         "setup does not report applied for a disabled boot-created source",
     )
+    disabled_repair = disabled.get("repair")
     check(
-        all(
-            command[2] != "service_interface::session_ledger_service::poll_source"
-            for command in disabled_runtime.commands
-            if len(command) > 2
-        ),
+        disabled["error_kind"] == "session_source_register_failed" and isinstance(disabled_repair, str) and "codex_local" in disabled_repair and "ledger_allowed_roots" in disabled_repair,
+        "a missing boot-created source names the source kind and the allow-list skip in setup's repair advisory",
+    )
+    check(
+        all(command[2] != "service_interface::session_ledger_service::poll_source" for command in disabled_runtime.commands if len(command) > 2),
         "setup does not poll a disabled boot-created source",
     )
     runtime.responses[list_sources_command] = command_outcome(
@@ -139,12 +140,7 @@ def run_session_source_boot_registration_regression(
     )
     applied = operation_handlers()[request.operation_ref](request, runtime)
     check(
-        applied["checkpoint_status"] == "applied"
-        and all(
-            command[2] != "service_interface::session_ledger_service::register_source"
-            for command in runtime.commands
-            if len(command) > 2
-        ),
+        applied["checkpoint_status"] == "applied" and all(command[2] != "service_interface::session_ledger_service::register_source" for command in runtime.commands if len(command) > 2),
         "setup verifies and polls the boot-created source without public re-registration",
     )
 
@@ -214,9 +210,7 @@ def run_router_and_qualification_regressions(
         ],
     }
     canonical_router = router_result(canonical_status)
-    check(
-        canonical_router["checkpoint_status"] == "verified", "canonical router identity verifies"
-    )
+    check(canonical_router["checkpoint_status"] == "verified", "canonical router identity verifies")
     check(
         canonical_router["evidence"][0]["observed"] == canonical_instance,
         "router evidence records the observed canonical instance id",
@@ -432,9 +426,7 @@ def run_router_and_qualification_regressions(
         failed_kb["checkpoint_status"] != "verified",
         "green process with empty KB retrieval is non-green",
     )
-    run_knowledge_readiness_poll(
-        target, runtime, request=request, check=check, command_outcome=command_outcome
-    )
+    run_knowledge_readiness_poll(target, runtime, request=request, check=check, command_outcome=command_outcome)
     run_knowledge_output_cap(
         target,
         runtime,
@@ -520,28 +512,23 @@ def _router_transport_regression(
 ) -> None:
     null_binding = router_result({"active_color": None, "active_instance_id": None, "colors": []})
     check(
-        null_binding["error_kind"] == "router_identity_failed"
-        and null_binding["evidence"][0]["observed"] is None,
+        null_binding["error_kind"] == "router_identity_failed" and null_binding["evidence"][0]["observed"] is None,
         "reachable router with a null active binding remains an identity failure",
     )
     management_unreachable = router_result({"error": "router socket unavailable"})
     check(
-        management_unreachable["error_kind"] == "router_mgmt_unreachable"
-        and management_unreachable["evidence"][0]["observed"] == "router_mgmt_unreachable",
+        management_unreachable["error_kind"] == "router_mgmt_unreachable" and management_unreachable["evidence"][0]["observed"] == "router_mgmt_unreachable",
         "platform-reported router management failure is distinct from an identity fault",
     )
     runtime.responses[command] = command_outcome(1, False, 1, "", "connection refused")
     unreachable = dispatch_request(router, runtime)
     check(
-        unreachable["error_kind"] == "router_unreachable"
-        and unreachable["evidence"][0]["observed"] == "router_unreachable"
-        and unreachable["error_kind"] != null_binding["error_kind"],
+        unreachable["error_kind"] == "router_unreachable" and unreachable["evidence"][0]["observed"] == "router_unreachable" and unreachable["error_kind"] != null_binding["error_kind"],
         "unreachable router is distinct from a null active binding",
     )
     runtime.responses[command] = command_outcome(0, False, 1, "HTTP/1.1 503 Service Unavailable", "")
     unavailable = dispatch_request(router, runtime)
     check(
-        unavailable["error_kind"] == "router_transport_503"
-        and unavailable["evidence"][0]["observed"] == "router_transport_503",
+        unavailable["error_kind"] == "router_transport_503" and unavailable["evidence"][0]["observed"] == "router_transport_503",
         "router public-port 503 is distinct from a null active binding",
     )

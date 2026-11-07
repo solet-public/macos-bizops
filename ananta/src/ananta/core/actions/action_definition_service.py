@@ -13,6 +13,7 @@ import logging
 from collections.abc import Callable
 
 from ananta.constants import FRAMEWORK_NAMESPACE
+from ananta.core.actions._measured_action_lane import run_blocking
 from ananta.core.domain.status import is_status_match
 from ananta.core.plugins.plugin_contracts import ActionStatus
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
@@ -38,9 +39,11 @@ class ActionDefinitionService:
         """Initialize ActionDefinitionService."""
         self.state_service = state_service
 
-    async def get_action_definition_from_registry(
-        self, action_name: str
-    ) -> dict[str, object] | None:
+    async def get_action_definition_from_registry(self, action_name: str) -> dict[str, object] | None:
+        """Read and decode the registry on the F2 worker."""
+        return await run_blocking(self._get_action_definition_from_registry, action_name)
+
+    def _get_action_definition_from_registry(self, action_name: str) -> dict[str, object] | None:
         """
         Get action definition from persistent registry.
 
@@ -61,9 +64,7 @@ class ActionDefinitionService:
                 query={"table": "action_definitions", "filters": {"action_name": action_name}},
             )
 
-            if is_status_match(result.get("action_status"), ActionStatus.COMPLETED) and result.get(
-                "data"
-            ):
+            if is_status_match(result.get("action_status"), ActionStatus.COMPLETED) and result.get("data"):
                 data_obj = result.get("data", {})
                 records_obj = data_obj.get("records", [])
                 # Type narrow records from object to list using isinstance check
@@ -124,9 +125,7 @@ class ActionDefinitionService:
             },
         }
 
-    def extract_merged_parameters(
-        self, action_def: dict[str, object], action_parameters: dict[str, object]
-    ) -> dict[str, object]:
+    def extract_merged_parameters(self, action_def: dict[str, object], action_parameters: dict[str, object]) -> dict[str, object]:
         """
         Merge action definition parameters with provided parameters.
 

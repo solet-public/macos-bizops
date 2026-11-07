@@ -1,0 +1,19 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::read_unit_usage",
+  "display_name": "Read a Unit's observed session usage",
+  "description": "Joins every managed session for exactly one registered unit_id or agent_instance_id to its known runtime session ids and the session ledger's per-session totals. Returns coverage none, partial, or full; observed provider, runtime, model and effort tuples; USD only where a current profile supports pricing; applicable allowance readings; a dispatch mismatch flag; the selector estimate and its basis; and counts/advisories for missing mappings, unresolved ids, unsupported meters, and incomplete reads. Observed model and effort come from runtime evidence. A current context effort applies only to its matching runtime id; historical unknown effort is retained and counted. Missing runtime data never blocks the read. Read-only.",
+  "embedding_description": "Reads one unit_id or agent_instance_id, joins every managed-session row for that unit to mapped or current context runtime IDs and per-session ledger totals, then reports partial or missing coverage and advisories, observed provider, model and effort usage, priced USD with its basis, allowance-pool readings, the selector estimate, and dispatch mismatches.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Unit usage read",
+    "result_type": "read_unit_usage_result",
+    "result_description": "coverage (none/partial/full), sessions (runtime identity, observed usage/pricing tuples, dispatch fields and executor_mismatch), estimate (USD, receipt/catalog_lookup/none basis and selected cell), difficulty_score, as_of, lag_seconds, and notes (resolution/completeness counts and advisories).",
+    "presentation_guidance": "State coverage first. Report observed token counts separately from priced USD and name the pricing basis. Call out missing, unsupported, partial or bounded sources and any executor mismatch. Never fill missing observed model or effort from dispatch fields.",
+    "output_action_guidance": "Use unit_id or agent_instance_id, never both. Treat partial and none coverage as an advisory answer with its notes; the read does not claim missing usage is zero. Use read_session_usage_window for a raw or priced time window."
+  },
+  "error_processor_customizations": {
+    "action_context": "One filtered managed-session read, mapping/context reads per worker, bounded S1 usage reads in groups of at most 200 runtime ids, and S2 in-memory pricing/estimate calculations. No writes.",
+    "error_interpretation": "parameter_invalid: exactly one of unit_id and agent_instance_id is required. Missing state or ledger runtime data appears in the answer's coverage and advisories rather than as a refusal.",
+    "recovery_guidance": "Correct the identity arguments when parameter_invalid is returned. For partial or none coverage, inspect notes and resolve the named mapping, ledger, meter, or freshness gap; do not treat an unsupported source as measured zero."
+  }
+}

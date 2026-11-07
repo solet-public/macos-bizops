@@ -211,11 +211,7 @@ def _upgraded_dependency_evidence(runtime: AdapterRuntime, upgraded: tuple[str, 
                 evidence_id="homebrew.python_framework_upgraded",
                 kind="homebrew_plan",
                 status="verified",
-                summary=(
-                    f"{_PYTHON_FRAMEWORK} was upgraded. Any solet whose .venv links it is refused its Keychain "
-                    "credentials (-25293) at its next restart until each item is re-authorized: read it once in a "
-                    "logged-in GUI session and answer Always Allow."
-                ),
+                summary=(f"{_PYTHON_FRAMEWORK} was upgraded. Any solet whose .venv links it is refused its Keychain credentials (-25293) at its next restart until each item is re-authorized: read it once in a logged-in GUI session and answer Always Allow."),
                 observed=[_PYTHON_FRAMEWORK],
                 expected=None,
                 source="brew-install-dry-run",
@@ -489,9 +485,7 @@ def _await_cask_executable(runtime: AdapterRuntime, executable_name: str) -> str
     return None
 
 
-def _executable_resolution_evidence(
-    runtime: AdapterRuntime, executable_name: str, executable: str | None, summary: str
-) -> list[dict[str, Any]]:
+def _executable_resolution_evidence(runtime: AdapterRuntime, executable_name: str, executable: str | None, summary: str) -> list[dict[str, Any]]:
     return [
         evidence(
             runtime,
@@ -511,9 +505,7 @@ def _coding_tool_route(request: Request, runtime: AdapterRuntime) -> dict[str, A
 
     executable_name, kind, package = _CODING_TOOL_ACQUISITIONS[request["operation_id"]]
     executable = _resolved_tool(runtime, executable_name)
-    evidence_items = _executable_resolution_evidence(
-        runtime, executable_name, executable, f"The {executable_name} executable was resolved before Homebrew provisioning."
-    )
+    evidence_items = _executable_resolution_evidence(runtime, executable_name, executable, f"The {executable_name} executable was resolved before Homebrew provisioning.")
     if executable is not None:
         return result(request, status="verified", evidence_items=evidence_items)
     brew = resolve_brew_executable(runtime)
@@ -561,9 +553,7 @@ def _coding_tool_route(request: Request, runtime: AdapterRuntime) -> dict[str, A
         )
     if kind == "cask":
         executable = _await_cask_executable(runtime, executable_name)
-        evidence_items = _executable_resolution_evidence(
-            runtime, executable_name, executable, f"The {executable_name} executable was resolved after Homebrew cask installation."
-        )
+        evidence_items = _executable_resolution_evidence(runtime, executable_name, executable, f"The {executable_name} executable was resolved after Homebrew cask installation.")
     evidence_items = [*evidence_items, *_upgraded_dependency_evidence(runtime, installed.upgraded_dependencies)]
     return result(request, status="applied", evidence_items=evidence_items)
 
@@ -646,6 +636,28 @@ def _bind_homebrew_actions(actions: list[dict[str, Any]], brew: str) -> list[dic
     return [{**action, "target": f"{brew}:{action['target']}"} for action in actions]
 
 
+def _postgres_configuration_failure(request: Request, exc: AdapterError, evidence_items: list[dict[str, Any]]) -> dict[str, Any]:
+    """A required psql failure keeps its bounded output; any other adapter error keeps the plain envelope."""
+
+    repair = _postgres_configuration_repair(exc)
+    if isinstance(exc, CommandExecutionError):
+        return command_failure_result(
+            request,
+            error_kind="postgres_configuration_failed",
+            evidence_items=evidence_items,
+            repair=repair,
+            outcome=exc.outcome,
+        )
+    return result(
+        request,
+        status="failed",
+        error_kind="postgres_configuration_failed",
+        retry_safe=True,
+        evidence_items=evidence_items,
+        repair=repair,
+    )
+
+
 def _postgres_configure_route(request: Request, runtime: AdapterRuntime) -> dict[str, Any]:
     observed = postgres_observation(runtime)
     evidence_items = postgres_evidence(runtime, observed)
@@ -692,14 +704,7 @@ def _postgres_configure_route(request: Request, runtime: AdapterRuntime) -> dict
     try:
         apply_postgres_configuration(runtime, policy, actions)
     except AdapterError as exc:
-        return result(
-            request,
-            status="failed",
-            error_kind="postgres_configuration_failed",
-            retry_safe=True,
-            evidence_items=evidence_items,
-            repair=_postgres_configuration_repair(exc),
-        )
+        return _postgres_configuration_failure(request, exc, evidence_items)
     return result(request, status="applied", evidence_items=evidence_items)
 
 

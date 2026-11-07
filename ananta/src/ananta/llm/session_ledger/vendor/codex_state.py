@@ -48,6 +48,7 @@ from typing import Any
 
 from ananta.llm.session_ledger.types import (
     EventType,
+    MessageRole,
     NormalizedSessionEvent,
     RawSessionEvent,
 )
@@ -148,13 +149,16 @@ def iter_thread_rows(
         updated_at = int(row[4])
         cwd = str(row[5])
         state_metadata = _row_to_state_payload(row[6:])
-        yield rowid, ThreadRow(
-            id=thread_id,
-            title=title,
-            created_at=created_at,
-            updated_at=updated_at,
-            cwd=cwd,
-            state_metadata=state_metadata,
+        yield (
+            rowid,
+            ThreadRow(
+                id=thread_id,
+                title=title,
+                created_at=created_at,
+                updated_at=updated_at,
+                cwd=cwd,
+                state_metadata=state_metadata,
+            ),
         )
 
 
@@ -165,10 +169,7 @@ def iter_dynamic_tools(
 ) -> Iterator[dict[str, Any]]:
     """Yield ``thread_dynamic_tools`` rows for ``thread_id`` (ordered by position)."""
     select_columns = ", ".join(_DYNAMIC_TOOL_KEYS)
-    sql = (
-        f"SELECT {select_columns} FROM thread_dynamic_tools "
-        f"WHERE thread_id = ? ORDER BY position"
-    )
+    sql = f"SELECT {select_columns} FROM thread_dynamic_tools WHERE thread_id = ? ORDER BY position"
     for row in con.execute(sql, (thread_id,)):
         yield _row_to_dynamic_tool_payload(row)
 
@@ -220,7 +221,7 @@ def normalize_raw(raw: RawSessionEvent) -> NormalizedSessionEvent:
     return NormalizedSessionEvent(
         external_session_id=raw.external_session_id,
         event_type=EventType.SYSTEM,
-        role=None,
+        role=MessageRole.SYSTEM,
         content_text=None,
         content_json=dict(raw.payload),
         event_at=raw.event_at,
@@ -233,15 +234,11 @@ def normalize_raw(raw: RawSessionEvent) -> NormalizedSessionEvent:
 
 
 def _row_to_state_payload(values: tuple[Any, ...]) -> dict[str, Any]:
-    return {
-        key: _scalar(value) for key, value in zip(_STATE_PAYLOAD_KEYS, values, strict=True)
-    }
+    return {key: _scalar(value) for key, value in zip(_STATE_PAYLOAD_KEYS, values, strict=True)}
 
 
 def _row_to_dynamic_tool_payload(values: tuple[Any, ...]) -> dict[str, Any]:
-    return {
-        key: _scalar(value) for key, value in zip(_DYNAMIC_TOOL_KEYS, values, strict=True)
-    }
+    return {key: _scalar(value) for key, value in zip(_DYNAMIC_TOOL_KEYS, values, strict=True)}
 
 
 def _scalar(value: Any) -> Any:

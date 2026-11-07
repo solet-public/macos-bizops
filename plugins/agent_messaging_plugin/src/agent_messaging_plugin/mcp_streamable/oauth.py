@@ -69,6 +69,7 @@ from ananta.services.store.errors import StoreError
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
+from ..bridge_sessions import run_bridge_work
 from .auth import HMAC_SIGNING_ALGORITHM
 
 if TYPE_CHECKING:
@@ -82,12 +83,8 @@ logger = logging.getLogger(__name__)
 # Endpoint paths.
 # ---------------------------------------------------------------------
 
-OAUTH_AUTHORIZATION_SERVER_PATH: Final[str] = (
-    "/.well-known/oauth-authorization-server"
-)
-OAUTH_PROTECTED_RESOURCE_PATH: Final[str] = (
-    "/.well-known/oauth-protected-resource"
-)
+OAUTH_AUTHORIZATION_SERVER_PATH: Final[str] = "/.well-known/oauth-authorization-server"
+OAUTH_PROTECTED_RESOURCE_PATH: Final[str] = "/.well-known/oauth-protected-resource"
 OAUTH_AUTHORIZE_PATH: Final[str] = "/authorize"
 OAUTH_TOKEN_PATH: Final[str] = "/oauth/token"
 OAUTH_REGISTER_PATH: Final[str] = "/register"
@@ -125,7 +122,6 @@ _ERROR_UNSUPPORTED_GRANT_TYPE: Final[str] = "unsupported_grant_type"
 _ERROR_INVALID_TARGET: Final[str] = "invalid_target"  # RFC 8707 §2
 
 
-
 # ---------------------------------------------------------------------
 # Adapter protocols — the vault plugin satisfies all three.
 # ---------------------------------------------------------------------
@@ -139,7 +135,9 @@ class OAuthClientStore(Protocol):
         ...
 
     def verify_oauth_client_credentials(
-        self, client_id: str, client_secret: str,
+        self,
+        client_id: str,
+        client_secret: str,
     ) -> dict[str, Any] | None:
         """Return client metadata on hit, None on bad credentials."""
         ...
@@ -175,7 +173,8 @@ class RefreshTokenStore(Protocol):
         ...
 
     def consume_oauth_refresh_token(
-        self, cleartext: str,
+        self,
+        cleartext: str,
     ) -> dict[str, Any] | None:
         """Look up + single-use invalidate a refresh token.
 
@@ -262,11 +261,7 @@ class AuthCodeCache:
     def _sweep_locked(self) -> None:
         """Drop expired entries; caller holds ``self._lock``."""
         now = time.monotonic()
-        expired = [
-            code
-            for code, entry in self._entries.items()
-            if now - entry.created_at > self._ttl
-        ]
+        expired = [code for code, entry in self._entries.items() if now - entry.created_at > self._ttl]
         for code in expired:
             self._entries.pop(code, None)
 
@@ -310,7 +305,9 @@ def build_oauth_router(
     async def authorization_server_metadata() -> Response:
         return JSONResponse(
             content=_authorization_server_document(
-                endpoints, scopes_tuple, supports_refresh=supports_refresh,
+                endpoints,
+                scopes_tuple,
+                supports_refresh=supports_refresh,
             ),
             status_code=200,
         )
@@ -335,7 +332,9 @@ def build_oauth_router(
 
     @router.get(OAUTH_AUTHORIZE_PATH)
     async def authorize(request: Request) -> Response:
-        return _handle_authorize(
+        # iss_5cf6184d: the client lookup is a vault (state-service) read.
+        return await run_bridge_work(
+            _handle_authorize,
             request,
             endpoints=endpoints,
             client_store=client_store,
@@ -386,11 +385,14 @@ def build_oauth_metadata_router(
     @router.get(OAUTH_AUTHORIZATION_SERVER_PATH)
     async def authorization_server_metadata(request: Request) -> Response:
         resolved = endpoints or _endpoints_from_request(
-            request, streamable_path=streamable_path,
+            request,
+            streamable_path=streamable_path,
         )
         return JSONResponse(
             content=_authorization_server_document(
-                resolved, scopes_tuple, supports_refresh=supports_refresh,
+                resolved,
+                scopes_tuple,
+                supports_refresh=supports_refresh,
             ),
             status_code=200,
         )
@@ -398,7 +400,8 @@ def build_oauth_metadata_router(
     @router.get(OAUTH_PROTECTED_RESOURCE_PATH)
     async def protected_resource_metadata(request: Request) -> Response:
         resolved = endpoints or _endpoints_from_request(
-            request, streamable_path=streamable_path,
+            request,
+            streamable_path=streamable_path,
         )
         return JSONResponse(
             content=_protected_resource_document(resolved, scopes_tuple),
@@ -411,7 +414,8 @@ def build_oauth_metadata_router(
         resource_path: str,
     ) -> Response:
         resolved = endpoints or _endpoints_from_request(
-            request, streamable_path=streamable_path,
+            request,
+            streamable_path=streamable_path,
         )
         if not _resource_path_matches(resolved, resource_path):
             return Response(status_code=404)
@@ -494,7 +498,9 @@ def build_dynamic_oauth_router(
 
     @router.get(OAUTH_AUTHORIZE_PATH)
     async def authorize(request: Request) -> Response:
-        return _handle_authorize(
+        # iss_5cf6184d: the client lookup is a vault (state-service) read.
+        return await run_bridge_work(
+            _handle_authorize,
             request,
             endpoints=_resolve(request),
             client_store=client_store,
@@ -560,7 +566,8 @@ def _authorization_server_document(
 
 
 def _protected_resource_document(
-    endpoints: OAuthEndpoints, scopes: tuple[str, ...],
+    endpoints: OAuthEndpoints,
+    scopes: tuple[str, ...],
 ) -> dict[str, Any]:
     """MCP 2025-06-18 §authorization protected-resource document."""
     return {
@@ -572,7 +579,9 @@ def _protected_resource_document(
 
 
 def _endpoints_from_request(
-    request: Request, *, streamable_path: str,
+    request: Request,
+    *,
+    streamable_path: str,
 ) -> OAuthEndpoints:
     """Derive endpoint URLs from the current request origin."""
     base = str(request.base_url).rstrip("/")
@@ -580,13 +589,11 @@ def _endpoints_from_request(
 
 
 def _resource_path_matches(
-    endpoints: OAuthEndpoints, resource_path: str,
+    endpoints: OAuthEndpoints,
+    resource_path: str,
 ) -> bool:
     """True when a path-specific PRMD suffix names this MCP resource."""
-    candidates = {
-        urlparse(resource).path.lstrip("/")
-        for resource in (endpoints.resource, *endpoints.resource_aliases)
-    }
+    candidates = {urlparse(resource).path.lstrip("/") for resource in (endpoints.resource, *endpoints.resource_aliases)}
     return resource_path.strip("/") in candidates
 
 
@@ -613,13 +620,16 @@ def _validate_authorize_response_type(params: dict[str, str]) -> Response | None
 
 
 def _resolve_authorize_client(
-    params: dict[str, str], client_store: OAuthClientStore,
+    params: dict[str, str],
+    client_store: OAuthClientStore,
 ) -> tuple[str, dict[str, Any]] | Response:
     """Look up + gate the client by id; return (client_id, client) or Response."""
     client_id = params.get("client_id", "")
     if not client_id:
         return _oauth_error(
-            _ERROR_INVALID_REQUEST, "client_id is required", http_status=400,
+            _ERROR_INVALID_REQUEST,
+            "client_id is required",
+            http_status=400,
         )
     client = client_store.lookup_oauth_client(client_id)
     if client is None:
@@ -638,13 +648,16 @@ def _resolve_authorize_client(
 
 
 def _validate_authorize_redirect_uri(
-    params: dict[str, str], client: dict[str, Any],
+    params: dict[str, str],
+    client: dict[str, Any],
 ) -> tuple[str, Response | None]:
     """Exact-match the supplied redirect_uri against the registered list."""
     redirect_uri = params.get("redirect_uri", "")
     if not redirect_uri:
         return "", _oauth_error(
-            _ERROR_INVALID_REQUEST, "redirect_uri is required", http_status=400,
+            _ERROR_INVALID_REQUEST,
+            "redirect_uri is required",
+            http_status=400,
         )
     registered_uris = client.get("redirect_uris") or []
     if not isinstance(registered_uris, list) or redirect_uri not in registered_uris:
@@ -675,22 +688,24 @@ def _validate_authorize_pkce(params: dict[str, str]) -> tuple[str, Response | No
 
 
 def _validate_authorize_resource(
-    params: dict[str, str], endpoints: OAuthEndpoints,
+    params: dict[str, str],
+    endpoints: OAuthEndpoints,
 ) -> tuple[str, Response | None]:
     """RFC 8707 §2: resource MUST identify this MCP server when supplied."""
     resource = params.get("resource", "")
     if resource and not _resource_identifies_endpoint(resource, endpoints):
         return "", _oauth_error(
             _ERROR_INVALID_TARGET,
-            f"resource {resource!r} does not match this MCP endpoint "
-            f"({endpoints.resource!r})",
+            f"resource {resource!r} does not match this MCP endpoint ({endpoints.resource!r})",
             http_status=400,
         )
     return (resource or _advertised_resource(endpoints)), None
 
 
 def _build_authorize_redirect(
-    redirect_uri: str, code: str, state: str,
+    redirect_uri: str,
+    code: str,
+    state: str,
 ) -> str:
     """Construct the final 302 target preserving any existing query string."""
     redirect_query: dict[str, str] = {"code": code}
@@ -725,7 +740,8 @@ def _handle_authorize(
     if err is not None:
         return err
     scopes = _intersect_scopes(
-        list(client.get("scopes") or []), params.get("scope", ""),
+        list(client.get("scopes") or []),
+        params.get("scope", ""),
     )
     code = auth_code_cache.issue(
         _PendingAuthCode(
@@ -740,7 +756,10 @@ def _handle_authorize(
     target = _build_authorize_redirect(redirect_uri, code, state)
     logger.info(
         "oauth_authorize: client_id=%s redirect_uri=%s code=<%d chars> state=%r",
-        client_id, redirect_uri, len(code), state,
+        client_id,
+        redirect_uri,
+        len(code),
+        state,
     )
     return RedirectResponse(url=target, status_code=302)
 
@@ -765,6 +784,36 @@ async def _handle_token_request(
     body = await _parse_token_body(request)
     if isinstance(body, Response):
         return body
+    # iss_5cf6184d: every grant reads the vault's client registry (a
+    # state-service query) and verifies a secret with scrypt; the refresh grant
+    # also rotates a stored token. None of it belongs on the event loop.
+    return await run_bridge_work(
+        _dispatch_token_grant,
+        request,
+        body,
+        endpoints=endpoints,
+        client_store=client_store,
+        hmac_key=hmac_key,
+        auth_code_cache=auth_code_cache,
+        refresh_token_store=refresh_token_store,
+        token_ttl_seconds=token_ttl_seconds,
+        refresh_token_ttl_seconds=refresh_token_ttl_seconds,
+    )
+
+
+def _dispatch_token_grant(
+    request: Request,
+    body: dict[str, str],
+    *,
+    endpoints: OAuthEndpoints,
+    client_store: OAuthClientStore,
+    hmac_key: bytes,
+    auth_code_cache: AuthCodeCache,
+    refresh_token_store: RefreshTokenStore | None,
+    token_ttl_seconds: int,
+    refresh_token_ttl_seconds: int,
+) -> Response:
+    """Run one parsed /oauth/token request's grant (worker thread)."""
     grant_type = body.get("grant_type", "")
     if grant_type == "client_credentials":
         return _handle_client_credentials_grant(
@@ -804,10 +853,7 @@ async def _handle_token_request(
             token_ttl_seconds=token_ttl_seconds,
             refresh_token_ttl_seconds=refresh_token_ttl_seconds,
         )
-    supported = (
-        "client_credentials, authorization_code"
-        + (", refresh_token" if refresh_token_store is not None else "")
-    )
+    supported = "client_credentials, authorization_code" + (", refresh_token" if refresh_token_store is not None else "")
     return _oauth_error(
         _ERROR_UNSUPPORTED_GRANT_TYPE,
         f"unsupported grant_type {grant_type!r}; supported: {supported}",
@@ -830,7 +876,8 @@ def _handle_client_credentials_grant(
         return creds
     client_id, client_secret = creds
     verification = client_store.verify_oauth_client_credentials(
-        client_id, client_secret,
+        client_id,
+        client_secret,
     )
     if verification is None:
         logger.warning(
@@ -852,7 +899,8 @@ def _handle_client_credentials_grant(
     if resource_error is not None:
         return resource_error
     granted_scopes = _intersect_scopes(
-        list(verification.get("scopes") or []), body.get("scope", ""),
+        list(verification.get("scopes") or []),
+        body.get("scope", ""),
     )
     response = _issue_access_token_response(
         endpoints=endpoints,
@@ -864,7 +912,8 @@ def _handle_client_credentials_grant(
         token_ttl_seconds=token_ttl_seconds,
     )
     _record_token_use(
-        request, client_store,
+        request,
+        client_store,
         client_id=str(verification["client_id"]),
         transport="client_credentials",
     )
@@ -872,7 +921,8 @@ def _handle_client_credentials_grant(
 
 
 def _consume_auth_code(
-    body: dict[str, str], auth_code_cache: AuthCodeCache,
+    body: dict[str, str],
+    auth_code_cache: AuthCodeCache,
 ) -> tuple[str, _PendingAuthCode] | Response:
     """Pull (code, verifier) from body + single-use consume the cache entry."""
     code = body.get("code", "")
@@ -894,7 +944,9 @@ def _consume_auth_code(
 
 
 def _validate_auth_code_bindings(
-    body: dict[str, str], entry: _PendingAuthCode, code_verifier: str,
+    body: dict[str, str],
+    entry: _PendingAuthCode,
+    code_verifier: str,
 ) -> Response | None:
     """Match client_id + redirect_uri + PKCE verifier against the bound code."""
     client_id_param = body.get("client_id", "")
@@ -937,12 +989,11 @@ def _resolve_token_grant_client(
     supplied secret still gets verified for confidential clients.
     """
     basic = _extract_basic_auth(request)
-    supplied_secret = body.get("client_secret") or (
-        basic[1] if basic is not None else None
-    )
+    supplied_secret = body.get("client_secret") or (basic[1] if basic is not None else None)
     if supplied_secret:
         client = client_store.verify_oauth_client_credentials(
-            client_id, supplied_secret,
+            client_id,
+            supplied_secret,
         )
         if client is None:
             return _oauth_error(
@@ -987,11 +1038,11 @@ def _handle_authorization_code_grant(
     if (err := _validate_auth_code_bindings(body, entry, code_verifier)) is not None:
         return err
     resolved = _resolve_token_grant_client(
-        request, body, client_store,
+        request,
+        body,
+        client_store,
         client_id=entry.client_id,
-        on_lookup_miss_message=(
-            "client metadata vanished between authorize and token exchange"
-        ),
+        on_lookup_miss_message=("client metadata vanished between authorize and token exchange"),
         required_grant="authorization_code",
     )
     if isinstance(resolved, Response):
@@ -1017,7 +1068,8 @@ def _handle_authorization_code_grant(
         client_metadata=verification,
     )
     _record_token_use(
-        request, client_store,
+        request,
+        client_store,
         client_id=entry.client_id,
         transport="authorization_code",
     )
@@ -1043,11 +1095,11 @@ def _handle_refresh_token_grant(
     if (err := _validate_refresh_client_id_match(body, stored_client_id)) is not None:
         return err
     resolved = _resolve_token_grant_client(
-        request, body, client_store,
+        request,
+        body,
+        client_store,
         client_id=stored_client_id,
-        on_lookup_miss_message=(
-            "client metadata vanished between refresh issuance and exchange"
-        ),
+        on_lookup_miss_message=("client metadata vanished between refresh issuance and exchange"),
         required_grant="refresh_token",
     )
     if isinstance(resolved, Response):
@@ -1069,7 +1121,8 @@ def _handle_refresh_token_grant(
         client_metadata=client_metadata,
     )
     _record_token_use(
-        request, client_store,
+        request,
+        client_store,
         client_id=stored_client_id,
         transport="refresh_token",
     )
@@ -1077,7 +1130,8 @@ def _handle_refresh_token_grant(
 
 
 def _consume_refresh_token(
-    body: dict[str, str], refresh_token_store: RefreshTokenStore,
+    body: dict[str, str],
+    refresh_token_store: RefreshTokenStore,
 ) -> tuple[dict[str, Any], str] | Response:
     """Single-use consume of the refresh token; returns (claims, client_id)."""
     refresh_token = body.get("refresh_token", "")
@@ -1098,7 +1152,8 @@ def _consume_refresh_token(
 
 
 def _validate_refresh_client_id_match(
-    body: dict[str, str], stored_client_id: str,
+    body: dict[str, str],
+    stored_client_id: str,
 ) -> Response | None:
     """OAuth 2.1 §4.3.1: forbid cross-client refresh-token use."""
     requested_client_id = body.get("client_id", "")
@@ -1112,7 +1167,8 @@ def _validate_refresh_client_id_match(
 
 
 def _validate_refresh_audience(
-    claims: dict[str, Any], endpoints: OAuthEndpoints,
+    claims: dict[str, Any],
+    endpoints: OAuthEndpoints,
 ) -> Response | None:
     """Audience-binding: refuse rotation across migrated solets."""
     bound_audience = claims.get("audience") or ""
@@ -1128,9 +1184,7 @@ def _validate_refresh_audience(
 def _scopes_from_claims(claims: dict[str, Any]) -> list[str]:
     """Normalize the scopes payload on a refresh-token claims dict."""
     scopes_raw = claims.get("scopes") or []
-    return (
-        [str(s) for s in scopes_raw] if isinstance(scopes_raw, list) else []
-    )
+    return [str(s) for s in scopes_raw] if isinstance(scopes_raw, list) else []
 
 
 # ---------------------------------------------------------------------
@@ -1202,8 +1256,7 @@ def _record_token_use(
         )
     except (StoreError, OSError):
         logger.exception(
-            "oauth_token: failed to record token use for client_id=%s "
-            "(token was still issued)",
+            "oauth_token: failed to record token use for client_id=%s (token was still issued)",
             client_id,
         )
 
@@ -1260,9 +1313,10 @@ def _issue_access_token_response(
         )
         payload["refresh_token_expires_in"] = refresh_token_ttl_seconds
     logger.info(
-        "oauth_token: issued access_token client_id=%s scopes=%s aud=%s "
-        "with_refresh=%s",
-        client_id, scopes, effective_resource,
+        "oauth_token: issued access_token client_id=%s scopes=%s aud=%s with_refresh=%s",
+        client_id,
+        scopes,
+        effective_resource,
         refresh_token_store is not None and client_opted_in_refresh,
     )
     return JSONResponse(
@@ -1357,7 +1411,8 @@ async def _parse_token_body(request: Request) -> dict[str, str] | Response:
 
 
 def _extract_client_credentials(
-    request: Request, body: dict[str, str],
+    request: Request,
+    body: dict[str, str],
 ) -> tuple[str, str] | Response:
     """Pull client_id + client_secret out of Basic auth OR form body."""
     basic = _extract_basic_auth(request)
@@ -1408,7 +1463,8 @@ def _intersect_scopes(granted: list[str], requested: str) -> list[str]:
 
 
 def _validate_resource_parameter(
-    body: dict[str, str], endpoints: OAuthEndpoints,
+    body: dict[str, str],
+    endpoints: OAuthEndpoints,
 ) -> tuple[str, Response | None]:
     """RFC 8707 §2: ``resource`` MUST identify this MCP server when supplied."""
     resource = body.get("resource", "")
@@ -1417,8 +1473,7 @@ def _validate_resource_parameter(
     if not _resource_identifies_endpoint(resource, endpoints):
         return "", _oauth_error(
             _ERROR_INVALID_TARGET,
-            f"resource {resource!r} does not match this MCP endpoint "
-            f"({endpoints.resource!r})",
+            f"resource {resource!r} does not match this MCP endpoint ({endpoints.resource!r})",
             http_status=400,
         )
     return resource, None
@@ -1482,7 +1537,8 @@ def _require_grant_eligible(
 
 
 def _require_client_grant(
-    client_metadata: dict[str, Any], requested_grant: str,
+    client_metadata: dict[str, Any],
+    requested_grant: str,
 ) -> Response | None:
     """Per-client grant-type allowlist enforcement.
 

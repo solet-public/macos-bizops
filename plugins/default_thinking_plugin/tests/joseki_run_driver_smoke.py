@@ -39,16 +39,22 @@ import sys
 from pathlib import Path
 from typing import Any
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(_REPO_ROOT / "ananta" / "src"))
-sys.path.insert(0, str(_REPO_ROOT / "plugins" / "default_thinking_plugin" / "src"))
+_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_ROOT / "ananta" / "src"))
+sys.path.insert(0, str(_ROOT / "plugins" / "default_thinking_plugin" / "src"))
 
+from ananta.core.plans.parser import parse  # noqa: E402
 from ananta.error_handling import FrameworkError  # noqa: E402
 from ananta.services.thinking_service.joseki_run_engine import (  # noqa: E402
     JosekiRunEngine,
 )
 from ananta.services.thinking_service.joseki_run_wiring import (  # noqa: E402
     FocusBufferPlanInstaller,
+)
+from default_thinking_plugin.joseki_instantiation import (  # noqa: E402
+    InstantiatedWbs,
+    instantiate_joseki_wbs,
 )
 from default_thinking_plugin.joseki_run_gateway import JosekiRunGateway  # noqa: E402
 from default_thinking_plugin.joseki_run_store import JosekiRunStore  # noqa: E402
@@ -115,11 +121,7 @@ class _MemState:
         del namespace
         filters = query.get("filters", {})
         assert isinstance(filters, dict)
-        matches = [
-            row
-            for row in self.rows.values()
-            if all(row.get(k) == v for k, v in filters.items())
-        ]
+        matches = [row for row in self.rows.values() if all(row.get(k) == v for k, v in filters.items())]
         limit = query.get("limit", 50)
         assert isinstance(limit, int)
         return {"data": {"records": matches[:limit]}}
@@ -151,7 +153,10 @@ class _Lifecycle:
         return {"found": True, "state": self.state}
 
     def record_run(
-        self, *, joseki_key: str, wbs_id: str | None = None,
+        self,
+        *,
+        joseki_key: str,
+        wbs_id: str | None = None,
     ) -> dict[str, Any]:
         del joseki_key
         self.recorded.append(wbs_id)
@@ -178,7 +183,8 @@ class _PermissiveLookup:
     """
 
     def get_arg_properties(
-        self, process_key: str,
+        self,
+        process_key: str,
     ) -> dict[str, dict[str, object]]:
         del process_key
         return {}
@@ -205,7 +211,12 @@ class _Registrar:
         self.registered: list[str] = []
 
     def register(
-        self, *, content: str, wbs_id: str, manifest_id: str, session_id: str,
+        self,
+        *,
+        content: str,
+        wbs_id: str,
+        manifest_id: str,
+        session_id: str,
     ) -> dict[str, Any]:
         del manifest_id, session_id
         from default_thinking_plugin.authored_validation import (
@@ -214,9 +225,7 @@ class _Registrar:
 
         report = validate_authored_wbs(content, wbs_id, 1, _PermissiveLookup())
         if report.errors:
-            raise ValueError(
-                f"registrar contract violated: {'; '.join(report.errors)}"
-            )
+            raise ValueError(f"registrar contract violated: {'; '.join(report.errors)}")
         self.registered.append(wbs_id)
         return {"wbs_id": wbs_id}
 
@@ -291,7 +300,8 @@ class _Rig:
             cards=_Cards(card),
             registrar=self.registrar,
             run_store=JosekiRunStore(
-                state_store=_MemState(), namespace="default_thinking_plugin",
+                state_store=_MemState(),
+                namespace="default_thinking_plugin",
             ),
             plan_buffer=self.buffer,
         )
@@ -305,7 +315,8 @@ class _Rig:
 
     def start(self, binding: str = "ruff") -> dict[str, Any]:
         return self.engine.run_joseki(
-            joseki_key="smoke_gate_run", bindings={"g": binding},
+            joseki_key="smoke_gate_run",
+            bindings={"g": binding},
         )
 
 
@@ -352,12 +363,7 @@ def _case_terminal_exactly_once(rig: _Rig, out: dict[str, Any]) -> None:
     first = rig.engine.complete_joseki_run(wbs_id=out["wbs_id"])
     second = rig.engine.complete_joseki_run(wbs_id=out["wbs_id"])
     _check(
-        first["outcome"] == "completed"
-        and first["run_count"] == 1
-        and len(rig.life.recorded) == 1
-        and rig.buffer.releases == 1
-        and second["outcome"] == "noop_lost_cas"
-        and len(rig.life.recorded) == 1,
+        first["outcome"] == "completed" and first["run_count"] == 1 and len(rig.life.recorded) == 1 and rig.buffer.releases == 1 and second["outcome"] == "noop_lost_cas" and len(rig.life.recorded) == 1,
         "[4] terminal wins once, evidence once, duplicate is a benign noop",
     )
 
@@ -393,10 +399,7 @@ def _case_duty_order_and_terminal_guard(rig: _Rig) -> None:
     verdict = rig.engine.reconcile_run(run_id=run["run_id"])
     row = rig.engine.get_joseki_run(run_id=run["run_id"])
     _check(
-        verdict["duty"] == "violation_surfaced"
-        and verdict["outcome"] == "failed"
-        and "auto_safe" in row["failure_detail"]
-        and rig.buffer.releases == 2,
+        verdict["duty"] == "violation_surfaced" and verdict["outcome"] == "failed" and "auto_safe" in row["failure_detail"] and rig.buffer.releases == 2,
         "[5] duty-0 violation surfaced before duty-1; typed detail; focus released",
     )
     again = rig.engine.reconcile_run(run_id=run["run_id"])
@@ -410,8 +413,7 @@ def _case_runtime_failure(rig: _Rig) -> None:
     rig.flows.failed = {"process_key": "search", "error_message": "exit 2"}
     verdict = rig.engine.reconcile_run(run_id=run["run_id"])
     _check(
-        verdict["duty"] == "runtime_failure_surfaced"
-        and "exit 2" in verdict["detail"],
+        verdict["duty"] == "runtime_failure_surfaced" and "exit 2" in verdict["detail"],
         "[9] duty-1 surfaces the failed action's typed error",
     )
     rig.flows.failed = None
@@ -432,16 +434,10 @@ def _case_draft_refused() -> None:
 def _case_stall_self_clear() -> None:
     rig = _Rig()
     run = rig.start("gc")
-    outcomes = [
-        rig.engine.reconcile_run(run_id=run["run_id"])["duty"] for _ in range(5)
-    ]
+    outcomes = [rig.engine.reconcile_run(run_id=run["run_id"])["duty"] for _ in range(5)]
     row = rig.engine.get_joseki_run(run_id=run["run_id"])
     _check(
-        outcomes[:4] == ["stall_detected"] * 4
-        and outcomes[4] == "stall_attempts_exhausted"
-        and row["status"] == "failed"
-        and "consecutive reconciliation passes" in row["failure_detail"]
-        and not rig.buffer.focused_sessions,
+        outcomes[:4] == ["stall_detected"] * 4 and outcomes[4] == "stall_attempts_exhausted" and row["status"] == "failed" and "consecutive reconciliation passes" in row["failure_detail"] and not rig.buffer.focused_sessions,
         "[10] stalls self-clear: attempts climb then terminal-fail at cap",
     )
 
@@ -461,9 +457,7 @@ def _case_install_orphan_containment() -> None:
         failed = rig.engine.list_joseki_runs(status="failed")
         running = rig.engine.list_joseki_runs(status="running")
         _check(
-            failed["count"] == 1
-            and "install failed" in failed["runs"][0]["failure_detail"]
-            and running["count"] == 0,
+            failed["count"] == 1 and "install failed" in failed["runs"][0]["failure_detail"] and running["count"] == 0,
             "[11] install failure → row CAS-failed, no running orphan",
         )
 
@@ -479,8 +473,7 @@ def _case_v1_inference_scope() -> None:
         _check(False, "[12] inference-kind card rejected in v1")
     except FrameworkError as exc:
         _check(
-            "joseki_not_mechanizable" in _error_code(exc)
-            and "deterministic-only" in str(exc),
+            "joseki_not_mechanizable" in _error_code(exc) and "deterministic-only" in str(exc),
             "[12] inference-kind step → typed v1-scope rejection at authoring",
         )
 
@@ -492,10 +485,7 @@ def _case_non_mechanizable() -> None:
         _check(False, "[8] non-mechanizable card refused")
     except FrameworkError as exc:
         _check(
-            "joseki_not_mechanizable" in _error_code(exc)
-            and "g" in str(exc)
-            and rig.registrar.registered == []
-            and rig.buffer.installs == 0,
+            "joseki_not_mechanizable" in _error_code(exc) and "g" in str(exc) and rig.registrar.registered == [] and rig.buffer.installs == 0,
             "[8] unbound slot → typed rejection naming it; nothing stored",
         )
 
@@ -509,10 +499,7 @@ def _case_progress_resets_attempts() -> None:
     progress = rig.engine.reconcile_run(run_id=run["run_id"])
     row = rig.engine.get_joseki_run(run_id=run["run_id"])
     _check(
-        progress["duty"] == "progress_observed"
-        and row["attempts"] == 0
-        and row["current_step"] == 1
-        and row["status"] == "running",
+        progress["duty"] == "progress_observed" and row["attempts"] == 0 and row["current_step"] == 1 and row["status"] == "running",
         "[13] observed progress stamps the cursor and resets attempts",
     )
 
@@ -531,26 +518,14 @@ def _case_reconciler_columns_schema_true() -> None:
     from ananta.services.thinking_service import joseki_run_wiring as wiring
     from ananta.types.schema_standardizer import StandardFieldDefinitions
 
-    actions = (
-        CoreSchemaDefinitions.get_action_events_schema()
-        .tables["action_events"]
-        .columns
-    )
-    violations = (
-        CoreSchemaDefinitions.get_result_processing_violations_schema()
-        .tables["result_processing_violations"]
-        .columns
-    )
+    actions = CoreSchemaDefinitions.get_action_events_schema().tables["action_events"].columns
+    violations = CoreSchemaDefinitions.get_result_processing_violations_schema().tables["result_processing_violations"].columns
     # The query_ordered tie-safe composite rides the platform's STANDARD
     # fields (injected on every table by the standardizer, never declared
     # per-table) — pin them at their source (Rev-A round-2 rider).
     standard = set(StandardFieldDefinitions.get_standard_fields())
     _check(
-        wiring._FLOW_COLUMN in actions
-        and "status" in actions
-        and wiring._FLOW_COLUMN in violations
-        and "flow_id" not in actions
-        and {"created_at", "id"} <= standard,
+        wiring._FLOW_COLUMN in actions and "status" in actions and wiring._FLOW_COLUMN in violations and "flow_id" not in actions and {"created_at", "id"} <= standard,
         "[14] reconciler filter + order columns are core-schema-true",
     )
 
@@ -575,9 +550,64 @@ def _case_terminal_verb_carries_error_block() -> None:
         None,
     )
     _check(
-        meta is not None
-        and meta.error_processor_customizations is not None,
+        meta is not None and meta.error_processor_customizations is not None,
         "[15] terminal complete_joseki_run declares error customizations (§16)",
+    )
+
+
+def _case_deploy_card_instantiates() -> None:
+    """Pin offline admission and emitted WBS shape for the shipped deploy card."""
+    joseki_key = "deploy_local_blue_green_release"
+    card_path = _ROOT / "plugins" / "default_thinking_plugin" / "knowledge_base_joseki" / f"{joseki_key}.md"
+    card_content = card_path.read_text(encoding="utf-8")
+    try:
+        instantiated = instantiate_joseki_wbs(
+            card_content=card_content,
+            joseki_key=joseki_key,
+            bindings={},
+            wbs_id="wbs-jrun-deploy-local-blue-green-release-offline",
+            manifest_id="wmanifest-offline-deploy-card-smoke",
+        )
+    except FrameworkError as exc:
+        _check(
+            False,
+            f"deploy card mechanically instantiates ({_error_code(exc)}: {exc})",
+        )
+        return
+    _check(True, "deploy card mechanically instantiates")
+
+    _check_deploy_source_shape(card_content)
+    _check_deploy_completion(instantiated)
+
+
+def _check_deploy_source_shape(card_content: str) -> None:
+    """Check source step annotations and process targets independently."""
+    executable_steps = [step for step in parse(card_content).steps if step.process_keys]
+    _check(
+        [step.number for step in executable_steps] == [1, 2, 3, 4, 5, 6] and all(step.result_processor_kind is not None and step.result_processor_kind.value == "deterministic_continuation" for step in executable_steps),
+        "deploy six processors",
+    )
+    expected_process_keys = [
+        "service_interface::local_self_deployment_service::swap_status",
+        "service_interface::lifecycle_management_service::apply_manifest",
+        "service_interface::lifecycle_management_service::apply_manifest",
+        "service_interface::local_self_deployment_service::swap_status",
+        "service_interface::lifecycle_management_service::list_plugins",
+        "service_interface::thinking_service::record_work_breakdown_structure_step_state",
+    ]
+    _check(
+        [key for step in executable_steps for key in step.process_keys] == expected_process_keys,
+        "deploy process order",
+    )
+
+
+def _check_deploy_completion(instantiated: InstantiatedWbs) -> None:
+    """Check terminal WBS structure without invoking any emitted action."""
+    emitted = parse(instantiated.content)
+    terminal = emitted.steps[-1]
+    _check(
+        instantiated.executable_step_count == 7 and instantiated.terminal_step_number == 7 and terminal.number == 7 and terminal.process_keys == ("service_interface::thinking_service::complete_joseki_run",) and bool(terminal.bound_sub_steps) and terminal.bound_sub_steps[0].arguments == {"wbs_id": instantiated.wbs_id},
+        "deploy completion binding",
     )
 
 
@@ -598,6 +628,7 @@ def main() -> int:
     _case_non_mechanizable()
     _case_reconciler_columns_schema_true()
     _case_terminal_verb_carries_error_block()
+    _case_deploy_card_instantiates()
 
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:

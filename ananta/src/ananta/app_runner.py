@@ -13,6 +13,7 @@ from ananta.constants import (
 )
 from ananta.core.domain.enums import ErrorSeverity
 from ananta.core.domain.error_codes import ErrorCode
+from ananta.core.runtime.loop_lag import install_loop_lag_monitor
 from ananta.error_handling import (
     AnantaError,
     ExternalError,
@@ -139,6 +140,7 @@ def run_async_app(async_main_func: Callable[[], Coroutine[object, object, object
 def _execute_async_main(async_main_func: Callable[[], Coroutine[object, object, object]]) -> int:
     """Execute async main function and handle all exceptions."""
     try:
+        install_loop_lag_monitor()
         asyncio.run(async_main_func())
         return 0
     except KeyboardInterrupt:

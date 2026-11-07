@@ -6,6 +6,10 @@ files, and enrols the target so the Step-4 update can run for real up to
 ``source_advanced``.  The candidate commit carries a real transition bundle
 whose digest the descriptor binds, exactly as a staged release would.
 
+Every real Git child gets a copy of the caller environment with inherited
+``GIT_*`` keys removed, explicit helper overrides applied, and safe global and
+system config paths pinned.
+
 Target adapters are exercised IN PROCESS through the seed's own
 ``setup_adapter.dispatch_request`` and the bootstrap adapter's
 ``execute_adapter_request`` (so the seed-side D2 validator and the real
@@ -22,7 +26,7 @@ import os
 import subprocess
 import sys
 import uuid
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -78,7 +82,17 @@ CANONICAL = "https://github.com/example/seed.git"
 KB = "plugins/github_midwife_plugin/knowledge_base"
 TEMPLATES = f"{KB}/hydration_templates"
 ADAPTER_MODULE = "plugins/github_midwife_plugin/src/github_midwife_plugin/setup_adapter.py"
-_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+
+
+def scrubbed_git_environment(overrides: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Build a fixture-safe environment for Git child processes."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment.update(overrides or {})
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    environment["GIT_CONFIG_SYSTEM"] = os.devnull
+    return environment
+
+
 _REPO_KB = _ROOT / KB
 HOOKS = "plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks"
 HOOK_FILES = ("coordination_owner.py", "heartbeat_report_alive.py", "rotation_due_watch.py", "wake_waiter.py", "hooks.json")
@@ -246,7 +260,7 @@ class SeedRuntime:
         del timeout_seconds, input_text
         self.commands.append(argv)
         if argv[0] == "git":
-            completed = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, env={**_ENV, **(extra_env or {})}, check=False)
+            completed = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, env=scrubbed_git_environment(extra_env), check=False)
             return bounded_command_outcome(returncode=completed.returncode, timed_out=False, duration_ms=1, stdout=completed.stdout, stderr=completed.stderr, output_limit=output_limit)
         if argv[0] == "/bin/launchctl":
             return CommandOutcome(1, False, 1, "", "Could not find service")
@@ -330,10 +344,7 @@ def _closure_runner(host: FakeHost, target: Path) -> Callable[..., subprocess.Co
             plugins_root = target / "plugins"
             if plugins_root.is_dir():
                 pieces.extend((entry.name, f"plugins/{entry.name}") for entry in sorted(plugins_root.iterdir()) if entry.is_dir() and entry.name not in {rel.rsplit("/", 1)[-1] for _, rel in REQUIRED_DISTRIBUTIONS})
-            packages = {
-                distribution: {"version": "1.0.0", "direct_url": json.dumps({"url": (target / relative).resolve().as_uri(), "dir_info": {"editable": True}})}
-                for distribution, relative in pieces
-            }
+            packages = {distribution: {"version": "1.0.0", "direct_url": json.dumps({"url": (target / relative).resolve().as_uri(), "dir_info": {"editable": True}})} for distribution, relative in pieces}
             if host.closure_scenario == "missing_package" and not host.installed:
                 packages.pop("github_midwife_plugin")
             return subprocess.CompletedProcess(command, 0, json.dumps({"pip": True, "build_backend": True, "wheel": True, "packages": packages}), "")
@@ -351,7 +362,7 @@ def _closure_runner(host: FakeHost, target: Path) -> Callable[..., subprocess.Co
 
 
 def git(repo: Path, *args: str) -> str:
-    completed = subprocess.run(("git", "-C", str(repo), *args), check=True, capture_output=True, text=True, env=_ENV)
+    completed = subprocess.run(("git", "-C", str(repo), *args), check=True, capture_output=True, text=True, env=scrubbed_git_environment())
     return completed.stdout.strip()
 
 
@@ -400,16 +411,16 @@ def seal(repo: Path, source_commit: str, manifest: str, tag: str, files: dict[st
     return Release(git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "HEAD^{tree}"), provenance, seed_id, manifest, source_commit, tag)
 
 
-def template_bytes(name: str) -> bytes:
-    return (_REPO_KB / "hydration_templates" / name).read_bytes()
+def template_bytes(name: str, root: Path = _ROOT) -> bytes:
+    return (root / KB / "hydration_templates" / name).read_bytes()
 
 
 def digest_of(content: bytes) -> str:
     return "sha256:" + hashlib.sha256(content).hexdigest()
 
 
-def default_artifacts() -> list[dict[str, Any]]:
-    plist, zshrc, claude = (digest_of(template_bytes(name)) for name in ("launchagent.plist.template", "zshrc_block.template", "user_claude_md_section.template"))
+def default_artifacts(root: Path = _ROOT) -> list[dict[str, Any]]:
+    plist, zshrc, claude = (digest_of(template_bytes(name, root)) for name in ("launchagent.plist.template", "zshrc_block.template", "user_claude_md_section.template"))
     return [
         {
             "artifact_id": "instance_launchagent_plist",
@@ -476,7 +487,7 @@ def default_operations() -> list[dict[str, Any]]:
     ]
 
 
-def bundle_document(baseline: Release, *, artifacts: list[dict[str, Any]] | None = None, operations: list[dict[str, Any]] | None = None, strategy: str = "router_preferred", knowledge_removals: list[str] | None = None) -> dict[str, Any]:
+def bundle_document(baseline: Release, *, artifacts: list[dict[str, Any]] | None = None, operations: list[dict[str, Any]] | None = None, strategy: str = "router_preferred", knowledge_removals: list[str] | None = None, root: Path = _ROOT) -> dict[str, Any]:
     return {
         "flow_id": "existing-install",
         "schema_version": 1,
@@ -494,18 +505,18 @@ def bundle_document(baseline: Release, *, artifacts: list[dict[str, Any]] | None
         ],
         "source_operation": {"operation_ref": "existing::source.fast_forward", "runner": "manager", "planned_actions": ["manager.acquire_update_candidate", "target.fetch_exact_candidate", "target.fast_forward_exact_candidate"]},
         "runtime_operations": default_operations() if operations is None else operations,
-        "managed_artifacts": default_artifacts() if artifacts is None else artifacts,
+        "managed_artifacts": default_artifacts(root) if artifacts is None else artifacts,
         "dependency_closure": {"additions": [], "removals": []},
         "knowledge_removals": [] if knowledge_removals is None else knowledge_removals,
         "lifecycle": {"strategy": strategy, "readiness_budget_seconds": 5, "readiness_release_signal": "bridge_health_healthy", "verification_modules": ["ananta.cli"]},
     }
 
 
-def bundle_files(document: dict[str, Any]) -> dict[str, bytes]:
+def bundle_files(document: dict[str, Any], root: Path = _ROOT) -> dict[str, bytes]:
     return {
         "existing_install_flow.json": (json.dumps(document, indent=2, sort_keys=True) + "\n").encode(),
-        "existing_install_flow.schema.json": (_REPO_KB / "existing_install_flow.schema.json").read_bytes(),
-        "setup_adapter_envelope.schema.json": (_REPO_KB / "setup_adapter_envelope.schema.json").read_bytes(),
+        "existing_install_flow.schema.json": (root / KB / "existing_install_flow.schema.json").read_bytes(),
+        "setup_adapter_envelope.schema.json": (root / KB / "setup_adapter_envelope.schema.json").read_bytes(),
     }
 
 
@@ -519,13 +530,14 @@ def bundle_digest(files: dict[str, bytes]) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def candidate_tree_files(files: dict[str, bytes], *, extra: dict[str, str | bytes] | None = None) -> dict[str, str | bytes]:
+def candidate_tree_files(files: dict[str, bytes], *, extra: dict[str, str | bytes] | None = None, root: Path = _ROOT) -> dict[str, str | bytes]:
+    """The r2 tree; ``root`` is where its adapter, hooks and templates are read from (the working tree by default)."""
     tree: dict[str, str | bytes] = {f"{KB}/{name}": content for name, content in files.items()}
     for name in ("launchagent.plist.template", "zshrc_block.template", "user_claude_md_section.template"):
-        tree[f"{TEMPLATES}/{name}"] = template_bytes(name)
-    tree[ADAPTER_MODULE] = (_ROOT / ADAPTER_MODULE).read_bytes()
+        tree[f"{TEMPLATES}/{name}"] = template_bytes(name, root)
+    tree[ADAPTER_MODULE] = (root / ADAPTER_MODULE).read_bytes()
     for name in HOOK_FILES:
-        tree[f"{HOOKS}/{name}"] = (_ROOT / HOOKS / name).read_bytes()
+        tree[f"{HOOKS}/{name}"] = (root / HOOKS / name).read_bytes()
     tree["README.md"] = "release n+1\n"
     tree["docs/new.txt"] = "new\n"
     if extra:
@@ -680,10 +692,22 @@ def _truthful_row(paths: ManagerPaths, record: InstanceInventoryRecordV2, descri
     operation_id = compute_operation_id(key)
     fingerprint = canonical_sha256([digest, record.instance_id, operation_id, list(_NON_TOUCH)])
     document = create_import_maintenance_operation(
-        operation_id=operation_id, instance_id=record.instance_id, idempotency_key=key, name=record.name, canonical_target=record.target.canonical_path,
-        target_device=identity.target_device, target_inode=identity.target_inode, channel_id="stable", provenance_seed_id=record.observed_provenance.seed_id,
-        head_commit=record.source_release.commit, head_tree=record.source_release.tree, inspection_bundle_digest=digest, diagnostic_contract_digest=record.contract_identities.diagnostic_contract_digest,
-        approval_fingerprint=fingerprint, manager_write_paths=(str(paths.maintenance_inventory_path),), non_touch_surfaces=_NON_TOUCH,
+        operation_id=operation_id,
+        instance_id=record.instance_id,
+        idempotency_key=key,
+        name=record.name,
+        canonical_target=record.target.canonical_path,
+        target_device=identity.target_device,
+        target_inode=identity.target_inode,
+        channel_id="stable",
+        provenance_seed_id=record.observed_provenance.seed_id,
+        head_commit=record.source_release.commit,
+        head_tree=record.source_release.tree,
+        inspection_bundle_digest=digest,
+        diagnostic_contract_digest=record.contract_identities.diagnostic_contract_digest,
+        approval_fingerprint=fingerprint,
+        manager_write_paths=(str(paths.maintenance_inventory_path),),
+        non_touch_surfaces=_NON_TOUCH,
     )
     path = paths.operation_path(record.instance_id, operation_id)
     write_maintenance_operation(path, None, document)
@@ -704,7 +728,21 @@ def _target_path(root: Path, router: bool) -> Path:
     return root / "releases" / "current" / "target" if router else root / "target"
 
 
-def build_fixture(root: Path, *, document: Callable[[Release], dict[str, Any]] | None = None, router: bool = False, roster: tuple[str, ...] = ("github_midwife_plugin",), legacy_plist: bool = True, host: FakeHost | None = None, extra_candidate_files: dict[str, str | bytes] | None = None, truthful: bool = False, at_candidate: bool = False, baseline_extra: dict[str, str | bytes] | None = None, candidate_removals: tuple[str, ...] = (), bundle: str = "macos-bizops") -> Fixture:
+def build_fixture(
+    root: Path,
+    *,
+    document: Callable[[Release], dict[str, Any]] | None = None,
+    router: bool = False,
+    roster: tuple[str, ...] = ("github_midwife_plugin",),
+    legacy_plist: bool = True,
+    host: FakeHost | None = None,
+    extra_candidate_files: dict[str, str | bytes] | None = None,
+    truthful: bool = False,
+    at_candidate: bool = False,
+    baseline_extra: dict[str, str | bytes] | None = None,
+    candidate_removals: tuple[str, ...] = (),
+    bundle: str = "macos-bizops",
+) -> Fixture:
     """``at_candidate=True`` (Step 6, F-ZD-1) clones the target already AT the candidate release and enrols it there."""
     root.mkdir(parents=True, exist_ok=True)
     source = root / "source"
@@ -757,7 +795,7 @@ def build_fixture(root: Path, *, document: Callable[[Release], dict[str, Any]] |
 def _clone(source: Path, target: Path) -> None:
     """Clone the fixture seed; a clone that fails once (a transient host-side git error) is retried with its stderr surfaced."""
     for attempt in (1, 2):
-        completed = subprocess.run(("git", "clone", "--quiet", str(source), str(target)), check=False, capture_output=True, text=True, env=_ENV)
+        completed = subprocess.run(("git", "clone", "--quiet", str(source), str(target)), check=False, capture_output=True, text=True, env=scrubbed_git_environment())
         if completed.returncode == 0:
             return
         if target.exists():

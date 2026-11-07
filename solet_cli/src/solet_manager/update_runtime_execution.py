@@ -343,10 +343,10 @@ class RuntimeExecution:
         outcome = self.source.rebaseline_local_state(self.journal, operation.operation_id, self._declared_targets(operation))
         if outcome is None:
             return
-        revisions, current = outcome
         # One journal write per revision: the journal admits one new revision a write, and a ``service_writes``
         # revision can arrive beside the operation's own (iss_fa27466f: the refresh's pin beside a KB symlink).
-        for revision in revisions:
+        # Each write carries the ``current`` that holds only what its revisions so far explain (iss_0cde2ca4).
+        for revision, current in outcome:
             self._write(record_local_state_revision(self.journal, revision=revision, current=current))
 
     def _declared_targets(self, operation: RuntimeOperation) -> frozenset[str]:

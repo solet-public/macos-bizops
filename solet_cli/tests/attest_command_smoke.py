@@ -30,6 +30,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(_ROOT / "solet_cli" / "src"), str(_ROOT / "solet_setup_contracts" / "src"), str(Path(__file__).resolve().parent)]
 
+import hashlib  # noqa: E402
 import json  # noqa: E402
 import platform  # noqa: E402
 import tempfile  # noqa: E402
@@ -39,13 +40,14 @@ from typing import Any  # noqa: E402
 from _release_identity_fixture import SOURCE_COMMIT, build_package, build_seed_checkout, fake_bridge, manifest, seed_lock_v3, write_json, write_receipt  # noqa: E402
 from solet_manager.attest import ATTESTATION_FILE_NAME, AttestRequest, AttestSeams, run_attest  # noqa: E402
 from solet_manager.cli import build_parser  # noqa: E402
+from solet_manager.create_applied_edits import record_applied_edits  # noqa: E402
 from solet_manager.errors import SourceError  # noqa: E402
 from solet_manager.models import InstanceRecord, JsonValue  # noqa: E402
 from solet_manager.paths import ManagerPaths  # noqa: E402
 from solet_manager.registry import InstanceRegistry  # noqa: E402
 from solet_manager.release_identity import CommandOutcome, run_command  # noqa: E402
 from solet_manager.release_lock import SeedLock  # noqa: E402
-from solet_manager.transaction import Transaction, canonical_sha256, write_transaction  # noqa: E402
+from solet_manager.transaction import Transaction, canonical_sha256, load_transaction, write_transaction  # noqa: E402
 
 _CHECKS = 0
 _SURFACE = "sha256:" + "7" * 64
@@ -124,6 +126,28 @@ def _assert_verified_installation(fixture: _Fixture) -> None:
     _check(manager["status"] == "verified" and manager["files_hashed"] == len(fixture.digests) and manager["install_source"]["source_commit"] == SOURCE_COMMIT, f"the manager section verifies with real digests: {manager['status']}/{manager['reason']}")
     _check(document["pairing"]["verdict"] == "paired", "the pairing verdict is recorded")
     _assert_verified_instance_and_environment(fixture, document)
+
+
+def _assert_create_edits_are_attributed(fixture: _Fixture) -> None:
+    readme = fixture.target / "README.md"
+    readme.write_text(readme.read_text(encoding="utf-8") + "Manager-owned create text.\n", encoding="utf-8")
+    transaction = load_transaction(fixture.paths.transaction_path("fixture"))
+    assert transaction is not None
+    digest = "sha256:" + hashlib.sha256(readme.read_bytes()).hexdigest()
+    record_applied_edits(
+        fixture.paths,
+        name="fixture",
+        target=str(fixture.target),
+        create_operation_id=transaction.operation_id,
+        operation_id="run_genesis",
+        before={},
+        after={"README.md": digest},
+    )
+    result, document = fixture.attest()
+    checkout = document["instances"][0]["seed_checkout"]
+    _check(result.status == "verified", f"a create-owned tracked edit does not drift the attestation: {result.status}")
+    _check(checkout["dirty_paths"] == [], f"the create-owned path is not ordinary dirt: {checkout['dirty_paths']}")
+    _check(checkout["accepted_manager_edits"] == ["README.md"], f"the attestation names the accepted Manager edit: {checkout['accepted_manager_edits']}")
 
 
 def _assert_verified_instance_and_environment(fixture: _Fixture, document: dict[str, Any]) -> None:
@@ -209,6 +233,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         fixture = _Fixture(Path(tmp))
         _assert_verified_installation(fixture)
+        _assert_create_edits_are_attributed(fixture)
         _assert_drift_is_named(fixture)
         _assert_stopped_solet_is_not_verified(fixture)
         _assert_no_manifest_still_measures(fixture)

@@ -53,13 +53,13 @@ The payload's ``cwd`` is preserved so the source plugin can populate
 ``ExternalSessionRef.project_path`` from the first-seen event when the
 session is being discovered.
 
-Failure policy: per project critical guidelines, no defensive fallback.
-Malformed JSON / unexpected shape / unrecognized content-block kind →
-``ValueError``. The importer marks the batch FAILED with
-``error_kind='value_error'`` (spec §17.2 acceptance pattern). Skips here
-are limited to documented session-config noise types and to
-``thinking`` content blocks (internal model state, not part of the
-public conversation).
+Failure policy: malformed JSON, unexpected shapes, non-string types and
+malformed known events raise ``ValueError``; the importer marks the batch FAILED
+with ``error_kind='value_error'``. Unknown top-level string types and unknown
+content-block kinds produce advisories, allowing known suffix events to import.
+Documented metadata and ``fallback`` blocks skip silently; ``thinking`` blocks
+remain internal model state. Advisories count physical lines once per poll,
+using the first unknown kind on that line and retaining no block payload.
 """
 
 from __future__ import annotations
@@ -72,6 +72,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ananta.llm.session_ledger.poll_advisories import record_unknown_line
 from ananta.llm.session_ledger.types import RawSessionEvent
 
 logger = logging.getLogger(__name__)
@@ -197,6 +198,7 @@ class _LineContext:
             git_branch=_optional_str(data.get("gitBranch")),
         )
 
+
 # Top-level JSONL line types that are session-config noise, not conversation.
 # These are silently skipped (NOT defensive — these types carry no
 # ledger-bearing content by design; see docstring).
@@ -234,6 +236,18 @@ _SKIP_LINE_TYPES = frozenset(
         # The structural tolerance branch below also catches it as
         # forward-compat if a future variant drops the timestamp.
         "queue-operation",
+        # ``api-request-blob`` is Claude Code request metadata, not a ledger event.
+        "api-request-blob",
+        # ``api-request`` is Claude Code request metadata, not a ledger event.
+        "api-request",
+        # ``api-request-shape`` describes request shape, not a ledger event.
+        "api-request-shape",
+        # ``atis-latch`` is Claude Code session metadata, not a ledger event.
+        "atis-latch",
+        # ``cost-state`` is Claude Code accounting metadata, not a ledger event.
+        "cost-state",
+        # ``file-history-delta`` is file metadata, not a ledger event.
+        "file-history-delta",
     }
 )
 
@@ -241,7 +255,8 @@ _SKIP_LINE_TYPES = frozenset(
 # ``thinking`` is internal model state (extended-thinking signature) and
 # never makes it to the public ledger. ``image`` is out of v1 scope; will
 # eventually become an ATTACHMENT event.
-_SKIP_BLOCK_KINDS = frozenset({"thinking", "image"})
+# ``fallback`` is assistant control metadata: {type: fallback, from: {model}, to: {model}}.
+_SKIP_BLOCK_KINDS = frozenset({"thinking", "image", "fallback"})
 
 # Conversational top-level types we handle.
 _LINE_TYPE_USER = "user"
@@ -270,16 +285,14 @@ def parse_line(line_text: str) -> list[RawSessionEvent]:
     except json.JSONDecodeError as exc:
         raise ValueError(f"claude_code: line is not valid JSON: {exc}") from exc
     if not isinstance(data, dict):
-        raise ValueError(
-            f"claude_code: line is not a JSON object: {type(data).__name__}"
-        )
+        raise ValueError(f"claude_code: line is not a JSON object: {type(data).__name__}")
     return list(parse_line_data(data))
 
 
 def parse_line_data(data: dict[str, Any]) -> Iterator[RawSessionEvent]:
     """Parse one already-decoded JSONL object into raw events.
 
-    Yields zero events for skip-listed line types; one event for plain
+    Yields zero events for metadata and advisory unknown line types; one event for plain
     text messages and system lines; N events for assistant lines with
     multiple tool_use blocks; N events for user lines carrying multiple
     tool_result blocks.
@@ -289,36 +302,12 @@ def parse_line_data(data: dict[str, Any]) -> Iterator[RawSessionEvent]:
         raise ValueError("claude_code: line missing string 'type'")
     if line_type in _SKIP_LINE_TYPES:
         return
-    # Vendor-drift tolerance (2026-06-12 sub-2.5 + Task #14): Claude Code
-    # occasionally adds new line types (timestamp-absent metadata like
-    # ``mode``, ``custom-title``; OR timestamp-present markers like
-    # ``queue-operation``). Both are tolerated as long as the line does
-    # NOT carry the event-shape signal (a ``message`` dict with a ``role``
-    # field). Skip-with-debug-log keeps ingest alive across vendor drift.
-    #
-    # The fast-fail safety net (per [[fast-fail-development-strategy]]):
-    # an unknown line type that DOES carry the event-shape signal is a
-    # genuine contract change worth catching loudly — raised explicitly
-    # below so we surface real new event kinds rather than silently
-    # swallowing them.
+    # Unknown top-level string types are ordinary vendor drift, including
+    # objects with message.role. Record only their type/location and continue
+    # to later known lines; known-event validation below stays strict.
     known_event_types = {_LINE_TYPE_SYSTEM, _LINE_TYPE_USER, _LINE_TYPE_ASSISTANT}
     if line_type not in known_event_types:
-        message = data.get("message")
-        has_event_shape = (
-            isinstance(message, dict) and isinstance(message.get("role"), str)
-        )
-        if has_event_shape:
-            raise ValueError(
-                f"claude_code: unrecognized event-shape line 'type' "
-                f"{line_type!r} (has message dict with role); vendor contract "
-                "change?"
-            )
-        logger.debug(
-            "claude_code: tolerating new line type %r (timestamp_present=%s, "
-            "no event-shape signal; not in _SKIP_LINE_TYPES; consider adding "
-            "for explicit documentation)",
-            line_type, "timestamp" in data,
-        )
+        record_unknown_line(line_type, _optional_str(data.get("sessionId")))
         return
     # Past this point line_type is guaranteed to be in known_event_types
     # ({SYSTEM, USER, ASSISTANT}) by the unknown-type branch above.
@@ -345,17 +334,29 @@ def _parse_conversation_line(
     # read generically here so a future vendor change that adds it
     # elsewhere is picked up for free rather than requiring a role check.
     usage = message.get("usage")
-    usage_json = usage if isinstance(usage, dict) else None
+    usage_json = _usage_with_identity(usage, message)
     content = message.get("content")
     if isinstance(content, str):
         # Legacy single-string content (early Claude Code versions).
         yield _build_message_event(ctx, role=role, text=content, usage=usage_json)
         return
     if not isinstance(content, list):
-        raise ValueError(
-            "claude_code: message.content must be string or list of content blocks"
-        )
+        raise ValueError("claude_code: message.content must be string or list of content blocks")
     yield from _parse_message_blocks(content, ctx=ctx, role=role, usage=usage_json)
+
+
+def _usage_with_identity(usage: object, message: dict[str, Any]) -> dict[str, Any] | None:
+    """Copy per-line usage and enrich absent identity keys from valid source strings."""
+    if not isinstance(usage, dict):
+        return None
+    enriched = dict(usage)
+    model = message.get("model")
+    if isinstance(model, str) and model:
+        enriched.setdefault("model", model)
+    message_id = message.get("id")
+    if isinstance(message_id, str) and message_id:
+        enriched.setdefault("message_id", message_id)
+    return enriched
 
 
 def _parse_message_blocks(
@@ -407,12 +408,11 @@ def _classify_block(
 
     Returns a tool event when the block is a tool_use / tool_result; returns
     ``None`` for text (consumed into ``text_parts``) and for skip-listed
-    block kinds. Raises ``ValueError`` for malformed or unknown kinds.
+    block kinds. Unknown string kinds record a physical-line advisory;
+    malformed known blocks and non-string kinds raise ``ValueError``.
     """
     if not isinstance(block, dict):
-        raise ValueError(
-            f"claude_code: content block is not a dict: {type(block).__name__}"
-        )
+        raise ValueError(f"claude_code: content block is not a dict: {type(block).__name__}")
     block_kind = block.get("type")
     if not isinstance(block_kind, str):
         raise ValueError("claude_code: content block missing string 'type'")
@@ -454,9 +454,8 @@ def _classify_block(
             project_path=ctx.project_path,
             git_branch=ctx.git_branch,
         )
-    raise ValueError(
-        f"claude_code: unrecognized content block type {block_kind!r}"
-    )
+    record_unknown_line(block_kind, ctx.session_id)
+    return None
 
 
 def _build_system_event(
@@ -606,10 +605,7 @@ def _extract_tool_result_text(content: object) -> str:
         # bare dict instead of wrapping it in a list.
         value = content.get("text")
         return value if isinstance(value, str) else ""
-    raise ValueError(
-        f"claude_code: tool_result content must be str, list, or dict, "
-        f"got {type(content).__name__}"
-    )
+    raise ValueError(f"claude_code: tool_result content must be str, list, or dict, got {type(content).__name__}")
 
 
 def _extract_system_text(data: dict[str, Any]) -> str:

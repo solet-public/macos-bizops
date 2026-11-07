@@ -26,21 +26,27 @@ EMBEDDING_DESCRIPTION: Deploy new committed code on the local solet with zero do
 ## Sequence
 
 [ ] 1. Verify router state and that no swap is in progress
+    RESULT_PROCESSOR_KIND: deterministic_continuation
     a) Verify router state and that no swap is in progress (service_interface::local_self_deployment_service::swap_status)
 
 [ ] 2. Read the current manifest etag with a dry run
+    RESULT_PROCESSOR_KIND: deterministic_continuation
     a) Read the current manifest etag with a dry run (service_interface::lifecycle_management_service::apply_manifest)
 
 [ ] 3. Commit the cutover under the captured etag
+    RESULT_PROCESSOR_KIND: deterministic_continuation
     a) Commit the cutover under the captured etag (service_interface::lifecycle_management_service::apply_manifest)
 
 [ ] 4. Confirm cutover completion and old-color drain
+    RESULT_PROCESSOR_KIND: deterministic_continuation
     a) Confirm cutover completion and old-color drain (service_interface::local_self_deployment_service::swap_status)
 
 [ ] 5. Verify plugin health on the new release
+    RESULT_PROCESSOR_KIND: deterministic_continuation
     a) Verify plugin health on the new release (service_interface::lifecycle_management_service::list_plugins)
 
 [ ] 6. Record the deploy outcome and step state
+    RESULT_PROCESSOR_KIND: deterministic_continuation
     a) Record the deploy outcome and step state (service_interface::thinking_service::record_work_breakdown_structure_step_state)
 
 ## Expected Step Count
@@ -48,6 +54,61 @@ EMBEDDING_DESCRIPTION: Deploy new committed code on the local solet with zero do
 6 steps.
 
 ## Binding Guidance
+
+After the authorizing seat enables its external driver, prefer the standalone
+command at `ananta/src/ananta/services/lifecycle_management_service/_deploy_by_rule.py`
+with the lane/runtime interpreter and `SOLET_NAME` set to this deployment's own
+solet name (`<<BIND:solet_name>>`, never hardcoded). Supply `--trigger landing`
+or `--trigger tick`, absolute `--repo`, `--app-home`, `--releases-root`, `--psolet`
+and `--bridge` paths, and the seat-supplied `--agent-instance-id`, `--actor-model`
+and `--actor-effort`. `--deadline` defaults to 900 seconds. The command does not
+enable a driver or create an identity. The seat owns driver enable, cadence
+correction, disable and readback, including identity refresh after rotation.
+
+Under the default cadence rule, a landing deploys only when the cumulative diff
+from the last recorded deployment to pinned master includes `ananta/src/`, a
+plugin's `src/`, or `profile/config/`, including old and new rename paths.
+Other landing deltas emit `skipped_nonproduction`; a seat-owned 7200-second tick
+may deploy moved master regardless of paths. Unchanged master does neither.
+The command composes steps 1–5 and records a verified `psolet deployed`
+observation. Step 6's authored WBS step-state recording remains applicable when
+running this card as a WBS. Manual steps below remain diagnostic/repair guidance.
+
+Inspect the command's terminal JSON decision, advisories, pinned target and
+measurement id; reconcile with `psolet db version current` and `db version history`.
+Live full-battery receipts cause advisory deferral, conservatively across the host
+because receipts lack repository identity. Missing observations advise and continue.
+This observes neither every landing phase nor a gate starting after the check;
+an overlapping gate can fail and need rerun. Identity-holder failures also advise
+and continue recording with the supplied identity. Completion requires drained
+old color, ready lifecycle plugins and the builder attestation/hash bound to the
+pinned full SHA. It consumes the builder's proof rather than independently
+rehashing release files; live profile config is checked separately. An ambiguous
+apply is never resubmitted. An already-serving verified target with a missing
+version observation is recorded on retry without another swap. Unresolved or
+invalid proof yields failure without a success observation; use the repair verbs
+below when seat investigation establishes that rollback is needed.
+
+After `deployed` or `already_recorded` has verified the target, release and
+measurement readback, the external command attempts one advisory
+`peer_send_by_name` through its existing solet-scoped bridge to the solet's
+Main role (title-cased `SOLET_NAME` plus `-Main`). Ready plugins, drained swap and builder
+attestation precede that notice. The content carries the solet, target SHA,
+release id, measurement id, recorded decision and a stable `notice_key` derived
+from the solet and measurement id. Repeated keys identify the same deployment.
+Failed, deferred, skipped and `already_current` branches send no completion
+notice.
+
+Read terminal JSON's `notice` alongside the deployment decision. `status=queued`
+and its `message_id` mean queued delivery only, not model receipt or acceptance.
+A timeout, unavailable role, malformed/error reply or missing message id leaves
+`status=uncertain` and an explicit advisory while preserving the verified
+deployment result and successful exit. There is no automatic notice retry,
+second APPLY or duplicate deployed record. The seat reconciles the retained
+measurement and receipt before deciding on a new explicit attempt. Correction
+or reversal uses a separate verified deployment and measurement; prior records
+and receipts remain immutable. Stdout remains the outcome readback even when
+notice delivery is uncertain.
 
 - Bind step 2 and step 3 `new_manifest` to the LIVE manifest content unchanged for a pure code deploy; any plugin-set change makes this a different (manifest-change) procedure with binding-validation review.
 - Bind step 3 `expected_etag` ONLY from step 2's `current_etag` in the same run — never from a stale read.

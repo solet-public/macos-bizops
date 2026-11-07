@@ -12,6 +12,10 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ananta.core.runtime.port_manager import ClientIOExecutor
+
+CLI_IO = ClientIOExecutor("vetting-cli-io")
+
 _ALLOWLIST_GATES: dict[str, str] = {
     "god_class": "god_class_allowlist.txt",
     "radon_cc": "radon_cc_allowlist.txt",

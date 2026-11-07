@@ -6,7 +6,10 @@ description: >
   (list_activity_types, get_activities), lead CRUD
   (create_or_update_leads, delete_leads), campaign trigger
   (list_campaigns, trigger_campaign), and static list membership
-  (list_static_lists, add_leads_to_list, remove_leads_from_list). REST API
+  (list_static_lists, add_leads_to_list, remove_leads_from_list), company,
+  opportunity, opportunity-role and sales-person describe/get/sync/delete
+  (e.g. get_companies, sync_opportunities, delete_sales_persons), and the
+  generic authenticated request verb (request). REST API
   (no official Marketo SDK) via a plain
   synchronous httpx client. Auth: OAuth 2.0 client-credentials against a
   LaunchPoint custom service, resolved from the address book entry
@@ -23,8 +26,8 @@ description: >
   all.
 
   Read/write posture — full CRUD INCLUDING delete and merge: unlike
-  zuora_plugin (no delete verb — billing records are voided through Zuora's
-  own workflow), Marketo's REST API natively supports lead deletion
+  zuora_plugin's typed billing actions (whose records are voided through
+  Zuora's own workflow), Marketo's REST API natively supports lead deletion
   (delete_leads) and lead merging (merge_leads, up to 25 losing leads per
   call, capped at 1 when merge_in_crm is set). This makes marketo_plugin the
   first marketing-data connector in the suite with destructive verbs —

@@ -1,0 +1,8 @@
+# snowflake_plugin typed REST families, build 2 (sql_api, task, stream, dynamic_table) and
+# build 3 (database, schema, warehouse, stage) and build 4 (table, view, sequence, pipe with
+# Snowpipe ingestion): hermetic
+# httpx MockTransport transcripts in the vendor response shapes; routing, input checks,
+# pagination hints, vendor error mapping, credential-redaction variants, worker wiring and
+# the per-process decorator/edge/knowledge-base registration check. No live account.
+plugins/snowflake_plugin/tests/smoke_rest_families.py
+plugins/snowflake_plugin/tests/smoke_rest_object_families.py

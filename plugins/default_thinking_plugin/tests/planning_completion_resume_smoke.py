@@ -49,6 +49,9 @@ sys.path.insert(0, str(_REPO_ROOT / "plugins" / "default_thinking_plugin" / "src
 sys.path.insert(0, str(_REPO_ROOT / "plugins" / "default_knowledge_plugin" / "src"))
 
 from ananta.error_handling import FrameworkError  # noqa: E402
+from ananta.services.thinking_service.interfaces.public import (  # noqa: E402
+    ThinkingServiceAPI,
+)
 from default_thinking_plugin.plugin import DefaultThinkingPlugin  # noqa: E402
 
 _passed = 0
@@ -316,6 +319,27 @@ def _case_6() -> None:
     )
 
 
+def _case_7() -> None:
+    print("\n[P7] abstract API documents resume call and continuation contract")
+    contract = inspect.getdoc(ThinkingServiceAPI.resume_thinking_completion) or ""
+    required_contract = (
+        "request_id",
+        "served",
+        "durable",
+        "planning correlation",
+        "state",
+        "session_id",
+        "submit_autonomic_completion",
+        "OUTPUT",
+        "actions-or-artifacts",
+        "operator entry point",
+    )
+    _check(
+        all(fragment in contract for fragment in required_contract),
+        "P7 ABC resume docstring covers params, state, source of truth, and continuation semantics",
+    )
+
+
 def main() -> int:
     print("INF-02 planning completion routing + resume smoke")
     _case_1()
@@ -324,6 +348,7 @@ def main() -> int:
     _case_4()
     _case_5()
     _case_6()
+    _case_7()
 
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:

@@ -66,6 +66,7 @@ TABLE_SOURCE = "source"
 TABLE_SOURCE_CURSOR = "source_cursor"
 TABLE_IMPORT_BATCH = "import_batch"
 TABLE_SESSION = "session"
+TABLE_SESSION_LABEL_CLEAR = "session_label_clear"
 TABLE_EVENT = "event"
 TABLE_TOOL_CALL = "tool_call"
 TABLE_ATTACHMENT = "attachment"
@@ -78,6 +79,7 @@ ID_PREFIX_SOURCE = "src"
 ID_PREFIX_SOURCE_CURSOR = "scu"
 ID_PREFIX_IMPORT_BATCH = "imb"
 ID_PREFIX_SESSION = "les"
+ID_PREFIX_SESSION_LABEL_CLEAR = "slc"
 ID_PREFIX_EVENT = "evt"
 ID_PREFIX_TOOL_CALL = "tcl"
 ID_PREFIX_ATTACHMENT = "atc"
@@ -114,10 +116,7 @@ def _source_table() -> TableSchema:
             "root_uri": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "Filesystem path, blob_id, or sentinel — interpretation is "
-                    "private to the source plugin."
-                ),
+                description=("Filesystem path, blob_id, or sentinel — interpretation is private to the source plugin."),
             ),
             "account_label": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -174,11 +173,7 @@ def _source_cursor_table() -> TableSchema:
     return TableSchema(
         table_name=TABLE_SOURCE_CURSOR,
         id_prefix=ID_PREFIX_SOURCE_CURSOR,
-        description=(
-            "Persistent cursors per source. ``cursor_scope`` is either "
-            "'discovery' (one per source, scope_key NULL) or 'event_read' "
-            "(one per (source, external session))."
-        ),
+        description=("Persistent cursors per source. ``cursor_scope`` is either 'discovery' (one per source, scope_key NULL) or 'event_read' (one per (source, external session))."),
         columns={
             "source_id": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -198,10 +193,7 @@ def _source_cursor_table() -> TableSchema:
             ),
             "scope_key": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "For event_read: external_session_id. For discovery: NULL. "
-                    "Partial unique indexes enforce one row per scope kind."
-                ),
+                description=("For event_read: external_session_id. For discovery: NULL. Partial unique indexes enforce one row per scope kind."),
             ),
         },
         indexes=[
@@ -259,10 +251,7 @@ def _import_batch_table() -> TableSchema:
             ),
             "error_kind": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "Coarse error category, e.g. 'value_error', "
-                    "'state_service_timeout'."
-                ),
+                description=("Coarse error category, e.g. 'value_error', 'state_service_timeout'."),
             ),
             "polling_lease_token": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -355,27 +344,15 @@ def _session_table() -> TableSchema:
             ),
             "originator_agent_instance_id": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "Snapshot of the originating bridge's agent_instance_id "
-                    "(peer threads) OR from filesystem-vendor session "
-                    "metadata (claude_code_local: 'bridge-session' line). "
-                    "NULL for non-MCP sources."
-                ),
+                description=("Snapshot of the originating bridge's agent_instance_id (peer threads) OR from filesystem-vendor session metadata (claude_code_local: 'bridge-session' line). NULL for non-MCP sources."),
             ),
             "recipient_session_label": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "Snapshot from core__agent_thread.recipient_session_label "
-                    "(peer threads only). NULL for single-actor sessions "
-                    "(filesystem ingest)."
-                ),
+                description=("Snapshot from core__agent_thread.recipient_session_label (peer threads only). NULL for single-actor sessions (filesystem ingest)."),
             ),
             "recipient_agent_instance_id": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "Snapshot of the recipient bridge's agent_instance_id "
-                    "(peer threads only). NULL for single-actor sessions."
-                ),
+                description=("Snapshot of the recipient bridge's agent_instance_id (peer threads only). NULL for single-actor sessions."),
             ),
             "canonical_external_session_id": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -443,10 +420,7 @@ def _event_table() -> TableSchema:
     return TableSchema(
         table_name=TABLE_EVENT,
         id_prefix=ID_PREFIX_EVENT,
-        description=(
-            "Append-only canonical events. Quarantined rows carry no content; "
-            "the secret span is never persisted (spec §10.9)."
-        ),
+        description=("Append-only canonical events. Quarantined rows carry no content; the secret span is never persisted (spec §10.9)."),
         columns={
             "session_id": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -464,20 +438,12 @@ def _event_table() -> TableSchema:
                 type=ColumnType.TEXT,
                 unique=False,
                 data_sensitivity=0.5,
-                description=(
-                    "Vendor-supplied event id verbatim when present, else a "
-                    "derv:-prefixed hash (derive_event_external_id). NOT "
-                    "globally unique on its own — see idx_event_session_"
-                    "external_unique below for the real identity."
-                ),
+                description=("Vendor-supplied event id verbatim when present, else a derv:-prefixed hash (derive_event_external_id). NOT globally unique on its own — see idx_event_session_external_unique below for the real identity."),
             ),
             "sequence": ColumnDefinition(
                 type=ColumnType.INTEGER,
                 not_null=True,
-                description=(
-                    "Monotonic per session; allocated under transaction by "
-                    "SessionLedgerRepository."
-                ),
+                description=("Monotonic per session; allocated under transaction by SessionLedgerRepository."),
             ),
             "event_type": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -500,10 +466,7 @@ def _event_table() -> TableSchema:
             ),
             "content_text": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "Inline text when len(text) <= CONTENT_INLINE_TEXT_MAX_BYTES. "
-                    "Otherwise persisted via content_blob_id."
-                ),
+                description=("Inline text when len(text) <= CONTENT_INLINE_TEXT_MAX_BYTES. Otherwise persisted via content_blob_id."),
             ),
             "content_json": ColumnDefinition(
                 type=ColumnType.JSON,
@@ -511,10 +474,7 @@ def _event_table() -> TableSchema:
             ),
             "content_blob_id": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "Set when content_text exceeds the inline cap. "
-                    "Pointer into blob_storage_service."
-                ),
+                description=("Set when content_text exceeds the inline cap. Pointer into blob_storage_service."),
             ),
             "event_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
@@ -547,11 +507,7 @@ def _event_table() -> TableSchema:
             ),
             "actor_agent_instance_id": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "Snapshot of the actor's agent_instance_id at "
-                    "event-write time. Same provenance as "
-                    "actor_session_label."
-                ),
+                description=("Snapshot of the actor's agent_instance_id at event-write time. Same provenance as actor_session_label."),
             ),
             "session_vendor": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -688,10 +644,7 @@ def _tool_call_table() -> TableSchema:
             ),
             "result_event_id": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "repository_fk: session_ledger__event.id (the TOOL_RESULT row), "
-                    "NULL while the call is still pending."
-                ),
+                description=("repository_fk: session_ledger__event.id (the TOOL_RESULT row), NULL while the call is still pending."),
             ),
             "tool_name": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -729,11 +682,7 @@ def _attachment_table() -> TableSchema:
     return TableSchema(
         table_name=TABLE_ATTACHMENT,
         id_prefix=ID_PREFIX_ATTACHMENT,
-        description=(
-            "Per-event attachment metadata. ``blob_id`` is written ONLY after "
-            "clean (text attachments) or after metadata-only scan "
-            "(binary attachments). Quarantined text attachments have blob_id NULL."
-        ),
+        description=("Per-event attachment metadata. ``blob_id`` is written ONLY after clean (text attachments) or after metadata-only scan (binary attachments). Quarantined text attachments have blob_id NULL."),
         columns={
             "event_id": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -742,9 +691,7 @@ def _attachment_table() -> TableSchema:
             ),
             "blob_id": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "Reference to blob_storage_service. NULL when QUARANTINED."
-                ),
+                description=("Reference to blob_storage_service. NULL when QUARANTINED."),
             ),
             "mime_type": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -776,11 +723,7 @@ def _active_lease_table() -> TableSchema:
     return TableSchema(
         table_name=TABLE_ACTIVE_LEASE,
         id_prefix=ID_PREFIX_ACTIVE_LEASE,
-        description=(
-            "Push-side keepalive. Sources send lease pings; the repository "
-            "calculates expires_at = last_seen_at + lease_ttl_seconds. "
-            "Sources never write expires_at directly."
-        ),
+        description=("Push-side keepalive. Sources send lease pings; the repository calculates expires_at = last_seen_at + lease_ttl_seconds. Sources never write expires_at directly."),
         columns={
             "session_id": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -822,10 +765,7 @@ def _summary_table() -> TableSchema:
     return TableSchema(
         table_name=TABLE_SUMMARY,
         id_prefix=ID_PREFIX_SUMMARY,
-        description=(
-            "Created in M1; populated in M6. NUL-byte sanitized before insert "
-            "AND before embedding (spec §10.10.3)."
-        ),
+        description=("Created in M1; populated in M6. NUL-byte sanitized before insert AND before embedding (spec §10.10.3)."),
         columns={
             "session_id": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -869,10 +809,7 @@ def _deployment_table() -> TableSchema:
     return TableSchema(
         table_name=TABLE_DEPLOYMENT,
         id_prefix=ID_PREFIX_DEPLOYMENT,
-        description=(
-            "M5 shipper pairing state. State machine: "
-            "pending → approved → paired → revoked (spec §13.2)."
-        ),
+        description=("M5 shipper pairing state. State machine: pending → approved → paired → revoked (spec §13.2)."),
         columns={
             "machine_id": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -907,29 +844,18 @@ def _deployment_table() -> TableSchema:
             ),
             "oauth_client_id": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "Set ONLY during the authenticated one-time poll that mints "
-                    "the client. NULL until that point."
-                ),
+                description=("Set ONLY during the authenticated one-time poll that mints the client. NULL until that point."),
             ),
             "initiating_client_id": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "OAuth client_id that called generate_ingest_setup. Used "
-                    "for the §13 ownership-binding check on approve_pairing."
-                ),
+                description=("OAuth client_id that called generate_ingest_setup. Used for the §13 ownership-binding check on approve_pairing."),
             ),
             "authorized_source_kinds": ColumnDefinition(
                 type=ColumnType.JSON,
                 not_null=True,
                 default="[]",
-                description=(
-                    "Per Codex item 10: bound at generate_ingest_setup from the "
-                    "operator's sources list. Both ingest_blob and "
-                    "ingest_raw_chunk validate the request's source_kind "
-                    "against this list and reject 403 if not authorized."
-                ),
+                description=("Per Codex item 10: bound at generate_ingest_setup from the operator's sources list. Both ingest_blob and ingest_raw_chunk validate the request's source_kind against this list and reject 403 if not authorized."),
             ),
             "paired_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
@@ -975,12 +901,7 @@ def _session_source_kind_table() -> TableSchema:
     return TableSchema(
         table_name=TABLE_SESSION_SOURCE_KIND,
         id_prefix=ID_PREFIX_SESSION_SOURCE_KIND,
-        description=(
-            "Junction: one row per (canonical session, distinct source_kind in "
-            "its (vendor, external_session_id) group). Backs list_sessions' "
-            "source_kind filter as a read-then-route over query_state, "
-            "replacing the EXISTS-over-canonical-group subquery."
-        ),
+        description=("Junction: one row per (canonical session, distinct source_kind in its (vendor, external_session_id) group). Backs list_sessions' source_kind filter as a read-then-route over query_state, replacing the EXISTS-over-canonical-group subquery."),
         columns={
             "canonical_session_id": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -991,10 +912,7 @@ def _session_source_kind_table() -> TableSchema:
                 type=ColumnType.TEXT,
                 not_null=True,
                 check=f"source_kind IN ({_enum_csv(IngestSourceKind)})",
-                description=(
-                    "StrEnum IngestSourceKind value contributed by a group "
-                    "member's source."
-                ),
+                description=("StrEnum IngestSourceKind value contributed by a group member's source."),
             ),
         },
         indexes=[
@@ -1008,6 +926,23 @@ def _session_source_kind_table() -> TableSchema:
                 columns=["source_kind", "canonical_session_id"],
             ),
         ],
+    )
+
+
+def _session_label_clear_table() -> TableSchema:
+    """Immutable receipts; terminal action is permanent retention."""
+    return TableSchema(
+        table_name=TABLE_SESSION_LABEL_CLEAR,
+        id_prefix=ID_PREFIX_SESSION_LABEL_CLEAR,
+        description="Append-only label clear receipts; no pre-feature history reconstruction.",
+        columns={
+            "session_id": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "previous_label": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "principal_kind": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
+            "principal_id": ColumnDefinition(type=ColumnType.TEXT),
+            "cleared_at": ColumnDefinition(type=ColumnType.DATETIME, not_null=True),
+        },
+        indexes=[IndexDefinition(name="idx_session_label_clear_history", columns=["session_id", "cleared_at", "id"])],
     )
 
 
@@ -1025,6 +960,7 @@ def get_session_ledger_schema() -> SchemaDefinition:
             TABLE_SOURCE_CURSOR: _source_cursor_table(),
             TABLE_IMPORT_BATCH: _import_batch_table(),
             TABLE_SESSION: _session_table(),
+            TABLE_SESSION_LABEL_CLEAR: _session_label_clear_table(),
             TABLE_EVENT: _event_table(),
             TABLE_TOOL_CALL: _tool_call_table(),
             TABLE_ATTACHMENT: _attachment_table(),
@@ -1049,11 +985,7 @@ def _summary_embeddings_table() -> TableSchema:
     return TableSchema(
         table_name=TABLE_SUMMARY_EMBEDDINGS,
         id_prefix="emb",
-        description=(
-            "M6 summary-chunk vector storage. Isolated from memory_service "
-            "vectors via the session_ledger_summary namespace so "
-            "search_sessions returns only session summaries."
-        ),
+        description=("M6 summary-chunk vector storage. Isolated from memory_service vectors via the session_ledger_summary namespace so search_sessions returns only session summaries."),
         columns={
             "embedding": ColumnDefinition(
                 type=ColumnType.VECTOR,
@@ -1092,11 +1024,7 @@ def get_session_ledger_summary_embeddings_schema() -> SchemaDefinition:
     return SchemaDefinition(
         namespace=SUMMARY_VECTOR_NAMESPACE,
         version="1.0.0",
-        description=(
-            "M6 session-ledger summary vector store. One table "
-            "(session_ledger_summary__embeddings) backing "
-            "service_interface::session_ledger_service::search_sessions."
-        ),
+        description=("M6 session-ledger summary vector store. One table (session_ledger_summary__embeddings) backing service_interface::session_ledger_service::search_sessions."),
         tables={TABLE_SUMMARY_EMBEDDINGS: _summary_embeddings_table()},
     )
 
@@ -1118,20 +1046,13 @@ def _event_embeddings_table(dimension: int) -> TableSchema:
     return TableSchema(
         table_name=TABLE_EVENT_EMBEDDINGS,
         id_prefix="emb",
-        description=(
-            "LED-01 event-content chunk vector storage. Isolated from the "
-            "summary store via the session_ledger_event namespace so "
-            "search_sessions stays summary-only."
-        ),
+        description=("LED-01 event-content chunk vector storage. Isolated from the summary store via the session_ledger_event namespace so search_sessions stays summary-only."),
         columns={
             "embedding": ColumnDefinition(
                 type=ColumnType.VECTOR,
                 type_params={"dimension": dimension},
                 not_null=True,
-                description=(
-                    "Vector embedding (native pgvector type), fixed "
-                    "dimension so the HNSW index below can build."
-                ),
+                description=("Vector embedding (native pgvector type), fixed dimension so the HNSW index below can build."),
             ),
             "dimension": ColumnDefinition(
                 type=ColumnType.INTEGER,
@@ -1140,17 +1061,11 @@ def _event_embeddings_table(dimension: int) -> TableSchema:
             ),
             "metadata": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "JSON metadata: event_id, session_id, event_at, "
-                    "chunk_index."
-                ),
+                description=("JSON metadata: event_id, session_id, event_at, chunk_index."),
             ),
             "distance_metric": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "Distance metric (cosine / l2 / inner). Provider "
-                    "default applies when null."
-                ),
+                description=("Distance metric (cosine / l2 / inner). Provider default applies when null."),
             ),
         },
         indexes=[
@@ -1183,11 +1098,7 @@ def build_session_ledger_event_embeddings_schema(dimension: int) -> SchemaDefini
     return SchemaDefinition(
         namespace=EVENT_VECTOR_NAMESPACE,
         version="1.0.0",
-        description=(
-            "LED-01 session-ledger event-content vector store. One table "
-            "(session_ledger_event__embeddings) backing semantic search "
-            "over session_ledger__event.content_text."
-        ),
+        description=("LED-01 session-ledger event-content vector store. One table (session_ledger_event__embeddings) backing semantic search over session_ledger__event.content_text."),
         tables={TABLE_EVENT_EMBEDDINGS: _event_embeddings_table(dimension)},
     )
 

@@ -45,6 +45,13 @@ raises ``ValueError`` from the parser; the importer's per-session catch
 (``importer._poll_one_pulling_source``) marks the offending session as
 skipped and continues. NUL strip is handled at the repository TEXT-write
 seam (per `[[nul-byte-sanitization-seam]]`); the plugin emits raw text.
+
+Activated polling uses the shared filesystem metadata policy: newest-first
+(mtime_ns, relative path) sweep continuation, per-session completed versions,
+explicit EOF reset, and leased oversized selection. Legacy direct discovery
+and vendor cursor methods below remain unchanged; the importer uses the safe
+poll hooks. New task/ambient snapshots replay completely, and rollout offsets
+continue only a proved same-inode append. No vendor event identity changes.
 """
 
 from __future__ import annotations
@@ -53,11 +60,18 @@ import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import ClassVar
 
 from ananta.core.plugins.plugin_base import PluginBase
 from ananta.interfaces.llm_session_source_interface import (
     LLMSessionSourceInterface,
-    PullingSourceMixin,
+)
+from ananta.llm.session_ledger.filesystem_poll import (
+    FilesystemCandidate,
+    FilesystemPollingMixin,
+    acknowledge_read,
+    observe_candidate,
+    selected_path,
 )
 from ananta.llm.session_ledger.root_uri import root_uri_to_path
 from ananta.llm.session_ledger.types import (
@@ -83,9 +97,12 @@ _CURSOR_FIELD_TASK_INDEX = "task_index"
 class ClaudeCodeTasksSessionSourcePlugin(
     PluginBase,
     LLMSessionSourceInterface,
-    PullingSourceMixin,
+    FilesystemPollingMixin,
 ):
     """Walks ``~/.claude/tasks/`` and surfaces each task file as a SYSTEM event."""
+
+    supports_whole_session_poll: ClassVar[bool] = True
+    snapshot_poll: ClassVar[bool] = True
 
     def __init__(self) -> None:
         super().__init__()
@@ -122,8 +139,7 @@ class ClaudeCodeTasksSessionSourcePlugin(
         kind = payload.get("kind")
         if kind != tasks_vendor.PAYLOAD_KIND_TASK:
             raise ValueError(
-                f"claude_code tasks: unexpected payload kind {kind!r}; "
-                f"only {tasks_vendor.PAYLOAD_KIND_TASK!r} is emitted by this source",
+                f"claude_code tasks: unexpected payload kind {kind!r}; only {tasks_vendor.PAYLOAD_KIND_TASK!r} is emitted by this source",
             )
         # Lift every task field into content_json so a future SQL filter
         # (`content_json::jsonb->>'subtype' = 'task_state'` plus
@@ -161,6 +177,24 @@ class ClaudeCodeTasksSessionSourcePlugin(
     # PullingSourceMixin
     # ------------------------------------------------------------------
 
+    def _poll_candidates(self, root_uri: str) -> Iterator[FilesystemCandidate]:
+        root = self._resolve_root_uri(root_uri)
+        if not root.is_dir():
+            return
+        glob_pat = self._resolve_glob()
+        for subdir in root.iterdir():
+            if not subdir.is_dir():
+                continue
+            candidate = observe_candidate(subdir, external_id=subdir.name, relative_path=subdir.name, task_glob=glob_pat)
+            if candidate is not None:
+                yield candidate
+
+    def _poll_ref(self, root_uri: str, candidate: FilesystemCandidate) -> ExternalSessionRef:
+        del root_uri
+        # Preserve the earliest configured task-file timestamp as first_seen.
+        times = [p.stat().st_mtime for p in candidate.path.glob(self._resolve_glob())]
+        return ExternalSessionRef(candidate.external_id, None, None, datetime.fromtimestamp(min(times), tz=UTC))
+
     def discover_sessions(
         self,
         root_uri: str,
@@ -183,9 +217,18 @@ class ClaudeCodeTasksSessionSourcePlugin(
         session: ExternalSessionRef,
         cursor_payload: dict[str, object] | None,
     ) -> Iterator[RawSessionEvent]:
+        yield from self._read_events(root_uri, session, cursor_payload)
+        acknowledge_read(session)
+
+    def _read_events(
+        self,
+        root_uri: str,
+        session: ExternalSessionRef,
+        cursor_payload: dict[str, object] | None,
+    ) -> Iterator[RawSessionEvent]:
         """Emit one RawSessionEvent per task file from `task_index` onwards."""
         root = self._resolve_root_uri(root_uri)
-        subdir = root / session.external_session_id
+        subdir = selected_path(session) or root / session.external_session_id
         if not subdir.is_dir():
             return
         glob_pat = self._resolve_glob()
@@ -201,7 +244,9 @@ class ClaudeCodeTasksSessionSourcePlugin(
                 # here so the smoke trail is greppable on real ingest.
                 logger.warning(
                     "%s: skipping malformed task file %s: %s",
-                    self.name, task_file, exc,
+                    self.name,
+                    task_file,
+                    exc,
                 )
                 raise
             payload = tasks_vendor.to_payload(parsed)
@@ -301,9 +346,7 @@ def _safe_mtime(path: Path) -> datetime | None:
         return None
 
 
-def _parse_cursor_dt(
-    cursor_payload: dict[str, object] | None, field: str
-) -> datetime | None:
+def _parse_cursor_dt(cursor_payload: dict[str, object] | None, field: str) -> datetime | None:
     if cursor_payload is None:
         return None
     value = cursor_payload.get(field)
@@ -315,9 +358,7 @@ def _parse_cursor_dt(
         return None
 
 
-def _parse_cursor_int(
-    cursor_payload: dict[str, object] | None, field: str
-) -> int | None:
+def _parse_cursor_int(cursor_payload: dict[str, object] | None, field: str) -> int | None:
     if cursor_payload is None:
         return None
     value = cursor_payload.get(field)

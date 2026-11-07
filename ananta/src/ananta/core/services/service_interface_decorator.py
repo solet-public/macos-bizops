@@ -81,6 +81,7 @@ class ServiceInterfaceActionMetadata:
     # dropped — the field is never inferred from the process key's provider.
     # See workbench/2026-06-07_state_service_consolidation_master_plan.md §3.3.3.
     requires_call_context: bool
+    is_async: bool = False  # Deferred completion, never an executor-selection flag.
 
     def to_process_dict(self) -> dict[str, object]:
         """Convert metadata to process registry dict format."""
@@ -105,6 +106,7 @@ class ServiceInterfaceActionMetadata:
             ),
             "is_enabled": self.is_enabled,
             "is_long_running": self.is_long_running,
+            "is_async": self.is_async,
             "version": self.version,
             "requires_result_processor": self.requires_result_processor,
             "requires_call_context": self.requires_call_context,
@@ -146,6 +148,7 @@ def service_interface_process(
     processor_policy_category: "ProcessorPolicyCategory | None" = None,
     is_enabled: bool = True,
     is_long_running: bool = False,
+    is_async: bool = False,
     version: str = "1.0.0",
     chaining_guidance: list[str] | None = None,
     action_definition_template: dict[str, object] | None = None,
@@ -260,6 +263,7 @@ def service_interface_process(
             requires_result_processor=effective_requires_result_processor,
             prompt_contract=prompt_contract,
             requires_call_context=requires_call_context,
+            is_async=is_async,
         )
 
         # Attach metadata to function

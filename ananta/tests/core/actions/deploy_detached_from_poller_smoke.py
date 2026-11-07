@@ -35,6 +35,14 @@ Asserts:
       macOS plugin is a bound ServiceProvider, so a ``plugin::`` key for its
       verbs never matches a dispatched row and would silently detach nothing.
 
+The measured embedding/search slot also frees messaging in a fetched batch.
+Its FIFO barrier lasts one cycle; uncertain rows retain protection separately
+from admission. Stop drains selected work; explicit external cancellation retains uncertainty protection.
+Busy reads scan one <=100-row page per poll; queued depth counts eligible page
+rows, not total queue size. Mixed pages retain their boundary until drained.
+Finite selected backlogs progress; infinite lower-key insertion and ordinary
+or pin-only saturation have no bound. Protected ids alone use the idle query.
+
 Project policy: no pytest. Exits 0 on success, 1 on first failure.
 
 Run:
@@ -47,11 +55,16 @@ import asyncio
 import json
 import logging
 import sys
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 
 from ananta.core.actions import action_path_liveness as liveness_module  # noqa: E402
@@ -61,10 +74,20 @@ from ananta.core.actions.action_queue_poller import (  # noqa: E402
     ActionQueuePoller,
     QueuedAction,
 )
+from ananta.services.state_service.ordered_query import (  # noqa: E402
+    apply_ordered_query_in_memory,
+    parse_ordered_query,
+)
+from candidate_starting_actions_pin_smoke import _SharedQueue  # noqa: E402
 
 APPLY = "service_interface::lifecycle_management_service::apply_manifest"
 RESTART = "service_interface::self_deployment_service::restart_with_manifest"
-FAST = "service_interface::knowledge_service::search"
+FAST = "plugin::agent_messaging_plugin::peer_inbox"
+MEASURED = (
+    "service_interface::embedding_service::generate_embeddings",
+    "service_interface::knowledge_service::search",
+)
+INGEST = "service_interface::session_ledger_service::ingest_raw_chunk"
 SLOW_NON_DEPLOY = "service_interface::knowledge_service::audit_retrieval_corpus"
 
 _failures: list[str] = []
@@ -80,7 +103,11 @@ def _check(condition: object, label: str) -> None:
 
 def _action(action_id: str, process_key: str) -> QueuedAction:
     return QueuedAction(
-        id=action_id, process_key=process_key, parameters="{}", notes="", created_at="",
+        id=action_id,
+        process_key=process_key,
+        parameters="{}",
+        notes="",
+        created_at="",
     )
 
 
@@ -125,9 +152,12 @@ class _Capture(logging.Handler):
     def __init__(self) -> None:
         super().__init__(level=logging.INFO)
         self.messages: list[str] = []
+        self.errors: list[str] = []
 
     def emit(self, record: logging.LogRecord) -> None:
         self.messages.append(record.getMessage())
+        if record.levelno >= logging.ERROR:
+            self.errors.append(record.getMessage())
 
     def starting(self, prefix: str) -> list[str]:
         return [m for m in self.messages if m.startswith(prefix)]
@@ -169,7 +199,8 @@ def test_fast_actions_dispatch_during_deploy() -> None:
         await _drain(h, release)
         _check(ran[-1] == "ae-deploy", "the deploy then completed through the same handler")
         _check(
-            h.poller.total_actions_processed == 3, "all three counted as processed",
+            h.poller.total_actions_processed == 3,
+            "all three counted as processed",
         )
 
     asyncio.run(scenario())
@@ -235,7 +266,8 @@ def test_single_flight() -> None:
         await asyncio.sleep(0)
         _check("ae-d2" not in h.claimed, f"the second deploy was not claimed ({h.claimed})")
         _check(
-            any(a.id == "ae-d2" for a in h.queue), "the second deploy row is still queued",
+            any(a.id == "ae-d2" for a in h.queue),
+            "the second deploy row is still queued",
         )
         _check("ae-f1" in ran, "the fast action behind both still ran")
         await h.poll()
@@ -289,7 +321,10 @@ class _ReaperSpy:
     def __init__(self, action_id: str) -> None:
         stale = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=2)
         self._row = {
-            "id": action_id, "process_key": APPLY, "parameters": "{}", "updated_at": stale,
+            "id": action_id,
+            "process_key": APPLY,
+            "parameters": "{}",
+            "updated_at": stale,
         }
         self.failed: list[str] = []
 
@@ -298,7 +333,10 @@ class _ReaperSpy:
         return {"data": {"records": [self._row]}}
 
     def update_state(
-        self, namespace: str, query: dict[str, object], updates: dict[str, object],
+        self,
+        namespace: str,
+        query: dict[str, object],
+        updates: dict[str, object],
     ) -> dict[str, object]:
         _ = (namespace, updates)
         filters = query["filters"]
@@ -367,10 +405,7 @@ def test_hung_deploy_is_visible_and_alarmed() -> None:
         await h.poll()
         live = ACTION_PATH_LIVENESS.snapshot()
         _check(
-            live["detached_deploy_action_id"] == "ae-hung"
-            and live["detached_deploy_process_key"] == APPLY
-            and isinstance(live["detached_deploy_age_seconds"], float)
-            and isinstance(live["detached_deploy_started_at"], str),
+            live["detached_deploy_action_id"] == "ae-hung" and live["detached_deploy_process_key"] == APPLY and isinstance(live["detached_deploy_age_seconds"], float) and isinstance(live["detached_deploy_started_at"], str),
             f"liveness names the in-flight deploy with its age ({live})",
         )
         _check(
@@ -391,13 +426,18 @@ def test_hung_deploy_is_visible_and_alarmed() -> None:
             len(errors) == 1 and "ae-hung" in errors[0] and APPLY in errors[0],
             f"DEPLOY_STALLED is logged once per interval, naming the deploy ({errors})",
         )
+        _check(
+            bool(errors) and f"stall threshold {liveness_module.DEPLOY_STALL_THRESHOLD_SECONDS:.0f}s" in errors[0] and f"at {liveness_module.DEPLOY_REAP_EXEMPTION_CEILING_SECONDS:.0f}s" in errors[0],
+            "DEPLOY_STALLED names the current threshold and exemption ceiling",
+        )
+        _check(
+            any("process restart" in message.lower() and "hung" in message.lower() for message in errors),
+            "deploy_restart_recovery_required: a hung deploy needs process restart to release its slot",
+        )
         await _drain(h, release)
         after = ACTION_PATH_LIVENESS.snapshot()
         _check(
-            after["detached_deploy_action_id"] is None
-            and after["detached_deploy_age_seconds"] is None
-            and after["detached_deploy_stalled"] is False
-            and after["action_path_stalled"] is False,
+            after["detached_deploy_action_id"] is None and after["detached_deploy_age_seconds"] is None and after["detached_deploy_stalled"] is False and after["action_path_stalled"] is False,
             "the finished deploy is cleared from liveness",
         )
 
@@ -487,10 +527,7 @@ def test_held_back_rows_take_no_slot() -> None:
 
         h = _Harness([_action("ae-run", APPLY)], handler)
         await h.poll()
-        rows: list[dict[str, object]] = [
-            {"id": f"ae-retry{i}", "process_key": APPLY, "excluded_versions": None}
-            for i in range(12)
-        ]
+        rows: list[dict[str, object]] = [{"id": f"ae-retry{i}", "process_key": APPLY, "excluded_versions": None} for i in range(12)]
         rows.append({"id": "ae-fast", "process_key": FAST, "excluded_versions": None})
 
         class _State:
@@ -520,8 +557,134 @@ def test_held_back_rows_take_no_slot() -> None:
     asyncio.run(scenario())
 
 
+def test_dispatch_tripwire_explains_page_causes() -> None:
+    print("\n[10] a full dispatch page reports eligibility and deploy holdbacks separately")
+    capture = _Capture()
+    poller_module.logger.addHandler(capture)
+    previous_level = poller_module.logger.level
+    poller_module.logger.setLevel(logging.WARNING)
+
+    async def scenario() -> None:
+        release = asyncio.Event()
+
+        async def handler(action: QueuedAction) -> None:
+            if action.process_key == APPLY:
+                await release.wait()
+
+        h = _Harness([_action("ae-run", APPLY)], handler)
+        await h.poll()
+        real = ActionQueuePoller.__new__(ActionQueuePoller)
+        real.max_actions_per_poll = 10
+        real._solet_version = "local"
+        real._last_observed_queue_depth = 0
+        real._detached_deploy = h.poller._detached_deploy
+        real._fetch_session_namespaces = lambda _taken: {}  # type: ignore[method-assign]
+        real._build_queued_action = lambda row, _ns: _action(  # type: ignore[method-assign]
+            str(row["id"]), str(row["process_key"])
+        )
+
+        class _State:
+            def __init__(self) -> None:
+                self.queries: list[dict[str, object]] = []
+                self.writes = 0
+
+            def query_ordered(self, namespace: str, data: dict[str, object]) -> dict[str, object]:
+                _ = namespace
+                self.queries.append(data)
+                return {"action_status": "completed", "data": {"records": rows}}
+
+        state = _State()
+        real.state_service = state  # type: ignore[assignment]
+
+        def held(count: int) -> list[dict[str, object]]:
+            return [{"id": f"held-{i}", "process_key": APPLY, "excluded_versions": None} for i in range(count)]
+
+        def rejected(count: int) -> list[dict[str, object]]:
+            return [{"id": f"excluded-{i}", "process_key": FAST, "excluded_versions": ["local"]} for i in range(count)]
+
+        def fast(count: int) -> list[dict[str, object]]:
+            return [{"id": f"fast-{i}", "process_key": FAST, "excluded_versions": None} for i in range(count)]
+
+        pinned_wrong: dict[str, object] = {
+            "id": "pin-ineligible",
+            "process_key": FAST,
+            "excluded_versions": ["local", "instance:other-instance"],
+        }
+
+        async def fetch(page: list[dict[str, object]]) -> list[str]:
+            nonlocal rows
+            rows = page
+            result = await real._get_queued_actions()
+            return [action.id for action in result]
+
+        rows: list[dict[str, object]] = []
+        held_page = held(91) + fast(9)
+        ids = await fetch(held_page)
+        warnings = capture.starting("DISPATCH-TRIPWIRE")
+        _check(
+            ids == [f"fast-{i}" for i in range(9)],
+            f"91 held-back rows preserve the 9 fast IDs ({ids})",
+        )
+        _check(
+            len(warnings) == 1 and "eligibility_rejected=0" in warnings[0] and "deploy_held_back=91" in warnings[0],
+            f"held-back cause is reported separately from eligibility ({warnings})",
+        )
+
+        capture.messages.clear()
+        mixed_page = rejected(44) + [pinned_wrong] + held(46) + fast(9)
+        ids = await fetch(mixed_page)
+        warnings = capture.starting("DISPATCH-TRIPWIRE")
+        _check(
+            ids == [f"fast-{i}" for i in range(9)],
+            f"mixed page preserves eligible action order ({ids})",
+        )
+        _check(
+            len(warnings) == 1 and "eligibility_rejected=45" in warnings[0] and "deploy_held_back=46" in warnings[0],
+            f"mixed causes include version and pin eligibility without folding in deploy holdback ({warnings})",
+        )
+
+        capture.messages.clear()
+        excluded_page = rejected(90) + [pinned_wrong] + fast(9)
+        await fetch(excluded_page)
+        warnings = capture.starting("DISPATCH-TRIPWIRE")
+        _check(
+            len(warnings) == 1 and "eligibility_rejected=91" in warnings[0] and "deploy_held_back=0" in warnings[0],
+            f"exclusion-only page reports eligibility cause ({warnings})",
+        )
+
+        capture.messages.clear()
+        await fetch(held(90) + fast(10))
+        _check(not capture.starting("DISPATCH-TRIPWIRE"), "a full set of slots stays quiet")
+        capture.messages.clear()
+        await fetch(held(5) + fast(4))
+        _check(not capture.starting("DISPATCH-TRIPWIRE"), "a below-cap page stays quiet")
+        _check(
+            len(state.queries) == 5
+            and all(
+                query
+                == {
+                    "table": "action_events",
+                    "filters": {"status": "queued"},
+                    "order_by": [["sequence", "asc"], ["id", "asc"]],
+                    "limit": 100,
+                    "include_deleted": True,
+                }
+                for query in state.queries
+            )
+            and state.writes == 0,
+            "all fixtures keep the exact bounded ordered read and perform no state writes",
+        )
+        await _drain(h, release)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        poller_module.logger.setLevel(previous_level)
+        poller_module.logger.removeHandler(capture)
+
+
 def test_stop_cancels_the_detached_deploy() -> None:
-    print("\n[10] stop() cancels the detached deploy as well as the poll task")
+    print("\n[11] stop() cancels the detached deploy as well as the poll task")
 
     async def scenario() -> None:
         release = asyncio.Event()
@@ -546,7 +709,7 @@ def test_stop_cancels_the_detached_deploy() -> None:
 
 
 def test_gated_off_colour_claims_nothing_more() -> None:
-    print("\n[11] a colour gated off mid-batch claims no more rows (no self-claimed finisher)")
+    print("\n[12] a colour gated off mid-batch claims no more rows (no self-claimed finisher)")
 
     async def scenario() -> None:
         active = [True]
@@ -571,12 +734,9 @@ def test_gated_off_colour_claims_nothing_more() -> None:
 
 
 def test_detached_keys_are_real_process_keys() -> None:
-    print("\n[12] every detached process key is a shipped process definition")
+    print("\n[13] every detached process key is a shipped process definition")
     processes = REPO_ROOT / "ananta" / "knowledge_base" / "processes"
-    declared = {
-        json.loads(path.read_text(encoding="utf-8")).get("process_key")
-        for path in processes.glob("*/*.json")
-    }
+    declared = {json.loads(path.read_text(encoding="utf-8")).get("process_key") for path in processes.glob("*/*.json")}
     detached = poller_module.DETACHED_DEPLOY_PROCESS_KEYS
     for key in sorted(detached):
         _check(key in declared, f"{key} is declared under ananta/knowledge_base/processes")
@@ -586,8 +746,513 @@ def test_detached_keys_are_real_process_keys() -> None:
     )
 
 
+def _selected_task(h: _Harness, lane_name: str = "measured") -> asyncio.Task[None]:
+    from ananta.core.actions import _measured_action_lane as lane
+
+    task = lane._states[h.poller].slots[lane_name].task
+    assert task is not None
+    return task
+
+
+@contextmanager
+def _measured_logs() -> Generator[_Capture]:
+    from ananta.core.actions import _measured_action_lane as lane
+
+    capture = _Capture()
+    level = lane.logger.level
+    lane.logger.setLevel(logging.INFO)
+    lane.logger.addHandler(capture)
+    try:
+        yield capture
+    finally:
+        lane.logger.removeHandler(capture)
+        lane.logger.setLevel(level)
+
+
+def test_measured_classes_do_not_block_messaging() -> None:
+    async def scenario(key: str) -> None:
+        release, entered = asyncio.Event(), asyncio.Event()
+        ran: list[str] = []
+        task: asyncio.Task[None] | None = None
+
+        async def handler(action: QueuedAction) -> None:
+            if action.id == "ae-long":
+                print(f"MEASURED_HANDLER_ENTERED: {action.id} {key}")
+                entered.set()
+                await release.wait()
+            ran.append(action.id)
+
+        h = _Harness([_action("ae-long", key), _action("ae-message", FAST)], handler)
+        before = set(vars(h.poller))
+        try:
+            returned = await h.poll(timeout=0.2)
+            await asyncio.sleep(0)
+            assert "ae-message" in ran and not release.is_set(), (
+                "MESSAGING_PROGRESS_BEFORE_MEASURED_RELEASE",
+                key,
+                returned,
+                ran,
+                h.claimed,
+            )
+            task = _selected_task(h)
+            assert entered.is_set() and not task.done()
+            assert ran == ["ae-message"] and h.claimed == ["ae-long", "ae-message"]
+            assert h.failed == [] and h.poller.total_actions_processed == 1
+            assert set(vars(h.poller)) == before, "NO_NEW_POLLER_ATTRIBUTES"
+        finally:
+            release.set()
+            if task is not None:
+                await task
+        assert ran == ["ae-message", "ae-long"] and h.poller.total_actions_processed == 2
+
+    for key in MEASURED:
+        asyncio.run(scenario(key))
+
+
+def test_ingest_and_unknown_classes_stay_serial() -> None:
+    from ananta.core.actions import _measured_action_lane as lane
+
+    definitions = [
+        *(REPO_ROOT / "ananta/knowledge_base/processes").glob("*/*.json"),
+        *(REPO_ROOT / "plugins").glob("*/knowledge_base/processes/*.json"),
+    ]
+    declared = {json.loads(p.read_text()).get("process_key") for p in definitions}
+    # A seed omits origin-only plugins (seed_factory_plugin) but ships this lane
+    # module, so only a key whose owner ships in this tree needs its definition
+    # here; the origin tree, which ships every plugin, still checks them all.
+    shipped = {key for key in lane.PROCESS_KEYS if not key.startswith("plugin::") or (REPO_ROOT / "plugins" / key.split("::")[1]).is_dir()}
+    assert lane.MEASURED_PROCESS_KEYS == frozenset(MEASURED) | lane.HEAVY_PROCESS_KEYS, sorted(lane.MEASURED_PROCESS_KEYS)
+    assert lane.PROCESS_KEYS == lane.MEASURED_PROCESS_KEYS | lane.SESSION_LIFECYCLE_PROCESS_KEYS, sorted(lane.PROCESS_KEYS)
+    assert frozenset(MEASURED) <= shipped and shipped <= declared, sorted(shipped - declared)
+
+    async def scenario(key: str) -> None:
+        release, entered = asyncio.Event(), asyncio.Event()
+        ran: list[str] = []
+        active, peak = 0, 0
+
+        async def handler(action: QueuedAction) -> None:
+            nonlocal active, peak
+            if action.process_key == key:
+                active += 1
+                peak = max(peak, active)
+                entered.set()
+                await release.wait()
+                active -= 1
+            ran.append(action.id)
+
+        h = _Harness([_action("ae-1", key), _action("ae-2", key), _action("ae-message", FAST)], handler)
+        task = asyncio.create_task(h.poller._poll_once())
+        try:
+            await asyncio.wait_for(entered.wait(), 0.2)
+            assert ran == [] and h.claimed == ["ae-1"] and not task.done()
+        finally:
+            release.set()
+            await task
+        assert ran == ["ae-1", "ae-2", "ae-message"] and peak == 1
+
+    for key in (INGEST, SLOW_NON_DEPLOY):
+        asyncio.run(scenario(key))
+
+
+def _reaper_control(h: _Harness, protected_id: str) -> None:
+    spy = _ReaperSpy(protected_id)
+    h.poller.state_service = spy  # type: ignore[assignment]
+    h.poller._maybe_reap_orphans()
+    assert spy.failed == []
+    stranger = _ReaperSpy("ae-stranger")
+    h.poller.state_service = stranger  # type: ignore[assignment]
+    h.poller._maybe_reap_orphans()
+    assert stranger.failed == ["ae-stranger"]
+
+
+async def _measured_fifo() -> None:
+    release = asyncio.Event()
+    ran: list[str] = []
+
+    async def handler(action: QueuedAction) -> None:
+        if action.id == "ae-message":
+            release.set()
+            await _selected_task(h)
+        if action.id == "ae-1":
+            await release.wait()
+        ran.append(action.id)
+
+    h = _Harness(
+        [
+            _action("ae-1", MEASURED[0]),
+            _action("ae-2", MEASURED[1]),
+            _action("ae-message", FAST),
+            _action("ae-3", MEASURED[0]),
+        ],
+        handler,
+    )
+    try:
+        await h.poll()
+        assert h.claimed == ["ae-1", "ae-message"]
+        assert [a.id for a in h.queue] == ["ae-2", "ae-3"], "HELD_PREDECESSOR_CYCLE_BARRIER"
+        await h.poll()
+        await _selected_task(h)
+        await h.poll()
+        await _selected_task(h)
+        assert ran == ["ae-1", "ae-message", "ae-2", "ae-3"]
+    finally:
+        release.set()
+
+
+async def _measured_failure(uncertain: bool, capture: _Capture) -> None:
+    from ananta.core.actions import _measured_action_lane as lane
+
+    ran: list[str] = []
+
+    async def handler(action: QueuedAction) -> None:
+        if action.id == "ae-fail":
+            raise RuntimeError("handler refused")
+        ran.append(action.id)
+
+    h = _Harness([_action("ae-fail", MEASURED[0]), _action("ae-message", FAST)], handler)
+    if uncertain:
+
+        def failed_write(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("terminal write refused")
+
+        h.poller._mark_action_failed = failed_write  # type: ignore[method-assign]
+    await h.poll()
+    await _selected_task(h)
+    assert ran == ["ae-message"] and h.poller.total_actions_processed == 1
+    if uncertain:
+        h.queue.append(_action("ae-next", MEASURED[1]))
+        await h.poll()
+        await _selected_task(h)
+        assert ran == ["ae-message", "ae-next"] and lane.live_ids(h.poller) == {"ae-fail"}, (
+            "UNCERTAIN_ROW_PROTECTED_NEXT_SELECTED_ADMITTED",
+            ran,
+            h.claimed,
+        )
+        _reaper_control(h, "ae-fail")
+        assert any("ae-fail" in m and "terminal recording" in m for m in capture.errors)
+    else:
+        assert h.failed == ["ae-fail"] and lane.live_ids(h.poller) == set()
+        h.queue.append(_action("ae-lost", MEASURED[1]))
+        h.poller._mark_action_processing = lambda _id: False  # type: ignore[method-assign]
+        await h.poll()
+        assert ran == ["ae-message"] and "ae-lost" not in h.claimed, "CAS_LOSER_NEVER_EXECUTES"
+
+
+def test_measured_slot_preserves_order_and_failure() -> None:
+    with _measured_logs() as capture:
+        asyncio.run(_measured_fifo())
+        asyncio.run(_measured_failure(False, capture))
+        asyncio.run(_measured_failure(True, capture))
+
+
+async def _measured_reaper_and_advisory(capture: _Capture) -> None:
+    from ananta.core.actions import _measured_action_lane as lane
+
+    release = asyncio.Event()
+
+    async def handler(_action: QueuedAction) -> None:
+        await release.wait()
+
+    h = _Harness([_action("ae-live", MEASURED[0]), _action("ae-deploy", APPLY)], handler)
+    await h.poll()
+    task = _selected_task(h)
+    try:
+        assert h.poller._live_detached_action_ids() == {"ae-live", "ae-deploy"}
+        _reaper_control(h, "ae-live")
+        state = lane._states[h.poller]
+        with patch.object(lane.time, "monotonic", return_value=state.slots["measured"].started + 121):
+            lane.report(h.poller)
+            lane.report(h.poller)
+        assert len([m for m in capture.errors if m.startswith("MEASURED_STALLED")]) == 1
+        other = _Harness([], handler)
+        assert not lane.held(other.poller, MEASURED[0]) and lane.live_ids(other.poller) == set()
+    finally:
+        release.set()
+        await task
+        await _drain(h, release)
+    assert lane.live_ids(h.poller) == set()
+    after = _ReaperSpy("ae-live")
+    h.poller.state_service = after  # type: ignore[assignment]
+    h.poller._maybe_reap_orphans()
+    assert after.failed == ["ae-live"]
+
+
+async def _measured_shutdown(capture: _Capture) -> None:
+    from ananta.core.actions import _measured_action_lane as lane
+
+    never_release, entered = asyncio.Event(), asyncio.Event()
+    terminal: list[str] = []
+
+    async def handler(action: QueuedAction) -> None:
+        entered.set()
+        await never_release.wait()
+        terminal.append(action.id)
+
+    h = _Harness([_action("ae-cancel", MEASURED[0])], handler)
+    try:
+        await h.poll()
+        await asyncio.wait_for(entered.wait(), 0.2)
+        task = _selected_task(h)
+        h.poller.running = True
+        h.poller.poller_task = asyncio.create_task(asyncio.sleep(3600))
+        stopping = asyncio.create_task(h.poller.stop())
+        await asyncio.sleep(0.01)
+        assert not stopping.done() and not task.cancelled(), "STOP_DRAINS_SELECTED_HANDLER"
+        never_release.set()
+        await asyncio.wait_for(stopping, 0.2)
+        assert task.done() and not task.cancelled() and h.poller.poller_task.cancelled()
+        assert lane.live_ids(h.poller) == frozenset() and terminal == ["ae-cancel"]
+        assert h.failed == [] and h.poller.total_actions_processed == 1 and h.claimed == ["ae-cancel"]
+    finally:
+        never_release.set()
+        await lane.stop(h.poller)
+    early = _Harness([_action("ae-before-entry", MEASURED[1])], handler)
+    await early.poller._poll_once()
+    early_task = _selected_task(early)
+    early_task.cancel()  # External cancellation before entry must still protect the CAS-owned row.
+    await lane.stop(early.poller)
+    assert early_task.cancelled() and lane.live_ids(early.poller) == {"ae-before-entry"}
+    assert any("ae-before-entry" in m and "cancelled" in m for m in capture.errors)
+
+
+def test_measured_slot_shutdown_and_reaper() -> None:
+    with _measured_logs() as capture:
+        asyncio.run(_measured_reaper_and_advisory(capture))
+        asyncio.run(_measured_shutdown(capture))
+
+
+class _ReadQueue(_SharedQueue):
+    """Real ordered grammar and queued-status CAS; only storage is in memory."""
+
+    def __init__(self, claimed: list[str]) -> None:
+        super().__init__()
+        self.claimed, self.queries = claimed, []
+        self.reply: Any = None
+
+    def query_ordered(self, namespace: str, data: dict[str, object]) -> Any:
+        spec = parse_ordered_query(data)
+        rows = apply_ordered_query_in_memory(self.rows, spec)
+        self.queries.append((namespace, dict(data), len(rows)))
+        print("MEASURED_RAW_WINDOW", namespace, data, len(rows))
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return (
+            self.reply
+            if self.reply is not None
+            else {
+                "action_status": "completed",
+                "data": {"records": rows},
+                "actions": [],
+            }
+        )
+
+    def update_state(self, namespace: str, query: Any, updates: Any) -> Any:
+        result: Any = super().update_state(namespace, query, updates)
+        if result["data"]["result"]["updated"]:
+            self.claimed.append(query["filters"]["id"])
+        return result
+
+
+def _real_fetch(h: _Harness, queue: _ReadQueue) -> None:
+    del h.poller._get_queued_actions
+    del h.poller._mark_action_processing
+    h.poller.state_service = queue
+    h.poller.max_actions_per_poll, h.poller._solet_version = 10, "local"
+    h.poller._claim_instance_id = "own"
+
+
+def _assert_backlog_page_contract(h: _Harness, queue: _ReadQueue, ran: list[str]) -> None:
+    queries = queue.queries
+    assert len(queries) == 4 and [q[2] for q in queries] == [100, 100, 16, 6]
+    assert [q[1].get("after") for q in queries] == [
+        None,
+        [100, "ae-held-99"],
+        [200, "ae-held-199"],
+        [200, "ae-held-199"],
+    ]
+    assert ran == [f"ae-message-{i}" for i in range(15)]
+    assert h.claimed == ["ae-active", *ran] and h.poller._last_observed_queue_depth == 5
+    assert all(r["status"] == "queued" for r in queue.rows[:201])
+
+
+def test_measured_backlog_paginates_without_claiming_held_rows() -> None:
+    async def scenario() -> None:
+        from ananta.core.actions import _measured_action_lane as lane
+
+        release, ran = asyncio.Event(), []
+
+        async def handler(action: QueuedAction) -> None:
+            if action.id == "ae-active":
+                await release.wait()
+            ran.append(action.id)
+
+        h = _Harness([_action("ae-active", MEASURED[0])], handler)
+        queue = _ReadQueue(h.claimed)
+        queries = queue.queries
+        queue.rows = [
+            {
+                "id": f"ae-held-{i}",
+                "sequence": i + 1,
+                "process_key": MEASURED[i % 2],
+                "status": "queued",
+            }
+            for i in range(201)
+        ]
+        queue.rows += [{"id": f"ae-message-{i}", "sequence": i + 202, "process_key": FAST, "status": "queued"} for i in range(15)]
+        queue.rows.append({"id": "ae-active", "sequence": 0, "status": "processing"})
+        try:
+            await h.poll()
+            await asyncio.sleep(0)
+            _real_fetch(h, queue)
+            for _ in range(4):
+                await h.poll()
+            assert all(f"ae-message-{i}" in ran for i in range(15)) and not release.is_set(), (
+                "MESSAGING_PROGRESS_PAST_BOUNDED_READ",
+                ran,
+                h.claimed,
+                queries,
+            )
+            _assert_backlog_page_contract(h, queue, ran)
+            release.set()
+            await _selected_task(h)
+            await h.poll()
+            await _selected_task(h)
+            assert "after" not in queries[-1][1] and h.claimed[-1] == "ae-held-0"
+        finally:
+            release.set()
+            await lane.stop(h.poller)
+
+    asyncio.run(scenario())
+
+
+async def _busy_read_contract(h: _Harness, queue: _ReadQueue, expected: dict[str, object]) -> None:
+    from ananta.core.actions import _measured_action_lane as lane
+
+    state = lane._states[h.poller]
+    for reply in (
+        {"action_status": "failed", "error": {"message": "provider"}},
+        {"action_status": "completed", "data": {"records": "malformed"}},
+    ):
+        queue.reply = reply
+        assert await lane.query_ordered(h.poller, "core", expected) is reply and state.cursor == (
+            7,
+            "boundary",
+        )
+    queue.reply = RuntimeError("provider raised")
+    try:
+        await lane.query_ordered(h.poller, "core", expected)
+    except RuntimeError as exc:
+        assert str(exc) == "provider raised" and state.cursor == (7, "boundary")
+    else:
+        raise AssertionError("PROVIDER_RAISE_PRESERVED")
+    queue.reply = {
+        "action_status": "completed",
+        "data": {"records": [{"process_key": MEASURED[0]}]},
+    }
+    await lane.query_ordered(h.poller, "core", expected)
+    assert state.cursor == (7, "boundary"), "MISSING_CURSOR_IS_ADVISORY"
+    queue.reply = {"action_status": "completed", "data": {"records": []}}
+    result = await lane.query_ordered(h.poller, "core", expected)
+    assert result == queue.reply and result is not queue.reply and state.cursor is None
+
+
+def test_idle_queue_and_ingest_keep_original_read_contract() -> None:
+    async def scenario() -> None:
+        from ananta.core.actions import _measured_action_lane as lane
+
+        release, ran = asyncio.Event(), []
+
+        async def handler(action: QueuedAction) -> None:
+            if action.id == "ae-fail":
+                raise RuntimeError("handler refused")
+            if action.id == "ae-next":
+                await release.wait()
+            ran.append(action.id)
+
+        h = _Harness([], handler)
+        queue = _ReadQueue(h.claimed)
+        _real_fetch(h, queue)
+        queue.rows = [
+            {
+                "id": name,
+                "sequence": i,
+                "status": "queued",
+                "process_key": key,
+                "excluded_versions": excluded,
+            }
+            for i, (name, key, excluded) in enumerate(
+                [
+                    ("own", FAST, ["local", "instance:own"]),
+                    ("other", FAST, ["instance:other"]),
+                    ("excluded", FAST, ["local"]),
+                    ("ingest", INGEST, None),
+                    ("ordinary", FAST, None),
+                ]
+            )
+        ]
+        expected: dict[str, object] = {
+            "table": "action_events",
+            "filters": {"status": "queued"},
+            "order_by": [["sequence", "asc"], ["id", "asc"]],
+            "limit": 100,
+            "include_deleted": True,
+        }
+        h.poller._own_rows_only_getter = lambda: True
+        await h.poll()
+        assert ran == ["own"] and queue.queries[-1][1] == {
+            **expected,
+            "filters": {"status": "queued", "excluded_versions": {"op": "is_not_null"}},
+        }
+        h.poller._own_rows_only_getter = lambda: False
+        await h.poll()
+        assert ran == ["own", "ingest", "ordinary"] and queue.queries[-1][1] == expected
+        queue.reply = {
+            "action_status": "completed",
+            "data": {"records": [{"id": "exact"}]},
+            "actions": [],
+        }
+        assert await lane.query_ordered(h.poller, "core", expected) is queue.reply
+        queue.reply = None
+        queue.rows = [{"id": "ae-fail", "sequence": 1, "process_key": MEASURED[0], "status": "queued"}]
+
+        def failed_write(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("terminal write refused")
+
+        h.poller._mark_action_failed = failed_write
+        await h.poll()
+        await _selected_task(h)
+        state = lane._states[h.poller]
+        state.cursor = (999, "stale")
+        queue.rows.append({"id": "ae-next", "sequence": 2, "process_key": MEASURED[1], "status": "queued"})
+        try:
+            await h.poll()
+            assert h.claimed[-1] == "ae-next" and queue.queries[-1][1] == expected, "PROTECTED_ROW_DOES_NOT_ACTIVATE_BUSY_PAGING"
+            assert "ae-fail" in lane.live_ids(h.poller) and state.cursor is None
+            _reaper_control(h, "ae-fail")
+            h.poller.state_service = queue
+            state.cursor = (7, "boundary")
+            await _busy_read_contract(h, queue, expected)
+            release.set()
+            await _selected_task(h)
+            assert lane.live_ids(h.poller) == {"ae-fail"}
+            state.cursor = (9, "stale")
+            assert await lane.query_ordered(h.poller, "core", expected) is queue.reply
+            assert state.cursor is None and queue.queries[-1][1] == expected
+        finally:
+            release.set()
+            await lane.stop(h.poller)
+
+    asyncio.run(scenario())
+
+
 def main() -> int:
     print("Deploy-detached-from-poller smoke (wgr_5de9baf3)")
+    test_measured_backlog_paginates_without_claiming_held_rows()
+    test_idle_queue_and_ingest_keep_original_read_contract()
+    test_measured_classes_do_not_block_messaging()
+    test_ingest_and_unknown_classes_stay_serial()
+    test_measured_slot_preserves_order_and_failure()
+    test_measured_slot_shutdown_and_reaper()
     test_fast_actions_dispatch_during_deploy()
     test_slow_action_before_after()
     test_single_flight()
@@ -597,6 +1262,7 @@ def main() -> int:
     test_held_back_row_logged_once()
     test_reaper_exemption_has_a_ceiling()
     test_held_back_rows_take_no_slot()
+    test_dispatch_tripwire_explains_page_causes()
     test_stop_cancels_the_detached_deploy()
     test_gated_off_colour_claims_nothing_more()
     test_detached_keys_are_real_process_keys()

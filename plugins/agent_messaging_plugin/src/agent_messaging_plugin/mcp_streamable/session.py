@@ -43,6 +43,7 @@ from hashlib import sha256
 from typing import TYPE_CHECKING, Final
 
 from ..models import BridgeBinding
+from ..peer_registry import PEER_REGISTRATION_LOCK
 from ..sender_provenance import (
     SENDER_PRINCIPAL_KIND_OAUTH_CLIENT,
     SENDER_PRINCIPAL_KIND_UNKNOWN,
@@ -174,7 +175,10 @@ class StreamableSessionManager:
         # open_bridge already pre-marks the bridge with agent_instance_id +
         # session_label from the claim (so legacy IO peer lookups read
         # the right identity), so no manual rebind is needed here.
-        self._peer_registry.register(binding)
+        # iss_59a7f833: serialized with every other request-path registry
+        # write (HTTP peer/register, the streamable relabel).
+        with PEER_REGISTRATION_LOCK:
+            self._peer_registry.register(binding)
         session = StreamableSession(
             mcp_session_id=_mint_session_id(),
             bridge_id=bridge.bridge_id,
@@ -195,8 +199,7 @@ class StreamableSessionManager:
         with self._lock:
             self._sessions[session.mcp_session_id] = session
         logger.info(
-            "streamable session allocated: mcp_session_id=%s bridge_id=%s "
-            "agent_id=%s agent_instance_id=%s",
+            "streamable session allocated: mcp_session_id=%s bridge_id=%s agent_id=%s agent_instance_id=%s",
             session.mcp_session_id,
             session.bridge_id,
             session.agent_id,
@@ -221,7 +224,7 @@ class StreamableSessionManager:
             bridge.touch()
         return session
 
-    def close(self, mcp_session_id: str) -> bool:
+    def close(self, mcp_session_id: str, *, shutdown: bool = False) -> bool:
         """Tear down a session; return False if no session matched."""
         with self._lock:
             session = self._sessions.pop(mcp_session_id, None)
@@ -231,7 +234,7 @@ class StreamableSessionManager:
         # concurrent peer_send racing the close fails fast on the
         # binding lookup rather than depositing into a doomed queue.
         self._peer_registry.unregister(session.bridge_id)
-        self._bridge_manager.close(session.bridge_id)
+        self._bridge_manager.close(session.bridge_id, reason="streamable_shutdown" if shutdown else "streamable_close")
         logger.info(
             "streamable session closed: mcp_session_id=%s bridge_id=%s",
             session.mcp_session_id,
@@ -243,7 +246,7 @@ class StreamableSessionManager:
         """Tear down every session; called from plugin shutdown."""
         with self._lock:
             session_ids = list(self._sessions.keys())
-        return sum(1 for sid in session_ids if self.close(sid))
+        return sum(1 for sid in session_ids if self.close(sid, shutdown=True))
 
 
 def _mint_session_id() -> str:

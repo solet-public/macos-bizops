@@ -14,30 +14,42 @@ from __future__ import annotations
 
 from typing import Literal
 
+from .rest_families import FAMILIES
+
+# Typed REST families share the request verb's completion contract; derived, never listed by hand.
+_REST_FAMILY_ACTIONS = frozenset(FAMILIES)
+
 
 def _instructions(action_name: str, outcome: Literal["result", "error"]) -> list[str]:
+    if action_name == "request" and outcome == "result":
+        return [
+            "The Snowflake REST request completed; vendor state may have changed.",
+            "Relay HTTP status, headers and body faithfully from job_payload, including vendor errors, Retry-After, SQL handles and pagination. Job completion does not prove mutation success.",
+            "Do not silently retry mutations, poll SQL handles or follow pagination or redirects.",
+        ]
+    if action_name in _REST_FAMILY_ACTIONS and outcome == "result":
+        return [
+            f"The Snowflake '{action_name}' operation named in job_payload.operation completed at the HTTP level; vendor state may have changed.",
+            "Relay status, error_code and body faithfully. A 202 means accepted, not finished: job_payload.pagination names the result_handler, statement_handle, next partition, next_from_name, next_begin_mark or next_start_time_inclusive for an explicit follow-up call.",
+            "Do not silently retry mutations or follow pagination. A task execute response means the run was requested, not that it completed; a pipe insert_files SUCCESS means Snowpipe queued the files, not that they were loaded (insert_report or load_history_scan shows loads).",
+            "A stage presigned_url is a time-limited bearer URL for that one file: hand it only to the caller that asked for it.",
+        ]
     if outcome == "result":
         return [
             f"A snowflake_plugin '{action_name}' job completed successfully.",
-            "The raw result is available as job_payload — relay it to the user (or use it "
-            "to continue your reasoning) as returned; technical fields like row_count, "
-            "columns, or path are meaningful to the caller and should not be paraphrased away.",
-            "Reply with action using the active IO plugin's post_message "
-            "(process_key: plugin::<io_plugin>::post_message) if the flow calls for messaging "
-            "the user directly.",
+            "The raw result is available as job_payload — relay it to the user (or use it to continue your reasoning) as returned; technical fields like row_count, columns, or path are meaningful to the caller and should not be paraphrased away.",
+            "Reply with action using the active IO plugin's post_message (process_key: plugin::<io_plugin>::post_message) if the flow calls for messaging the user directly.",
         ]
     return [
         f"A snowflake_plugin '{action_name}' job ended with an error.",
-        "The error message in job_error is already topology-safe (no account, user, or "
-        "warehouse detail) and is safe to relay to the user verbatim.",
-        "Reply with action using the active IO plugin's post_message "
-        "(process_key: plugin::<io_plugin>::post_message) if the flow calls for messaging "
-        "the user directly.",
+        "The error message in job_error is already topology-safe (no account, user, or warehouse detail) and is safe to relay to the user verbatim.",
+        "Reply with action using the active IO plugin's post_message (process_key: plugin::<io_plugin>::post_message) if the flow calls for messaging the user directly.",
     ]
 
 
 def build_completion_template(
-    action_name: str, outcome: Literal["result", "error"],
+    action_name: str,
+    outcome: Literal["result", "error"],
 ) -> dict[str, object]:
     """Inference-routing template used when AsyncJobManager routes a completion event."""
     return {

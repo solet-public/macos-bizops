@@ -1,8 +1,8 @@
 """Bulk API v2 ingest verb implementations — pure functions over a ``SalesforceCliExecutor``.
 
 Wave 1 of lane-sf-bulk-v2's 2026-08-24 Bulk API v2 capability plan:
-submit/status/results/abort for Bulk v2 INGEST only — bulk query is wave 2,
-out of this landing. Same shape as `record_actions.py`/`soql_actions.py`:
+submit/status/results/abort for Bulk v2 INGEST. The query job lifecycle and
+ingest job list/delete are the ``bulk_jobs`` family in ``typed_families.py``. Same shape as `record_actions.py`/`soql_actions.py`:
 each function takes the executor and a ``params`` dict, returning a plain
 result dict; invalid parameters raise ``ValueError``.
 
@@ -49,39 +49,36 @@ PathGate = Callable[[str], str]
 
 
 def bulk_ingest_submit(
-    executor: SalesforceCliExecutor, params: dict[str, Any], path_gate: PathGate,
+    executor: SalesforceCliExecutor,
+    params: dict[str, Any],
+    path_gate: PathGate,
 ) -> dict[str, Any]:
-    """Submit a Bulk v2 ingest job (insert/update/upsert/delete) from a CSV file.
+    """Submit a Bulk v2 ingest job (insert/update/upsert/delete/hardDelete) from a CSV file.
 
     `csv_path` must be contained under an operator-configured
     `import_allowed_roots` entry (`path_gate`, refuse-all default).
     `external_id_field` is required iff `operation == "upsert"` and rejected
     otherwise — fail loud on a mismatched pair rather than silently ignoring
     an extra param (mirrors `soql_actions._resolve_effective_limit`'s
-    together-or-neither posture for its own override pair).
+    together-or-neither posture for its own override pair). hardDelete is
+    the CLI's ``data delete bulk --hard-delete``; Salesforce refuses it unless
+    the user holds the "Bulk API Hard Delete" permission, and no local gate
+    duplicates that vendor check.
     """
     operation = _require_str(params, "operation")
-    if operation == BULK_INGEST_HARD_DELETE_OPERATION:
-        raise ValueError(
-            f"operation {BULK_INGEST_HARD_DELETE_OPERATION!r} is excluded from bulk_ingest_submit "
-            "(bypasses the recycle bin, needs an org permission, not covered by the standing "
-            "delete ratification) — use 'delete', or ask the operator for a hardDelete request"
-        )
     if operation not in BULK_INGEST_OPERATIONS:
-        raise ValueError(
-            f"'operation' must be one of {sorted(BULK_INGEST_OPERATIONS)} (got {operation!r})"
-        )
+        raise ValueError(f"'operation' must be one of {sorted(BULK_INGEST_OPERATIONS)} (got {operation!r})")
     sobject = _require_str(params, "sobject")
     csv_path = _require_str(params, "csv_path")
     resolved_path = path_gate(csv_path)
     external_id_field = params.get("external_id_field")
-    argv = ["data", operation, "bulk", "--sobject", sobject, "--file", resolved_path, "--async"]
+    command = "delete" if operation == BULK_INGEST_HARD_DELETE_OPERATION else operation
+    argv = ["data", command, "bulk", "--sobject", sobject, "--file", resolved_path, "--async"]
+    if operation == BULK_INGEST_HARD_DELETE_OPERATION:
+        argv.append("--hard-delete")
     if operation == "upsert":
         if not isinstance(external_id_field, str) or not external_id_field:
-            raise ValueError(
-                "'external_id_field' is required and must be a non-empty string when "
-                "operation is 'upsert'"
-            )
+            raise ValueError("'external_id_field' is required and must be a non-empty string when operation is 'upsert'")
         argv += ["--external-id", external_id_field]
     elif external_id_field is not None:
         raise ValueError("'external_id_field' is only valid when operation is 'upsert'")
@@ -108,7 +105,9 @@ def bulk_job_abort(executor: SalesforceCliExecutor, params: dict[str, Any]) -> d
 
 
 def bulk_job_results(
-    executor: SalesforceCliExecutor, params: dict[str, Any], path_gate: PathGate,
+    executor: SalesforceCliExecutor,
+    params: dict[str, Any],
+    path_gate: PathGate,
 ) -> dict[str, Any]:
     """Fetch a completed Bulk v2 ingest job's three result CSVs, write each under containment.
 
@@ -141,10 +140,7 @@ def _fetch_and_write_csv(executor: SalesforceCliExecutor, path: str, resolved_pa
     content = text if isinstance(text, str) else ""
     parent_dir = os.path.dirname(resolved_path)
     if not os.path.isdir(parent_dir):
-        raise ValueError(
-            f"the parent directory of the results path does not exist ({parent_dir}); "
-            "create it first — this verb writes files, it does not create directories"
-        )
+        raise ValueError(f"the parent directory of the results path does not exist ({parent_dir}); create it first — this verb writes files, it does not create directories")
     with open(resolved_path, "w", encoding="utf-8", newline="") as handle:
         handle.write(content)
 

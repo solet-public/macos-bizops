@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::create_payment",
+  "display_name": "Zuora: Create Payment",
+  "description": "Create an external or electronic payment (POST /v1/payments), optionally applied to invoices or debit memos at once; body needs amount, currency and type. Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "Record or collect a customer payment in Zuora: an external payment such as a check or wire, or an electronic charge through the gateway, optionally applied to specific invoices and debit memos right away. Use when cash arrives or to charge a card on demand.",
+  "result_processor_customizations": {
+    "action_label": "Zuora payment created",
+    "result_type": "zuora_create_payment_result",
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+  },
+  "error_processor_customizations": {
+    "action_context": "Create an external or electronic payment (POST /v1/payments), optionally applied to invoices or debit memos at once; body needs amount, currency and type.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape: a bad identifier, header value or query pairing, a body missing a required field, or an unreadable upload file. zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.validation_failed is a vendor 4xx or an HTTP 200 carrying success false, with Zuora's reasons. zuora.object_not_found, zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the needed Payments or Payment Methods permission or enable the vendor feature the reason names (for example Invoice Settlement). Read current vendor state with the matching get or list verb before retrying a write; pass an idempotency_key where offered. Back off on rate limits."
+  }
+}

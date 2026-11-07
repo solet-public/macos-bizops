@@ -78,6 +78,7 @@ from ananta.core.state.job_completion_reach import (  # noqa: E402
     REACH_CHANNEL_FLOW,
 )
 from ananta.interfaces.state_service_protocol import StateServiceProtocol  # noqa: E402
+from async_job_fixture_support import JobState  # noqa: E402
 
 _RESULT_HANDLER_KEY = "plugin::_smoke_only::noop_result"  # wint:negative-fixture
 _ERROR_HANDLER_KEY = "plugin::_smoke_only::noop_error"  # wint:negative-fixture
@@ -118,70 +119,20 @@ class _FakeFlowRuntimeGraph:
         self.complete_token_calls.append(token_id)
 
 
-class _FakeStateService:
-    """Stand-in tracking StateServiceProtocol's real read/write/update surface.
-
-    Table-keyed on the same literal table names AsyncJobManager itself uses
-    (`self._table` == "job", plus the hardcoded "job_payload" sequence/write
-    calls) — an unexpected table name is a smoke-authoring bug, not a case
-    to swallow, so it raises rather than returning an empty result.
-    """
+class _FakeStateService(JobState):
+    """Persist real job rows and use the shared typed transaction fixture."""
 
     def __init__(
-        self,
-        metadata: dict[str, object] | None,
+        self, metadata: dict[str, object] | None,
         trigger_type: str | None = "operator_message",
     ) -> None:
-        self._metadata = metadata
-        self._trigger_type = trigger_type
-        self.update_state_calls: list[dict[str, object]] = []
-        self.write_state_calls: list[dict[str, object]] = []
-
-    def read_state(self, namespace: str, query: dict[str, object]) -> dict[str, object]:
-        table = query.get("table")
-        if table == "job_payload":
-            return {"action_status": "completed", "data": {"records": []}}
-        if table == "flows":
-            # Carried since _record_completion_reach (2026-08-14) classifies a
-            # job's origin from its flow's trigger_type. trigger_type=None
-            # stands for an unreadable flow row — the case that must leave the
-            # stamp ABSENT rather than guessing a value.
-            if self._trigger_type is None:
-                return {"action_status": "completed", "data": {"records": []}}
-            filters = query.get("filters")
-            flow_id = filters.get("id") if isinstance(filters, dict) else None
-            return {
-                "action_status": "completed",
-                "data": {
-                    "records": [{"id": flow_id, "trigger_type": self._trigger_type}]
-                },
-            }
-        if table == "job":
-            if self._metadata is None:
-                return {"action_status": "completed", "data": {"records": []}}
-            filters = query.get("filters")
-            job_id = filters.get("id") if isinstance(filters, dict) else None
-            return {
-                "action_status": "completed",
-                "data": {"records": [{"id": job_id, "metadata": self._metadata}]},
-            }
-        raise AssertionError(f"unexpected read_state table: {table!r}")
-
-    def write_state(
-        self,
-        namespace: str,
-        data: dict[str, object],
-        calling_service: str | None = None,
-        calling_namespace: str | None = None,
-    ) -> dict[str, object]:
-        self.write_state_calls.append(data)
-        return {"action_status": "completed"}
-
-    def update_state(
-        self, namespace: str, query: dict[str, object], updates: dict[str, object]
-    ) -> dict[str, object]:
-        self.update_state_calls.append(updates)
-        return {"action_status": "completed"}
+        super().__init__()
+        self.rows["job"] = [
+            {"id": f"job-smoke-{index}", "status": "queued", "metadata": metadata}
+            for index in range(1, 9)
+        ]
+        if trigger_type is not None:
+            self.rows["flows"] = [{"id": "flow-smoke-1", "trigger_type": trigger_type}]
 
 
 def _completion_handlers_metadata(

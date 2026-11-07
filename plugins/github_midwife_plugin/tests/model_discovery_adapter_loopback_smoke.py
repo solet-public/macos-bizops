@@ -16,12 +16,12 @@ from typing import cast
 
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 _REPOSITORY_ROOT = _PLUGIN_ROOT.parents[1]
-_CHECKS = 0
+_checks = 0
 
 
 def _check(condition: object, label: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    global _checks
+    _checks += 1
     if not condition:
         raise AssertionError(label)
 
@@ -37,10 +37,7 @@ class _ModelsHandler(BaseHTTPRequestHandler):
             body = b'{"data":[]}'
             status = 200
         elif type(self).mode == "models":
-            body = (
-                b'{"data":[{"id":"chat-only-model"},'
-                b'{"id":"embedding-only-model"}]}'
-            )
+            body = b'{"data":[{"id":"chat-only-model"},{"id":"embedding-only-model"}]}'
             status = 200
         elif type(self).mode == "unavailable":
             body = b'{"error":"unavailable"}'
@@ -102,7 +99,9 @@ def _target_environment(target: Path) -> dict[str, str]:
     site_packages = target / ".venv/lib" / version / "site-packages"
     entries = (str(target_source), str(_REPOSITORY_ROOT), *(entry for entry in sys.path if entry))
     (site_packages / "_parent_import_path.pth").write_text("\n".join(entries) + "\n", encoding="utf-8")
-    return dict(os.environ)
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    return environment
 
 
 def _bind_target_embedding_service(target: Path) -> None:
@@ -138,8 +137,7 @@ def _assert_target_module_resolution(target: Path, environment: dict[str, str]) 
     resolved = Path(completed.stdout.strip()).resolve()
     _check(
         completed.returncode == 0 and resolved.is_relative_to(target.resolve()),
-        "target venv imports the target-local setup adapter rather than the checkout: "
-        f"{completed.stdout!r} {completed.stderr!r}",
+        f"target venv imports the target-local setup adapter rather than the checkout: {completed.stdout!r} {completed.stderr!r}",
     )
 
 
@@ -212,14 +210,11 @@ def _exercise_ollama_gate(
     )
     _check(
         _ModelsHandler.requests == [],
-        "Ollama discovery must not contact the configured LM Studio endpoint: "
-        f"{_ModelsHandler.requests!r}",
+        f"Ollama discovery must not contact the configured LM Studio endpoint: {_ModelsHandler.requests!r}",
     )
     _check(
-        ollama.get("checkpoint_status") == "blocked"
-        and ollama.get("error_kind") == "ollama_discovery_unimplemented",
-        "ungated Ollama discovery must not verify an LM Studio response: "
-        f"{ollama!r}",
+        ollama.get("checkpoint_status") == "blocked" and ollama.get("error_kind") == "ollama_discovery_unimplemented",
+        f"ungated Ollama discovery must not verify an LM Studio response: {ollama!r}",
     )
     return base_url
 
@@ -246,12 +241,7 @@ def _assert_unobserved_metadata(target: Path, environment: dict[str, str], base_
     )
     embedding_candidates = cast(list[dict[str, object]], embedding["discovered_candidates"])
     _check(
-        all(
-            candidate["metadata"].get("embedding_capable") is None
-            and candidate["metadata"].get("dimensions") is None
-            and candidate["metadata"].get("local_disk_bytes") is None
-            for candidate in cast(list[dict[str, dict[str, object]]], embedding_candidates)
-        ),
+        all(candidate["metadata"].get("embedding_capable") is None and candidate["metadata"].get("dimensions") is None and candidate["metadata"].get("local_disk_bytes") is None for candidate in cast(list[dict[str, dict[str, object]]], embedding_candidates)),
         "discovery must not stamp the platform expected dimension or embedding capability",
     )
     _ModelsHandler.nonce = "inference-metadata-nonce"
@@ -273,12 +263,7 @@ def _assert_unobserved_metadata(target: Path, environment: dict[str, str], base_
         "control supplies an embedding-only model to inference discovery",
     )
     _check(
-        all(
-            candidate["metadata"].get("context_tokens") is None
-            and candidate["metadata"].get("structured_output_support") is None
-            and candidate["metadata"].get("estimated_memory_bytes") is None
-            for candidate in cast(list[dict[str, dict[str, object]]], inference_candidates)
-        ),
+        all(candidate["metadata"].get("context_tokens") is None and candidate["metadata"].get("structured_output_support") is None and candidate["metadata"].get("estimated_memory_bytes") is None for candidate in cast(list[dict[str, dict[str, object]]], inference_candidates)),
         "an embedding-only model offered to inference must not claim structured output",
     )
 
@@ -301,9 +286,7 @@ def main() -> int:
                 nonce="empty-nonce",
             )
             _check(
-                empty.get("checkpoint_status") == "verified"
-                and empty.get("discovered_candidates") == []
-                and empty.get("error_kind") is None,
+                empty.get("checkpoint_status") == "verified" and empty.get("discovered_candidates") == [] and empty.get("error_kind") is None,
                 "HTTP 200 with an empty data list is a verified empty candidate set",
             )
             unavailable = _exercise_mode(
@@ -314,9 +297,7 @@ def main() -> int:
                 nonce="unavailable-nonce",
             )
             _check(
-                unavailable.get("checkpoint_status") == "blocked"
-                and unavailable.get("error_kind") == "model_discovery_failed"
-                and "Restore its service" in str(unavailable.get("repair")),
+                unavailable.get("checkpoint_status") == "blocked" and unavailable.get("error_kind") == "model_discovery_failed" and "Restore its service" in str(unavailable.get("repair")),
                 "HTTP 503 remains an actionable transport/service failure",
             )
             malformed = _exercise_mode(
@@ -327,17 +308,12 @@ def main() -> int:
                 nonce="malformed-nonce",
             )
             _check(
-                malformed.get("checkpoint_status") == "blocked"
-                and malformed.get("error_kind") == "model_discovery_invalid_response"
-                and "Repair the selected model service response" in str(malformed.get("repair")),
+                malformed.get("checkpoint_status") == "blocked" and malformed.get("error_kind") == "model_discovery_invalid_response" and "Repair the selected model service response" in str(malformed.get("repair")),
                 "malformed HTTP 200 JSON remains an actionable invalid-response result",
             )
             unavailable_endpoint = _invoke(target, environment, _unbound_loopback_url())
             _check(
-                unavailable_endpoint.get("checkpoint_status") == "blocked"
-                and unavailable_endpoint.get("error_kind") == "model_discovery_failed"
-                and unavailable_endpoint.get("retry_safe") is True
-                and "Restore its service" in str(unavailable_endpoint.get("repair")),
+                unavailable_endpoint.get("checkpoint_status") == "blocked" and unavailable_endpoint.get("error_kind") == "model_discovery_failed" and unavailable_endpoint.get("retry_safe") is True and "Restore its service" in str(unavailable_endpoint.get("repair")),
                 "connection refusal remains an actionable retry-safe discovery failure",
             )
             base_url = _exercise_ollama_gate(target, environment, server)
@@ -346,7 +322,7 @@ def main() -> int:
             server.shutdown()
             thread.join(timeout=5)
             server.server_close()
-    print(f"{_CHECKS} passed")
+    print(f"{_checks} passed")
     return 0
 
 

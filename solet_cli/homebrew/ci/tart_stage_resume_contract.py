@@ -5,6 +5,12 @@ The executable guest driver is deliberately separate.  This module has no
 Tart side effect: it validates the one host-to-guest URL rewrite and constructs
 the closed directory-share invocation that a caller may execute only after VM
 resource custody has been granted.
+
+The origin is either a dev stage (``manager_url`` is a host-local ``file://``
+payload) or a stable stage (``install_mode`` is ``release`` and ``manager_url``
+is the GitHub release asset a real user's tap Formula downloads).  Before
+publish that asset does not exist, so the guest reads the staged payload
+instead, whose digest is the Formula's ``sha256``; see :func:`guest_metadata`.
 """
 
 from __future__ import annotations
@@ -13,7 +19,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 ADAPTERS = ("homebrew", "lm_studio", "postgresql", "launchd")
 _METADATA_KEYS = frozenset(
@@ -38,6 +44,7 @@ _METADATA_KEYS = frozenset(
     }
 )
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_RELEASE_ASSET_PATH = re.compile(r"^/[^/]+/[^/]+/releases/download/[^/]+/[^/]+$")
 _VM_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _MANIFEST_KEYS = frozenset(
@@ -76,12 +83,21 @@ def selected_adapters(selector: str) -> tuple[str, ...]:
 
 
 def guest_metadata(origin: dict[str, object], asset_name: str) -> dict[str, object]:
-    """Derive the guest-visible metadata with exactly one permitted delta."""
+    """Derive the guest-visible metadata with only the permitted deltas.
+
+    A dev origin already names a host-local payload, so only ``manager_url``
+    moves to the read-only stage mount.  A stable origin names the not yet
+    published release asset: ``manager_url`` moves to the same staged payload
+    and ``install_mode`` moves to ``dev`` with it, because the Formula renderer
+    pairs a ``file://`` URL with dev mode and nothing else.  Every other field,
+    the seed identity and the release archive digest included, is unchanged.
+    """
 
     manager_url = _origin_manager_url(origin)
     _validate_asset_name(manager_url, asset_name)
     derived = dict(origin)
     derived["manager_url"] = f"file:///Volumes/solet-stage/origin/payload/{asset_name}"
+    derived["install_mode"] = "dev"
     _validate_guest_metadata_delta(origin, derived)
     return derived
 
@@ -89,15 +105,39 @@ def guest_metadata(origin: dict[str, object], asset_name: str) -> dict[str, obje
 def _origin_manager_url(origin: dict[str, object]) -> str:
     if frozenset(origin) != _METADATA_KEYS:
         raise ContractError("origin release metadata has an unexpected key set")
-    if origin.get("install_mode") != "dev":
-        raise ContractError("stage-resume transport requires Item A dev-mode metadata")
+    mode = origin.get("install_mode")
+    if mode not in {"dev", "release"}:
+        raise ContractError("origin install_mode must be 'dev' or 'release'")
     manager_url = origin.get("manager_url")
     if not isinstance(manager_url, str):
         raise ContractError("origin manager_url must be a string")
     parsed = urlsplit(manager_url)
-    if parsed.scheme != "file" or parsed.netloc or not parsed.path.startswith("/"):
-        raise ContractError("origin manager_url must be an absolute host-local file URL")
+    if mode == "dev":
+        if parsed.scheme != "file" or parsed.netloc or not parsed.path.startswith("/"):
+            raise ContractError("origin manager_url must be an absolute host-local file URL")
+    elif not _is_release_asset_url(parsed):
+        raise ContractError(
+            "stable origin manager_url must be a GitHub release asset "
+            "https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>"
+        )
     return manager_url
+
+
+def _is_release_asset_url(parsed: SplitResult) -> bool:
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and (parsed.hostname or "").casefold() == "github.com"
+        and parsed.username is None
+        and parsed.password is None
+        and port is None
+        and not parsed.query
+        and not parsed.fragment
+        and _RELEASE_ASSET_PATH.fullmatch(parsed.path) is not None
+    )
 
 
 def _validate_asset_name(manager_url: str, asset_name: str) -> None:
@@ -110,7 +150,8 @@ def _validate_guest_metadata_delta(
     origin: dict[str, object], derived: dict[str, object]
 ) -> None:
     changed = {key for key in origin if origin[key] != derived[key]}
-    if changed != {"manager_url"}:
+    permitted = {"manager_url"} if origin["install_mode"] == "dev" else {"manager_url", "install_mode"}
+    if changed != permitted:
         raise AssertionError("guest metadata derivation changed an unauthorized field")
 
 

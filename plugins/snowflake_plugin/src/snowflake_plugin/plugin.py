@@ -1,22 +1,17 @@
 """Snowflake plugin entry point — a warehouse query (and write) connector.
 
-Query — and, per the operator's 2026-08-09 posture reversal + Amendment 1,
-write to — the operator-registered Snowflake account ("snowflake_account"
-address book entry). Every read verb stays READ-ONLY via the statement-leader
-guard; Snowflake has NO session-level read-only flag, so that guard is
-FAST-FAIL ONLY — the TRUE developer-proof boundary for those verbs is the
-read-only ROLE the connection is pinned to. The one write verb,
-``run_statement``, performs no plugin-side access control of its own; the
-registered credential's server-side role grants are the entire control plane
-for what it can actually do (vendor RBAC, not a plugin re-implementation —
-see run_statement's own docstring).
+Query and statement verbs run against the operator-registered Snowflake
+account ("snowflake_account" address book entry). Statements are forwarded
+under the registered role; writes and deletes are supported where vendor RBAC
+permits them, and the plugin adds no separate write gate (see
+run_statement's own docstring).
 
 Verbs (all EDGE), all on the D0.3 deferred-completion shape
 (workbench/2026-08-09_sync_verb_d03_deferred_completion_doctrine_syncverb-doctrine.md):
 the dispatch handler returns ``{"job_id", "status": "queued"}`` in
 milliseconds; ``async_jobs.py``'s single background worker thread does the
 real connect + query I/O and completes the job.
-  - run_query       — one read-only statement; result written as a TSV file
+  - run_query       — one statement; result written as a TSV file
     at the caller's output_tsv_path (default 500 rows, up to 1000 with an
     acknowledged override) — never rows inline, at any size
   - list_databases  — databases visible to the current role
@@ -28,6 +23,13 @@ real connect + query I/O and completes the job.
   - test_connection — account, user, role, warehouse, version
   - run_statement   — the write verb: single-statement contract, explicit
     per-call commit semantics, no statement-leader classification of any kind
+  - request         — account-relative REST calls, including writes and deletes;
+    the registered credential's vendor grants decide the outcome
+  - sql_api / task / stream / dynamic_table / database / schema / warehouse /
+    stage / table / view / sequence / pipe — typed REST families (one verb per
+    vendor family, an ``operation`` parameter per documented endpoint) over the
+    same transport; reads, writes, deletes and actions alike, and for pipe the
+    Snowpipe file-ingestion calls (rest_families.py)
 
 No plugin-owned vault keys (the private key is chain-consumed through the
 address book's ``resolve_with_secrets``), so this plugin needs NO vault
@@ -61,7 +63,7 @@ from ananta.interfaces.edge_process_provider import (
     EdgeProcessProvider,
 )
 
-from . import async_jobs, connection, export_containment
+from . import async_jobs, connection, export_containment, rest_families
 from .app_config import AppConfigLoader, SnowflakeConfigError
 from .constants import (
     CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
@@ -78,21 +80,68 @@ from .constants import (
     PARAM_ACKNOWLEDGE_OVERRIDE,
     PARAM_ROW_LIMIT,
     PLUGIN_NAME,
+    REST_RESULT_TYPE,
+    RESULT_TYPE_DATABASE,
     RESULT_TYPE_DESCRIBE_TABLE,
+    RESULT_TYPE_DYNAMIC_TABLE,
     RESULT_TYPE_EXPORT_QUERY,
     RESULT_TYPE_LIST_DATABASES,
     RESULT_TYPE_LIST_SCHEMAS,
     RESULT_TYPE_LIST_TABLES,
+    RESULT_TYPE_PIPE,
     RESULT_TYPE_RUN_QUERY,
     RESULT_TYPE_RUN_STATEMENT,
+    RESULT_TYPE_SCHEMA,
+    RESULT_TYPE_SEQUENCE,
+    RESULT_TYPE_SQL_API,
+    RESULT_TYPE_STAGE,
+    RESULT_TYPE_STREAM,
+    RESULT_TYPE_TABLE,
+    RESULT_TYPE_TASK,
     RESULT_TYPE_TEST_CONNECTION,
+    RESULT_TYPE_VIEW,
+    RESULT_TYPE_WAREHOUSE,
     STATEMENT_TIMEOUT_SECONDS_DEFAULT,
 )
 from .statement_guard import StatementGuardError
 
+_FAMILY_RETURN = ReturnValueSchema(
+    type=ParameterType.OBJECT,
+    description="Queued job_id/status; the typed HTTP result arrives on job completion.",
+    properties={
+        "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+        "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+    },
+)
+
+
+# Each family declares exactly the path placeholders its vendor paths use.
+_PATH_PARAMETER_TEXT = {
+    "statement_handle": "Statement handle for status and cancel.",
+    "database": "Database identifier the object belongs to; required by every operation except fetch_result.",
+    "schema": "Schema identifier the object belongs to; required by every operation except fetch_result.",
+    "name": "Identifier of the one object the operation acts on (in the database and warehouse families, that database or warehouse; for a table create_like or clone, the source table).",
+    "file_path": "Stage file path for presigned_url, for example data/2026/part_0.csv; sent as one encoded path segment.",
+    "result_handler": "resultHandler from a 202 response, for fetch_result.",
+}
+
+
+def _family_parameters(family: str) -> dict[str, ParameterMetadata]:
+    """Typed REST family inputs; rest_families validates them against the vendor shape."""
+    parameters = {
+        "operation": ParameterMetadata(type=ParameterType.STRING, required=True, description=f"One of: {rest_families.operation_names(family)}."),
+        "query": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Vendor query parameters for the operation, by their documented names (for example showLimit, fromName, createMode, ifExists, copyGrants, targetName, requestId)."),
+        "body": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Vendor JSON body for the operations that take one (create, create_or_alter, clone, rename, create_as_select, create_using_template, create_like, replication and failover accounts, presigned_url, submit, insert_files)."),
+    }
+    for key in rest_families.path_parameters(family):
+        parameters[key] = ParameterMetadata(type=ParameterType.STRING, required=False, description=_PATH_PARAMETER_TEXT[key])
+    if rest_families.takes_tags(family):
+        parameters["tags"] = ParameterMetadata(type=ParameterType.LIST, required=False, description="Tag objects for set_tags (tag_name, tag_value) and unset_tags (tag_name).")
+    return parameters
+
 
 class SnowflakePlugin(PluginBase, EdgeProcessProvider):
-    """Read-only Snowflake warehouse query plugin."""
+    """Snowflake SQL and REST connector using the registered credential's grants."""
 
     name: str = PLUGIN_NAME
 
@@ -119,7 +168,7 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
 
         It lives in the address book RESOLVER's namespace
         (``<solet>.default_address_book_plugin.snowflake_private_key``)
-        and is read only through ``resolve_with_secrets`` under the
+        and is accessed only through ``resolve_with_secrets`` under the
         resolver's identity — never a direct vault verb under this plugin.
         """
         return []
@@ -147,8 +196,7 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
         if self.config_provider is None:
             raise SnowflakeConfigError(
                 ERROR_NOT_CONFIGURED,
-                "config_provider not bound — plugin.initialize() was never "
-                "called (boot/lifecycle fault)",
+                "config_provider not bound — plugin.initialize() was never called (boot/lifecycle fault)",
             )
         return self.config_provider
 
@@ -158,10 +206,7 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
         self.logger = logging.getLogger(self.name)
         self._address_book_service = self.orchestrator_ref.get_service("address_book_service")
         if self._address_book_service is None:
-            raise RuntimeError(
-                f"{ERROR_ADDRESS_BOOK_NOT_AVAILABLE}: {self.name} requires "
-                "address_book_service to resolve the Snowflake account"
-            )
+            raise RuntimeError(f"{ERROR_ADDRESS_BOOK_NOT_AVAILABLE}: {self.name} requires address_book_service to resolve the Snowflake account")
         self._app_config_loader = AppConfigLoader(self._address_book_service)
         self.set_ready()
 
@@ -201,8 +246,7 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
         if timeout_s <= 0:
             raise SnowflakeConfigError(
                 ERROR_NOT_CONFIGURED,
-                f"{CONFIG_KEY_STATEMENT_TIMEOUT_SECONDS} must be > 0 (got {timeout_s}); a "
-                "non-positive value would disable the statement-timeout DoS bound",
+                f"{CONFIG_KEY_STATEMENT_TIMEOUT_SECONDS} must be > 0 (got {timeout_s}); a non-positive value would disable the statement-timeout DoS bound",
             )
         return timeout_s
 
@@ -235,13 +279,10 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
         raw_roots = config.get(CONFIG_KEY_EXPORT_ALLOWED_ROOTS)
         roots: list[str] = []
         if raw_roots is not None:
-            if not isinstance(raw_roots, list) or not all(
-                isinstance(entry, str) for entry in raw_roots
-            ):
+            if not isinstance(raw_roots, list) or not all(isinstance(entry, str) for entry in raw_roots):
                 raise SnowflakeConfigError(
                     ERROR_NOT_CONFIGURED,
-                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory "
-                    "path strings",
+                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory path strings",
                 )
             roots = list(raw_roots)
         return export_containment.assert_export_path_allowed(
@@ -269,9 +310,7 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
         try:
             config = self._app_config_loader.resolve()
             conn = connection.connect(config, login_timeout_seconds=self._login_timeout_seconds())
-            connection.apply_session_hardening(
-                conn, statement_timeout_seconds=self._statement_timeout_seconds()
-            )
+            connection.apply_session_hardening(conn, statement_timeout_seconds=self._statement_timeout_seconds())
             return self._success(action(conn))
         except Exception as exc:  # our coded guards + any driver fault -> typed
             code, message = self._classify_run_error(exc, verb)
@@ -299,12 +338,18 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
         return code, message
 
     def _dispatch_async(
-        self, action_name: str, params: dict[str, Any], state: dict[str, Any],
+        self,
+        action_name: str,
+        params: dict[str, Any],
+        state: dict[str, Any],
     ) -> dict[str, Any]:
         """D0.3 ms-scale dispatch: create the job, return immediately — no I/O here."""
         try:
             create_result = async_jobs.create_job(
-                self, action_name=action_name, params=params, state=state,
+                self,
+                action_name=action_name,
+                params=params,
+                state=state,
             )
         except ValueError as exc:
             return self._error(ERROR_INVALID_PARAMS, str(exc))
@@ -316,6 +361,23 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
             return self._error(ERROR_API_ERROR, message)
         return self._success(create_result["data"])
 
+    def _dispatch_family(
+        self,
+        family: str,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Refuse vendor-invalid typed input before queueing; the worker makes the call."""
+        try:
+            request = rest_families.build_request(family, params)
+        except rest_families.RestFamilyError as exc:
+            return self._error(ERROR_INVALID_PARAMS, str(exc))
+        request_id = request["query"].get("requestId")
+        if isinstance(request_id, str):
+            # Pin a generated requestId into the job: a SQL API retry=true resubmission reuses it, and Snowpipe echoes it.
+            params = {**params, "query": {**(params.get("query") or {}), "requestId": request_id}}
+        return self._dispatch_async(family, params, state)
+
     # ------------------------------------------------------------------
     # EdgeProcessProvider
     # ------------------------------------------------------------------
@@ -323,20 +385,26 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
     def get_edge_process_definitions(self) -> dict[str, EdgeProcessDefinition]:
         return {
             "run_query": _edge("run_query", RESULT_TYPE_RUN_QUERY),
-            "list_databases": _edge(
-                "list_databases", RESULT_TYPE_LIST_DATABASES),
-            "list_schemas": _edge(
-                "list_schemas", RESULT_TYPE_LIST_SCHEMAS),
-            "list_tables": _edge(
-                "list_tables", RESULT_TYPE_LIST_TABLES),
-            "describe_table": _edge(
-                "describe_table", RESULT_TYPE_DESCRIBE_TABLE),
-            "export_query": _edge(
-                "export_query", RESULT_TYPE_EXPORT_QUERY),
-            "test_connection": _edge(
-                "test_connection", RESULT_TYPE_TEST_CONNECTION),
-            "run_statement": _edge(
-                "run_statement", RESULT_TYPE_RUN_STATEMENT),
+            "list_databases": _edge("list_databases", RESULT_TYPE_LIST_DATABASES),
+            "list_schemas": _edge("list_schemas", RESULT_TYPE_LIST_SCHEMAS),
+            "list_tables": _edge("list_tables", RESULT_TYPE_LIST_TABLES),
+            "describe_table": _edge("describe_table", RESULT_TYPE_DESCRIBE_TABLE),
+            "export_query": _edge("export_query", RESULT_TYPE_EXPORT_QUERY),
+            "test_connection": _edge("test_connection", RESULT_TYPE_TEST_CONNECTION),
+            "run_statement": _edge("run_statement", RESULT_TYPE_RUN_STATEMENT),
+            "request": _edge("request", REST_RESULT_TYPE),
+            "sql_api": _edge("sql_api", RESULT_TYPE_SQL_API),
+            "task": _edge("task", RESULT_TYPE_TASK),
+            "stream": _edge("stream", RESULT_TYPE_STREAM),
+            "dynamic_table": _edge("dynamic_table", RESULT_TYPE_DYNAMIC_TABLE),
+            "database": _edge("database", RESULT_TYPE_DATABASE),
+            "schema": _edge("schema", RESULT_TYPE_SCHEMA),
+            "warehouse": _edge("warehouse", RESULT_TYPE_WAREHOUSE),
+            "stage": _edge("stage", RESULT_TYPE_STAGE),
+            "table": _edge("table", RESULT_TYPE_TABLE),
+            "view": _edge("view", RESULT_TYPE_VIEW),
+            "sequence": _edge("sequence", RESULT_TYPE_SEQUENCE),
+            "pipe": _edge("pipe", RESULT_TYPE_PIPE),
         }
 
     # ------------------------------------------------------------------
@@ -344,12 +412,252 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
     # ------------------------------------------------------------------
 
     @platform_process(
+        name="request",
+        display_name="Snowflake: Authenticated Request",
+        description=(
+            "Send a REST request to the registered Snowflake account using its existing RSA key pair. "
+            "Writes and deletes are governed only by vendor RBAC. Returns a queued job; completion "
+            "contains HTTP status, headers and body with credential redaction. SQL handles and "
+            "pagination are returned without polling or following them."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "method": ParameterMetadata(type=ParameterType.STRING, required=True, description="HTTP method, including GET, POST, PUT, PATCH or DELETE."),
+            "path": ParameterMetadata(type=ParameterType.STRING, required=True, description="Relative account REST path, for example /api/v2/statements."),
+            "query": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Optional query parameters, sent to the vendor unchanged."),
+            "headers": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Optional headers; authentication and Host are plugin-owned. No CR/LF."),
+            "body": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Optional JSON request body, including SQL API statements."),
+        },
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Queued job_id/status; HTTP result arrives on job completion.",
+        ),
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type=REST_RESULT_TYPE),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def request(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async("request", params, state)
+
+    @platform_process(
+        name="sql_api",
+        display_name="Snowflake: SQL API Statements",
+        description=(
+            "Run SQL through the Snowflake SQL API (/api/v2/statements) on the registered account. "
+            "operation submit posts body.statement (one or several statements; set "
+            "body.parameters.MULTI_STATEMENT_COUNT, '0' for any count) with optional timeout, "
+            "database, schema, warehouse, role and bindings; a requestId is generated when omitted. "
+            "status reads a statement_handle's state or a result partition; cancel stops it. Any "
+            "statement the role's grants permit runs, including DELETE and DDL. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("sql_api"),
+        return_value_schema=_FAMILY_RETURN,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type=RESULT_TYPE_SQL_API),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def sql_api(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("sql_api", params, state)
+
+    @platform_process(
+        name="task",
+        display_name="Snowflake: Tasks",
+        description=(
+            "Manage Snowflake tasks in database.schema through the Task REST API: list, create, get, "
+            "create_or_alter, delete, execute, resume, suspend, dependents, current_graphs, "
+            "complete_graphs, set_tags, unset_tags, get_tags and fetch_result. execute requests a "
+            "run; it does not wait for the run to finish. Vendor RBAC alone decides each operation. "
+            "Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("task"),
+        return_value_schema=_FAMILY_RETURN,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type=RESULT_TYPE_TASK),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def task(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("task", params, state)
+
+    @platform_process(
+        name="stream",
+        display_name="Snowflake: Streams",
+        description=("Manage Snowflake streams (change data capture) in database.schema through the Stream REST API: list, create, get, delete, clone, set_tags, unset_tags, get_tags and fetch_result. Read stream rows with run_query or sql_api. Vendor RBAC alone decides each operation. Returns a queued job."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("stream"),
+        return_value_schema=_FAMILY_RETURN,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type=RESULT_TYPE_STREAM),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def stream(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("stream", params, state)
+
+    @platform_process(
+        name="dynamic_table",
+        display_name="Snowflake: Dynamic Tables",
+        description=(
+            "Manage Snowflake dynamic tables in database.schema through the Dynamic Table REST API: "
+            "list, create, get, delete, clone, undrop, suspend, resume, refresh, suspend_recluster, "
+            "resume_recluster, swap_with, set_tags, unset_tags, get_tags and fetch_result. Vendor "
+            "RBAC alone decides each operation. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("dynamic_table"),
+        return_value_schema=_FAMILY_RETURN,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type=RESULT_TYPE_DYNAMIC_TABLE),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def dynamic_table(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("dynamic_table", params, state)
+
+    @platform_process(
+        name="database",
+        display_name="Snowflake: Databases",
+        description=(
+            "Manage Snowflake databases through the Database REST API (/api/v2/databases): list, "
+            "create, create_from_share, clone, get, create_or_alter, delete, undrop, "
+            "enable_replication, disable_replication, refresh_replication, enable_failover, "
+            "disable_failover, primary_failover, set_tags, unset_tags, get_tags and fetch_result. "
+            "Vendor RBAC alone decides each operation, including delete. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("database"),
+        return_value_schema=_FAMILY_RETURN,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type=RESULT_TYPE_DATABASE),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def database(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("database", params, state)
+
+    @platform_process(
+        name="schema",
+        display_name="Snowflake: Schemas",
+        description=("Manage Snowflake schemas in a database through the Schema REST API: list, create, clone, undrop, get, create_or_alter, delete, set_tags, unset_tags, get_tags and fetch_result. Vendor RBAC alone decides each operation, including delete. Returns a queued job."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("schema"),
+        return_value_schema=_FAMILY_RETURN,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type=RESULT_TYPE_SCHEMA),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def schema(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("schema", params, state)
+
+    @platform_process(
+        name="warehouse",
+        display_name="Snowflake: Warehouses",
+        description=(
+            "Manage Snowflake virtual warehouses through the Warehouse REST API "
+            "(/api/v2/warehouses): list, create, get, create_or_alter, delete, resume, suspend, "
+            "abort, enable, disable, rename, set_tags, unset_tags, get_tags and fetch_result. "
+            "Vendor RBAC alone decides each operation, including delete and abort. Returns a "
+            "queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("warehouse"),
+        return_value_schema=_FAMILY_RETURN,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type=RESULT_TYPE_WAREHOUSE),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def warehouse(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("warehouse", params, state)
+
+    @platform_process(
+        name="stage",
+        display_name="Snowflake: Stages",
+        description=(
+            "Manage Snowflake stages in database.schema through the Stage REST API: list, create, get, delete, list_files (LIST @stage, optional regex pattern), presigned_url (a time-limited URL for one staged file) and fetch_result. Vendor RBAC alone decides each operation, including delete. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("stage"),
+        return_value_schema=_FAMILY_RETURN,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type=RESULT_TYPE_STAGE),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def stage(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("stage", params, state)
+
+    @platform_process(
+        name="table",
+        display_name="Snowflake: Tables",
+        description=(
+            "Manage Snowflake tables in database.schema through the Table REST API: list, create, "
+            "create_as_select (query parameter query), create_using_template, get, create_or_alter, "
+            "delete, clone, create_like, undrop, suspend_recluster, resume_recluster, swap_with, "
+            "set_tags, unset_tags, get_tags and fetch_result. Vendor RBAC alone decides each "
+            "operation, including delete. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("table"),
+        return_value_schema=_FAMILY_RETURN,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type=RESULT_TYPE_TABLE),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def table(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("table", params, state)
+
+    @platform_process(
+        name="view",
+        display_name="Snowflake: Views",
+        description=("Manage Snowflake views in database.schema through the View REST API: list, create (body name, columns and query), get, delete, set_tags, unset_tags, get_tags and fetch_result. Vendor RBAC alone decides each operation, including delete. Returns a queued job."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("view"),
+        return_value_schema=_FAMILY_RETURN,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type=RESULT_TYPE_VIEW),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def view(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("view", params, state)
+
+    @platform_process(
+        name="sequence",
+        display_name="Snowflake: Sequences",
+        description=("Manage Snowflake sequences in database.schema through the Sequence REST API: list, create, get, delete, clone, rename (query targetName, optionally to another database or schema) and fetch_result. Vendor RBAC alone decides each operation, including delete. Returns a queued job."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("sequence"),
+        return_value_schema=_FAMILY_RETURN,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type=RESULT_TYPE_SEQUENCE),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def sequence(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("sequence", params, state)
+
+    @platform_process(
+        name="pipe",
+        display_name="Snowflake: Pipes and Snowpipe",
+        description=(
+            "Manage Snowflake pipes in database.schema through the Pipe REST API (list, create, get, "
+            "delete, refresh, set_tags, unset_tags, get_tags, fetch_result) and drive Snowpipe "
+            "ingestion: insert_files queues staged files, insert_report and load_history_scan read "
+            "what was loaded. Queued by Snowpipe is not loaded into the table. Vendor RBAC alone "
+            "decides each operation. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("pipe"),
+        return_value_schema=_FAMILY_RETURN,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type=RESULT_TYPE_PIPE),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def pipe(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("pipe", params, state)
+
+    @platform_process(
         name="run_query",
         display_name="Snowflake: Run Query",
         description=(
-            "Run ONE read-only SQL statement against the configured Snowflake account. Read "
-            "leaders only (SELECT/SHOW/DESCRIBE/EXPLAIN/WITH); the operator-granted role is "
-            "expected to be read-only. Returns immediately with a job_id and status 'queued' "
+            "Run ONE SQL statement against the configured Snowflake account. The statement "
+            "is forwarded under the operator-granted role, so vendor RBAC decides whether it "
+            "succeeds. Returns immediately with a job_id and status 'queued' "
             "(D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the "
             "job finishing. When the job completes, the result is ALWAYS written to the "
             "caller-supplied output_tsv_path, never returned inline — Snowflake's own Python "
@@ -372,33 +680,22 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
             "sql": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description="A single read-only SQL statement.",
+                description="A single SQL statement.",
             ),
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=(
-                    "ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."
-                ),
+                description=("ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."),
             ),
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
-                description=(
-                    "Must be exactly true, together with row_limit, to fetch more than the "
-                    f"default {DEFAULT_ROW_LIMIT} rows. Requires understanding why the default "
-                    "exists: avoiding exhausted warehouse compute/disk, and pulling all rows to "
-                    "filter client-side instead of writing a proper WHERE clause."
-                ),
+                description=(f"Must be exactly true, together with row_limit, to fetch more than the default {DEFAULT_ROW_LIMIT} rows. Requires understanding why the default exists: avoiding exhausted warehouse compute/disk, and pulling all rows to filter client-side instead of writing a proper WHERE clause."),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Explicit row ceiling, up to {MAX_ROWS_HARD_CAP}. Only honored together with "
-                    f"acknowledge_default_limit_override=true; refused (not clamped) above "
-                    f"{MAX_ROWS_HARD_CAP}."
-                ),
+                description=(f"Explicit row ceiling, up to {MAX_ROWS_HARD_CAP}. Only honored together with acknowledge_default_limit_override=true; refused (not clamped) above {MAX_ROWS_HARD_CAP}."),
             ),
         },
         output_type="object",
@@ -420,12 +717,7 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="list_databases",
         display_name="Snowflake: List Databases",
-        description=(
-            "List databases visible to the configured role. Returns immediately with a job_id "
-            "and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is "
-            "NOT the same as the job finishing; the database list itself is delivered when the "
-            "job completes."
-        ),
+        description=("List databases visible to the configured role. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the job finishing; the database list itself is delivered when the job completes."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
         output_type="object",
@@ -447,17 +739,10 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="list_schemas",
         display_name="Snowflake: List Schemas",
-        description=(
-            "List schemas in a database. Requires database. Returns immediately with a job_id "
-            "and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is "
-            "NOT the same as the job finishing; the schema list itself is delivered when the job "
-            "completes."
-        ),
+        description=("List schemas in a database. Requires database. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the job finishing; the schema list itself is delivered when the job completes."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "database": ParameterMetadata(
-                type=ParameterType.STRING, required=True, description="The database to list schemas from."
-            ),
+            "database": ParameterMetadata(type=ParameterType.STRING, required=True, description="The database to list schemas from."),
         },
         output_type="object",
         output_description="Job ID and status for async listing tracking.",
@@ -478,12 +763,7 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="list_tables",
         display_name="Snowflake: List Tables",
-        description=(
-            "List tables in a database.schema. Requires database and schema. Returns immediately "
-            "with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch "
-            "returning is NOT the same as the job finishing; the table list itself is delivered "
-            "when the job completes."
-        ),
+        description=("List tables in a database.schema. Requires database and schema. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the job finishing; the table list itself is delivered when the job completes."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "database": ParameterMetadata(type=ParameterType.STRING, required=True, description="The database."),
@@ -540,12 +820,12 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
         name="export_query",
         display_name="Snowflake: Export Query",
         description=(
-            "The N>>500 route: run a read-only query and write the result as ONE tab-separated "
+            "The N>>500 route: run a query and write the result as ONE tab-separated "
             ".tsv file at an ABSOLUTE output_tsv_path in the operator's workspace. Returns "
             "immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — "
             "the dispatch returning is NOT the same as the job finishing. The path must lie "
             "under an operator-configured export_allowed_roots entry (empty config refuses every "
-            "export). Same read-only rules and override mechanism as run_query, with a higher hard cap: "
+            "export). Same forwarding and override mechanism as run_query, with a higher hard cap: "
             "Snowflake's own Python connector documentation imposes no vendor row ceiling, only "
             f"our own policy. Defaults to {DEFAULT_ROW_LIMIT} rows absent an acknowledged override "
             "— for that common small/default case, run_query has an identical interface with a "
@@ -559,34 +839,21 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "sql": ParameterMetadata(
-                type=ParameterType.STRING, required=True, description="A single read-only SQL statement."
-            ),
+            "sql": ParameterMetadata(type=ParameterType.STRING, required=True, description="A single SQL statement."),
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=(
-                    "ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."
-                ),
+                description=("ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."),
             ),
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
-                description=(
-                    "Must be exactly true, together with row_limit, to fetch more than the "
-                    f"default {DEFAULT_ROW_LIMIT} rows. Requires understanding why the default "
-                    "exists: avoiding exhausted warehouse compute/disk, and pulling all rows to "
-                    "filter client-side instead of writing a proper WHERE clause."
-                ),
+                description=(f"Must be exactly true, together with row_limit, to fetch more than the default {DEFAULT_ROW_LIMIT} rows. Requires understanding why the default exists: avoiding exhausted warehouse compute/disk, and pulling all rows to filter client-side instead of writing a proper WHERE clause."),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Explicit row ceiling, up to {EXPORT_ROW_CAP}. Only honored together with "
-                    f"acknowledge_default_limit_override=true; refused (not clamped) above "
-                    f"{EXPORT_ROW_CAP}."
-                ),
+                description=(f"Explicit row ceiling, up to {EXPORT_ROW_CAP}. Only honored together with acknowledge_default_limit_override=true; refused (not clamped) above {EXPORT_ROW_CAP}."),
             ),
         },
         output_type="object",
@@ -659,38 +926,22 @@ class SnowflakePlugin(PluginBase, EdgeProcessProvider):
             "sql": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=(
-                    "A single SQL statement — any statement the registered role's own "
-                    "server-side grants permit, not just reads."
-                ),
+                description=("A single SQL statement — any statement the registered role's own server-side grants permit, not just reads."),
             ),
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=False,
-                description=(
-                    "ABSOLUTE .tsv destination path, contained under an export_allowed_roots "
-                    "entry. Required ONLY if the statement produces a result set (e.g. a "
-                    "RETURNING clause) — omit it for a plain INSERT/UPDATE/DELETE/DDL with no "
-                    "result set, which returns rowcount inline instead."
-                ),
+                description=("ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry. Required ONLY if the statement produces a result set (e.g. a RETURNING clause) — omit it for a plain INSERT/UPDATE/DELETE/DDL with no result set, which returns rowcount inline instead."),
             ),
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
-                description=(
-                    "Only relevant when the statement produces a result set: must be exactly "
-                    f"true, together with row_limit, to fetch more than the default "
-                    f"{DEFAULT_ROW_LIMIT} returned rows."
-                ),
+                description=(f"Only relevant when the statement produces a result set: must be exactly true, together with row_limit, to fetch more than the default {DEFAULT_ROW_LIMIT} returned rows."),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Only relevant when the statement produces a result set: explicit row "
-                    f"ceiling, up to {MAX_ROWS_HARD_CAP}. Only honored together with "
-                    "acknowledge_default_limit_override=true."
-                ),
+                description=(f"Only relevant when the statement produces a result set: explicit row ceiling, up to {MAX_ROWS_HARD_CAP}. Only honored together with acknowledge_default_limit_override=true."),
             ),
         },
         output_type="object",

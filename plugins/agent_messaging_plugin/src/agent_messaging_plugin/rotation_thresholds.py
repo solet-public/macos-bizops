@@ -14,6 +14,7 @@ reports "rotation due" EARLIER than it would with its real, larger ceiling
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -29,31 +30,37 @@ from pathlib import Path
 # transcripts (2 seat-class sessions on claude-fable-5, 2 worker-class sessions on
 # claude-sonnet-5), all exact on the alias with no dated suffix. A dated full-ID
 # form is included defensively for claude-haiku-4-5, whose alias can also resolve
-# that way. Any model not listed here falls through to DEFAULT_CONSERVATIVE_CEILING
-# below -- never a guess.
+# that way. These are the verified ceiling entries. A known model with an
+# unverified window is represented separately in NOTICE_MODEL_WINDOWS and uses
+# DEFAULT_CONSERVATIVE_CEILING with an explicit provenance marker and warning.
+# Unknown models also fall through to that conservative floor -- never a guess.
 # Corroborating field evidence: the 2026-08-04 operator-flagged "774k ≈ 77% context"
 # catch is arithmetically consistent with a 1,000,000-token window -- the live
 # fleet was already operating against these exact ceilings before this table
 # existed to name them.
 @dataclass(frozen=True)
 class NoticeModelWindow:
-    """One static fallback window, with its source kept beside the value."""
+    """One declared window state, with its source kept beside the value."""
 
-    window_tokens: int
+    window_tokens: int | None
     provenance: str
 
 
 # ONE DECLARATIVE NOTICE POLICY BLOCK (operator ruling 2026-08-29).
 # Runtime-reported windows win whenever the reporter supplies one. These rows
-# are static fallbacks only; they deliberately contain no Codex entry because
-# its catalog maximum and effective runtime window are different quantities.
-# The key reserves the second slot for a future effort-specific override.
+# are static fallbacks or explicit unverified markers; they deliberately
+# contain no Codex entry because its catalog maximum and effective runtime
+# window are different quantities. The key reserves the second slot for a
+# future effort-specific override.
 ROTATION_NOTICE_FRACTION: float = 0.80
 COMPACTION_RESERVE_FRACTION: float = 0.10
 DEFAULT_HARD_CLEAR_TOKENS: int = 400_000
 NOTICE_MODEL_WINDOWS: dict[tuple[str, str | None], NoticeModelWindow] = {
     ("claude-fable-5", None): NoticeModelWindow(
         1_000_000, "Anthropic model catalog; tracked 2026-08-07",
+    ),
+    ("claude-fable-5-1", None): NoticeModelWindow(
+        None, "unverified-model-window",
     ),
     ("claude-sonnet-5", None): NoticeModelWindow(
         1_000_000, "Anthropic model catalog; tracked 2026-08-07",
@@ -69,12 +76,26 @@ NOTICE_MODEL_WINDOWS: dict[tuple[str, str | None], NoticeModelWindow] = {
     ),
 }
 
+# Known catalog IDs whose context window is not verified remain in the notice
+# table with a None value and an explicit source marker. They are excluded from
+# the integer ceiling map but remain distinguishable from unknown models.
+UNVERIFIED_MODEL_IDS: frozenset[str] = frozenset(
+    model
+    for (model, effort), entry in NOTICE_MODEL_WINDOWS.items()
+    if effort is None and entry.window_tokens is None
+)
+
+
+class UnverifiedModelWindowWarning(UserWarning):
+    """A recognized model has no verified context-window ceiling."""
+
+
 # Legacy capacity callers retain this public map, derived from the declarative
 # notice table so a static window is never defined twice.
 MODEL_CONTEXT_CEILINGS: dict[str, int] = {
     model: entry.window_tokens
     for (model, effort), entry in NOTICE_MODEL_WINDOWS.items()
-    if effort is None
+    if effort is None and entry.window_tokens is not None
 }
 
 # Conservative fallback for any model NOT present in MODEL_CONTEXT_CEILINGS
@@ -453,8 +474,33 @@ lands but the seat stays idle regardless."""
 def resolve_ceiling(model: str) -> int:
     """The declared ceiling for ``model``, or the conservative fallback when
     ``model`` has no entry in :data:`MODEL_CONTEXT_CEILINGS` -- e.g. a future
-    model release not yet added here."""
-    return MODEL_CONTEXT_CEILINGS.get(model, DEFAULT_CONSERVATIVE_CEILING)
+    model release not yet added here. Recognized models with unverified windows
+    use the conservative value and emit :class:`UnverifiedModelWindowWarning`.
+    """
+    ceiling, provenance = resolve_ceiling_with_provenance(model)
+    if provenance == "unverified-model-window":
+        warnings.warn(
+            f"context window for recognized model {model!r} is unverified; "
+            f"using conservative ceiling {ceiling}",
+            UnverifiedModelWindowWarning,
+            stacklevel=2,
+        )
+    return ceiling
+
+
+def resolve_ceiling_with_provenance(model: str) -> tuple[int, str]:
+    """Return a conservative ceiling and the model-window provenance state.
+
+    The explicit state lets callers preserve the distinction between a known
+    but unverified model and an unknown model without assigning either a
+    guessed window.
+    """
+    ceiling = MODEL_CONTEXT_CEILINGS.get(model)
+    if ceiling is not None:
+        return ceiling, "declared-static-window"
+    if model in UNVERIFIED_MODEL_IDS:
+        return DEFAULT_CONSERVATIVE_CEILING, "unverified-model-window"
+    return DEFAULT_CONSERVATIVE_CEILING, "unknown-model-conservative-fallback"
 
 
 @dataclass(frozen=True)
@@ -637,6 +683,8 @@ __all__ = [
     "CAPACITY_BAND_APPROACHING_FRACTION",
     "CAPACITY_BAND_CRITICAL_FRACTION",
     "DEFAULT_CONSERVATIVE_CEILING",
+    "UNVERIFIED_MODEL_IDS",
+    "UnverifiedModelWindowWarning",
     "RotationDueVerdict",
     "CalculatedActionEvaluation",
     "CalculatedContextVerdict",
@@ -658,6 +706,7 @@ __all__ = [
     "is_rotation_due",
     "is_rotation_due_for_ceiling",
     "resolve_ceiling",
+    "resolve_ceiling_with_provenance",
 ]
 
 

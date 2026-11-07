@@ -52,9 +52,7 @@ class StubTransaction:
         for params in params_seq:
             self.execute(sql, params)
 
-    def fetch_one(
-        self, sql: str, params: list[object] | None = None
-    ) -> dict[str, object] | None:
+    def fetch_one(self, sql: str, params: list[object] | None = None) -> dict[str, object] | None:
         recorded = RecordedCall(sql=sql, params=list(params or []))
         self.fetches.append(recorded)
         self._state.calls.append(recorded)
@@ -87,9 +85,7 @@ class StubTransaction:
         # shape).
         return None
 
-    def fetch_all(
-        self, sql: str, params: list[object] | None = None
-    ) -> list[dict[str, object]]:
+    def fetch_all(self, sql: str, params: list[object] | None = None) -> list[dict[str, object]]:
         recorded = RecordedCall(sql=sql, params=list(params or []))
         self.fetches.append(recorded)
         self._state.calls.append(recorded)
@@ -104,9 +100,7 @@ class StubTransaction:
     def write_state(self, namespace: str, data: dict[str, Any]) -> str:
         table = str(data.get("table", ""))
         record = dict(data.get("record") or {})
-        self._state.writes.append(
-            WriteRecord(namespace=namespace, table=table, record=record)
-        )
+        self._state.writes.append(WriteRecord(namespace=namespace, table=table, record=record))
         return str(record.get("id", ""))
 
     def update_state(
@@ -117,16 +111,10 @@ class StubTransaction:
     ) -> int:
         table = str(query.get("table", ""))
         filters = dict(query.get("filters") or {})
-        self._state.updates.append(
-            UpdateRecord(
-                namespace=namespace, table=table, filters=filters, updates=dict(updates)
-            )
-        )
+        self._state.updates.append(UpdateRecord(namespace=namespace, table=table, filters=filters, updates=dict(updates)))
         return self._state._update_rows_affected
 
-    def query_state(
-        self, namespace: str, query: dict[str, Any]
-    ) -> list[dict[str, object]]:
+    def query_state(self, namespace: str, query: dict[str, Any]) -> list[dict[str, object]]:
         """Typed in-txn read — returns the raw planted rows (no envelope).
 
         A by-``id`` read of the ``__session`` table with no planted match is the
@@ -292,12 +280,8 @@ class StubStateService:
     # distinguish two queries against the SAME table by their filters — e.g. the
     # session-upsert keystone's existing-row read (source_id/external_session_id)
     # vs its canonical resolve (canonical_external_session_id IS NULL).
-    query_responses: list[
-        tuple[str, Any, list[dict[str, object]]]
-    ] = field(default_factory=list)
-    fetch_one_responses: list[
-        tuple[Any, dict[str, object] | None]
-    ] = field(default_factory=list)
+    query_responses: list[tuple[str, Any, list[dict[str, object]]]] = field(default_factory=list)
+    fetch_one_responses: list[tuple[Any, dict[str, object] | None]] = field(default_factory=list)
     allocated_sequence: int = 0
     upserts: list[UpsertCall] = field(default_factory=list)
     # Typed-primitive call logs (SQL-lockdown Slice 5). Both the autocommit
@@ -337,7 +321,10 @@ class StubStateService:
     upsert_failures: list[tuple[str, Any, str]] = field(default_factory=list)
 
     def add_upsert_failure(
-        self, table: str, when: Any, error_message: str,
+        self,
+        table: str,
+        when: Any,
+        error_message: str,
     ) -> None:
         """Queue a FAILED ``upsert_state`` envelope for the first record
         matching ``when(record) -> bool`` on ``table``. Never fires for a
@@ -346,7 +333,9 @@ class StubStateService:
         self.upsert_failures.append((table, when, error_message))
 
     def _match_upsert_failure(
-        self, table_name: str, record: dict[str, object],
+        self,
+        table_name: str,
+        record: dict[str, object],
     ) -> dict[str, Any] | None:
         """Split out of ``upsert_state`` to keep it under the radon-cc
         threshold — the first queued ``upsert_failures`` entry matching
@@ -365,9 +354,7 @@ class StubStateService:
                 }
         return None
 
-    def add_select_response(
-        self, sql_fragment: str, rows: list[dict[str, object]]
-    ) -> None:
+    def add_select_response(self, sql_fragment: str, rows: list[dict[str, object]]) -> None:
         """Queue a canned SELECT response keyed by a substring of the SQL."""
         self.select_responses.append((sql_fragment, list(rows)))
 
@@ -437,11 +424,7 @@ class StubStateService:
                 record=dict(record),
                 conflict_columns=list(conflict_columns),
                 on_conflict=on_conflict if isinstance(on_conflict, str) else None,
-                conflict_predicate=(
-                    list(conflict_predicate)
-                    if isinstance(conflict_predicate, list)
-                    else None
-                ),
+                conflict_predicate=(list(conflict_predicate) if isinstance(conflict_predicate, list) else None),
             )
         )
         failure = self._match_upsert_failure(str(data.get("table", "")), record)
@@ -510,11 +493,7 @@ class StubStateService:
         """
         table = str(query.get("table", ""))
         filters = dict(query.get("filters") or {})
-        self.updates.append(
-            UpdateRecord(
-                namespace=namespace, table=table, filters=filters, updates=dict(updates)
-            )
-        )
+        self.updates.append(UpdateRecord(namespace=namespace, table=table, filters=filters, updates=dict(updates)))
         return {
             "action_status": "completed",
             "data": {"result": {"updated": self._update_rows_affected}},
@@ -616,9 +595,7 @@ class StubStateService:
         mirroring the real envelope; ``None`` (default) models an empty set so the
         first event's ``MAX(sequence)+1`` is sequence 1.
         """
-        self.calls.append(
-            RecordedCall(sql=f"max {data.get('table')}.{data.get('column')}", params=[])
-        )
+        self.calls.append(RecordedCall(sql=f"max {data.get('table')}.{data.get('column')}", params=[]))
         return {
             "action_status": "completed",
             "data": {"namespace": namespace, "result": {"value": self._max_value_result}},
@@ -637,9 +614,7 @@ class StubStateService:
         Returns the controllable ``_count_result`` (default 0) at
         ``data.result.value``, mirroring the real ``run_aggregate`` envelope.
         """
-        self.calls.append(
-            RecordedCall(sql=f"count {data.get('table')}", params=[])
-        )
+        self.calls.append(RecordedCall(sql=f"count {data.get('table')}", params=[]))
         return {
             "action_status": "completed",
             "data": {"namespace": namespace, "result": {"value": self._count_result}},
@@ -673,7 +648,8 @@ class StubStateService:
             )
         )
         return self._planted_records(
-            namespace, query.get("table"),
+            namespace,
+            query.get("table"),
             filters if isinstance(filters, dict) else None,
         )
 
@@ -696,17 +672,14 @@ class StubStateService:
                 namespace=namespace,
                 table=str(data.get("table", "")),
                 filters=dict(filters) if isinstance(filters, dict) else {},
-                order_by=(
-                    [list(pair) for pair in order_by_raw]
-                    if isinstance(order_by_raw, list)
-                    else []
-                ),
+                order_by=([list(pair) for pair in order_by_raw] if isinstance(order_by_raw, list) else []),
                 limit=int(data.get("limit", 0)),
                 after=list(after_raw) if isinstance(after_raw, list) else None,
             )
         )
         return self._planted_records(
-            namespace, data.get("table"),
+            namespace,
+            data.get("table"),
             filters if isinstance(filters, dict) else None,
         )
 
@@ -730,7 +703,10 @@ class StubStateService:
         }
 
     def get_key_value(
-        self, namespace: str, key: str, scope: str = "GLOBAL",
+        self,
+        namespace: str,
+        key: str,
+        scope: str = "GLOBAL",
     ) -> dict[str, Any]:
         """In-memory KV read; absent key → empty ``data`` (no ``value``)."""
         value = self.key_values.get((namespace, key, scope))
@@ -741,6 +717,11 @@ class StubStateService:
             "error": None,
             "timestamp": "",
         }
+
+    def delete_key_value(self, namespace: str, key: str, scope: str = "GLOBAL") -> dict[str, Any]:
+        """Retire derived checkpoint state using the existing KV contract."""
+        self.key_values.pop((namespace, key, scope), None)
+        return {"action_status": "completed", "data": {}, "actions": [], "error": None, "timestamp": ""}
 
     def _planted_records(
         self,
@@ -780,6 +761,29 @@ class StubStateService:
             if needle in fragment:
                 return list(rows)
         return []
+
+    def prepare_record(self, namespace: str, table_name: str, record: dict[str, object]) -> dict[str, object]:
+        """Copy ``record`` and populate standard fields as ``StateService`` does.
+
+        Mirrors ``StateService.prepare_record`` (namespace default, ``name`` from
+        ``id``, ``created_by``/``updated_by`` only when the key is absent). The
+        stub holds no schema registry, so it cannot generate an id: a missing or
+        ``None`` id raises, and every transactional caller supplies one.
+        """
+        del table_name
+        prepared = dict(record)
+        if "namespace" not in prepared:
+            prepared["namespace"] = namespace
+        record_id = prepared.get("id")
+        if record_id is None:
+            raise ValueError("StubStateService.prepare_record requires an explicit id")
+        if prepared.get("name") is None:
+            prepared["name"] = record_id
+        if "created_by" not in prepared:
+            prepared["created_by"] = "ananta.services.state_service"
+        if "updated_by" not in prepared:
+            prepared["updated_by"] = "ananta.services.state_service"
+        return prepared
 
     @contextmanager
     def transactional(self) -> Any:

@@ -100,7 +100,11 @@ class BoundedSummaryExecutor:
             # not-accepted (the caller counts the session skipped → re-picked
             # next pass).
             self._slot.release()
-            logger.exception("failed to start background auto-summary thread")
+            logger.exception(
+                "failed to start background %s thread; task was not accepted and "
+                "requires a later caller resubmission",
+                self._name,
+            )
             return False
         return True
 
@@ -109,8 +113,9 @@ class BoundedSummaryExecutor:
             work()
         except Exception:  # noqa: BLE001 — background boundary; drain owns per-session isolation
             logger.exception(
-                "background auto-summary drain failed at the top level; "
-                "the next cron fire starts a fresh drain",
+                "background %s task failed at the top level; no automatic retry; "
+                "the slot is released for a later submission",
+                self._name,
             )
         finally:
             # Released exactly once per accepted submit, after the drain returns

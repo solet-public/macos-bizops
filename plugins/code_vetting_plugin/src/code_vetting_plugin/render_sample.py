@@ -19,7 +19,7 @@ from .driver import Clock, VettingDriver, VettingResult
 from .metrics import MetricsWriter
 from .models import ContextProfile
 from .report import ReportRenderer
-from .run_context import allowlist_totals, git_head, repo_root
+from .run_context import CLI_IO, allowlist_totals, git_head, repo_root
 from .run_record import AllowlistDelta, RunTarget, build_run_metrics
 from .samples import InMemoryStateWriter, SampleL1Scanner, SampleL3Verifier, sample_critics
 
@@ -90,22 +90,27 @@ async def main() -> None:
         context_profile=ContextProfile.PRODUCTION,
     )
     root = repo_root()
-    ref = git_head(root)
+    ref = await CLI_IO.run(git_head, root)
     run_id = f"vr-sample-{ref}"
     target = RunTarget(repo="platform", ref=ref, scope="whole tracked tree (self-vet)")
     result = await driver.run(
         run_id=run_id,
         target=target,
-        allowlist_delta=AllowlistDelta(totals=allowlist_totals(root)),
+        allowlist_delta=AllowlistDelta(totals=await CLI_IO.run(allowlist_totals, root)),
         preamble=_PREAMBLE,
     )
 
+    row = await CLI_IO.run(_write_output, result, state, run_id)
+
+    retention_summary = await _demo_retention()
+    await CLI_IO.run(_print_summary, result, row, retention_summary)
+
+
+def _write_output(result: VettingResult, state: InMemoryStateWriter, run_id: str) -> dict[str, object]:
     _REPORT_PATH.write_text(result.report, encoding="utf-8")
     row = state.rows[_NAMESPACE][run_id]
     _ROW_PATH.write_text(json.dumps(row, indent=2, ensure_ascii=True, sort_keys=True) + "\n", encoding="utf-8")
-
-    retention_summary = await _demo_retention()
-    _print_summary(result, row, retention_summary)
+    return row
 
 
 if __name__ == "__main__":

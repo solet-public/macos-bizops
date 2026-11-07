@@ -8,12 +8,9 @@ knowledge_base/01_snowflake_overview.md §3).
 Auth is key-pair (RSA JWT): the private key (already parsed to DER bytes by
 app_config) is handed to the connector directly — no temp file, no PAT.
 
-Posture asymmetry vs external_postgres_plugin (§4/§5.6): Snowflake has NO
-session-level read-only flag equivalent to psycopg3's ``conn.read_only``. The
-connector-side statement-leader guard (statement_guard.py) is therefore
-FAST-FAIL ONLY — it cannot make an over-privileged role fail to write. The
-TRUE developer-proof boundary is the read-only ROLE the connection is pinned
-to (GRANT SELECT/USAGE only). Single-statement is NATIVE
+Snowflake has NO session-level authorization flag equivalent to psycopg3's
+``conn.read_only``. The registered vendor role is the sole access boundary;
+this plugin does not add a write gate. Single-statement is NATIVE
 (``MULTI_STATEMENT_COUNT`` defaults to 1 and this plugin never uses
 ``execute_string``), so no statement-splitting parser is needed here (unlike
 the Postgres connector's ``sqlparse`` belt) — including for the write verb,
@@ -47,13 +44,11 @@ from .constants import (
     ERROR_API_ERROR,
     ERROR_AUTH_FAILED,
     ERROR_PERMISSION_DENIED,
-    ERROR_READ_ONLY_VIOLATION,
     ERROR_TIMEOUT,
     ERROR_WAREHOUSE_SUSPENDED,
     GENERIC_MESSAGE_AUTH_FAILED,
     GENERIC_MESSAGE_CONNECTION_FAILED,
     GENERIC_MESSAGE_PERMISSION_DENIED,
-    GENERIC_MESSAGE_READ_ONLY,
     GENERIC_MESSAGE_TIMEOUT,
     GENERIC_MESSAGE_WAREHOUSE_SUSPENDED,
 )
@@ -94,9 +89,7 @@ def apply_session_hardening(conn: Any, *, statement_timeout_seconds: int) -> Non
     caller-supplied statement runs.
     """
     with conn.cursor() as cur:
-        cur.execute(
-            f"ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = {int(statement_timeout_seconds)}"
-        )
+        cur.execute(f"ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = {int(statement_timeout_seconds)}")
 
 
 # errno -> fixed (code, message) for the GENERIC-message classes (§1.6/F3).
@@ -154,8 +147,3 @@ def _safe_snowflake_message(exc: Exception) -> str:
     if isinstance(msg, str) and msg:
         return msg
     return "query failed"
-
-
-# Re-exported for the guard module's naming symmetry with external_postgres_plugin.
-GENERIC_MESSAGE_READ_ONLY_VIOLATION = GENERIC_MESSAGE_READ_ONLY
-ERROR_READ_ONLY_VIOLATION_CODE = ERROR_READ_ONLY_VIOLATION

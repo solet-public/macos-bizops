@@ -42,8 +42,46 @@ from solet_manager.transaction import (  # noqa: E402
 )
 
 _REPO = Path(__file__).resolve().parents[2]
+__all__ = [
+    "FakeAdapter",
+    "VerifiedContext",
+    "_checks",
+    "_CONTRACTS",
+    "_advance_to_model_review",
+    "_apply_current_frontier",
+    "_check",
+    "_consents_are_rendered",
+    "_crash_resume_is_safe",
+    "_decision_probe_attempts",
+    "_doctor_status_cause_is_precise",
+    "_entry_failure_is_safe",
+    "_exit_resume_is_safe",
+    "_find_request",
+    "_finish_from_model_review",
+    "_initial_stages_verified",
+    "_make_hydration_vector",
+    "_model_decisions_are_visible",
+    "_no_future_decision_requests",
+    "_persisted_consents_are_true",
+    "_prepare",
+    "_purity_stop_is_clean",
+    "_raises",
+    "_set_invoke_adapter",
+    "_set_plan_builder",
+    "_set_write_transaction",
+    "_stage_progress_is_typed",
+    "_stage_request_is_valid",
+    "_start_request_is_bound",
+    "_state_changing_read_only_plan",
+    "_status_rendering_matches",
+    "create_execution_module",
+    "decision_discovery_module",
+    "operation_executor_module",
+    "preview_engine_module",
+]
+
 _CONTRACTS = _REPO / "plugins" / "github_midwife_plugin" / "knowledge_base"
-_CHECKS = 0
+_checks = 0
 _PRE_APPLY_PROBE_OWNERS = {
     "homebrew_available": "request_homebrew_install",
     "python_version_valid": "install_python_runtime",
@@ -107,8 +145,8 @@ def _set_write_transaction(value: object) -> None:
 
 
 def _check(condition: object, label: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    global _checks
+    _checks += 1
     if not condition:
         raise AssertionError(label)
 
@@ -175,11 +213,7 @@ class FakeAdapter:
 
     def _discovery_result(self, request: OperationRequest) -> OperationResult:
         decision_id = str(request.public_inputs["decision_id"])
-        candidates = (
-            ()
-            if decision_id == self.empty_decision
-            else self._candidates(decision_id)
-        )
+        candidates = () if decision_id == self.empty_decision else self._candidates(decision_id)
         return self._result(
             request,
             CheckpointStatus.VERIFIED,
@@ -204,10 +238,7 @@ class FakeAdapter:
         )
 
     def _stage_boundary_result(self, request: OperationRequest) -> OperationResult:
-        should_fail = (
-            request.operation_id == self.failed_stage_probe_once
-            and self.stage_probe_failures_remaining > 0
-        )
+        should_fail = request.operation_id == self.failed_stage_probe_once and self.stage_probe_failures_remaining > 0
         if not should_fail:
             return self._result(request, CheckpointStatus.VERIFIED)
         self.stage_probe_failures_remaining -= 1
@@ -227,10 +258,7 @@ class FakeAdapter:
             id=f"host.{operation_id}",
             title=f"Apply {operation_id}",
             mutation_kind="fixture_mutation",
-            target=(
-                f"$TARGET/{operation_id}"
-                + (f"?revision={self.action_revision}" if self.action_revision else "")
-            ),
+            target=(f"$TARGET/{operation_id}" + (f"?revision={self.action_revision}" if self.action_revision else "")),
             requires_confirmation=True,
             condition_or_evidence_ref=f"{operation_id}.required",
         )
@@ -263,13 +291,13 @@ class FakeAdapter:
 
     def _candidates(self, decision_id: str) -> tuple[DiscoveredCandidate, ...]:
         if decision_id == "embedding_model":
-            metadata = {
+            metadata: dict[str, JsonValue] = {
                 "provider": f"lm_studio_{self.metadata_revision}",
                 "embedding_capable": True,
                 "dimensions": 768,
                 "local_disk_bytes": 1000,
             }
-            other_metadata = {**metadata, "dimensions": 1024, "local_disk_bytes": 2000}
+            other_metadata: dict[str, JsonValue] = {**metadata, "dimensions": 1024, "local_disk_bytes": 2000}
         else:
             metadata = {
                 "provider": f"lm_studio_{self.metadata_revision}",
@@ -359,6 +387,7 @@ def _prepare(
         target=target.resolve(),
         autostart=True,
         decisions={
+            "coding_agents": ["codex", "claude_code"],
             "embeddings_implementation": "lm_studio",
             "inference_implementation": inference_implementation,
             "execution_topology": "solo",
@@ -366,6 +395,7 @@ def _prepare(
             "session_sources": [],
         },
         decision_sources={
+            "coding_agents": "config",
             "embeddings_implementation": "config",
             "inference_implementation": "config",
             "execution_topology": "config",
@@ -418,14 +448,7 @@ def _make_hydration_vector(target: Path) -> None:
     target_python = target / ".venv" / "bin" / "python3"
     target_python.parent.mkdir(parents=True)
     target_python.touch()
-    adapter_module = (
-        target
-        / "plugins"
-        / "github_midwife_plugin"
-        / "src"
-        / "github_midwife_plugin"
-        / "setup_adapter.py"
-    )
+    adapter_module = target / "plugins" / "github_midwife_plugin" / "src" / "github_midwife_plugin" / "setup_adapter.py"
     adapter_module.parent.mkdir(parents=True)
     adapter_module.touch()
 
@@ -436,12 +459,12 @@ def _apply_current_frontier(
     *,
     decision_selections: dict[str, str] | None = None,
 ) -> tuple[CommandResult, CommandResult]:
-    preview = manager.preview(config, decision_selections=decision_selections)
+    preview = manager.preview(config, decision_selections={**decision_selections} if decision_selections is not None else None)
     _check(preview.status == "preview_ready", "current frontier reaches preview_ready")
     result = manager.create(
         config,
         approved_fingerprint=str(preview.data["approval_fingerprint"]),
-        decision_selections=decision_selections,
+        decision_selections={**decision_selections} if decision_selections is not None else None,
     )
     return preview, result
 
@@ -455,26 +478,24 @@ def _advance_to_model_review(
     dependencies, dependencies_result = _apply_current_frontier(
         manager,
         config,
-        decision_selections=decision_selections,
+        decision_selections={**decision_selections} if decision_selections is not None else None,
     )
     _check(
-        dependencies.data["frontier"] == ["system_dependencies"]
-        and dependencies_result.error_kind == "next_stage_preview_required",
+        dependencies.data["frontier"] == ["system_dependencies"] and dependencies_result.error_kind == "next_stage_preview_required",
         "system dependency approval advances only to the next frontier",
     )
     genesis, genesis_result = _apply_current_frontier(
         manager,
         config,
-        decision_selections=decision_selections,
+        decision_selections={**decision_selections} if decision_selections is not None else None,
     )
     _check(
-        genesis.data["frontier"] == ["genesis"]
-        and genesis_result.error_kind == "next_stage_preview_required",
+        genesis.data["frontier"] == ["genesis"] and genesis_result.error_kind == "next_stage_preview_required",
         "genesis approval advances only to the model frontier",
     )
     review = manager.preview(
         config,
-        decision_selections=decision_selections,
+        decision_selections={**decision_selections} if decision_selections is not None else None,
     )
     return dependencies, genesis, review
 
@@ -490,8 +511,7 @@ def _finish_from_model_review(
         decision_selections=selections,
     )
     _check(
-        models.data["frontier"] == ["models"]
-        and models_result.error_kind == "next_stage_preview_required",
+        models.data["frontier"] == ["models"] and models_result.error_kind == "next_stage_preview_required",
         "model approval advances only to the coding-agent frontier",
     )
     coding_agents, result = _apply_current_frontier(manager, config)
@@ -514,18 +534,11 @@ class VerifiedContext:
 
 def _initial_stages_verified(initial: CommandResult) -> bool:
     statuses = initial.data.get("stage_statuses")
-    return bool(
-        isinstance(statuses, dict)
-        and statuses.get("preflight") == "verified"
-        and statuses.get("decision_review") == "verified"
-    )
+    return bool(isinstance(statuses, dict) and statuses.get("preflight") == "verified" and statuses.get("decision_review") == "verified")
 
 
 def _no_future_decision_requests(fake: FakeAdapter) -> bool:
-    return not any(
-        request.probe_purpose in {"decision_discovery", "decision_qualification"}
-        for request in fake.requests
-    )
+    return not any(request.probe_purpose in {"decision_discovery", "decision_qualification"} for request in fake.requests)
 
 
 def _purity_stop_is_clean(
@@ -533,27 +546,18 @@ def _purity_stop_is_clean(
     path: Path,
     fake: FakeAdapter,
 ) -> bool:
-    return before == path.read_bytes() and not any(
-        request.phase == "apply" for request in fake.requests
-    )
+    return before == path.read_bytes() and not any(request.phase == "apply" for request in fake.requests)
 
 
 def _stage_request_is_valid(request: OperationRequest) -> bool:
-    return (
-        request.operation_ref == "setup::git.verify_checkout"
-        and str(uuid.UUID(request.request_id)) == request.request_id
-    )
+    return request.operation_ref == "setup::git.verify_checkout" and str(uuid.UUID(request.request_id)) == request.request_id
 
 
 def _model_decisions_are_visible(preview: CommandResult) -> bool:
     rendered = preview.data.get("decisions")
     if not isinstance(rendered, list):
         return False
-    rendered_ids = {
-        str(item["id"])
-        for item in rendered
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
+    rendered_ids = {str(item["id"]) for item in rendered if isinstance(item, dict) and isinstance(item.get("id"), str)}
     return {
         "embedding_model",
         "inference_model",
@@ -564,9 +568,7 @@ def _model_decisions_are_visible(preview: CommandResult) -> bool:
 def _consents_are_rendered(preview: CommandResult) -> bool:
     consents = preview.data.get("consents")
     required = {"title", "scope", "mutations", "decline_consequence"}
-    return isinstance(consents, list) and all(
-        isinstance(item, dict) and required.issubset(item) for item in consents
-    )
+    return isinstance(consents, list) and all(isinstance(item, dict) and required.issubset(item) for item in consents)
 
 
 def _persisted_consents_are_true(transaction: Transaction) -> bool:
@@ -575,35 +577,24 @@ def _persisted_consents_are_true(transaction: Transaction) -> bool:
 
 
 def _decision_probe_attempts(transaction: Transaction) -> dict[tuple[object, object], object]:
-    return {
-        (attempt["stage_id"], attempt["boundary"]): attempt["attempt"]
-        for attempt in transaction.stage_probe_attempts
-        if attempt["probe_id"] == "decisions_resolved"
-    }
+    return {(attempt["stage_id"], attempt["boundary"]): attempt["attempt"] for attempt in transaction.stage_probe_attempts if attempt["probe_id"] == "decisions_resolved"}
 
 
 def _stage_progress_is_typed(status: CommandResult) -> bool:
     progress = status.data.get("stage_progress")
     expected = {"stage_id", "checkpoint_status", "entry", "operations", "exit"}
-    return isinstance(progress, list) and all(
-        isinstance(stage, dict) and expected == set(stage) for stage in progress
-    )
+    return isinstance(progress, list) and all(isinstance(stage, dict) and expected == set(stage) for stage in progress)
 
 
 def _status_rendering_matches(status: CommandResult) -> bool:
-    return json.loads(render_json(status)) == status.to_dict() and (
-        '"stage_progress"' in render_human(status)
-    )
+    return json.loads(render_json(status)) == status.to_dict() and ('"stage_progress"' in render_human(status))
 
 
 def _start_request_is_bound(
     applied: OperationRequest,
     transaction: Transaction,
 ) -> bool:
-    return (
-        applied.approval_fingerprint == transaction.approval_fingerprint
-        and applied.timeout_seconds == 120
-    )
+    return applied.approval_fingerprint == transaction.approval_fingerprint and applied.timeout_seconds == 120
 
 
 def _doctor_status_cause_is_precise(
@@ -625,28 +616,13 @@ def _doctor_status_cause_is_precise(
 
 
 def _entry_failure_is_safe(result: CommandResult, fake: FakeAdapter) -> bool:
-    return (
-        result.status == "preview_ready"
-        and [item["operation_id"] for item in result.data.get("operations", [])]
-        == ["request_homebrew_install"]
-        and not any(
-            request.phase == "apply"
-            for request in fake.requests
-        )
-    )
+    operations = result.data.get("operations", [])
+    return result.status == "preview_ready" and isinstance(operations, list) and len(operations) == 1 and isinstance(operations[0], dict) and operations[0].get("operation_id") == "request_homebrew_install" and not any(request.phase == "apply" for request in fake.requests)
 
 
 def _apply_counts(fake: FakeAdapter) -> dict[str, int]:
-    operation_ids = {
-        request.operation_id for request in fake.requests if request.phase == "apply"
-    }
-    return {
-        operation_id: sum(
-            request.phase == "apply" and request.operation_id == operation_id
-            for request in fake.requests
-        )
-        for operation_id in operation_ids
-    }
+    operation_ids = {request.operation_id for request in fake.requests if request.phase == "apply"}
+    return {operation_id: sum(request.phase == "apply" and request.operation_id == operation_id for request in fake.requests) for operation_id in operation_ids}
 
 
 def _exit_resume_is_safe(
@@ -654,36 +630,8 @@ def _exit_resume_is_safe(
     fake: FakeAdapter,
 ) -> bool:
     counts = _apply_counts(fake)
-    exit_attempts = sum(
-        request.operation_id == "postgres_ready"
-        and request.probe_purpose == "stage_exit"
-        for request in fake.requests
-    )
-    return bool(
-        result.error_kind == "next_stage_preview_required"
-        and counts
-        and set(counts.values()) == {1}
-        and exit_attempts == 2
-    )
-
-
-def _frontier_chain_is_precise(
-    first: CommandResult,
-    first_count: int,
-    second: CommandResult,
-    second_count: int,
-    third: CommandResult,
-    discovery_count: int,
-) -> bool:
-    return (
-        first.data.get("frontier") == ["system_dependencies"]
-        and first_count == 4
-        and second.data.get("frontier") == ["genesis"]
-        and second_count == 2
-        and third.status == "preview_ready"
-        and third.data.get("frontier") == ["models"]
-        and discovery_count == 2
-    )
+    exit_attempts = sum(request.operation_id == "postgres_ready" and request.probe_purpose == "stage_exit" for request in fake.requests)
+    return bool(result.error_kind == "next_stage_preview_required" and counts and set(counts.values()) == {1} and exit_attempts == 2)
 
 
 def _crash_resume_is_safe(
@@ -691,21 +639,9 @@ def _crash_resume_is_safe(
     fake: FakeAdapter,
     operation_id: str,
 ) -> bool:
-    applies = sum(
-        request.phase == "apply" and request.operation_id == operation_id
-        for request in fake.requests
-    )
-    post_probe = any(
-        request.probe_purpose == "post_apply"
-        and _PRE_APPLY_PROBE_OWNERS.get(request.operation_id, request.operation_id)
-        == operation_id
-        for request in fake.requests
-    )
-    return (
-        result.error_kind == "next_stage_preview_required"
-        and applies == 1
-        and post_probe
-    )
+    applies = sum(request.phase == "apply" and request.operation_id == operation_id for request in fake.requests)
+    post_probe = any(request.probe_purpose == "post_apply" and _PRE_APPLY_PROBE_OWNERS.get(request.operation_id, request.operation_id) == operation_id for request in fake.requests)
+    return result.error_kind == "next_stage_preview_required" and applies == 1 and post_probe
 
 
 def _state_changing_read_only_plan(
@@ -713,10 +649,7 @@ def _state_changing_read_only_plan(
     **kwargs: object,
 ) -> SetupPlan:
     plan = original(**kwargs)  # type: ignore[operator]
-    if (
-        kwargs.get("prospective_consents") is not False
-        or kwargs.get("resolution_stage_ids") != {"preflight"}
-    ):
+    if kwargs.get("prospective_consents") is not False or kwargs.get("resolution_stage_ids") != {"preflight"}:
         return plan
     changed_answers = json.loads(json.dumps(plan.answers))
     changed_answers["decisions"]["coding_agents"] = ["codex"]

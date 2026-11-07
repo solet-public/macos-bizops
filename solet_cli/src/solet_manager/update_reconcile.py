@@ -28,6 +28,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
+from .enrolled_target import identity_drift_message, identity_repair, observe_identity_mismatches
 from .errors import AbandonRefusedError, ApprovalFingerprintMalformedError, ApprovalFingerprintRequiredError, ProbeDriftError, StateError, UpdateBlockedError
 from .maintenance_inventory import replace_active_update
 from .models import CommandResult, ExitCode, InstanceInventoryRecordV2, JsonValue, MaintenanceOperationKind, OperationType
@@ -47,6 +48,7 @@ from .update_execution import (
     probe_update,
     target_head,
 )
+from .update_hook_pin_carry import put_pins_back
 from .update_hydration_carry import put_back
 from .update_journal import (
     ABANDONABLE_STATUSES,
@@ -75,7 +77,9 @@ def preview_reconcile(request: UpdateRequest) -> CommandResult:
     head = target_head(record)
     data = _base_data(record, journal, head)
     if status == "doctor_incomplete":
-        return CommandResult(RESULT_KIND, "doctor_incomplete", "The active update needs no successor: re-run --yes with the recorded runtime fingerprint to rerun the final doctor.", ExitCode.HUMAN_ACTION, "doctor_incomplete", f"Run `solet-manager update {record.name} --yes --approval-fingerprint <runtime fingerprint>`.", data=data)
+        return CommandResult(
+            RESULT_KIND, "doctor_incomplete", "The active update needs no successor: re-run --yes with the recorded runtime fingerprint to rerun the final doctor.", ExitCode.HUMAN_ACTION, "doctor_incomplete", f"Run `solet-manager update {record.name} --yes --approval-fingerprint <runtime fingerprint>`.", data=data
+        )
     if status not in FAILURE_TERMINAL_STATUSES:
         raise UpdateBlockedError("update_not_terminal", f"the active update is {status}, not terminal", repair=f"Resume it with `solet-manager update {record.name} --yes --approval-fingerprint <fingerprint>`.")
     if head != cast(dict[str, JsonValue], journal["candidate"])["commit"]:
@@ -88,7 +92,15 @@ def preview_reconcile(request: UpdateRequest) -> CommandResult:
     if journal["runtime_approval"] is not None and cast(dict[str, JsonValue], journal["runtime_approval"])["forward_only_boundary"] is not None:
         data["forward_only"] = {"boundary": cast(dict[str, JsonValue], journal["runtime_approval"])["forward_only_boundary"], "requires_new_backup_checkpoint": True, "router_previous_is_code_only": True}
     status_text = "successor_preview_ready" if probe.fingerprint is not None else "awaiting_user"
-    return CommandResult(RESULT_KIND, status_text, "Successor operation planned; approve with --yes --approval-fingerprint. The router's previous release is a code-only rollback.", ExitCode.OK if probe.fingerprint else ExitCode.HUMAN_ACTION, None if probe.fingerprint else "successor_blocked", None if probe.fingerprint else "Resolve every listed reason, then preview again.", data=data)
+    return CommandResult(
+        RESULT_KIND,
+        status_text,
+        "Successor operation planned; approve with --yes --approval-fingerprint. The router's previous release is a code-only rollback.",
+        ExitCode.OK if probe.fingerprint else ExitCode.HUMAN_ACTION,
+        None if probe.fingerprint else "successor_blocked",
+        None if probe.fingerprint else "Resolve every listed reason, then preview again.",
+        data=data,
+    )
 
 
 def _pre_candidate_preview(record: InstanceInventoryRecordV2, journal: dict[str, JsonValue], head: str, data: dict[str, JsonValue]) -> CommandResult:
@@ -184,6 +196,7 @@ def abandon_update(request: UpdateRequest) -> CommandResult:
         # iss_f89ab692: a crash between setting a hydration block aside and the fast-forward left the file at its
         # committed bytes; abandoning puts the operator's own bytes back, so the net target change is none.
         restored = put_back(paths, record, journal)
+        pins_restored = put_pins_back(paths, record, journal)
         dirty_paths = dirty_tracked_paths(Path(record.target.canonical_path))
         dirty = bool(dirty_paths)
         if status in ABANDONABLE_STATUSES:
@@ -200,11 +213,30 @@ def abandon_update(request: UpdateRequest) -> CommandResult:
         if next_value is not journal:
             write_update_journal(path, journal, next_value)
         released = release_terminal_pointer(paths, record)
-        data: dict[str, JsonValue] = {"instance_id": record.instance_id, "operation_id": journal["operation_id"], "journal_status": next_value["status"], "outcome": outcome, "head_observed": head, "retirement": next_value["retirement"], "pointer_released": released is not None, "private_candidate_ref_retained": candidate_ref, "tracked_tree_dirty": dirty, "dirty_tracked_paths": list(dirty_paths), "hydration_blocks_restored": list(restored), "target_byte_writes": len(restored)}
+        data: dict[str, JsonValue] = {
+            "instance_id": record.instance_id,
+            "operation_id": journal["operation_id"],
+            "journal_status": next_value["status"],
+            "outcome": outcome,
+            "head_observed": head,
+            "retirement": next_value["retirement"],
+            "pointer_released": released is not None,
+            "private_candidate_ref_retained": candidate_ref,
+            "tracked_tree_dirty": dirty,
+            "dirty_tracked_paths": list(dirty_paths),
+            "hydration_blocks_restored": list(restored),
+            "hook_pins_restored": list(pins_restored),
+            "target_byte_writes": len(restored) + len(pins_restored),
+        }
         message = f"{outcome}: {_restored_clause(restored)}no target byte changed; the private candidate ref {candidate_ref} remains (the Manager deletes nothing)."
+        message += _pin_restored_clause(pins_restored)
         if dirty:
             message += " The tracked tree carries local state; the Manager never discards it."
         return CommandResult(RESULT_KIND, outcome, message, ExitCode.OK, data=data)
+
+
+def _pin_restored_clause(restored: tuple[str, ...]) -> str:
+    return f" Restored installer hook pins in {', '.join(restored)}." if restored else ""
 
 
 def _restored_clause(restored: tuple[str, ...]) -> str:
@@ -239,18 +271,33 @@ def _orphan_prepared(request: UpdateRequest, record: InstanceInventoryRecordV2) 
         if journal["status"] == "prepared" and journal["instance_id"] == record.instance_id:
             orphans.append(journal)
     if len(orphans) != 1:
-        raise UpdateBlockedError("no_active_update", "no update is active for this instance and no single orphan prepared journal exists", repair=f"Run `solet-manager update {record.name} --dry-run` to start one.")
+        raise _no_active_update(record, " and no single orphan prepared journal exists")
     return orphans[0], "prepared"
 
 
 def _active_journal(request: UpdateRequest, record: InstanceInventoryRecordV2) -> tuple[dict[str, JsonValue], str]:
     active = record.active_operation
     if active is None or active.kind is not MaintenanceOperationKind.UPDATE:
-        raise UpdateBlockedError("no_active_update", "no update is active for this instance", repair=f"Run `solet-manager update {record.name} --dry-run` to start one.")
+        raise _no_active_update(record)
     journal = read_update_journal(request.manager_paths.operation_path(record.instance_id, active.operation_id))
     if journal["operation_id"] != active.operation_id or journal["instance_id"] != record.instance_id:
         raise StateError("the update journal at the active pointer names a different operation")
     return journal, cast(str, journal["status"])
+
+
+def _no_active_update(record: InstanceInventoryRecordV2, detail: str = "") -> UpdateBlockedError:
+    reasons = observe_identity_mismatches(record)
+    if reasons:
+        return UpdateBlockedError(
+            "no_active_update",
+            f"No update is active{detail}; {identity_drift_message(record, reasons)}",
+            repair=identity_repair(record),
+        )
+    return UpdateBlockedError(
+        "no_active_update",
+        f"no update is active for this instance{detail}",
+        repair=f"Run `solet-manager update {record.name} --dry-run` to start one.",
+    )
 
 
 def _base_data(record: InstanceInventoryRecordV2, journal: dict[str, JsonValue], head: str) -> dict[str, JsonValue]:
@@ -268,4 +315,3 @@ def _base_data(record: InstanceInventoryRecordV2, journal: dict[str, JsonValue],
         "preservation": {"target_byte_writes": 0, "manager_state_writes": 0},
         "approval_fingerprint": None,
     }
-

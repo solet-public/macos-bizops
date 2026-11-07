@@ -51,9 +51,9 @@ py``'s own module docstring names that contrasting property: ``shutdown()``
 SIGTERM-then-SIGKILLs every tracked headless worker on platform stop,
 unconditionally, including mid-swap).
 
-PROCESS TARGETING: the pane's command is ``sh -c 'exec <claude argv>'`` so the
-pane's own pid (``#{pane_pid}``) IS the ``claude`` process, not an
-intermediate shell — and, as a fresh tmux pane, that pid is also a process
+PROCESS TARGETING: the pane's command is ``sh -c 'SHELL=/bin/bash exec <claude
+argv>'`` so the pane's own pid (``#{pane_pid}``) IS the ``claude`` process, not
+an intermediate shell — and, as a fresh tmux pane, that pid is also a process
 group leader. :meth:`terminate` signals the WHOLE group (``os.killpg`` via
 ``_sigterm_then_kill_process_group``, falling back to
 ``headless_adapter``'s single-pid ``_sigterm_then_kill``/``_pid_alive``
@@ -77,10 +77,11 @@ import shutil
 import signal
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from .claude_hook_commands import optional_hook_command
 from .headless_adapter import (
     WorkerHookResolutionError,
     _announce_managed_policy,
@@ -123,6 +124,19 @@ _SESSION_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
 # flag's actual presence in the built claude argv, never assumed.
 _DEV_CHANNELS_FLAG = "--dangerously-load-development-channels"
 _DEV_CHANNELS_PROMPT_MARKERS = ("WARNING: Loading development channels", "Enter to confirm")
+# Bypass-permissions acceptance (Operator, 2026-10-30, iss_a5e6b07d): a lane
+# launched with ``--permission-mode bypassPermissions`` (the platform's own
+# spawn-time choice) is shown Claude Code's interactive "Bypass Permissions
+# mode" acceptance dialogue BEFORE the development-channels prompt. Its default
+# selection is "No, exit", so the bare Enter the dev-channels loop sends
+# selected "No, exit" and every tmux-hosted claude lane quit seconds after
+# registering its bridge (1 s pane capture, 2026-10-30 16:25:35Z). The loop
+# now recognises that dialogue, moves the selection to "Yes, I accept" (Down,
+# then Enter) and waits for it to clear before the dev-channels branch runs.
+# Both markers must be present: "Enter to confirm" alone is shared with the
+# dev-channels prompt and must never identify this one.
+_BYPASS_PROMPT_MARKERS = ("Bypass Permissions mode", "Yes, I accept")
+_BYPASS_PERMISSION_MODE = "bypassPermissions"
 DEFAULT_CONFIRM_TIMEOUT_SECONDS = 20.0
 DEFAULT_CONFIRM_POLL_INTERVAL_SECONDS = 0.5
 
@@ -137,8 +151,33 @@ def _needs_dev_channels_confirmation(claude_cmd: list[str]) -> bool:
     return _DEV_CHANNELS_FLAG in claude_cmd
 
 
+def _needs_bypass_acceptance(claude_cmd: list[str]) -> bool:
+    """Gate for the bypass-permissions acceptance step: only an argv that
+    selects ``--permission-mode bypassPermissions`` is shown that dialogue,
+    whether or not the development-channels flag is also present (the
+    third-party-provider argv omits that flag and keeps bypass mode). Any
+    other argv must never enter the step, not even for one pane poll."""
+    try:
+        index = claude_cmd.index("--permission-mode")
+    except ValueError:
+        return False
+    return index + 1 < len(claude_cmd) and claude_cmd[index + 1] == _BYPASS_PERMISSION_MODE
+
+
 def _pane_shows_dev_channels_prompt(pane_text: str) -> bool:
-    return any(marker in pane_text for marker in _DEV_CHANNELS_PROMPT_MARKERS)
+    """True only for the development-channels dialogue itself: its first
+    marker is required, because the second ("Enter to confirm") is also
+    printed by the bypass-permissions dialogue and must not match here."""
+    return _DEV_CHANNELS_PROMPT_MARKERS[0] in pane_text
+
+
+def _pane_shows_bypass_prompt(pane_text: str) -> bool:
+    return all(marker in pane_text for marker in _BYPASS_PROMPT_MARKERS)
+
+
+def _pane_shows_startup_prompt(pane_text: str) -> bool:
+    """Either interactive dialogue a freshly launched tmux claude can show."""
+    return _pane_shows_bypass_prompt(pane_text) or _pane_shows_dev_channels_prompt(pane_text)
 
 
 # Third-party-provider fix (§39.1/§40.1, reported and field-verified by a seed
@@ -177,12 +216,10 @@ def _effective_spawn_env(spec: Mapping[str, object]) -> Mapping[str, str]:
     36 §36.1 per-spawn provider selection does not exist in our tree yet; that
     is the ``provider-select-design`` lane).
 
-    TODAY that is this process's own environment: the tmux driver injects only
-    identity vars via ``new-session -e`` (see :func:`_env_pairs`), so any
-    provider switch reaches the worker by inheritance. LATER, when the per-spawn
-    overlay lands, it composes here and nowhere else -- the ``provider_env``
-    read below is the seam, deliberately written now so the predicate needs no
-    rework at that landing.
+    The worker receives the per-spawn overlay on the pane via ``new-session -e``
+    (see :func:`_provider_env_pairs`); this function reads the same
+    ``provider_env`` for the detection predicate, so the predicate sees what the
+    pane actually gets. Identity vars come from :func:`_env_pairs`.
 
     ⚠ Two honest limits, neither silently papered over:
     * The overlay KEY NAME (``provider_env``) is taken from the adopter's
@@ -202,22 +239,51 @@ def _effective_spawn_env(spec: Mapping[str, object]) -> Mapping[str, str]:
         return env
     if not isinstance(overlay, Mapping):
         raise TypeError(
-            "spawn spec 'provider_env' must be a mapping of environment "
-            f"variables, got {type(overlay).__name__} -- refusing to guess the "
-            "effective spawn environment provider detection keys on.",
+            f"spawn spec 'provider_env' must be a mapping of environment variables, got {type(overlay).__name__} -- refusing to guess the effective spawn environment provider detection keys on.",
         )
     env.update({str(key): str(value) for key, value in overlay.items()})
     return env
+
+
+def _provider_env_pairs(spec: Mapping[str, object], identity_pairs: list[str]) -> list[str]:
+    """``-e KEY=VAL`` args applying the per-spawn Claude provider overlay to the
+    worker pane.
+
+    The overlay is the pane's own environment, passed on ``new-session -e`` in
+    the same channel the identity variables use. It is never logged, never
+    written to the ledger or spawn detail, and never placed on the Claude argv.
+    Known limit: the values are an argv element of the tmux ``new-session``
+    call, so local process listings (``ps``) can show them for the instant of
+    that call, exactly as they show the identity variables today.
+    An overlay key that names a managed worker variable (identity, PATH,
+    PYTHONPATH, FLEET_TRANSPORT, ...) is refused rather than allowed to override
+    it: the overlay selects a provider, it does not rewrite the worker's wiring.
+    The refusal names keys only, never values.
+    """
+    from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
+
+    overlay = spec.get("provider_env")
+    if not overlay:
+        return []
+    if not isinstance(overlay, Mapping):
+        raise HostCannotSpawnError("spawn spec 'provider_env' must be a mapping of environment variables.")
+    managed = {pair.split("=", 1)[0] for pair in identity_pairs if "=" in pair}
+    collisions = sorted(str(key) for key in overlay if str(key) in managed)
+    if collisions:
+        raise HostCannotSpawnError(
+            f"provider_env keys {collisions} name managed worker variables; the overlay may select a provider but may not override worker wiring.",
+        )
+    pairs: list[str] = []
+    for key, value in overlay.items():
+        pairs += ["-e", f"{key}={value}"]
+    return pairs
 
 
 def _provider_ignores_dev_channels(spawn_env: Mapping[str, str]) -> bool:
     """True when the effective spawn environment selects a third-party provider
     that ignores ``--dangerously-load-development-channels``. Adopter's shape,
     bound to OUR effective-env computation rather than to their overlay."""
-    return any(
-        str(spawn_env.get(marker, "")).strip() == "1"
-        for marker in _THIRD_PARTY_PROVIDER_ENV_MARKERS
-    )
+    return any(str(spawn_env.get(marker, "")).strip() == "1" for marker in _THIRD_PARTY_PROVIDER_ENV_MARKERS)
 
 
 def _emit_role_tag_path() -> Path:
@@ -225,9 +291,16 @@ def _emit_role_tag_path() -> Path:
 
 
 def _env_pairs(
-    *, agent_instance_id: str, agent_session_id: str, label: str,
-    solet_name: str, solet_bin: str, allowed_tools: object, transport: str,
-    context_gauge_reporter_path: Path, cwd: Path,
+    *,
+    agent_instance_id: str,
+    agent_session_id: str,
+    label: str,
+    solet_name: str,
+    solet_bin: str,
+    allowed_tools: object,
+    transport: str,
+    context_gauge_reporter_path: Path,
+    cwd: Path,
 ) -> list[str]:
     """``-e KEY=VAL`` args for ``tmux new-session`` — split out of
     :meth:`TmuxHostDriver.spawn` to keep it under the radon cc threshold.
@@ -294,14 +367,18 @@ def _env_pairs(
     heartbeat_dir = _resolve_heartbeat_marker_dir()
     if heartbeat_dir is not None:
         pairs += ["-e", f"AGENT_HEARTBEAT_MARKER_DIR={heartbeat_dir}"]
-    receipt_path = _resolve_coordination_receipt_path()
+    receipt_path = _resolve_coordination_receipt_path(solet_name, context_gauge_reporter_path)
     if receipt_path is not None:
         pairs += ["-e", f"AGENT_COORDINATION_RECEIPT_PATH={receipt_path}"]
     return pairs
 
 
 def _pane_command(
-    claude_cmd: list[str], *, label: str, solet_bin: str, transport: str,
+    claude_cmd: list[str],
+    *,
+    label: str,
+    solet_bin: str,
+    transport: str,
 ) -> str:
     """The tag emit MUST run and complete BEFORE ``exec`` replaces this
     shell with the claude process — once exec'd, the pane has no shell left
@@ -324,11 +401,17 @@ def _pane_command(
 
     Branched on the CALLER-RESOLVED ``transport``, never probed — the same
     declared-FLEET_TRANSPORT contract every other consumer reads.
+
+    BASH SHELL (Change 21): the claude process starts with ``SHELL=/bin/bash``
+    so the Bash tool snapshots bash; lanes run ``--setting-sources project`` and
+    ignore the user-settings ``SHELL``. The assignment sits in this pane command
+    rather than in a ``new-session -e`` pair because it runs after the pane
+    shell has started and is therefore the last writer of ``SHELL``; ``exec``
+    still replaces the shell, so the pane pid remains the claude process.
     """
     emit_script = _emit_role_tag_path()
     parts = [
-        f"sh {shlex.quote(str(emit_script))} {shlex.quote(label)}; "
-        if emit_script.exists() else "",
+        f"sh {shlex.quote(str(emit_script))} {shlex.quote(label)}; " if emit_script.exists() else "",
     ]
     if transport == "watch" and solet_bin:
         # spool=True, deliberately UNLIKE codex's --no-spool: wake_waiter.py
@@ -345,7 +428,7 @@ def _pane_command(
         # watcher claims under the id it inherits, as the identity rules
         # require -- exactly one mint, in spawn()).
         parts.append(f"{watch_cmd} --exit-with-parent $$ >/dev/null 2>&1 & ")
-    parts.append(f"exec {shlex.join(claude_cmd)}")
+    parts.append(f"SHELL=/bin/bash exec {shlex.join(claude_cmd)}")
     return "".join(parts)
 
 
@@ -405,10 +488,7 @@ def _configure_server_options(tmux_bin: str, session_name: str, run_fn: Any) -> 
         for command in commands:
             outcome = run_fn(command, capture_output=True, text=True, timeout=5)
             if outcome.returncode != 0:
-                raise HostCannotSpawnError(
-                    "tmux server capability setup failed "
-                    f"(exit {outcome.returncode}): {outcome.stderr.strip()}"
-                )
+                raise HostCannotSpawnError(f"tmux server capability setup failed (exit {outcome.returncode}): {outcome.stderr.strip()}")
     except (OSError, subprocess.TimeoutExpired) as exc:
         _abort_unconfigured_session(tmux_bin, session_name, run_fn)
         raise HostCannotSpawnError(f"tmux server capability setup raised: {exc}") from exc
@@ -510,6 +590,20 @@ tmux's local paste-chunking completing fast once ``send-keys -l`` returns).
 Flagged as an open item if further tuning is ever warranted; not treated as
 precisely measured for tmux specifically the way the iTerm2 defaults were."""
 
+DEFAULT_SEND_BOUNDARY_TIMEOUT_SECONDS = 10.0
+"""Upper bound on how long ONE ``send()`` waits to OBSERVE an empty composer
+before it will insert anything (``driver_channel()`` returns a
+:class:`_BoundarySendKeysDriverChannel` carrying it; the base channel, built
+directly, keeps the legacy blind send).
+
+Why 10s is safe on the delivery-drive executor (``delivery_drive.py``: 4
+workers, 32-deep queue): the same worker already holds for up to
+``DEFAULT_PASTE_STABLE_TIMEOUT_SECONDS`` (10s) after the insert, so a drive
+that finds no boundary costs at most one extra such window (<= 20s worst case,
+and ZERO extra when the composer is already empty, the common case). It is
+also long enough to cover the occupant this exists for: a previous queued
+notice for the same pane is submitted within that same 10s paste window."""
+
 
 def _is_collapsed_paste_of(composer_content: str, probe_text: str) -> bool:
     """Whether the composer row is the TUI's collapsed stand-in for
@@ -544,61 +638,54 @@ def _is_collapsed_paste_of(composer_content: str, probe_text: str) -> bool:
     return declared_lines > 0 and declared_lines == probe_text.count("\n")
 
 
+def _landed_composer_row(
+    shows_probe: Callable[[str, str], bool],
+    captured: str | None,
+    probe_text: str | None,
+) -> str | None:
+    """The composer row of ``captured`` when it shows ``probe_text``, else ``None``.
+
+    iss_ab1f0a21 (measured): a BUSY Claude pane never satisfies whole-pane
+    stability — its spinner glyph, token counter and elapsed timer change on
+    every 0.5 s sample — so every drive into one burned the full 10 s paste
+    timeout. The composer row is static once the paste has landed, so the
+    paste wait also accepts that row, matched by the population anchor
+    ``verify_driven`` already trusts (``shows_probe``: glyph-anchored prefix of
+    the driven text, or the collapsed-paste stand-in), unchanged across two
+    samples. Whole-pane stability and the fail-open timeout still apply to a
+    pane that never shows the anchor.
+    """
+    if captured is None or probe_text is None:
+        return None
+    for line in captured.splitlines():
+        if shows_probe(line, probe_text):
+            return line
+    return None
+
+
 class _TmuxSendKeysDriverChannel:
-    """The ``DriverChannel`` (§5) for a tmux-hosted pane — injects literal
-    keystrokes (``send-keys -l``) followed by a separate ``Enter`` key press,
-    exactly what a human attaching to the same pane would type. ``-l``
-    (literal) is load-bearing: without it, tmux interprets key-name-shaped
-    text (e.g. a message that happens to read ``Enter`` or ``C-c``) as a key
-    binding instead of literal characters.
+    """Literal bracketed-paste driver with render-stability verification.
 
-    **Paste-stability wait (spawn/registration-gaps fix, 2026-08-08,
-    live-measured — see the findings file section named above):** a large
-    literal payload sent via ``send-keys -l`` can get chunked by tmux into
-    multiple separate bracketed-paste events on the receiving Claude Code
-    TUI (measured: a ~9.7KB payload split into 9 ``[Pasted text #N]``
-    fragments), and an ``Enter`` sent immediately afterward — the OLD,
-    unguarded behavior — lands while that multi-chunk paste is still being
-    assembled/rendered and gets absorbed as a literal newline inside it
-    instead of submitting. Same failure shape as the already-fixed iTerm2
-    ``async_send_text`` race (rotation-systematization fix loop #2);
-    independently reproduced here for tmux with the real production code,
-    not merely inferred from the parallel. The fix mirrors that one exactly:
-    poll the pane's own rendered content (``tmux capture-pane -p``) until it
-    stops changing across N consecutive samples, THEN send the submitting
-    ``Enter`` — never immediately after the text send.
-
-    **Baseline-gated stability fix (driver-channel strand fix, 2026-08-14,
-    hermetically reproduced — workbench/2026-08-14_driver_channel_strand_
-    fix_report_lane_d.md):** the stability wait above had no BASELINE — it
-    only compared each sample to the one immediately before it. When the TUI
-    is slow to render the injected paste (busy event loop, mid-turn work),
-    the first several samples can all show the PRE-SEND screen, which is
-    just as internally-identical as a genuinely-stable POST-render screen —
-    "stability" was declared against the OLD content, Enter fired into a
-    composer that did not yet contain the text, and the paste rendered
-    afterward with its submitting Enter already spent. The fix captures a
-    baseline sample before the stability poll begins and only counts a
-    sample toward ``stable_samples_required`` once it both matches the
-    immediately-preceding sample AND differs from that baseline — the
-    fail-open timeout (log loudly, still send Enter) is unchanged byte for
-    byte, so a render that never visibly changes the pane (e.g. output
-    scrolled away) still submits within the timeout rather than hanging."""
+    Poll for a stable pane that differs from the pre-send baseline before
+    submitting Enter. Identical pre-render frames do not prove paste arrival.
+    The bounded fail-open timeout remains logged; see individual operations
+    for clear/submit verification and transport failure behavior.
+    """
 
     def __init__(
-        self, *, tmux_bin: str, session: str, run_fn: Any,
+        self,
+        *,
+        tmux_bin: str,
+        session: str,
+        run_fn: Any,
         poll_interval_seconds: float = DEFAULT_PASTE_STABLE_POLL_INTERVAL_SECONDS,
         stable_samples_required: int = DEFAULT_PASTE_STABLE_SAMPLES_REQUIRED,
         stable_timeout_seconds: float = DEFAULT_PASTE_STABLE_TIMEOUT_SECONDS,
         cleared_signature: str = DEFAULT_CLEARED_COMPOSER_SIGNATURE,
-        clear_verify_poll_interval_seconds: float = (
-            DEFAULT_CLEAR_VERIFY_POLL_INTERVAL_SECONDS
-        ),
+        clear_verify_poll_interval_seconds: float = (DEFAULT_CLEAR_VERIFY_POLL_INTERVAL_SECONDS),
         clear_stable_samples_required: int = DEFAULT_CLEAR_VERIFY_SAMPLES_REQUIRED,
         clear_verify_timeout_seconds: float = DEFAULT_CLEAR_VERIFY_TIMEOUT_SECONDS,
-        drive_verify_poll_interval_seconds: float = (
-            DEFAULT_DRIVE_VERIFY_POLL_INTERVAL_SECONDS
-        ),
+        drive_verify_poll_interval_seconds: float = (DEFAULT_DRIVE_VERIFY_POLL_INTERVAL_SECONDS),
         drive_verify_samples_required: int = DEFAULT_DRIVE_VERIFY_SAMPLES_REQUIRED,
         drive_verify_timeout_seconds: float = DEFAULT_DRIVE_VERIFY_TIMEOUT_SECONDS,
         sleep_fn: Any = time.sleep,
@@ -683,21 +770,31 @@ class _TmuxSendKeysDriverChannel:
         try:
             loaded = self._run_fn(
                 [self._tmux_bin, "load-buffer", "-b", buffer_name, "-"],
-                input=text, capture_output=True, text=True, timeout=10,
+                input=text,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if getattr(loaded, "returncode", 1) != 0:
                 logger.warning(
-                    "tmux driver channel send() failed — session %r rejected the "
-                    "payload buffer load",
+                    "tmux driver channel send() failed — session %r rejected the payload buffer load",
                     self._session,
                 )
                 return False
             self._run_fn(
                 [
-                    self._tmux_bin, "paste-buffer", "-b", buffer_name,
-                    "-t", self._session, "-d", "-p",
+                    self._tmux_bin,
+                    "paste-buffer",
+                    "-b",
+                    buffer_name,
+                    "-t",
+                    self._session,
+                    "-d",
+                    "-p",
                 ],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
         except (OSError, subprocess.TimeoutExpired):
             logger.warning(
@@ -708,22 +805,26 @@ class _TmuxSendKeysDriverChannel:
         return True
 
     def submit(self) -> None:
-        self._wait_for_paste_stable()
+        self._submit_after_paste(None)
+
+    def _submit_after_paste(self, probe_text: str | None) -> None:
+        self._wait_for_paste_stable(probe_text)
         try:
             self._run_fn(
                 [self._tmux_bin, "send-keys", "-t", self._session, self.convention.submit_value],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
         except (OSError, subprocess.TimeoutExpired):
             logger.warning(
-                "tmux driver channel send() failed sending Enter — session %r is no "
-                "longer reachable",
+                "tmux driver channel send() failed sending Enter — session %r is no longer reachable",
                 self._session,
             )
 
     def send(self, text: str) -> None:
         if self._insert(text):
-            self.submit()
+            self._submit_after_paste(text)
 
     def _capture_pane(self) -> str | None:
         """The pane's own rendered content, or ``None`` on any capture
@@ -732,7 +833,9 @@ class _TmuxSendKeysDriverChannel:
         try:
             result = self._run_fn(
                 [self._tmux_bin, "capture-pane", "-t", self._session, "-p"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
@@ -756,10 +859,7 @@ class _TmuxSendKeysDriverChannel:
         real captured screen lines by the iTerm2 precedent this mirrors
         (``seat_rotation_helper.is_cleared_state``), not reasoned about.
         """
-        return any(
-            line.replace("\x00", "").strip() == self._cleared_signature
-            for line in captured.splitlines()
-        )
+        return any(line.replace("\x00", "").strip() == self._cleared_signature for line in captured.splitlines())
 
     def verify_cleared(self) -> bool:
         """Poll the pane until ``clear_stable_samples_required`` CONSECUTIVE
@@ -802,11 +902,9 @@ class _TmuxSendKeysDriverChannel:
                 stable_count = 0
             if self._now_fn() > deadline:
                 logger.warning(
-                    "tmux driver channel: pane %r never showed a cleared composer "
-                    "within %.1fs -- reporting the clear as UNVERIFIED (fail-closed). "
-                    "No key is re-sent: the /clear text is already in that pane's "
-                    "input buffer and re-firing it would deposit a second copy.",
-                    self._session, self._clear_verify_timeout_seconds,
+                    "tmux driver channel: pane %r never showed a cleared composer within %.1fs -- reporting the clear as UNVERIFIED (fail-closed). No key is re-sent: the /clear text is already in that pane's input buffer and re-firing it would deposit a second copy.",
+                    self._session,
+                    self._clear_verify_timeout_seconds,
                 )
                 return False
             self._sleep_fn(self._clear_verify_poll_interval_seconds)
@@ -820,7 +918,9 @@ class _TmuxSendKeysDriverChannel:
         try:
             result = self._run_fn(
                 [self._tmux_bin, "capture-pane", "-e", "-t", self._session, "-p"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
@@ -856,7 +956,6 @@ class _TmuxSendKeysDriverChannel:
         if probe.startswith(composer_content):
             return True
         return _is_collapsed_paste_of(composer_content, probe_text)
-
 
     def _composer_style_at_content(self, raw_line: str) -> str | None:
         """The SGR style in effect at the first content character after the
@@ -903,10 +1002,7 @@ class _TmuxSendKeysDriverChannel:
         lines = captured.splitlines()
         stranded = any(self._is_stranded_drive_line(line, text) for line in lines)
         populated = any(self._composer_content_matches(line, text) for line in lines)
-        idle = any(
-            _ANSI_SGR_RE.sub("", line.replace("\x00", "")).strip() == self._cleared_signature
-            for line in lines
-        )
+        idle = any(_ANSI_SGR_RE.sub("", line.replace("\x00", "")).strip() == self._cleared_signature for line in lines)
         return stranded, populated, idle
 
     def verify_driven(self, text: str) -> bool | None:
@@ -963,16 +1059,14 @@ class _TmuxSendKeysDriverChannel:
                 # than resetting or accepting it.
             if self._now_fn() > deadline:
                 logger.warning(
-                    "tmux driver channel: pane %r showed neither a confirmed "
-                    "submit nor a positively stranded composer for the driven "
-                    "text within %.1fs -- reporting the drive as UNVERIFIED "
-                    "(could-not-determine). No key is re-sent.",
-                    self._session, self._drive_verify_timeout_seconds,
+                    "tmux driver channel: pane %r showed neither a confirmed submit nor a positively stranded composer for the driven text within %.1fs -- reporting the drive as UNVERIFIED (could-not-determine). No key is re-sent.",
+                    self._session,
+                    self._drive_verify_timeout_seconds,
                 )
                 return None
             self._sleep_fn(self._drive_verify_poll_interval_seconds)
 
-    def _wait_for_paste_stable(self) -> None:
+    def _wait_for_paste_stable(self, probe_text: str | None = None) -> None:
         """Poll until the pane's rendered content is IDENTICAL across
         ``stable_samples_required`` consecutive samples AND differs from the
         BASELINE — this function's own first sample, taken right after the
@@ -1000,25 +1094,37 @@ class _TmuxSendKeysDriverChannel:
         render that never visibly differs from that first look (e.g. output
         scrolled away, or a render so fast the very first sample already
         shows it) still submits via this same timeout path, exactly as
-        before this fix."""
+        before this fix.
+
+        iss_ab1f0a21: given the driven ``probe_text`` (:meth:`send` passes
+        it), the wait also ends once the composer row shows it unchanged
+        across two samples — see :func:`_landed_composer_row`."""
         deadline = self._now_fn() + self._stable_timeout_seconds
         baseline: str | None = None
         have_baseline = False
         prev: str | None = None
+        prev_landed: str | None = None
         stable_count = 0
         while True:
             if self._now_fn() > deadline:
                 logger.warning(
-                    "tmux driver channel: pane %r did not stabilize within %.1fs before "
-                    "the submitting Enter — sending it anyway (fail-open; the alternative "
-                    "is never submitting at all).",
-                    self._session, self._stable_timeout_seconds,
+                    "tmux driver channel: pane %r did not stabilize within %.1fs before the submitting Enter — sending it anyway (fail-open; the alternative is never submitting at all).",
+                    self._session,
+                    self._stable_timeout_seconds,
                 )
                 return
             current = self._capture_pane()
             if not have_baseline:
                 baseline = current
                 have_baseline = True
+            landed = _landed_composer_row(
+                self._composer_content_matches,
+                current,
+                probe_text,
+            )
+            if landed is not None and landed == prev_landed:
+                return
+            prev_landed = landed
             if current is not None and current == prev and current != baseline:
                 stable_count += 1
                 if stable_count >= self._stable_samples_required:
@@ -1027,6 +1133,59 @@ class _TmuxSendKeysDriverChannel:
                 stable_count = 0
             prev = current
             self._sleep_fn(self._poll_interval_seconds)
+
+
+class _BoundarySendKeysDriverChannel(_TmuxSendKeysDriverChannel):
+    """The shipped channel: ``send()`` first waits to OBSERVE an empty composer.
+
+    A subclass, not a flag on the base: the base channel's blind send is what
+    the fake-runner pin tests and direct constructors rely on, and the wait is
+    one concern with one extra (class-level, overridable) bound.
+    """
+
+    _send_boundary_timeout_seconds: float = DEFAULT_SEND_BOUNDARY_TIMEOUT_SECONDS
+
+    def send(self, text: str) -> None:
+        self._await_input_boundary(text)
+        super().send(text)
+
+    def _await_input_boundary(self, text: str) -> None:
+        """Before ANY insert: poll until a sample shows an EMPTY composer, or
+        raise ``DriverChannelSendError`` having sent nothing.
+
+        Reuses :meth:`_classify_drive_sample` (no second classifier): the
+        boundary is a sample that is idle (the empty-composer row), not
+        stranded and not already holding ``text``. Pasting into an occupied
+        composer is the strand this closes (iss_186ffa3c, iss_2dfe05f2).
+
+        Runs only BEFORE the insert, so the no-re-send invariant after a send
+        is untouched; the deadline branch sends no paste and no key, so
+        nothing can strand and the pane is left byte-for-byte as found. The
+        error is the channel's existing "could not confirm acceptance"
+        vocabulary: delivery notices report ``driver_error`` (durable mail
+        retained, ``stored_no_wake``), explicit verbs ``driver_delivery_failed``.
+        ``/clear`` and ``/compact`` share this insertion point, so
+        :meth:`verify_cleared` needs no pre-send step of its own."""
+        deadline = self._now_fn() + self._send_boundary_timeout_seconds
+        while True:
+            captured = self._capture_pane_colored()
+            if captured is not None:
+                stranded, populated, is_idle = self._classify_drive_sample(captured, text)
+                if is_idle and not stranded and not populated:
+                    return
+            if self._now_fn() > deadline:
+                break
+            self._sleep_fn(self._drive_verify_poll_interval_seconds)
+        from .session_hosts import DriverChannelSendError  # noqa: PLC0415
+
+        logger.warning(
+            "tmux driver channel: pane %r showed no empty composer within %.1fs -- NOT sending (nothing pasted, no key sent); the message stays durable.",
+            self._session,
+            self._send_boundary_timeout_seconds,
+        )
+        raise DriverChannelSendError(
+            f"tmux pane {self._session!r} showed no empty composer within {self._send_boundary_timeout_seconds:.1f}s; nothing was sent.",
+        )
 
 
 def _sigterm_then_kill_process_group(pgid: int, grace_seconds: float) -> None:
@@ -1076,8 +1235,13 @@ def _sigterm_then_kill_process_group(pgid: int, grace_seconds: float) -> None:
 #
 # This is a behaviour change to §43.1's REFUSAL, not to §45.1's warning.
 def _claude_launch_remedies(
-    *, claude_bin: str, solet_name: str, permission_mode: str | None,
-    driver_permission_mode: str, transport: str | None, driver_transport: str,
+    *,
+    claude_bin: str,
+    solet_name: str,
+    permission_mode: str | None,
+    driver_permission_mode: str,
+    transport: str | None,
+    driver_transport: str,
     mcp_config_path: Path,
 ) -> list[str]:
     """The underlying-``claude``-launch checks, shared with the headless
@@ -1095,21 +1259,15 @@ def _claude_launch_remedies(
     remedies: list[str] = []
     if not (claude_bin and os.access(claude_bin, os.X_OK)):
         remedies.append(
-            f"no executable 'claude' binary found (checked PATH via "
-            f"shutil.which, then {claude_bin!r}) — install Claude "
-            "Code or pass claude_bin explicitly.",
+            f"no executable 'claude' binary found (checked PATH via shutil.which, then {claude_bin!r}) — install Claude Code or pass claude_bin explicitly.",
         )
     if not solet_name:
         remedies.append(
-            "SOLET_NAME is not set — the spawned session cannot "
-            "discover its bridge port without it.",
+            "SOLET_NAME is not set — the spawned session cannot discover its bridge port without it.",
         )
     if not (permission_mode or driver_permission_mode):
         remedies.append(
-            f"no permission mode configured (neither a per-spawn override nor "
-            f"{_ENV_PERMISSION_MODE} is set) — an unattended tmux-hosted worker "
-            "needs an explicit operator-ruled posture; this driver never "
-            "defaults to bypass.",
+            f"no permission mode configured (neither a per-spawn override nor {_ENV_PERMISSION_MODE} is set) — an unattended tmux-hosted worker needs an explicit operator-ruled posture; this driver never defaults to bypass.",
         )
     resolved_transport = transport if transport is not None else (driver_transport or "watch")
     if resolved_transport == "mcp" and not mcp_config_path.exists():
@@ -1149,11 +1307,7 @@ def _tmux_capability_report() -> dict[str, object]:
         "host": "tmux",
         "topology": "detached-session",
         "inspectable_via": ["tmux attach -t <host_ref>", "tmux -CC attach -t <host_ref>"],
-        "attach_hint": (
-            "detached tmux session; attach directly or via iTerm2 'tmux -CC attach "
-            "-t <host_ref>' for native-window presentation (documented separately, "
-            "not automated by this driver)"
-        ),
+        "attach_hint": ("detached tmux session; attach directly or via iTerm2 'tmux -CC attach -t <host_ref>' for native-window presentation (documented separately, not automated by this driver)"),
         **_permission_state_report(
             _tmux_denied_tools(allow_askuserquestion=False),
             denies_key="permission_denies_default",
@@ -1190,9 +1344,8 @@ def _tmux_hook_settings_json(
     heartbeat_hook_path: Path,
     rotation_due_hook_path: Path,
     wake_hook_path: Path,
-    check_messages_hook_path: Path,
+    session_start_hook_path: Path,
     step_zero_hook_path: Path,
-    role_binding_hook_path: Path,
     allow_askuserquestion: bool,
 ) -> str:
     """The tmux driver's ``--settings`` JSON: the same hook wiring and tool
@@ -1220,39 +1373,39 @@ def _tmux_hook_settings_json(
         },
         "hooks": {
             "PreToolUse": [
-                {"hooks": [{"type": "command", "command": f"python3 {allowlist_hook_path}"}]},
+                {"hooks": [{"type": "command", "command": shlex.join(["python3", str(allowlist_hook_path)])}]},
             ],
             "SessionStart": [
-                {"hooks": [{"type": "command", "command": f"python3 {capture_hook_path}"}]},
+                {"hooks": [{"type": "command", "command": optional_hook_command(capture_hook_path, "SessionStart")}]},
                 {
                     # Matches coordination-hooks@<solet>'s own hooks.json
                     # matcher for this event exactly (fidelity, not a
-                    # new choice) -- check_messages_reminder.py also
-                    # fires here (in addition to UserPromptSubmit
-                    # below) matching the plugin's own dual wiring.
+                    # new choice) -- session_start_context.py
+                    # fires only here (never UserPromptSubmit
+                    # below), matching the shipped plugin.
                     "matcher": "startup|resume|clear",
                     "hooks": [
-                        {"type": "command", "command": f"python3 {check_messages_hook_path}"},
-                        {"type": "command", "command": f"python3 {role_binding_hook_path}"},
+                        {"type": "command", "command": optional_hook_command(session_start_hook_path, "SessionStart"), "timeout": 8},
                     ],
                 },
             ],
             "UserPromptSubmit": [
-                {"hooks": [{"type": "command", "command": f"python3 {step_zero_hook_path}"}]},
-                {"hooks": [{"type": "command", "command": f"python3 {check_messages_hook_path}"}]},
+                {"hooks": [{"type": "command", "command": optional_hook_command(step_zero_hook_path, "UserPromptSubmit")}]},
             ],
             "PostToolUse": [
-                {"hooks": [
-                    {"type": "command", "command": f"python3 {heartbeat_hook_path}"},
-                    {"type": "command", "command": f"python3 {rotation_due_hook_path}"},
-                ]},
+                {
+                    "hooks": [
+                        {"type": "command", "command": optional_hook_command(heartbeat_hook_path, "PostToolUse")},
+                        {"type": "command", "command": optional_hook_command(rotation_due_hook_path, "PostToolUse")},
+                    ]
+                },
             ],
             "Stop": [
                 {
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"python3 {wake_hook_path}",
+                            "command": optional_hook_command(wake_hook_path, "Stop"),
                             # Matches wake_waiter.js's own required
                             # shape exactly -- without this the Stop
                             # hook applies Claude Code's short default
@@ -1267,6 +1420,83 @@ def _tmux_hook_settings_json(
         },
     }
     return json.dumps(settings)
+
+
+def _launch_tmux_new_session(tmux_bin: str, run_fn: Any, new_session_cmd: list[str]) -> None:
+    """Run one native launch, using stdin only for a definite argv size refusal."""
+    from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
+
+    try:
+        result = run_fn(
+            new_session_cmd,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0 and result.stderr.strip() == "command too long":
+            # The client refused before dispatch. Native stdin transport
+            # avoids its argv envelope limit without a transient script.
+            logger.warning("tmux new-session exceeded the command envelope; retrying the same argv via source-file stdin")
+            result = run_fn(
+                [tmux_bin, "start-server", ";", "source-file", "-"],
+                input=shlex.join(new_session_cmd[1:]) + "\n",
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HostCannotSpawnError(f"tmux new-session raised: {exc}") from exc
+    if result.returncode != 0:
+        raise HostCannotSpawnError(
+            f"tmux new-session failed (exit {result.returncode}): {result.stderr.strip()}",
+        )
+
+
+def _accept_bypass_permissions_prompt(
+    tmux_bin: str,
+    run_fn: Any,
+    session_name: str,
+    await_condition: Callable[[str, Callable[[str], bool]], bool],
+    capture_text: Callable[[str], str],
+    kill_session: Callable[[str], None],
+    confirm_timeout_seconds: float,
+) -> None:
+    """Accept Claude Code's "Bypass Permissions mode" dialogue, which a
+    ``--permission-mode bypassPermissions`` lane shows before the
+    development-channels prompt and whose default selection is "No, exit"
+    (Operator evidence iss_a5e6b07d, 2026-10-30 16:25:35Z pane capture).
+    The platform chose bypass mode for this lane at spawn time; this step
+    only answers the dialogue that mode produces. It runs whenever the argv
+    carries bypass mode, with or without the development-channels flag
+    (review uev_6bf315b2: the third-party-provider argv omits that flag but
+    keeps bypass mode). Bounded wait for the first startup dialogue: the
+    bypass dialogue is accepted (Down to "Yes, I accept", Enter) and must
+    clear within the confirm timeout or the half-alive session is killed;
+    the development-channels dialogue appearing instead, or no dialogue at
+    all within the timeout (a config that already accepted), means there is
+    nothing to accept and the pane is left untouched for the next stage."""
+    from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
+
+    if not await_condition(session_name, _pane_shows_startup_prompt):
+        return
+    if not _pane_shows_bypass_prompt(capture_text(session_name)):
+        return
+    for key in ("Down", "Enter"):
+        run_fn(
+            [tmux_bin, "send-keys", "-t", session_name, key],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    cleared = await_condition(
+        session_name,
+        lambda text: not _pane_shows_bypass_prompt(text),
+    )
+    if not cleared:
+        kill_session(session_name)
+        raise HostCannotSpawnError(
+            f"tmux pane {session_name!r} still showed the Bypass Permissions dialogue {confirm_timeout_seconds}s after Down and Enter were sent -- killed the half-alive session instead of returning one stuck at the prompt.",
+        )
 
 
 class TmuxHostDriver:
@@ -1300,13 +1530,16 @@ class TmuxHostDriver:
 
         self._tmux_bin = _resolve_bin(tmux_bin, "tmux", "tmux")
         self._claude_bin = _resolve_bin(
-            claude_bin, "claude", str(Path.home() / ".local" / "bin" / "claude"),
+            claude_bin,
+            "claude",
+            str(Path.home() / ".local" / "bin" / "claude"),
         )
         self._solet_name = _resolve_str(solet_name, "SOLET_NAME")
         # R11 (2026-08-17): resolve the wake CLI per read, never once here.
         # See the `_solet_bin` property and WakeCliResolver's own note.
         self._cli_resolver = WakeCliResolver(
-            solet_bin, python_executable=python_executable,
+            solet_bin,
+            python_executable=python_executable,
         )
         self._permission_mode = _resolve_str(permission_mode, _ENV_PERMISSION_MODE)
         # fleet-watch-transport-migration phase 2 slice 1 (2026-08-06):
@@ -1317,9 +1550,7 @@ class TmuxHostDriver:
         # rather than refusing to spawn.
         self._transport = transport if transport is not None else ""
         self._cwd = cwd if cwd is not None else _resolve_default_cwd()
-        self._mcp_config_path = (
-            mcp_config_path if mcp_config_path is not None else (self._cwd / ".mcp.json")
-        )
+        self._mcp_config_path = mcp_config_path if mcp_config_path is not None else (self._cwd / ".mcp.json")
         self._run_fn = run_fn
         self._grace_seconds = grace_seconds
         self._pane_width = pane_width
@@ -1355,19 +1586,18 @@ class TmuxHostDriver:
         """Split out of :meth:`verify_config` to keep it under the radon cc
         threshold — the tmux-specific half (binary presence + version)."""
         remedies: list[str] = []
-        resolved_tmux = shutil.which(self._tmux_bin) or (
-            self._tmux_bin if os.path.isabs(self._tmux_bin) else None
-        )
+        resolved_tmux = shutil.which(self._tmux_bin) or (self._tmux_bin if os.path.isabs(self._tmux_bin) else None)
         if not (resolved_tmux and os.access(resolved_tmux, os.X_OK)):
             remedies.append(
-                f"no executable 'tmux' binary found (checked PATH, then "
-                f"{self._tmux_bin!r}) — install tmux (e.g. 'brew install tmux') "
-                "or pass tmux_bin explicitly.",
+                f"no executable 'tmux' binary found (checked PATH, then {self._tmux_bin!r}) — install tmux (e.g. 'brew install tmux') or pass tmux_bin explicitly.",
             )
             return remedies
         try:
             version_check = self._run_fn(
-                [resolved_tmux, "-V"], capture_output=True, text=True, timeout=5,
+                [resolved_tmux, "-V"],
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             version_stdout = version_check.stdout or ""
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -1376,15 +1606,15 @@ class TmuxHostDriver:
         parsed = _parse_tmux_version(version_stdout)
         if parsed is None or parsed < _MIN_TMUX_VERSION:
             remedies.append(
-                f"tmux version {version_stdout.strip()!r} is older than "
-                f"{_MIN_TMUX_VERSION[0]}.{_MIN_TMUX_VERSION[1]} (or unparseable/unreachable) — "
-                "'allow-passthrough' and per-session '-e' env injection both "
-                "require it; upgrade tmux.",
+                f"tmux version {version_stdout.strip()!r} is older than {_MIN_TMUX_VERSION[0]}.{_MIN_TMUX_VERSION[1]} (or unparseable/unreachable) — 'allow-passthrough' and per-session '-e' env injection both require it; upgrade tmux.",
             )
         return remedies
 
     def verify_config(
-        self, *, permission_mode: str | None = None, transport: str | None = None,
+        self,
+        *,
+        permission_mode: str | None = None,
+        transport: str | None = None,
         degraded_hooks_acknowledged: bool = False,
         managed_settings_paths: tuple[Path, ...] | None = None,
     ) -> list[str]:
@@ -1415,10 +1645,12 @@ class TmuxHostDriver:
         return [
             *self._tmux_binary_remedies(),
             *_claude_launch_remedies(
-                claude_bin=self._claude_bin, solet_name=self._solet_name,
+                claude_bin=self._claude_bin,
+                solet_name=self._solet_name,
                 permission_mode=permission_mode,
                 driver_permission_mode=self._permission_mode,
-                transport=transport, driver_transport=self._transport,
+                transport=transport,
+                driver_transport=self._transport,
                 mcp_config_path=self._mcp_config_path,
             ),
             *_managed_policy_remedies(
@@ -1431,44 +1663,25 @@ class TmuxHostDriver:
         return _tmux_capability_report()
 
     def _spawn_command(
-        self, spec: Mapping[str, object], *, transport: str, label: str,
+        self,
+        spec: Mapping[str, object],
+        *,
+        transport: str,
+        label: str,
         resolved_hooks: Mapping[str, Path] | None = None,
     ) -> list[str]:
         permission_mode = str(spec.get("permission_mode") or "") or self._permission_mode
-        # R4 Package C (2026-08-10): resolved via the two-rung ladder
-        # (origin checkout, then the plugin's shipped fallback copy) --
-        # see headless_adapter._resolve_worker_hook_paths's own docstring.
-        # Raises WorkerHookResolutionError, converted to
-        # HostCannotSpawnError by the caller (spawn()), if any file
-        # resolves at neither rung -- never silently emits settings
-        # pointing at a missing path.
+        # Missing hooks fail resolution before any spawn settings are emitted.
         resolved_hooks = resolved_hooks or _resolve_worker_hook_paths(self._cwd)
-        allowlist_hook_path = resolved_hooks["headless_tool_allowlist_gate.py"]
-        capture_hook_path = resolved_hooks["capture_session_mapping.py"]
-        heartbeat_hook_path = resolved_hooks["heartbeat_report_alive.py"]
-        rotation_due_hook_path = resolved_hooks["rotation_due_watch.py"]
-        # Deaf-wake fix (2026-08-08): project-vendored Python ports of
-        # coordination-hooks@<solet>'s four JS hooks, wired here (the adapter's
-        # own generated --settings blob) rather than the shared project-
-        # scope .claude/settings.json, specifically so this does not
-        # double-fire the wake for the seat -- the seat already gets these
-        # via the user-scope plugin, which --setting-sources project
-        # excludes for a spawned worker in the first place (that exclusion
-        # is the root cause this fix addresses; see
-        # workbench/2026-08-08_deaf_wake_diagnosis_findings_rotation-impl.md).
-        wake_hook_path = resolved_hooks["wake_waiter.py"]
-        check_messages_hook_path = resolved_hooks["check_messages_reminder.py"]
-        step_zero_hook_path = resolved_hooks["step_zero_reminder.py"]
-        role_binding_hook_path = resolved_hooks["role_binding_reminder.py"]
+        # Resolve the same shipped hooks used by the headless host.
         settings_json = _tmux_hook_settings_json(
-            allowlist_hook_path=allowlist_hook_path,
-            capture_hook_path=capture_hook_path,
-            heartbeat_hook_path=heartbeat_hook_path,
-            rotation_due_hook_path=rotation_due_hook_path,
-            wake_hook_path=wake_hook_path,
-            check_messages_hook_path=check_messages_hook_path,
-            step_zero_hook_path=step_zero_hook_path,
-            role_binding_hook_path=role_binding_hook_path,
+            allowlist_hook_path=resolved_hooks["headless_tool_allowlist_gate.py"],
+            capture_hook_path=resolved_hooks["capture_session_mapping.py"],
+            heartbeat_hook_path=resolved_hooks["heartbeat_report_alive.py"],
+            rotation_due_hook_path=resolved_hooks["rotation_due_watch.py"],
+            wake_hook_path=resolved_hooks["wake_waiter.py"],
+            session_start_hook_path=resolved_hooks["session_start_context.py"],
+            step_zero_hook_path=resolved_hooks["step_zero_reminder.py"],
             allow_askuserquestion=bool(spec.get("allow_askuserquestion")),
         )
         cmd = [
@@ -1489,11 +1702,16 @@ class TmuxHostDriver:
             # "nameSource" field, while every tmux worker without the flag reads
             # "nameSource":"derived" with an auto-name. --name populates the
             # guard's file in interactive mode.
-            "--name", label,
-            "--remote-control", label,
-            "--permission-mode", permission_mode,
-            "--setting-sources", "project",
-            "--settings", settings_json,
+            "--name",
+            label,
+            "--remote-control",
+            label,
+            "--permission-mode",
+            permission_mode,
+            "--setting-sources",
+            "project",
+            "--settings",
+            settings_json,
         ]
         # fleet-watch-transport-migration phase 2 slice 1 (2026-08-06):
         # mirrors headless_adapter.py's own posture exactly -- "mcp" gets
@@ -1549,12 +1767,12 @@ class TmuxHostDriver:
         agent_instance_id = str(spec.get("agent_instance_id") or "")
         if not agent_instance_id:
             raise HostCannotSpawnError(
-                "spawn spec is missing agent_instance_id — the tmux driver "
-                "cannot register the spawned session under the ledger's "
-                "identity without it.",
+                "spawn spec is missing agent_instance_id — the tmux driver cannot register the spawned session under the ledger's identity without it.",
             )
         _announce_managed_policy(
-            degraded_ok, agent_instance_id=agent_instance_id, host="tmux",
+            degraded_ok,
+            agent_instance_id=agent_instance_id,
+            host="tmux",
             denied_tools=_tmux_denied_tools_for(spec),
         )
         # W6 (#13 §44.3): shared with the headless driver so the two can never
@@ -1584,55 +1802,66 @@ class TmuxHostDriver:
             resolved_hooks = _resolve_worker_hook_paths(self._cwd)
         except WorkerHookResolutionError as exc:
             raise HostCannotSpawnError(str(exc)) from exc
-        env_pairs = _env_pairs(
-            agent_instance_id=agent_instance_id, agent_session_id=agent_session_id,
-            label=label, solet_name=self._solet_name, solet_bin=self._solet_bin,
-            allowed_tools=spec.get("allowed_tools") or (), transport=transport,
-            context_gauge_reporter_path=resolved_hooks["rotation_due_watch.py"],
-            cwd=cwd)
+        env_pairs = _env_pairs(agent_instance_id=agent_instance_id, agent_session_id=agent_session_id, label=label, solet_name=self._solet_name, solet_bin=self._solet_bin, allowed_tools=spec.get("allowed_tools") or (), transport=transport, context_gauge_reporter_path=resolved_hooks["rotation_due_watch.py"], cwd=cwd)
+        env_pairs = env_pairs + _provider_env_pairs(spec, env_pairs)
         try:
             claude_cmd = self._spawn_command(
-                spec, transport=transport, label=label, resolved_hooks=resolved_hooks,
+                spec,
+                transport=transport,
+                label=label,
+                resolved_hooks=resolved_hooks,
             )
         except WorkerHookResolutionError as exc:
             raise HostCannotSpawnError(str(exc)) from exc
-        pane_command = _pane_command(
-            claude_cmd, label=label, solet_bin=self._solet_bin, transport=transport)
+        pane_command = _pane_command(claude_cmd, label=label, solet_bin=self._solet_bin, transport=transport)
         new_session_cmd = [
-            self._tmux_bin, "new-session", "-d", "-s", session_name,
-            "-x", str(self._pane_width), "-y", str(self._pane_height),
+            self._tmux_bin,
+            "new-session",
+            "-d",
+            "-s",
+            session_name,
+            "-x",
+            str(self._pane_width),
+            "-y",
+            str(self._pane_height),
             *env_pairs,
-            "-c", str(cwd),
-            "sh", "-c", pane_command,
+            "-c",
+            str(cwd),
+            "sh",
+            "-c",
+            pane_command,
         ]
         self._launch_new_session(new_session_cmd)
         _configure_server_options(self._tmux_bin, session_name, self._run_fn)
+        if _needs_bypass_acceptance(claude_cmd):
+            _accept_bypass_permissions_prompt(
+                self._tmux_bin,
+                self._run_fn,
+                session_name,
+                self._await_pane_condition,
+                self._capture_pane_text,
+                self._kill_session,
+                self._confirm_timeout_seconds,
+            )
         if _needs_dev_channels_confirmation(claude_cmd):
             self._confirm_dev_channels_prompt(session_name)
         return session_name
 
     def _launch_new_session(self, new_session_cmd: list[str]) -> None:
-        """Split out of :meth:`spawn` to keep it under the radon cc
-        threshold -- the ``tmux new-session`` subprocess call and its two
-        failure shapes (raised exception, non-zero exit)."""
-        from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
+        """Keep the driver delegate small; the launch boundary is module-level."""
+        _launch_tmux_new_session(self._tmux_bin, self._run_fn, new_session_cmd)
 
-        try:
-            result = self._run_fn(
-                new_session_cmd, capture_output=True, text=True, timeout=15,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise HostCannotSpawnError(f"tmux new-session raised: {exc}") from exc
-        if result.returncode != 0:
-            raise HostCannotSpawnError(
-                f"tmux new-session failed (exit {result.returncode}): {result.stderr.strip()}",
-            )
+    def capture_pane_text(self, host_ref: str) -> str:
+        """Read the visible pane; empty means unavailable, never known clear."""
+        return self._capture_pane_text(host_ref)
 
     def _capture_pane_text(self, session_name: str) -> str:
         try:
             result = self._run_fn(
                 [self._tmux_bin, "capture-pane", "-t", session_name, "-p"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
         except (OSError, subprocess.TimeoutExpired):
             return ""
@@ -1665,34 +1894,31 @@ class TmuxHostDriver:
         if not self._await_pane_condition(session_name, _pane_shows_dev_channels_prompt):
             self._kill_session(session_name)
             raise HostCannotSpawnError(
-                f"tmux pane {session_name!r} never showed the "
-                "--dangerously-load-development-channels confirmation prompt "
-                f"within {self._confirm_timeout_seconds}s -- killed the "
-                "half-alive session instead of returning one that may hang "
-                "forever.",
+                f"tmux pane {session_name!r} never showed the --dangerously-load-development-channels confirmation prompt within {self._confirm_timeout_seconds}s -- killed the half-alive session instead of returning one that may hang forever.",
             )
         self._run_fn(
             [self._tmux_bin, "send-keys", "-t", session_name, "Enter"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         cleared = self._await_pane_condition(
-            session_name, lambda text: not _pane_shows_dev_channels_prompt(text),
+            session_name,
+            lambda text: not _pane_shows_dev_channels_prompt(text),
         )
         if not cleared:
             self._kill_session(session_name)
             raise HostCannotSpawnError(
-                f"tmux pane {session_name!r} still showed the "
-                "development-channels confirmation prompt "
-                f"{self._confirm_timeout_seconds}s after Enter was sent -- "
-                "killed the half-alive session instead of returning one "
-                "stuck at the prompt.",
+                f"tmux pane {session_name!r} still showed the development-channels confirmation prompt {self._confirm_timeout_seconds}s after Enter was sent -- killed the half-alive session instead of returning one stuck at the prompt.",
             )
 
     def alive(self, host_ref: str) -> bool:
         try:
             result = self._run_fn(
                 [self._tmux_bin, "has-session", "-t", host_ref],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
         except (OSError, subprocess.TimeoutExpired):
             return False
@@ -1702,7 +1928,9 @@ class TmuxHostDriver:
         try:
             result = self._run_fn(
                 [self._tmux_bin, "list-panes", "-t", host_ref, "-F", "#{pane_pid}"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
@@ -1722,7 +1950,9 @@ class TmuxHostDriver:
         error, matching ``terminate_session``'s own idempotent contract."""
         with_suppress = self._run_fn(
             [self._tmux_bin, "kill-session", "-t", host_ref],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         del with_suppress  # non-zero here just means "already gone" — not fatal
 
@@ -1753,11 +1983,13 @@ class TmuxHostDriver:
         # found nothing (a session with no pane, or a race).
         self._kill_session(host_ref)
 
-    def driver_channel(self, host_ref: str) -> _TmuxSendKeysDriverChannel | None:
+    def driver_channel(self, host_ref: str) -> _BoundarySendKeysDriverChannel | None:
         if not self.alive(host_ref):
             return None
-        return _TmuxSendKeysDriverChannel(
-            tmux_bin=self._tmux_bin, session=host_ref, run_fn=self._run_fn,
+        return _BoundarySendKeysDriverChannel(
+            tmux_bin=self._tmux_bin,
+            session=host_ref,
+            run_fn=self._run_fn,
         )
 
 

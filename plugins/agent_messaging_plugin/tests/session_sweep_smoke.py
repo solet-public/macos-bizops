@@ -20,12 +20,13 @@ Run:
 
 from __future__ import annotations
 
-import hashlib
 import sys
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from unittest import TestCase
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
 
 from _real_state_fake import CapEnforcingState, RealShapeState  # noqa: E402
 from _recorded_lane_worktree_fixture import RecordedLaneWorktreeFixture  # noqa: E402
+from _register_unit_double import fixture_assignment  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
 from ananta.services.store import Store, open_store  # noqa: E402
 
@@ -51,13 +53,16 @@ from agent_messaging_plugin.managed_dispatch import (  # noqa: E402
     DISPATCH_WORKER_LOST,
     DispatchSpec,
     managed_dispatch_status,
-    prepare_managed_dispatch,
     read_managed_dispatch,
     record_first_turn_evidence,
     supervise_managed_dispatches,
 )
+from agent_messaging_plugin.managed_dispatch import (  # noqa: E402
+    prepare_managed_dispatch as _prepare_native_dispatch,
+)
 from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
 from agent_messaging_plugin.peer_registry import PeerRegistry  # noqa: E402
+from agent_messaging_plugin.role_binding_store import HolderClaim, claim_role_binding_v4  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
     CONDITION_DEADLINE,
     CONDITION_LANE_CLOSED,
@@ -128,6 +133,7 @@ def _past_grace() -> datetime:
     """
     return datetime.now(UTC) + timedelta(seconds=GAUGE_COVERAGE_GRACE_S + 60)
 
+
 _passed = 0
 _failed: list[str] = []
 
@@ -171,10 +177,19 @@ class _LivenessDriver:
         return None
 
 
+def prepare_managed_dispatch(state: Any, spec: DispatchSpec, **kwargs: Any) -> dict[str, Any]:
+    from _register_unit_double import RegisterUnitDouble
+    from managed_dispatch_smoke import _seed_binding
+
+    from agent_messaging_plugin.managed_dispatch import DispatchActor
+
+    register = RegisterUnitDouble()
+    register.add_unit(spec.unit_id)
+    _seed_binding(state, role=spec.spawned_by_role, instance=spec.spawned_by_instance_id, session="ases-steward")
+    return _prepare_native_dispatch(state, spec, register=register, actor=DispatchActor(spec.spawned_by_instance_id, "ases-steward", "live_peer_binding"), **kwargs)
+
+
 def _dispatch_spec(tmp: Path, dispatch_id: str, *, uptake_seconds: int = 60) -> DispatchSpec:
-    brief = tmp / "brief.md"
-    if not brief.exists():
-        brief.write_text("supervisor fixture\n", encoding="utf-8")
     return DispatchSpec(
         dispatch_id=dispatch_id,
         lane_id=dispatch_id,
@@ -182,8 +197,9 @@ def _dispatch_spec(tmp: Path, dispatch_id: str, *, uptake_seconds: int = 60) -> 
         role_class="project",
         work_class="production_mutation",
         budget_line="managed-dispatch-smoke",
-        brief_ref=str(brief),
-        brief_sha256=hashlib.sha256(brief.read_bytes()).hexdigest(),
+        unit_id=f"unt_{dispatch_id}",
+        dispatch_kind="infrastructure",
+        repository_root=str(REPO_ROOT),
         expected_path=str(tmp / f"{dispatch_id}.md"),
         completion_contract={
             "evidence_obligations": [
@@ -199,7 +215,6 @@ def _dispatch_spec(tmp: Path, dispatch_id: str, *, uptake_seconds: int = 60) -> 
         visibility="headless",
         local_name="Managed-Worker",
         report_by_seconds=900,
-
         allowed_tools=("Read",),
         permission_mode="bypassPermissions",
         transport="mcp",
@@ -211,7 +226,6 @@ def _dispatch_spec(tmp: Path, dispatch_id: str, *, uptake_seconds: int = 60) -> 
         uptake_due_at=(T0 + timedelta(seconds=uptake_seconds)).isoformat(),
         report_by=(T0 + timedelta(minutes=15)).isoformat(),
         watchdog_due_at=(T0 + timedelta(minutes=3)).isoformat(),
-
     )
 
 
@@ -228,7 +242,7 @@ def _linked_live_attempt(
         ManagedSessionSpec(
             agent_instance_id=agent_instance_id,
             lane_id=dispatch_id,
-            brief_ref=str(tmp / "brief.md"),
+            assignment=fixture_assignment(),
             work_class="production_mutation",
             budget_line="managed-dispatch-smoke",
             host=_TEST_MANAGED_HOST,
@@ -244,18 +258,7 @@ def _linked_live_attempt(
         to_state=LIFECYCLE_LIVE,
         directed_by="fixture",
     )
-    record_first_turn_evidence(
-        state,
-        dispatch_id=dispatch_id,
-        agent_instance_id=agent_instance_id,
-        source="charter",
-        delivered=True,
-        error="",
-        host=_TEST_MANAGED_HOST,
-        host_ref="managed-host-ref",
-        agent_runtime="codex",
-        observed_at=T0 + timedelta(seconds=1),
-    )
+    record_first_turn_evidence(state, dispatch_id=dispatch_id, agent_instance_id=agent_instance_id, source="charter", delivered=True, error="", host=_TEST_MANAGED_HOST, host_ref="managed-host-ref", agent_runtime="codex", observed_at=T0 + timedelta(seconds=1), register=None, actor=None)
 
 
 def test_managed_tmux_death_converges_and_deduplicates() -> None:
@@ -280,18 +283,8 @@ def test_managed_tmux_death_converges_and_deduplicates() -> None:
             agent_instance_id="agi-steward",
         )
         try:
-            first = sweep_managed_dispatches(
-                state,
-                peer_registry=registry,
-                bridge_manager=manager,
-                now=T0 + timedelta(seconds=2),
-            )
-            second = sweep_managed_dispatches(
-                state,
-                peer_registry=registry,
-                bridge_manager=manager,
-                now=T0 + timedelta(seconds=3),
-            )
+            first = sweep_managed_dispatches(state, peer_registry=registry, bridge_manager=manager, now=T0 + timedelta(seconds=2), register=None)
+            second = sweep_managed_dispatches(state, peer_registry=registry, bridge_manager=manager, now=T0 + timedelta(seconds=3), register=None)
         finally:
             if prior is None:
                 session_hosts._REGISTRY.pop(key, None)  # noqa: SLF001
@@ -330,7 +323,7 @@ def test_managed_probe_fault_is_unknown() -> None:
         driver = _LivenessDriver(RuntimeError("probe fault"))
         session_hosts._REGISTRY[key] = driver  # noqa: SLF001
         try:
-            result = sweep_managed_dispatches(state, now=T0 + timedelta(seconds=2))
+            result = sweep_managed_dispatches(state, now=T0 + timedelta(seconds=2), register=None)
             unknown_projection = read_managed_dispatch(state, "mdp-unknown")
             status = managed_dispatch_status(
                 state,
@@ -341,10 +334,10 @@ def test_managed_probe_fault_is_unknown() -> None:
                 state,
                 now=T0 + timedelta(seconds=33),
             )
-            repeated = sweep_managed_dispatches(state, now=T0 + timedelta(seconds=40))
-            escalated = sweep_managed_dispatches(state, now=T0 + timedelta(seconds=123))
+            repeated = sweep_managed_dispatches(state, now=T0 + timedelta(seconds=40), register=None)
+            escalated = sweep_managed_dispatches(state, now=T0 + timedelta(seconds=123), register=None)
             driver.outcome = True
-            recovered = sweep_managed_dispatches(state, now=T0 + timedelta(seconds=124))
+            recovered = sweep_managed_dispatches(state, now=T0 + timedelta(seconds=124), register=None)
         finally:
             if prior is None:
                 session_hosts._REGISTRY.pop(key, None)  # noqa: SLF001
@@ -355,28 +348,20 @@ def test_managed_probe_fault_is_unknown() -> None:
         _check(row["lifecycle_state"] == LIFECYCLE_LIVE, "05 unknown does not terminate live row")
         _check(status["host_liveness"] == "unknown", "05 aggregate status is explicitly unknown")
         _check(
-            bool(unknown_projection.get("next_liveness_probe_at"))
-            and bool(unknown_projection.get("liveness_escalation_due_at")),
+            bool(unknown_projection.get("next_liveness_probe_at")) and bool(unknown_projection.get("liveness_escalation_due_at")),
             "05 unknown liveness persists a bounded re-probe obligation",
         )
         _check(
-            [item["condition"] for item in reprobe["conditions"]]
-            == ["liveness_reprobe_due"],
+            [item["condition"] for item in reprobe["conditions"]] == ["liveness_reprobe_due"],
             "05 elapsed re-probe deadline surfaces the exact action",
         )
         _check(repeated["unknown"] == 1, "05 repeated probe fault remains unknown")
         _check(
-            any(
-                item["condition"] == "liveness_unknown_escalation"
-                for item in escalated["conditions"]
-            ),
+            any(item["condition"] == "liveness_unknown_escalation" for item in escalated["conditions"]),
             "05 repeated faults reach bounded coordinator escalation",
         )
         _check(
-            recovered["alive"] == 1
-            and not read_managed_dispatch(state, "mdp-unknown").get(
-                "next_liveness_probe_at"
-            ),
+            recovered["alive"] == 1 and not read_managed_dispatch(state, "mdp-unknown").get("next_liveness_probe_at"),
             "05 a successful re-probe clears unknown obligations",
         )
 
@@ -392,14 +377,16 @@ def test_managed_dispatch_sweep_is_uncapped() -> None:
                 _dispatch_spec(tmp, f"mdp-page-{index}", uptake_seconds=10),
                 now=T0,
             )
-        result = sweep_managed_dispatches(state, now=T0 + timedelta(seconds=20))
+        result = sweep_managed_dispatches(state, now=T0 + timedelta(seconds=20), register=None)
         _check(result["dispatches_evaluated"] == 125, "14 all 125 dispatches are evaluated")
         _check(result["notices_emitted"] == 125, "14 every owed dispatch gets one notice")
 
 
 def _peer_registry() -> PeerRegistry:
     store: Store = open_store(
-        get_peer_binding_schema(), namespace=PEER_BINDING_NAMESPACE, backend="in_memory",
+        get_peer_binding_schema(),
+        namespace=PEER_BINDING_NAMESPACE,
+        backend="in_memory",
     )
     return PeerRegistry(bindings_store=store)
 
@@ -425,8 +412,12 @@ def _spawn_live(
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id=agent_instance_id, lane_id="lane-x", brief_ref="",
-            work_class=WORK_CLASS_READ_ONLY, budget_line="b1", host="operator",
+            agent_instance_id=agent_instance_id,
+            lane_id="lane-x",
+            assignment=fixture_assignment(),
+            work_class=WORK_CLASS_READ_ONLY,
+            budget_line="b1",
+            host="operator",
             report_by_seconds=report_by_seconds,
             spawned_by_instance_id=spawned_by_instance_id,
         ),
@@ -439,13 +430,19 @@ def _spawn_live(
         )
     if lifecycle_state != LIFECYCLE_SPAWNING:
         transition_lifecycle_state(
-            state, agent_instance_id=agent_instance_id, from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+            state,
+            agent_instance_id=agent_instance_id,
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="operator:none",
         )
         if lifecycle_state == LIFECYCLE_IDLE:
             transition_lifecycle_state(
-                state, agent_instance_id=agent_instance_id, from_state=LIFECYCLE_LIVE,
-                to_state=LIFECYCLE_IDLE, directed_by="operator:none",
+                state,
+                agent_instance_id=agent_instance_id,
+                from_state=LIFECYCLE_LIVE,
+                to_state=LIFECYCLE_IDLE,
+                directed_by="operator:none",
             )
 
 
@@ -469,18 +466,21 @@ def test_overdue_marks_past_deadline_live_and_idle() -> None:
     state = _state()
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-live-late", lifecycle_state=LIFECYCLE_LIVE,
+        state,
+        agent_instance_id="agi-live-late",
+        lifecycle_state=LIFECYCLE_LIVE,
         report_by_override=past,
     )
     _spawn_live(
-        state, agent_instance_id="agi-idle-late", lifecycle_state=LIFECYCLE_IDLE,
+        state,
+        agent_instance_id="agi-idle-late",
+        lifecycle_state=LIFECYCLE_IDLE,
         report_by_override=past,
     )
     marked = sweep_overdue_sessions(state, now=T0)
     _check(marked == 2, "both a late LIVE row and a late IDLE row are marked overdue")
     _check(
-        read_managed_session(state, "agi-live-late")["lifecycle_state"] == LIFECYCLE_OVERDUE
-        and read_managed_session(state, "agi-idle-late")["lifecycle_state"] == LIFECYCLE_OVERDUE,
+        read_managed_session(state, "agi-live-late")["lifecycle_state"] == LIFECYCLE_OVERDUE and read_managed_session(state, "agi-idle-late")["lifecycle_state"] == LIFECYCLE_OVERDUE,
         "both rows now read 'overdue'",
     )
 
@@ -489,7 +489,9 @@ def test_overdue_skips_future_deadline() -> None:
     state = _state()
     future = (T0 + timedelta(seconds=300)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-not-yet", lifecycle_state=LIFECYCLE_LIVE,
+        state,
+        agent_instance_id="agi-not-yet",
+        lifecycle_state=LIFECYCLE_LIVE,
         report_by_override=future,
     )
     marked = sweep_overdue_sessions(state, now=T0)
@@ -497,7 +499,10 @@ def test_overdue_skips_future_deadline() -> None:
 
 
 def _register_live_binding(
-    reg: PeerRegistry, mgr: BridgeSessionManager, *, agent_instance_id: str,
+    reg: PeerRegistry,
+    mgr: BridgeSessionManager,
+    *,
+    agent_instance_id: str,
     agent_session_id: str = "",
 ) -> str:
     """Same pattern ``test_deadline_dependency_fires_and_delivers`` uses —
@@ -510,8 +515,11 @@ def _register_live_binding(
     bridge_id = mgr.open(solet_name="", parent_pid=1).bridge_id
     reg.register(
         BridgeBinding(
-            bridge_id=bridge_id, agent_id="claude_code", agent_instance_id=agent_instance_id,
-            session_label=agent_instance_id, parent_pid=1,
+            bridge_id=bridge_id,
+            agent_id="claude_code",
+            agent_instance_id=agent_instance_id,
+            session_label=agent_instance_id,
+            parent_pid=1,
             agent_session_id=agent_session_id,
         ),
     )
@@ -539,15 +547,22 @@ def _register_watcher_held_steward(
     Returns ``(watch_instance_id, steward_bridge_id)``.
     """
     _spawn_live(
-        state, agent_instance_id=ledger_instance_id, lifecycle_state=LIFECYCLE_SPAWNING,
+        state,
+        agent_instance_id=ledger_instance_id,
+        lifecycle_state=LIFECYCLE_SPAWNING,
     )
     backfill_registration(
-        state, agent_instance_id=ledger_instance_id, agent_id="claude_code",
+        state,
+        agent_instance_id=ledger_instance_id,
+        agent_id="claude_code",
         agent_session_id=agent_session_id,
     )
     watch_instance_id = f"agi-watch-{watch_instance_digest(agent_session_id)}"
     bridge_id = _register_live_binding(
-        reg, mgr, agent_instance_id=watch_instance_id, agent_session_id=agent_session_id,
+        reg,
+        mgr,
+        agent_instance_id=watch_instance_id,
+        agent_session_id=agent_session_id,
     )
     return watch_instance_id, bridge_id
 
@@ -572,8 +587,11 @@ def test_overdue_notifies_steward() -> None:
     steward_bridge_id = _register_live_binding(reg, mgr, agent_instance_id="agi-steward")
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-worker", lifecycle_state=LIFECYCLE_LIVE,
-        report_by_override=past, spawned_by_instance_id="agi-steward",
+        state,
+        agent_instance_id="agi-worker",
+        lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past,
+        spawned_by_instance_id="agi-steward",
     )
     marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
     _check(marked == 1, "the overdue row is still transitioned")
@@ -583,18 +601,13 @@ def test_overdue_notifies_steward() -> None:
     )
     _, events = mgr.get(steward_bridge_id).events_after(-1)
     _check(
-        len(events) == 1
-        and events[0].event_type == "session_overdue_notice"
-        and "agi-worker" in events[0].content,
-        f"RED-vs-GREEN: the steward's bridge gets exactly one delivered "
-        f"overdue-notice event naming the overdue session (got {events!r}) "
-        "-- before this fix, sweep_overdue_sessions sent NO notification "
-        "of any kind",
+        len(events) == 1 and events[0].event_type == "session_overdue_notice" and "agi-worker" in events[0].content,
+        f"RED-vs-GREEN: the steward's bridge gets exactly one delivered overdue-notice event naming the overdue session (got {events!r}) -- before this fix, sweep_overdue_sessions sent NO notification of any kind",
     )
 
 
 def test_overdue_fresh_heartbeat_is_quiet_but_the_row_stays_lapsed() -> None:
-    """iss_8126960b: a fresh passive heartbeat suppresses only the direct wake.
+    """iss_a07c576f: a fresh passive heartbeat suppresses only the direct wake.
 
     Killing mutation: route every lapsed row through ``EVENT_SESSION_OVERDUE_NOTICE``
     (the former implementation).  This emits the wake-class event and calls the
@@ -637,8 +650,35 @@ def test_overdue_fresh_heartbeat_is_quiet_but_the_row_stays_lapsed() -> None:
     _check(not drive_calls, "fresh-heartbeat quiet line never invokes the direct driver wake")
 
 
+def test_overdue_notice_markers_have_current_register_basis() -> None:
+    """Reject closed-row interim markers in source and its KB description."""
+    source = Path(overdue_notice.__file__).read_text(encoding="utf-8")
+    _check(
+        "iss_a07c576f-0820-4d53-a3bb-01780bc23e18" in source,
+        "overdue notice marker names its current tracking issue",
+    )
+    _check(
+        "iss_8126960b" not in source and "R3-U2" not in source,
+        "overdue notice marker has no closed-row dependency or stale successor claim",
+    )
+    kb_path = REPO_ROOT / "plugins/agent_messaging_plugin/knowledge_base/03_inter_agent_messaging.md"
+    kb_text = kb_path.read_text(encoding="utf-8")
+    routing_heading = kb_text.find("overdue-notice routing")
+    section_start = kb_text.rfind("### ", 0, routing_heading) if routing_heading >= 0 else -1
+    section_end = kb_text.find("\n\nThe role-addressed durability", section_start)
+    section = kb_text[section_start:section_end] if section_start >= 0 and section_end >= 0 else ""
+    _check(
+        "### Current overdue-notice routing" in section and "iss_a07c576f-0820-4d53-a3bb-01780bc23e18" in section and "180-second cadence" in section and "heartbeat never re-arms" in section,
+        "overdue notice KB section names the current basis and preserves liveness semantics",
+    )
+    _check(
+        "iss_8126960b" not in section and "R3-U2" not in section,
+        "overdue notice KB section has no closed-row authority or stale successor claim",
+    )
+
+
 def test_overdue_stale_heartbeat_keeps_the_full_alarm_and_wake() -> None:
-    """iss_8126960b: a stamp just beyond the 180s hook cadence stays urgent."""
+    """iss_a07c576f: a stamp just beyond the 180s hook cadence stays urgent."""
     state = _state()
     reg = _peer_registry()
     mgr = _bridge_manager()
@@ -692,24 +732,24 @@ def test_overdue_notifies_unmanaged_steward() -> None:
     # The steward is registered in the peer registry directly -- no
     # _spawn_live() call for it at all, so it has NO managed_session row.
     steward_bridge_id = _register_live_binding(
-        reg, mgr, agent_instance_id="agi-unmanaged-steward",
+        reg,
+        mgr,
+        agent_instance_id="agi-unmanaged-steward",
     )
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-worker-unmanaged-steward", lifecycle_state=LIFECYCLE_LIVE,
-        report_by_override=past, spawned_by_instance_id="agi-unmanaged-steward",
+        state,
+        agent_instance_id="agi-worker-unmanaged-steward",
+        lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past,
+        spawned_by_instance_id="agi-unmanaged-steward",
     )
     marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
     _check(marked == 1, "the overdue row is still transitioned")
     _, events = mgr.get(steward_bridge_id).events_after(-1)
     _check(
-        len(events) == 1
-        and events[0].event_type == "session_overdue_notice"
-        and "agi-worker-unmanaged-steward" in events[0].content,
-        f"RED-vs-GREEN: an UNMANAGED steward (no managed_session row of its "
-        f"own) still gets the overdue notice delivered (got {events!r}) -- "
-        "before this fix, resolution went only through the spawner's "
-        "managed_session row and silently found nothing to notify",
+        len(events) == 1 and events[0].event_type == "session_overdue_notice" and "agi-worker-unmanaged-steward" in events[0].content,
+        f"RED-vs-GREEN: an UNMANAGED steward (no managed_session row of its own) still gets the overdue notice delivered (got {events!r}) -- before this fix, resolution went only through the spawner's managed_session row and silently found nothing to notify",
     )
 
 
@@ -753,32 +793,30 @@ def test_overdue_notifies_a_watch_id_registered_steward() -> None:
     mgr = _bridge_manager()
     ledger_id = "agi-73ba7ce552285765b4716a1059326da0"
     watch_id, steward_bridge_id = _register_watcher_held_steward(
-        state, reg, mgr,
+        state,
+        reg,
+        mgr,
         ledger_instance_id=ledger_id,
         agent_session_id=f"ases-{ledger_id}",
     )
     _check(
         watch_id == "agi-watch-d09a711455d6e5eb7631c087",
-        f"the fixture's derived watch id reproduces the id observed live in the "
-        f"peer registry at 2026-08-19 19:48Z (got {watch_id!r})",
+        f"the fixture's derived watch id reproduces the id observed live in the peer registry at 2026-08-19 19:48Z (got {watch_id!r})",
     )
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-worker-watch-held-steward",
-        lifecycle_state=LIFECYCLE_LIVE, report_by_override=past,
+        state,
+        agent_instance_id="agi-worker-watch-held-steward",
+        lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past,
         spawned_by_instance_id=ledger_id,
     )
     marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
     _check(marked == 1, "the overdue row is still transitioned")
     _, events = mgr.get(steward_bridge_id).events_after(-1)
     _check(
-        len(events) == 1
-        and events[0].event_type == "session_overdue_notice"
-        and "agi-worker-watch-held-steward" in events[0].content,
-        f"RED-vs-GREEN (GAU-26 discriminator a): a WATCHER-HELD steward gets the "
-        f"overdue notice on its live bridge (got {events!r}) -- before this fix "
-        "both resolution legs keyed the ledger id against a registry holding only "
-        "its watch id, and the alarm was delivered nowhere",
+        len(events) == 1 and events[0].event_type == "session_overdue_notice" and "agi-worker-watch-held-steward" in events[0].content,
+        f"RED-vs-GREEN (GAU-26 discriminator a): a WATCHER-HELD steward gets the overdue notice on its live bridge (got {events!r}) -- before this fix both resolution legs keyed the ledger id against a registry holding only its watch id, and the alarm was delivered nowhere",
     )
 
 
@@ -805,22 +843,29 @@ def test_overdue_join_reads_the_session_id_and_never_derives_it() -> None:
     mgr = _bridge_manager()
     ledger_id = "agi-6be1383613fbd0ec10874571e89956e1"
     _, steward_bridge_id = _register_watcher_held_steward(
-        state, reg, mgr,
+        state,
+        reg,
+        mgr,
         ledger_instance_id=ledger_id,
         agent_session_id="ases-1786663089-37639-3748",
     )
     decoy_bridge_id = mgr.open(solet_name="", parent_pid=1).bridge_id
     reg.register(
         BridgeBinding(
-            bridge_id=decoy_bridge_id, agent_id="claude_code",
-            agent_instance_id="agi-decoy-somebody-else", session_label="decoy",
-            parent_pid=1, agent_session_id=f"ases-{ledger_id}",
+            bridge_id=decoy_bridge_id,
+            agent_id="claude_code",
+            agent_instance_id="agi-decoy-somebody-else",
+            session_label="decoy",
+            parent_pid=1,
+            agent_session_id=f"ases-{ledger_id}",
         ),
     )
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-worker-foreign-session-id",
-        lifecycle_state=LIFECYCLE_LIVE, report_by_override=past,
+        state,
+        agent_instance_id="agi-worker-foreign-session-id",
+        lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past,
         spawned_by_instance_id=ledger_id,
     )
     marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
@@ -828,17 +873,12 @@ def test_overdue_join_reads_the_session_id_and_never_derives_it() -> None:
     _, events = mgr.get(steward_bridge_id).events_after(-1)
     _check(
         len(events) == 1 and events[0].event_type == "session_overdue_notice",
-        f"RED-vs-GREEN (GAU-26 discriminator b): a steward whose agent_session_id "
-        f"is NOT derivable from its ledger id still resolves, because the key is "
-        f"read from its managed_session row (got {events!r})",
+        f"RED-vs-GREEN (GAU-26 discriminator b): a steward whose agent_session_id is NOT derivable from its ledger id still resolves, because the key is read from its managed_session row (got {events!r})",
     )
     _, decoy_events = mgr.get(decoy_bridge_id).events_after(-1)
     _check(
         decoy_events == [],
-        f"THE DERIVE-KILLER: the decoy bound to 'ases-' + the ledger id -- exactly "
-        f"what a reconstructing implementation builds -- receives NOTHING (got "
-        f"{decoy_events!r}). A deriving build misroutes this session's private "
-        "overdue notice to a different session, and fails here by name",
+        f"THE DERIVE-KILLER: the decoy bound to 'ases-' + the ledger id -- exactly what a reconstructing implementation builds -- receives NOTHING (got {decoy_events!r}). A deriving build misroutes this session's private overdue notice to a different session, and fails here by name",
     )
 
 
@@ -857,21 +897,28 @@ def test_overdue_bridge_bound_steward_keeps_its_direct_route() -> None:
     mgr = _bridge_manager()
     ledger_id = "agi-6be1383613fbd0ec10874571e89956e1"
     steward_bridge_id = _register_live_binding(
-        reg, mgr, agent_instance_id=ledger_id,
+        reg,
+        mgr,
+        agent_instance_id=ledger_id,
         agent_session_id="ases-1786663089-37639-3748",
     )
     decoy_bridge_id = mgr.open(solet_name="", parent_pid=1).bridge_id
     reg.register(
         BridgeBinding(
-            bridge_id=decoy_bridge_id, agent_id="claude_code",
-            agent_instance_id="agi-decoy-somebody-else", session_label="decoy",
-            parent_pid=1, agent_session_id=f"ases-{ledger_id}",
+            bridge_id=decoy_bridge_id,
+            agent_id="claude_code",
+            agent_instance_id="agi-decoy-somebody-else",
+            session_label="decoy",
+            parent_pid=1,
+            agent_session_id=f"ases-{ledger_id}",
         ),
     )
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-worker-bridge-bound-steward",
-        lifecycle_state=LIFECYCLE_LIVE, report_by_override=past,
+        state,
+        agent_instance_id="agi-worker-bridge-bound-steward",
+        lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past,
         spawned_by_instance_id=ledger_id,
     )
     sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
@@ -879,9 +926,7 @@ def test_overdue_bridge_bound_steward_keeps_its_direct_route() -> None:
     _, decoy_events = mgr.get(decoy_bridge_id).events_after(-1)
     _check(
         len(events) == 1 and decoy_events == [],
-        f"a bridge-bound steward with NO managed_session row still takes the "
-        f"direct route, and the derived-key decoy stays empty (steward "
-        f"{events!r}, decoy {decoy_events!r})",
+        f"a bridge-bound steward with NO managed_session row still takes the direct route, and the derived-key decoy stays empty (steward {events!r}, decoy {decoy_events!r})",
     )
 
 
@@ -897,23 +942,27 @@ def test_overdue_steward_row_without_a_session_id_is_best_effort() -> None:
     decoy_bridge_id = mgr.open(solet_name="", parent_pid=1).bridge_id
     reg.register(
         BridgeBinding(
-            bridge_id=decoy_bridge_id, agent_id="claude_code",
-            agent_instance_id="agi-decoy-somebody-else", session_label="decoy",
-            parent_pid=1, agent_session_id=f"ases-{ledger_id}",
+            bridge_id=decoy_bridge_id,
+            agent_id="claude_code",
+            agent_instance_id="agi-decoy-somebody-else",
+            session_label="decoy",
+            parent_pid=1,
+            agent_session_id=f"ases-{ledger_id}",
         ),
     )
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-worker-sessionless-steward",
-        lifecycle_state=LIFECYCLE_LIVE, report_by_override=past,
+        state,
+        agent_instance_id="agi-worker-sessionless-steward",
+        lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past,
         spawned_by_instance_id=ledger_id,
     )
     marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
     _, decoy_events = mgr.get(decoy_bridge_id).events_after(-1)
     _check(
         marked == 1 and decoy_events == [],
-        f"an empty agent_session_id is best-effort silence, not a rebuilt key: "
-        f"the row is still marked and the decoy gets nothing (got {decoy_events!r})",
+        f"an empty agent_session_id is best-effort silence, not a rebuilt key: the row is still marked and the decoy gets nothing (got {decoy_events!r})",
     )
 
 
@@ -929,39 +978,47 @@ def test_overdue_ambiguous_session_id_is_never_a_guessed_recipient() -> None:
     ledger_id = "agi-ambiguous-steward"
     session_id = f"ases-{ledger_id}"
     _, first_bridge_id = _register_watcher_held_steward(
-        state, reg, mgr, ledger_instance_id=ledger_id, agent_session_id=session_id,
+        state,
+        reg,
+        mgr,
+        ledger_instance_id=ledger_id,
+        agent_session_id=session_id,
     )
     twin_bridge_id = mgr.open(solet_name="", parent_pid=1).bridge_id
     reg.register(
         BridgeBinding(
-            bridge_id=twin_bridge_id, agent_id="claude_code",
-            agent_instance_id="agi-watch-twin-row", session_label="twin",
-            parent_pid=1, agent_session_id=session_id,
+            bridge_id=twin_bridge_id,
+            agent_id="claude_code",
+            agent_instance_id="agi-watch-twin-row",
+            session_label="twin",
+            parent_pid=1,
+            agent_session_id=session_id,
         ),
     )
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-worker-ambiguous-steward",
-        lifecycle_state=LIFECYCLE_LIVE, report_by_override=past,
+        state,
+        agent_instance_id="agi-worker-ambiguous-steward",
+        lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past,
         spawned_by_instance_id=ledger_id,
     )
     _spawn_live(
-        state, agent_instance_id="agi-worker-sharing-the-tick",
-        lifecycle_state=LIFECYCLE_LIVE, report_by_override=past,
+        state,
+        agent_instance_id="agi-worker-sharing-the-tick",
+        lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past,
     )
     marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
     _check(
         marked == 2,
-        f"an ambiguous session id does not raise out of the sweep -- both rows in "
-        f"the tick are still marked (got {marked})",
+        f"an ambiguous session id does not raise out of the sweep -- both rows in the tick are still marked (got {marked})",
     )
     _, first_events = mgr.get(first_bridge_id).events_after(-1)
     _, twin_events = mgr.get(twin_bridge_id).events_after(-1)
     _check(
         first_events == [] and twin_events == [],
-        f"and NEITHER candidate is picked: a private steward notice delivered to "
-        f"the wrong one of two sessions sharing a session id is the failure this "
-        f"whole defect is about (first {first_events!r}, twin {twin_events!r})",
+        f"and NEITHER candidate is picked: a private steward notice delivered to the wrong one of two sessions sharing a session id is the failure this whole defect is about (first {first_events!r}, twin {twin_events!r})",
     )
 
 
@@ -974,7 +1031,9 @@ def test_overdue_no_spawner_is_silent_noop() -> None:
     mgr = _bridge_manager()
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-orphan", lifecycle_state=LIFECYCLE_LIVE,
+        state,
+        agent_instance_id="agi-orphan",
+        lifecycle_state=LIFECYCLE_LIVE,
         report_by_override=past,
     )
     marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
@@ -994,8 +1053,11 @@ def test_overdue_unresolvable_spawner_is_best_effort() -> None:
     mgr = _bridge_manager()
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-worker-ghost", lifecycle_state=LIFECYCLE_LIVE,
-        report_by_override=past, spawned_by_instance_id="agi-steward-ghost",
+        state,
+        agent_instance_id="agi-worker-ghost",
+        lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past,
+        spawned_by_instance_id="agi-steward-ghost",
     )
     marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
     _check(marked == 1, "a row with an unresolvable spawner is still transitioned")
@@ -1008,8 +1070,11 @@ def test_overdue_marks_without_notify_when_registry_absent() -> None:
     state = _state()
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-early-boot", lifecycle_state=LIFECYCLE_LIVE,
-        report_by_override=past, spawned_by_instance_id="agi-steward-unreachable",
+        state,
+        agent_instance_id="agi-early-boot",
+        lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past,
+        spawned_by_instance_id="agi-steward-unreachable",
     )
     marked = sweep_overdue_sessions(state, now=T0)  # no peer_registry/bridge_manager at all
     _check(
@@ -1051,25 +1116,23 @@ def test_overdue_alarm_that_reached_nobody_is_still_recorded() -> None:
     mgr = _bridge_manager()
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-worker-unrecorded", lifecycle_state=LIFECYCLE_LIVE,
-        report_by_override=past, spawned_by_instance_id="agi-steward-ghost",
+        state,
+        agent_instance_id="agi-worker-unrecorded",
+        lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past,
+        spawned_by_instance_id="agi-steward-ghost",
     )
     marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
     _check(marked == 1, "the row is still transitioned")
     rows = _overdue_records(state)
     _check(
         len(rows) == 1,
-        f"RED-vs-GREEN (GAU-28): the undelivered overdue alarm leaves exactly one "
-        f"durable row (got {len(rows)}) -- before this fix its only trace was a "
-        "WARNING in a log file that rotates",
+        f"RED-vs-GREEN (GAU-28): the undelivered overdue alarm leaves exactly one durable row (got {len(rows)}) -- before this fix its only trace was a WARNING in a log file that rotates",
     )
     row = rows[0] if rows else {}
     _check(
-        row.get("delivery_outcome") == NOTICE_DELIVERY_NO_STEWARD_BINDING
-        and row.get("steward_instance_id") is None,
-        f"and it says WHY nobody got it, with a NULL steward meaning 'none was "
-        f"resolved' rather than 'not recorded' (got {row.get('delivery_outcome')!r}, "
-        f"steward {row.get('steward_instance_id')!r})",
+        row.get("delivery_outcome") == NOTICE_DELIVERY_NO_STEWARD_BINDING and row.get("steward_instance_id") is None,
+        f"and it says WHY nobody got it, with a NULL steward meaning 'none was resolved' rather than 'not recorded' (got {row.get('delivery_outcome')!r}, steward {row.get('steward_instance_id')!r})",
     )
     _check(
         row.get("agent_instance_id") == "agi-worker-unrecorded",
@@ -1086,25 +1149,27 @@ def test_overdue_delivered_alarm_records_the_steward_it_reached() -> None:
     mgr = _bridge_manager()
     ledger_id = "agi-73ba7ce552285765b4716a1059326da0"
     watch_id, steward_bridge_id = _register_watcher_held_steward(
-        state, reg, mgr, ledger_instance_id=ledger_id, agent_session_id=f"ases-{ledger_id}",
+        state,
+        reg,
+        mgr,
+        ledger_instance_id=ledger_id,
+        agent_session_id=f"ases-{ledger_id}",
     )
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-worker-recorded", lifecycle_state=LIFECYCLE_LIVE,
-        report_by_override=past, spawned_by_instance_id=ledger_id,
+        state,
+        agent_instance_id="agi-worker-recorded",
+        lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past,
+        spawned_by_instance_id=ledger_id,
     )
     sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
     _, events = mgr.get(steward_bridge_id).events_after(-1)
     rows = _overdue_records(state)
     row = rows[0] if rows else {}
     _check(
-        len(events) == 1
-        and len(rows) == 1
-        and row.get("delivery_outcome") == NOTICE_DELIVERY_APPENDED
-        and row.get("steward_instance_id") == watch_id,
-        f"a DELIVERED overdue alarm is recorded as 'appended' and names the "
-        f"binding it reached (got {row.get('delivery_outcome')!r}, steward "
-        f"{row.get('steward_instance_id')!r}, {len(events)} event(s))",
+        len(events) == 1 and len(rows) == 1 and row.get("delivery_outcome") == NOTICE_DELIVERY_APPENDED and row.get("steward_instance_id") == watch_id,
+        f"a DELIVERED overdue alarm is recorded as 'appended' and names the binding it reached (got {row.get('delivery_outcome')!r}, steward {row.get('steward_instance_id')!r}, {len(events)} event(s))",
     )
 
 
@@ -1120,22 +1185,22 @@ def test_overdue_record_carries_the_measured_lateness() -> None:
     mgr = _bridge_manager()
     past = (T0 - timedelta(seconds=137)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-worker-late-by-137", lifecycle_state=LIFECYCLE_LIVE,
-        report_by_override=past, spawned_by_instance_id="agi-steward-ghost",
+        state,
+        agent_instance_id="agi-worker-late-by-137",
+        lifecycle_state=LIFECYCLE_LIVE,
+        report_by_override=past,
+        spawned_by_instance_id="agi-steward-ghost",
     )
     sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0)
     rows = _overdue_records(state)
     row = rows[0] if rows else {}
     _check(
         row.get("observed_s") == 137.0 and row.get("threshold_s") == 0.0,
-        f"the record carries the MEASURED lateness (137s past report_by) against "
-        f"a zero-second bound, not a re-derived or defaulted number (got "
-        f"observed_s={row.get('observed_s')!r}, threshold_s={row.get('threshold_s')!r})",
+        f"the record carries the MEASURED lateness (137s past report_by) against a zero-second bound, not a re-derived or defaulted number (got observed_s={row.get('observed_s')!r}, threshold_s={row.get('threshold_s')!r})",
     )
     _check(
         row.get("emitted_at") == T0.isoformat(),
-        f"and it is stamped with the sweep's own clock, the moment the sweep "
-        f"DECIDED to fire (got {row.get('emitted_at')!r})",
+        f"and it is stamped with the sweep's own clock, the moment the sweep DECIDED to fire (got {row.get('emitted_at')!r})",
     )
 
 
@@ -1144,20 +1209,19 @@ def test_overdue_terminates_stuck_spawning_row() -> None:
     state = _state()
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-spawn-stuck", lifecycle_state=LIFECYCLE_SPAWNING,
+        state,
+        agent_instance_id="agi-spawn-stuck",
+        lifecycle_state=LIFECYCLE_SPAWNING,
         report_by_override=past,
     )
     marked = sweep_overdue_sessions(state, now=T0, host_alive_probe=lambda _row: False)
     _check(
         marked == 1,
-        "RED-vs-GREEN: a stuck 'spawning' row past its report_by deadline IS "
-        "swept (before this fix, sweep_overdue_sessions scanned only "
-        "live/idle and this row sat in 'spawning' forever)",
+        "RED-vs-GREEN: a stuck 'spawning' row past its report_by deadline IS swept (before this fix, sweep_overdue_sessions scanned only live/idle and this row sat in 'spawning' forever)",
     )
     _check(
         read_managed_session(state, "agi-spawn-stuck")["lifecycle_state"] == LIFECYCLE_TERMINATED,
-        "the row reaches 'terminated' directly -- 'overdue' is not a legal "
-        "edge from 'spawning'",
+        "the row reaches 'terminated' directly -- 'overdue' is not a legal edge from 'spawning'",
     )
 
 
@@ -1165,7 +1229,9 @@ def test_overdue_skips_spawning_row_with_future_deadline() -> None:
     state = _state()
     future = (T0 + timedelta(seconds=300)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-spawn-not-yet", lifecycle_state=LIFECYCLE_SPAWNING,
+        state,
+        agent_instance_id="agi-spawn-not-yet",
+        lifecycle_state=LIFECYCLE_SPAWNING,
         report_by_override=future,
     )
     marked = sweep_overdue_sessions(state, now=T0)
@@ -1198,12 +1264,18 @@ def test_overdue_spawning_alive_row_is_extended_not_reaped() -> None:
     steward_bridge_id = _register_live_binding(reg, mgr, agent_instance_id="agi-alive-steward")
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-alive-unreg", lifecycle_state=LIFECYCLE_SPAWNING,
-        report_by_seconds=3600, report_by_override=past,
+        state,
+        agent_instance_id="agi-alive-unreg",
+        lifecycle_state=LIFECYCLE_SPAWNING,
+        report_by_seconds=3600,
+        report_by_override=past,
         spawned_by_instance_id="agi-alive-steward",
     )
     marked = sweep_overdue_sessions(
-        state, peer_registry=reg, bridge_manager=mgr, now=T0,
+        state,
+        peer_registry=reg,
+        bridge_manager=mgr,
+        now=T0,
         host_alive_probe=lambda _row: True,
     )
     _check(marked == 0, "an observed-alive spawning row is NOT counted as swept")
@@ -1219,12 +1291,8 @@ def test_overdue_spawning_alive_row_is_extended_not_reaped() -> None:
     )
     _, events = mgr.get(steward_bridge_id).events_after(-1)
     _check(
-        len(events) == 1
-        and events[0].event_type == "session_spawn_unregistered_notice"
-        and "agi-alive-unreg" in events[0].content
-        and "OBSERVED ALIVE" in events[0].content,
-        f"the steward gets exactly one spawn-UNREGISTERED notice (distinct "
-        f"class from orphaned) naming the row (got {events!r})",
+        len(events) == 1 and events[0].event_type == "session_spawn_unregistered_notice" and "agi-alive-unreg" in events[0].content and "OBSERVED ALIVE" in events[0].content,
+        f"the steward gets exactly one spawn-UNREGISTERED notice (distinct class from orphaned) naming the row (got {events!r})",
     )
 
 
@@ -1233,8 +1301,11 @@ def test_overdue_spawning_alive_has_no_lifetime_cap() -> None:
     state = _state()
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-alive-exhausted", lifecycle_state=LIFECYCLE_SPAWNING,
-        report_by_seconds=300, report_by_override=past,
+        state,
+        agent_instance_id="agi-alive-exhausted",
+        lifecycle_state=LIFECYCLE_SPAWNING,
+        report_by_seconds=300,
+        report_by_override=past,
     )
     # Age the spawn timestamp past the patience bound (4 windows x 300s).
     state.update_state(
@@ -1245,8 +1316,7 @@ def test_overdue_spawning_alive_has_no_lifetime_cap() -> None:
     marked = sweep_overdue_sessions(state, now=T0, host_alive_probe=lambda _row: True)
     _check(marked == 0, "an observed-live host remains spawning beyond the old patience limit")
     _check(
-        read_managed_session(state, "agi-alive-exhausted")["lifecycle_state"]
-        == LIFECYCLE_SPAWNING,
+        read_managed_session(state, "agi-alive-exhausted")["lifecycle_state"] == LIFECYCLE_SPAWNING,
         "elapsed time never terminates an observed-live session",
     )
 
@@ -1256,14 +1326,15 @@ def test_overdue_spawning_operator_host_alive_is_not_evidence() -> None:
     state = _state()
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-op-host", lifecycle_state=LIFECYCLE_SPAWNING,
+        state,
+        agent_instance_id="agi-op-host",
+        lifecycle_state=LIFECYCLE_SPAWNING,
         report_by_override=past,
     )
     marked = sweep_overdue_sessions(state, now=T0)
     _check(
         marked == 0,
-        "an unobservable spawning row past deadline is preserved — the "
-        "operator driver's vacuous alive() is never liveness evidence",
+        "an unobservable spawning row past deadline is preserved — the operator driver's vacuous alive() is never liveness evidence",
     )
 
 
@@ -1274,20 +1345,16 @@ def test_spawning_native_probe_never_infers_death_from_age_or_fault() -> None:
         for observation in (True, False, RuntimeError("probe unavailable")):
             state = _state()
             session_hosts._REGISTRY[key] = _LivenessDriver(observation)  # noqa: SLF001
-            _spawn_live(state, agent_instance_id="agi-native-proof", lifecycle_state=LIFECYCLE_SPAWNING,
-                        report_by_override=(T0 - timedelta(days=3650)).isoformat())
+            _spawn_live(state, agent_instance_id="agi-native-proof", lifecycle_state=LIFECYCLE_SPAWNING, report_by_override=(T0 - timedelta(days=3650)).isoformat())
             state.update_state(
                 AGENT_ROLE_BINDING_NAMESPACE,
                 {"table": "managed_session", "filters": {"agent_instance_id": "agi-native-proof"}},
-                {"host": _TEST_MANAGED_HOST, "host_ref": "native-proof",
-                 "agent_runtime": session_hosts.AGENT_RUNTIME_CODEX,
-                 "last_transition_at": (T0 - timedelta(days=3650)).isoformat()},
+                {"host": _TEST_MANAGED_HOST, "host_ref": "native-proof", "agent_runtime": session_hosts.AGENT_RUNTIME_CODEX, "last_transition_at": (T0 - timedelta(days=3650)).isoformat()},
             )
             marked = sweep_overdue_sessions(state, now=T0)
             actual = read_managed_session(state, "agi-native-proof")["lifecycle_state"]
             expected = LIFECYCLE_TERMINATED if observation is False else LIFECYCLE_SPAWNING
-            _check(actual == expected and marked == int(observation is False),
-                   f"native spawning observation {observation!r} alone controls termination, never age")
+            _check(actual == expected and marked == int(observation is False), f"native spawning observation {observation!r} alone controls termination, never age")
     finally:
         if prior is None:
             session_hosts._REGISTRY.pop(key, None)  # noqa: SLF001
@@ -1312,19 +1379,18 @@ def test_overdue_spawning_notifies_steward_of_orphan() -> None:
     steward_bridge_id = _register_live_binding(reg, mgr, agent_instance_id="agi-spawn-steward")
     past = (T0 - timedelta(seconds=10)).isoformat()
     _spawn_live(
-        state, agent_instance_id="agi-spawn-orphan", lifecycle_state=LIFECYCLE_SPAWNING,
-        report_by_override=past, spawned_by_instance_id="agi-spawn-steward",
+        state,
+        agent_instance_id="agi-spawn-orphan",
+        lifecycle_state=LIFECYCLE_SPAWNING,
+        report_by_override=past,
+        spawned_by_instance_id="agi-spawn-steward",
     )
-    marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0,
-                                    host_alive_probe=lambda _row: False)
+    marked = sweep_overdue_sessions(state, peer_registry=reg, bridge_manager=mgr, now=T0, host_alive_probe=lambda _row: False)
     _check(marked == 1, "the orphaned spawning row is still transitioned")
     _, events = mgr.get(steward_bridge_id).events_after(-1)
     _check(
-        len(events) == 1
-        and events[0].event_type == "session_spawn_orphaned_notice"
-        and "agi-spawn-orphan" in events[0].content,
-        f"the steward's bridge gets exactly one delivered spawn-orphaned "
-        f"notice naming the orphaned session (got {events!r})",
+        len(events) == 1 and events[0].event_type == "session_spawn_orphaned_notice" and "agi-spawn-orphan" in events[0].content,
+        f"the steward's bridge gets exactly one delivered spawn-orphaned notice naming the orphaned session (got {events!r})",
     )
 
 
@@ -1366,7 +1432,10 @@ def test_deadline_dependency_not_yet_due_skipped() -> None:
     mgr = _bridge_manager()
     future = (T0 + timedelta(seconds=60)).isoformat()
     _seed_dependency(
-        state, row_id="sdp-future", condition_kind=CONDITION_DEADLINE, condition_ref=future,
+        state,
+        row_id="sdp-future",
+        condition_kind=CONDITION_DEADLINE,
+        condition_ref=future,
     )
     fired = sweep_deadline_dependencies(state, peer_registry=reg, bridge_manager=mgr, now=T0)
     _check(fired == 0, "a deadline still in the future is not fired")
@@ -1389,13 +1458,19 @@ def test_deadline_dependency_fires_and_delivers() -> None:
     bridge_id = mgr.open(solet_name="", parent_pid=1).bridge_id
     reg.register(
         BridgeBinding(
-            bridge_id=bridge_id, agent_id="claude_code", agent_instance_id="agi-waiter",
-            session_label="Waiter", parent_pid=1,
+            bridge_id=bridge_id,
+            agent_id="claude_code",
+            agent_instance_id="agi-waiter",
+            session_label="Waiter",
+            parent_pid=1,
         ),
     )
     past = (T0 - timedelta(seconds=5)).isoformat()
     _seed_dependency(
-        state, row_id="sdp-1", condition_kind=CONDITION_DEADLINE, condition_ref=past,
+        state,
+        row_id="sdp-1",
+        condition_kind=CONDITION_DEADLINE,
+        condition_ref=past,
         waiter_instance_id="agi-waiter",
     )
     fired = sweep_deadline_dependencies(state, peer_registry=reg, bridge_manager=mgr, now=T0)
@@ -1407,9 +1482,7 @@ def test_deadline_dependency_fires_and_delivers() -> None:
     _check(rows[0]["fired_at"] is not None, "fired_at is stamped on the edge")
     _, events = mgr.get(bridge_id).events_after(-1)
     _check(
-        len(events) == 1
-        and events[0].event_type == "session_dependency_wake"
-        and "deadline" in events[0].content,
+        len(events) == 1 and events[0].event_type == "session_dependency_wake" and "deadline" in events[0].content,
         f"the waiter's bridge gets exactly one delivered wake event (got {events!r})",
     )
     again = sweep_deadline_dependencies(state, peer_registry=reg, bridge_manager=mgr, now=T0)
@@ -1441,24 +1514,24 @@ def test_deadline_dependency_unmanaged_waiter_still_delivers() -> None:
     # The waiter is registered in the peer registry directly -- no
     # _spawn_live() call for it at all, so it has NO managed_session row.
     bridge_id = _register_live_binding(
-        reg, mgr, agent_instance_id="agi-watch-92a6ae0e3e134e5e11774007",
+        reg,
+        mgr,
+        agent_instance_id="agi-watch-92a6ae0e3e134e5e11774007",
     )
     past = (T0 - timedelta(seconds=5)).isoformat()
     _seed_dependency(
-        state, row_id="sdp-unmanaged-waiter", condition_kind=CONDITION_DEADLINE,
-        condition_ref=past, waiter_instance_id="agi-watch-92a6ae0e3e134e5e11774007",
+        state,
+        row_id="sdp-unmanaged-waiter",
+        condition_kind=CONDITION_DEADLINE,
+        condition_ref=past,
+        waiter_instance_id="agi-watch-92a6ae0e3e134e5e11774007",
     )
     fired = sweep_deadline_dependencies(state, peer_registry=reg, bridge_manager=mgr, now=T0)
     _check(fired == 1, "the deadline edge fires")
     _, events = mgr.get(bridge_id).events_after(-1)
     _check(
-        len(events) == 1
-        and events[0].event_type == "session_dependency_wake"
-        and "deadline" in events[0].content,
-        f"RED-vs-GREEN: an UNMANAGED (watch-registered) waiter still gets the "
-        f"wake delivered (got {events!r}) -- before this fix, resolution went "
-        "only through the waiter's managed_session row and silently found "
-        "nothing to notify",
+        len(events) == 1 and events[0].event_type == "session_dependency_wake" and "deadline" in events[0].content,
+        f"RED-vs-GREEN: an UNMANAGED (watch-registered) waiter still gets the wake delivered (got {events!r}) -- before this fix, resolution went only through the waiter's managed_session row and silently found nothing to notify",
     )
 
 
@@ -1469,7 +1542,10 @@ def test_deadline_dependency_unresolvable_waiter_is_best_effort() -> None:
     # No managed_session row at all for this waiter — agent_id is unknowable.
     past = (T0 - timedelta(seconds=5)).isoformat()
     _seed_dependency(
-        state, row_id="sdp-2", condition_kind=CONDITION_DEADLINE, condition_ref=past,
+        state,
+        row_id="sdp-2",
+        condition_kind=CONDITION_DEADLINE,
+        condition_ref=past,
         waiter_instance_id="agi-ghost",
     )
     fired = sweep_deadline_dependencies(state, peer_registry=reg, bridge_manager=mgr, now=T0)
@@ -1485,14 +1561,16 @@ def test_deadline_dependency_lane_scoped_is_logged_noop() -> None:
     mgr = _bridge_manager()
     past = (T0 - timedelta(seconds=5)).isoformat()
     _seed_dependency(
-        state, row_id="sdp-3", condition_kind=CONDITION_DEADLINE, condition_ref=past,
+        state,
+        row_id="sdp-3",
+        condition_kind=CONDITION_DEADLINE,
+        condition_ref=past,
         waiter_lane_id="lane-only",
     )
     fired = sweep_deadline_dependencies(state, peer_registry=reg, bridge_manager=mgr, now=T0)
     _check(
         fired == 1,
-        "a lane-scoped edge (no waiter_instance_id) still fires; delivery is a no-op, "
-        "not a crash",
+        "a lane-scoped edge (no waiter_instance_id) still fires; delivery is a no-op, not a crash",
     )
 
 
@@ -1507,14 +1585,15 @@ def test_lane_closed_empty_lane_is_not_closed() -> None:
     reg = _peer_registry()
     mgr = _bridge_manager()
     _seed_dependency(
-        state, row_id="sdp-lane-empty", condition_kind=CONDITION_LANE_CLOSED,
+        state,
+        row_id="sdp-lane-empty",
+        condition_kind=CONDITION_LANE_CLOSED,
         condition_ref="lane-never-spawned",
     )
     fired = sweep_lane_closed_dependencies(state, peer_registry=reg, bridge_manager=mgr, now=T0)
     _check(
         fired == 0,
-        "a lane_id with ZERO managed_session rows is NOT closed — no vacuous "
-        "truth on an empty set",
+        "a lane_id with ZERO managed_session rows is NOT closed — no vacuous truth on an empty set",
     )
 
 
@@ -1532,19 +1611,24 @@ def test_lane_closed_open_while_any_session_non_terminal() -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id="agi-lane-b", lane_id="lane-mixed", brief_ref="",
-            work_class=WORK_CLASS_READ_ONLY, budget_line="b1", host="operator",
+            agent_instance_id="agi-lane-b",
+            lane_id="lane-mixed",
+            assignment=fixture_assignment(),
+            work_class=WORK_CLASS_READ_ONLY,
+            budget_line="b1",
+            host="operator",
         ),
     )  # left 'spawning' — non-terminal
     _seed_dependency(
-        state, row_id="sdp-lane-mixed", condition_kind=CONDITION_LANE_CLOSED,
+        state,
+        row_id="sdp-lane-mixed",
+        condition_kind=CONDITION_LANE_CLOSED,
         condition_ref="lane-mixed",
     )
     fired = sweep_lane_closed_dependencies(state, peer_registry=reg, bridge_manager=mgr, now=T0)
     _check(
         fired == 0,
-        "one terminal + one non-terminal managed_session row for the lane -> "
-        "NOT closed yet",
+        "one terminal + one non-terminal managed_session row for the lane -> NOT closed yet",
     )
 
 
@@ -1561,7 +1645,9 @@ def test_lane_closed_fires_when_every_session_terminal() -> None:
         )
         terminate_session(state, agent_instance_id=agi, directed_by="operator:none")
     _seed_dependency(
-        state, row_id="sdp-lane-done", condition_kind=CONDITION_LANE_CLOSED,
+        state,
+        row_id="sdp-lane-done",
+        condition_kind=CONDITION_LANE_CLOSED,
         condition_ref="lane-done",
     )
     fired = sweep_lane_closed_dependencies(state, peer_registry=reg, bridge_manager=mgr, now=T0)
@@ -1576,7 +1662,10 @@ def test_lane_closed_fires_when_every_session_terminal() -> None:
 
 
 def _seed_claim(
-    state: StateManagementInterface, *, agent_session_id: str, held_role: str,
+    state: StateManagementInterface,
+    *,
+    agent_session_id: str,
+    held_role: str,
 ) -> None:
     state.write_state(
         AGENT_ROLE_BINDING_NAMESPACE,
@@ -1595,10 +1684,7 @@ def _seed_claim(
 
 
 def _claim_rows(state: StateManagementInterface) -> list[dict[str, Any]]:
-    return [
-        r for r in state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_SESSION_ROLE_CLAIM)
-        if not r.get("is_deleted")
-    ]
+    return [r for r in state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_SESSION_ROLE_CLAIM) if not r.get("is_deleted")]
 
 
 def test_pruner_terminal_managed_session_pruned_immediately() -> None:
@@ -1634,8 +1720,7 @@ def test_pruner_live_managed_session_never_pruned() -> None:
     pruned = pruner.sweep(state, peer_registry=reg)
     _check(
         pruned == 0 and len(_claim_rows(state)) == 1,
-        "a claim whose managed_session is non-terminal is NEVER pruned (ledger-authoritative "
-        "alive), regardless of elapsed time",
+        "a claim whose managed_session is non-terminal is NEVER pruned (ledger-authoritative alive), regardless of elapsed time",
     )
 
 
@@ -1646,8 +1731,12 @@ def test_pruner_live_registered_session_never_pruned() -> None:
     bridge_id = mgr.open(solet_name="", parent_pid=1).bridge_id
     reg.register(
         BridgeBinding(
-            bridge_id=bridge_id, agent_id="claude_code", agent_instance_id="agi-reg",
-            session_label="Reg", parent_pid=1, agent_session_id="sess-reg",
+            bridge_id=bridge_id,
+            agent_id="claude_code",
+            agent_instance_id="agi-reg",
+            session_label="Reg",
+            parent_pid=1,
+            agent_session_id="sess-reg",
         ),
     )
     _seed_claim(state, agent_session_id="sess-reg", held_role="Some-Lane")
@@ -1668,8 +1757,7 @@ def test_pruner_absence_within_grace_window_not_pruned() -> None:
     pruned = pruner.sweep(state, peer_registry=reg)
     _check(
         pruned == 0 and len(_claim_rows(state)) == 1,
-        "genuine absence (no managed_session, no live binding) within the grace window "
-        "is NOT pruned — the blue-green-bounce guard",
+        "genuine absence (no managed_session, no live binding) within the grace window is NOT pruned — the blue-green-bounce guard",
     )
     clock_value["now"] = T0 + timedelta(seconds=100)
     pruned2 = pruner.sweep(state, peer_registry=reg)
@@ -1731,8 +1819,7 @@ def test_pruner_pages_claims_without_a_target_query_state_read() -> None:
     pruner = SessionRoleClaimPruner(grace_window_s=300, clock=lambda: T0)
     first_pruned = pruner.sweep(state, peer_registry=_peer_registry())
     _check(
-        first_pruned == 205 and {row["agent_session_id"] for row in _claim_rows(state)}
-        == {"sess-absent", "sess-live-page"},
+        first_pruned == 205 and {row["agent_session_id"] for row in _claim_rows(state)} == {"sess-absent", "sess-live-page"},
         "D1 pages >200 claims: terminal rows prune while absent-grace and live rows survive",
     )
     _check(
@@ -1749,8 +1836,7 @@ def test_pruner_pages_claims_without_a_target_query_state_read() -> None:
     )
     pruner.sweep(state, peer_registry=_peer_registry())
     _check(
-        "sess-absent" not in pruner._first_absent_at
-        and {row["agent_session_id"] for row in _claim_rows(state)} == {"sess-live-page"},
+        "sess-absent" not in pruner._first_absent_at and {row["agent_session_id"] for row in _claim_rows(state)} == {"sess-live-page"},
         "grace-map cleanup forgets an absent claim that vanishes across paged sweeps",
     )
 
@@ -1773,8 +1859,11 @@ def test_retire_session_crash_mid_retire_is_redrivable() -> None:
             _spawn_live(state, agent_instance_id="agi-crash")
             terminate_session(state, agent_instance_id="agi-crash", directed_by="operator:none")
             _seed_dependency(
-                state, row_id="sdp-crash", condition_kind=CONDITION_SESSION_TERMINAL,
-                condition_ref="agi-crash", waiter_instance_id="agi-waiter-crash",
+                state,
+                row_id="sdp-crash",
+                condition_kind=CONDITION_SESSION_TERMINAL,
+                condition_ref="agi-crash",
+                waiter_instance_id="agi-waiter-crash",
             )
             _check(
                 read_managed_session(state, "agi-crash")["lifecycle_state"] == LIFECYCLE_TERMINATED,
@@ -1782,11 +1871,8 @@ def test_retire_session_crash_mid_retire_is_redrivable() -> None:
             )
             result = retire_session(state, agent_instance_id="agi-crash", directed_by="operator:none")
             _check(
-                result["already_retired"] is False
-                and result["dependencies_fired"] == 1
-                and result["host_action"] == "not_attempted",
-                f"re-running retire_session finishes the job: fires the pending edge and "
-                f"completes the transition without re-attempting the host (got {result!r})",
+                result["already_retired"] is False and result["dependencies_fired"] == 1 and result["host_action"] == "not_attempted",
+                f"re-running retire_session finishes the job: fires the pending edge and completes the transition without re-attempting the host (got {result!r})",
             )
             _check(
                 read_managed_session(state, "agi-crash")["lifecycle_state"] == LIFECYCLE_RETIRED,
@@ -1818,8 +1904,12 @@ def _spawn_unregistered(
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id=agent_instance_id, lane_id="lane-z", brief_ref="",
-            work_class=WORK_CLASS_READ_ONLY, budget_line="b1", host=host,
+            agent_instance_id=agent_instance_id,
+            lane_id="lane-z",
+            assignment=fixture_assignment(),
+            work_class=WORK_CLASS_READ_ONLY,
+            budget_line="b1",
+            host=host,
             spawned_by_instance_id=spawned_by_instance_id,
             degraded_hooks_acknowledged=degraded_hooks_acknowledged,
         ),
@@ -1836,7 +1926,8 @@ def test_registration_within_bound_is_not_marked() -> None:
     state = _state()
     _spawn_unregistered(state, agent_instance_id="agi-fresh", spawned_at=T0)
     marked = sweep_unregistered_spawning_sessions(
-        state, now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S - 1),
+        state,
+        now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S - 1),
     )
     _check(marked == 0, "a spawning row inside the registration bound is not marked")
     _check(
@@ -1853,15 +1944,15 @@ def test_registration_past_bound_marks_field_not_state() -> None:
     state = _state()
     _spawn_unregistered(state, agent_instance_id="agi-deaf", spawned_at=T0)
     marked = sweep_unregistered_spawning_sessions(
-        state, now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S + 1),
+        state,
+        now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S + 1),
     )
     _check(marked == 1, "the same row, past the bound, is marked")
     row = read_managed_session(state, "agi-deaf")
     _check(bool(row.get("registration_overdue_at")), "registration_overdue_at is stamped")
     _check(
         row["lifecycle_state"] == LIFECYCLE_SPAWNING,
-        "FIELD-NOT-STATE: lifecycle_state is still 'spawning' -- the watchdog "
-        "attributes, it does not transition",
+        "FIELD-NOT-STATE: lifecycle_state is still 'spawning' -- the watchdog attributes, it does not transition",
     )
     reason = str(row.get("registration_overdue_reason") or "")
     _check(
@@ -1925,14 +2016,17 @@ def test_registration_late_registration_clears_the_mark() -> None:
     state = _state()
     _spawn_unregistered(state, agent_instance_id="agi-late", spawned_at=T0)
     sweep_unregistered_spawning_sessions(
-        state, now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S + 1),
+        state,
+        now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S + 1),
     )
     _check(
         bool(read_managed_session(state, "agi-late").get("registration_overdue_at")),
         "setup: the row is marked registration-overdue",
     )
     backfill_registration(
-        state, agent_instance_id="agi-late", agent_id="claude_code",
+        state,
+        agent_instance_id="agi-late",
+        agent_id="claude_code",
         agent_session_id="ases-agi-late",
     )
     row = read_managed_session(state, "agi-late")
@@ -1953,15 +2047,19 @@ def test_registration_acknowledged_degraded_is_marked_but_says_so() -> None:
     reason says the risk was accepted, so it does not read as a surprise."""
     state = _state()
     _spawn_unregistered(
-        state, agent_instance_id="agi-degraded", spawned_at=T0,
+        state,
+        agent_instance_id="agi-degraded",
+        spawned_at=T0,
         degraded_hooks_acknowledged=True,
     )
     marked = sweep_unregistered_spawning_sessions(
-        state, now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S + 1),
+        state,
+        now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S + 1),
     )
     _check(marked == 1, "an acknowledged-degraded row is still marked (the fact is still true)")
     _check(
-        "ACKNOWLEDGED" in str(
+        "ACKNOWLEDGED"
+        in str(
             read_managed_session(state, "agi-degraded").get("registration_overdue_reason") or "",
         ),
         "but its reason records that this was an accepted risk",
@@ -1980,20 +2078,21 @@ def test_registration_notifies_steward_with_distinct_event() -> None:
     )
     steward_bridge_id = _register_live_binding(reg, mgr, agent_instance_id="agi-steward-w4a")
     _spawn_unregistered(
-        state, agent_instance_id="agi-deaf-child", spawned_at=T0,
+        state,
+        agent_instance_id="agi-deaf-child",
+        spawned_at=T0,
         spawned_by_instance_id="agi-steward-w4a",
     )
     sweep_unregistered_spawning_sessions(
-        state, peer_registry=reg, bridge_manager=mgr,
+        state,
+        peer_registry=reg,
+        bridge_manager=mgr,
         now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S + 1),
     )
     _, events = mgr.get(steward_bridge_id).events_after(-1)
     _check(
-        len(events) == 1
-        and events[0].event_type == EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE
-        and "agi-deaf-child" in events[0].content,
-        f"the steward gets exactly one registration-overdue notice, under an "
-        f"event type distinct from the other three spawn notices (got {events!r})",
+        len(events) == 1 and events[0].event_type == EVENT_SESSION_REGISTRATION_OVERDUE_NOTICE and "agi-deaf-child" in events[0].content,
+        f"the steward gets exactly one registration-overdue notice, under an event type distinct from the other three spawn notices (got {events!r})",
     )
 
 
@@ -2001,7 +2100,8 @@ def test_registration_marks_without_notify_when_registry_absent() -> None:
     state = _state()
     _spawn_unregistered(state, agent_instance_id="agi-noreg", spawned_at=T0)
     marked = sweep_unregistered_spawning_sessions(
-        state, now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S + 1),
+        state,
+        now=T0 + timedelta(seconds=DEFAULT_REGISTRATION_BOUND_S + 1),
     )
     _check(marked == 1, "an early-boot tick with no bridge still MARKS the row")
 
@@ -2014,16 +2114,21 @@ def test_registration_marks_without_notify_when_registry_absent() -> None:
 def _gauge(state: StateManagementInterface, agent_instance_id: str, **over: object) -> None:
     """Write a gauge row the way report_context_status would."""
     kwargs: dict[str, object] = {
-        "agent_instance_id": agent_instance_id, "claude_session_id": "s1",
-        "model": "claude-sonnet-5", "current_tokens": 900_000, "ceiling": 1_000_000,
-        "measured_at": T0.isoformat(), "cache_cold": False,
-        "reporter_surface": "checkout", "reporter_generation": 2,
+        "agent_instance_id": agent_instance_id,
+        "claude_session_id": "s1",
+        "model": "claude-sonnet-5",
+        "current_tokens": 900_000,
+        "ceiling": 1_000_000,
+        "measured_at": T0.isoformat(),
+        "cache_cold": False,
+        "reporter_surface": "checkout",
+        "reporter_generation": 2,
     }
     kwargs.update(over)
     upsert_session_context_status(state, **kwargs)  # type: ignore[arg-type]
 
 
-def _wired() -> tuple[StateManagementInterface, PeerRegistry, BridgeSessionManager, str]:
+def _wired(session: str = "") -> tuple[StateManagementInterface, PeerRegistry, BridgeSessionManager, str]:
     state, reg, mgr = _state(), _peer_registry(), _bridge_manager()
     _spawn_live(state, agent_instance_id="agi-steward")
     state.update_state(
@@ -2031,7 +2136,7 @@ def _wired() -> tuple[StateManagementInterface, PeerRegistry, BridgeSessionManag
         {"table": "managed_session", "filters": {"agent_instance_id": "agi-steward"}},
         {"agent_id": "claude_code"},
     )
-    bridge_id = _register_live_binding(reg, mgr, agent_instance_id="agi-steward")
+    bridge_id = _register_live_binding(reg, mgr, agent_instance_id="agi-steward", agent_session_id=session)
     _spawn_live(state, agent_instance_id="agi-worker", spawned_by_instance_id="agi-steward")
     return state, reg, mgr, bridge_id
 
@@ -2044,12 +2149,115 @@ def test_rotation_due_notice_carries_the_measured_number() -> None:
     _check(n == 1, "a session past the rotation threshold produces one notice")
     _, events = mgr.get(bridge_id).events_after(-1)
     body = events[0].content if events else ""
-    _check(events and events[0].event_type == "rotation_due_notice",
-           "the event is typed rotation_due_notice, distinct from the overdue notice")
-    _check(body == "context is 900,000 — make sure everything is durable.",
-           "the notice contains only current context and the durability instruction")
-    _check(not any(term in body.lower() for term in ("warm_", "rotate at", "pays for itself", "break-even")),
-           "the steward path contains none of the retired economics vocabulary")
+    _check(events and events[0].event_type == "rotation_due_notice", "the event is typed rotation_due_notice, distinct from the overdue notice")
+    _check(body == "context is 900,000 — make sure everything is durable.", "the notice contains only current context and the durability instruction")
+    _check(not any(term in body.lower() for term in ("warm_", "rotate at", "pays for itself", "break-even")), "the steward path contains none of the retired economics vocabulary")
+
+
+class _NoticeChannel:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def insert(self, text: str) -> None:
+        self.sent.append(text)
+
+    def submit(self) -> None:
+        return
+
+    def send(self, text: str) -> None:
+        self.sent.append(text)
+
+
+def _bind_notice_main(state: StateManagementInterface, instance: str, session: str) -> None:
+    claim_role_binding_v4(
+        state,
+        name="Fixture-Main",
+        claim=HolderClaim(
+            holder_kind="session",
+            holder_identity={"agent_id": "claude_code"},
+            agent_instance_id=instance,
+            agent_session_id=session,
+            session_label="display-only",
+        ),
+    )
+
+
+@patch.dict("os.environ", {"SOLET_NAME": "fixture"})
+def test_main_rotation_stores_without_driver_and_binding_reversal_restores_it() -> None:
+    """S2-M1 killer: real delivery lookup/send, with only the host channel replaced."""
+    state, reg, mgr, bridge_id = _wired("ases-steward")
+    _bind_notice_main(state, "agi-steward", "ases-steward")
+    channel = _NoticeChannel()
+    with patch("agent_messaging_plugin.session_lifecycle_control._resolve_driver_channel", return_value=channel):
+        delivered = _notify_rotation_due(
+            state=state,
+            peer_registry=reg,
+            bridge_manager=mgr,
+            row={"current_tokens": 900_000},
+            agent_instance_id="agi-worker",
+            spawner_instance_id="agi-steward",
+        )
+        _check(not channel.sent, "S2-M1: current primary Main seat rotation emits no native driver send")
+        channel.sent.clear()
+        _, events = mgr.get(bridge_id).events_after(-1)
+        _check((delivered, [event.event_type for event in events]) == (True, ["rotation_due_notice"]), "Main rotation event remains readable after append")
+        other_bridge = _register_live_binding(reg, mgr, agent_instance_id="agi-other", agent_session_id="ases-other")
+        _bind_notice_main(state, "agi-other", "ases-other")
+        _notify_rotation_due(
+            state=state,
+            peer_registry=reg,
+            bridge_manager=mgr,
+            row={"current_tokens": 900_000},
+            agent_instance_id="agi-worker",
+            spawner_instance_id="agi-steward",
+        )
+        _, later = mgr.get(bridge_id).events_after(-1)
+        _check(channel.sent == ["delivery waiting from rotation_due_notice — drain peer_inbox"], "role correction restores the existing non-Main rotation driver send")
+        _check((len(later), later[0], mgr.get(other_bridge).events_after(-1)[1]) == (2, events[0], []), "binding reversal changes future driving only, preserving prior events and recipient")
+
+
+@patch.dict("os.environ", {"SOLET_NAME": "fixture"})
+def test_uncertain_rotation_bindings_advise_and_drive() -> None:
+    for mode in ("vacant", "stale", "ambiguous"):
+        state, reg, mgr, bridge_id = _wired("ases-steward")
+        if mode != "vacant":
+            _bind_notice_main(state, "agi-steward", "ases-old" if mode == "stale" else "ases-steward")
+        if mode == "ambiguous":
+            _register_live_binding(reg, mgr, agent_instance_id="agi-duplicate", agent_session_id="ases-steward")
+        channel = _NoticeChannel()
+        with patch("agent_messaging_plugin.session_lifecycle_control._resolve_driver_channel", return_value=channel):
+            with TestCase().assertLogs("agent_messaging_plugin.session_sweep", level="WARNING") as logs:
+                delivered = _notify_rotation_due(
+                    state=state,
+                    peer_registry=reg,
+                    bridge_manager=mgr,
+                    row={"current_tokens": 900_000},
+                    agent_instance_id="agi-worker",
+                    spawner_instance_id="agi-steward",
+                )
+        _check((delivered, len(channel.sent), len(mgr.get(bridge_id).events_after(-1)[1])) == (True, 1, 1), f"{mode} Main binding fails open with append and native rotation driver send")
+        _check(any("ADVISORY" in line for line in logs.output), f"{mode} Main binding emits visible ADVISORY")
+
+
+@patch.dict("os.environ", {"SOLET_NAME": "fixture"})
+def test_gauge_notice_main_and_non_main_storage_route_is_partial() -> None:
+    """Gauge has no in-fence driver; measure its unchanged local waiter signal honestly."""
+    for main in (True, False):
+        state, reg, mgr, bridge_id = _wired("ases-steward")
+        if main:
+            _bind_notice_main(state, "agi-steward", "ases-steward")
+        now = datetime.now(UTC)
+        _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=5400)).isoformat())
+        _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=30))
+        channel = _NoticeChannel()
+        with patch("agent_messaging_plugin.session_lifecycle_control._resolve_driver_channel", return_value=channel):
+            with patch.object(mgr, "_signal_wakeup", wraps=mgr._signal_wakeup) as signal:
+                delivered = sweep_gauge_staleness(state, now=now, peer_registry=reg, bridge_manager=mgr)
+        _, events = mgr.get(bridge_id).events_after(-1)
+        records, truncated = read_gauge_notice_records(state, notice_type="gauge_stale_notice")
+        _check((delivered, [event.event_type for event in events]) == (1, ["gauge_stale_notice"]), f"gauge Main={main}: event remains readable")
+        _check((len(records), truncated, records[0]["delivery_outcome"]) == (1, False, NOTICE_DELIVERY_APPENDED), f"gauge Main={main}: durable appended outcome remains present")
+        _check((channel.sent, signal.call_count) == ([], 1), f"gauge Main={main}: no native driver send; excluded manager still signals local waiter (PARTIAL)")
 
 
 def test_rotation_due_is_silent_below_the_threshold() -> None:
@@ -2074,26 +2282,19 @@ def test_the_saturated_band_below_the_fraction_now_reaches_the_steward() -> None
     state, reg, mgr, bridge_id = _wired()
     _gauge(state, "agi-worker", current_tokens=300_000, model="claude-opus-5")
     n = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr)
-    _check(n == 1, "300,000 on a 1M ceiling now produces a notice (it produced none "
-                   "while this leg decided on the fraction alone)")
+    _check(n == 1, "300,000 on a 1M ceiling now produces a notice (it produced none while this leg decided on the fraction alone)")
     _, events = mgr.get(bridge_id).events_after(-1)
     body = events[0].content if events else ""
-    _check("band=warm_immediate" in body,
-           "and the notice names warm_immediate -- the band that fired it")
-    _check("0.300" in body,
-           "...beside the fraction 0.300, which is BELOW the 0.5 hint: the two "
-           "numbers now appear together without contradicting the decision")
+    _check("band=warm_immediate" in body, "and the notice names warm_immediate -- the band that fired it")
+    _check("0.300" in body, "...beside the fraction 0.300, which is BELOW the 0.5 hint: the two numbers now appear together without contradicting the decision")
 
 
 def test_rotation_due_uses_the_runtime_window_minimum() -> None:
     state, reg, mgr, bridge_id = _wired()
-    _gauge(state, "agi-worker", current_tokens=144_000, ceiling=200_000,
-           model="claude-haiku-4-5")
+    _gauge(state, "agi-worker", current_tokens=144_000, ceiling=200_000, model="claude-haiku-4-5")
     n = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr)
     _, events = mgr.get(bridge_id).events_after(-1)
-    _check(n == 1 and events and events[0].content == (
-        "context is 144,000 — make sure everything is durable."
-    ), "the steward uses the 200K runtime window and notices at 144K")
+    _check(n == 1 and events and events[0].content == ("context is 144,000 — make sure everything is durable."), "the steward uses the 200K runtime window and notices at 144K")
 
 
 def test_consumer_4_prose_names_an_axis_the_decision_actually_used() -> None:
@@ -2127,39 +2328,24 @@ def test_consumer_4_prose_names_an_axis_the_decision_actually_used() -> None:
     """
     state, reg, mgr, bridge_id = _wired()
 
-    _gauge(state, "agi-worker", current_tokens=300_000, ceiling=1_000_000,
-           model="claude-opus-5")
+    _gauge(state, "agi-worker", current_tokens=300_000, ceiling=1_000_000, model="claude-opus-5")
     n = sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr)
     _check(n == 1, "the band-fired case still notifies")
     _, events = mgr.get(bridge_id).events_after(-1)
     band_fired_body = events[0].content if events else ""
-    _check("band=warm_immediate" in band_fired_body,
-           "band-fired case: the discriminator this fix must not destroy -- "
-           "still names the band that fired")
-    _check("DUE BECAUSE the ECONOMICS BAND is 'warm_immediate'" in band_fired_body,
-           "...and says IN WORDS that the band is why, not the fraction")
-    _check("NOT crossed" in band_fired_body,
-           "...and explicitly disclaims the fraction hint, which is NOT "
-           "crossed at 0.300 of the ceiling")
+    _check("band=warm_immediate" in band_fired_body, "band-fired case: the discriminator this fix must not destroy -- still names the band that fired")
+    _check("DUE BECAUSE the ECONOMICS BAND is 'warm_immediate'" in band_fired_body, "...and says IN WORDS that the band is why, not the fraction")
+    _check("NOT crossed" in band_fired_body, "...and explicitly disclaims the fraction hint, which is NOT crossed at 0.300 of the ceiling")
 
     state2, reg2, mgr2, bridge_id2 = _wired()
-    _gauge(state2, "agi-worker", current_tokens=100_000, ceiling=200_000,
-           model="claude-haiku-4-5")
+    _gauge(state2, "agi-worker", current_tokens=100_000, ceiling=200_000, model="claude-haiku-4-5")
     n2 = sweep_rotation_due_sessions(state2, peer_registry=reg2, bridge_manager=mgr2)
-    _check(n2 == 1, "a small-ceiling session at its own halfway point is notified -- "
-                    "the fraction term keeps this reachable where the bands cannot")
+    _check(n2 == 1, "a small-ceiling session at its own halfway point is notified -- the fraction term keeps this reachable where the bands cannot")
     _, events2 = mgr2.get(bridge_id2).events_after(-1)
     fraction_fired_body = events2[0].content if events2 else ""
-    _check("band=warm_keep" in fraction_fired_body,
-           "fraction-fired case: the band is still shown -- informational, not "
-           "hidden -- but no longer the unqualified verdict")
-    _check("DUE BECAUSE" in fraction_fired_body and "fires first" in fraction_fired_body,
-           "FIXED: the notice now says the FRACTION is why it fired, so an "
-           "event typed rotation_due_notice no longer contradicts its own body "
-           "by reading a bare 'keep working'")
-    _check("DUE BECAUSE the ECONOMICS BAND" not in fraction_fired_body,
-           "...and does not claim the band-only branch's reason, which would "
-           "be a lie for this row")
+    _check("band=warm_keep" in fraction_fired_body, "fraction-fired case: the band is still shown -- informational, not hidden -- but no longer the unqualified verdict")
+    _check("DUE BECAUSE" in fraction_fired_body and "fires first" in fraction_fired_body, "FIXED: the notice now says the FRACTION is why it fired, so an event typed rotation_due_notice no longer contradicts its own body by reading a bare 'keep working'")
+    _check("DUE BECAUSE the ECONOMICS BAND" not in fraction_fired_body, "...and does not claim the band-only branch's reason, which would be a lie for this row")
 
 
 def test_rotation_due_flags_an_unattributable_reporter() -> None:
@@ -2171,10 +2357,8 @@ def test_rotation_due_flags_an_unattributable_reporter() -> None:
     sweep_rotation_due_sessions(state, peer_registry=reg, bridge_manager=mgr)
     _, events = mgr.get(bridge_id).events_after(-1)
     body = events[0].content if events else ""
-    _check("UNATTRIBUTABLE" in body,
-           "a row from a pre-attribution reporter is flagged, not silently trusted")
-    _check("provisional" in body,
-           "and the band is marked provisional rather than presented as measured")
+    _check("UNATTRIBUTABLE" in body, "a row from a pre-attribution reporter is flagged, not silently trusted")
+    _check("provisional" in body, "and the band is marked provisional rather than presented as measured")
 
 
 def test_gauge_coverage_catches_a_live_session_with_no_row() -> None:
@@ -2183,20 +2367,24 @@ def test_gauge_coverage_catches_a_live_session_with_no_row() -> None:
     (it does not know) can report this; the sweep sees both facts."""
     state, reg, mgr, bridge_id = _wired()  # agi-worker is LIVE with NO gauge row
     n = sweep_gauge_coverage(
-        state, now=_past_grace(), peer_registry=reg, bridge_manager=mgr,
+        state,
+        now=_past_grace(),
+        peer_registry=reg,
+        bridge_manager=mgr,
     )
     _check(n == 1, "a live session with no gauge row is detected")
     _, events = mgr.get(bridge_id).events_after(-1)
-    _check(events and events[0].event_type == "gauge_coverage_notice"
-           and "agi-worker" in events[0].content,
-           "the steward is told which session is dark")
+    _check(events and events[0].event_type == "gauge_coverage_notice" and "agi-worker" in events[0].content, "the steward is told which session is dark")
 
 
 def test_gauge_coverage_is_silent_when_the_row_exists() -> None:
     state, reg, mgr, bridge_id = _wired()
     _gauge(state, "agi-worker")
     n = sweep_gauge_coverage(
-        state, now=_past_grace(), peer_registry=reg, bridge_manager=mgr,
+        state,
+        now=_past_grace(),
+        peer_registry=reg,
+        bridge_manager=mgr,
     )
     _check(n == 0, "a session that IS reporting produces no coverage notice")
     _, events = mgr.get(bridge_id).events_after(-1)
@@ -2222,7 +2410,10 @@ def test_gauge_coverage_grants_a_newly_live_session_its_startup_grace() -> None:
     """
     state, reg, mgr, bridge_id = _wired()  # agi-worker LIVE, no gauge row, born now
     n = sweep_gauge_coverage(
-        state, now=datetime.now(UTC), peer_registry=reg, bridge_manager=mgr,
+        state,
+        now=datetime.now(UTC),
+        peer_registry=reg,
+        bridge_manager=mgr,
     )
     _check(n == 0, "a just-born live session is NOT called dark")
     _, events = mgr.get(bridge_id).events_after(-1)
@@ -2234,18 +2425,23 @@ def test_gauge_coverage_still_fires_once_the_grace_expires() -> None:
     button: the SAME row, still dark, is reported once it has had time."""
     state, reg, mgr, bridge_id = _wired()
     early = sweep_gauge_coverage(
-        state, now=datetime.now(UTC), peer_registry=reg, bridge_manager=mgr,
+        state,
+        now=datetime.now(UTC),
+        peer_registry=reg,
+        bridge_manager=mgr,
     )
     late = sweep_gauge_coverage(
-        state, now=_past_grace(), peer_registry=reg, bridge_manager=mgr,
+        state,
+        now=_past_grace(),
+        peer_registry=reg,
+        bridge_manager=mgr,
     )
     _check((early, late) == (0, 1), "silent while young, reported once aged")
     _, events = mgr.get(bridge_id).events_after(-1)
     _check(len(events) == 1, "exactly one notice, delivered on the later tick")
     _check(
         "startup grace" in events[0].content,
-        "and the prose names the grace it passed, so the reader can see the "
-        "measurement the finding rests on",
+        "and the prose names the grace it passed, so the reader can see the measurement the finding rests on",
     )
 
 
@@ -2265,7 +2461,10 @@ def test_gauge_coverage_does_not_grant_grace_on_an_unreadable_timestamp() -> Non
         {"last_transition_at": ""},
     )
     n = sweep_gauge_coverage(
-        state, now=datetime.now(UTC), peer_registry=reg, bridge_manager=mgr,
+        state,
+        now=datetime.now(UTC),
+        peer_registry=reg,
+        bridge_manager=mgr,
     )
     _check(n == 1, "an unreadable age does NOT buy silence")
 
@@ -2296,23 +2495,21 @@ def test_gauge_coverage_grace_covers_the_measured_boot_to_first_tick() -> None:
     """
     _check(
         GAUGE_COVERAGE_GRACE_S >= MEASURED_WORST_BOOT_TO_FIRST_TICK_S,
-        f"the startup grace ({GAUGE_COVERAGE_GRACE_S}s) covers the WORST "
-        f"MEASURED boot-to-first-tick ({MEASURED_WORST_BOOT_TO_FIRST_TICK_S}s) "
-        "for a spawned worker -- a grace under the measurement manufactures one "
-        "false alarm per lane per spawn wave",
+        f"the startup grace ({GAUGE_COVERAGE_GRACE_S}s) covers the WORST MEASURED boot-to-first-tick ({MEASURED_WORST_BOOT_TO_FIRST_TICK_S}s) for a spawned worker -- a grace under the measurement manufactures one false alarm per lane per spawn wave",
     )
     state, reg, mgr, bridge_id = _wired()
     at_worst_boot = datetime.now(UTC) + timedelta(
         seconds=MEASURED_WORST_BOOT_TO_FIRST_TICK_S - 30,
     )
     n = sweep_gauge_coverage(
-        state, now=at_worst_boot, peer_registry=reg, bridge_manager=mgr,
+        state,
+        now=at_worst_boot,
+        peer_registry=reg,
+        bridge_manager=mgr,
     )
     _check(
         n == 0,
-        "a live session still inside the measured boot-to-first-tick window is "
-        "NOT reported dark -- this is the exact false alarm measured against "
-        "lane-gau10-stall-boolean and lane-r2-holds-false on 2026-08-18",
+        "a live session still inside the measured boot-to-first-tick window is NOT reported dark -- this is the exact false alarm measured against lane-gau10-stall-boolean and lane-r2-holds-false on 2026-08-18",
     )
     _, events = mgr.get(bridge_id).events_after(-1)
     _check(not events, "and its steward is not woken about it")
@@ -2340,18 +2537,15 @@ def test_gauge_coverage_notice_states_the_measurement_not_the_inference() -> Non
     _check(bool(body), "the dark session still produces a notice")
     _check(
         "not a session that simply has not reported yet" not in body,
-        "the notice does NOT rule out 'it just has not reported yet' -- that is "
-        f"the inference the next tick falsified. Got: {body!r}",
+        f"the notice does NOT rule out 'it just has not reported yet' -- that is the inference the next tick falsified. Got: {body!r}",
     )
     _check(
         "likeliest cause" not in body,
-        "...nor does it present a CAUSE it did not measure as the likeliest "
-        f"one. Got: {body!r}",
+        f"...nor does it present a CAUSE it did not measure as the likeliest one. Got: {body!r}",
     )
     _check(
         str(int(GAUGE_COVERAGE_GRACE_S)) in body,
-        "...and it DOES state the measurable fact instead: how long the session "
-        f"has been live with no row. Got: {body!r}",
+        f"...and it DOES state the measurable fact instead: how long the session has been live with no row. Got: {body!r}",
     )
 
 
@@ -2395,18 +2589,15 @@ def test_gauge_coverage_notice_says_when_no_reporter_has_run_at_all() -> None:
     body = events[0].content if events else ""
     _check(
         "report_alive is landing" not in body,
-        "a row with no report_alive since it went live is NOT described as one "
-        f"whose report_alive is landing. Got: {body!r}",
+        f"a row with no report_alive since it went live is NOT described as one whose report_alive is landing. Got: {body!r}",
     )
     _check(
         "no report_alive" in body.lower() or "never reported alive" in body.lower(),
-        "...the notice names the second measurement (no lifecycle report either) "
-        f"so the reader can tell the two failures apart. Got: {body!r}",
+        f"...the notice names the second measurement (no lifecycle report either) so the reader can tell the two failures apart. Got: {body!r}",
     )
 
 
-def test_gauge_coverage_notice_names_the_evidence_when_the_session_has_ticked()\
-        -> None:
+def test_gauge_coverage_notice_names_the_evidence_when_the_session_has_ticked() -> None:
     """★ CATCHES: the other half -- throwing away the STRONG signal.
 
     When report_alive HAS landed since the row went live, PostToolUse
@@ -2436,13 +2627,11 @@ def test_gauge_coverage_notice_names_the_evidence_when_the_session_has_ticked()\
     body = events[0].content if events else ""
     _check(
         "report_alive" in body and "no report_alive" not in body.lower(),
-        "a session whose report_alive IS landing is described that way -- the "
-        f"evidenced form of the finding. Got: {body!r}",
+        f"a session whose report_alive IS landing is described that way -- the evidenced form of the finding. Got: {body!r}",
     )
     _check(
         "not a session that simply has not reported yet" not in body,
-        "...and even the strong branch does not assert the unfalsifiable "
-        f"negative. Got: {body!r}",
+        f"...and even the strong branch does not assert the unfalsifiable negative. Got: {body!r}",
     )
 
 
@@ -2497,7 +2686,10 @@ def test_rotation_due_latch_does_not_swallow_an_undelivered_notice() -> None:
     _gauge(state, "agi-worker")
     latch = NoticeLatch()
     undelivered = sweep_rotation_due_sessions(
-        state, peer_registry=reg, bridge_manager=mgr, latch=latch,
+        state,
+        peer_registry=reg,
+        bridge_manager=mgr,
+        latch=latch,
     )
     _check(undelivered == 0, "no live steward binding -- nothing delivered")
     bridge_id = _register_live_binding(reg, mgr, agent_instance_id="agi-steward")
@@ -2526,10 +2718,18 @@ def test_gauge_coverage_notifies_once_and_releases_on_recovery() -> None:
     latch = NoticeLatch()
     aged = _past_grace()
     first = sweep_gauge_coverage(
-        state, now=aged, peer_registry=reg, bridge_manager=mgr, latch=latch,
+        state,
+        now=aged,
+        peer_registry=reg,
+        bridge_manager=mgr,
+        latch=latch,
     )
     second = sweep_gauge_coverage(
-        state, now=aged, peer_registry=reg, bridge_manager=mgr, latch=latch,
+        state,
+        now=aged,
+        peer_registry=reg,
+        bridge_manager=mgr,
+        latch=latch,
     )
     _check((first, second) == (1, 0), "one notice for one outage, not one per tick")
     _, events = mgr.get(bridge_id).events_after(-1)
@@ -2537,13 +2737,16 @@ def test_gauge_coverage_notifies_once_and_releases_on_recovery() -> None:
     _check(latch.suppressed("agi-worker"), "the key is latched while the outage holds")
     _gauge(state, "agi-worker")  # reporting recovered
     recovered = sweep_gauge_coverage(
-        state, now=aged, peer_registry=reg, bridge_manager=mgr, latch=latch,
+        state,
+        now=aged,
+        peer_registry=reg,
+        bridge_manager=mgr,
+        latch=latch,
     )
     _check(recovered == 0, "nothing to say while it reports")
     _check(
         not latch.suppressed("agi-worker"),
-        "and recovery RELEASED the key -- a later outage notifies rather than being "
-        "suppressed by the first one",
+        "and recovery RELEASED the key -- a later outage notifies rather than being suppressed by the first one",
     )
 
 
@@ -2572,14 +2775,16 @@ def test_a_broken_notice_message_surfaces_instead_of_being_swallowed() -> None:
     raised = False
     try:
         _notify_rotation_due(
-            state=state, peer_registry=reg, bridge_manager=mgr,
+            state=state,
+            peer_registry=reg,
+            bridge_manager=mgr,
             row={},  # no 'fraction' -> _rotation_prose raises
-            agent_instance_id="agi-worker", spawner_instance_id="agi-steward",
+            agent_instance_id="agi-worker",
+            spawner_instance_id="agi-steward",
         )
     except (TypeError, ValueError):
         raised = True
-    _check(raised, "a broken notice MESSAGE surfaces rather than being reported "
-                   "as a delivery failure")
+    _check(raised, "a broken notice MESSAGE surfaces rather than being reported as a delivery failure")
 
 
 # ---------------------------------------------------------------------------
@@ -2626,7 +2831,10 @@ def test_l4a_legs_no_op_without_a_bridge() -> None:
 
 
 def _ticking(
-    state: StateManagementInterface, agent_instance_id: str, *, last_alive: datetime,
+    state: StateManagementInterface,
+    agent_instance_id: str,
+    *,
+    last_alive: datetime,
 ) -> None:
     """Arm the lifecycle row so the §3.3 identity derives to ``last_alive``.
 
@@ -2673,8 +2881,7 @@ def test_last_report_alive_derives_the_tick_moment() -> None:
         )
     _check(
         last_report_alive({"report_by": moment.isoformat(), "report_by_seconds": 0}) is None,
-        "a zero window is NO EVIDENCE (None), never a datetime — absence of the "
-        "WINDOW is not evidence of absence of a TICK",
+        "a zero window is NO EVIDENCE (None), never a datetime — absence of the WINDOW is not evidence of absence of a TICK",
     )
 
 
@@ -2740,8 +2947,7 @@ def test_gauge_stale_is_silent_when_both_clocks_stopped() -> None:
     n = sweep_gauge_staleness(state, now=now, peer_registry=reg, bridge_manager=mgr)
     _check(
         n == 0,
-        "a session whose BOTH clocks stopped is not a gauge finding — and the "
-        "gauge being the FRESHER of the two does not invert into one",
+        "a session whose BOTH clocks stopped is not a gauge finding — and the gauge being the FRESHER of the two does not invert into one",
     )
 
 
@@ -2819,20 +3025,16 @@ def test_gauge_stale_notice_states_both_clocks_and_names_no_cause() -> None:
         f"BOTH measured timestamps appear in the notice. Got: {body!r}",
     )
     _check(
-        "that session's gauge reporter" in body
-        and "session_context_status_history" in body
-        and "upsert-only and keeps no history" not in body,
+        "that session's gauge reporter" in body and "session_context_status_history" in body and "upsert-only and keeps no history" not in body,
         "the runtime-neutral gauge writer and GAU-15 history verb are named",
     )
     _check(
         "likeliest cause" not in body and "transcript_path" not in body,
-        "but no CAUSE is asserted — the leg cannot see which, and the detector "
-        f"must outlive today's leading candidate. Got: {body!r}",
+        f"but no CAUSE is asserted — the leg cannot see which, and the detector must outlive today's leading candidate. Got: {body!r}",
     )
     _check(
         "no session_context_status row at all" not in body,
-        "and it never reuses the missing-row leg's wording — different cause, "
-        f"different fix. Got: {body!r}",
+        f"and it never reuses the missing-row leg's wording — different cause, different fix. Got: {body!r}",
     )
 
 
@@ -2847,20 +3049,36 @@ def test_gauge_stale_notifies_once_and_releases_on_recovery() -> None:
     _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=5400)).isoformat())
     _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=30))
     first = sweep_gauge_staleness(
-        state, now=now, peer_registry=reg, bridge_manager=mgr, latch=latch,
+        state,
+        now=now,
+        peer_registry=reg,
+        bridge_manager=mgr,
+        latch=latch,
     )
     second = sweep_gauge_staleness(
-        state, now=now, peer_registry=reg, bridge_manager=mgr, latch=latch,
+        state,
+        now=now,
+        peer_registry=reg,
+        bridge_manager=mgr,
+        latch=latch,
     )
     _check(first == 1 and second == 0, "one notice per episode, not one per tick")
     _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=10)).isoformat())
     recovered = sweep_gauge_staleness(
-        state, now=now, peer_registry=reg, bridge_manager=mgr, latch=latch,
+        state,
+        now=now,
+        peer_registry=reg,
+        bridge_manager=mgr,
+        latch=latch,
     )
     _check(recovered == 0, "a recovered gauge produces no notice")
     _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=5400)).isoformat())
     relapse = sweep_gauge_staleness(
-        state, now=now, peer_registry=reg, bridge_manager=mgr, latch=latch,
+        state,
+        now=now,
+        peer_registry=reg,
+        bridge_manager=mgr,
+        latch=latch,
     )
     _check(relapse == 1, "and a RELAPSE notifies again rather than staying silent")
 
@@ -2872,6 +3090,7 @@ def test_gauge_stale_leg_no_ops_without_a_bridge() -> None:
         sweep_gauge_staleness(state, now=datetime.now(UTC)) == 0,
         "the leg is inert without a peer registry and bridge manager",
     )
+
 
 # ---------------------------------------------------------------------------
 # GAU-25: DETECTIONS and DELIVERIES are two numbers and must never collapse
@@ -2910,30 +3129,32 @@ def test_gauge_stale_counts_the_detection_the_delivery_lost() -> None:
     _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=30))
     counts = StewardNoticeCounts()
     delivered = sweep_gauge_staleness(
-        state, now=now, peer_registry=reg, bridge_manager=mgr, counts=counts,
+        state,
+        now=now,
+        peer_registry=reg,
+        bridge_manager=mgr,
+        counts=counts,
     )
     _check(delivered == 0, "nothing was delivered — the steward resolves to no binding")
     _check(
         counts.detected == 1,
-        "★ but the DETECTOR fired, and the sweep says so. This is the number "
-        "the operator-facing line could not previously report, and the whole "
-        "of GAU-25: L4d=0 was consistent with any number of real detections",
+        "★ but the DETECTOR fired, and the sweep says so. This is the number the operator-facing line could not previously report, and the whole of GAU-25: L4d=0 was consistent with any number of real detections",
     )
     _check(
         counts.undelivered == 1,
-        "and the failed delivery is counted as its own population — an alarm "
-        "nobody received, not a quiet tick",
+        "and the failed delivery is counted as its own population — an alarm nobody received, not a quiet tick",
     )
     _check(
         counts.delivered == delivered,
-        "the sink's delivered field and the legacy int return are the SAME "
-        "number — the return value's meaning is unchanged, which is what lets "
-        "~86 existing call sites keep reading it",
+        "the sink's delivered field and the legacy int return are the SAME number — the return value's meaning is unchanged, which is what lets ~86 existing call sites keep reading it",
     )
 
 
 def _transitioned(
-    state: StateManagementInterface, agent_instance_id: str, *, last_transition_at: datetime,
+    state: StateManagementInterface,
+    agent_instance_id: str,
+    *,
+    last_transition_at: datetime,
 ) -> None:
     """Set ``last_transition_at`` directly -- the GAU-22(c) rotation-window
     signal reads this column, and ``_spawn_live``'s own transition call stamps
@@ -2969,7 +3190,8 @@ def test_gau22_rotation_window_still_fires_once_grace_expires() -> None:
     _gauge(state, "agi-worker", measured_at=(now - timedelta(seconds=1800)).isoformat())
     _ticking(state, "agi-worker", last_alive=now - timedelta(seconds=30))
     _transitioned(
-        state, "agi-worker",
+        state,
+        "agi-worker",
         last_transition_at=now - timedelta(seconds=GAUGE_STALE_ROTATION_GRACE_S + 60),
     )
     n = sweep_gauge_staleness(state, now=now, peer_registry=reg, bridge_manager=mgr)
@@ -3005,8 +3227,14 @@ def test_every_steward_leg_reports_detections_separately_from_deliveries() -> No
     due = StewardNoticeCounts()
     _check(
         sweep_rotation_due_sessions(
-            state, peer_registry=reg, bridge_manager=mgr, counts=due,
-        ) == 0 and due.detected == 1 and due.undelivered == 1,
+            state,
+            peer_registry=reg,
+            bridge_manager=mgr,
+            counts=due,
+        )
+        == 0
+        and due.detected == 1
+        and due.undelivered == 1,
         "L4a (rotation-due) reports its detection even when delivery fails",
     )
 
@@ -3014,8 +3242,15 @@ def test_every_steward_leg_reports_detections_separately_from_deliveries() -> No
     dark = StewardNoticeCounts()
     _check(
         sweep_gauge_coverage(
-            state, now=_past_grace(), peer_registry=reg, bridge_manager=mgr, counts=dark,
-        ) == 0 and dark.detected == 1 and dark.undelivered == 1,
+            state,
+            now=_past_grace(),
+            peer_registry=reg,
+            bridge_manager=mgr,
+            counts=dark,
+        )
+        == 0
+        and dark.detected == 1
+        and dark.undelivered == 1,
         "L4b (gauge-coverage) reports its detection even when delivery fails",
     )
 
@@ -3025,8 +3260,15 @@ def test_every_steward_leg_reports_detections_separately_from_deliveries() -> No
     stale = StewardNoticeCounts()
     _check(
         sweep_gauge_staleness(
-            state, now=now, peer_registry=reg, bridge_manager=mgr, counts=stale,
-        ) == 0 and stale.detected == 1 and stale.undelivered == 1,
+            state,
+            now=now,
+            peer_registry=reg,
+            bridge_manager=mgr,
+            counts=stale,
+        )
+        == 0
+        and stale.detected == 1
+        and stale.undelivered == 1,
         "L4d (gauge-staleness) reports its detection even when delivery fails",
     )
 
@@ -3048,10 +3290,20 @@ def test_latch_suppressed_detections_stay_visible_but_do_not_re_warn() -> None:
     latch = NoticeLatch()
     first, second = StewardNoticeCounts(), StewardNoticeCounts()
     sweep_gauge_staleness(
-        state, now=now, peer_registry=reg, bridge_manager=mgr, latch=latch, counts=first,
+        state,
+        now=now,
+        peer_registry=reg,
+        bridge_manager=mgr,
+        latch=latch,
+        counts=first,
     )
     sweep_gauge_staleness(
-        state, now=now, peer_registry=reg, bridge_manager=mgr, latch=latch, counts=second,
+        state,
+        now=now,
+        peer_registry=reg,
+        bridge_manager=mgr,
+        latch=latch,
+        counts=second,
     )
     _check(
         (first.detected, first.delivered, first.actionable) == (1, 1, 1),
@@ -3059,13 +3311,11 @@ def test_latch_suppressed_detections_stay_visible_but_do_not_re_warn() -> None:
     )
     _check(
         (second.detected, second.delivered, second.undelivered) == (1, 0, 0),
-        "★ the second tick STILL REPORTS THE DETECTION — a suppressed notice "
-        "must not make the operator line read as an all-clear",
+        "★ the second tick STILL REPORTS THE DETECTION — a suppressed notice must not make the operator line read as an all-clear",
     )
     _check(
         second.actionable == 0,
-        "but it is not actionable, so the WARNING stays quiet across an "
-        "outage already reported — which is what the latch is for",
+        "but it is not actionable, so the WARNING stays quiet across an outage already reported — which is what the latch is for",
     )
 
 
@@ -3157,13 +3407,11 @@ def test_the_rider_actually_passes_the_sink_and_prints_both_numbers() -> None:
 
     _check(
         isinstance(seen.get("stale_sink"), StewardNoticeCounts),
-        "★ the rider PASSES a counts sink to the L4d leg. Without this the "
-        "whole fix is an inert knob and every other assertion here is vacuous",
+        "★ the rider PASSES a counts sink to the L4d leg. Without this the whole fix is an inert knob and every other assertion here is vacuous",
     )
     _check(
         isinstance(seen.get("quiet_sink"), StewardNoticeCounts),
-        "and to the L4a/L4b legs too — the audit fixed all three, not just the "
-        "one that was filed",
+        "and to the L4a/L4b legs too — the audit fixed all three, not just the one that was filed",
     )
     summary = next(
         (r.getMessage() for r in records if "rotation surface swept" in r.getMessage()),
@@ -3171,28 +3419,28 @@ def test_the_rider_actually_passes_the_sink_and_prints_both_numbers() -> None:
     )
     _check(
         "L4d=3 detected(0 delivered/3 undelivered)" in summary,
-        "★ the operator-facing line prints DETECTIONS and DELIVERIES as "
-        "separate numbers. The pre-fix line for this exact tick read "
-        f"'L4d=0 session(s) with an arrested gauge row'. Got: {summary!r}",
+        f"★ the operator-facing line prints DETECTIONS and DELIVERIES as separate numbers. The pre-fix line for this exact tick read 'L4d=0 session(s) with an arrested gauge row'. Got: {summary!r}",
     )
     _check(
         "L4d=0 session(s)" not in summary,
-        "and the old collapsed spelling is gone — nobody can read the new line "
-        "the way L4d=0 used to be read",
+        "and the old collapsed spelling is gone — nobody can read the new line the way L4d=0 used to be read",
     )
     _check(
-        any(
-            r.levelno == logging.WARNING and "stopped advancing" in r.getMessage()
-            for r in records
-        ),
-        "★ and the WARNING fires on a tick with 3 detections and 0 deliveries. "
-        "_run_counted_leg gates on the leg lambda's return value, so this is "
-        "the assertion that pins the lambda returning delivered+undelivered "
-        "rather than delivered — the same GAU-25 defect one level up",
+        any(r.levelno == logging.WARNING and "stopped advancing" in r.getMessage() for r in records),
+        "★ and the WARNING fires on a tick with 3 detections and 0 deliveries. _run_counted_leg gates on the leg lambda's return value, so this is the assertion that pins the lambda returning delivered+undelivered rather than delivered — the same GAU-25 defect one level up",
     )
+
+
+def test_configured_plugin_sweep_causal_annotation() -> None:
+    from _register_unit_double import check_configured_plugin_sweep_causal_annotation
+
+    check_configured_plugin_sweep_causal_annotation()
 
 
 def main() -> int:
+    test_main_rotation_stores_without_driver_and_binding_reversal_restores_it()
+    test_uncertain_rotation_bindings_advise_and_drive()
+    test_configured_plugin_sweep_causal_annotation()
     test_managed_tmux_death_converges_and_deduplicates()
     test_managed_probe_fault_is_unknown()
     test_managed_dispatch_sweep_is_uncapped()
@@ -3201,6 +3449,7 @@ def main() -> int:
     test_overdue_skips_future_deadline()
     test_overdue_notifies_steward()
     test_overdue_fresh_heartbeat_is_quiet_but_the_row_stays_lapsed()
+    test_overdue_notice_markers_have_current_register_basis()
     test_overdue_stale_heartbeat_keeps_the_full_alarm_and_wake()
     test_overdue_notifies_unmanaged_steward()
     test_overdue_notifies_a_watch_id_registered_steward()
@@ -3261,7 +3510,6 @@ def main() -> int:
     test_gauge_coverage_notice_states_the_measurement_not_the_inference()
     test_gauge_coverage_notice_says_when_no_reporter_has_run_at_all()
     test_gauge_coverage_notice_names_the_evidence_when_the_session_has_ticked()
-
 
     test_rotation_due_notifies_once_per_episode()
     test_rotation_due_latch_rearms_when_the_session_rotates()

@@ -32,6 +32,7 @@ import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 _REPO = Path(__file__).resolve().parents[3]
+_ANANTA_SRC = _REPO / "ananta/src"
 _SRC = _REPO / "plugins/agent_messaging_plugin/src"
 
 sys.path.insert(0, str(_SRC))
@@ -87,7 +88,7 @@ def _env(runtime: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
     env = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": os.environ.get("HOME", ""),
-        "PYTHONPATH": str(_SRC),
+        "PYTHONPATH": os.pathsep.join((str(_ANANTA_SRC), str(_SRC))),
         "PYTHONDONTWRITEBYTECODE": "1",
         "XDG_RUNTIME_DIR": str(runtime),
         "SOLET_NAME": _SOLET,

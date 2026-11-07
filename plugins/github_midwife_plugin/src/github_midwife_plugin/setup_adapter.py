@@ -38,16 +38,20 @@ _IDENTITY_INPUT_REFS = {
     "hydration::claude.install_plugin",
     "hydration::codex.install_plugin",
 }
-_LOCAL_SOURCE_OPERATION_REFS = frozenset({
-    "setup::lm_studio.pull_inference",
-    "setup::lm_studio.ensure_index_inference",
-    "setup::lm_studio.load_inference",
-})
-_LOCAL_SOURCE_PROBE_REFS = frozenset({
-    "setup::lm_studio.inference_artifact_present",
-    "setup::lm_studio.inference_model_indexed",
-    "setup::lm_studio.inference_model_served",
-})
+_LOCAL_SOURCE_OPERATION_REFS = frozenset(
+    {
+        "setup::lm_studio.pull_inference",
+        "setup::lm_studio.ensure_index_inference",
+        "setup::lm_studio.load_inference",
+    }
+)
+_LOCAL_SOURCE_PROBE_REFS = frozenset(
+    {
+        "setup::lm_studio.inference_artifact_present",
+        "setup::lm_studio.inference_model_indexed",
+        "setup::lm_studio.inference_model_served",
+    }
+)
 _LOCAL_SOURCE_REFS = _LOCAL_SOURCE_OPERATION_REFS | _LOCAL_SOURCE_PROBE_REFS
 _ALLOWED_PUBLIC_INPUTS: dict[str, frozenset[str]] = {
     **dict.fromkeys((*lm_studio_operations(), *lm_studio_probes()), LM_STUDIO_PUBLIC_INPUT_KEYS),
@@ -56,13 +60,10 @@ _ALLOWED_PUBLIC_INPUTS: dict[str, frozenset[str]] = {
     # The existing-install flow's closed handler rows (design section 3.2); the
     # create flow never reaches them and they never reach a genesis handler.
     **EXISTING_ALLOWED_PUBLIC_INPUTS,
-    "hydration::shell.install": frozenset({"git_controller_name"}),
-    "service_interface::embedding_service.get_embedding_dimension": (
-        READINESS_PUBLIC_INPUT_KEYS
-    ),
-    "genesis::solet.run": frozenset(
-        {"solet_name", "clone_directory", "setup_profile", "autostart", *IMPLEMENTATION_DECISIONS}
-    ),
+    "hydration::shell.install": frozenset({"git_controller_name", "selected_coding_agents"}),
+    "hydration::shell.probe_path": frozenset({"selected_coding_agents"}),
+    "service_interface::embedding_service.get_embedding_dimension": (READINESS_PUBLIC_INPUT_KEYS),
+    "genesis::solet.run": frozenset({"solet_name", "clone_directory", "setup_profile", "autostart", "selected_coding_agents", *IMPLEMENTATION_DECISIONS}),
     # The llama.cpp service and model callables serve only the roles those decisions selected.
     **dict.fromkeys(
         (
@@ -80,42 +81,24 @@ _ALLOWED_PUBLIC_INPUTS: dict[str, frozenset[str]] = {
     "plugin::agent_messaging_plugin.peer_identity": frozenset({"selected_coding_agents"}),
     "hydration::claude.install_plugin": frozenset({"solet_name", "clone_directory"}),
     "hydration::codex.install_plugin": frozenset({"solet_name", "clone_directory"}),
-    "setup::models.configure_lm_studio_embeddings": frozenset(
-        {"lm_studio_base_url", "model"}
-    ),
-    "setup::models.configure_lm_studio_inference": frozenset(
-        {"lm_studio_base_url", "model"}
-    ),
-    "setup::models.discover_lm_studio": frozenset(
-        {"decision_id", "lm_studio_base_url"}
-    ),
+    "setup::models.configure_lm_studio_embeddings": frozenset({"lm_studio_base_url", "model"}),
+    "setup::models.configure_lm_studio_inference": frozenset({"lm_studio_base_url", "model"}),
+    "setup::models.discover_lm_studio": frozenset({"decision_id", "lm_studio_base_url"}),
     "setup::models.discover_ollama": frozenset({"decision_id"}),
     "setup::models.discover_embeddings": frozenset({"decision_id"}),
     "setup::models.discover_inference": frozenset({"decision_id"}),
     "setup::models.qualify_embedding": frozenset({"decision_id", "candidate_id"}),
-    "setup::models.qualify_structured_actions": frozenset(
-        {"decision_id", "candidate_id"}
-    ),
-    "setup::models.qualify_representative_inference": frozenset(
-        {"decision_id", "candidate_id"}
-    ),
+    "setup::models.qualify_structured_actions": frozenset({"decision_id", "candidate_id"}),
+    "setup::models.qualify_representative_inference": frozenset({"decision_id", "candidate_id"}),
     "plugin::g_suite_plugin.configure": frozenset({"google_oauth_client_id"}),
     "plugin::jira_plugin.configure": frozenset({"jira_base_url", "jira_email"}),
     "plugin::marketo_plugin.configure": frozenset({"marketo_client_id"}),
-    "plugin::salesforce_plugin.configure": frozenset(
-        {"salesforce_alias", "salesforce_instance_url"}
-    ),
+    "plugin::salesforce_plugin.configure": frozenset({"salesforce_alias", "salesforce_instance_url"}),
     "plugin::salesforce_plugin.provision_cli": frozenset({"acknowledge_system_change"}),
-    "plugin::schwab_market_data_plugin.configure": frozenset(
-        {"schwab_client_id", "schwab_callback_url"}
-    ),
-    "plugin::snowflake_plugin.configure": frozenset(
-        {"snowflake_account", "snowflake_user", "snowflake_role"}
-    ),
+    "plugin::schwab_market_data_plugin.configure": frozenset({"schwab_client_id", "schwab_callback_url"}),
+    "plugin::snowflake_plugin.configure": frozenset({"snowflake_account", "snowflake_user", "snowflake_role"}),
     "plugin::zuora_plugin.configure": frozenset({"zuora_base_url", "zuora_client_id"}),
-    "plugin::external_postgres_plugin.configure_connection": frozenset(
-        {"external_postgres_name", "external_postgres_host", "external_postgres_user"}
-    ),
+    "plugin::external_postgres_plugin.configure_connection": frozenset({"external_postgres_name", "external_postgres_host", "external_postgres_user"}),
 }
 
 
@@ -243,6 +226,10 @@ def _validate_operation_inputs(request: AdapterRequest) -> JsonObject | None:
     allowed = _ALLOWED_PUBLIC_INPUTS.get(request.operation_ref, frozenset())
     if set(request.public_inputs) - allowed:
         return _protocol_failure(request)
+    if "selected_coding_agents" in request.public_inputs:
+        selected = request.public_inputs["selected_coding_agents"]
+        if not _coding_agent_input_valid(selected):
+            return _protocol_failure(request)
     if request.operation_ref == "genesis::autostart.install":
         return _validate_autostart_install_inputs(request)
     if request.operation_ref not in _IDENTITY_INPUT_REFS:
@@ -258,6 +245,10 @@ def _validate_operation_inputs(request: AdapterRequest) -> JsonObject | None:
     return None
 
 
+def _coding_agent_input_valid(selected: object) -> bool:
+    return isinstance(selected, list) and bool(selected) and all(isinstance(agent, str) and agent in {"claude_code", "codex"} for agent in selected) and len(selected) == len(set(selected))
+
+
 def _genesis_run_inputs_valid(request: AdapterRequest, expected: JsonObject) -> bool:
     """Extend ``expected`` with genesis's profile, autostart and any implementation decisions."""
     expected["setup_profile"] = request.public_inputs.get("setup_profile")
@@ -266,6 +257,8 @@ def _genesis_run_inputs_valid(request: AdapterRequest, expected: JsonObject) -> 
         return False
     if expected["autostart"] not in {"enabled", "disabled"}:
         return False
+    if "selected_coding_agents" in request.public_inputs:
+        expected["selected_coding_agents"] = request.public_inputs["selected_coding_agents"]
     for decision in IMPLEMENTATION_DECISIONS:
         value = request.public_inputs.get(decision)
         if decision in request.public_inputs and (not isinstance(value, str) or not value):

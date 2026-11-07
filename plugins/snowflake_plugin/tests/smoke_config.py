@@ -17,7 +17,7 @@ Exercises:
   5. repr() redacts the private key (never logs the DER bytes)
   6. statement_timeout_seconds / login_timeout_seconds config bounds:
      absent -> default; non-positive / non-integer -> fail loud
-  7. EDGE parity: validate_edge_process_provider raises nothing, 7 verbs
+  7. EDGE parity: validate_edge_process_provider raises nothing, 21 verbs
 
 Run:
     SOLET_NAME=<name> .venv/bin/python3 \
@@ -73,7 +73,7 @@ def _entries(
     warehouse: str = "wh",
     database: str = "db",
     schema: str = "public",
-    role: str = "EXAMPLE_READONLY",
+    role: str = "EXAMPLE_ROLE",
 ) -> list[dict[str, str]]:
     fields = {
         "account": account,
@@ -103,7 +103,7 @@ def test_resolve_complete_entry() -> None:
     _assert("account carried", config.account == "myorg-myaccount")
     _assert("user carried", config.user == "OPERATOR_USER")
     _assert("warehouse carried", config.warehouse == "wh")
-    _assert("private_key_der is bytes", isinstance(config.private_key_der, bytes))
+    _assert("private_key_der is bytes", type(config.private_key_der) is bytes)
     _assert("private_key_der non-empty (real PEM parsed)", len(config.private_key_der) > 0)
 
 
@@ -183,13 +183,11 @@ def test_edge_parity() -> None:
     actions = discover_actions(plugin)
     raised = None
     try:
-        PluginRegistrationValidator().validate_edge_process_provider(
-            "snowflake_plugin", plugin, actions
-        )
+        PluginRegistrationValidator().validate_edge_process_provider("snowflake_plugin", plugin, actions)
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 8 verbs discovered", len(actions) == 8, str(len(actions)))
+    _assert("all 21 verbs discovered", len(actions) == 21, str(len(actions)))
 
 
 def main() -> int:

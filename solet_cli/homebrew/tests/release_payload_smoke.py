@@ -58,11 +58,12 @@ def _run_renderer(
     output: Path,
     *,
     manifest_path: Path = _EXAMPLE_MANIFEST,
+    renderer: Path = _RENDERER,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             sys.executable,
-            str(_RENDERER),
+            str(renderer),
             "--metadata",
             str(metadata_path),
             "--manifest",
@@ -97,6 +98,21 @@ def _render_valid_payload(
     )
     _check(isinstance(lock_value, dict), "rendered seed lock is an object")
     return formula, cast(dict[str, object], lock_value), output
+
+
+def _check_example_metadata_renders(root: Path) -> None:
+    """Validate the documented sample through the actual renderer unchanged."""
+    output = root / "example-output"
+    result = _run_renderer(_EXAMPLE, output)
+    _check(
+        result.returncode == 0,
+        f"unmodified release metadata example renders: {result.stderr}",
+    )
+    _check(
+        (output / "Formula" / "solet.rb").is_file()
+        and (output / "solet_cli" / "homebrew" / "seed.lock.json").is_file(),
+        "unmodified release metadata example produces the renderer outputs",
+    )
 
 
 def _check_named_seed_catalog(
@@ -343,6 +359,45 @@ def _check_identity_refusals(root: Path, metadata: dict[str, object]) -> None:
     # Manager distribution identity is independent of seed identity: the
     # public release asset can live in the tap while the macos-bizops seed
     # remains in its own repository with its immutable tag/commit/tree tuple.
+
+
+def _check_seed_lock_digest_refusal(root: Path, metadata: dict[str, object]) -> None:
+    """Exercise the renderer's digest check with a tampered Formula template."""
+    fixture = root / "tampered-renderer"
+    (fixture / "scripts").mkdir(parents=True)
+    (fixture / "Formula").mkdir()
+    renderer = fixture / "scripts" / "render_release_payload.py"
+    renderer.write_bytes(_RENDERER.read_bytes())
+    (fixture / "seed.lock.json.template").write_bytes(
+        (_ROOT / "seed.lock.json.template").read_bytes()
+    )
+    formula_template = _ROOT / "Formula" / "solet.rb.template"
+    tampered_template = (fixture / "Formula" / "solet.rb.template")
+    template_text = formula_template.read_text(encoding="utf-8")
+    digest_placeholder = '"seed_lock_sha256": "{{EXISTING_INSTALL_SEED_LOCK_SHA256}}"'
+    _check(
+        digest_placeholder in template_text,
+        "Formula template exposes the rendered seed lock digest",
+    )
+    tampered_template.write_text(
+        template_text.replace(digest_placeholder, '"seed_lock_sha256": "' + "0" * 64 + '"'),
+        encoding="utf-8",
+    )
+
+    metadata_path = root / "tampered-template.json"
+    output = root / "tampered-template-output"
+    _write_metadata(metadata_path, metadata)
+    result = _run_renderer(metadata_path, output, renderer=renderer)
+    _check(
+        result.returncode != 0
+        and "does not match sha256 of the rendered seed.lock.json" in result.stderr,
+        f"renderer refuses a Formula digest tampered from the emitted lock: {result.stderr}",
+    )
+    _check(
+        (output / "Formula" / "solet.rb").is_file()
+        and (output / "solet_cli" / "homebrew" / "seed.lock.json").is_file(),
+        "tampered digest is checked after the actual payload files are rendered",
+    )
 
 
 def _check_independent_manager_identities(
@@ -783,16 +838,18 @@ def main() -> int:
     metadata_value: object = json.loads(_EXAMPLE.read_text(encoding="utf-8"))
     _check(isinstance(metadata_value, dict), "example release metadata is an object")
     metadata = cast(dict[str, object], metadata_value)
+    with tempfile.TemporaryDirectory() as raw:
+        _check_example_metadata_renders(Path(raw))
     metadata["manager_url"] = (
         "https://github.com/solet-public/homebrew-tap/releases/download/"
         "manager-v0.1.0-r0/solet-0.1.0.tar.gz"
     )
-    metadata["manager_source_ref"] = "a" * 40
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         formula, lock, output = _render_valid_payload(root, metadata)
         _check_formula_boundary(formula, lock, metadata)
         _check_named_seed_catalog(output, metadata, lock)
+        _check_seed_lock_digest_refusal(root, metadata)
         _check_identity_refusals(root, metadata)
         _check_independent_manager_identities(root, metadata)
         _check_no_index_formula_install(root, formula)

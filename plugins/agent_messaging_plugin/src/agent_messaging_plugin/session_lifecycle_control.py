@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, runtime_checkable
 
 from ananta.llm.agent_messaging.role_binding import (
     AGENT_ROLE_BINDING_NAMESPACE,
@@ -16,7 +18,12 @@ from ananta.llm.agent_messaging.state_results import (
     require_updated,
 )
 
-from . import workbench_brief_snapshot
+from .lane_worktree_evidence import PacketCustody, RetirementCustodyContext, RetirementEvidenceReader
+from .lane_worktrees import (
+    LaneWorktreeError,
+    active_lane_worktree_inventory,
+    sweep_orphaned_lane_worktrees,
+)
 from .managed_dispatch import (
     DispatchError,
     read_managed_dispatch,
@@ -26,6 +33,7 @@ from .park_drive import (
     interrupt_parked_channel,
     send_delivery_notice,
 )
+from .register_unit_client import VerbError
 from .schema import (
     CONDITION_DEADLINE,
     CONDITION_LANE_CLOSED,
@@ -38,6 +46,7 @@ from .schema import (
     LIFECYCLE_TERMINATED,
     TABLE_MANAGED_SESSION,
     TABLE_SESSION_DEPENDENCY,
+    TABLE_SESSION_TRANSITION,
 )
 from .session_hosts import (
     DEFAULT_AGENT_RUNTIME,
@@ -48,6 +57,7 @@ from .session_hosts import (
     HostCannotSpawnError,
     HostMechanismMissingError,
     HostNotDeclaredError,
+    ParkInterruptingDriverChannel,
     resolve_host_driver,
 )
 from .session_lifecycle_store import (
@@ -66,6 +76,7 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
     from .bridge_sessions import BridgeSessionManager
+    from .composer_preservation import DrainReceipt
     from .models import BridgeBinding
     from .peer_registry import PeerRegistry
     from .session_hosts import DriverChannel, HostDriver
@@ -74,7 +85,7 @@ if TYPE_CHECKING:
 from . import session_lifecycle_verbs as spawn_lifecycle
 
 logger = logging.getLogger(__name__)
-VerbError = workbench_brief_snapshot.VerbError
+CLAUDE_PICKUP_PENDING: Final[str] = "durable mail retained; waiting for existing hook/next-turn inbox pickup"
 
 _TERMINAL_STATES = frozenset({LIFECYCLE_TERMINATED, LIFECYCLE_RETIRED})
 
@@ -83,6 +94,8 @@ def _probe_host_liveness(  # pyright: ignore[reportUnusedFunction]
     row: Mapping[str, Any],
 ) -> tuple[str, str]:
     """Probe alive/dead/unknown without folding faults into either fact."""
+    if row.get("host") == "operator":
+        return "unknown", "operator host is unobservable; stop the process manually"
     host_ref = str(row.get("host_ref") or "")
     if not host_ref:
         return "unknown", "host_ref unavailable"
@@ -94,13 +107,216 @@ def _probe_host_liveness(  # pyright: ignore[reportUnusedFunction]
         alive = driver.alive(host_ref)
     except Exception as exc:  # noqa: BLE001 — probe faults are durable unknown evidence
         return "unknown", f"{type(exc).__name__}: {exc}"
-    return (
-        ("alive", "driver.alive returned true")
-        if alive
-        else (
-            "dead",
-            "driver.alive returned false",
+    if alive is True:
+        return "alive", "driver.alive returned true"
+    if alive is False:
+        return "dead", "driver.alive returned false"
+    return "unknown", "driver.alive returned no boolean observation"
+
+
+_HOST_ATTEMPT_SCHEMA = "managed-session.host-attempt/v1"
+
+
+@dataclass(frozen=True)
+class HostAttempt:
+    """Immutable host evidence carried by one successful transition's rationale."""
+
+    agent_instance_id: str
+    host: str
+    host_ref: str
+    action: str
+    remedy: str | None
+    observation: str
+    observed_at: str
+    provenance: str
+
+    def reason(self, human_reason: str) -> str:
+        return json.dumps(
+            {"schema": _HOST_ATTEMPT_SCHEMA, "human_reason": human_reason, "attempt": dataclasses.asdict(self)},
+            sort_keys=True,
         )
+
+
+def _decode_host_attempt(reason: str, instance: str) -> HostAttempt:
+    envelope = json.loads(reason)
+    if not isinstance(envelope, dict) or envelope.get("schema") != _HOST_ATTEMPT_SCHEMA:
+        raise ValueError("unversioned host attempt")
+    if not isinstance(envelope.get("human_reason"), str):
+        raise ValueError("missing human rationale")
+    attempt = _host_attempt_fields(envelope.get("attempt"))
+    _validate_host_attempt(attempt, instance)
+    return attempt
+
+
+def _host_attempt_fields(fields: object) -> HostAttempt:
+    if not isinstance(fields, dict) or set(fields) != {field.name for field in dataclasses.fields(HostAttempt)}:
+        raise ValueError("malformed host attempt fields")
+    if any(not isinstance(value, str) for key, value in fields.items() if key != "remedy"):
+        raise ValueError("host attempt text fields required")
+    if fields["remedy"] is not None and not isinstance(fields["remedy"], str):
+        raise ValueError("invalid remedy")
+    return HostAttempt(**fields)
+
+
+def _validate_host_attempt(attempt: HostAttempt, instance: str) -> None:
+    if attempt.agent_instance_id != instance or not attempt.host or not attempt.provenance:
+        raise ValueError("host attempt identity or provenance missing")
+    if attempt.action not in {"terminated", "none_available", "not_attempted"}:
+        raise ValueError("unknown host action")
+    if attempt.observation not in {"alive", "dead", "unknown"}:
+        raise ValueError("unknown observation")
+    _validate_host_observation(attempt)
+
+
+def _validate_host_observation(attempt: HostAttempt) -> None:
+    if attempt.action == "none_available" and not attempt.remedy:
+        raise ValueError("missing manual remedy")
+    if attempt.observation != "unknown" and not attempt.host_ref:
+        raise ValueError("observed host requires exact ref")
+    if datetime.fromisoformat(attempt.observed_at).utcoffset() is None:
+        raise ValueError("host observation requires aware time")
+
+
+def read_host_attempt(state: StateManagementInterface, agent_instance_id: str) -> dict[str, Any]:
+    """Read the latest termination rationale; never search past a newer unknown.
+
+    Legacy and unreadable evidence remain readable/advisory. They cannot be
+    converted to proof, and history is never corrected in place.
+    """
+    result: dict[str, Any] = {"prior_host_outcome": None, "prior_host_reason": None, "prior_host_advisory": None}
+    try:
+        rows = require_records(
+            state.query_ordered(
+                AGENT_ROLE_BINDING_NAMESPACE,
+                {
+                    "table": TABLE_SESSION_TRANSITION,
+                    "filters": {"agent_instance_id": agent_instance_id, "to_state": LIFECYCLE_TERMINATED, "is_deleted": 0},
+                    "order_by": [["occurred_at", "desc"], ["id", "desc"]],
+                    "limit": 1,
+                },
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 -- evidence unavailable is an explicit advisory
+        result["prior_host_advisory"] = f"prior_host_evidence_unreadable: {type(exc).__name__}: {exc}"
+        return result
+    if not rows:
+        result["prior_host_advisory"] = "prior_host_evidence_unknown: no recorded termination attempt"
+        return result
+    row = rows[0]
+    reason = row.get("reason")
+    result["prior_host_reason"] = reason
+    try:
+        attempt = _decode_host_attempt(str(reason or ""), agent_instance_id)
+    except (TypeError, ValueError) as exc:
+        result["prior_host_advisory"] = f"prior_host_evidence_unknown: {exc}"
+        return result
+    result["prior_host_outcome"] = {**dataclasses.asdict(attempt), "transition_id": row.get("id")}
+    return result
+
+
+def refuse_if_local_name_held(
+    state: StateManagementInterface,
+    *,
+    local_name: str,
+    role_name: str,
+    directed_by: str = "plugin:spawn_session",
+) -> None:
+    """W6 OPERATOR RULING (2026-08-14): a second spawn for a role that is
+    already held is REFUSED, LOUDLY. Never a silent uniquifying suffix, never
+    a silent eviction.
+
+    A suffix would give the second process a different local name than the
+    role it was requested under, so ``Git-Controller-2`` would answer to a
+    name that no caller asked for. And a silent eviction would make a routine
+    act destructive. So the only non-colliding answer is to refuse and name the
+    incumbent.
+
+    The incumbent is a non-terminal ``managed_session`` row sharing this
+    ``local_name`` — the ledger, not the role binding, because the collision
+    being prevented is two LOCAL PROCESSES answering to one name on one
+    machine. That choice also keeps crash succession cheap for free: a
+    crashed holder's row is observed and CAS-transitioned to ``terminated``
+    here, after which the complete same-name set is read again. This
+    mirrors the claim path's own posture, where a DEAD holder is deliberately
+    still claimable (``role_claim.py``) — the refusal is about live
+    collisions, not about corpses.
+    """
+    if not local_name:
+        return
+    # A stale observation is discarded in full; every retry rereads all rows
+    # and probes again. Bounded churn remains the existing name collision.
+    for _ in range(3):
+        rows = _same_name_rows(state, local_name)
+        if not rows:
+            return
+        _repair_dead_incumbents(state, rows, local_name, role_name, directed_by)
+    raise VerbError("local_name_already_held", f"{local_name!r}: unresolved collision; incumbents changed during observation; retry with fresh evidence.")
+
+
+def _same_name_rows(state: StateManagementInterface, local_name: str) -> list[dict[str, Any]]:
+    result = state.query_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {
+            "table": TABLE_MANAGED_SESSION,
+            "filters": {"local_name": local_name, "is_deleted": 0},
+        },
+    )
+    return [row for row in require_records(result) if row.get("lifecycle_state") not in _TERMINAL_STATES]
+
+
+def _repair_dead_incumbents(
+    state: StateManagementInterface,
+    rows: list[dict[str, Any]],
+    local_name: str,
+    role_name: str,
+    directed_by: str,
+) -> None:
+    for row in rows:
+        expected = {key: row.get(key) for key in ("host", "host_ref", "lifecycle_state", "last_transition_at", "last_heartbeat_at")}
+        observation, detail = _probe_host_liveness(row)
+        if observation != "dead":
+            _refuse_name_collision(row, local_name, role_name, observation, detail)
+        attempt = HostAttempt(
+            agent_instance_id=str(row["agent_instance_id"]),
+            host=str(expected["host"]),
+            host_ref=str(expected["host_ref"]),
+            action="not_attempted",
+            remedy=None,
+            observation="dead",
+            observed_at=datetime.now(UTC).isoformat(),
+            provenance="spawn_collision_observed_dead",
+        )
+        try:
+            transition_lifecycle_state(
+                state,
+                agent_instance_id=attempt.agent_instance_id,
+                from_state=str(expected["lifecycle_state"]),
+                to_state=LIFECYCLE_TERMINATED,
+                directed_by=directed_by,
+                reason=attempt.reason("same-name incumbent observed_dead"),
+                expected_observation=expected,
+            )
+        except StaleLifecycleStateError:
+            return
+        except IllegalLifecycleTransitionError as exc:
+            _refuse_name_collision(row, local_name, role_name, "unknown", str(exc))
+
+
+def _refuse_name_collision(row: Mapping[str, Any], local_name: str, role_name: str, observation: str, detail: str) -> None:
+    raise VerbError(
+        "local_name_already_held",
+        f"refusing to spawn a second session named {local_name!r}"
+        f"{f' (role {role_name!r})' if role_name else ''}: "
+        f"{row.get('agent_instance_id')} retains that name "
+        f"(lifecycle_state={row.get('lifecycle_state')!r}, "
+        f"host={row.get('host')!r}, host_ref={row.get('host_ref')!r}, "
+        f"lane_id={row.get('lane_id')!r}, observed={observation!r}, detail={detail!r}). Two sessions answering to one "
+        "local name collide silently — the git mutation guard matches the "
+        "name exactly, so both would pass it. Terminate the incumbent "
+        "first (this plugin's terminate_session verb, agent_instance_id="
+        f"{row.get('agent_instance_id')}), then spawn the replacement. "
+        "Spawning does NOT claim the durable role binding either way; the "
+        "new worker claims it explicitly once it is up.",
     )
 
 
@@ -111,6 +327,8 @@ def _resolve_driver_channel(row: dict[str, Any]) -> DriverChannel:
     driver registered, or a registered driver with no channel for this
     host_ref, e.g. the degenerate ``operator`` driver), never a silent
     degradation."""
+    if row.get("brief_ref") and not row.get("assignment"):
+        raise VerbError("unit_assignment_historical", "This path-based session is read-only history; it cannot receive new work.")
     host = str(row.get("host") or "")
     agent_runtime = str(row.get("agent_runtime") or DEFAULT_AGENT_RUNTIME)
     agent_instance_id = str(row.get("agent_instance_id") or "")
@@ -123,19 +341,20 @@ def _resolve_driver_channel(row: dict[str, Any]) -> DriverChannel:
     ) as exc:
         raise VerbError(
             "unsupported_on_host",
-            f"host {host!r} for {agent_instance_id!r} has no driver in this "
-            f"build ({exc}) — driver-channel verbs (clear/compact/drive) are "
-            "unavailable; use the manual equivalent for this session.",
+            f"host {host!r} for {agent_instance_id!r} has no driver in this build ({exc}) — driver-channel verbs (clear/compact/drive) are unavailable; use the manual equivalent for this session.",
         ) from exc
     channel = driver.driver_channel(str(row.get("host_ref") or ""))
     if channel is None:
+        # A top-level import would close the cycle control -> delivery_drive ->
+        # session_lifecycle_verbs -> control: delivery_drive imports names from
+        # session_lifecycle_verbs at load, session_lifecycle_verbs imports names
+        # from this module at load (its late re-export block), and this module
+        # imports session_lifecycle_verbs at its own top.
+        from .delivery_drive import OPERATOR_SEAT_MANUAL_WAKE  # noqa: PLC0415 -- lazy: see the cycle above
+
         raise VerbError(
             "unsupported_on_host",
-            f"host {host!r} for {agent_instance_id!r} has no driver channel "
-            "(degenerate driver, or the tracking process's memory doesn't "
-            "recognize this host_ref, e.g. after a restart) — driver-channel "
-            "verbs (clear/compact/drive) are unavailable; use the manual "
-            "equivalent for this session.",
+            f"host {host!r} for {agent_instance_id!r} has no driver channel (degenerate driver, or the tracking process's memory doesn't recognize this host_ref, e.g. after a restart) — driver-channel verbs (clear/compact/drive) are unavailable; use the manual equivalent for this session: {OPERATOR_SEAT_MANUAL_WAKE}.",
         )
     return channel
 
@@ -165,14 +384,34 @@ DriveOnDeliveryOutcome = Literal[
     "not_managed",
     "ineligible_state",
     "driver_unavailable",
+    "driver_scheduled",
+    "driver_queue_full",
     "driver_sent",
     "driver_error",
+    "driver_pending",
+    "driver_turn_observed",
 ]
 DRIVE_NOT_MANAGED: Final[DriveOnDeliveryOutcome] = "not_managed"
 DRIVE_INELIGIBLE_STATE: Final[DriveOnDeliveryOutcome] = "ineligible_state"
 DRIVE_DRIVER_UNAVAILABLE: Final[DriveOnDeliveryOutcome] = "driver_unavailable"
+# iss_ab680764: the managed-row lookup passed and the channel half of the drive
+# was handed to the delivery-drive executor; it has NOT run yet. Never reported
+# as ``driver_sent``, which only a finished channel send may claim.
+DRIVE_DRIVER_SCHEDULED: Final[DriveOnDeliveryOutcome] = "driver_scheduled"
+# iss_ab680764 (review D1): the delivery-drive queue was at its cap, so the
+# drive was refused rather than queued behind a backlog it would outlive.
+DRIVE_DRIVER_QUEUE_FULL: Final[DriveOnDeliveryOutcome] = "driver_queue_full"
 DRIVE_DRIVER_SENT: Final[DriveOnDeliveryOutcome] = "driver_sent"
 DRIVE_DRIVER_ERROR: Final[DriveOnDeliveryOutcome] = "driver_error"
+DRIVE_DRIVER_PENDING: Final[DriveOnDeliveryOutcome] = "driver_pending"
+DRIVE_DRIVER_TURN_OBSERVED: Final[DriveOnDeliveryOutcome] = "driver_turn_observed"
+
+
+@runtime_checkable
+class CodexDrainChannel(Protocol):
+    """Delivery capability that preserves the composer around a non-interrupting doorbell."""
+
+    def send_drain_notice(self, text: str) -> DrainReceipt: ...
 
 
 def _sanitize_notice_label(label: str) -> str:
@@ -228,44 +467,12 @@ def _resolve_delivery_managed_session(
 
 def _record_driver_error_detail(
     detail_sink: Callable[[str], None] | None,
+    channel: DriverChannel,
     exc: Exception,
 ) -> None:
     """Preserve a driver-channel diagnostic for a payload-owning caller."""
-    if detail_sink is not None and isinstance(exc, DriverChannelSendError):
-        detail_sink(str(exc))
-
-
-def _drive_parked_delivery(
-    row: dict[str, Any],
-    *,
-    recipient_agent_instance_id: str,
-    notice: str,
-    detail_sink: Callable[[str], None] | None,
-) -> DriveOnDeliveryOutcome:
-    """Recover only a parked pane with an explicitly declared interrupt seam."""
-    try:
-        channel = _resolve_driver_channel(row)
-    except VerbError:
-        return DRIVE_DRIVER_UNAVAILABLE
-    try:
-        park_detail = interrupt_parked_channel(channel)
-    except Exception as exc:  # noqa: BLE001 -- preserve the sender's durable delivery
-        _record_driver_error_detail(detail_sink, exc)
-        return DRIVE_DRIVER_ERROR
-    if park_detail is None:
-        return DRIVE_INELIGIBLE_STATE
-    return send_delivery_notice(
-        channel,
-        row=row,
-        recipient_agent_instance_id=recipient_agent_instance_id,
-        notice=notice,
-        detail_sink=detail_sink,
-        park_detail=park_detail,
-        driver_sent=DRIVE_DRIVER_SENT,
-        driver_error=DRIVE_DRIVER_ERROR,
-        record_error_detail=_record_driver_error_detail,
-        logger=logger,
-    )
+    if detail_sink is not None:
+        detail_sink(f"{type(channel).__name__}: {exc}")
 
 
 def drive_on_delivery(
@@ -308,6 +515,113 @@ def drive_on_delivery(
     never fail the caller's own send result and must never mask it — the
     caller's already-computed delivery outcome is untouched either way.
     """
+    if state is not None:
+        managed, _reason = _resolve_delivery_managed_session(
+            state,
+            recipient_agent_instance_id=recipient_agent_instance_id,
+            recipient_agent_session_id=recipient_agent_session_id,
+        )
+        if managed is not None and managed.get("agent_runtime") == "claude_code" and _has_retained_claude_pickup(state, managed):
+            if detail_sink is not None:
+                detail_sink(CLAUDE_PICKUP_PENDING)
+            return DRIVE_DRIVER_PENDING
+    target = _look_up_delivery_target(
+        state,
+        recipient_agent_instance_id=recipient_agent_instance_id,
+        recipient_agent_session_id=recipient_agent_session_id,
+    )
+    if not isinstance(target, _DeliveryTarget):
+        return target
+    return _drive_delivery_target(
+        target,
+        recipient_agent_instance_id=recipient_agent_instance_id,
+        notice=_delivery_notice(sender_label),
+        detail_sink=detail_sink,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _DeliveryTarget:
+    """A managed row that passed the drive gate, with its live channel."""
+
+    row: dict[str, Any]
+    channel: DriverChannel
+    parked: bool
+
+
+def _delivery_notice(sender_label: str) -> str:
+    return f"delivery waiting from {_sanitize_notice_label(sender_label)} — drain peer_inbox"
+
+
+def _has_retained_claude_pickup(state: StateManagementInterface, row: Mapping[str, Any]) -> bool:
+    """Guard legacy automatic callers that have no per-message drive reference.
+
+    Their durable notifications stay unchanged. Current role bindings also
+    protect a successor whose original pickup routing names the old holder.
+    """
+    from .delivery_drive import PICKUP_PAGE_LIMIT, TABLE_DELIVERY_PICKUP  # noqa: PLC0415
+
+    routes = [("recipient_instance", str(row["agent_instance_id"]))]
+    session = str(row.get("agent_session_id") or "")
+    if session:
+        routes.append(("recipient_session", session))
+    for field, value in routes:
+        if require_records(
+            state.query_state(
+                AGENT_ROLE_BINDING_NAMESPACE,
+                {
+                    "table": TABLE_DELIVERY_PICKUP,
+                    "filters": {"pending": True, field: value},
+                    "limit": 1,
+                },
+            )
+        ):
+            return True
+    role_routes = [("agent_instance_id", str(row["agent_instance_id"]))]
+    if session:
+        role_routes.append(("agent_session_id", session))
+    return any(_route_has_pending_role(state, field, value, PICKUP_PAGE_LIMIT) for field, value in role_routes)
+
+
+def _route_has_pending_role(state: StateManagementInterface, field: str, value: str, limit: int) -> bool:
+    from .delivery_drive import TABLE_DELIVERY_PICKUP  # noqa: PLC0415
+
+    roles = require_records(
+        state.query_state(
+            AGENT_ROLE_BINDING_NAMESPACE,
+            {
+                "table": "role_binding",
+                "filters": {field: value},
+                "limit": limit,
+            },
+        )
+    )
+    for role in roles:
+        if require_records(
+            state.query_state(
+                AGENT_ROLE_BINDING_NAMESPACE,
+                {
+                    "table": TABLE_DELIVERY_PICKUP,
+                    "filters": {"pending": True, "role_name": role["role"]},
+                    "limit": 1,
+                },
+            )
+        ):
+            return True
+    return len(roles) == limit
+
+
+def _look_up_delivery_target(
+    state: StateManagementInterface | None,
+    *,
+    recipient_agent_instance_id: str,
+    recipient_agent_session_id: str,
+) -> _DeliveryTarget | DriveOnDeliveryOutcome:
+    """Read the managed row, apply the lifecycle gate, resolve the channel.
+
+    A generic delivery notice never drives a parked row; the sole exception is
+    a channel declaring the measured parked-pane interrupt capability.
+    """
     if state is None:
         return DRIVE_DRIVER_UNAVAILABLE
     row, resolution_outcome = _resolve_delivery_managed_session(
@@ -318,31 +632,209 @@ def drive_on_delivery(
     if row is None:
         return resolution_outcome or DRIVE_DRIVER_UNAVAILABLE
     lifecycle_state = str(row.get("lifecycle_state") or "")
-    notice = f"delivery waiting from {_sanitize_notice_label(sender_label)} — drain peer_inbox"
-    if lifecycle_state == LIFECYCLE_PARKED:
-        return _drive_parked_delivery(
-            row,
-            recipient_agent_instance_id=recipient_agent_instance_id,
-            notice=notice,
-            detail_sink=detail_sink,
-        )
-    if lifecycle_state not in _DRIVE_ON_DELIVERY_ELIGIBLE_STATES:
+    parked = lifecycle_state == LIFECYCLE_PARKED
+    if not parked and lifecycle_state not in _DRIVE_ON_DELIVERY_ELIGIBLE_STATES:
         return DRIVE_INELIGIBLE_STATE
     try:
         channel = _resolve_driver_channel(row)
     except VerbError:
         return DRIVE_DRIVER_UNAVAILABLE
+    if parked and not isinstance(channel, ParkInterruptingDriverChannel):
+        return DRIVE_INELIGIBLE_STATE
+    return _DeliveryTarget(row=row, channel=channel, parked=parked)
+
+
+def _drive_delivery_target(
+    target: _DeliveryTarget,
+    *,
+    recipient_agent_instance_id: str,
+    notice: str,
+    detail_sink: Callable[[str], None] | None,
+) -> DriveOnDeliveryOutcome:
+    """Interrupt a parked pane if due, then send the notice; never raises."""
+    if target.row.get("agent_runtime") == "codex":
+        if not notice.startswith("Solet delivery doorbell (message reference "):
+            notice = "Solet delivery doorbell (managed delivery). Run solet-bridge inbox to drain both direct and role sections. Read task authority from the durable inbox."
+        return _send_codex_drain_notice(target.channel, notice, detail_sink)
+    park_detail: str | None = None
+    if target.parked:
+        try:
+            park_detail = interrupt_parked_channel(target.channel)
+        except Exception as exc:  # noqa: BLE001 -- preserve the sender's durable delivery
+            _record_driver_error_detail(detail_sink, target.channel, exc)
+            return DRIVE_DRIVER_ERROR
     return send_delivery_notice(
-        channel,
-        row=row,
+        target.channel,
+        row=target.row,
         recipient_agent_instance_id=recipient_agent_instance_id,
         notice=notice,
         detail_sink=detail_sink,
-        park_detail=None,
+        park_detail=park_detail,
         driver_sent=DRIVE_DRIVER_SENT,
         driver_error=DRIVE_DRIVER_ERROR,
-        record_error_detail=_record_driver_error_detail,
+        record_error_detail=lambda sink, exc: _record_driver_error_detail(
+            sink,
+            target.channel,
+            exc,
+        ),
         logger=logger,
+    )
+
+
+def _send_codex_drain_notice(
+    channel: DriverChannel,
+    notice: str,
+    detail_sink: Callable[[str], None] | None,
+) -> DriveOnDeliveryOutcome:
+    if not isinstance(channel, CodexDrainChannel):
+        if detail_sink is not None:
+            detail_sink("pending: current Codex driver has no safe idle drain capability")
+        return DRIVE_DRIVER_UNAVAILABLE
+    try:
+        receipt = channel.send_drain_notice(notice)
+    except Exception as exc:  # noqa: BLE001 -- retain the caller's durable mail
+        _record_driver_error_detail(detail_sink, channel, exc)
+        return DRIVE_DRIVER_ERROR
+    if detail_sink is not None:
+        detail_sink(receipt.detail())
+    evidence = receipt.evidence
+    if evidence == "turn_observed":
+        return DRIVE_DRIVER_TURN_OBSERVED
+    if evidence == "submitted":
+        return DRIVE_DRIVER_SENT
+    if evidence == "submitted_no_turn":
+        return DRIVE_DRIVER_ERROR
+    return DRIVE_DRIVER_PENDING
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryDrive:
+    """A drive-on-delivery whose send-time lookup passed, to run later.
+
+    iss_ab680764: :func:`resolve_delivery_drive` answers the sender at once;
+    :meth:`run` does what can take seconds — the parked-pane interrupt and the
+    channel send with its paste wait — on the delivery-drive executor. A
+    queued drive may run seconds after the send, so :meth:`run` repeats the
+    WHOLE lookup (managed row, lifecycle gate, parked capability, channel)
+    immediately before it touches the pane: a recipient parked, retired or
+    gone while the drive waited gets that lookup's non-driven outcome, never
+    ``driver_sent``.
+    """
+
+    state: StateManagementInterface
+    recipient_agent_instance_id: str
+    recipient_agent_session_id: str
+    notice: str
+    recipient_role_name: str = ""
+    pickup_message_id: str = ""
+    initial_delivery: bool = True
+
+    def run(
+        self,
+        detail_sink: Callable[[str], None] | None = None,
+    ) -> DriveOnDeliveryOutcome:
+        """Re-check the gate, then interrupt/send; never raises."""
+        recipient = _current_delivery_recipient(self)
+        if recipient is None:
+            if detail_sink is not None:
+                detail_sink("durable mail retained; current role recipient unresolved")
+            return DRIVE_DRIVER_PENDING
+        instance, session = recipient
+        managed, _reason = _resolve_delivery_managed_session(
+            self.state,
+            recipient_agent_instance_id=instance,
+            recipient_agent_session_id=session,
+        )
+        if _claude_drive_pending(self, managed):
+            if detail_sink is not None:
+                detail_sink(CLAUDE_PICKUP_PENDING)
+            return DRIVE_DRIVER_PENDING
+        target = _look_up_delivery_target(
+            self.state,
+            recipient_agent_instance_id=instance,
+            recipient_agent_session_id=session,
+        )
+        if not isinstance(target, _DeliveryTarget):
+            if detail_sink is not None:
+                detail_sink(f"run-time re-check refused the queued drive: {target}")
+            return target
+        return _drive_delivery_target(
+            target,
+            recipient_agent_instance_id=instance,
+            notice=self.notice,
+            detail_sink=detail_sink,
+        )
+
+    def _claim_first_claude_doorbell(self) -> bool:
+        """CAS before input: a crash or explicit reopen never repeats the doorbell."""
+        if not self.initial_delivery:
+            return False
+        if not self.pickup_message_id:
+            row, _reason = _resolve_delivery_managed_session(
+                self.state,
+                recipient_agent_instance_id=self.recipient_agent_instance_id,
+                recipient_agent_session_id=self.recipient_agent_session_id,
+            )
+            return row is not None and not _has_retained_claude_pickup(self.state, row)
+        from .delivery_drive import CodexPickupStore  # noqa: PLC0415 -- shared pickup lifecycle
+
+        store = CodexPickupStore(self.state)
+        row = store.read(self.pickup_message_id)
+        return bool(row is not None and row["pending"] and row["version"] == 1 and store.change(row, phase="driver_pending", reason=CLAUDE_PICKUP_PENDING, lease_until=None) is not None)
+
+
+def _claude_drive_pending(drive: DeliveryDrive, row: Mapping[str, Any] | None) -> bool:
+    return bool(row is not None and row.get("agent_runtime") == "claude_code" and not drive._claim_first_claude_doorbell())  # noqa: SLF001 -- same module's drive boundary
+
+
+def _current_delivery_recipient(drive: DeliveryDrive) -> tuple[str, str] | None:
+    if not drive.recipient_role_name:
+        return drive.recipient_agent_instance_id, drive.recipient_agent_session_id
+    from .role_binding_store import resolve_role_binding  # noqa: PLC0415
+
+    try:
+        role = resolve_role_binding(drive.state, drive.recipient_role_name)
+        if role.agent_id in {"codex", "claude_code"}:
+            return role.agent_instance_id, role.agent_session_id
+    except Exception:  # noqa: BLE001 -- wrong-recipient uncertainty never touches a pane
+        logger.warning("Managed delivery role refresh failed", exc_info=True)
+    return None
+
+
+def resolve_delivery_drive(
+    state: StateManagementInterface | None,
+    *,
+    recipient_agent_instance_id: str,
+    recipient_agent_session_id: str = "",
+    sender_label: str,
+    pickup_notice: str = "",
+    recipient_role_name: str = "",
+    pickup_message_id: str = "",
+    initial_delivery: bool = True,
+) -> DeliveryDrive | DriveOnDeliveryOutcome:
+    """The send-time half of :func:`drive_on_delivery`.
+
+    Returns the final outcome when the lookup already decides it
+    (``driver_unavailable``, ``not_managed``, ``ineligible_state``), else the
+    :class:`DeliveryDrive` to run later.
+    """
+    if state is None:
+        return DRIVE_DRIVER_UNAVAILABLE
+    target = _look_up_delivery_target(
+        state,
+        recipient_agent_instance_id=recipient_agent_instance_id,
+        recipient_agent_session_id=recipient_agent_session_id,
+    )
+    if not isinstance(target, _DeliveryTarget):
+        return target
+    return DeliveryDrive(
+        state=state,
+        recipient_agent_instance_id=recipient_agent_instance_id,
+        recipient_agent_session_id=recipient_agent_session_id,
+        notice=pickup_notice or _delivery_notice(sender_label),
+        recipient_role_name=recipient_role_name,
+        pickup_message_id=pickup_message_id,
+        initial_delivery=initial_delivery,
     )
 
 
@@ -381,11 +873,7 @@ def notify_steward_of_managed_dispatch(
             spawner_instance_id,
         )
         return False
-    prose = (
-        f"managed_dispatch_notice: dispatch {dispatch_id} has condition "
-        f"{condition!r}; next_required_action={next_required_action!r}. "
-        "Read managed_dispatch_status and make the named decision."
-    )
+    prose = f"managed_dispatch_notice: dispatch {dispatch_id} has condition {condition!r}; next_required_action={next_required_action!r}. Read managed_dispatch_status and make the named decision."
     try:
         bridge_manager.append_event(
             binding.bridge_id,
@@ -528,9 +1016,7 @@ def _verify_drive_effect(
         "drive_unverified",
         f"the drive for {agent_instance_id!r} was DISPATCHED but its effect could "
         "not be confirmed — the driver read the target back and never observed the "
-        "driven text leaving the composer"
-        + (" (it is sitting there stranded)." if result is False else " (deadline passed).")
-        + " The text is already in that session's input buffer: do NOT re-send it "
+        "driven text leaving the composer" + (" (it is sitting there stranded)." if result is False else " (deadline passed).") + " The text is already in that session's input buffer: do NOT re-send it "
         "(a blind retry deposits a second copy and still cannot confirm itself).",
     )
 
@@ -656,8 +1142,7 @@ def clear_session(
     if current in _TERMINAL_STATES:
         raise VerbError(
             "lifecycle_state_conflict",
-            f"clear_session arrived on a {current!r} row — terminal rows "
-            "never receive driver-channel commands.",
+            f"clear_session arrived on a {current!r} row — terminal rows never receive driver-channel commands.",
         )
     channel = _resolve_driver_channel(row)
     _send_driver_text(channel, "/clear")
@@ -708,8 +1193,7 @@ def compact_session(state: StateManagementInterface, *, agent_instance_id: str) 
     if current in _TERMINAL_STATES:
         raise VerbError(
             "lifecycle_state_conflict",
-            f"compact_session arrived on a {current!r} row — terminal rows "
-            "never receive driver-channel commands.",
+            f"compact_session arrived on a {current!r} row — terminal rows never receive driver-channel commands.",
         )
     channel = _resolve_driver_channel(row)
     _send_driver_text(channel, "/compact")
@@ -790,8 +1274,7 @@ def drive_session(
     if current in _TERMINAL_STATES:
         raise VerbError(
             "lifecycle_state_conflict",
-            f"drive_session arrived on a {current!r} row — terminal rows "
-            "never receive driver-channel commands.",
+            f"drive_session arrived on a {current!r} row — terminal rows never receive driver-channel commands.",
         )
     verification, park_detail = drive_session_channel(
         _resolve_driver_channel(row),
@@ -832,6 +1315,30 @@ HOST_ACTION_NONE_AVAILABLE = "none_available"
 HOST_ACTION_NOT_ATTEMPTED = "not_attempted"
 
 
+def _host_result(
+    state: StateManagementInterface,
+    row: Mapping[str, Any],
+    *,
+    action: str = HOST_ACTION_NOT_ATTEMPTED,
+    remedy: str | None = None,
+    observation: tuple[str, str] | None = None,
+) -> dict[str, Any]:
+    """Current-call action, fresh native observation and separate durable history."""
+    liveness, detail = observation if observation is not None else _probe_host_liveness(row)
+    return {
+        "host": str(row.get("host") or ""),
+        "host_ref": str(row.get("host_ref") or ""),
+        "host_action": action,
+        "host_remedy": remedy,
+        "host_liveness": liveness,
+        "host_liveness_detail": detail,
+        "host_liveness_observed_at": datetime.now(UTC).isoformat(),
+        "registry_checked": False,
+        "teardown_complete": False,
+        **read_host_attempt(state, str(row.get("agent_instance_id") or "")),
+    }
+
+
 def _resolve_termination_driver(
     row: Mapping[str, object],
     agent_instance_id: str,
@@ -847,9 +1354,7 @@ def _resolve_termination_driver(
     ) as exc:
         raise VerbError(
             "unsupported_on_host",
-            f"host {host!r} for {agent_instance_id!r} has no driver in this "
-            f"build ({exc}) — terminate_session cannot reach the host; stop "
-            "the process manually.",
+            f"host {host!r} for {agent_instance_id!r} has no driver in this build ({exc}) — terminate_session cannot reach the host; stop the process manually.",
         ) from exc
     return driver, host
 
@@ -869,8 +1374,7 @@ def _terminate_host(
         driver.terminate(host_ref, grace_seconds)
     except HostCannotSpawnError as exc:
         logger.info(
-            "terminate_session %s: host %r driver is degenerate (no spawn, "
-            "no kill) — proceeding with the ledger-only transition.",
+            "terminate_session %s: host %r driver is degenerate (no spawn, no kill) — proceeding with the ledger-only transition.",
             agent_instance_id,
             host,
         )
@@ -885,47 +1389,21 @@ def terminate_session(
     directed_by: str,
     grace_seconds: int = DEFAULT_TERMINATE_GRACE_SECONDS,
 ) -> dict[str, Any]:
-    """§4 ``terminate_session`` — graceful stop -> kill after ``grace_seconds``
-    -> ledger ``-> terminated``, in that order: the host action happens
-    BEFORE the ledger write so the ledger never claims ``terminated`` over a
-    process still running (2026-08-03/04 Dawn ruling, on the live e2e's
-    finding that a ``retire_session`` over a still-running headless worker
-    is the ledger lying about reality). ``host='operator'`` inventory rows
-    (created by normal peer registration, never dispatched through
-    ``spawn_session``) keep their designed degenerate path: ``driver.terminate()`` raises
-    ``HostCannotSpawnError`` ("I didn't spawn this, I can't kill it"), which
-    is information, not a verb failure — caught here and treated as no host
-    action available, so the ledger transition still lands. Without this, no
-    operator-hosted row could ever reach ``terminated``, wedging
-    ``session_sweep.sweep_lane_closed_dependencies`` (needs EVERY row on a
-    lane terminal) for any lane touched by a non-headless session. A row
-    whose ``host`` names no registered driver at all (``unsupported_on_host``)
-    is genuinely broken state, distinct from a registered-but-degenerate
-    driver. Idempotent on an already-terminal row (retire_session's
-    partial-failure contract composes this and must tolerate re-running it)
-    — a repeat call never re-attempts the host action, since the first
-    successful call already reaped it.
+    """Invoke the existing driver, observe it, then transition the ledger.
 
-    OWNS firing + best-effort delivering armed ``session_terminal``
-    ``session_dependency`` edges (2026-08-04, coordinator-seat ruling on the
-    acceptance Test C completion) — the SOLE call site now; ``retire_session``
-    composes this function as its own first step and no longer fires them
-    itself. Fires on BOTH paths: the state-transition success path (an edge
-    already armed before termination), and the already-terminal early
-    return (a repeat call catches an edge armed AFTER the session already
-    died — an orphan the success path, which only runs once per
-    ``... -> terminated`` transition, could never reach). The predicated
-    ``fired_at IS NULL`` guard makes both paths idempotent and mutually
-    safe to call any number of times.
+    A driver return is an invocation outcome, not proof of death. Operator
+    hosts retain their ledger-only path and manual remedy. The successful
+    CAS appends a versioned attempt to the transition reason; failed CAS
+    cannot attach evidence to another writer, and audit failure stays loud.
+    Terminal repeats make no host invocation, read prior immutable evidence
+    and observe liveness afresh. Unknown legacy history is advisory.
 
-    The result says what happened to the HOST process: ``host`` (the row's
-    host), ``host_action`` (``terminated`` — the driver ended it;
-    ``none_available`` — a degenerate driver, e.g. ``operator``, cannot stop a
-    process it did not spawn, so ONLY the ledger moved and the process is
-    still running; ``not_attempted`` — the row was already terminal, so this
-    call touched no host) and ``host_remedy`` (the driver's own text for
-    ``none_available``, else ``None``). ``none_available`` is not a failure
-    (the ledger transition still lands, by design) but it must never be silent."""
+    This function alone fires and best-effort delivers session_terminal
+    dependencies, both after a transition and on terminal repeats (for edges
+    armed later). Their fired_at-is-null CAS preserves exactly-once delivery.
+    Registry observations belong to the transport wrapper; the pure result
+    leaves registry_checked and teardown_complete false until that read.
+    """
     try:
         row = read_managed_session(state, agent_instance_id)
     except SessionNotFoundError as exc:
@@ -941,9 +1419,7 @@ def terminate_session(
             "already_terminal": True,
             "lifecycle_state": current,
             "session_terminal_edges_fired": fired,
-            "host": str(row.get("host") or ""),
-            "host_action": HOST_ACTION_NOT_ATTEMPTED,
-            "host_remedy": None,
+            **_host_result(state, row),
         }
     driver, host = _resolve_termination_driver(row, agent_instance_id)
     host_remedy = _terminate_host(
@@ -953,6 +1429,18 @@ def terminate_session(
         agent_instance_id=agent_instance_id,
         host=host,
     )
+    observation = _probe_host_liveness(row)
+    action = HOST_ACTION_TERMINATED if host_remedy is None else HOST_ACTION_NONE_AVAILABLE
+    attempt = HostAttempt(
+        agent_instance_id=agent_instance_id,
+        host=host,
+        host_ref=str(row.get("host_ref") or ""),
+        action=action,
+        remedy=host_remedy,
+        observation=observation[0],
+        observed_at=datetime.now(UTC).isoformat(),
+        provenance="terminate_session",
+    )
     try:
         transition_lifecycle_state(
             state,
@@ -960,7 +1448,7 @@ def terminate_session(
             from_state=current,
             to_state=LIFECYCLE_TERMINATED,
             directed_by=directed_by,
-            reason="terminate_session",
+            reason=attempt.reason("terminate_session"),
         )
     except IllegalLifecycleTransitionError as exc:
         raise VerbError("illegal_lifecycle_transition", str(exc)) from exc
@@ -975,11 +1463,7 @@ def terminate_session(
         "already_terminal": False,
         "lifecycle_state": LIFECYCLE_TERMINATED,
         "session_terminal_edges_fired": fired,
-        "host": host,
-        "host_action": (
-            HOST_ACTION_TERMINATED if host_remedy is None else HOST_ACTION_NONE_AVAILABLE
-        ),
-        "host_remedy": host_remedy,
+        **_host_result(state, row, action=action, remedy=host_remedy, observation=observation),
     }
 
 
@@ -1057,11 +1541,19 @@ def retire_session(
     *,
     agent_instance_id: str,
     directed_by: str,
+    register: RetirementEvidenceReader | None = None,
+    packet: Callable[[], PacketCustody] | None = None,
 ) -> dict[str, Any]:
     """§4 ``retire_session`` — the lane-landing verb. Five steps, fixed
     order, each idempotent, no cross-table transaction (§4 partial-failure
     contract): (1) adjudicate a derivable lane worktree before the irreversible
-    host termination; no worktree means no adjudication; (2) terminate
+    host termination; no worktree means no adjudication. With ``register`` the
+    adjudication may also cite exact custody recorded for the session's own
+    assigned Unit, read afresh by step (4) before removal. ``packet`` resolves
+    the caller's pinned custody packet for this call only, capturing it first
+    if asked, before step (1); that packet and the whole lane are then
+    verified afresh at both (1) and (4), and its id is recorded in the
+    transition reason and the result; (2) terminate
     (tolerates already-terminal; OWNS firing +
     delivering ``session_terminal`` dependency edges as of 2026-08-04 — see
     :func:`terminate_session`, the sole call site now); (3) release this
@@ -1075,16 +1567,22 @@ def retire_session(
     re-drivable by construction, never wedged (INCLUDING the firing step:
     a re-run's ``terminate_session`` call lands on the already-terminal
     path, which itself re-sweeps for any edge armed since the first call).
+    After (5), :func:`_sweep_terminal_lane_worktrees` does opportunistic
+    tidying only — it reclaims the terminal lane worktrees earlier
+    retirements left on disk, never this lane's own tree, and can change
+    neither the result below nor the re-drivability above.
     """
     initial_row = read_managed_session(state, agent_instance_id)
     initial_state = str(initial_row.get("lifecycle_state") or "")
     if initial_state == LIFECYCLE_RETIRED:
         return _retire_outcome(
-            already_retired=True, fired=0,
-            terminate_result={"host": str(initial_row.get("host") or "")},
+            already_retired=True,
+            fired=0,
+            terminate_result=_host_result(state, initial_row),
         )
+    custody = RetirementCustodyContext.for_session(initial_row, register, packet() if packet is not None else None)
     if initial_state != LIFECYCLE_TERMINATED:
-        spawn_lifecycle._adjudicate_retire_lane_worktree(initial_row)  # noqa: SLF001
+        spawn_lifecycle._adjudicate_retire_lane_worktree(initial_row, custody=custody)  # noqa: SLF001
 
     terminate_result = terminate_session(
         state,
@@ -1101,7 +1599,7 @@ def retire_session(
     current = str(terminated_row.get("lifecycle_state") or "")
     if current == LIFECYCLE_RETIRED:
         return _retire_outcome(already_retired=True, fired=fired, terminate_result=terminate_result)
-    worktree_disposition = spawn_lifecycle._retire_lane_worktree(terminated_row)  # noqa: SLF001
+    worktree_disposition = spawn_lifecycle._retire_lane_worktree(terminated_row, custody=custody)  # noqa: SLF001
     try:
         transition_lifecycle_state(
             state,
@@ -1109,56 +1607,136 @@ def retire_session(
             from_state=LIFECYCLE_TERMINATED,
             to_state=LIFECYCLE_RETIRED,
             directed_by=directed_by,
-            reason="retire_session",
+            reason=_retire_reason(custody.packet),
             recorded_fields={"worktree_disposition": worktree_disposition},
         )
     except StaleLifecycleStateError as exc:
         raise VerbError("stale_lifecycle_state", str(exc)) from exc
-    return _retire_outcome(already_retired=False, fired=fired, terminate_result=terminate_result)
+    _sweep_terminal_lane_worktrees(state, terminated_row)
+    return _retire_outcome(already_retired=False, fired=fired, terminate_result=terminate_result, packet=(custody.packet, worktree_disposition))
+
+
+def _sweep_terminal_lane_worktrees(
+    state: StateManagementInterface,
+    row: Mapping[str, Any],
+) -> None:
+    """Reclaim the terminal lane worktrees earlier retirements left on disk.
+
+    Disposal used to happen only as a side effect of the next unrelated lane
+    spawn, so with no spawn nothing was reclaimed however many terminal lane
+    trees were registered.  This reuses the sweep and the guard already proven
+    at :func:`session_lifecycle_verbs._provision_spawn_worktree`, and runs only
+    after the terminated -> retired write, so it is pure opportunistic tidying:
+    it never changes this verb's result, never affects the transition that has
+    already been recorded, and never makes a re-run fail.  A retained tree is
+    surfaced as the existing ``dirty_stale_worktree_skipped`` warning rather
+    than a new error shape.  The retiring lane's own tree has already been
+    handled, and is excluded here: step (4) adjudicated it against custody read
+    afresh, while this sweep has no custody to read, so a tree deliberately
+    retained by that decision must not be reconsidered without it.
+
+    Both skip branches are advisory, never refusals (``rul_becb4bed``): an
+    incomplete inventory logs ``lane_worktree_cleanup_skipped`` and sweeps
+    nothing rather than acting on unknown data, and a row with no derivable
+    lane root is skipped silently as the existing code already does.
+    """
+    if str(row.get("provisioning_mode") or "worktree") in {
+        "synthetic_no_worktree",
+        "operator_existing_checkout",
+    }:
+        return
+    try:
+        repo_root = spawn_lifecycle._resolve_lane_repo_root(str(row.get("lane_repo_root") or ""))  # noqa: SLF001
+        own = spawn_lifecycle._retiring_lane_worktree(row)  # noqa: SLF001
+        inventory = active_lane_worktree_inventory(state, repo_root)
+        if not inventory.cleanup_safe:
+            logger.warning(
+                "lane_worktree_cleanup_skipped: incomplete_active_inventory=%s",
+                "; ".join(inventory.incomplete_rows),
+            )
+            return
+        own_path = None if own is None else own.path.resolve()
+        sweep = sweep_orphaned_lane_worktrees(
+            repo_root,
+            terminal_paths=tuple(path for path in inventory.terminal_paths if path.resolve() != own_path),
+        )
+    except (LaneWorktreeError, VerbError, OSError) as exc:
+        logger.warning("terminal lane worktree sweep skipped after retirement: %s", exc)
+        return
+    for warning in sweep.skipped:
+        spawn_lifecycle._log_dirty_stale_worktree_skipped(warning)  # noqa: SLF001
+
+
+def _retire_reason(packet: PacketCustody | None) -> str:
+    """The audit reason; a pinned packet's id and fingerprint are its provenance, with no new column."""
+    if packet is None:
+        return "retire_session"
+    return f"retire_session custody_packet={packet.packet_id} fingerprint={packet.expected_fingerprint} captured={packet.captured}"
 
 
 def _retire_outcome(
-    *, already_retired: bool, fired: int, terminate_result: Mapping[str, Any],
+    *,
+    already_retired: bool,
+    fired: int,
+    terminate_result: Mapping[str, Any],
+    packet: tuple[PacketCustody | None, str] = (None, ""),
 ) -> dict[str, Any]:
     """The retire result: the two original keys plus what happened to the host.
 
     Without a ``host_action`` from this call's terminate step the call touched
     no host, so it reports ``not_attempted`` rather than inheriting a claim.
+    A pinned packet adds ``custody_packet`` with what removal then did, so a
+    retained worktree is never read as removed.
     """
-    return {
+    outcome: dict[str, Any] = {
+        **{key: value for key, value in terminate_result.items() if key not in {"already_terminal", "lifecycle_state", "session_terminal_edges_fired"}},
         "already_retired": already_retired,
         "dependencies_fired": fired,
         "host": str(terminate_result.get("host") or ""),
         "host_action": str(terminate_result.get("host_action") or HOST_ACTION_NOT_ATTEMPTED),
         "host_remedy": terminate_result.get("host_remedy"),
     }
+    pinned, disposition = packet
+    if pinned is not None:
+        outcome["custody_packet"] = {"packet_id": pinned.packet_id, "fingerprint": pinned.expected_fingerprint, "captured": pinned.captured, "worktree_disposition": disposition}
+    return outcome
 
 
 def describe_retire_gaps(
-    result: Mapping[str, Any], registration: BridgeBinding | None, *, registry_checked: bool,
+    result: Mapping[str, Any],
+    registration: BridgeBinding | None,
+    *,
+    registry_checked: bool,
 ) -> list[str]:
-    """What a retire left undone, one sentence each; ``[]`` means a clean teardown.
-
-    ``completed`` only says the ledger row is retired. The host process and the
-    peer registration are separate facts, so they are reported separately
-    rather than inferred from the ledger transition. Only things this retire
-    genuinely left undone are listed: ``not_attempted`` (the row was already
-    torn down by an earlier terminate or the sweep) lists nothing, because this
-    call left nothing undone, and a lane that is still registered is reported
-    by its own registration check, not by the host action.
-    """
+    """Outstanding observed/unknown facts, including unresolved prior attempts."""
     gaps: list[str] = []
-    action = result.get("host_action")
-    if action == HOST_ACTION_NONE_AVAILABLE:
-        gaps.append(f"host {result.get('host')!r} process was not stopped: {result.get('host_remedy')}")
+    if result.get("host_liveness") != "dead":
+        prior = result.get("prior_host_outcome") or {}
+        same_host = prior.get("host") == result.get("host") and prior.get("host_ref") == result.get("host_ref")
+        remedy = result.get("host_remedy") or (prior.get("remedy") if same_host else None)
+        gaps.append(
+            f"host {result.get('host')!r} process was not stopped or confirmed dead: {remedy or result.get('host_liveness_detail')}; liveness={result.get('host_liveness', 'unknown')}; {result.get('prior_host_advisory') or 'attempt recorded'}",
+        )
     if not registry_checked:
         gaps.append("peer registration was not checked: the agent messaging bridge is not active")
     elif registration is not None:
         gaps.append(
-            f"still registered in peer_list: bridge {registration.bridge_id}, "
-            f"parent_pid {registration.parent_pid}",
+            f"still registered in peer_list: bridge {registration.bridge_id}, parent_pid {registration.parent_pid}",
         )
     return gaps
+
+
+def report_teardown(
+    result: dict[str, Any],
+    registration: BridgeBinding | None,
+    *,
+    registry_checked: bool,
+) -> None:
+    """Registration is an independent observation; never manufacture its absence."""
+    result["registry_checked"] = registry_checked
+    result["peer_registration"] = {"bridge_id": registration.bridge_id, "parent_pid": registration.parent_pid} if registration is not None else None
+    result["teardown_complete"] = result.get("host_liveness") == "dead" and registry_checked and registration is None
+    result["not_done"] = describe_retire_gaps(result, registration, registry_checked=registry_checked)
 
 
 _VALID_CONDITION_KINDS = frozenset(
@@ -1188,9 +1766,7 @@ def _validate_condition_ref(condition_kind: str, condition_ref: str) -> None:
         if not condition_ref.startswith("agi-"):
             raise VerbError(
                 "invalid_condition_ref",
-                "condition_kind='session_terminal' requires condition_ref to be "
-                "an agent_instance_id (the 'agi-' prefix every instance id "
-                f"shares); got {condition_ref!r}.",
+                f"condition_kind='session_terminal' requires condition_ref to be an agent_instance_id (the 'agi-' prefix every instance id shares); got {condition_ref!r}.",
             )
     elif condition_kind == CONDITION_DEADLINE:
         try:
@@ -1198,8 +1774,7 @@ def _validate_condition_ref(condition_kind: str, condition_ref: str) -> None:
         except ValueError as exc:
             raise VerbError(
                 "invalid_condition_ref",
-                "condition_kind='deadline' requires condition_ref to be an "
-                f"ISO-8601 timestamp; {condition_ref!r} does not parse: {exc}",
+                f"condition_kind='deadline' requires condition_ref to be an ISO-8601 timestamp; {condition_ref!r} does not parse: {exc}",
             ) from exc
     elif condition_kind == CONDITION_LANE_CLOSED and not condition_ref:
         raise VerbError(
@@ -1241,15 +1816,12 @@ def arm_session_dependency(
     if not waiter_instance_id:
         raise VerbError(
             "invalid_waiter",
-            "arm_session_dependency requires a non-empty waiter_instance_id "
-            "(session-scoped only in v1 — lane-scoped arming is unsupported "
-            "by construction; this verb has no waiter_lane_id parameter).",
+            "arm_session_dependency requires a non-empty waiter_instance_id (session-scoped only in v1 — lane-scoped arming is unsupported by construction; this verb has no waiter_lane_id parameter).",
         )
     if req.condition_kind not in _VALID_CONDITION_KINDS:
         raise VerbError(
             "unknown_condition_kind",
-            f"condition_kind {req.condition_kind!r} is not one of "
-            f"{sorted(_VALID_CONDITION_KINDS)}.",
+            f"condition_kind {req.condition_kind!r} is not one of {sorted(_VALID_CONDITION_KINDS)}.",
         )
     condition_ref = req.condition_ref.strip()
     _validate_condition_ref(req.condition_kind, condition_ref)
@@ -1352,9 +1924,7 @@ def _refuse_report_alive_on_ineligible_state(current: str) -> None:  # pyright: 
     if current in _TERMINAL_STATES:
         raise VerbError(
             "lifecycle_state_conflict",
-            f"report_alive arrived on a {current!r} row — state skew, not "
-            "accepted (a terminal row is finished; it never self-reports back "
-            "to life).",
+            f"report_alive arrived on a {current!r} row — state skew, not accepted (a terminal row is finished; it never self-reports back to life).",
         )
 
 
@@ -1392,6 +1962,7 @@ def report_alive(
     from agent_messaging_plugin.session_lifecycle_liveness import (  # noqa: PLC0415
         report_alive as report_liveness,
     )
+
     return report_liveness(
         state,
         agent_instance_id=agent_instance_id,

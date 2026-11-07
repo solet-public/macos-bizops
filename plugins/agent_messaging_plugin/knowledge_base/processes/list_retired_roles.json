@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::list_retired_roles",
+  "display_name": "List the retired-role registry",
+  "description": "Returns the solet's authoritative retired-role registry as {registry_version, roles: [...]}, each role carrying role, retired_at, retired_by, reason, successor and the registry_version it was added at (iss_d9c955a2). This is the explicit versioned interface project-solet's content guard binds to: registry_version strictly increases with every retirement, so a consumer caches by version and refetches when it changes. Every read failure is an error, never an empty list; an empty registry is also an error, because the Register-Lead migration seed guarantees at least one row, so empty means the seed has not run. Consumers must fail closed on any error.",
+  "embedding_description": "Read the versioned set of retired fleet role names, with the reason, date and successor for each, that transports refuse to deliver to and that document guards reject; fails loudly rather than returning an empty set.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Retired roles listed",
+    "result_type": "list_retired_roles_result",
+    "result_description": "registry_version (integer, the highest row version) and roles (every retired role, ordered by the version it was added at).",
+    "presentation_guidance": "Name each retired role with its reason and successor, and state the registry_version so a consumer can tell whether its cached copy is current."
+  },
+  "error_processor_customizations": {
+    "action_context": "A read-only call; it never writes.",
+    "error_interpretation": "retired_role_registry_unavailable: the registry could not be read, a row was malformed, or the registry is empty because its seed has not run. None of these mean that no role is retired.",
+    "recovery_guidance": "Fail closed: a consumer must refuse whatever it was checking rather than proceed with no retired names. Report the error; do not substitute a hard-coded list."
+  }
+}

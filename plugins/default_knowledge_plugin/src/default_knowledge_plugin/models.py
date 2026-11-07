@@ -11,6 +11,7 @@ from .constants import (
     DEFAULT_INCLUDE_PATTERNS,
     WritePosture,
 )
+from .source_selection import SourceSelection
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +32,8 @@ class Manifest:
     metadata block before writing (W4). ``archive_subdir`` names the
     relative subdirectory the ``archive_file`` lifecycle verb moves
     retired docs into; when unset the verb fail-louds (W11).
+    ``selection`` (``content.selection``) limits collection to the root's files
+    and the named top-level directories; ``None`` walks the whole tree.
     """
 
     name: str
@@ -46,6 +49,7 @@ class Manifest:
     write_posture: WritePosture = WritePosture.FULL
     require_metadata_block: bool = False
     archive_subdir: str | None = None
+    selection: SourceSelection | None = None
 
 
 @dataclass(frozen=True, slots=True)

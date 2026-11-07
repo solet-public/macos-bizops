@@ -33,6 +33,7 @@ from macos_self_deployment_plugin import drain_sentinel  # noqa: E402
 from macos_self_deployment_plugin.plugin import (  # noqa: E402
     MacosSelfDeploymentPlugin,
 )
+from macos_self_deployment_plugin.stop_self_watchdog import WatchdogRequest  # noqa: E402
 
 
 def _expect(condition: bool, message: str) -> None:
@@ -53,10 +54,10 @@ def _scenario_dry_run_plans_without_mutating() -> None:
             plugin._self_color = "blue"
             plugin._self_instance_id = "smoketest-blue-dryrun"
             sentinel = drain_sentinel.sentinel_path("smoketest")
-            spawner_calls: list[int] = []
+            spawner_calls: list[WatchdogRequest] = []
 
-            def fake_spawner(target_pid: int) -> int:
-                spawner_calls.append(target_pid)
+            def fake_spawner(request: WatchdogRequest) -> int:
+                spawner_calls.append(request)
                 return 0
 
             plugin.set_watchdog_spawner_for_smoke(fake_spawner)

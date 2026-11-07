@@ -23,8 +23,10 @@ Exercises:
      test_connection wrapper, and a REST-level fault classifying
      topology-safe through the SAME path smoke_records.py already covers at
      the ``_run`` level — decoupled entirely from the dispatch call.
-  4. ACTION_HANDLERS carries all 13 migrated/added verbs (the 9 original
-     D0.3-migrated verbs plus the 4 lane-sf-bulk-v2 Bulk v2 ingest verbs) —
+  4. ACTION_HANDLERS carries all 21 migrated/added verbs (the 9 original
+     D0.3-migrated verbs, the 4 lane-sf-bulk-v2 Bulk v2 ingest verbs,
+     authenticated_request and the composite/tooling/bulk_jobs/reports/
+     dashboards/rest_resources/actions families) —
      a name typo here would silently strand a verb's queued jobs forever
      (the drain loop only polls names present in this dict).
   5. ensure_worker_started is idempotent: two calls produce the same thread
@@ -95,11 +97,7 @@ class _FakeAsyncJobManager:
         return {"action_status": "completed", "data": {"job_id": job_id, "status": "queued"}}
 
     def list_jobs(self, status: str | None = None, provider_name: str | None = None, **_: Any) -> dict[str, Any]:
-        jobs = [
-            j for j in self._jobs.values()
-            if (status is None or j["status"] == status)
-            and (provider_name is None or j["provider_name"] == provider_name)
-        ]
+        jobs = [j for j in self._jobs.values() if (status is None or j["status"] == status) and (provider_name is None or j["provider_name"] == provider_name)]
         return {"action_status": "completed", "data": {"jobs": jobs}}
 
     def get_job_payload(self, job_id: str, payload_type: str = "request") -> dict[str, Any]:
@@ -128,7 +126,8 @@ def test_dispatch_returns_queued_without_touching_executor() -> None:
     plugin._cli_executor = executor  # noqa: SLF001 — must stay untouched by dispatch
 
     result = plugin.get_record(
-        {"sobject": "Account", "id": "001x"}, {"session_id": "s1", "flow_id": "f1"},
+        {"sobject": "Account", "id": "001x"},
+        {"session_id": "s1", "flow_id": "f1"},
     )
     _assert("dispatch action_status completed", result["action_status"] == "completed")
     _assert("dispatch returns a job_id", isinstance(result["data"].get("job_id"), str))
@@ -153,6 +152,7 @@ def test_all_verbs_dispatch_async() -> None:
     plugin, fake_manager = _plugin_with_fake_manager()
     state = {"session_id": "s1", "flow_id": "f1"}
     calls: dict[str, dict[str, Any]] = {
+        "authenticated_request": {"method": "DELETE", "path": "/services/data/v62.0/sobjects/Account/001x"},
         "soql_query": {"query": "SELECT Id FROM Account", "output_tsv_path": "/tmp/x.tsv"},
         "export_soql": {"query": "SELECT Id FROM Account", "output_tsv_path": "/tmp/y.tsv"},
         "get_record": {"sobject": "Account", "id": "001x"},
@@ -163,7 +163,9 @@ def test_all_verbs_dispatch_async() -> None:
         "delete_record": {"sobject": "Account", "id": "001x"},
         "test_connection": {},
         "bulk_ingest_submit": {
-            "operation": "insert", "sobject": "Account", "csv_path": "/tmp/in.csv",
+            "operation": "insert",
+            "sobject": "Account",
+            "csv_path": "/tmp/in.csv",
         },
         "bulk_job_status": {"job_id": "750xx"},
         "bulk_job_results": {
@@ -173,6 +175,13 @@ def test_all_verbs_dispatch_async() -> None:
             "unprocessed_results_path": "/tmp/unprocessed.csv",
         },
         "bulk_job_abort": {"job_id": "750xx"},
+        "composite": {"operation": "collections_delete", "query": {"ids": ["001D000000IqhSLIAZ"]}},
+        "tooling": {"operation": "list_sobjects"},
+        "bulk_jobs": {"operation": "query_delete", "job_id": "750R0000000zlh9IAA"},
+        "reports": {"operation": "delete", "report_id": "00OD0000001ZbP7MAK"},
+        "dashboards": {"operation": "refresh", "dashboard_id": "01ZD00000007S89MAE"},
+        "rest_resources": {"operation": "delete_by_external_id", "sobject": "Account", "external_id_field": "External_Id__c", "external_id": "A-100"},
+        "actions": {"operation": "list_custom"},
     }
     for action_name, params in calls.items():
         method = getattr(plugin, action_name)
@@ -182,7 +191,7 @@ def test_all_verbs_dispatch_async() -> None:
             result["action_status"] == "completed" and result["data"].get("status") == "queued",
             str(result),
         )
-    _assert("thirteen jobs created, one per verb", len(fake_manager._jobs) == 13)
+    _assert("twenty-one jobs created, one per verb", len(fake_manager._jobs) == 21)
 
 
 def test_worker_completes_get_record_on_success() -> None:
@@ -192,7 +201,9 @@ def test_worker_completes_get_record_on_success() -> None:
     job_id = dispatch["data"]["job_id"]
 
     plugin._cli_executor.run_json.return_value = {  # noqa: SLF001
-        "attributes": {"type": "Account"}, "Id": "001x", "Name": "Acme",
+        "attributes": {"type": "Account"},
+        "Id": "001x",
+        "Name": "Acme",
     }
     async_jobs._process_job(plugin, fake_manager, job_id, "get_record")
 
@@ -207,7 +218,8 @@ def test_worker_completes_create_record_write() -> None:
     plugin, fake_manager = _plugin_with_fake_manager()
     plugin._cli_executor = MagicMock()  # noqa: SLF001
     dispatch = plugin.create_record(
-        {"sobject": "Contact", "fields": {"LastName": "Smith"}}, {"session_id": "s1", "flow_id": "f1"},
+        {"sobject": "Contact", "fields": {"LastName": "Smith"}},
+        {"session_id": "s1", "flow_id": "f1"},
     )
     job_id = dispatch["data"]["job_id"]
 
@@ -236,7 +248,8 @@ def test_worker_soql_query_writes_tsv_via_export_path_gate() -> None:
         gate_calls: list[str] = []
         plugin._export_path_gate = lambda p: gate_calls.append(p) or p  # type: ignore[method-assign]  # noqa: SLF001
         plugin._cli_executor.run_json.return_value = {  # noqa: SLF001
-            "totalSize": 1, "done": True,
+            "totalSize": 1,
+            "done": True,
             "records": [{"attributes": {}, "Id": "001x", "Name": "Acme"}],
         }
         async_jobs._process_job(plugin, fake_manager, job_id, "soql_query")
@@ -275,7 +288,8 @@ def test_worker_completes_job_on_error_topology_safe() -> None:
 
     host_marker = "SECRET-ORG-myorg.my.salesforce.com"
     plugin._cli_executor.run_json.side_effect = SalesforceCliCallError(  # noqa: SLF001
-        "INVALID_LOGIN", f"invalid_client_id for {host_marker}",
+        "INVALID_LOGIN",
+        f"invalid_client_id for {host_marker}",
     )
     async_jobs._process_job(plugin, fake_manager, job_id, "get_record")
 
@@ -292,12 +306,30 @@ def test_worker_completes_job_on_error_topology_safe() -> None:
 
 def test_action_handlers_covers_all_thirteen_verbs() -> None:
     expected = {
-        "soql_query", "export_soql", "get_record", "describe_sobject", "list_sobjects",
-        "create_record", "update_record", "delete_record", "test_connection",
-        "bulk_ingest_submit", "bulk_job_status", "bulk_job_results", "bulk_job_abort",
+        "authenticated_request",
+        "soql_query",
+        "export_soql",
+        "get_record",
+        "describe_sobject",
+        "list_sobjects",
+        "create_record",
+        "update_record",
+        "delete_record",
+        "test_connection",
+        "bulk_ingest_submit",
+        "bulk_job_status",
+        "bulk_job_results",
+        "bulk_job_abort",
+        "composite",
+        "tooling",
+        "bulk_jobs",
+        "reports",
+        "dashboards",
+        "rest_resources",
+        "actions",
     }
     _assert(
-        "ACTION_HANDLERS carries exactly the 13 migrated/added verb names",
+        "ACTION_HANDLERS carries exactly the 21 migrated/added verb names",
         set(async_jobs.ACTION_HANDLERS.keys()) == expected,
         str(sorted(async_jobs.ACTION_HANDLERS.keys())),
     )

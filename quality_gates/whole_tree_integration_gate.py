@@ -10,13 +10,24 @@ divergence at call-sites, and the `result_processor_kind` propagation
 gap in scheduling submissions.
 
 Scope (Cycle 1, structural mode only — no live solet needed):
-  C1.* — service-interface decorator/JSON/ABC consistency
-         (walks ananta/src/ananta/services/*/interfaces/public.py +
-          ananta/src/ananta/interfaces/*_service_interface.py +
-          ananta/knowledge_base/processes/<svc>/*.json)
-  C2.* — plugin @platform_process + KB JSON consistency
-         (walks plugins/*/src/*/plugin.py +
-          plugins/*/knowledge_base/processes/*.json)
+  C1.*/C2.* — imported source catalog versus KB JSON, by full process_key
+         in both directions (built by whole_tree_integration_catalog.py, a
+         sibling module). C1 keys come from the real
+         ServiceInterfaceScanner (enabled predicate included); C2 keys from
+         every completed class behind an `ananta.plugins` entry point declared
+         in plugins/*/pyproject.toml, imported from the tree under test and
+         never constructed, projected by the shared registration_census (so
+         class-decorator-generated and inherited actions count; provider =
+         entry-point name). Each key is joined to the JSON path the runtime KB
+         overlay reads for it: C1.5/C2.2 no payload carries the key, C1.6/C2.3
+         the overlay's file disagrees or a payload names no key of the
+         namespace, C1.7/C2.4 a payload's key matches nothing registrable,
+         C1.8/C2.5 one identity carried or declared twice. A provider the
+         catalog cannot measure (import failure, out-of-tree class, dynamic
+         get_available_actions) is an ADVISORY, never a finding, and the
+         CATALOG line then says INCOMPLETE. Instance-only actions stay
+         unmeasured; this is a source catalog, not a deployed-registry census.
+         The decorator-literal AST surfaces remain the C3/C5 inputs only.
   C3.* — call-site references to bound-plugin process_keys
          (AST-walks ananta/src + plugins/*/src + ananta/tests and reports each
           string literal whose ENTIRE value is "plugin::<X>::<verb>" or
@@ -41,7 +52,11 @@ Scope (Cycle 1, structural mode only — no live solet needed):
           marker "# wint:negative-fixture" is treated as an intentional
           unregistered-key fixture and skipped (test-path-only, line-scoped —
           see _NEGATIVE_FIXTURE_MARKER + the KB negative-fixture-convention
-          article).
+          article). In a born seed (the tree carries PROVENANCE.json) a
+          reference to a plugin the seed does not ship is an ADVISORY, not a
+          C3.1 finding: the seed omits origin-only plugins on purpose, and the
+          origin tree, which ships every plugin, still measures that reference
+          (iss_c801f7ba).
   C5.* — scheduled-action result_processor_kind propagation
          (AST-walks scheduling-plugin construction sites; asserts every
           action dict literal includes `result_processor_kind`)
@@ -58,7 +73,10 @@ operator-approved 2026-06-07 dispatch — needs live registry + bindings
 inspection. Cycle 2 also adds the `--live-registry` flag.
 
 Exit codes (mirrors `radon_*_check.py` + `god_class_check.py`):
-  0  — clean, or every finding is allowlisted
+  0  — clean, or every finding is allowlisted (advisories never block; an
+       exact C1/C2 entry that covers no finding of a measured provider is
+       reported as a satisfied allowance to remove; a born seed's C2 entry for
+       a plugin it does not ship is not one)
   1  — one or more non-allowlisted findings
   2  — harness error (cannot construct scanner, missing required paths)
   64 — usage error (bad arguments)
@@ -106,6 +124,16 @@ from ananta.core.services.service_interface_decorator import (  # noqa: E402
 )
 
 from quality_gates.allowlist_schema import load_allowlist as _load_tagged_allowlist  # noqa: E402
+from quality_gates.whole_tree_integration_catalog import (  # noqa: E402
+    PLUGIN_SPEC,
+    SERVICE_SPEC,
+    ProcessCatalog,
+    build_plugin_catalog,
+    build_service_catalog,
+    catalog_summary,
+    check_parity,
+    collect_payload_keys,
+)
 
 
 def _rel(path: Path) -> str:
@@ -119,6 +147,7 @@ def _rel(path: Path) -> str:
         return path.relative_to(REPO_ROOT).as_posix()
     except ValueError:
         return path.as_posix()
+
 
 _SERVICES_DIR = REPO_ROOT / "ananta" / "src" / "ananta" / "services"
 _SERVICE_KB_DIR = REPO_ROOT / "ananta" / "knowledge_base" / "processes"
@@ -135,9 +164,14 @@ _CALL_SITE_BUNDLED_VENV_PREFIX = ".venv"
 
 # Operator-tooling segments excluded per "Peer Pre-Completion Gate Procedure".
 # Matches a path-segment EQUALITY check inside `plugins/<X>/<segment>/...`.
-_OPERATOR_TOOLING_PLUGIN_SEGMENTS = frozenset({
-    "research", "tools", "migrations", "parity_tests",
-})
+_OPERATOR_TOOLING_PLUGIN_SEGMENTS = frozenset(
+    {
+        "research",
+        "tools",
+        "migrations",
+        "parity_tests",
+    }
+)
 
 # Negative-fixture convention (2026-07-02): a test that PROVES an unregistered
 # process_key is rejected necessarily contains an unregistered key literal, so
@@ -172,13 +206,15 @@ _WHOLE_PROCESS_KEY_RE = re.compile(
     re.VERBOSE,
 )
 
-_SCHEDULING_VERB_NAMES = frozenset({
-    "create_cron_schedule",
-    "execute_in_seconds",
-    "ensure_global_heartbeat",
-    "ensure_periodic_poll_schedule",
-    "ensure_periodic_summarize_schedule",
-})
+_SCHEDULING_VERB_NAMES = frozenset(
+    {
+        "create_cron_schedule",
+        "execute_in_seconds",
+        "ensure_global_heartbeat",
+        "ensure_periodic_poll_schedule",
+        "ensure_periodic_summarize_schedule",
+    }
+)
 
 _RESULT_PROCESSOR_KIND_KEY = "result_processor_kind"
 
@@ -288,18 +324,12 @@ def _bindings_from_profile_template(root: Path) -> dict[str, str]:
     """
     provenance_path = root / "PROVENANCE.json"
     if not provenance_path.is_file():
-        raise BindingsResolutionError(
-            f"no materialized service_bindings.json and no {provenance_path.name} at {root} — "
-            "cannot determine which profile's bindings to check against. Run against a born "
-            "clone (which carries PROVENANCE.json) or a tree with materialized bindings."
-        )
+        raise BindingsResolutionError(f"no materialized service_bindings.json and no {provenance_path.name} at {root} — cannot determine which profile's bindings to check against. Run against a born clone (which carries PROVENANCE.json) or a tree with materialized bindings.")
     try:
         from github_midwife_plugin.config_materialize import load_profile  # noqa: PLC0415
         from github_midwife_plugin.genesis import resolve_profile_name  # noqa: PLC0415
     except ImportError as exc:  # birth spine absent/unimportable — cannot resolve
-        raise BindingsResolutionError(
-            f"cannot import the birth spine to resolve the profile template: {exc}"
-        ) from exc
+        raise BindingsResolutionError(f"cannot import the birth spine to resolve the profile template: {exc}") from exc
 
     # Both raise RuntimeError subclasses (GenesisError / ConfigMaterializeError)
     # on an unknown bundle or a missing template; `main` renders those as exit 2.
@@ -310,9 +340,7 @@ def _bindings_from_profile_template(root: Path) -> dict[str, str]:
 
     raw_bindings = profile.get("service_bindings")
     if not isinstance(raw_bindings, dict) or not raw_bindings:
-        raise BindingsResolutionError(
-            f"profile template {profile_name!r} declares no non-empty 'service_bindings' mapping"
-        )
+        raise BindingsResolutionError(f"profile template {profile_name!r} declares no non-empty 'service_bindings' mapping")
     return {str(k): str(v) for k, v in raw_bindings.items()}
 
 
@@ -425,7 +453,8 @@ def _decorator_kwarg_attr(decorator: ast.Call, key: str) -> str | None:
 
 
 def _function_decorator_call(
-    func: ast.FunctionDef, decorator_name: str,
+    func: ast.FunctionDef,
+    decorator_name: str,
 ) -> ast.Call | None:
     """Return the `ast.Call` for the named decorator on `func` (or None)."""
     for decorator in func.decorator_list:
@@ -435,7 +464,8 @@ def _function_decorator_call(
 
 
 def _function_decorator_calls(
-    module: ast.Module, decorator_name: str,
+    module: ast.Module,
+    decorator_name: str,
 ) -> Iterator[tuple[ast.FunctionDef, ast.Call]]:
     """Yield (FunctionDef, decorator_Call) for every method decorated `decorator_name`."""
     for node in ast.walk(module):
@@ -466,16 +496,12 @@ def _service_decorator_is_enabled(decorator: ast.Call) -> bool:
     """Evaluate the literal ``is_enabled`` marker through the shared predicate."""
     for kw in decorator.keywords:
         if kw.arg == "is_enabled":
-            return (
-                isinstance(kw.value, ast.Constant)
-                and isinstance(kw.value.value, bool)
-                and is_service_interface_process_enabled(kw.value.value)
-            )
+            return isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, bool) and is_service_interface_process_enabled(kw.value.value)
     return is_service_interface_process_enabled(True)
 
 
 # ---------------------------------------------------------------------------
-# C1.* — Service interface consistency
+# Service-interface AST surface (C3/C5 inputs; C1 parity is the catalog)
 # ---------------------------------------------------------------------------
 
 
@@ -537,83 +563,8 @@ def _collect_kb_jsons(kb_dir: Path) -> dict[str, Path]:
     return {p.stem: p for p in sorted(kb_dir.glob("*.json"))}
 
 
-def check_services(surfaces: list[ServiceSurface]) -> list[Finding]:
-    findings: list[Finding] = []
-    for surface in surfaces:
-        findings.extend(_check_service_decorator_vs_kb(surface))
-        findings.extend(_check_service_kb_process_keys(surface))
-    return findings
-
-
-def _check_service_decorator_vs_kb(surface: ServiceSurface) -> list[Finding]:
-    """C1.5/C1.7 — decorated methods ↔ KB JSON files, one-to-one."""
-    findings: list[Finding] = []
-    decorated_names = set(surface.decorated.keys())
-    json_names = set(surface.kb_jsons.keys())
-
-    for missing in sorted(decorated_names - json_names):
-        func = surface.decorated[missing]
-        findings.append(Finding(
-            check_id="C1.5",
-            scope_qualifier=surface.name,
-            specifier=missing,
-            message=(
-                f"@service_interface_process method '{missing}' on "
-                f"{_rel(surface.public_path)} has no KB JSON "
-                f"at ananta/knowledge_base/processes/{surface.name}/{missing}.json"
-            ),
-            file_path=_rel(surface.public_path),
-            lineno=func.lineno,
-        ))
-    for orphan in sorted(json_names - decorated_names):
-        path = surface.kb_jsons[orphan]
-        findings.append(Finding(
-            check_id="C1.7",
-            scope_qualifier=surface.name,
-            specifier=orphan,
-            message=(
-                f"orphan KB JSON {_rel(path)} — no matching "
-                f"@service_interface_process method named '{orphan}' on "
-                f"{_rel(surface.public_path)}"
-            ),
-            file_path=_rel(path),
-        ))
-    return findings
-
-
-def _check_service_kb_process_keys(surface: ServiceSurface) -> list[Finding]:
-    """C1.6 — JSON process_key matches the canonical service-interface shape."""
-    findings: list[Finding] = []
-    for name, path in surface.kb_jsons.items():
-        expected = f"service_interface::{surface.name}::{name}"
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            findings.append(Finding(
-                check_id="C1.6",
-                scope_qualifier=surface.name,
-                specifier=name,
-                message=f"cannot parse {_rel(path)}: {exc}",
-                file_path=_rel(path),
-            ))
-            continue
-        actual = payload.get("process_key", "")
-        if actual != expected:
-            findings.append(Finding(
-                check_id="C1.6",
-                scope_qualifier=surface.name,
-                specifier=name,
-                message=(
-                    f"{_rel(path)} process_key={actual!r} "
-                    f"does not match expected {expected!r}"
-                ),
-                file_path=_rel(path),
-            ))
-    return findings
-
-
 # ---------------------------------------------------------------------------
-# C2.* — Plugin @platform_process consistency
+# Plugin @platform_process AST surface (C3/C5 inputs; C2 parity is the catalog)
 # ---------------------------------------------------------------------------
 
 
@@ -657,81 +608,6 @@ def _collect_platform_process_decorated(
     return out
 
 
-def check_plugins(surfaces: list[PluginSurface]) -> list[Finding]:
-    findings: list[Finding] = []
-    for surface in surfaces:
-        findings.extend(_check_plugin_decorator_vs_kb(surface))
-        findings.extend(_check_plugin_kb_process_keys(surface))
-    return findings
-
-
-def _check_plugin_decorator_vs_kb(surface: PluginSurface) -> list[Finding]:
-    """C2.2/C2.4 — decorated methods ↔ KB JSON files, one-to-one."""
-    findings: list[Finding] = []
-    decorated_names = set(surface.decorated.keys())
-    json_names = set(surface.kb_jsons.keys())
-
-    for missing in sorted(decorated_names - json_names):
-        func = surface.decorated[missing]
-        findings.append(Finding(
-            check_id="C2.2",
-            scope_qualifier=surface.name,
-            specifier=missing,
-            message=(
-                f"@platform_process method '{missing}' on "
-                f"{_rel(surface.plugin_py)} has no KB JSON "
-                f"at plugins/{surface.name}/knowledge_base/processes/{missing}.json"
-            ),
-            file_path=_rel(surface.plugin_py),
-            lineno=func.lineno,
-        ))
-    for orphan in sorted(json_names - decorated_names):
-        path = surface.kb_jsons[orphan]
-        findings.append(Finding(
-            check_id="C2.4",
-            scope_qualifier=surface.name,
-            specifier=orphan,
-            message=(
-                f"orphan KB JSON {_rel(path)} — no matching "
-                f"@platform_process method named '{orphan}' on "
-                f"{_rel(surface.plugin_py)}"
-            ),
-            file_path=_rel(path),
-        ))
-    return findings
-
-
-def _check_plugin_kb_process_keys(surface: PluginSurface) -> list[Finding]:
-    """C2.3 — JSON process_key matches the canonical plugin shape."""
-    findings: list[Finding] = []
-    for name, path in surface.kb_jsons.items():
-        expected = f"plugin::{surface.name}::{name}"
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            findings.append(Finding(
-                check_id="C2.3",
-                scope_qualifier=surface.name,
-                specifier=name,
-                message=f"cannot parse {_rel(path)}: {exc}",
-                file_path=_rel(path),
-            ))
-            continue
-        actual = payload.get("process_key", "")
-        if actual != expected:
-            findings.append(Finding(
-                check_id="C2.3",
-                scope_qualifier=surface.name,
-                specifier=name,
-                message=(
-                    f"{_rel(path)} process_key={actual!r} "
-                    f"does not match expected {expected!r}"
-                ),
-                file_path=_rel(path),
-            ))
-    return findings
-
-
 # ---------------------------------------------------------------------------
 # C3.* — Call-site references to bound-plugin process_keys
 # ---------------------------------------------------------------------------
@@ -739,9 +615,9 @@ def _check_plugin_kb_process_keys(surface: PluginSurface) -> list[Finding]:
 
 @dataclass
 class CallSiteRef:
-    namespace: str   # "plugin" or "service_interface"
-    provider: str    # plugin/service name
-    verb: str        # method/function name
+    namespace: str  # "plugin" or "service_interface"
+    provider: str  # plugin/service name
+    verb: str  # method/function name
     file_path: Path
     lineno: int
 
@@ -825,11 +701,7 @@ def _docstring_constant_ids(module: ast.Module) -> set[int]:
         if not isinstance(node, doc_owners) or not node.body:
             continue
         first = node.body[0]
-        if (
-            isinstance(first, ast.Expr)
-            and isinstance(first.value, ast.Constant)
-            and isinstance(first.value.value, str)
-        ):
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
             docstring_ids.add(id(first.value))
     return docstring_ids
 
@@ -844,11 +716,7 @@ def _negative_fixture_lines(path: Path, text: str) -> frozenset[int]:
     """
     if not _is_test_path(path):
         return frozenset()
-    return frozenset(
-        lineno
-        for lineno, line in enumerate(text.splitlines(), start=1)
-        if _NEGATIVE_FIXTURE_MARKER in line
-    )
+    return frozenset(lineno for lineno, line in enumerate(text.splitlines(), start=1) if _NEGATIVE_FIXTURE_MARKER in line)
 
 
 def _scan_single_file_for_refs(path: Path) -> Iterator[CallSiteRef]:
@@ -919,9 +787,14 @@ def check_call_sites(
     for ref in refs:
         if _ref_in_self_referential_source(ref):
             continue
-        findings.extend(_classify_call_site_ref(
-            ref, bound_plugins, services_by_name, plugins_by_name,
-        ))
+        findings.extend(
+            _classify_call_site_ref(
+                ref,
+                bound_plugins,
+                services_by_name,
+                plugins_by_name,
+            )
+        )
     return findings
 
 
@@ -948,34 +821,32 @@ def _classify_call_site_ref(
 
 
 def _check_service_interface_ref(
-    ref: CallSiteRef, services_by_name: dict[str, ServiceSurface],
+    ref: CallSiteRef,
+    services_by_name: dict[str, ServiceSurface],
 ) -> list[Finding]:
     surface = services_by_name.get(ref.provider)
     if surface is None:
-        return [Finding(
-            check_id="C3.1",
-            scope_qualifier=_rel(ref.file_path),
-            specifier=ref.process_key,
-            message=(
-                f"call-site references {ref.process_key} but no service "
-                f"named '{ref.provider}' has a public.py surface"
-            ),
-            file_path=_rel(ref.file_path),
-            lineno=ref.lineno,
-        )]
+        return [
+            Finding(
+                check_id="C3.1",
+                scope_qualifier=_rel(ref.file_path),
+                specifier=ref.process_key,
+                message=(f"call-site references {ref.process_key} but no service named '{ref.provider}' has a public.py surface"),
+                file_path=_rel(ref.file_path),
+                lineno=ref.lineno,
+            )
+        ]
     if ref.verb not in surface.decorated:
-        return [Finding(
-            check_id="C3.1",
-            scope_qualifier=_rel(ref.file_path),
-            specifier=ref.process_key,
-            message=(
-                f"call-site references {ref.process_key} but service "
-                f"{ref.provider!r} has no @service_interface_process verb "
-                f"named '{ref.verb}'"
-            ),
-            file_path=_rel(ref.file_path),
-            lineno=ref.lineno,
-        )]
+        return [
+            Finding(
+                check_id="C3.1",
+                scope_qualifier=_rel(ref.file_path),
+                specifier=ref.process_key,
+                message=(f"call-site references {ref.process_key} but service {ref.provider!r} has no @service_interface_process verb named '{ref.verb}'"),
+                file_path=_rel(ref.file_path),
+                lineno=ref.lineno,
+            )
+        ]
     return []
 
 
@@ -986,47 +857,41 @@ def _check_plugin_namespace_ref(
 ) -> list[Finding]:
     findings: list[Finding] = []
     if ref.provider in bound_plugins:
-        findings.append(Finding(
-            check_id="C3.2",
-            scope_qualifier=_rel(ref.file_path),
-            specifier=ref.process_key,
-            message=(
-                f"call-site references {ref.process_key} but '{ref.provider}' "
-                "is a bound ServiceProvider; runtime _should_skip_plugin() "
-                "will drop the plugin:: registration. Migrate to the "
-                "service_interface:: surface or allowlist as W-NS-SWEEP debt"
-            ),
-            file_path=_rel(ref.file_path),
-            lineno=ref.lineno,
-        ))
+        findings.append(
+            Finding(
+                check_id="C3.2",
+                scope_qualifier=_rel(ref.file_path),
+                specifier=ref.process_key,
+                message=(f"call-site references {ref.process_key} but '{ref.provider}' is a bound ServiceProvider; runtime _should_skip_plugin() will drop the plugin:: registration. Migrate to the service_interface:: surface or allowlist as W-NS-SWEEP debt"),
+                file_path=_rel(ref.file_path),
+                lineno=ref.lineno,
+            )
+        )
         return findings
     surface = plugins_by_name.get(ref.provider)
     if surface is None:
-        findings.append(Finding(
-            check_id="C3.1",
-            scope_qualifier=_rel(ref.file_path),
-            specifier=ref.process_key,
-            message=(
-                f"call-site references {ref.process_key} but no plugin "
-                f"named '{ref.provider}' has a plugin.py surface"
-            ),
-            file_path=_rel(ref.file_path),
-            lineno=ref.lineno,
-        ))
+        findings.append(
+            Finding(
+                check_id="C3.1",
+                scope_qualifier=_rel(ref.file_path),
+                specifier=ref.process_key,
+                message=(f"call-site references {ref.process_key} but no plugin named '{ref.provider}' has a plugin.py surface"),
+                file_path=_rel(ref.file_path),
+                lineno=ref.lineno,
+            )
+        )
         return findings
     if ref.verb not in surface.decorated:
-        findings.append(Finding(
-            check_id="C3.1",
-            scope_qualifier=_rel(ref.file_path),
-            specifier=ref.process_key,
-            message=(
-                f"call-site references {ref.process_key} but plugin "
-                f"{ref.provider!r} has no @platform_process verb "
-                f"named '{ref.verb}'"
-            ),
-            file_path=_rel(ref.file_path),
-            lineno=ref.lineno,
-        ))
+        findings.append(
+            Finding(
+                check_id="C3.1",
+                scope_qualifier=_rel(ref.file_path),
+                specifier=ref.process_key,
+                message=(f"call-site references {ref.process_key} but plugin {ref.provider!r} has no @platform_process verb named '{ref.verb}'"),
+                file_path=_rel(ref.file_path),
+                lineno=ref.lineno,
+            )
+        )
     return findings
 
 
@@ -1058,11 +923,15 @@ def check_root_manifest_drift(repo_root: Path) -> list[Finding]:
     findings: list[Finding] = []
 
     if classification.schema_validation_error is not None:
-        findings.append(Finding(
-            check_id="C6.6", scope_qualifier="manifest", specifier="schema",
-            message=classification.schema_validation_error,
-            file_path=str(manifest_path),
-        ))
+        findings.append(
+            Finding(
+                check_id="C6.6",
+                scope_qualifier="manifest",
+                specifier="schema",
+                message=classification.schema_validation_error,
+                file_path=str(manifest_path),
+            )
+        )
         # Schema-failed manifests do not surface further drift findings —
         # the classification's other fields are empty in that branch.
         return findings
@@ -1073,32 +942,40 @@ def check_root_manifest_drift(repo_root: Path) -> list[Finding]:
     # it is reported, never blocking.  When no index could be consulted the
     # untracked set is empty and every unknown entry blocks, as before.
     for name in classification.tracked_unknown_entries:
-        findings.append(Finding(
-            check_id="C6.1", scope_qualifier="root", specifier=name,
-            message="root entry not declared in root_manifest.yaml",
-            file_path=str(repo_root / name),
-        ))
+        findings.append(
+            Finding(
+                check_id="C6.1",
+                scope_qualifier="root",
+                specifier=name,
+                message="root entry not declared in root_manifest.yaml",
+                file_path=str(repo_root / name),
+            )
+        )
     if classification.untracked_entries:
         print(
-            "INFO: C6.1::root — undeclared root entries untracked by git, "
-            f"not blocking: {', '.join(classification.untracked_entries)}",
+            f"INFO: C6.1::root — undeclared root entries untracked by git, not blocking: {', '.join(classification.untracked_entries)}",
             file=sys.stderr,
         )
     for name in classification.missing_universal:
-        findings.append(Finding(
-            check_id="C6.2", scope_qualifier="universal", specifier=name,
-            message="universal entry declared in manifest but missing from tree",
-            file_path=str(manifest_path),
-        ))
+        findings.append(
+            Finding(
+                check_id="C6.2",
+                scope_qualifier="universal",
+                specifier=name,
+                message="universal entry declared in manifest but missing from tree",
+                file_path=str(manifest_path),
+            )
+        )
     for entry in classification.sunset_overdue:
-        findings.append(Finding(
-            check_id="C6.5", scope_qualifier="sunset", specifier=entry.path,
-            message=(
-                f"sunset_target {entry.sunset_target} is past by "
-                f"{entry.days_overdue} day(s); path still present"
-            ),
-            file_path=str(manifest_path),
-        ))
+        findings.append(
+            Finding(
+                check_id="C6.5",
+                scope_qualifier="sunset",
+                specifier=entry.path,
+                message=(f"sunset_target {entry.sunset_target} is past by {entry.days_overdue} day(s); path still present"),
+                file_path=str(manifest_path),
+            )
+        )
     return findings
 
 
@@ -1126,12 +1003,8 @@ def check_scheduling_rpk_propagation(
     resolution; when omitted (e.g. ad-hoc invocation), category lookup is
     skipped and the gate falls back to "RPK required" for every target.
     """
-    services_by_name: dict[str, ServiceSurface] = (
-        {s.name: s for s in services} if services is not None else {}
-    )
-    plugins_by_name: dict[str, PluginSurface] = (
-        {p.name: p for p in plugins} if plugins is not None else {}
-    )
+    services_by_name: dict[str, ServiceSurface] = {s.name: s for s in services} if services is not None else {}
+    plugins_by_name: dict[str, PluginSurface] = {p.name: p for p in plugins} if plugins is not None else {}
     findings: list[Finding] = []
     seen: set[Path] = set()
     for root in roots:
@@ -1142,9 +1015,7 @@ def check_scheduling_rpk_propagation(
             module = _parse_source_safely(path)
             if module is None:
                 continue
-            findings.extend(
-                _check_scheduling_in_module(module, path, services_by_name, plugins_by_name)
-            )
+            findings.extend(_check_scheduling_in_module(module, path, services_by_name, plugins_by_name))
     return findings
 
 
@@ -1164,9 +1035,7 @@ def _check_scheduling_in_module(
         actions_arg = _find_actions_kwarg(node)
         if actions_arg is None:
             continue
-        findings.extend(
-            _check_actions_literal(actions_arg, verb, path, services_by_name, plugins_by_name)
-        )
+        findings.extend(_check_actions_literal(actions_arg, verb, path, services_by_name, plugins_by_name))
     return findings
 
 
@@ -1220,30 +1089,22 @@ def _check_actions_literal(
             continue
         process_key = _extract_dict_string_value(element, "process_key")
         if process_key is not None:
-            category = _resolve_action_target_category(
-                process_key, services_by_name, plugins_by_name
-            )
+            category = _resolve_action_target_category(process_key, services_by_name, plugins_by_name)
             if category == "EDGE_SINK":
                 # Canonical EDGE_SINK shape — RPK omission is required, not a
                 # violation. See Phase 1 design memo + KB article
                 # 21_scheduling_service/01_template_flow_record_lifecycle.md.
                 continue
-        findings.append(Finding(
-            check_id="C5.1",
-            scope_qualifier=_rel(path),
-            specifier=f"{verb}#{index}",
-            message=(
-                f"{_rel(path)}:{actions.lineno} "
-                f"{verb}(actions=[...]) entry #{index} omits "
-                f"'{_RESULT_PROCESSOR_KIND_KEY}'; "
-                "EDGE-category cron targets MUST carry one (EDGE_SINK targets "
-                "are exempt; declare the target verb's "
-                "processor_policy_category=ProcessorPolicyCategory.EDGE_SINK "
-                "to take the exemption)"
-            ),
-            file_path=_rel(path),
-            lineno=actions.lineno,
-        ))
+        findings.append(
+            Finding(
+                check_id="C5.1",
+                scope_qualifier=_rel(path),
+                specifier=f"{verb}#{index}",
+                message=(f"{_rel(path)}:{actions.lineno} {verb}(actions=[...]) entry #{index} omits '{_RESULT_PROCESSOR_KIND_KEY}'; EDGE-category cron targets MUST carry one (EDGE_SINK targets are exempt; declare the target verb's processor_policy_category=ProcessorPolicyCategory.EDGE_SINK to take the exemption)"),
+                file_path=_rel(path),
+                lineno=actions.lineno,
+            )
+        )
     return findings
 
 
@@ -1284,16 +1145,12 @@ def _resolve_action_target_category(
         surface = services_by_name.get(provider)
         if surface is None or verb not in surface.decorated:
             return None
-        decorator = _function_decorator_call(
-            surface.decorated[verb], "service_interface_process"
-        )
+        decorator = _function_decorator_call(surface.decorated[verb], "service_interface_process")
     elif namespace == "plugin":
         surface = plugins_by_name.get(provider)
         if surface is None or verb not in surface.decorated:
             return None
-        decorator = _function_decorator_call(
-            surface.decorated[verb], "platform_process"
-        )
+        decorator = _function_decorator_call(surface.decorated[verb], "platform_process")
     else:
         return None
     if decorator is None:
@@ -1307,9 +1164,11 @@ def _resolve_action_target_category(
 
 
 def _emit_human(
-    findings: list[Finding], allowlist: Allowlist,
+    findings: list[Finding],
+    allowlist: Allowlist,
+    run: GateRun,
 ) -> tuple[int, int]:
-    """Print findings; return (blocking_count, allowlisted_count)."""
+    """Print findings, then the catalog disclosures; return (blocking_count, allowlisted_count)."""
     blocking = 0
     allowlisted = 0
     for finding in findings:
@@ -1321,11 +1180,16 @@ def _emit_human(
             allowlisted += 1
         else:
             blocking += 1
+    print(run.summary)
+    for advisory in run.advisories:
+        print(f"ADVISORY: {advisory}")
     return blocking, allowlisted
 
 
 def _emit_json(
-    findings: list[Finding], allowlist: Allowlist,
+    findings: list[Finding],
+    allowlist: Allowlist,
+    run: GateRun,
 ) -> tuple[int, int]:
     blocking = 0
     allowlisted = 0
@@ -1336,20 +1200,29 @@ def _emit_json(
             allowlisted += 1
         else:
             blocking += 1
-        payload_findings.append({
-            "check_id": finding.check_id,
-            "scope_qualifier": finding.scope_qualifier,
-            "specifier": finding.specifier,
-            "message": finding.message,
-            "file_path": finding.file_path,
-            "lineno": finding.lineno,
-            "allowlisted": is_allowlisted,
-        })
-    print(json.dumps({
-        "blocking": blocking,
-        "allowlisted": allowlisted,
-        "findings": payload_findings,
-    }, indent=2))
+        payload_findings.append(
+            {
+                "check_id": finding.check_id,
+                "scope_qualifier": finding.scope_qualifier,
+                "specifier": finding.specifier,
+                "message": finding.message,
+                "file_path": finding.file_path,
+                "lineno": finding.lineno,
+                "allowlisted": is_allowlisted,
+            }
+        )
+    print(
+        json.dumps(
+            {
+                "blocking": blocking,
+                "allowlisted": allowlisted,
+                "findings": payload_findings,
+                "catalog": run.summary,
+                "advisories": run.advisories,
+            },
+            indent=2,
+        )
+    )
     return blocking, allowlisted
 
 
@@ -1366,43 +1239,104 @@ def _filter_by_scope(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--allowlist", type=Path, default=None,
-                        help="Path to tracked-debt allowlist file.")
-    parser.add_argument("--profile", default="local",
-                        help="Profile name for bindings (default: local).")
-    parser.add_argument("--service", default=None,
-                        help="Scope to a single service for fast iteration.")
-    parser.add_argument("--plugin", default=None,
-                        help="Scope to a single plugin for fast iteration.")
-    parser.add_argument("--json", action="store_true",
-                        help="Emit machine-readable JSON instead of human text.")
-    parser.add_argument("--skip-call-sites", action="store_true",
-                        help="Skip C3.* — useful when iterating on C1/C2/C5.")
-    parser.add_argument("--skip-scheduling", action="store_true",
-                        help="Skip C5.* — useful when iterating on C1/C2/C3.")
+    parser.add_argument("--allowlist", type=Path, default=None, help="Path to tracked-debt allowlist file.")
+    parser.add_argument("--profile", default="local", help="Profile name for bindings (default: local).")
+    parser.add_argument("--service", default=None, help="Scope to a single service for fast iteration.")
+    parser.add_argument("--plugin", default=None, help="Scope to a single plugin for fast iteration.")
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of human text.")
+    parser.add_argument("--skip-call-sites", action="store_true", help="Skip C3.* — useful when iterating on C1/C2/C5.")
+    parser.add_argument("--skip-scheduling", action="store_true", help="Skip C5.* — useful when iterating on C1/C2/C3.")
     return parser
 
 
-def _run_all_checks(args: argparse.Namespace) -> list[Finding]:
+@dataclass
+class GateRun:
+    """Every finding, plus the catalog disclosures that never block on their own."""
+
+    findings: list[Finding]
+    catalogs: list[ProcessCatalog]
+    summary: str
+    advisories: list[str] = field(default_factory=list)
+    unshipped: list[str] = field(default_factory=list)
+
+
+def _catalog_findings(catalogs: list[ProcessCatalog], args: argparse.Namespace) -> list[Finding]:
+    """C1/C2 parity findings from the imported catalog, narrowed by ``--service``/``--plugin``."""
+    scopes = {SERVICE_SPEC.namespace: args.service, PLUGIN_SPEC.namespace: args.plugin}
+    findings: list[Finding] = []
+    for catalog in catalogs:
+        payloads = collect_payload_keys(catalog.root.glob(catalog.spec.corpus))
+        found = check_parity(catalog, payloads)
+        findings.extend(Finding(f.check_id, f.scope_qualifier, f.specifier, f.message, f.file_path) for f in found if scopes[catalog.spec.namespace] in (None, f.scope_qualifier))
+    return findings
+
+
+def unshipped_plugin(root: Path, provider: str) -> bool:
+    """True only in a born seed (it carries PROVENANCE.json) that omits ``plugins/<provider>``.
+
+    The origin tree ships every plugin, so there a missing provider stays drift.
+    A seed leaves origin-only plugins out on purpose (iss_c801f7ba).
+    """
+    return (root / "PROVENANCE.json").is_file() and not (root / "plugins" / provider).is_dir()
+
+
+def split_unshipped_references(findings: list[Finding], root: Path) -> tuple[list[Finding], list[str]]:
+    """Turn a born seed's C3.1 references to plugins it does not ship into advisories."""
+    kept: list[Finding] = []
+    advisories: list[str] = []
+    for finding in findings:
+        namespace, _, rest = finding.specifier.partition("::")
+        provider = rest.partition("::")[0]
+        if finding.check_id == "C3.1" and namespace == "plugin" and unshipped_plugin(root, provider):
+            advisories.append(f"seed does not ship {provider}: {finding.file_path}:{finding.lineno} references {finding.specifier} (measured as C3.1 on the origin tree)")
+        else:
+            kept.append(finding)
+    return kept, advisories
+
+
+def satisfied_allowances(allowlist: Allowlist, findings: list[Finding], root: Path | None = None) -> list[str]:
+    """C1/C2 entries that cover no current finding: the remediation landed, so remove them.
+
+    Only meaningful when the catalog measured everything; the caller skips
+    it otherwise, so an unmeasured provider never reads as remediated. With
+    ``root``, a born seed's C2 entry for a plugin it does not ship is not
+    satisfied either: that provider was never measured here.
+    """
+    live = {(f.check_id, f.scope_qualifier, specifier) for f in findings for specifier in (f.specifier, "*")}
+    candidates = (e for e in allowlist.entries if e.check_id[:3] in ("C1.", "C2.") and (e.check_id, e.scope_qualifier, e.specifier) not in live)
+    return sorted(f"{e.check_id}::{e.scope_qualifier}::{e.specifier}" for e in candidates if root is None or e.check_id[:3] != "C2." or not unshipped_plugin(root, e.scope_qualifier))
+
+
+def _disclosures(run: GateRun, allowlist: Allowlist, findings: list[Finding], scoped: bool) -> list[str]:
+    """Catalog and unshipped-plugin advisories, plus satisfied allowances when an unscoped run measured everything."""
+    advisories = [*(advisory for catalog in run.catalogs for advisory in catalog.advisories), *run.unshipped]
+    if not scoped and all(map(ProcessCatalog.is_complete, run.catalogs)):
+        advisories.extend(f"satisfied allowance, remove it: {key}" for key in satisfied_allowances(allowlist, findings, REPO_ROOT))
+    return advisories
+
+
+def _run_all_checks(args: argparse.Namespace) -> GateRun:
     services = _discover_service_surfaces()
     plugins = _discover_plugin_surfaces()
     services, plugins = _filter_by_scope(services, plugins, args.service, args.plugin)
     bindings = load_bindings(args.profile)
+    catalogs = [build_service_catalog(REPO_ROOT), build_plugin_catalog(REPO_ROOT)]
 
-    findings: list[Finding] = []
-    findings.extend(check_services(services))
-    findings.extend(check_plugins(plugins))
+    findings = _catalog_findings(catalogs, args)
     if not args.skip_call_sites:
         refs = _scan_call_sites()
         findings.extend(check_call_sites(refs, bindings, services, plugins))
     if not args.skip_scheduling:
-        findings.extend(check_scheduling_rpk_propagation(
-            [REPO_ROOT / "ananta" / "src", REPO_ROOT / "plugins"],
-            services=services,
-            plugins=plugins,
-        ))
+        findings.extend(
+            check_scheduling_rpk_propagation(
+                [REPO_ROOT / "ananta" / "src", REPO_ROOT / "plugins"],
+                services=services,
+                plugins=plugins,
+            )
+        )
     findings.extend(check_root_manifest_drift(REPO_ROOT))
-    return findings
+    findings, unshipped = split_unshipped_references(findings, REPO_ROOT)
+    return GateRun(findings, catalogs, catalog_summary(catalogs, set(bindings.values())), unshipped=unshipped)
 
 
 def main(argv: list[str]) -> int:
@@ -1412,31 +1346,28 @@ def main(argv: list[str]) -> int:
     allowlist = load_allowlist(args.allowlist) if args.allowlist else Allowlist()
 
     try:
-        findings = _run_all_checks(args)
+        run = _run_all_checks(args)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"ERROR: harness failure: {exc}", file=sys.stderr)
         return 2
 
-    findings.sort(key=lambda f: (f.check_id, f.scope_qualifier, f.specifier))
+    findings = sorted(run.findings, key=lambda f: (f.check_id, f.scope_qualifier, f.specifier))
+    run.advisories = _disclosures(run, allowlist, findings, scoped=bool(args.service or args.plugin))
 
     if args.json:
-        blocking, allowlisted = _emit_json(findings, allowlist)
+        blocking, allowlisted = _emit_json(findings, allowlist, run)
     else:
-        blocking, allowlisted = _emit_human(findings, allowlist)
+        blocking, allowlisted = _emit_human(findings, allowlist, run)
 
     if not args.json:
         if blocking == 0:
             if not findings:
                 print("OK: 0 findings; whole-tree integration gate clean.")
             else:
-                print(
-                    f"OK: {len(findings)} finding(s) — all allowlisted; "
-                    "whole-tree integration gate clean."
-                )
+                print(f"OK: {len(findings)} finding(s) — all allowlisted; whole-tree integration gate clean.")
         else:
             print(
-                f"\n{len(findings)} whole-tree integration finding(s) "
-                f"({allowlisted} allowlisted; {blocking} still failing).",
+                f"\n{len(findings)} whole-tree integration finding(s) ({allowlisted} allowlisted; {blocking} still failing).",
                 file=sys.stderr,
             )
     return 1 if blocking else 0

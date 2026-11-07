@@ -117,11 +117,7 @@ def _enumerate_conversation_members(zf: ZipFile) -> list[str]:
     if shards:
         return shards
     json_members = [n for n in names if n.endswith(".json")][:10]
-    raise ValueError(
-        f"chatgpt export ZIP has neither {LEGACY_CONVERSATIONS_MEMBER!r} "
-        f"nor any conversations-NNN.json shards (sample json members: "
-        f"{json_members})"
-    )
+    raise ValueError(f"chatgpt export ZIP has neither {LEGACY_CONVERSATIONS_MEMBER!r} nor any conversations-NNN.json shards (sample json members: {json_members})")
 
 
 def load_conversations_member(zf: ZipFile) -> list[Any]:
@@ -157,9 +153,7 @@ def walk_conversations(blob_path: Path) -> Iterator[ChatGPTConversation]:
             raise ValueError(f"conversations.json[{idx}] is not a JSON object")
         cid = row.get("conversation_id") or row.get("id")
         if not isinstance(cid, str) or not cid:
-            raise ValueError(
-                f"conversations.json[{idx}] missing non-empty 'conversation_id'"
-            )
+            raise ValueError(f"conversations.json[{idx}] missing non-empty 'conversation_id'")
         title = row.get("title") if isinstance(row.get("title"), str) else None
         create_time = _coerce_unix_time(row.get("create_time"), label=f"[{idx}].create_time")
         update_time = _coerce_unix_time(row.get("update_time"), label=f"[{idx}].update_time")
@@ -185,15 +179,14 @@ def iter_events_for_conversation(
 
     Walks the ``mapping`` tree depth-first from the root, then secondary-sorts
     by ``message.create_time`` to yield chronologically. Empty / metadata
-    nodes (no ``message`` payload, no role, or empty parts) are skipped.
+    nodes (no ``message`` payload, no role, or empty non-tool parts) are skipped.
+    Empty tool output is retained as a TOOL_RESULT with the vendor payload.
 
     Raises ``ValueError`` on a malformed mapping shape.
     """
     mapping = conv.raw.get("mapping")
     if not isinstance(mapping, dict):
-        raise ValueError(
-            f"conversation {conv.conversation_id!r} missing dict 'mapping'"
-        )
+        raise ValueError(f"conversation {conv.conversation_id!r} missing dict 'mapping'")
     ordered_nodes = _ordered_message_nodes(mapping)
     for node_id, node in ordered_nodes:
         msg = node.get("message")
@@ -207,7 +200,9 @@ def iter_events_for_conversation(
             continue
         text = _extract_text(msg)
         if text is None:
-            continue  # empty / non-text payload — skip silently
+            if role_str != "tool":
+                continue  # empty / non-text message
+            text = ""  # An empty tool result is still an event; retain its payload.
         create_time = _coerce_unix_time(
             msg.get("create_time"),
             label=f"{conv.conversation_id}/{node_id}/create_time",
@@ -235,19 +230,18 @@ def iter_events_for_conversation(
 def normalize_raw(raw: RawSessionEvent) -> NormalizedSessionEvent:
     role_str = raw.payload.get("_chatgpt_role")
     if not isinstance(role_str, str):
-        raise ValueError(
-            "chatgpt RawSessionEvent missing '_chatgpt_role' (was the parser bypassed?)"
-        )
+        raise ValueError("chatgpt RawSessionEvent missing '_chatgpt_role' (was the parser bypassed?)")
     role = _map_chatgpt_role(role_str)
     text = raw.payload.get("text")
     if not isinstance(text, str):
         raise ValueError("chatgpt RawSessionEvent missing string 'text'")
     return NormalizedSessionEvent(
         external_session_id=raw.external_session_id,
-        event_type=EventType.MESSAGE,
+        event_type=EventType.TOOL_RESULT if role is MessageRole.TOOL else EventType.MESSAGE,
         role=role,
         content_text=text,
-        content_json=None,
+        # Preserve vendor correlation metadata without inventing a tool-use id.
+        content_json={"raw_message": raw.payload["raw_message"]} if role is MessageRole.TOOL else None,
         event_at=raw.event_at,
         vendor_event_id=raw.vendor_event_id,
         vendor_parent_event_id=raw.vendor_parent_event_id,

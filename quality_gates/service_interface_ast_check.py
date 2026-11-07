@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Service-interface AST consistency gate.
 
-Three-check static analysis of the platform's service-interface ABCs +
+Four-check static analysis of the platform's service-interface ABCs +
 their KB JSON manifests. See the service-interface-AST-gate design
 record v1 (dev-checkout workbench — not part of the shipped tree) for
 the full design + KB precedents.
 
-Checks (a/b/c, per design §1):
+Checks (a/b/c/d):
 
   (a) For every ``@service_interface_process(name="X")``-decorated
       ``FunctionDef`` in any ``ananta/src/ananta/services/<service>/
@@ -49,6 +49,13 @@ Checks (a/b/c, per design §1):
       method DOES use — see ``quality_gates/service_interface_ast_check.
       py`` check (d) design note; that convention is bespoke per plugin
       via each plugin's own ``_execute_action`` and is out of scope here).
+      The same schema is compared with the concrete callable resolved from
+      source startup constructors and runtime routing precedence, including
+      package reexports and local inheritance. Profile bindings select plugin
+      entrypoints only for plugin-direct routes. This is source coverage of
+      profile/config/service_bindings.json, not an attestation of live or
+      environment-overridden bindings. Dynamic/absent routes, imports, bases
+      and schemas emit specific nonblocking COVERAGE ADVISORY lines.
       Skipped (not a finding) when the decorator's ``parameters=`` value
       isn't a literal dict (e.g. built via ``**`` dict-merge) — no
       false positive on an unresolvable schema.
@@ -82,6 +89,16 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+
+from quality_gates.service_interface_ast_bindings import (  # noqa: E402
+    SourceIndex,
+    StaticResolutionError,
+    concrete_class,
+    concrete_method,
+)
+
 SERVICES_GLOB = "ananta/src/ananta/services/*/interfaces/public.py"
 _PROCESSES_RELPATH = Path("ananta") / "knowledge_base" / "processes"
 
@@ -95,6 +112,7 @@ def _repo_root() -> Path:
     gate conventions.
     """
     return Path.cwd()
+
 
 _WRAPPER_OK = 0
 _WRAPPER_BLOCKING = 2
@@ -134,9 +152,7 @@ def _is_abstractmethod(dec: ast.expr) -> bool:
     return False
 
 
-def _decorator_keyword_value(
-    dec: ast.Call, key: str, constants: dict[str, str] | None = None
-) -> str | None:
+def _decorator_keyword_value(dec: ast.Call, key: str, constants: dict[str, str] | None = None) -> str | None:
     """Extract a string-keyword from a decorator Call.
 
     Handles two shapes:
@@ -174,9 +190,7 @@ def _collect_module_string_constants(tree: ast.Module) -> dict[str, str]:
     for node in tree.body:
         if not isinstance(node, ast.Assign):
             continue
-        if not (
-            isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
-        ):
+        if not (isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
             continue
         for target in node.targets:
             if isinstance(target, ast.Name):
@@ -198,11 +212,7 @@ def _service_public_py_files() -> list[Path]:
     file each decorator lives in.
     """
     interfaces_glob = "ananta/src/ananta/services/*/interfaces/*.py"
-    return [
-        path
-        for path in sorted(_repo_root().glob(interfaces_glob))
-        if path.name != "__init__.py"
-    ]
+    return [path for path in sorted(_repo_root().glob(interfaces_glob)) if path.name != "__init__.py"]
 
 
 def _process_json_files() -> list[Path]:
@@ -256,14 +266,8 @@ def _check_a_name_match(
         file=public_py,
         line=item.lineno,
         identifier=f"a::{posix}::{class_node.name}::{item.name}",
-        message=(
-            f'@service_interface_process(name="{sip_name}") '
-            f"on def {item.name} — decorator/function-name mismatch"
-        ),
-        recommend=(
-            f"Either rename the function to {sip_name!r} or "
-            f"update the decorator to name={item.name!r}."
-        ),
+        message=(f'@service_interface_process(name="{sip_name}") on def {item.name} — decorator/function-name mismatch'),
+        recommend=(f"Either rename the function to {sip_name!r} or update the decorator to name={item.name!r}."),
     )
     return finding, registered_entry
 
@@ -296,11 +300,7 @@ def _required_function_params(item: ast.FunctionDef | ast.AsyncFunctionDef) -> s
     all_pos = args.posonlyargs + args.args
     n_no_default = len(all_pos) - len(args.defaults)
     required = {a.arg for a in all_pos[:n_no_default] if a.arg != "self"}
-    required.update(
-        a.arg
-        for a, d in zip(args.kwonlyargs, args.kw_defaults, strict=True)
-        if d is None
-    )
+    required.update(a.arg for a, d in zip(args.kwonlyargs, args.kw_defaults, strict=True) if d is None)
     return required
 
 
@@ -323,12 +323,7 @@ def _check_d_schema_signature_match(
         file=public_py,
         line=item.lineno,
         identifier=f"d::{posix}::{class_node.name}::{item.name}",
-        message=(
-            f"def {item.name} requires {sorted(missing)} with no default, "
-            f"but @service_interface_process(parameters=...) declares only "
-            f"{sorted(keys)} — no live call path can ever supply "
-            f"{sorted(missing)}"
-        ),
+        message=(f"{class_node.name}.{item.name}: def {item.name} requires {sorted(missing)} with no default, but @service_interface_process(parameters=...) declares only {sorted(keys)} — no live call path can ever supply {sorted(missing)}"),
         recommend=(
             f"Either add {sorted(missing)} to the decorator's `parameters=` "
             "dict (if the dispatcher's queued-action path truly supplies "
@@ -352,17 +347,8 @@ def _check_b_bare_abstractmethod(
         file=public_py,
         line=item.lineno,
         identifier=f"b::{posix}::{class_node.name}::{item.name}",
-        message=(
-            f"@abstractmethod {item.name} in {class_node.name} "
-            f"lacks @service_interface_process"
-        ),
-        recommend=(
-            "Add @service_interface_process(name=..., provider=..., "
-            "parameters=..., return_value_schema=...) above @abstractmethod. "
-            "If this is a legitimate non-verb abstract helper, add to "
-            "quality_gates/service_interface_ast_allowlist.txt with a "
-            "comment explaining why."
-        ),
+        message=(f"@abstractmethod {item.name} in {class_node.name} lacks @service_interface_process"),
+        recommend=("Add @service_interface_process(name=..., provider=..., parameters=..., return_value_schema=...) above @abstractmethod. If this is a legitimate non-verb abstract helper, add to quality_gates/service_interface_ast_allowlist.txt with a comment explaining why."),
     )
 
 
@@ -389,9 +375,7 @@ def _check_method_decorators(
 
     if sip is not None:
         assert isinstance(sip, ast.Call)
-        a_finding, registered_entry = _check_a_name_match(
-            sip, item, class_node, public_py, posix, constants
-        )
+        a_finding, registered_entry = _check_a_name_match(sip, item, class_node, public_py, posix, constants)
         if a_finding is not None:
             findings.append(a_finding)
         d_finding = _check_d_schema_signature_match(sip, item, class_node, public_py, posix)
@@ -415,9 +399,7 @@ def _check_class(
     for item in class_node.body:
         if not isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
             continue
-        method_findings, registered_entry = _check_method_decorators(
-            item, class_node, public_py, posix, constants
-        )
+        method_findings, registered_entry = _check_method_decorators(item, class_node, public_py, posix, constants)
         findings.extend(method_findings)
         if registered_entry is not None:
             registered.add(registered_entry)
@@ -445,13 +427,78 @@ def _check_public_py(public_py: Path) -> tuple[list[Finding], set[tuple[str, str
         if not _is_service_interface_abc(class_node):
             continue
         assert isinstance(class_node, ast.ClassDef)
-        class_findings, class_registered = _check_class(
-            class_node, public_py, posix, constants
-        )
+        class_findings, class_registered = _check_class(class_node, public_py, posix, constants)
         findings.extend(class_findings)
         registered.update(class_registered)
 
     return findings, registered
+
+
+def _concrete_schemas(
+    index: SourceIndex,
+    public_py: Path,
+) -> list[tuple[str | None, ast.Call, ast.FunctionDef | ast.AsyncFunctionDef]]:
+    """Keep concrete comparisons separate from the interface registration set."""
+    tree = index.tree(public_py)
+    constants = _collect_module_string_constants(tree)
+    schemas: list[tuple[str | None, ast.Call, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+    for cls in tree.body:
+        if not isinstance(cls, ast.ClassDef) or not _is_service_interface_abc(cls):
+            continue
+        for item in cls.body:
+            if not isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            for dec in item.decorator_list:
+                if isinstance(dec, ast.Call) and _is_service_interface_process(dec):
+                    schemas.append((_decorator_keyword_value(dec, "provider", constants), dec, item))
+                    break
+    return schemas
+
+
+def _check_concrete_methods(public_files: list[Path]) -> list[Finding]:
+    """Compare literal schemas with bound callables; disclose incomplete coverage."""
+    index = SourceIndex(_repo_root())
+    findings: list[Finding] = []
+    compared = 0
+    unresolved = 0
+    for public_py in public_files:
+        try:
+            schemas = _concrete_schemas(index, public_py)
+        except StaticResolutionError as exc:
+            print(f"COVERAGE ADVISORY: {exc}")
+            unresolved += 1
+            continue
+        for provider, schema, interface in schemas:
+            try:
+                finding = _compare_concrete(index, provider, schema, interface)
+                compared += 1
+                if finding is not None:
+                    findings.append(finding)
+            except StaticResolutionError as exc:
+                identity = f"{provider or '<unresolved provider>'}.{interface.name}"
+                print(f"COVERAGE ADVISORY: {identity}: {exc}")
+                unresolved += 1
+    print(f"Concrete signature coverage: {compared} compared; {unresolved} unresolved (selected checkout profile; not live bindings).")
+    return findings
+
+
+def _compare_concrete(
+    index: SourceIndex,
+    provider: str | None,
+    schema: ast.Call,
+    interface: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> Finding | None:
+    """Apply the existing signature/schema rule at the resolved concrete owner."""
+    if provider is None:
+        raise StaticResolutionError("nonliteral or absent provider")
+    if not _decorator_parameters_keys(schema)[1]:
+        raise StaticResolutionError("nonliteral or absent schema parameters")
+    bound = concrete_class(index, provider)
+    owner, method = concrete_method(index, bound, interface.name)
+    if any(_is_abstractmethod(dec) for dec in method.decorator_list):
+        raise StaticResolutionError(f"resolved method {owner.node.name}.{method.name} is abstract")
+    posix = owner.path.relative_to(_repo_root()).as_posix()
+    return _check_d_schema_signature_match(schema, method, owner.node, owner.path, posix)
 
 
 def _check_orphan_jsons(registered: set[tuple[str, str]]) -> list[Finding]:
@@ -467,15 +514,8 @@ def _check_orphan_jsons(registered: set[tuple[str, str]]) -> list[Finding]:
                     file=json_path,
                     line=1,
                     identifier=f"c::{provider}::{name}",
-                    message=(
-                        f"orphan JSON: processes/{provider}/{name}.json has no "
-                        f"matching @service_interface_process decorator"
-                    ),
-                    recommend=(
-                        f"Either restore the decorator at ananta/src/ananta/"
-                        f"services/{provider}/interfaces/public.py, or delete "
-                        f"the JSON file (per [[no-phantom-abstractions]])."
-                    ),
+                    message=(f"orphan JSON: processes/{provider}/{name}.json has no matching @service_interface_process decorator"),
+                    recommend=(f"Either restore the decorator at ananta/src/ananta/services/{provider}/interfaces/public.py, or delete the JSON file (per [[no-phantom-abstractions]])."),
                 )
             )
     return findings
@@ -518,12 +558,7 @@ def _is_allowlisted(identifier: str, allowlist: frozenset[str]) -> bool:
         if len(entry_parts) != 4:
             continue
         e_check, e_file, e_class, e_func = entry_parts
-        if (
-            e_check == id_check
-            and e_class == id_class
-            and e_func == id_func
-            and (id_file == e_file or id_file.endswith("/" + e_file))
-        ):
+        if e_check == id_check and e_class == id_class and e_func == id_func and (id_file == e_file or id_file.endswith("/" + e_file)):
             return True
     return False
 
@@ -531,33 +566,23 @@ def _is_allowlisted(identifier: str, allowlist: frozenset[str]) -> bool:
 def _print_findings(findings: list[Finding], allowlist: frozenset[str]) -> None:
     repo_root = _repo_root()
     for f in findings:
-        posix = (
-            f.file.relative_to(repo_root).as_posix()
-            if f.file.is_absolute() and repo_root in f.file.parents
-            else str(f.file)
-        )
+        posix = f.file.relative_to(repo_root).as_posix() if f.file.is_absolute() and repo_root in f.file.parents else str(f.file)
         marker = " [allowlisted]" if _is_allowlisted(f.identifier, allowlist) else ""
         print(f"{posix}:{f.line}")
         print(f"  CHECK ({f.check}) — {f.message}{marker}")
         print(f"  RECOMMEND: {f.recommend}")
 
 
-def _summarize(
-    findings: list[Finding], allowlist: frozenset[str], allowlist_active: bool
-) -> int:
+def _summarize(findings: list[Finding], allowlist: frozenset[str], allowlist_active: bool) -> int:
     if not findings:
-        print(
-            "OK: service-interface AST gate clean "
-            "(0 violations across all 3 checks)."
-        )
+        print("OK: service-interface AST gate clean (0 violations across all 4 checks; see coverage advisories).")
         return _WRAPPER_OK
     total = len(findings)
     if allowlist_active:
         allowlisted = sum(1 for f in findings if _is_allowlisted(f.identifier, allowlist))
         failing = total - allowlisted
         print(
-            f"\n{total} service-interface AST finding(s) "
-            f"({allowlisted} allowlisted; {failing} still failing).",
+            f"\n{total} service-interface AST finding(s) ({allowlisted} allowlisted; {failing} still failing).",
             file=sys.stderr,
         )
         return _WRAPPER_BLOCKING if failing > 0 else _WRAPPER_OK
@@ -574,13 +599,7 @@ def main(argv: list[str]) -> int:
         "--allowlist",
         type=Path,
         default=None,
-        help=(
-            "Path to a tracked-debt register file listing identifiers that "
-            "should be reported but not block. See design v1 §4.2 for the "
-            "per-check entry shape. Allowlisted findings are still printed "
-            "so the gate stays honest; they just don't contribute to the "
-            "exit-2 verdict. Adding a new entry is not a scanner fix."
-        ),
+        help=("Path to a tracked-debt register file listing identifiers that should be reported but not block. See design v1 §4.2 for the per-check entry shape. Allowlisted findings are still printed so the gate stays honest; they just don't contribute to the exit-2 verdict. Adding a new entry is not a scanner fix."),
     )
     args = parser.parse_args(argv)
 
@@ -595,12 +614,14 @@ def main(argv: list[str]) -> int:
 
     all_findings: list[Finding] = []
     all_registered: set[tuple[str, str]] = set()
-    for public_py in _service_public_py_files():
+    public_files = _service_public_py_files()
+    for public_py in public_files:
         per_file_findings, per_file_registered = _check_public_py(public_py)
         all_findings.extend(per_file_findings)
         all_registered.update(per_file_registered)
 
     all_findings.extend(_check_orphan_jsons(all_registered))
+    all_findings.extend(_check_concrete_methods(public_files))
 
     _print_findings(all_findings, allowlist)
     return _summarize(all_findings, allowlist, allowlist_active)

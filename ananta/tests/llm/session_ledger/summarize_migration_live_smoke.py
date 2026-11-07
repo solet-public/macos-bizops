@@ -30,18 +30,13 @@ Coverage:
   ``summary_text`` when NULL and is a no-op (no clobber) once it is set.
 
 Writes only sentinel rows (tracked by id) and hard-deletes them in a ``finally``.
-There are NO DB-level foreign keys (FKs are repository-enforced). Env-gated behind
-``LEDGER_SUMMARIZE_LIVE_SMOKE=1`` (needs the live solet DB up).
-
-Run::
-
-    LEDGER_SUMMARIZE_LIVE_SMOKE=1 \\
-      .venv/bin/python3 ananta/tests/llm/session_ledger/summarize_migration_live_smoke.py
+There are NO DB-level foreign keys (FKs are repository-enforced). Private fixture: run under quality_gates/provision_test_pg.py using the
+explicit the private manifest variable contract. Without it, exit 77; legacy enable flags
+never select a live profile. See quality_gates/private_postgres.md.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from contextlib import contextmanager
@@ -49,13 +44,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, LiteralString, cast
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+_ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(_ROOT))
+REPO_ROOT = _ROOT
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(
-    0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
+    0,
+    str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 
-from ananta.constants import SOLET_NAME_ENV_VAR  # noqa: E402
+from ananta.core.domain.types import ActionResult  # noqa: E402
 from ananta.llm.session_ledger.repository import (  # noqa: E402
     SessionLedgerRepository,
 )
@@ -63,6 +61,7 @@ from ananta.llm.session_ledger.types import (  # noqa: E402
     IngestSourceKind,
     SourceVendor,
 )
+from ananta.services.state_service import StateService  # noqa: E402
 from postgres_state_management_plugin.plugin import (  # noqa: E402
     _PostgresStateTransaction,
 )
@@ -72,6 +71,8 @@ from postgres_state_management_plugin.postgres_backend.config import (  # noqa: 
 from postgres_state_management_plugin.postgres_backend.provider import (  # noqa: E402
     PostgresProvider,
 )
+
+from quality_gates.private_test_pg import MANIFEST_ENV, PG_SCHEMA, ledger_fixture, load_fixture, skip_fixture  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
@@ -87,21 +88,15 @@ def _check(condition: object, label: str) -> None:
         print(f"  FAIL  {label}")
 
 
-_PROFILE_PG_CONFIG = (
-    REPO_ROOT / "profile" / "config" / "plugins"
-    / "postgres_state_management_plugin.json"
-)
-
-
 def _load_pg_config() -> PostgresConfig:
-    return PostgresConfig(**json.loads(_PROFILE_PG_CONFIG.read_text(encoding="utf-8")))
+    return PostgresConfig(**load_fixture("ledger_summarize").connection_config(PG_SCHEMA))
 
 
-def _envelope(data: dict[str, Any]) -> dict[str, Any]:
+def _envelope(data: dict[str, object]) -> ActionResult:
     return {"action_status": "completed", "data": data, "actions": [], "error": None}
 
 
-class _LiveStateAdapter:
+class _LiveStateAdapter(StateService):
     """Full StateManagementInterface stand-in over a real provider.
 
     Autocommit ``write_state`` / ``update_state`` / ``query_state`` /
@@ -112,9 +107,16 @@ class _LiveStateAdapter:
     """
 
     def __init__(self, provider: PostgresProvider) -> None:
+        super().__init__()
         self._provider = provider
 
-    def write_state(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:
+    def write_state(
+        self,
+        namespace: str,
+        data: dict[str, object],
+        calling_service: str | None = None,
+        calling_namespace: str | None = None,
+    ) -> ActionResult:
         row_id = self._provider.insert(
             namespace=namespace,
             table=str(data["table"]),
@@ -122,9 +124,7 @@ class _LiveStateAdapter:
         )
         return _envelope({"result": {"generated_id": row_id, "inserted": 1}})
 
-    def update_state(
-        self, namespace: str, query: dict[str, Any], updates: dict[str, Any]
-    ) -> dict[str, Any]:
+    def update_state(self, namespace: str, query: dict[str, object], updates: dict[str, object]) -> ActionResult:
         filters = query.get("filters") or {}
         affected = self._provider.update(
             namespace=namespace,
@@ -134,16 +134,17 @@ class _LiveStateAdapter:
         )
         return _envelope({"result": {"updated": affected}})
 
-    def query_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
-        filters = query.get("filters") or {}
+    def query_state(self, namespace: str, filters: dict[str, object]) -> ActionResult:
+        query = filters
+        where_filters = query.get("filters") or {}
         rows = self._provider.select(
             namespace=namespace,
             table=str(query["table"]),
-            conditions=cast("dict[str, Any]", filters) if isinstance(filters, dict) else None,
+            conditions=cast("dict[str, Any]", where_filters) if isinstance(where_filters, dict) else None,
         )
         return _envelope({"records": rows, "count": len(rows)})
 
-    def query_ordered(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:
+    def query_ordered(self, namespace: str, data: dict[str, object]) -> ActionResult:
         filters = data.get("filters") or {}
         order_by = cast("list[list[str]]", data.get("order_by") or [])
         rows = self._provider.select_ordered(
@@ -156,7 +157,7 @@ class _LiveStateAdapter:
         )
         return _envelope({"records": rows, "count": len(rows)})
 
-    def delete_records(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
+    def delete_records(self, namespace: str, query: dict[str, object]) -> ActionResult:
         filters = query.get("filters") or {}
         deleted = self._provider.delete(
             namespace=namespace,
@@ -173,14 +174,12 @@ class _LiveStateAdapter:
 
 
 _MARK = "__summarize_migration_live_smoke__"
-_SCHEMA = os.environ[SOLET_NAME_ENV_VAR]
+_SCHEMA = PG_SCHEMA
 _T0 = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 _NOW = datetime(2026, 6, 1, 9, 0, 0, tzinfo=UTC)
 
 
-def _row_or_none(
-    provider: PostgresProvider, table: str, conditions: dict[str, Any]
-) -> dict[str, Any] | None:
+def _row_or_none(provider: PostgresProvider, table: str, conditions: dict[str, Any]) -> dict[str, Any] | None:
     rows = provider.select(namespace="session_ledger", table=table, conditions=conditions)
     return rows[0] if rows else None
 
@@ -200,21 +199,19 @@ def _hard_delete(provider: PostgresProvider, table: str, row_id: str) -> None:
 
 
 def _delete_summaries_for_session(provider: PostgresProvider, session_id: str) -> None:
-    delete_sql: LiteralString = (
-        f'DELETE FROM "{_SCHEMA}"."session_ledger__summary" WHERE session_id = %s'
-    )
+    # Same fixture SQL bytes; this matches the adjacent _hard_delete LiteralString seam.
+    delete_sql = cast(LiteralString, f'DELETE FROM "{_SCHEMA}"."session_ledger__summary" WHERE session_id = %s')
     with provider.get_transactional_connection() as conn, conn.cursor() as cur:
         cur.execute(delete_sql, (session_id,))
 
 
-def _make_session(
-    repo: SessionLedgerRepository, source_id: str, external_session_id: str
-) -> str:
+def _make_session(repo: SessionLedgerRepository, source_id: str, external_session_id: str) -> str:
     """Insert a fresh session (summary_text starts NULL) via the INSERT branch."""
     return repo.upsert_session(
         source_id=source_id,
         external_session_id=external_session_id,
         vendor=SourceVendor.CLAUDE_CODE,
+        source_kind=IngestSourceKind.CODEX_PUSHED,
         vendor_session_label="label",
         project_path="/proj",
         first_event_at=_T0,
@@ -264,27 +261,21 @@ def test_summarize_lifecycle(  # noqa: PLR0915 — one linear lifecycle, no bran
         )
 
         # (a) first chunk, summary_text NULL → fires (NULL arm).
-        summaries.append(
-            _persist(repo, session_id=s1, chunk_index=0, summary_text="c0", embedding_vector_id="ev-c0")
-        )
+        summaries.append(_persist(repo, session_id=s1, chunk_index=0, summary_text="c0", embedding_vector_id="ev-c0"))
         _check(
             _session_summary_text(provider, s1) == "c0",
             "persist chunk0 on a NULL-summary session sets summary_text=c0 (NULL arm)",
         )
 
         # (b) higher chunk → fires (this-is-the-latest arm).
-        summaries.append(
-            _persist(repo, session_id=s1, chunk_index=2, summary_text="c2", embedding_vector_id="ev-c2")
-        )
+        summaries.append(_persist(repo, session_id=s1, chunk_index=2, summary_text="c2", embedding_vector_id="ev-c2"))
         _check(
             _session_summary_text(provider, s1) == "c2",
             "persist higher chunk2 updates summary_text=c2 (latest-chunk arm)",
         )
 
         # (c) lower chunk, higher exists, summary_text set → does NOT clobber.
-        summaries.append(
-            _persist(repo, session_id=s1, chunk_index=1, summary_text="c1", embedding_vector_id="ev-c1")
-        )
+        summaries.append(_persist(repo, session_id=s1, chunk_index=1, summary_text="c1", embedding_vector_id="ev-c1"))
         _check(
             _session_summary_text(provider, s1) == "c2",
             "persist lower chunk1 does NOT clobber summary_text (stays c2; no-overwrite arm)",
@@ -293,15 +284,14 @@ def test_summarize_lifecycle(  # noqa: PLR0915 — one linear lifecycle, no bran
         # ── overwrite_summary_text_for_codex_stage1: replace text + HARD-delete chunk0 ──
         s2 = _make_session(repo, source_id, f"ext-overwrite-{_MARK}")
         sessions.append(s2)
-        summaries.append(
-            _persist(repo, session_id=s2, chunk_index=0, summary_text="old-chunk0", embedding_vector_id="ev-ow0")
-        )
+        summaries.append(_persist(repo, session_id=s2, chunk_index=0, summary_text="old-chunk0", embedding_vector_id="ev-ow0"))
         _check(
             _row_or_none(provider, "summary", {"session_id": s2, "chunk_index": 0}) is not None,
             "overwrite fixture: chunk0 present before overwrite",
         )
         repo.overwrite_summary_text_for_codex_stage1(
-            session_id=s2, new_summary_text="rewritten-by-codex-stage1",
+            session_id=s2,
+            new_summary_text="rewritten-by-codex-stage1",
         )
         _check(
             _session_summary_text(provider, s2) == "rewritten-by-codex-stage1",
@@ -317,25 +307,22 @@ def test_summarize_lifecycle(  # noqa: PLR0915 — one linear lifecycle, no bran
         # ── list_summaries_by_external_ids: = ANY, is_deleted-excluded ──
         s3 = _make_session(repo, source_id, f"ext-list-{_MARK}")
         sessions.append(s3)
-        live_id = _persist(
-            repo, session_id=s3, chunk_index=0, summary_text="live-row", embedding_vector_id="ev-live"
-        )
+        live_id = _persist(repo, session_id=s3, chunk_index=0, summary_text="live-row", embedding_vector_id="ev-live")
         summaries.append(live_id)
-        deleted_id = _persist(
-            repo, session_id=s3, chunk_index=1, summary_text="deleted-row", embedding_vector_id="ev-deleted"
-        )
+        deleted_id = _persist(repo, session_id=s3, chunk_index=1, summary_text="deleted-row", embedding_vector_id="ev-deleted")
         summaries.append(deleted_id)
         # Soft-delete the second chunk so the = ANY read must exclude it.
         provider.update(
-            namespace="session_ledger", table="summary",
-            conditions={"id": deleted_id}, updates={"is_deleted": 1},
+            namespace="session_ledger",
+            table="summary",
+            conditions={"id": deleted_id},
+            updates={"is_deleted": 1},
         )
         rows = repo.list_summaries_by_external_ids(["ev-live", "ev-deleted", "ev-missing"])
         returned_ids = {str(r.get("embedding_vector_id")) for r in rows}
         _check(
             returned_ids == {"ev-live"},
-            f"list_summaries returns only the live matching row via = ANY "
-            f"(soft-deleted + non-matching excluded; got {returned_ids!r})",
+            f"list_summaries returns only the live matching row via = ANY (soft-deleted + non-matching excluded; got {returned_ids!r})",
         )
         _check(
             repo.list_summaries_by_external_ids([]) == [],
@@ -363,34 +350,28 @@ def test_summarize_lifecycle(  # noqa: PLR0915 — one linear lifecycle, no bran
             _hard_delete(provider, "summary", summary_id)
         for source_id in sources:
             _hard_delete(provider, "source", source_id)
-        leftover = [
-            sid for sid in sessions
-            if _row_or_none(provider, "session", {"id": sid}) is not None
-        ]
+        leftover = [sid for sid in sessions if _row_or_none(provider, "session", {"id": sid}) is not None]
         _check(not leftover, f"all sentinel sessions hard-deleted (cleanup); leftover={leftover!r}")
 
 
 def main() -> int:
-    if os.environ.get("LEDGER_SUMMARIZE_LIVE_SMOKE") != "1":
-        print("=== summarize_migration_live_smoke ===")
-        print(
-            "  SKIP  set LEDGER_SUMMARIZE_LIVE_SMOKE=1 to run; "
-            "needs the live solet DB."
-        )
-        return 0
+    if not os.environ.get(MANIFEST_ENV):
+        return skip_fixture()
     print("=== summarize_migration_live_smoke ===")
-    provider = PostgresProvider(_load_pg_config())
-    provider.initialize()
-    repo = SessionLedgerRepository(
-        state_service=cast("Any", _LiveStateAdapter(provider)),
-        clock=lambda: _NOW,
-    )
-    test_summarize_lifecycle(repo, provider)
+    with ledger_fixture("ledger_summarize") as fixture:
+        provider = PostgresProvider(_load_pg_config())
+        provider.initialize()
+        repo = SessionLedgerRepository(
+            state_service=cast("Any", fixture.state),
+            clock=lambda: _NOW,
+        )
+        test_summarize_lifecycle(repo, provider)
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:
             print(f"  FAILED: {label}")
         return 1
+    print("PRIVATE_PG_BODY ledger_summarize")
     return 0
 
 

@@ -45,6 +45,7 @@ import contextlib
 import json
 import logging
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -55,6 +56,7 @@ from unittest.mock import patch
 from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -170,7 +172,9 @@ class _World:
             clock=lambda: _T0,
         )
         store: Store = open_store(
-            get_peer_binding_schema(), namespace=PEER_BINDING_NAMESPACE, backend="in_memory",
+            get_peer_binding_schema(),
+            namespace=PEER_BINDING_NAMESPACE,
+            backend="in_memory",
         )
         self.registry = PeerRegistry(bindings_store=store)
         self.manager = BridgeSessionManager(
@@ -247,19 +251,14 @@ class _World:
 
     def holds_route(self, name: str, agi: str, *, bridge: str | None = None) -> httpx.Response:
         return self.http.get(
-            f"{_PREFIX}/{bridge or self.caller_bridge}/peer/holds_role"
-            f"?name={quote(name)}&agent_instance_id={quote(agi)}",
+            f"{_PREFIX}/{bridge or self.caller_bridge}/peer/holds_role?name={quote(name)}&agent_instance_id={quote(agi)}",
         )
 
     def inbox_verb(self, **args: object) -> dict[str, Any]:
         return self.plugin.peer_inbox_action(dict(args), {})
 
     def inbox_route(self, *, bridge: str | None = None, **args: object) -> httpx.Response:
-        query = "&".join(
-            f"{key}={quote(str(value).lower() if isinstance(value, bool) else str(value), safe='')}"
-            for key, value in args.items()
-            if value is not None
-        )
+        query = "&".join(f"{key}={quote(str(value).lower() if isinstance(value, bool) else str(value), safe='')}" for key, value in args.items() if value is not None)
         return self.http.get(
             f"{_PREFIX}/{bridge or self.caller_bridge}/peer/inbox_for_session?{query}",
         )
@@ -371,8 +370,7 @@ def _check_holds_case(
         f"[{case}] both doors answer (verb={verb.get('action_status')}, route={route.status_code})",
     )
     r.check(
-        {key: route_data.get(key) for key in verb_data} == verb_data
-        and set(verb_data) == {"holds", "name", "agent_session_id", "delivery_route_attached"},
+        {key: route_data.get(key) for key in verb_data} == verb_data and set(verb_data) == {"holds", "name", "agent_session_id", "delivery_route_attached"},
         f"[{case}] the route returns exactly the verb's object ({verb_data} vs {route_data})",
     )
     r.check(
@@ -381,8 +379,7 @@ def _check_holds_case(
     )
     wanted = {**expected, "name": name}
     r.check(
-        all(route_data.get(key) == value for key, value in wanted.items())
-        and all(verb_data.get(key) == value for key, value in wanted.items()),
+        all(route_data.get(key) == value for key, value in wanted.items()) and all(verb_data.get(key) == value for key, value in wanted.items()),
         f"[{case}] the shared answer is the expected one ({wanted})",
     )
     r.check(
@@ -396,19 +393,14 @@ def _check_holds_refusals(r: _Results) -> None:
     verb = w.holds_verb("", "agi-A")
     route = w.holds_route("", "agi-A")
     r.check(
-        verb.get("action_status") == "failed"
-        and (verb.get("error") or {}).get("code") == "missing_argument"
-        and route.status_code == 400
-        and route.json().get("code") == "missing_argument",
+        verb.get("action_status") == "failed" and (verb.get("error") or {}).get("code") == "missing_argument" and route.status_code == 400 and route.json().get("code") == "missing_argument",
         "missing name: both doors refuse with missing_argument",
     )
     unbound = _World(state_service_bound=False)
     verb = unbound.holds_verb(_ROLE, "agi-A")
     route = unbound.holds_route(_ROLE, "agi-A")
     r.check(
-        verb.get("action_status") == "failed"
-        and (verb.get("error") or {}).get("code") == "state_service_unavailable"
-        and route.status_code == 503,
+        verb.get("action_status") == "failed" and (verb.get("error") or {}).get("code") == "state_service_unavailable" and route.status_code == 503,
         "no state service: both doors refuse (state_service_unavailable / 503), never 'not held'",
     )
 
@@ -517,6 +509,10 @@ def _check_page_walk(r: _Results, w: _World) -> None:
             args["role_after"] = role_after
         verb = _verb_outcome(w.inbox_verb(**args))
         route = _route_outcome(w.inbox_route(**args))
+        r.check(
+            verb == tuple(json.loads(json.dumps(verb))),
+            f"page {page_no}: verb page is already JSON-native",
+        )
         r.check(verb == route, f"page {page_no}: the route page equals the verb page")
         if verb[0] != "ok":
             r.check(False, f"page {page_no}: the walk reads a page ({verb})")
@@ -525,8 +521,7 @@ def _check_page_walk(r: _Results, w: _World) -> None:
         if page_no == 1:
             r.check(
                 len(page["entries"]) == 2 and len(page["role_entries"]) == 2,
-                "page 1 carries BOTH sections (2 instance + 2 role entries), "
-                f"so equality is not vacuous (got {len(page['entries'])}/{len(page['role_entries'])})",
+                f"page 1 carries BOTH sections (2 instance + 2 role entries), so equality is not vacuous (got {len(page['entries'])}/{len(page['role_entries'])})",
             )
         after = page.get("next_after_created_at") or None
         role_after = page.get("next_role_cursor") or None
@@ -550,12 +545,8 @@ def _check_forged_role_cursor(r: _Results, w: _World) -> None:
     page = route[1] if route[0] == "ok" else {}
     r.check(verb == route and route[0] == "ok", "malformed role_after: the route page equals the verb page")
     r.check(
-        page.get("role_section_status") == "error"
-        and page.get("role_section_error")
-        and page.get("role_entries") == []
-        and len(page.get("entries", [])) == 3,
-        "malformed role_after: role_section_status=error with its message (instance section still "
-        f"read), not a clean empty role section ({page.get('role_section_status')!r})",
+        page.get("role_section_status") == "error" and page.get("role_section_error") and page.get("role_entries") == [] and len(page.get("entries", [])) == 3,
+        f"malformed role_after: role_section_status=error with its message (instance section still read), not a clean empty role section ({page.get('role_section_status')!r})",
     )
 
 
@@ -571,8 +562,7 @@ def _check_refusals(r: _Results, w: _World) -> None:
         route = _route_outcome(route_response)
         r.check(
             verb[0] == "refused" and route[0] == "refused" and verb == route,
-            f"{label}: the same refusal at both doors, never a page ({verb[:2]} vs {route[:2]}, "
-            f"http={route_response.status_code})",
+            f"{label}: the same refusal at both doors, never a page ({verb[:2]} vs {route[:2]}, http={route_response.status_code})",
         )
         r.check(route_response.status_code >= 400, f"{label}: the route status is an error status")
 
@@ -585,9 +575,7 @@ def _check_ambiguous_session(r: _Results) -> None:
     route_response = amb.inbox_route(agent_session_id="ases-A")
     route = _route_outcome(route_response)
     r.check(
-        verb[:2] == ("refused", "peer_session_ambiguous")
-        and route == verb
-        and route_response.status_code == 409,
+        verb[:2] == ("refused", "peer_session_ambiguous") and route == verb and route_response.status_code == 409,
         "duplicate session binding: the same peer_session_ambiguous refusal (409), not an empty page",
     )
 
@@ -640,11 +628,8 @@ def _check_include_covered_parity(r: _Results, w: _World) -> None:
     page = route[1] if route[0] == "ok" else {}
     plain = floored[1] if floored[0] == "ok" else {}
     r.check(
-        page.get("role_floor_applied") is False
-        and plain.get("role_floor_applied") is True
-        and len(page.get("role_entries", [])) > len(plain.get("role_entries", [])),
-        "include_covered reads past the covered mark through the route (the default read is floored: "
-        f"{len(plain.get('role_entries', []))} role rows vs {len(page.get('role_entries', []))})",
+        page.get("role_floor_applied") is False and plain.get("role_floor_applied") is True and len(page.get("role_entries", [])) > len(plain.get("role_entries", [])),
+        f"include_covered reads past the covered mark through the route (the default read is floored: {len(plain.get('role_entries', []))} role rows vs {len(page.get('role_entries', []))})",
     )
     bare: dict[str, object] = {"agent_session_id": "ases-A", "include_covered": True}
     verb = _verb_outcome(w.inbox_verb(**bare))
@@ -664,12 +649,14 @@ def _check_include_covered_cli(r: _Results, w: _World) -> None:
         payload = {}
     r.check(
         result.exit_code == 0 and payload.get("complete") is True and payload.get("role_count") == 3,
-        "inbox --observer --include-covered over the route reads every role row past the mark "
-        f"(role_count={payload.get('role_count')}, exit={result.exit_code})",
+        f"inbox --observer --include-covered over the route reads every role row past the mark (role_count={payload.get('role_count')}, exit={result.exit_code})",
     )
     with BridgeClient("http://test", transport=w.forwarding_transport()) as client:
         page = client.peer_inbox_for_session(
-            agent_session_id="ases-A", limit=5, observer=True, include_covered=True,
+            agent_session_id="ases-A",
+            limit=5,
+            observer=True,
+            include_covered=True,
         )
     r.check(page.get("role_floor_applied") is False, "BridgeClient.peer_inbox_for_session sends include_covered")
 
@@ -696,20 +683,17 @@ def scenario_route_policy(r: _Results) -> None:
     w = _inbox_world()
     unknown = "agc-does-not-exist"
     r.check(
-        w.holds_route(_ROLE, "agi-A", bridge=unknown).status_code == 404
-        and w.inbox_route(bridge=unknown, agent_session_id="ases-A").status_code == 404,
+        w.holds_route(_ROLE, "agi-A", bridge=unknown).status_code == 404 and w.inbox_route(bridge=unknown, agent_session_id="ases-A").status_code == 404,
         "an unknown bridge is refused 404 on both routes",
     )
     closed = w.manager.open(solet_name="", parent_pid=3).bridge_id
     w.manager.close(closed)
     r.check(
-        w.holds_route(_ROLE, "agi-A", bridge=closed).status_code == 404
-        and w.inbox_route(bridge=closed, agent_session_id="ases-A").status_code == 404,
+        w.holds_route(_ROLE, "agi-A", bridge=closed).status_code == 404 and w.inbox_route(bridge=closed, agent_session_id="ases-A").status_code == 404,
         "a closed bridge is refused 404 on both routes",
     )
     r.check(
-        w.holds_route(_ROLE, "agi-A").status_code == 200
-        and w.inbox_route(agent_session_id="ases-A").status_code == 200,
+        w.holds_route(_ROLE, "agi-A").status_code == 200 and w.inbox_route(agent_session_id="ases-A").status_code == 200,
         "a stdio bridge (client_id empty) is allowed, as on process/call",
     )
 
@@ -721,26 +705,22 @@ def scenario_route_policy(r: _Results) -> None:
 
     empty = oauth_bridge(())
     r.check(
-        w.holds_route(_ROLE, "agi-A", bridge=empty).status_code == 403
-        and w.inbox_route(bridge=empty, agent_session_id="ases-A").status_code == 403,
+        w.holds_route(_ROLE, "agi-A", bridge=empty).status_code == 403 and w.inbox_route(bridge=empty, agent_session_id="ases-A").status_code == 403,
         "an OAuth bridge with an empty allowlist is refused 403 on both routes (fail closed)",
     )
     only_holds = oauth_bridge((PEER_HOLDS_ROLE_PROCESS_KEY,))
     r.check(
-        w.holds_route(_ROLE, "agi-A", bridge=only_holds).status_code == 200
-        and w.inbox_route(bridge=only_holds, agent_session_id="ases-A").status_code == 403,
+        w.holds_route(_ROLE, "agi-A", bridge=only_holds).status_code == 200 and w.inbox_route(bridge=only_holds, agent_session_id="ases-A").status_code == 403,
         "an OAuth bridge is held to each route's OWN process key (holds_role yes, inbox no)",
     )
     only_inbox = oauth_bridge((PEER_INBOX_PROCESS_KEY,))
     r.check(
-        w.holds_route(_ROLE, "agi-A", bridge=only_inbox).status_code == 403
-        and w.inbox_route(bridge=only_inbox, agent_session_id="ases-A").status_code == 200,
+        w.holds_route(_ROLE, "agi-A", bridge=only_inbox).status_code == 403 and w.inbox_route(bridge=only_inbox, agent_session_id="ases-A").status_code == 200,
         "an OAuth bridge carrying only peer_inbox reads the inbox, not the role",
     )
     unrestricted = oauth_bridge(_UNRESTRICTED)
     r.check(
-        w.holds_route(_ROLE, "agi-A", bridge=unrestricted).status_code == 200
-        and w.inbox_route(bridge=unrestricted, agent_session_id="ases-A").status_code == 200,
+        w.holds_route(_ROLE, "agi-A", bridge=unrestricted).status_code == 200 and w.inbox_route(bridge=unrestricted, agent_session_id="ases-A").status_code == 200,
         "an operator-equivalent (unrestricted) OAuth bridge is allowed",
     )
 
@@ -780,11 +760,7 @@ def _check_holds_role_cli(r: _Results) -> None:
     data = _holds_role_envelope_data(held.output)
     envelope = json.loads(held.output) if held.exit_code == 0 else {}
     r.check(
-        held.exit_code == 0
-        and envelope.get("result", {}).get("success") is True
-        and data.get("holds") is True
-        and data.get("delivery_route_attached") is True
-        and data.get("session_label") == "Controller-A",
+        held.exit_code == 0 and envelope.get("result", {}).get("success") is True and data.get("holds") is True and data.get("delivery_route_attached") is True and data.get("session_label") == "Controller-A",
         f"holds-role prints the result.success/result.data envelope (exit={held.exit_code}, {held.output[:120]!r})",
     )
     gone = _invoke_cli(w, ["holds-role", "--name", _ROLE, "--instance-id", "agi-never"])
@@ -795,7 +771,8 @@ def _check_holds_role_cli(r: _Results) -> None:
     )
     # a refusal (state service unbound) must exit non-zero with NO envelope
     refused = _invoke_cli(
-        _World(state_service_bound=False), ["holds-role", "--name", _ROLE, "--instance-id", "agi-A"],
+        _World(state_service_bound=False),
+        ["holds-role", "--name", _ROLE, "--instance-id", "agi-A"],
     )
     r.check(
         refused.exit_code != 0 and '"success"' not in refused.output,
@@ -811,12 +788,8 @@ def _check_inbox_cli(r: _Results) -> None:
     except json.JSONDecodeError:
         payload = {}
     r.check(
-        complete.exit_code == 0
-        and payload.get("complete") is True
-        and payload.get("direct_count") == 3
-        and payload.get("role_count") == 3,
-        f"solet-bridge inbox drains both sections over the direct route (got {payload.get('direct_count')}/"
-        f"{payload.get('role_count')}, exit={complete.exit_code})",
+        complete.exit_code == 0 and payload.get("complete") is True and payload.get("direct_count") == 3 and payload.get("role_count") == 3,
+        f"solet-bridge inbox drains both sections over the direct route (got {payload.get('direct_count')}/{payload.get('role_count')}, exit={complete.exit_code})",
     )
     stranger = _invoke_cli(inbox_world, ["inbox", "--observer"], env={"AGENT_SESSION_ID": "ases-nobody"})
     r.check(
@@ -899,14 +872,25 @@ def scenario_stall(r: _Results) -> None:
         inbox.status_code == 200 and inbox_elapsed < _ANSWER_BUDGET_SECONDS,
         f"GET peer/inbox_for_session answers inside {_ANSWER_BUDGET_SECONDS}s while the queue is held ({inbox_elapsed:.3f}s)",
     )
+    caller = w2.manager.get(w2.caller_bridge)
+    assert caller is not None
+    caller.caller_agent_session_id = "ases-A"
+    report_started = time.monotonic()
+    report = w2.http.post(
+        f"{_PREFIX}/{w2.caller_bridge}/peer/send_by_name",
+        json={"name": _ROLE, "content": "COMMIT LANDED."},
+    )
+    r.check(
+        report.status_code == 200 and time.monotonic() - report_started < _ANSWER_BUDGET_SECONDS,
+        "attributed landing report answers inside 1s while the real serial queue is held",
+    )
     r.check(
         "queued_holds_role" not in finished,
         "a peer_holds_role queued behind the held action has NOT answered (control: the queue really is held)",
     )
     drain.join(timeout=_STALL_SECONDS + 5)
     r.check(
-        "queued_holds_role" in finished
-        and finished["queued_holds_role"] - started >= _STALL_SECONDS - 0.05,
+        "queued_holds_role" in finished and finished["queued_holds_role"] - started >= _STALL_SECONDS - 0.05,
         "control: the queued verb answered only after the held action released the loop",
     )
 
@@ -968,11 +952,13 @@ def _mutants() -> list[tuple[str, contextlib.AbstractContextManager[Any], Callab
             "return an empty page instead of raising (server side, both doors)",
             _patch_all(
                 patch.object(
-                    http_routes_module, "read_peer_inbox_for_session",
+                    http_routes_module,
+                    "read_peer_inbox_for_session",
                     _empty_page_instead_of_raising(reads_module.read_peer_inbox_for_session),
                 ),
                 patch.object(
-                    plugin_module, "read_peer_inbox_for_session",
+                    plugin_module,
+                    "read_peer_inbox_for_session",
                     _empty_page_instead_of_raising(reads_module.read_peer_inbox_for_session),
                 ),
             ),
@@ -981,7 +967,8 @@ def _mutants() -> list[tuple[str, contextlib.AbstractContextManager[Any], Callab
         (
             "return an empty page instead of raising (client side)",
             patch.object(
-                BridgeClient, "peer_inbox_for_session",
+                BridgeClient,
+                "peer_inbox_for_session",
                 _client_swallows_refusal(BridgeClient.peer_inbox_for_session),
             ),
             scenario_client_and_cli,
@@ -989,7 +976,8 @@ def _mutants() -> list[tuple[str, contextlib.AbstractContextManager[Any], Callab
         (
             "the route drops include_covered (the CLI's floored-page guard must fail loudly)",
             patch.object(
-                http_routes_module, "read_peer_inbox_for_session",
+                http_routes_module,
+                "read_peer_inbox_for_session",
                 _route_drops_include_covered(reads_module.read_peer_inbox_for_session),
             ),
             scenario_include_covered,
@@ -997,7 +985,8 @@ def _mutants() -> list[tuple[str, contextlib.AbstractContextManager[Any], Callab
         (
             "skip bridge resolution",
             patch.object(
-                http_routes_module, "_refuse_unresolvable_or_disallowed_bridge",
+                http_routes_module,
+                "_refuse_unresolvable_or_disallowed_bridge",
                 lambda *_a, **_k: None,
             ),
             scenario_route_policy,
@@ -1018,7 +1007,8 @@ def _check_guard_catches_dropped_field(r: _Results) -> None:
     w = _covered_world()
     args = ["inbox", "--observer", "--include-covered", "--since", _SINCE, "--limit", "2"]
     with patch.object(
-        http_routes_module, "read_peer_inbox_for_session",
+        http_routes_module,
+        "read_peer_inbox_for_session",
         _route_drops_include_covered(reads_module.read_peer_inbox_for_session),
     ):
         result = _invoke_cli(w, args, env={"AGENT_SESSION_ID": "ases-A"})
@@ -1027,13 +1017,8 @@ def _check_guard_catches_dropped_field(r: _Results) -> None:
     except json.JSONDecodeError:
         payload = {}
     r.check(
-        result.exit_code != 0
-        and payload.get("complete") is False
-        and payload.get("role_section_status") == "error"
-        and "needs a deploy" in str(payload.get("role_section_error")),
-        "route drops include_covered: the CLI's floored-page guard fails loudly "
-        f"(exit={result.exit_code}, complete={payload.get('complete')}, "
-        f"role_section_status={payload.get('role_section_status')!r})",
+        result.exit_code != 0 and payload.get("complete") is False and payload.get("role_section_status") == "error" and "needs a deploy" in str(payload.get("role_section_error")),
+        f"route drops include_covered: the CLI's floored-page guard fails loudly (exit={result.exit_code}, complete={payload.get('complete')}, role_section_status={payload.get('role_section_status')!r})",
     )
 
 
@@ -1045,9 +1030,112 @@ def scenario_mutants_are_killed(r: _Results) -> None:
             scenario(probe)
         r.check(
             probe.failed,
-            f"MUTANT KILLED: {name} (the checks failed: {len(probe.failed)}, e.g. "
-            f"{probe.failed[0] if probe.failed else 'NONE — it survived'})",
+            f"MUTANT KILLED: {name} (the checks failed: {len(probe.failed)}, e.g. {probe.failed[0] if probe.failed else 'NONE — it survived'})",
         )
+
+
+def scenario_attributed_role_reports(r: _Results) -> None:
+    """A one-shot caller resolves its own sender from the registry on every send."""
+    for role, agent_id in (
+        ("Git-Controller", "claude_code"),
+        ("Project-Solet-Git-Controller", "codex"),
+    ):
+        w = _World()
+        receiving = w.manager.open(solet_name="", parent_pid=2).bridge_id
+        w.registry.register(
+            BridgeBinding(
+                bridge_id=receiving,
+                agent_id=agent_id,
+                agent_instance_id="agi-controller",
+                agent_session_id="ases-controller",
+                session_label=role,
+                parent_pid=2,
+            )
+        )
+        w.claim("agi-controller", "ases-controller", role, name=role)
+        w.register("agi-main", "ases-main", "Main")
+        w.claim("agi-main", "ases-main", "Main", name="Main")
+        caller = w.manager.get(w.caller_bridge)
+        assert caller is not None
+        caller.caller_agent_session_id = "ases-controller"
+        response = w.http.post(
+            f"{_PREFIX}/{w.caller_bridge}/peer/send_by_name",
+            json={"name": "Main", "content": "COMMIT LANDED."},
+        )
+        r.check(response.status_code == 200, f"{role}: attributed one-shot direct report accepted")
+        binding = w.registry.resolve_by_agent_session_id("ases-controller")
+        r.check(
+            binding is not None and binding.bridge_id == receiving,
+            f"{role}: receiving binding preserved",
+        )
+        if response.status_code != 200:
+            continue
+        inbox = w.inbox_route(agent_session_id="ases-main", limit=20).json()
+        r.check(
+            "agi-controller" in str(inbox) and agent_id in str(inbox),
+            f"{role}: durable envelope carries resolved caller identity",
+        )
+        r.check(response.json().get("message_id") is not None, f"{role}: direct receipt retained")
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.txt"
+            report.write_text("COMMIT LANDED.", encoding="utf-8")
+            result = _invoke_cli(
+                w,
+                ["send-by-name", "Main", "--content-file", str(report)],
+                env={"AGENT_SESSION_ID": "ases-controller"},
+            )
+        r.check(
+            result.exit_code == 0 and bool(json.loads(result.output).get("message_id")),
+            f"{role}: real CLI to real direct route succeeds without a bridge-id input",
+        )
+        w.registry.unregister(receiving)
+        replacement = w.register("agi-controller", "ases-controller", role)
+        response = w.http.post(
+            f"{_PREFIX}/{w.caller_bridge}/peer/send_by_name",
+            json={"name": "Main", "content": "AFTER RECONNECT"},
+        )
+        binding = w.registry.resolve_by_agent_session_id("ases-controller")
+        r.check(
+            response.status_code == 200 and binding is not None and binding.bridge_id == replacement,
+            f"{role}: sender resolves again after receiving bridge replacement",
+        )
+
+
+def scenario_report_attribution_refusals(r: _Results) -> None:
+    for fault in ("missing", "unknown", "ambiguous", "oauth"):
+        w = _World()
+        caller = w.manager.get(w.caller_bridge)
+        assert caller is not None
+        caller.caller_agent_session_id = "" if fault == "missing" else "ases-controller"
+        if fault in {"ambiguous", "oauth"}:
+            w.register("agi-controller", "ases-controller", "Controller")
+        if fault == "ambiguous":
+            w.register("agi-other", "ases-controller", "Other")
+        if fault == "oauth":
+            caller.client_id = "oauth-client"
+        response = w.http.post(
+            f"{_PREFIX}/{w.caller_bridge}/peer/send_by_name",
+            json={"name": "Main", "content": "REPORT"},
+        )
+        r.check(
+            response.status_code >= 400 and "Remedy:" in response.json().get("message", ""),
+            f"{fault}: attribution refuses with actionable remedy",
+        )
+    w = _World()
+    w.register("agi-registered", "ases-registered", "Registered", bridge_id=w.caller_bridge)
+    caller = w.manager.get(w.caller_bridge)
+    assert caller is not None
+    caller.caller_agent_session_id = "unknown-must-not-override"
+    w.register("agi-main", "ases-main", "Main")
+    w.claim("agi-main", "ases-main", "Main", name="Main")
+    response = w.http.post(
+        f"{_PREFIX}/{w.caller_bridge}/peer/send_by_name",
+        json={"name": "Main", "content": "REGISTERED REPORT"},
+    )
+    r.check(
+        response.status_code == 200 and "agi-registered" in str(w.inbox_route(agent_session_id="ases-main").json()),
+        "registered sender takes precedence over untrusted attribution",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1066,6 +1154,8 @@ def main() -> int:
         ("client and CLI", scenario_client_and_cli),
         ("stall (real serial poller drain)", scenario_stall),
         ("mutants", scenario_mutants_are_killed),
+        ("attributed role reports", scenario_attributed_role_reports),
+        ("report attribution refusals", scenario_report_attribution_refusals),
     ):
         print(f"\n[{title}]")
         scenario(r)

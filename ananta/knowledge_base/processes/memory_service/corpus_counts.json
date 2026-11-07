@@ -1,0 +1,19 @@
+{
+  "process_key": "service_interface::memory_service::corpus_counts",
+  "display_name": "Memory Corpus Counts",
+  "description": "Return a bounded scalar count of nondeleted ACT-R memories, including archived memories and knowledge-base chunks. The count is not a content fingerprint and database COUNT work is not constant-time.",
+  "embedding_description": "",
+  "parameters": {},
+  "result_processor_customizations": {
+    "action_label": "Memory Corpus Counts",
+    "result_type": "memory_corpus_counts",
+    "result_description": "Scalar corpus count, scope, UTC observation interval and completeness",
+    "presentation_guidance": "A missing count with complete=false is unavailable data, never zero.",
+    "output_action_guidance": "Use count only when complete is true."
+  },
+  "error_processor_customizations": {
+    "action_context": "Counting the stored ACT-R memory corpus",
+    "error_interpretation": "The bounded scalar count was unavailable or malformed.",
+    "recovery_guidance": "Treat the count as unavailable; do not interpret it as zero."
+  }
+}

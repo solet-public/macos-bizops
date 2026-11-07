@@ -24,6 +24,7 @@ from .local_state import ObservedLocalState, observe_local_state
 from .models import InstanceInventoryRecordV2
 from .paths import ManagerPaths, update_candidate_cache
 from .update_candidate import UpdateCandidate
+from .update_hook_pin_carry import PinCarry, plan_pin_carry
 from .update_hydration_carry import UNCARRIABLE_REASON, CarryPlan, plan_hydration_carry
 from .update_topology import (
     CollisionRow,
@@ -55,6 +56,7 @@ class Reduction:
     installer_pins: tuple[str, ...] = ()
     #: iss_f89ab692: the overlapped files whose only local change is the create's hydration block.
     hydration: CarryPlan = CarryPlan()
+    hook_pins: tuple[PinCarry, ...] = ()
 
 
 def reduce_update(
@@ -86,17 +88,18 @@ def reduce_update(
     blocked: dict[str, list[str]] = {}
     pins: tuple[str, ...] = ()
     hydration = CarryPlan()
+    hook_pins: tuple[PinCarry, ...] = ()
     if "already_current" not in reasons or source_mode == "verify":
         cache = update_candidate_cache(paths, candidate.descriptor_digest).repository
         # A baseline the channel repository has never seen is divergent history, not an error (Step 6, n5).
         # The target and the bare candidate cache are pinned differently (iss_836499b3 R2-1), hence two readers.
         if _object_exists(cache_run_git, cache, release.commit) and is_ancestor(cache_run_git, cache, release.commit, candidate.fields.commit):
-            collisions, local_state, blocked, pins, hydration = _local_state_reduction(paths, git, cache_git, cache, record, candidate, baseline, entries)
+            collisions, local_state, blocked, pins, hydration, hook_pins = _local_state_reduction(paths, git, cache_git, cache, record, candidate, baseline, entries)
         else:
             reasons.add("history_diverged")
     reasons.update(row.reason for row in collisions)
     reasons.update(blocked)
-    return Reduction(tuple(sorted(reasons)), collisions, local_state, blocked, pins, hydration)
+    return Reduction(tuple(sorted(reasons)), collisions, local_state, blocked, pins, hydration, hook_pins)
 
 
 def _local_state_reduction(
@@ -108,7 +111,7 @@ def _local_state_reduction(
     candidate: UpdateCandidate,
     baseline: ExistingInstallInspectionResult,
     entries: tuple[tuple[str, str, str], ...],
-) -> tuple[tuple[CollisionRow, ...], ObservedLocalState, dict[str, list[str]], tuple[str, ...], CarryPlan]:
+) -> tuple[tuple[CollisionRow, ...], ObservedLocalState, dict[str, list[str]], tuple[str, ...], CarryPlan, tuple[PinCarry, ...]]:
     """Section 6.3: the exact transition set, the landed collision proof, the Step 7 reasons, the commitment, the installer pins, and the hydration carry."""
     target = Path(record.target.canonical_path)
     transition = parse_transition_paths(
@@ -136,7 +139,8 @@ def _local_state_reduction(
         read_candidate=lambda spec: cache_git(cache, ("cat-file", "blob", spec), "candidate agent instructions are unreadable"),
         candidate_commit=candidate.fields.commit,
     )
-    reasons = local_state_reasons(baseline.facts, transition, roots, case_insensitive=case_insensitive, installer_pins=pins, hydration_blocks=hydration.paths)
+    hook_pins = plan_pin_carry(target, pins, transition, lambda spec: cache_git(cache, ("cat-file", "blob", spec), "candidate hook manifest is unreadable"), candidate.fields.commit)
+    reasons = local_state_reasons(baseline.facts, transition, roots, case_insensitive=case_insensitive, installer_pins=pins, hydration_blocks=hydration.paths | frozenset(item.path for item in hook_pins))
     blocked = {reason: list(reason_paths) for reason, reason_paths in reasons}
     if hydration.uncarriable:
         blocked[UNCARRIABLE_REASON] = list(hydration.uncarriable)
@@ -144,7 +148,7 @@ def _local_state_reduction(
         fact_paths = _fact_reason_paths(baseline, reason)
         if fact_paths:
             blocked[reason] = fact_paths
-    return collisions, observe_local_state(target, baseline.facts), blocked, pins, hydration
+    return collisions, observe_local_state(target, baseline.facts), blocked, pins, hydration, hook_pins
 
 
 def _fact_reason_paths(baseline: ExistingInstallInspectionResult, reason: str) -> list[str]:

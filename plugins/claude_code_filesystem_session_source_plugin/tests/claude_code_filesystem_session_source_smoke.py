@@ -51,9 +51,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(
     0,
-    str(
-        REPO_ROOT / "plugins" / "claude_code_filesystem_session_source_plugin" / "src"
-    ),
+    str(REPO_ROOT / "plugins" / "claude_code_filesystem_session_source_plugin" / "src"),
 )
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "tests" / "llm" / "session_ledger"))
 
@@ -262,12 +260,10 @@ def test_parser_assistant_text_and_tool_uses_flatten() -> None:
     tool_calls = [e for e in events if e.payload.get("kind") == "tool_call"]
     _check(
         {tc.vendor_event_id for tc in tool_calls} == {_TOOL_USE_ID_A, _TOOL_USE_ID_B},
-        "TOOL_CALL vendor_event_id = tool_use.id for both blocks "
-        "(load-bearing for projection)",
+        "TOOL_CALL vendor_event_id = tool_use.id for both blocks (load-bearing for projection)",
     )
     _check(
-        all(tc.vendor_parent_event_id == _ASSISTANT_TEXT_AND_TOOL_USE_UUID
-            for tc in tool_calls),
+        all(tc.vendor_parent_event_id == _ASSISTANT_TEXT_AND_TOOL_USE_UUID for tc in tool_calls),
         "TOOL_CALL vendor_parent_event_id = line.uuid",
     )
 
@@ -283,8 +279,7 @@ def test_parser_tool_result_event() -> None:
     )
     _check(
         e.vendor_parent_event_id == _TOOL_USE_ID_A,
-        "TOOL_RESULT vendor_parent_event_id = content.tool_use_id "
-        "(load-bearing for resolution)",
+        "TOOL_RESULT vendor_parent_event_id = content.tool_use_id (load-bearing for resolution)",
     )
     _check(e.payload.get("text") == "file body", "tool result body preserved")
 
@@ -314,26 +309,39 @@ def test_parser_skips_thinking_blocks_in_isolation() -> None:
     _check(parse_line(json.dumps(line)) == [], "thinking-only line → 0 events")
 
 
-def test_parser_raises_on_unknown_block_kind() -> None:
+def test_parser_advises_on_unknown_block_kind() -> None:
+    """Exercise the actual filesystem poll report, retaining strict known blocks."""
+    import importer_smoke as runtime
+    from ananta.llm.session_ledger.types import UnknownLineAdvisory
+
     line: dict[str, Any] = {
         "type": "assistant",
         "message": {
             "role": "assistant",
-            "content": [{"type": "totally_made_up", "x": 1}],
+            "content": [
+                {"type": "text", "text": "before"},
+                {"type": "synthetic-future-block-2099", "private": "PRIVATE_PAYLOAD"},
+                {"type": "text", "text": "after"},
+            ],
         },
         "uuid": "a" + "8" * 35,
         "timestamp": "2026-05-30T12:00:00.000Z",
         "sessionId": _SID,
     }
+    with tempfile.TemporaryDirectory(prefix="unknown_block_poll_") as td:
+        root = Path(td)
+        _write_jsonl(root / "synthetic" / (_SID + ".jsonl"), [_line_user_text(), line, _line_assistant_text_and_two_tool_uses()])
+        importer, _, _ = runtime.runtime_importer(_make_plugin(), str(root))
+        report = importer.poll_once()
+        _check(report.batches_failed == 0 and report.events_persisted == 5, "unknown block: real poll preserves prefix and suffix with zero errors")
+        _check(report.unknown_line_advisories == (UnknownLineAdvisory("runtime-source", _SID, "synthetic-future-block-2099", 1),), "unknown block: real poll report retains exact kind/session count")
+    line["message"]["content"] = [{"type": "text", "text": 123}]
     try:
         parse_line(json.dumps(line))
     except ValueError as exc:
-        _check(
-            "totally_made_up" in str(exc),
-            "unknown content-block type raises ValueError (no defensive fallback)",
-        )
-        return
-    _check(False, "expected ValueError on unknown content-block type")
+        _check("text block" in str(exc), "malformed known block remains strict")
+    else:
+        _check(False, "malformed known block must raise")
 
 
 def test_parser_raises_on_invalid_json() -> None:
@@ -368,7 +376,9 @@ def test_normalize_tool_call_carries_tool_name() -> None:
     _check(n.event_type is EventType.TOOL_CALL, "TOOL_CALL event")
     _check(n.content_text is None, "TOOL_CALL has no content_text (repo validator)")
     _check(
-        isinstance(n.content_json, dict) and n.content_json.get("tool_name") in {
+        isinstance(n.content_json, dict)
+        and n.content_json.get("tool_name")
+        in {
             "Read",
             "Bash",
         },
@@ -429,8 +439,7 @@ def test_discover_and_read_events_in_tmpdir() -> None:
         # event_read_cursor must carry the per-file byte offset
         last_cursor = plugin.event_read_cursor(str(root), ref, raw_events[-1])
         _check(
-            isinstance(last_cursor.get("byte_offset"), int)
-            and last_cursor["byte_offset"] > 0,
+            isinstance(last_cursor.get("byte_offset"), int) and last_cursor["byte_offset"] > 0,
             "event_read_cursor returns positive byte_offset after a full read",
         )
 
@@ -446,11 +455,7 @@ def test_discover_high_water_skips_unchanged_files() -> None:
         os.utime(jsonl, (past, past))
         plugin = _make_plugin()
         future_iso = datetime(2026, 5, 30, 13, 0, tzinfo=UTC).isoformat()
-        refs = list(
-            plugin.discover_sessions(str(root),
-                cursor_payload={"mtime_high_water_iso": future_iso}
-            )
-        )
+        refs = list(plugin.discover_sessions(str(root), cursor_payload={"mtime_high_water_iso": future_iso}))
         _check(
             refs == [],
             "high-water mtime in the future suppresses the unchanged fixture",
@@ -474,9 +479,7 @@ def test_read_events_resumes_from_offset() -> None:
         all_events = list(plugin.read_events(str(root), ref, cursor_payload=None))
         final_offset = plugin.event_read_cursor(str(root), ref, all_events[-1])["byte_offset"]
         # Second pass: resume from final offset — should yield zero new events.
-        replay = list(
-            plugin.read_events(str(root), ref, cursor_payload={"byte_offset": final_offset})
-        )
+        replay = list(plugin.read_events(str(root), ref, cursor_payload={"byte_offset": final_offset}))
         _check(
             replay == [],
             "resuming at the final offset yields zero new events (idempotent re-poll)",
@@ -519,12 +522,14 @@ class _QualificationLedger:
     def list_sources(self) -> dict[str, object]:
         rows: list[object] = []
         if self.registered:
-            rows.append({
-                "source_kind": "claude_code_local",
-                "source_id": "src-claude-fixture",
-                "enabled": True,
-                "root_uri": self.root_uri,
-            })
+            rows.append(
+                {
+                    "source_kind": "claude_code_local",
+                    "source_id": "src-claude-fixture",
+                    "enabled": True,
+                    "root_uri": self.root_uri,
+                }
+            )
         return {"sources": rows}
 
     def poll_source(self, source_id: str) -> dict[str, int]:
@@ -556,7 +561,8 @@ def test_qualify_is_source_local_and_content_blind() -> None:
         _check(result["action_status"] == "completed", "qualify completes for fixture source")
         _check(ledger.polled_source_id == "src-claude-fixture", "qualify polls its registered source")
         _check(
-            result["data"] == {
+            result["data"]
+            == {
                 "source_registered": True,
                 "source_kind": "claude_code_local",
                 "backfill_count": 4,
@@ -568,16 +574,15 @@ def test_qualify_is_source_local_and_content_blind() -> None:
 
 def test_qualify_allows_absent_registered_root() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        ledger = _QualificationLedger(
-            root_uri=str(Path(tmp) / "never-created"), events_persisted=0
-        )
+        ledger = _QualificationLedger(root_uri=str(Path(tmp) / "never-created"), events_persisted=0)
         plugin = ClaudeCodeFilesystemSessionSourcePlugin()
         plugin.orchestrator_ref = _QualificationOrchestrator(ledger)  # type: ignore[assignment]
         result = plugin.qualify({}, {})
     _check(result["action_status"] == "completed", "qualify accepts an absent registered root")
     _check(ledger.polled_source_id is None, "absent root bypasses the impossible backfill")
     _check(
-        result["data"] == {
+        result["data"]
+        == {
             "source_registered": True,
             "source_kind": "claude_code_local",
             "backfill_count": 0,
@@ -612,7 +617,544 @@ def test_qualify_refuses_unregistered_source() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _poll_case(root: Path, kind: str, plugin_name: str, fixture_name: str) -> Any:
+    """Bind a real adapter fixture to a synthetic root and typed runtime.
+
+    All source observations and durable cursors stay in this case."""
+    from types import SimpleNamespace
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta" / "tests" / "llm" / "session_ledger"))
+    import importer_smoke as runtime
+    from ananta.llm.session_ledger import types
+    from ananta.llm.session_ledger.poll_budget import COMPLETED_VERSION_KEY, DiscoveryBudgetYield
+
+    fixture = runtime._fixture_module(plugin_name, fixture_name)
+    return SimpleNamespace(root=root, kind=kind, fixture=fixture, runtime=runtime, types=types, completed_key=COMPLETED_VERSION_KEY, yield_type=DiscoveryBudgetYield, source_key=("runtime-source", types.CursorScope.DISCOVERY, None))
+
+
+def _poll_fresh(case: Any) -> Any:
+    """Recreate the actual adapter using its real ConfigProvider.
+
+    Only the configured glob or filename is supplied; discovery is unchanged."""
+    configs = {"codex": {}, "claude": {"glob": "*.jsonl"}, "tasks": {"glob": "*.json"}, "ambient": {"filename": "ambient-suggestions.json"}}
+    plugin = case.runtime._legacy_plugin(case.kind, case.fixture, case.root)
+    plugin.initialize(configs[case.kind])
+    return plugin
+
+
+def _poll_seed(case: Any, distribution: str) -> None:
+    """Create 53 valid sessions with tied or deliberately unordered mtimes.
+
+    The future-dated legacy cursor must reopen rather than exclude them."""
+    import os
+
+    case.paths = [case.runtime._legacy_path(case.kind, case.fixture, case.root, index) for index in range(53)]
+    for index, path in enumerate(case.paths):
+        stamp = 1_700_000_000 + (index % 3 if distribution == "nonmonotonic" else 0)
+        os.utime(path, ns=(stamp * 1_000_000_000, stamp * 1_000_000_000))
+    plugin = _poll_fresh(case)
+    assert plugin.supports_whole_session_poll, "real filesystem adapter must activate complete polling hooks"
+    case.expected = []
+    for ref in plugin.discover_sessions(str(case.root), None):
+        case.expected.extend(plugin.normalize(raw) for raw in plugin.read_events(str(case.root), ref, None))
+    case.order = [item.external_id for item in sorted(plugin._poll_candidates(str(case.root)), key=lambda item: item.pair, reverse=True)]
+    _, case.repo, case.state = case.runtime.runtime_importer(plugin, str(case.root))
+    case.repo.cursors[case.source_key] = {"mtime_high_water_iso": "2099-01-01T00:00:00+00:00", "file_mtime_iso": "2099-01-01T00:00:00+00:00", "highest_filename_stem": "zzzz"}
+    case.observed, case.visited = [], []
+
+
+def _poll_cut_visits(case: Any) -> None:
+    """Recreate plugin and importer after every one-session deadline cut.
+
+    Normalization advances only admission time; the admitted session finishes."""
+    from ananta.llm.session_ledger.types import NormalizedSessionEvent, RawSessionEvent
+
+    for _ in range(55):
+        plugin = _poll_fresh(case)
+        clock = [0.0]
+        normalize = plugin.normalize
+
+        def timed(raw: RawSessionEvent, normalize_current: Any = normalize, clock_current: list[float] = clock) -> NormalizedSessionEvent:
+            normalized = normalize_current(raw)
+            case.observed.append(normalized)
+            if not case.visited or case.visited[-1] != raw.external_session_id:
+                case.visited.append(raw.external_session_id)
+            clock_current[0] = 61.0
+            return normalized
+
+        plugin.normalize = timed
+        importer, _, _ = case.runtime.runtime_importer(plugin, str(case.root), repository=case.repo, clock=lambda clock=clock: clock[0])
+        report = importer.poll_once()
+        assert report.batches_failed == 0, "valid actual filesystem fixture must poll successfully"
+        assert report.sessions_seen <= 1, "admission stops only after one complete actual session"
+        cursor = case.repo.cursors[case.source_key]
+        if report.sessions_seen:
+            assert cursor["state"] == "backfilling", "deadline is pending, never EOF/caught_up"
+        if cursor["state"] == "caught_up":
+            return
+    raise AssertionError("pair-resume must reach EOF and reset, not strand oldest anchor")
+
+
+def _poll_assert_coverage(case: Any) -> None:
+    """Compare ordered surviving paths and every successful EOF marker.
+
+    This distinguishes a completed sweep from an accidentally exhausted suffix."""
+    assert case.visited == case.order, "equal/nonmonotonic pair restart visits every surviving path in exact newest order"
+    assert case.repo.cursors[case.source_key]["after"] is None, "actual EOF clears the after key"
+    completed = [key for key, value in case.repo.cursors.items() if key[1] is case.types.CursorScope.EVENT_READ and case.completed_key in value]
+    assert len(completed) == 53, "each whole successful version has one completed cursor"
+
+
+def _poll_assert_events(case: Any) -> None:
+    """Compare all normalized fields and existing vendor/derived identities.
+
+    The expected stream is an uninterrupted read of the identical real inputs."""
+    from collections import Counter
+
+    from ananta.llm.session_ledger.importer import _event_external_id
+
+    assert Counter(map(repr, case.observed)) == Counter(map(repr, case.expected)), "whole-session restart preserves exact vendor events, usage and model data"
+    rows = [row.record for row in case.state.upserts if row.table == "event"]
+    assert len(rows) == len(case.expected), "restart preserves exact event counts"
+    # Derivation uses the actual persisted session ID and unchanged whole-walk
+    # occurrence order, including sources without vendor-supplied IDs.
+    ordinals = {}
+    for row, normalized in zip(rows, case.observed, strict=True):
+        derived = _event_external_id(normalized=normalized, session_id=row["session_id"], ordinals=ordinals)
+        assert row["external_id"] == derived, "derived/vendor external IDs remain unchanged"
+
+
+def _poll_prefix(case: Any) -> None:
+    """Expire during an unchanged prefix that yields no session references.
+
+    Its examined metadata must be acknowledged before resuming below the pair."""
+    reads = [0]
+    progress = case.types.PollDiscoveryProgress()
+
+    def read_cursor(key: str) -> dict[str, object] | None:
+        reads[0] += 1
+        return case.repo.read_cursor(source_id="runtime-source", scope=case.types.CursorScope.EVENT_READ, scope_key=key)
+
+    fresh = _poll_fresh(case)
+    try:
+        list(fresh.discover_sessions_for_poll(str(case.root), None, read_event_cursor=read_cursor, can_admit_next=lambda: reads[0] < 5, progress=progress))
+    except case.yield_type:
+        pass
+    else:
+        raise AssertionError("completed-prefix deadline must yield, not claim EOF")
+    assert reads[0] == 5 and progress.last_examined is not None, "metadata prefix advances before budget yield"
+    partial = fresh.completed_discovery_cursor(str(case.root), None, exhausted=False, pending=True, progress=progress)
+    assert partial["state"] == "backfilling" and partial["after"] is not None, "budget stop preserves pending pair rather than EOF"
+    assert not list(fresh.discover_sessions_for_poll(str(case.root), partial, read_event_cursor=read_cursor, can_admit_next=lambda: True, progress=case.types.PollDiscoveryProgress()))
+    assert reads[0] == 53, "restart resumes strictly below the metadata prefix including path ties"
+
+
+def _poll_append_old(case: Any) -> None:
+    """Add a genuine event to an old version without changing parser rules.
+
+    Snapshot sources replay their new population using existing stable IDs."""
+    old = case.paths[0]
+    if case.kind == "codex":
+        line = case.fixture._basic_rollout_lines()[1]
+        line["payload"]["content"][0]["text"] = "second-sweep"
+        old.write_text(old.read_text() + json.dumps(line) + "\n")
+    elif case.kind == "claude":
+        line = case.fixture._line_user_text()
+        line["uuid"] = "second-sweep"
+        line["sessionId"] = old.stem
+        old.write_text(old.read_text() + json.dumps(line) + "\n")
+    elif case.kind == "tasks":
+        case.fixture._write_task(old.with_name("0.json"), "second-sweep")
+    else:
+        obj = json.loads(old.read_text())
+        obj["suggestions"].append({**obj["suggestions"][0], "id": "second-sweep"})
+        old.write_text(json.dumps(obj))
+
+
+def _poll_second_sweep(case: Any) -> None:
+    """Observe old appended content and an inserted non-head session.
+
+    A previous caught_up result is not permission to stop enumeration."""
+    import os
+
+    _poll_append_old(case)
+    os.utime(case.paths[0], ns=(1_600_000_000_000_000_000, 1_600_000_000_000_000_000))
+    case.added = case.runtime._legacy_path(case.kind, case.fixture, case.root, 99)
+    os.utime(case.added, ns=(1_600_000_001_000_000_000, 1_600_000_001_000_000_000))
+    case.importer, _, _ = case.runtime.runtime_importer(_poll_fresh(case), str(case.root), repository=case.repo)
+    second = case.importer.poll_once()
+    assert second.sessions_seen == 2, "second full sweep sees old append and new non-head file"
+    assert any("second-sweep" in str(row.record) for row in case.state.upserts if row.table == "event"), "second sweep imports actual old-append event, not only metadata"
+    assert case.repo.cursors[case.source_key] == {"version": 1, "state": "caught_up", "after": None}
+
+
+def _poll_fail_reset(case: Any) -> None:
+    """Inject cursor-write failure, retry it, then model confirmed reset.
+
+    The previous durable version survives failure; reset reopens all sessions."""
+    previous = dict(case.repo.cursors)
+    case.added.write_bytes(case.added.read_bytes() + (b"\n" if case.kind in ("codex", "claude") else b" "))
+    case.repo.fail_cursor = True
+    case.importer.poll_once()
+    assert case.repo.cursors == previous, "failed event/source writes preserve prior durable versions"
+    case.repo.fail_cursor = False
+    case.importer.poll_once()
+    assert case.repo.cursors != previous, "retry corrects the changed completed version"
+    case.repo.cursors.clear()
+    replay = case.importer.poll_once()
+    assert replay.sessions_seen == 54, "confirmed cursor reset reopens the full population"
+
+
+def _poll_churn(case: Any) -> None:
+    """Replace a visited inode, delete unseen content and insert a new head.
+
+    Comparison boundaries survive deletion; the next reset includes changes."""
+    import os
+
+    paths = [case.runtime._legacy_path(case.kind, case.fixture, case.root, index) for index in range(4)]
+    for path in paths:
+        os.utime(path, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    plugin = _poll_fresh(case)
+    importer, repo, _ = case.runtime.runtime_importer(plugin, str(case.root), clock=case.runtime.expire_plugin_clock(plugin))
+    importer.poll_once()
+    cursor = dict(repo.cursors[case.source_key])
+    assert cursor["state"] == "backfilling" and cursor["after"] is not None, "cut retains a tie-safe comparison boundary"
+    replacement = paths[3].with_name(paths[3].name + ".replacement")
+    replacement.write_bytes(paths[3].read_bytes())
+    replacement.replace(paths[3])
+    paths[0].unlink()
+    added = case.runtime._legacy_path(case.kind, case.fixture, case.root, 99)
+    os.utime(added, ns=(1_800_000_000_000_000_000, 1_800_000_000_000_000_000))
+    for _ in range(2):
+        plugin = _poll_fresh(case)
+        importer, _, _ = case.runtime.runtime_importer(plugin, str(case.root), repository=repo)
+        importer.poll_once()
+    for item in plugin._poll_candidates(str(case.root)):
+        saved = repo.read_cursor(source_id="runtime-source", scope=case.types.CursorScope.EVENT_READ, scope_key=item.external_id)
+        assert saved is not None and saved.get(case.completed_key) == item.version, "next reset sweep includes surviving replacement/new versions above saved key"
+    assert repo.cursors[case.source_key]["after"] is None
+
+
+def _poll_has_marker(case: Any) -> bool:
+    """Read successful version publication from the existing event cursors."""
+    return any(case.completed_key in value for key, value in case.repo.cursors.items() if key[1] is case.types.CursorScope.EVENT_READ)
+
+
+def _poll_partial(case: Any) -> None:
+    """Finish a trailing partial input after a fresh importer restart.
+
+    Parser return alone cannot certify a physically incomplete version."""
+    path = case.runtime._legacy_path(case.kind, case.fixture, case.root, 0)
+    complete = path.read_bytes()
+    path.write_bytes(complete[:-2])
+    importer, case.repo, _ = case.runtime.runtime_importer(_poll_fresh(case), str(case.root))
+    importer.poll_once()
+    assert not _poll_has_marker(case), "partial physical record must never receive a completed fingerprint"
+    assert case.repo.cursors[case.source_key]["state"] == "backfilling", "incomplete version keeps regular sweep pending"
+    path.write_bytes(complete)
+    importer, _, _ = case.runtime.runtime_importer(_poll_fresh(case), str(case.root), repository=case.repo)
+    importer.poll_once()
+    assert _poll_has_marker(case), "later-completed record reopens and reaches successful EOF"
+
+
+def test_resumable_filesystem_poll() -> None:
+    """Real metadata/normalizer/restart coverage; no discovery substitution."""
+    for distribution in ("equal", "nonmonotonic"):
+        with tempfile.TemporaryDirectory(prefix="resumable_claude_") as scratch:
+            root = Path(scratch) / "sessions"
+            root.mkdir()
+            case = _poll_case(root, "claude", "claude_code_filesystem_session_source_plugin", "claude_code_filesystem_session_source_smoke.py")
+            _poll_seed(case, distribution)
+            _poll_cut_visits(case)
+            _poll_assert_coverage(case)
+            _poll_assert_events(case)
+            _poll_prefix(case)
+            _poll_second_sweep(case)
+            _poll_fail_reset(case)
+    for scenario in ("churn", "partial", "empty"):
+        with tempfile.TemporaryDirectory(prefix=scenario + "_claude_") as scratch:
+            root = Path(scratch) / "sessions"
+            root.mkdir()
+            case = _poll_case(root, "claude", "claude_code_filesystem_session_source_plugin", "claude_code_filesystem_session_source_smoke.py")
+            if scenario == "churn":
+                _poll_churn(case)
+            elif scenario == "partial":
+                _poll_partial(case)
+            else:
+                importer, repo, _ = case.runtime.runtime_importer(_poll_fresh(case), str(root))
+                assert importer.poll_once().sessions_seen == 0
+                assert repo.cursors[case.source_key] == {"version": 1, "state": "caught_up", "after": None}, "empty/no-ref EOF resets state"
+    print("PASS real claude pair/version/restart/EOF/reset coverage")
+
+
+def _oversized_setup(case: Any) -> None:
+    """Build equal-size inputs and grow one strictly above the test threshold.
+
+    Both remain actual parseable vendor inputs, never a fake source adapter."""
+    small = case.runtime._legacy_path(case.kind, case.fixture, case.root, 0)
+    large = case.runtime._legacy_path(case.kind, case.fixture, case.root, 1)
+    case.threshold = small.stat().st_size
+    assert large.stat().st_size == case.threshold
+    large.write_bytes(large.read_bytes() + (b"\n" if case.kind in ("codex", "claude") else b" "))
+    case.large_key = large.stem if case.kind in ("codex", "claude") else large.parent.name
+    case.plugin = _poll_fresh(case)
+    case.importer, case.repo, _ = case.runtime.runtime_importer(case.plugin, str(case.root))
+    case.reads = []
+
+
+def _oversized_deferral(case: Any) -> None:
+    """Prove equality stays regular and deferred bytes do not prevent caught_up.
+
+    Deferral publishes diagnostics without recording false event completion."""
+    progress = case.types.PollDiscoveryProgress()
+    refs = list(case.plugin.discover_sessions_for_poll(str(case.root), None, read_event_cursor=lambda key: None, can_admit_next=lambda: True, progress=progress))
+    assert len(refs) == 1 and refs[0].aggregate_bytes == case.threshold, "equal threshold remains regular; strictly greater defers"
+    assert progress.deferred_count == 1 and progress.deferred_bytes == case.threshold + 1, "deferral names/counts exact aggregate bytes"
+    assert case.importer.poll_once().sessions_seen == 1
+    assert case.repo.cursors[case.source_key]["state"] == "caught_up", "regular EOF reaches caught_up despite oversized backlog"
+    assert ("runtime-source", case.types.CursorScope.EVENT_READ, case.large_key) not in case.repo.cursors, "deferral never stamps completion"
+
+
+def _oversized_fresh_regular(case: Any) -> None:
+    """Insert regular work before the authoritative leased recheck.
+
+    F1 may invalidate only state, preserving version and the existing boundary."""
+    from collections.abc import Iterator
+
+    case.runtime._legacy_path(case.kind, case.fixture, case.root, 2)
+    original = dict(case.repo.cursors[case.source_key])
+    case.repo.cursors[case.source_key] = dict(original)
+    read_events = case.plugin.read_events
+
+    def track(root_uri: str, ref: Any, cursor: dict[str, object] | None) -> Iterator[Any]:
+        case.reads.append(ref.external_session_id)
+        yield from read_events(root_uri, ref, cursor)
+
+    case.plugin.read_events = track
+    case.repo.trace.clear()
+    case.importer.poll_one_oversized()
+    assert not case.reads, "fresh regular pending must forbid every oversized read"
+    assert case.repo.cursors[case.source_key] == {**original, "state": "backfilling"}, "leased F1 invalidation changes only state preserving version/after"
+    assert case.repo.trace[0] == "acquire" and case.repo.trace.index("acquire") < case.repo.trace.index("write:discovery"), "source lease precedes authoritative selection and writes"
+    case.importer.poll_once()
+    assert case.reads and case.repo.cursors[case.source_key]["state"] == "caught_up", "next normal producer imports fresh regular work"
+    case.reads.clear()
+
+
+def _oversized_refusal_success(case: Any) -> None:
+    """Contrast lease contention with a successful selected whole-session read.
+
+    The worker must leave the regular discovery cursor byte-identical."""
+    before = json.dumps(case.repo.cursors[case.source_key], sort_keys=True)
+    case.repo.refuse = True
+    case.repo.trace.clear()
+    case.importer.poll_one_oversized()
+    assert case.repo.trace == ["acquire"] and not case.reads, "contended real provider performs no source/event reads or writes"
+    case.repo.refuse = False
+    case.importer.poll_one_oversized()
+    assert case.reads == [case.large_key], "eventual oversized attempt reads exactly one selected real session"
+    assert case.repo.cursors["runtime-source", case.types.CursorScope.EVENT_READ, case.large_key][case.completed_key], "eventual oversized completion stores EOF fingerprint"
+    assert json.dumps(case.repo.cursors[case.source_key], sort_keys=True) == before, "successful oversized completion leaves regular cursor byte-identical"
+    assert not case.repo.held, "real oversized provider releases source lease"
+
+
+def test_oversized_provider_policy() -> None:
+    """Reach real regular caught_up, then exercise A's leased provider recheck."""
+    from unittest.mock import patch
+
+    from ananta.llm.session_ledger import filesystem_poll as policy
+    from ananta.llm.session_ledger import importer as importer_mod
+
+    with tempfile.TemporaryDirectory(prefix="large_policy_claude_") as scratch:
+        root = Path(scratch) / "sessions"
+        root.mkdir()
+        case = _poll_case(root, "claude", "claude_code_filesystem_session_source_plugin", "claude_code_filesystem_session_source_smoke.py")
+        _oversized_setup(case)
+        with patch.object(policy, "OVERSIZED_SESSION_BYTES", case.threshold), patch.object(importer_mod, "OVERSIZED_SESSION_BYTES", case.threshold):
+            _oversized_deferral(case)
+            _oversized_fresh_regular(case)
+            _oversized_refusal_success(case)
+    print("PASS real claude threshold/regular-pending/leased-oversized coverage")
+
+
+def test_unknown_offsets() -> None:
+    """Completed physical bytes include unknown/metadata input, never partial tails."""
+    from ananta.llm.session_ledger.poll_advisories import collect_poll_advisories, poll_source_context
+    from ananta.llm.session_ledger.types import UnknownLineAdvisory
+
+    with tempfile.TemporaryDirectory(prefix="unknown_offsets_") as tmp:
+        root = Path(tmp)
+        path = root / "synthetic" / f"{_SID}.jsonl"
+        unknown = {"type": "synthetic-unknown-line-type", "message": {"role": "assistant", "content": "PRIVATE_PAYLOAD"}}
+        _write_jsonl(path, [_line_assistant_text_and_two_tool_uses(), unknown, unknown])
+        plugin = _make_plugin()
+        ref = list(plugin.discover_sessions(str(root), None))[0]
+        with collect_poll_advisories() as collector, poll_source_context("source"):
+            events = list(plugin.read_events(str(root), ref, None))
+            cursor = plugin.event_read_cursor(str(root), ref, events[-1])
+            assert len(events) == 3, "MULTI_EVENT_KNOWN_LINE_PRESERVED"
+            assert collector.snapshot() == (UnknownLineAdvisory("source", _SID, "synthetic-unknown-line-type", 2),), "PHYSICAL_UNKNOWN_LINES_NOT_EVENTS"
+            assert cursor == {"byte_offset": path.stat().st_size}, "TRAILING_UNKNOWN_EOF_OFFSET"
+            assert list(plugin.read_events(str(root), ref, cursor)) == [] and collector.snapshot()[0].count == 2, "RESUMED_READ_SKIPS_CONSUMED_UNKNOWNS"
+        for lines in ([unknown], [{"type": "summary"}], []):
+            _write_jsonl(path, lines)
+            with collect_poll_advisories(), poll_source_context("source"):
+                assert list(plugin.read_events(str(root), ref, None)) == [], "NO_EVENT_INPUT"
+                assert plugin.event_read_cursor(str(root), ref, None) == {"byte_offset": path.stat().st_size}, "ALL_UNKNOWN_METADATA_EMPTY_CURSOR"
+    _check(True, "unknown and metadata completion offsets")
+
+
+def test_unknown_partial_tail() -> None:
+    """Complete an appended partial line without rereading prior unknown bytes."""
+    from ananta.llm.session_ledger.poll_advisories import collect_poll_advisories, poll_source_context
+
+    with tempfile.TemporaryDirectory(prefix="unknown_partial_") as tmp:
+        root = Path(tmp)
+        path = root / "synthetic" / f"{_SID}.jsonl"
+        plugin = _make_plugin()
+        unknown = {"type": "synthetic-unknown-line-type"}
+        _write_jsonl(path, [unknown])
+        ref = list(plugin.discover_sessions(str(root), None))[0]
+        _write_jsonl(path, [unknown])
+        complete = path.stat().st_size
+        partial = json.dumps(_line_user_text()).encode()
+        with path.open("ab") as handle:
+            handle.write(partial)
+        with collect_poll_advisories(), poll_source_context("source"):
+            assert list(plugin.read_events(str(root), ref, None)) == []
+            cursor = plugin.event_read_cursor(str(root), ref, None)
+            assert cursor == {"byte_offset": complete}, "PARTIAL_BYTES_STAY_REACHABLE"
+        with path.open("ab") as handle:
+            handle.write(b"\n")
+        with collect_poll_advisories() as collector, poll_source_context("source"):
+            events = list(plugin.read_events(str(root), ref, cursor))
+            assert len(events) == 1 and collector.snapshot() == (), "COMPLETED_PARTIAL_IMPORTS_ONCE"
+            assert plugin.event_read_cursor(str(root), ref, events[-1]) == {"byte_offset": path.stat().st_size}, "APPEND_AFTER_EOF_CURSOR"
+    _check(True, "unknown and metadata completion offsets preserve partial tails")
+
+
+def test_unknown_read_failure() -> None:
+    """Missing files, malformed records and closed generators publish no completion."""
+    from ananta.llm.session_ledger.poll_advisories import collect_poll_advisories, completed_claude_read, poll_source_context
+
+    with tempfile.TemporaryDirectory(prefix="unknown_failure_") as tmp:
+        root = Path(tmp)
+        path = root / "synthetic" / f"{_SID}.jsonl"
+        _write_jsonl(path, [_line_assistant_text_and_two_tool_uses(), {"type": "assistant"}])
+        plugin = _make_plugin()
+        ref = list(plugin.discover_sessions(str(root), None))[0]
+        with collect_poll_advisories(), poll_source_context("source"):
+            iterator = plugin.read_events(str(root), ref, None)
+            next(iterator)
+            iterator.close()
+            assert completed_claude_read(str(root), _SID) is None, "CLOSED_GENERATOR_NO_COMPLETION"
+            try:
+                list(plugin.read_events(str(root), ref, None))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("MALFORMED_KNOWN_READ_MUST_RAISE")
+            assert completed_claude_read(str(root), _SID) is None, "FAILED_READ_NO_COMPLETION"
+            path.unlink()  # synthetic fixture only
+            assert list(plugin.read_events(str(root), ref, None)) == [], "MISSING_READ_EMPTY"
+            assert completed_claude_read(str(root), _SID) is None, "MISSING_FILE_NO_COMPLETION"
+    _check(True, "failed and truncated reads never publish successful offsets")
+
+
+def test_unknown_failed_persistence() -> None:
+    """A read-ahead known line must not checkpoint past an unpersisted event."""
+    from unittest.mock import patch
+
+    import importer_smoke as runtime
+    from ananta.llm.session_ledger.importer import SessionLedgerImporter
+    from ananta.llm.session_ledger.repository import LedgerRepositoryError
+    from ananta.llm.session_ledger.types import CursorScope
+
+    fixture = runtime._fixture_module("claude_code_filesystem_session_source_plugin", "claude_code_filesystem_session_source_smoke.py")
+    with tempfile.TemporaryDirectory(prefix="advisory_persist_failure_") as td:
+        root = Path(td)
+        path = root / "synthetic" / (fixture._SID + ".jsonl")
+        fixture._write_jsonl(path, [fixture._line_user_text(), {"type": "synthetic-unknown-line-type"}, fixture._line_assistant_text_and_two_tool_uses()])
+        plugin = fixture._make_plugin()
+        importer, repo, _ = runtime.runtime_importer(plugin, str(root))
+        persist = SessionLedgerImporter._persist_normalized_for_session
+        reached: list[str | None] = []
+
+        def fail_suffix(self: SessionLedgerImporter, **kwargs: Any) -> int:
+            event = kwargs["normalized"]
+            reached.append(event.vendor_event_id)
+            if event.role is MessageRole.ASSISTANT:
+                raise LedgerRepositoryError("synthetic suffix persist failure")
+            return persist(self, **kwargs)
+
+        with patch.object(SessionLedgerImporter, "_persist_normalized_for_session", fail_suffix):
+            importer.poll_once()
+        assert len(reached) == 2, "FAILED_SUFFIX_PERSIST_PATH_REACHED"
+        assert ("runtime-source", CursorScope.EVENT_READ, fixture._SID) not in repo.cursors, "FAILED_PERSIST_NO_READAHEAD_CHECKPOINT"
+    _check(True, "persistence failure leaves complete suffix reachable")
+
+
+def _assert_oversized_unknown_append(importer: Any, repo: Any, importer_mod: Any, path: Path, unknown: dict[str, object]) -> None:
+    """Append eligibility must resume beyond both previously consumed unknowns."""
+    from unittest.mock import patch
+
+    from ananta.llm.session_ledger.types import CursorScope, UnknownLineAdvisory
+
+    with path.open("a") as stream:
+        stream.write(json.dumps({**_line_user_text(), "uuid": "appended-known"}) + "\n")
+        stream.write(json.dumps(unknown) + "\n")
+    with patch.object(importer_mod.logger, "info") as log:
+        importer.poll_one_oversized()
+        after = [call.args[1] for call in log.call_args_list if call.args[0] == "ledger oversized DRAIN complete: unknown_line_advisories=%s"]
+    assert repo.cursors["runtime-source", CursorScope.EVENT_READ, _SID]["byte_offset"] == path.stat().st_size, "OVERSIZED_APPENDED_COMPLETE_EOF"
+    assert after == [(UnknownLineAdvisory("runtime-source", _SID, "synthetic-unknown-line-type", 1),)], "OVERSIZED_APPEND_DOES_NOT_REREAD_UNKNOWN"
+    assert not repo.held_sources, "OVERSIZED_ADVISORY_SCOPE_RELEASES_LEASE"
+
+
+def test_oversized_unknown_offsets() -> None:
+    """The independent worker checkpoints consumed unknown bytes before append.
+
+    Both an all-unknown input and a known-prefix/trailing-unknown input are
+    admitted through actual regular discovery, deferred by the test threshold,
+    then read through poll_one_oversized. No private collector is installed by
+    this test: the worker must establish its own invocation scope. Its next
+    eligible append must report only the newly appended unknown physical line.
+    """
+    from unittest.mock import patch
+
+    import importer_smoke as runtime
+    from ananta.llm.session_ledger import filesystem_poll as policy
+    from ananta.llm.session_ledger import importer as importer_mod
+    from ananta.llm.session_ledger.types import CursorScope, UnknownLineAdvisory
+
+    for known_prefix in (False, True):
+        with tempfile.TemporaryDirectory(prefix="oversized_unknown_") as tmp:
+            root = Path(tmp)
+            path = root / "synthetic" / f"{_SID}.jsonl"
+            unknown = {"type": "synthetic-unknown-line-type", "message": {"role": "assistant"}}
+            _write_jsonl(path, ([_line_user_text()] if known_prefix else []) + [unknown, unknown])
+            plugin = _make_plugin()
+            importer, repo, _ = runtime.runtime_importer(plugin, str(root))
+            with patch.object(policy, "OVERSIZED_SESSION_BYTES", 1), patch.object(importer_mod, "OVERSIZED_SESSION_BYTES", 1):
+                assert importer.poll_once().events_persisted == 0, "OVERSIZED_REGULAR_DEFERS"
+                with patch.object(importer_mod.logger, "info") as log:
+                    importer.poll_one_oversized()
+                    first = [call.args[1] for call in log.call_args_list if call.args[0] == "ledger oversized DRAIN complete: unknown_line_advisories=%s"]
+                cursor = repo.cursors["runtime-source", CursorScope.EVENT_READ, _SID]
+                assert cursor.get("byte_offset") == path.stat().st_size, "OVERSIZED_CONSUMED_UNKNOWN_EOF"
+                assert first == [(UnknownLineAdvisory("runtime-source", _SID, "synthetic-unknown-line-type", 2),)], "OVERSIZED_EXACT_INITIAL_ADVISORY"
+                _assert_oversized_unknown_append(importer, repo, importer_mod, path, unknown)
+    _check(True, "oversized unknown suffix and unknown-only reads checkpoint consumed bytes")
+
+
 def main() -> int:
+    test_oversized_unknown_offsets()
+    test_unknown_failed_persistence()
+    test_unknown_offsets()
+    test_unknown_partial_tail()
+    test_unknown_read_failure()
+    test_resumable_filesystem_poll()
+    test_oversized_provider_policy()
     print("=== claude_code_filesystem_session_source_smoke ===")
     test_descriptor()
     test_parser_user_text_line()
@@ -620,7 +1162,7 @@ def main() -> int:
     test_parser_tool_result_event()
     test_parser_skips_session_config_noise()
     test_parser_skips_thinking_blocks_in_isolation()
-    test_parser_raises_on_unknown_block_kind()
+    test_parser_advises_on_unknown_block_kind()
     test_parser_raises_on_invalid_json()
     test_normalize_message_user()
     test_normalize_tool_call_carries_tool_name()

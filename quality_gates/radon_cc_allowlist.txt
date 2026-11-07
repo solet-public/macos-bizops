@@ -98,3 +98,10 @@ solet_cli/src/solet_manager/release_observer.py::validate  # owner: fleet-coordi
 solet_cli/src/solet_manager/contract_reconciliation.py::_migrate_answer_values  # owner: fleet-coordinator-seat reason: gates-cluster-b-ungated-surfaces (chg_f24592a5) pre-existing debt surfaced by scope widening expires: 2026-12-20
 solet_cli/tests/journal_migration_smoke.py::_check_real_and_synthetic_bootstrap  # owner: fleet-coordinator-seat reason: gates-cluster-b-ungated-surfaces (chg_f24592a5) pre-existing debt surfaced by scope widening expires: 2026-12-20
 solet_cli/tests/permission_preflight_smoke.py::_assert_fingerprint_binding  # owner: fleet-coordinator-seat reason: gates-cluster-b-ungated-surfaces (chg_f24592a5) pre-existing debt surfaced by scope widening expires: 2026-12-20
+
+# Pre-existing hidden-hook CC debt, measured at base 757245913 with
+# radon_cc_check.py --raw over every tracked .claude/hooks/*.py file.
+# Security-sensitive authorization refactoring belongs to a separate reviewed unit.
+.claude/hooks/git_controller_authorization.py::_release_batch_members  # owner: fleet-coordinator-seat reason: iss_94156bc0-d197-4114-8706-00d243dcef6a pre-existing hidden-hook static debt expires: 2026-12-03
+.claude/hooks/git_controller_authorization.py::_event  # owner: fleet-coordinator-seat reason: iss_94156bc0-d197-4114-8706-00d243dcef6a pre-existing hidden-hook static debt expires: 2026-12-03
+.claude/hooks/memory_passthrough/head_policy.py::render_head  # owner: fleet-coordinator-seat reason: iss_94156bc0-d197-4114-8706-00d243dcef6a pre-existing hidden-hook static debt expires: 2026-12-03

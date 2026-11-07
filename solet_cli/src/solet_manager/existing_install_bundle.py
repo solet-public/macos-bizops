@@ -81,7 +81,8 @@ _STRATEGIES = frozenset({"router_preferred", "single_color_required"})
 _READINESS_SIGNAL = "bridge_health_healthy"
 _TEMPLATE_ROOT = "plugins/github_midwife_plugin/knowledge_base/hydration_templates/"
 _DESTINATION_ROOTS = ("{HOME}/", "{TARGET}/", "{PROFILE_HOME}/")
-# Static preserved-never prefixes (section 6.3).  The install-specific ignore
+# Static preserved-never prefixes (section 6.3). Roots stay exact template
+# tokens; path suffixes are compared case-insensitively for APFS. The install-specific ignore
 # and tracked-tree rules live in the runtime plan, where a real target exists.
 _PRESERVED_NEVER_PREFIXES = (
     "{TARGET}/profile/config/",
@@ -94,14 +95,14 @@ _PRESERVED_NEVER_PREFIXES = (
     "{HOME}/.codex/sessions/",
     "{HOME}/.codex/archived_sessions/",
     "{HOME}/.claude/projects/",
-    "{HOME}/Library/Keychains/",
+    "{HOME}/library/keychains/",
 )
 #: The one path inside ``.git/`` an artifact may name: the clone's local, never-committed ignore file.
 CLONE_EXCLUDE_DESTINATION = "{TARGET}/.git/info/exclude"
 _PRESERVED_NEVER_EXACT = frozenset(
     {
-        "{TARGET}/AGENTS.md",
-        "{TARGET}/CLAUDE.md",
+        "{TARGET}/agents.md",
+        "{TARGET}/claude.md",
         "{HOME}/.codex/history.jsonl",
         "{HOME}/.codex/session_index.jsonl",
     }
@@ -591,9 +592,14 @@ def _artifact(value: JsonValue) -> ManagedArtifact:
 
 def _destination(row: dict[str, JsonValue]) -> str:
     destination = _text(row["logical_destination"], "managed_artifact.logical_destination")
-    if not destination.startswith(_DESTINATION_ROOTS) or "/../" in destination or destination.endswith("/"):
+    if not destination.startswith(_DESTINATION_ROOTS) or any(segment in {"", ".", ".."} for segment in destination.split("/")[1:]):
         raise ContractError(f"managed_artifact.logical_destination is not rooted at a closed template root: {destination!r}")
-    if destination != CLONE_EXCLUDE_DESTINATION and (destination in _PRESERVED_NEVER_EXACT or destination.startswith(_PRESERVED_NEVER_PREFIXES)):
+    root, separator, relative_destination = destination.partition("/")
+    folded_destination = f"{root}{separator}{relative_destination.casefold()}"
+    if destination != CLONE_EXCLUDE_DESTINATION and (
+        folded_destination in _PRESERVED_NEVER_EXACT
+        or folded_destination.startswith(_PRESERVED_NEVER_PREFIXES)
+    ):
         raise ContractError(f"managed_artifact destination is inside a preserved-never surface: {destination!r}")
     if destination == CLONE_EXCLUDE_DESTINATION and row["kind"] != "managed_block":
         raise ContractError("the clone ignore file may only carry a managed_block artifact")

@@ -1,4 +1,4 @@
-# Maintenance-Verbs Joseki Cards: Rotation, Seat Self-Rotation, Restart, Memory Sync, KB Refresh, Context Gauge
+# Operations Joseki Cards: Rotation, Restart, Memory Sync, KB Refresh, Context Gauge, Candidate Relay
 
 Tags: knowledge:tag:maintenance_verbs, knowledge:tag:joseki, knowledge:tag:session_lifecycle, knowledge:tag:memory_passthrough, knowledge:tag:context_gauge
 
@@ -8,9 +8,9 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:agent-messaging, consumer_profile:both
 
-Embedding Description: Ordered-call joseki cards for seven recurring fleet maintenance operations — rotate a worker, rotate the operator seat itself with no helper agent in the injection path (the operator types it, or the seat runs a deterministic detached script), restart a dead worker, sync the local memory-passthrough projection, curate the ambient MEMORY.md head at a rotation boundary, refresh a plugin's KB/process registry, check a session's context-window occupancy against the measured economic rotation policy — each with its verify step and known traps. Follow the card, don't re-derive the sequence.
+Embedding Description: Ordered-call joseki cards for recurring fleet and candidate lifecycle operations — rotate a worker, rotate the operator seat itself with no helper agent in the injection path (the operator types it, or the seat runs a deterministic detached script), restart a dead worker, sync the local memory-passthrough projection, curate the ambient MEMORY.md head at a rotation boundary, refresh a plugin's KB/process registry, check a session's context-window occupancy against the measured economic rotation policy, and relay a delivered candidate through review and readiness to the repository-specific landing path — each with its verify step and known traps. Follow the card, don't re-derive the sequence.
 
-**When you need this**: a session is about to rotate, restart, or check on another managed session; the operator seat itself needs its context cleared and resumed mid-programme, whether or not the operator is at the keyboard; a session needs to hydrate or drain its local memory-passthrough projection; a seat is at a rotation boundary or just hit a hydrate budget failure and needs to curate the ambient MEMORY.md head back under budget; a session is editing a plugin's KB process JSON or config and needs to refresh the live registry; a session (worker or the operator seat) needs to know how close it is to its context-window ceiling. Design records: `workbench/2026-08-09_maintenance_verbs_m0_design_mverbs-impl.md` (maintenance-verbs programme, Lane A, M0/M1) and the 2026-08-10 maintenance-verbs M2 memory-curation charter draft (M2, ambient-index curation & placement decay).
+**When you need this**: a session is about to rotate, restart, or check on another managed session; the operator seat itself needs its context cleared and resumed mid-programme, whether or not the operator is at the keyboard; a session needs to hydrate or drain its local memory-passthrough projection; a seat is at a rotation boundary or just hit a hydrate budget failure and needs to curate the ambient MEMORY.md head back under budget; a session is editing a plugin's KB process JSON or config and needs to refresh the live registry; a session (worker or the operator seat) needs to know how close it is to its context-window ceiling; or Main needs the native delivered-to-review and reviewed-to-ready verbs, and the boundary between Project-Solet `landing run` and the local Git-Controller. Design records: `workbench/2026-08-09_maintenance_verbs_m0_design_mverbs-impl.md` (maintenance-verbs programme, Lane A, M0/M1) and the 2026-08-10 maintenance-verbs M2 memory-curation charter draft (M2, ambient-index curation & placement decay).
 
 ---
 
@@ -123,9 +123,9 @@ an adopter's machine, with no error to make the gap visible.
 
 Kills a dead or hung worker process and spawns a fresh one in its place — distinct from rotation (which reuses the live process).
 
-1. `plugin::agent_messaging_plugin::session_status` on the dying worker — capture `lane_id`, `brief_ref`, `work_class`, `budget_line`, `role_class`, `host`, `model`, `effort` before the row goes terminal.
+1. `plugin::agent_messaging_plugin::session_status` on the dying worker — capture `lane_id`, `unit_id`, `work_class`, `budget_line`, `role_class`, `host`, `model`, `effort` before the row goes terminal.
 2. `plugin::agent_messaging_plugin::terminate_session` with `agent_instance_id`, `directed_by`, `grace_seconds=30`.
-3. `plugin::agent_messaging_plugin::spawn_session` with the captured fields, including `role_name=<the role this worker should hold>`. This call ALREADY drives one automatic first turn immediately after a successful host dispatch (the lane's captured charter if one is on file, otherwise a fixed fallback bootstrap turn) — this is not optional and nothing further needs to trigger it.
+3. `plugin::agent_messaging_plugin::spawn_session` with the captured fields (`unit_id` is the only launch address; the replacement reads the Unit's registered brief revision, and a missing or retired Unit refuses the spawn), including `role_name=<the role this worker should hold>`. Retain the returned `data.job_id` and schedule exact-id `service_interface::job_service::get_job` reads until terminal. Bind the replacement identity from `job.result.data` only on success; handle error/cancelled outcomes before proceeding to step 4. The worker drives one automatic first turn immediately after a successful host dispatch (the lane's captured charter if one is on file, otherwise a fixed fallback bootstrap turn) — this is not optional and nothing further needs to trigger it.
 4. Check whether a lane charter is on file for `lane_id` (only relevant if you need to know whether the automatic first turn from step 3 already instructs the fresh session to claim `role_name`). If no charter is on file: `plugin::agent_messaging_plugin::drive_session` on the new `agent_instance_id` with `text` explicitly instructing it to claim the target role ("claim role '<role_name>' via the rename skill / arm a watch process for it — this is a restart continuing lane '<lane_id>', not a fresh unbriefed spawn").
 5. **Verify — do not skip.** `plugin::agent_messaging_plugin::peer_holds_role` with `name=role_name`, `agent_instance_id=<new id>` must return `holds: true` before the restart is reported complete.
 
@@ -236,6 +236,70 @@ Refreshing a plugin's KB process-definition JSON or config after editing it in t
 - *Singular refresh lies.* `refresh_plugin_process` (singular) returns `{"success": true}` synchronously while its result is rejected in the async result-processing path — the caller gets an unambiguous success and never learns otherwise.
 - *`0` updates ≠ nothing to do; it can also mean nothing changed.* Assert `updated_count > 0` with empty `errors`, not just a bare success flag.
 - *Store-updated ≠ behavior-changed.* `reload_plugin_config`'s green means the config row was written, not that any running instance is reading it differently.
+
+## Card: Candidate delivery, review, readiness, and landing relay
+
+Carries a delivered candidate through typed review and landing readiness,
+while keeping each lifecycle fact and repository's landing authority separate.
+Main invokes the relay at each handoff; nothing starts these commands
+automatically.
+
+1. After the author delivers a candidate, run `psolet delivered-to-review`
+   from a session other than the author. Name the target checkout explicitly;
+   a registered repository name does not select its checkout:
+
+   ```sh
+   psolet delivered-to-review --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT --dry-run
+   psolet delivered-to-review --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT
+   ```
+
+   The command freezes the exact delivered revision, creates or reuses its
+   review unit, selects and spawns a reviewer, assigns the owner, and sends a
+   generated GO. A same-delivery rerun is idempotent. It has no recovery path
+   for a new delivery after FAIL or a retired reviewer (`iss_2b8b517d`), and a
+   partial relay has no resume mode; inspect its recorded observations before
+   any bounded manual fallback.
+2. The reviewer records a typed PASS/CLEAR against that frozen candidate.
+   Afterward Main runs `psolet reviewed-to-ready` under the repository's active
+   landing policy:
+
+   ```sh
+   psolet reviewed-to-ready --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT --dry-run
+   psolet reviewed-to-ready --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT
+   ```
+
+   The verb requires the newest revision to be frozen and the newest typed
+   clearing review outcome to name that exact revision. It reuses current
+   readiness for the same revision and review event. A candidate delivery, a
+   reviewer message, a PASS, and readiness are distinct facts; none proves a
+   landing occurred.
+3. For Project Solet only, Project-Solet-Git-Controller uses
+   `psolet landing run --repo project-solet --unit UNIT [--dry-run]` on a
+   current `ready_to_land` receipt and with its existing live binding. The
+   command verifies frozen bytes and modes, runs one provisioned full gate,
+   records the evidence, runs read-only preflight, fast-forwards Project Solet
+   `master`, and records the landing. A conflict, byte mismatch, or red gate
+   records a blocker and leaves `master` untouched. Dry-run writes nothing and
+   runs no gate. An already-published candidate can be recorded from retained
+   verdict evidence without merging or re-running the gate.
+4. The local Git-Controller does not use Project Solet's `landing run`; it follows
+   the repository-specific procedure and gates in the Git-Controller commit skill. In either repository,
+   only current register readiness plus the repository's guards authorizes
+   landing. A message or peer receipt is not acceptance or authorization.
+   Landing is still separate from deployment and close-out; after cutover,
+   follow the canonical Change Close-Out Checklist for issue disposition, doc
+   impact, reviewer follow-ups, and lane or worktree retirement.
+
+**Interim metadata path.** Until the exact-candidate metadata Unit
+`unt_d428a5c3` lands after `unt_44965222`, the author report carries the
+proposed landing commit message (subject and body) plus doc-impact statement.
+Main sends both to Git-Controller in the READY message. The register stores
+neither (`iss_49b2e4c8`); do not invent a verb, flag, or field for them.
+
+**Known limits.** No automatic trigger starts these verbs. `landing run` has
+not yet carried a real landing; the first real landing was recorded by route A
+(`lnd_8976b957`). The old G/ scripts and route A are bounded fallback paths
+only, not the default when a native relay is available.
 
 ## Card: Context gauge check
 

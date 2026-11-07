@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::update_subscription",
+  "display_name": "Zuora: Update Subscription",
+  "description": "Amend a subscription (PUT /v1/subscriptions/{subscription-key}): add, change or remove rate plans, correct terms, renewal settings, notes and custom fields, with optional preview and billing. Completion carries subscriptionId and any invoice or credit memo. Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "Amend a Zuora subscription in place: add, change or remove rate plans and charge quantities or prices, switch between termed and evergreen, change renewal settings, term length, notes or custom fields, optionally previewing the billing impact or running billing immediately.",
+  "result_processor_customizations": {
+    "action_label": "Zuora subscription updated",
+    "result_type": "zuora_update_subscription_result",
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+  },
+  "error_processor_customizations": {
+    "action_context": "Amend a subscription (PUT /v1/subscriptions/{subscription-key}): add, change or remove rate plans, correct terms, renewal settings, notes and custom fields, with optional preview and billing. Completion carries subscriptionId and any invoice or credit memo.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape: a bad identifier, header value or query pairing, or a body missing a required field. zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.validation_failed is a vendor 4xx or an HTTP 200 carrying success false, with Zuora's reasons. zuora.object_not_found, zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the needed Orders, Subscriptions or Accounts permission or enable the vendor feature the reason names. Read current vendor state with the matching get or list verb before retrying a write; pass an idempotency_key where offered. Back off on rate limits."
+  }
+}

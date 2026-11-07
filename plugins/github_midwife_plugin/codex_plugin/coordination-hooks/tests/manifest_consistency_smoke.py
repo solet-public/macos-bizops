@@ -4,13 +4,11 @@
 from __future__ import annotations
 
 import ast
-import importlib.util
 import json
 import re
 import sys
 from collections import Counter
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 sys.dont_write_bytecode = True
@@ -40,21 +38,15 @@ from _harness import HOOKS_DIR, PLUGIN_ROOT, Results, preflight  # noqa: E402
 EXPECTED = Counter(
     {
         ("SessionStart", "startup|resume|clear", "step_zero_reminder.js"): 1,
-        ("SessionStart", "startup|resume|clear", "check_messages_reminder.js"): 1,
-        ("SessionStart", "startup|resume|clear", "role_binding_reminder.js"): 1,
-        ("PreToolUse", "^Bash$", "git_controller_gate.py"): 1,
+        ("SessionStart", "startup|resume|clear", "session_start_context.py"): 1,
         ("Stop", "", "context_status_reporter.py"): 1,
         ("Stop", "", "inbox_consumer.py"): 1,
     }
 )
-COMMAND_RE = re.compile(
-    r"^(node|python3) \$\{PLUGIN_ROOT\}/hooks/([A-Za-z0-9_]+\.(?:js|py))$"
-)
+COMMAND_RE = re.compile(r"^(node|python3) \$\{PLUGIN_ROOT\}/hooks/([A-Za-z0-9_]+\.(?:js|py))$")
 HOOK_KEYWORDS = {
     "step_zero_reminder.js": ("project-orientation", "step-zero"),
-    "check_messages_reminder.js": ("coordination reminder", "unread-message"),
-    "role_binding_reminder.js": ("role-binding", "role binding"),
-    "git_controller_gate.py": ("git-controller", "git controller"),
+    "session_start_context.py": ("live session context",),
     "context_status_reporter.py": ("context-status", "context status"),
     "inbox_consumer.py": ("inbox-consumer", "peer inbox"),
 }
@@ -64,13 +56,9 @@ DOCUMENTS = (
     "SECURITY.md",
     ".codex-plugin/plugin.json",
 )
-NETWORK_MODULES = frozenset(
-    {"aiohttp", "http", "httpx", "requests", "socket", "urllib", "websocket", "websockets"}
-)
+NETWORK_MODULES = frozenset({"aiohttp", "http", "httpx", "requests", "socket", "urllib", "websocket", "websockets"})
 PROCESS_MODULES = frozenset({"commands", "pty", "subprocess"})
-PYTHON_WRITE_CALLS = frozenset(
-    {"makedirs", "mkdir", "open", "remove", "rename", "replace", "unlink", "write_bytes", "write_text"}
-)
+PYTHON_WRITE_CALLS = frozenset({"makedirs", "mkdir", "open", "remove", "rename", "replace", "unlink", "write_bytes", "write_text"})
 NODE_WRITE_TOKENS = (
     "appendFile",
     "copyFile",
@@ -84,24 +72,8 @@ NODE_WRITE_TOKENS = (
 NODE_PROCESS_TOKENS = ("child_process", "execFile", "execSync", "spawn(", "spawnSync")
 
 
-def _load_gate() -> ModuleType:
-    path = HOOKS_DIR / "git_controller_gate.py"
-    spec = importlib.util.spec_from_file_location("codex_gate_manifest_smoke", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def _entry_points() -> set[str]:
-    return {
-        path.name
-        for path in HOOKS_DIR.iterdir()
-        if path.is_file()
-        and path.suffix in {".js", ".py"}
-        and not path.name.startswith("_")
-    }
+    return {path.name for path in HOOKS_DIR.iterdir() if path.is_file() and path.suffix in {".js", ".py"} and not path.name.startswith("_")}
 
 
 def _python_imports(tree: ast.AST) -> set[str]:
@@ -136,12 +108,7 @@ def _check_javascript_source(res: Results, path: Path, source: str) -> None:
 def _check_python_source(res: Results, path: Path, source: str) -> None:
     tree = ast.parse(source, filename=path.name)
     imports = _python_imports(tree)
-    external = {
-        module
-        for module in imports
-        if module not in sys.stdlib_module_names
-        and not (HOOKS_DIR / f"{module}.py").is_file()
-    }
+    external = {module for module in imports if module not in sys.stdlib_module_names and not (HOOKS_DIR / f"{module}.py").is_file()}
     res.check(
         not external,
         f"{path.name} imports only stdlib or local modules",
@@ -152,7 +119,7 @@ def _check_python_source(res: Results, path: Path, source: str) -> None:
         f"{path.name} imports no network module",
     )
     process_imports = imports.intersection(PROCESS_MODULES)
-    if path.name in {"context_status_reporter.py", "inbox_consumer.py"}:
+    if path.name in {"context_status_reporter.py", "inbox_consumer.py", "session_start_context.py"}:
         res.check(
             process_imports == {"subprocess"},
             f"{path.name} imports only its declared process module",
@@ -164,12 +131,7 @@ def _check_python_source(res: Results, path: Path, source: str) -> None:
             f"{path.name} imports no process module",
             repr(sorted(process_imports)),
         )
-    call_names = {
-        node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, (ast.Attribute, ast.Name))
-    }
+    call_names = {node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, (ast.Attribute, ast.Name))}
     write_calls = call_names.intersection(PYTHON_WRITE_CALLS)
     res.check(
         not write_calls,
@@ -253,9 +215,7 @@ def _record_group(
         _record_entry(res, event, matcher, entry, actual, referenced)
 
 
-def _collect_inventory(
-    res: Results, hooks: dict[object, object]
-) -> tuple[Counter[tuple[str, str, str]], set[str]]:
+def _collect_inventory(res: Results, hooks: dict[object, object]) -> tuple[Counter[tuple[str, str, str]], set[str]]:
     actual: Counter[tuple[str, str, str]] = Counter()
     referenced: set[str] = set()
     for event, groups in hooks.items():
@@ -274,10 +234,7 @@ def _check_documentation(res: Results, referenced: set[str]) -> None:
         referenced == entry_points,
         "every handler on disk is registered exactly by inventory",
     )
-    documents = {
-        document: (PLUGIN_ROOT / document).read_text(encoding="utf-8").lower()
-        for document in DOCUMENTS
-    }
+    documents = {document: (PLUGIN_ROOT / document).read_text(encoding="utf-8").lower() for document in DOCUMENTS}
     for name in sorted(referenced):
         res.check((HOOKS_DIR / name).is_file(), f"registered handler exists: {name}")
         terms = (name, *HOOK_KEYWORDS[name])
@@ -287,39 +244,6 @@ def _check_documentation(res: Results, referenced: set[str]) -> None:
                 f"{document} names {name}",
                 f"none of {terms!r} present",
             )
-
-
-def _check_gate_routing(
-    res: Results, actual: Counter[tuple[str, str, str]]
-) -> None:
-    gate = _load_gate()
-    routed = getattr(gate, "CODEX_GATED_TOOL_NAMES", None)
-    res.check(routed == frozenset({"Bash"}), "gate dispatch surface is exactly Bash")
-    pretool_matchers = {
-        matcher
-        for event, matcher, script in actual
-        if event == "PreToolUse" and script == "git_controller_gate.py"
-    }
-    res.check(
-        pretool_matchers == {"^Bash$"},
-        "manifest routes exactly the gate dispatch surface",
-    )
-
-
-def _check_security_claim(res: Results) -> None:
-    security = " ".join(
-        (PLUGIN_ROOT / "SECURITY.md").read_text(encoding="utf-8").split()
-    )
-    adversarial_claim = (
-        "even when `AGENT_IDENTITY`, `AGENT_INSTANCE_ID`, `AGENT_SESSION_LABEL`, "
-        "`AGENT_SESSION_ID`, and the hook payload's `session_id` are all set to "
-        "`Git-Controller`, a missing or non-controller `AGENT_ROLE` still blocks a "
-        "detected mutation."
-    )
-    res.check(
-        adversarial_claim in security,
-        "SECURITY.md pins the adversarial identity result",
-    )
 
 
 def _check_stop_binding(res: Results, hooks: dict[object, object]) -> None:
@@ -349,9 +273,7 @@ def main() -> int:
     res.check(actual == EXPECTED, "registered event/matcher/script inventory is exact", repr(actual))
     _check_stop_binding(res, hooks)
     _check_documentation(res, referenced)
-    _check_gate_routing(res, actual)
     _check_source_contract(res)
-    _check_security_claim(res)
     return res.finish()
 
 

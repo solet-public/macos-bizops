@@ -37,11 +37,18 @@ cutover, and the same class for role/direct wake outbox bookkeeping columns.
 
 from __future__ import annotations
 
+import copy
 import operator
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
+from ananta.llm.agent_messaging.state_results import (
+    require_completed,
+    require_records,
+    require_updated,
+)
 from ananta.services.state_service.ordered_query import (
     apply_ordered_query_in_memory,
     parse_ordered_query,
@@ -130,8 +137,6 @@ def _err(
     return {"action_status": "failed", "error": error, "data": {}}
 
 
-
-
 _COMPARISON_MATCHERS: dict[str, Callable[[Any, Any], bool]] = {
     "lt": operator.lt,
     "lte": operator.le,
@@ -168,8 +173,7 @@ def _match_dict_op(cell: Any, want: dict[str, Any]) -> bool:
         raise ValueError(f"RealShapeState._match_one: unsupported dict-op filter {want!r}")
     if "value" not in want:
         raise ValueError(
-            f"RealShapeState._match_one: filter op {op!r} requires a 'value' "
-            "(the real provider raises the same way)",
+            f"RealShapeState._match_one: filter op {op!r} requires a 'value' (the real provider raises the same way)",
         )
     if cell is None:
         # SQL three-valued logic: any comparison against NULL is UNKNOWN, never
@@ -198,6 +202,16 @@ class RealShapeState:
         # postgres providers reject these writes, so the fake must fail the same way.
         self._enforced_columns: dict[str, frozenset[str]] = _schema_enforcement()
 
+    @contextmanager
+    def transactional(self) -> Iterator[_RealShapeTransaction]:
+        """Yield transaction-shaped methods and roll back rows on exceptions."""
+        saved_rows = copy.deepcopy(self._rows)
+        try:
+            yield _RealShapeTransaction(self)
+        except Exception:
+            self._rows = saved_rows
+            raise
+
     # -- test controls -------------------------------------------------
     def fail_next(self, op: str) -> None:
         """Make the NEXT op of kind ``op`` return a provider-error ActionResult."""
@@ -210,7 +224,9 @@ class RealShapeState:
         return None
 
     def _reject_unknown_columns(
-        self, table: str, columns: Any,
+        self,
+        table: str,
+        columns: Any,
     ) -> dict[str, Any] | None:
         """Model the postgres 'column does not exist' rejection for an enforced table."""
         allowed = self._enforced_columns.get(table)
@@ -219,8 +235,7 @@ class RealShapeState:
         unknown = sorted(str(c) for c in columns if c not in allowed)
         if unknown:
             return _err(
-                f"column(s) {unknown} do not exist on {table!r} (not in the declared "
-                "schema) — postgres would reject this write",
+                f"column(s) {unknown} do not exist on {table!r} (not in the declared schema) — postgres would reject this write",
             )
         return None
 
@@ -272,9 +287,7 @@ class RealShapeState:
             return failed
         table = str(query["table"])
         filters = dict(query.get("filters", {}))
-        rows = [
-            dict(r) for r in self._table(namespace, table) if self._match(r, filters)
-        ]
+        rows = [dict(r) for r in self._table(namespace, table) if self._match(r, filters)]
         return _ok({"records": rows, "count": len(rows)})
 
     def query_ordered(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
@@ -360,7 +373,10 @@ class RealShapeState:
         return _ok({"result": {"generated_id": record["id"], "inserted": 1}})
 
     def update_state(
-        self, namespace: str, query: dict[str, Any], updates: dict[str, Any],
+        self,
+        namespace: str,
+        query: dict[str, Any],
+        updates: dict[str, Any],
     ) -> dict[str, Any]:
         failed = self._maybe_fail("update")
         if failed is not None:
@@ -399,7 +415,10 @@ class RealShapeState:
 
     # -- key-value ----------------------------------------------------
     def get_key_value(
-        self, namespace: str, key: str, scope: str = "GLOBAL",
+        self,
+        namespace: str,
+        key: str,
+        scope: str = "GLOBAL",
     ) -> dict[str, Any]:
         failed = self._maybe_fail("get_kv")
         if failed is not None:
@@ -425,6 +444,32 @@ class RealShapeState:
     # -- assertion helper --------------------------------------------
     def rows(self, namespace: str, table: str) -> list[dict[str, Any]]:
         return self._table(namespace, table)
+
+
+class _RealShapeTransaction:
+    """Transaction API used by production state consumers in test fakes."""
+
+    def __init__(self, state: RealShapeState) -> None:
+        self._state = state
+
+    def query_state(self, namespace: str, query: dict[str, Any]) -> list[dict[str, Any]]:
+        return require_records(self._state.query_state(namespace, query))
+
+    def write_state(self, namespace: str, data: dict[str, Any]) -> str:
+        rows = self._state._table(namespace, str(data["table"]))
+        if any(row.get("id") == data["record"].get("id") for row in rows):
+            raise RuntimeError("duplicate primary key")
+        result = require_completed(self._state.write_state(namespace, data), "transaction insert")
+        return str(result["result"]["generated_id"])
+
+    def update_state(
+        self,
+        namespace: str,
+        query: dict[str, Any],
+        updates: dict[str, Any],
+    ) -> int:
+        updates = {**updates, "updated_at": self._state.now_iso()}
+        return require_updated(self._state.update_state(namespace, query, updates))
 
 
 class CapEnforcingState:
@@ -463,9 +508,7 @@ class CapEnforcingState:
             return result
         table = str(query.get("table", ""))
         return _err(
-            f"read_state on table {table!r} returned more than the "
-            f"{MAX_READ_ROWS}-row cap for a query with no explicit 'limit'. "
-            f"Refused rather than truncated.",
+            f"read_state on table {table!r} returned more than the {MAX_READ_ROWS}-row cap for a query with no explicit 'limit'. Refused rather than truncated.",
             code="query.unbounded_read_over_cap",
             details={"namespace": namespace, "table": table, "cap_rows": MAX_READ_ROWS},
         )

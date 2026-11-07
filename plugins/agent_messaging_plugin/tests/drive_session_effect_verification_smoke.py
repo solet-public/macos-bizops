@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
+from _register_unit_double import fixture_assignment  # noqa: E402
 
 from agent_messaging_plugin import session_hosts  # noqa: E402
 from agent_messaging_plugin import tmux_adapter as tmux_module  # noqa: E402
@@ -160,7 +161,7 @@ def _live_session(
         state,
         ManagedSessionSpec(
             agent_instance_id=agent_instance_id, lane_id="lane-drive-honesty",
-            brief_ref="", work_class="read_only",
+            assignment=fixture_assignment(), work_class="read_only",
             budget_line="fleet:session-mgmt-bugwave-2026-08-19", host=host,
         ),
     )

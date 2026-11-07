@@ -44,8 +44,9 @@ EMBEDDING_DESCRIPTION: Start and supervise a managed worker through one durable 
 [ ] 2. Atomically dispatch the managed worker
     RESULT_PROCESSOR_KIND: deterministic_continuation
     a) Call `plugin::agent_messaging_plugin::dispatch_managed_work` with every Input Contract field.
-    b) Record the returned `dispatch_id`, attempt identity, state, and first-turn evidence.
-    c) Treat `uptake_pending` as "submission confirmed; ACK absent" and `uptake_uncertain` as "submission failed or is unknown". Neither is active work. A host failure returns the durable failed-start dispatch identity/state/version and remains supervised.
+    b) Retain the returned `data.job_id`. Schedule `service_interface::job_service::get_job` with that exact id. If the job is queued or processing, schedule another read and keep this step pending; never submit the launch again. Handle error/cancelled jobs using their stored error and original failure data.
+    c) Only after terminal retrieval, record `dispatch_id`, attempt identity, state, and first-turn evidence from `job.result.data`. The receipt itself supplies none of these fields.
+    d) Treat `uptake_pending` as "submission confirmed; ACK absent" and `uptake_uncertain` as "submission failed or is unknown". Neither is active work. A host failure returns the durable failed-start dispatch identity/state/version and remains supervised.
 
 [ ] 3. Require a structured model-turn ACK
     RESULT_PROCESSOR_KIND: deterministic_continuation
@@ -56,7 +57,7 @@ EMBEDDING_DESCRIPTION: Start and supervise a managed worker through one durable 
     RESULT_PROCESSOR_KIND: deterministic_continuation
     a) The worker reports `milestone`, `blocked`, or `completion` through `report_managed_dispatch`, always with the current causal version and attempt identity.
     b) `blocked_internal` names the coordinator-owned question, evidence, safe options, exact owner, and a timezone-aware future decision deadline. `blocked_operator` uses owner `operator` and names the authority gap and exact question.
-    c) The coordinator answers, retries, cancels, or accepts/rejects through `plugin::agent_messaging_plugin::resolve_managed_dispatch`; a stale causal version is rejected and retained for audit.
+    c) The coordinator answers, retries, cancels, or accepts/rejects through `plugin::agent_messaging_plugin::resolve_managed_dispatch`; a stale causal version is rejected and retained for audit. This resolution call also returns a job receipt: schedule exact-id `get_job` reads until terminal and inspect `job.result` before using its version, replacement attempt, or resolution outcome.
 
 [ ] 5. Supervise from durable platform state
     RESULT_PROCESSOR_KIND: deterministic_continuation
@@ -68,7 +69,8 @@ EMBEDDING_DESCRIPTION: Start and supervise a managed worker through one durable 
     RESULT_PROCESSOR_KIND: deterministic_continuation
     a) A worker completion event must name the exact expected path, current artifact SHA-256, completion-contract digest, allowed verdict, every required evidence obligation, and an explicit reason for each skip/not-applicable item.
     b) The coordinator re-reads and re-hashes the artifact, independently checks every declared obligation/verdict, binds acceptance to the exact worker-evidence digest, then calls `resolve_managed_dispatch(action="accept_completion")` with a fresh event ID and current version.
-    c) Request scoped Git-Controller landing separately. Dispatch completion never mutates Git and never proves landing, deployment, or publication.
+    c) Retrieve the acceptance job by its returned id until terminal, and require the original acceptance result before reporting the dispatch complete.
+    d) Request scoped Git-Controller landing separately. Dispatch completion never mutates Git and never proves landing, deployment, or publication.
 
 ## Binding Guidance
 

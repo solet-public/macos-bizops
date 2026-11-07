@@ -22,6 +22,12 @@ Verbs (all EDGE):
   - trigger_campaign                                         — write (side-effecting; the flow it runs is NOT readable first — see the KB's campaign flow inspection article)
   - list_static_lists                                        — read, ASYNC
   - add_leads_to_list / remove_leads_from_list               — write
+  - describe_/get_/sync_/delete_ companies, opportunities, opportunity_roles,
+    sales_persons, named_accounts, custom_objects; get_/sync_/delete_
+    named_account_lists; get_/add_/remove_named_account_list_members;
+    list_custom_object_types                                 — read ASYNC (describe/get/list) and
+                                                               write ASYNC (sync/delete/add/remove, destructive delete);
+                                                               see lead_database_objects.py
   - test_connection                                          — diagnostic (credentials reachable)
   - check_setup                                              — diagnostic (which READ capabilities the Role grants; PARTIAL, see docstring)
   - check_marketo_job_status                                 — diagnostic (poll an ASYNC verb's dispatched job)
@@ -39,7 +45,8 @@ through AsyncJobManager's completion_handlers exactly as
 comfyui_image_generation_plugin's generate_image does (the production exemplar
 this migration follows), and check_marketo_job_status is the caller-polling
 fallback for direct process_call callers, mirroring comfyui's
-check_generation_status. Every other verb below is still unmigrated and still
+check_generation_status. The generic request verb also uses this worker.
+The remaining older verbs below are still unmigrated and still
 runs its vendor call inline on the dispatch await via self._run — that
 includes create_or_update_leads/delete_leads/merge_leads/add_leads_to_list/
 remove_leads_from_list/trigger_campaign/test_connection/check_setup, all named
@@ -58,11 +65,15 @@ allowlist entry needed.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
+from collections import deque
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from ananta.core.actions.action_metadata import (
     ContextHandling,
@@ -83,7 +94,9 @@ from ananta.interfaces.edge_process_provider import (
     EdgeProcessProvider,
 )
 
-from . import completion_templates, export_containment, marketing_actions
+from . import asset_api, asset_process_metadata, completion_templates, export_containment, lead_database_objects, marketing_actions
+from . import lead_database_process_metadata as object_metadata
+from . import request as generic_request
 from .app_config import AppConfigError, AppConfigLoader
 from .constants import (
     CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
@@ -92,15 +105,18 @@ from .constants import (
     DEFAULT_ROW_LIMIT,
     ERROR_ADDRESS_BOOK_NOT_AVAILABLE,
     ERROR_API_ERROR,
+    ERROR_AUTH_FAILED,
     ERROR_INVALID_PARAMS,
     ERROR_JOB_NOT_FOUND,
     ERROR_NOT_CONFIGURED,
+    ERROR_PERMISSION_DENIED,
     MARKETO_LIST_PAGE_ROW_CAP,
     MARKETO_LIST_ROW_LIMIT_CAP,
     PARAM_ACKNOWLEDGE_OVERRIDE,
     PARAM_JOB_ID,
     PARAM_ROW_LIMIT,
     PLUGIN_NAME,
+    REQUEST_VERB_LABEL,
     RESULT_TYPE_ADD_LEADS_TO_LIST,
     RESULT_TYPE_CHECK_MARKETO_JOB_STATUS,
     RESULT_TYPE_CHECK_SETUP,
@@ -115,6 +131,7 @@ from .constants import (
     RESULT_TYPE_LIST_STATIC_LISTS,
     RESULT_TYPE_MERGE_LEADS,
     RESULT_TYPE_REMOVE_LEADS_FROM_LIST,
+    RESULT_TYPE_REQUEST,
     RESULT_TYPE_TEST_CONNECTION,
     RESULT_TYPE_TRIGGER_CAMPAIGN,
 )
@@ -125,6 +142,15 @@ from .errors import (
     classify_marketo_envelope,
 )
 from .http_client import MarketoAuthError, MarketoClient
+from .lead_database_objects import (
+    COMPANIES,
+    CUSTOM_OBJECTS,
+    NAMED_ACCOUNT_LISTS,
+    NAMED_ACCOUNTS,
+    OPPORTUNITIES,
+    OPPORTUNITY_ROLES,
+    SALES_PERSONS,
+)
 
 if TYPE_CHECKING:
     from ananta.core.state.async_job_manager import AsyncJobManager
@@ -132,6 +158,7 @@ if TYPE_CHECKING:
 # Background worker's handler per async-dispatched action name — the actual
 # vendor I/O, run off the dispatch path (D0.3 deferred-completion shape).
 _JOB_EXECUTORS: dict[str, Callable[[MarketoClient, dict[str, Any]], dict[str, Any]]] = {
+    "request": generic_request.execute_request,
     "get_leads": marketing_actions.execute_get_leads,
     "get_activities": marketing_actions.execute_get_activities,
     "list_campaigns": marketing_actions.execute_list_campaigns,
@@ -139,7 +166,12 @@ _JOB_EXECUTORS: dict[str, Callable[[MarketoClient, dict[str, Any]], dict[str, An
     "describe_lead_fields": marketing_actions.execute_describe_lead_fields,
     "list_activity_types": marketing_actions.execute_list_activity_types,
     "get_api_usage": marketing_actions.execute_get_api_usage,
+    **dict.fromkeys(lead_database_objects.VERB_OPERATIONS, lead_database_objects.execute),
+    **dict.fromkeys(asset_api.ENDPOINTS, asset_api.execute),
 }
+
+_HTTP_UNAUTHORIZED = 401
+_HTTP_FORBIDDEN = 403
 
 _JOB_PROVIDER_PREFIX = f"{PLUGIN_NAME}."
 
@@ -158,12 +190,92 @@ def _eligible_marketo_job(
     provider_name = job.get("provider_name")
     if not isinstance(provider_name, str) or not provider_name.startswith(_JOB_PROVIDER_PREFIX):
         return None
-    action_name = provider_name[len(_JOB_PROVIDER_PREFIX):]
+    action_name = provider_name[len(_JOB_PROVIDER_PREFIX) :]
     executor = _JOB_EXECUTORS.get(action_name)
     job_id = job.get("id")
     if executor is None or not isinstance(job_id, str):
         return None
     return job_id, action_name, executor
+
+
+# A single running operation and FIFO async turn reservations preserve ordering.
+# Waiting callers never occupy an executor worker or its submission queue.
+# The process owns this pool across plugin stop/restart; Python retires it at exit.
+_F5_WORKERS = 1
+_F5_PENDING_BOUND = 1
+_F5_EXECUTOR = ThreadPoolExecutor(max_workers=_F5_WORKERS, thread_name_prefix="marketo-f5")
+_F5_SUBMISSION_LOCK = threading.RLock()
+_f5_in_flight: Future[object] | None = None
+_f5_turn: Future[None] | None = None
+_f5_waiters: deque[Future[None]] = deque()
+logging.getLogger(__name__).info("F5 executor marketo-f5: workers=%s pending=%s", _F5_WORKERS, _F5_PENDING_BOUND)
+
+
+def _release_f5_turn(turn: Future[None]) -> None:
+    global _f5_turn
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is not turn:
+            return
+        if _f5_waiters:
+            next_turn = _f5_waiters.popleft()
+            _f5_turn = next_turn
+            next_turn.set_result(None)
+        else:
+            _f5_turn = None
+
+
+def _cancel_f5_waiter(turn: Future[None]) -> None:
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is turn:
+            _release_f5_turn(turn)
+        elif turn in _f5_waiters:
+            _f5_waiters.remove(turn)
+            turn.cancel()
+
+
+def _complete_f5_operation(turn: Future[None], done: Future[object]) -> None:
+    global _f5_in_flight
+    with _F5_SUBMISSION_LOCK:
+        if _f5_in_flight is done:
+            _f5_in_flight = None
+        _release_f5_turn(turn)
+
+
+def _report_f5_late_failure(done: Future[object]) -> None:
+    error = done.exception()
+    if error is not None:
+        logging.getLogger(__name__).error("F5 operation failed after its waiter cancelled: %s", error)
+
+
+async def _run_f5_blocking[T](operation: Callable[[], T]) -> T:
+    """Reserve FIFO order before waiting; cancellation retains active ownership."""
+    global _f5_in_flight, _f5_turn
+    turn = Future[None]()
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is None:
+            _f5_turn = turn
+            turn.set_result(None)
+        else:
+            _f5_waiters.append(turn)
+    try:
+        await asyncio.shield(asyncio.gather(asyncio.wrap_future(turn), return_exceptions=True))
+    except asyncio.CancelledError:
+        _cancel_f5_waiter(turn)
+        raise
+    try:
+        with _F5_SUBMISSION_LOCK:
+            future = _F5_EXECUTOR.submit(copy_context().run, operation)
+            _f5_in_flight = cast(Future[object], future)
+    except BaseException:
+        _release_f5_turn(turn)
+        raise
+    future.add_done_callback(lambda done: _complete_f5_operation(turn, cast(Future[object], done)))
+    try:
+        await asyncio.shield(asyncio.gather(asyncio.wrap_future(future), return_exceptions=True))
+    except asyncio.CancelledError:
+        future.add_done_callback(lambda done: _report_f5_late_failure(cast(Future[object], done)))
+        raise
+    return future.result()
 
 
 class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
@@ -176,8 +288,8 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
     the platform's ``FlowManager._sequence_cache`` concurrency caveat from
     applying here (see D0.3 doctrine §2). The worker processes
     ``get_leads``/``get_activities``/``list_campaigns``/``list_static_lists``
-    jobs queued by their dispatch handlers below; every other verb is still
-    unmigrated and still runs inline on the dispatch path via ``self._run``.
+    jobs and the generic ``request`` through their dispatch handlers below;
+    the remaining older write/diagnostic verbs still run inline via ``self._run``.
     """
 
     name: str = PLUGIN_NAME
@@ -239,10 +351,7 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
         self.logger = logging.getLogger(self.name)
         self._address_book_service = self.orchestrator_ref.get_service("address_book_service")
         if self._address_book_service is None:
-            raise RuntimeError(
-                f"{ERROR_ADDRESS_BOOK_NOT_AVAILABLE}: {self.name} requires "
-                "address_book_service to resolve the marketo_instance credentials"
-            )
+            raise RuntimeError(f"{ERROR_ADDRESS_BOOK_NOT_AVAILABLE}: {self.name} requires address_book_service to resolve the marketo_instance credentials")
         self._app_config_loader = AppConfigLoader(self._address_book_service)
         self.set_ready()
 
@@ -345,13 +454,10 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
         raw_roots = config.get(CONFIG_KEY_EXPORT_ALLOWED_ROOTS)
         roots: list[str] = []
         if raw_roots is not None:
-            if not isinstance(raw_roots, list) or not all(
-                isinstance(entry, str) for entry in raw_roots
-            ):
+            if not isinstance(raw_roots, list) or not all(isinstance(entry, str) for entry in raw_roots):
                 raise MarketoServiceError(
                     ERROR_NOT_CONFIGURED,
-                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory "
-                    "path strings",
+                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory path strings",
                 )
             roots = list(raw_roots)
         return export_containment.assert_export_path_allowed(
@@ -395,6 +501,7 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
         notes: str,
         prepare: Callable[[], dict[str, Any]],
         state: dict[str, Any],
+        result_kind: Literal["export", "write", "asset"] = "export",
     ) -> dict[str, Any]:
         """Ms-scale D0.3 dispatch: validate, create a job, return {job_id, status}.
 
@@ -411,7 +518,7 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
             code, message = self._classify_exception(exc, action_name)
             return self._error(code, message)
         request_data["notes"] = notes
-        job_metadata = completion_templates.build_job_metadata(session_id, flow_id, verb_label)
+        job_metadata = completion_templates.build_job_metadata(session_id, flow_id, verb_label, result_kind=result_kind)
         result = manager.create_job(
             plugin_name=PLUGIN_NAME,
             action_name=action_name,
@@ -420,6 +527,29 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
             job_metadata=job_metadata,
         )
         return self._job_creation_response(result, action_name)
+
+    def _dispatch_object_verb(self, verb: str, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Dispatch one typed Lead Database object verb (see lead_database_objects.VERB_OPERATIONS)."""
+        family, operation = lead_database_objects.VERB_OPERATIONS[verb]
+        is_write = lead_database_objects.is_write_verb(verb)
+        return self._dispatch_async_job(
+            action_name=verb,
+            verb_label=f"{family.label} {operation}" + (" (changes vendor state)" if is_write else ""),
+            notes=f"Marketo {verb}",
+            prepare=lambda: lead_database_objects.prepare(verb, params, self._export_path_gate),
+            state=state,
+            result_kind="write" if is_write else "export",
+        )
+
+    def _dispatch_asset_verb(self, verb: str, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async_job(
+            action_name=verb,
+            verb_label=f"asset {verb}",
+            notes=f"Marketo {verb}",
+            prepare=lambda: asset_api.prepare(verb, params, self._export_path_gate),
+            state=state,
+            result_kind="asset" if asset_api.is_write(verb) else "export",
+        )
 
     def _job_creation_response(self, result: dict[str, Any], action_name: str) -> dict[str, Any]:
         """Interpret AsyncJobManager.create_job's result into a dispatch response."""
@@ -448,7 +578,7 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
         if isinstance(exc, MarketoEnvelopeError):
             return classify_marketo_envelope(exc)
         if isinstance(exc, MarketoTransportError):
-            return ERROR_API_ERROR, "Marketo API call failed (transport fault)."
+            return _classify_transport(exc)
         # A bare RuntimeError (e.g. _require_client/_require_async_job_manager's
         # "not yet available" faults) preserves its own message rather than
         # falling through to the generic catch-all below — must be checked
@@ -466,6 +596,10 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
     @service_lifecycle(operation="start")
     async def start_services(self) -> ActionResult:
         """Start the background worker that processes queued Marketo jobs."""
+        return await _run_f5_blocking(self._f5_start_services)
+
+    def _f5_start_services(self) -> ActionResult:
+        """Start the background worker that processes queued Marketo jobs."""
         if self._services_started:
             return self._service_action_result({"message": "marketo_plugin worker already running"})
         self._stop_event.clear()
@@ -479,12 +613,14 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
         self._service_started_at = datetime.now(UTC).isoformat()
         if self.logger:
             self.logger.debug("marketo_plugin worker started")
-        return self._service_action_result(
-            {"message": "marketo_plugin worker started", "started_at": self._service_started_at}
-        )
+        return self._service_action_result({"message": "marketo_plugin worker started", "started_at": self._service_started_at})
 
     @service_lifecycle(operation="stop")
     async def stop_services(self) -> ActionResult:
+        """Stop the background worker gracefully."""
+        return await _run_f5_blocking(self._f5_stop_services)
+
+    def _f5_stop_services(self) -> ActionResult:
         """Stop the background worker gracefully."""
         if not self._services_started:
             return self._service_action_result({"message": "marketo_plugin worker already stopped"})
@@ -572,6 +708,7 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
 
     def get_edge_process_definitions(self) -> dict[str, EdgeProcessDefinition]:
         return {
+            "request": _edge("request", RESULT_TYPE_REQUEST, retryable=False),
             "describe_lead_fields": _edge("describe_lead_fields", RESULT_TYPE_DESCRIBE_LEAD_FIELDS, retryable=True),
             "get_leads": _edge("get_leads", RESULT_TYPE_GET_LEADS, retryable=True),
             "get_api_usage": _edge("get_api_usage", RESULT_TYPE_GET_API_USAGE, retryable=True),
@@ -588,13 +725,55 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
             "test_connection": _edge("test_connection", RESULT_TYPE_TEST_CONNECTION, retryable=True),
             "check_setup": _edge("check_setup", RESULT_TYPE_CHECK_SETUP, retryable=True),
             "check_marketo_job_status": _edge(
-                "check_marketo_job_status", RESULT_TYPE_CHECK_MARKETO_JOB_STATUS, retryable=False,
+                "check_marketo_job_status",
+                RESULT_TYPE_CHECK_MARKETO_JOB_STATUS,
+                retryable=False,
             ),
+            **{verb: _edge(verb, lead_database_objects.result_type(verb), retryable=not lead_database_objects.is_write_verb(verb)) for verb in lead_database_objects.VERB_OPERATIONS},
+            **{verb: _edge(verb, asset_api.result_type(verb), retryable=not asset_api.is_write(verb)) for verb in asset_api.ENDPOINTS},
         }
 
     # ------------------------------------------------------------------
     # @platform_process implementations
     # ------------------------------------------------------------------
+
+    @platform_process(
+        name="request",
+        display_name="Marketo: Authenticated Request",
+        description=(
+            "Queue an authenticated request to any relative Marketo REST, Asset, Bulk or Identity path. "
+            "GET/POST/PUT/PATCH/DELETE and vendor-permitted operations are forwarded; vendor RBAC is the boundary. "
+            "Poll check_marketo_job_status for HTTP status, body, nextPageToken, success/errors and retry_after. "
+            "Writes and deletes may change vendor state. The plugin supplies Authorization; credentials are redacted."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "method": ParameterMetadata(type=ParameterType.STRING, required=True, description="HTTP method, including GET, POST, PUT, PATCH or DELETE."),
+            "path": ParameterMetadata(type=ParameterType.STRING, required=True, description="Relative path on the registered instance, e.g. /bulk/v1/activities/export/create.json."),
+            "query": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Optional query parameters."),
+            "json_body": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Optional JSON body; use JSON or form, not both."),
+            "form_body": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Optional form-encoded body."),
+            "headers": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Optional string headers. Authorization is supplied by the plugin; Host must remain the registered tenant."),
+        },
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="A queued job handle; poll check_marketo_job_status for the vendor response.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Request job identifier."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Queued, not confirmation of vendor success."),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def request(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async_job(
+            action_name="request",
+            verb_label=REQUEST_VERB_LABEL,
+            notes="Marketo request",
+            prepare=lambda: generic_request.prepare_request(params),
+            state=state,
+        )
 
     @platform_process(
         name="describe_lead_fields",
@@ -701,10 +880,7 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
             "filter_type": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=(
-                    "A field from describe_lead_fields.searchable_fields for "
-                    "this Marketo instance."
-                ),
+                description=("A field from describe_lead_fields.searchable_fields for this Marketo instance."),
             ),
             "filter_values": ParameterMetadata(type=ParameterType.LIST, required=True, description="Up to 300 filter values to match."),
             "fields": ParameterMetadata(type=ParameterType.LIST, required=False, description="Optional list of lead field API names to return."),
@@ -716,19 +892,12 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
-                description=(
-                    f"Must be exactly true, together with row_limit, to fetch more than the "
-                    f"default {DEFAULT_ROW_LIMIT} leads."
-                ),
+                description=(f"Must be exactly true, together with row_limit, to fetch more than the default {DEFAULT_ROW_LIMIT} leads."),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Explicit record ceiling, up to {MARKETO_LIST_ROW_LIMIT_CAP}. Only honored "
-                    f"together with acknowledge_default_limit_override=true; refused (not clamped) "
-                    f"above {MARKETO_LIST_ROW_LIMIT_CAP}."
-                ),
+                description=(f"Explicit record ceiling, up to {MARKETO_LIST_ROW_LIMIT_CAP}. Only honored together with acknowledge_default_limit_override=true; refused (not clamped) above {MARKETO_LIST_ROW_LIMIT_CAP}."),
             ),
         },
         return_value_schema=ReturnValueSchema(
@@ -830,11 +999,7 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
                 type=ParameterType.STRING,
                 required=True,
                 description=(
-                    "Second-granularity ISO-8601 instant to read activities from "
-                    "(e.g. 2026-07-28T00:00:00-07:00). A fractional-seconds "
-                    "component is floor-truncated before the paging-token request; "
-                    "all other bytes are preserved. To read further than the "
-                    "effective row limit reaches, re-invoke with a later instant."
+                    "Second-granularity ISO-8601 instant to read activities from (e.g. 2026-07-28T00:00:00-07:00). A fractional-seconds component is floor-truncated before the paging-token request; all other bytes are preserved. To read further than the effective row limit reaches, re-invoke with a later instant."
                 ),
             ),
             "lead_ids": ParameterMetadata(
@@ -855,19 +1020,12 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
-                description=(
-                    f"Must be exactly true, together with row_limit, to fetch more than the "
-                    f"default {DEFAULT_ROW_LIMIT} activity items."
-                ),
+                description=(f"Must be exactly true, together with row_limit, to fetch more than the default {DEFAULT_ROW_LIMIT} activity items."),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Explicit record ceiling, up to {MARKETO_LIST_ROW_LIMIT_CAP}. Only honored "
-                    f"together with acknowledge_default_limit_override=true; refused (not clamped) "
-                    f"above {MARKETO_LIST_ROW_LIMIT_CAP}."
-                ),
+                description=(f"Explicit record ceiling, up to {MARKETO_LIST_ROW_LIMIT_CAP}. Only honored together with acknowledge_default_limit_override=true; refused (not clamped) above {MARKETO_LIST_ROW_LIMIT_CAP}."),
             ),
         },
         return_value_schema=ReturnValueSchema(
@@ -981,19 +1139,12 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
-                description=(
-                    f"Must be exactly true, together with row_limit, to fetch more than the "
-                    f"default {DEFAULT_ROW_LIMIT} campaigns."
-                ),
+                description=(f"Must be exactly true, together with row_limit, to fetch more than the default {DEFAULT_ROW_LIMIT} campaigns."),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Explicit record ceiling, up to {MARKETO_LIST_ROW_LIMIT_CAP}. Only honored "
-                    f"together with acknowledge_default_limit_override=true; refused (not clamped) "
-                    f"above {MARKETO_LIST_ROW_LIMIT_CAP}."
-                ),
+                description=(f"Explicit record ceiling, up to {MARKETO_LIST_ROW_LIMIT_CAP}. Only honored together with acknowledge_default_limit_override=true; refused (not clamped) above {MARKETO_LIST_ROW_LIMIT_CAP}."),
             ),
         },
         return_value_schema=ReturnValueSchema(
@@ -1071,19 +1222,12 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
-                description=(
-                    f"Must be exactly true, together with row_limit, to fetch more than the "
-                    f"default {DEFAULT_ROW_LIMIT} static lists."
-                ),
+                description=(f"Must be exactly true, together with row_limit, to fetch more than the default {DEFAULT_ROW_LIMIT} static lists."),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Explicit record ceiling, up to {MARKETO_LIST_ROW_LIMIT_CAP}. Only honored "
-                    f"together with acknowledge_default_limit_override=true; refused (not clamped) "
-                    f"above {MARKETO_LIST_ROW_LIMIT_CAP}."
-                ),
+                description=(f"Explicit record ceiling, up to {MARKETO_LIST_ROW_LIMIT_CAP}. Only honored together with acknowledge_default_limit_override=true; refused (not clamped) above {MARKETO_LIST_ROW_LIMIT_CAP}."),
             ),
         },
         return_value_schema=ReturnValueSchema(
@@ -1138,6 +1282,551 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
     def remove_leads_from_list(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         return self._run(lambda client: marketing_actions.remove_leads_from_list(client, params), "remove_leads_from_list")
 
+    # ------------------------------------------------------------------
+    # Asset folders and My Tokens
+    # ------------------------------------------------------------------
+
+    @platform_process(
+        name="get_asset_folder",
+        display_name="Marketo: Get Asset Folder",
+        description=asset_process_metadata.DESCRIPTIONS["get_asset_folder"],
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=asset_process_metadata.parameters("get_asset_folder"),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def get_asset_folder(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_asset_verb("get_asset_folder", params, state)
+
+    @platform_process(
+        name="get_asset_folder_by_name",
+        display_name="Marketo: Get Asset Folder By Name",
+        description=asset_process_metadata.DESCRIPTIONS["get_asset_folder_by_name"],
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=asset_process_metadata.parameters("get_asset_folder_by_name"),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def get_asset_folder_by_name(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_asset_verb("get_asset_folder_by_name", params, state)
+
+    @platform_process(
+        name="list_asset_folders",
+        display_name="Marketo: List Asset Folders",
+        description=asset_process_metadata.DESCRIPTIONS["list_asset_folders"],
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=asset_process_metadata.parameters("list_asset_folders"),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def list_asset_folders(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_asset_verb("list_asset_folders", params, state)
+
+    @platform_process(
+        name="get_asset_folder_content",
+        display_name="Marketo: Get Asset Folder Content",
+        description=asset_process_metadata.DESCRIPTIONS["get_asset_folder_content"],
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=asset_process_metadata.parameters("get_asset_folder_content"),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def get_asset_folder_content(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_asset_verb("get_asset_folder_content", params, state)
+
+    @platform_process(
+        name="create_asset_folder",
+        display_name="Marketo: Create Asset Folder",
+        description=asset_process_metadata.DESCRIPTIONS["create_asset_folder"],
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=asset_process_metadata.parameters("create_asset_folder"),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def create_asset_folder(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_asset_verb("create_asset_folder", params, state)
+
+    @platform_process(
+        name="update_asset_folder",
+        display_name="Marketo: Update Asset Folder",
+        description=asset_process_metadata.DESCRIPTIONS["update_asset_folder"],
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=asset_process_metadata.parameters("update_asset_folder"),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def update_asset_folder(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_asset_verb("update_asset_folder", params, state)
+
+    @platform_process(
+        name="delete_asset_folder",
+        display_name="Marketo: Delete Asset Folder",
+        description=asset_process_metadata.DESCRIPTIONS["delete_asset_folder"],
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=asset_process_metadata.parameters("delete_asset_folder"),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def delete_asset_folder(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_asset_verb("delete_asset_folder", params, state)
+
+    @platform_process(
+        name="get_asset_tokens",
+        display_name="Marketo: Get Asset Tokens",
+        description=asset_process_metadata.DESCRIPTIONS["get_asset_tokens"],
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=asset_process_metadata.parameters("get_asset_tokens"),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def get_asset_tokens(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_asset_verb("get_asset_tokens", params, state)
+
+    @platform_process(
+        name="set_asset_token",
+        display_name="Marketo: Set Asset Token",
+        description=asset_process_metadata.DESCRIPTIONS["set_asset_token"],
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=asset_process_metadata.parameters("set_asset_token"),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def set_asset_token(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_asset_verb("set_asset_token", params, state)
+
+    @platform_process(
+        name="delete_asset_token",
+        display_name="Marketo: Delete Asset Token",
+        description=asset_process_metadata.DESCRIPTIONS["delete_asset_token"],
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=asset_process_metadata.parameters("delete_asset_token"),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def delete_asset_token(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_asset_verb("delete_asset_token", params, state)
+
+    # ------------------------------------------------------------------
+    # Lead Database objects: companies, opportunities, opportunity roles, sales persons
+    # ------------------------------------------------------------------
+
+    @platform_process(
+        name="describe_companies",
+        display_name="Marketo: Describe Companies",
+        description=object_metadata.describe_description(COMPANIES),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.describe_parameters(COMPANIES),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def describe_companies(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("describe_companies", params, state)
+
+    @platform_process(
+        name="get_companies",
+        display_name="Marketo: Get Companies",
+        description=object_metadata.get_description(COMPANIES),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.get_parameters(COMPANIES),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def get_companies(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("get_companies", params, state)
+
+    @platform_process(
+        name="sync_companies",
+        display_name="Marketo: Sync Companies",
+        description=object_metadata.sync_description(COMPANIES),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.sync_parameters(COMPANIES),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def sync_companies(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("sync_companies", params, state)
+
+    @platform_process(
+        name="delete_companies",
+        display_name="Marketo: Delete Companies",
+        description=object_metadata.delete_description(COMPANIES),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.delete_parameters(COMPANIES),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def delete_companies(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("delete_companies", params, state)
+
+    @platform_process(
+        name="describe_opportunities",
+        display_name="Marketo: Describe Opportunities",
+        description=object_metadata.describe_description(OPPORTUNITIES),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.describe_parameters(OPPORTUNITIES),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def describe_opportunities(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("describe_opportunities", params, state)
+
+    @platform_process(
+        name="get_opportunities",
+        display_name="Marketo: Get Opportunities",
+        description=object_metadata.get_description(OPPORTUNITIES),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.get_parameters(OPPORTUNITIES),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def get_opportunities(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("get_opportunities", params, state)
+
+    @platform_process(
+        name="sync_opportunities",
+        display_name="Marketo: Sync Opportunities",
+        description=object_metadata.sync_description(OPPORTUNITIES),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.sync_parameters(OPPORTUNITIES),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def sync_opportunities(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("sync_opportunities", params, state)
+
+    @platform_process(
+        name="delete_opportunities",
+        display_name="Marketo: Delete Opportunities",
+        description=object_metadata.delete_description(OPPORTUNITIES),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.delete_parameters(OPPORTUNITIES),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def delete_opportunities(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("delete_opportunities", params, state)
+
+    @platform_process(
+        name="describe_opportunity_roles",
+        display_name="Marketo: Describe Opportunity Roles",
+        description=object_metadata.describe_description(OPPORTUNITY_ROLES),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.describe_parameters(OPPORTUNITY_ROLES),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def describe_opportunity_roles(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("describe_opportunity_roles", params, state)
+
+    @platform_process(
+        name="get_opportunity_roles",
+        display_name="Marketo: Get Opportunity Roles",
+        description=object_metadata.get_description(OPPORTUNITY_ROLES),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.get_parameters(OPPORTUNITY_ROLES),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def get_opportunity_roles(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("get_opportunity_roles", params, state)
+
+    @platform_process(
+        name="sync_opportunity_roles",
+        display_name="Marketo: Sync Opportunity Roles",
+        description=object_metadata.sync_description(OPPORTUNITY_ROLES),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.sync_parameters(OPPORTUNITY_ROLES),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def sync_opportunity_roles(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("sync_opportunity_roles", params, state)
+
+    @platform_process(
+        name="delete_opportunity_roles",
+        display_name="Marketo: Delete Opportunity Roles",
+        description=object_metadata.delete_description(OPPORTUNITY_ROLES),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.delete_parameters(OPPORTUNITY_ROLES),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def delete_opportunity_roles(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("delete_opportunity_roles", params, state)
+
+    @platform_process(
+        name="describe_sales_persons",
+        display_name="Marketo: Describe Sales Persons",
+        description=object_metadata.describe_description(SALES_PERSONS),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.describe_parameters(SALES_PERSONS),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def describe_sales_persons(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("describe_sales_persons", params, state)
+
+    @platform_process(
+        name="get_sales_persons",
+        display_name="Marketo: Get Sales Persons",
+        description=object_metadata.get_description(SALES_PERSONS),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.get_parameters(SALES_PERSONS),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def get_sales_persons(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("get_sales_persons", params, state)
+
+    @platform_process(
+        name="sync_sales_persons",
+        display_name="Marketo: Sync Sales Persons",
+        description=object_metadata.sync_description(SALES_PERSONS),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.sync_parameters(SALES_PERSONS),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def sync_sales_persons(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("sync_sales_persons", params, state)
+
+    @platform_process(
+        name="delete_sales_persons",
+        display_name="Marketo: Delete Sales Persons",
+        description=object_metadata.delete_description(SALES_PERSONS),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.delete_parameters(SALES_PERSONS),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def delete_sales_persons(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("delete_sales_persons", params, state)
+
+    # ------------------------------------------------------------------
+    # Lead Database objects: named accounts, named account lists, custom objects
+    # ------------------------------------------------------------------
+
+    @platform_process(
+        name="describe_named_accounts",
+        display_name="Marketo: Describe Named Accounts",
+        description=object_metadata.describe_description(NAMED_ACCOUNTS),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.describe_parameters(NAMED_ACCOUNTS),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def describe_named_accounts(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("describe_named_accounts", params, state)
+
+    @platform_process(
+        name="get_named_accounts",
+        display_name="Marketo: Get Named Accounts",
+        description=object_metadata.get_description(NAMED_ACCOUNTS),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.get_parameters(NAMED_ACCOUNTS),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def get_named_accounts(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("get_named_accounts", params, state)
+
+    @platform_process(
+        name="sync_named_accounts",
+        display_name="Marketo: Sync Named Accounts",
+        description=object_metadata.sync_description(NAMED_ACCOUNTS),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.sync_parameters(NAMED_ACCOUNTS),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def sync_named_accounts(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("sync_named_accounts", params, state)
+
+    @platform_process(
+        name="delete_named_accounts",
+        display_name="Marketo: Delete Named Accounts",
+        description=object_metadata.delete_description(NAMED_ACCOUNTS),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.delete_parameters(NAMED_ACCOUNTS),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def delete_named_accounts(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("delete_named_accounts", params, state)
+
+    @platform_process(
+        name="get_named_account_lists",
+        display_name="Marketo: Get Named Account Lists",
+        description=object_metadata.get_description(NAMED_ACCOUNT_LISTS),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.get_parameters(NAMED_ACCOUNT_LISTS),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def get_named_account_lists(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("get_named_account_lists", params, state)
+
+    @platform_process(
+        name="sync_named_account_lists",
+        display_name="Marketo: Sync Named Account Lists",
+        description=object_metadata.sync_description(NAMED_ACCOUNT_LISTS),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.sync_parameters(NAMED_ACCOUNT_LISTS),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def sync_named_account_lists(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("sync_named_account_lists", params, state)
+
+    @platform_process(
+        name="delete_named_account_lists",
+        display_name="Marketo: Delete Named Account Lists",
+        description=object_metadata.delete_description(NAMED_ACCOUNT_LISTS),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.delete_parameters(NAMED_ACCOUNT_LISTS),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def delete_named_account_lists(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("delete_named_account_lists", params, state)
+
+    @platform_process(
+        name="get_named_account_list_members",
+        display_name="Marketo: Get Named Account List Members",
+        description=object_metadata.GET_MEMBERS_DESCRIPTION,
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.get_members_parameters(),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def get_named_account_list_members(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("get_named_account_list_members", params, state)
+
+    @platform_process(
+        name="add_named_account_list_members",
+        display_name="Marketo: Add Named Account List Members",
+        description=object_metadata.ADD_MEMBERS_DESCRIPTION,
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.change_members_parameters(),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def add_named_account_list_members(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("add_named_account_list_members", params, state)
+
+    @platform_process(
+        name="remove_named_account_list_members",
+        display_name="Marketo: Remove Named Account List Members",
+        description=object_metadata.REMOVE_MEMBERS_DESCRIPTION,
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.change_members_parameters(),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def remove_named_account_list_members(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("remove_named_account_list_members", params, state)
+
+    @platform_process(
+        name="list_custom_object_types",
+        display_name="Marketo: List Custom Object Types",
+        description=object_metadata.LIST_TYPES_DESCRIPTION,
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.list_types_parameters(),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def list_custom_object_types(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("list_custom_object_types", params, state)
+
+    @platform_process(
+        name="describe_custom_objects",
+        display_name="Marketo: Describe Custom Objects",
+        description=object_metadata.describe_description(CUSTOM_OBJECTS),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.describe_parameters(CUSTOM_OBJECTS),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def describe_custom_objects(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("describe_custom_objects", params, state)
+
+    @platform_process(
+        name="get_custom_objects",
+        display_name="Marketo: Get Custom Objects",
+        description=object_metadata.get_description(CUSTOM_OBJECTS),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.get_parameters(CUSTOM_OBJECTS),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def get_custom_objects(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("get_custom_objects", params, state)
+
+    @platform_process(
+        name="sync_custom_objects",
+        display_name="Marketo: Sync Custom Objects",
+        description=object_metadata.sync_description(CUSTOM_OBJECTS),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.sync_parameters(CUSTOM_OBJECTS),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def sync_custom_objects(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("sync_custom_objects", params, state)
+
+    @platform_process(
+        name="delete_custom_objects",
+        display_name="Marketo: Delete Custom Objects",
+        description=object_metadata.delete_description(CUSTOM_OBJECTS),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=object_metadata.delete_parameters(CUSTOM_OBJECTS),
+        return_value_schema=object_metadata.JOB_HANDLE_SCHEMA,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def delete_custom_objects(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_object_verb("delete_custom_objects", params, state)
+
     @platform_process(
         name="test_connection",
         display_name="Marketo: Test Connection",
@@ -1177,29 +1866,25 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
         parameters={},
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description=(
-                "reads_verified (bool, READ capabilities only), checks (per-probe status + "
-                "guidance), writes_unverified (verb names whose permissions can't be probed "
-                "safely), writes_unverified_note."
-            ),
+            description=("reads_verified (bool, READ capabilities only), checks (per-probe status + guidance), writes_unverified (verb names whose permissions can't be probed safely), writes_unverified_note."),
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def check_setup(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda client: marketing_actions.check_setup(client), "check_setup"
-        )
+        return self._run(lambda client: marketing_actions.check_setup(client), "check_setup")
 
     @platform_process(
         name="check_marketo_job_status",
         display_name="Marketo: Check Async Job Status",
         description=(
-            "Poll the status of an async job dispatched by get_leads, get_activities, "
-            "list_campaigns, or list_static_lists. status is one of queued, processing, "
-            "completed, error, or cancelled. result carries the finished job's TSV handle "
-            "(path, row_count, columns, truncated) once status is completed, and is null "
-            "in every other state. error carries the classified marketo.* code + message "
+            "Poll the status of an async job dispatched by any queued Marketo verb (the lead, "
+            "activity, campaign and list reads, request, and the company, opportunity, opportunity "
+            "role, sales person, named account, named account list, custom object, asset folder and My Token verbs). "
+            "status is one of queued, processing, completed, error, "
+            "or cancelled. result carries the finished job's payload once status is completed (a "
+            "TSV handle for reads, per-record results and tallies for sync/delete, the HTTP "
+            "response for request), and is null in every other state. error carries the classified marketo.* code + message "
             "once status is error, and is null in every other state — poll again after "
             "check_after_seconds while status is queued or processing."
         ),
@@ -1208,7 +1893,7 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
             PARAM_JOB_ID: ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description="The job_id returned by get_leads/get_activities/list_campaigns/list_static_lists.",
+                description="The job_id returned by any queued Marketo verb.",
             ),
         },
         return_value_schema=ReturnValueSchema(
@@ -1219,7 +1904,7 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
                 "status": ParameterMetadata(type=ParameterType.STRING, description="queued, processing, completed, error, or cancelled."),
                 "result": ParameterMetadata(
                     type=ParameterType.OBJECT,
-                    description="The finished TSV handle (path, row_count, columns, truncated) once status is completed; null otherwise.",
+                    description="The finished job payload (TSV handle, per-record write results, or HTTP response) once status is completed; null otherwise.",
                 ),
                 "error": ParameterMetadata(
                     type=ParameterType.OBJECT,
@@ -1238,12 +1923,12 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
             manager = self._require_async_job_manager()
         except RuntimeError as exc:
             return self._error(ERROR_API_ERROR, str(exc))
-        job = self._extract_job_record(manager.get_job(job_id))
+        job = _extract_job_record(manager.get_job(job_id))
         if job is None:
             return self._error(ERROR_JOB_NOT_FOUND, f"Marketo job not found: {job_id}")
         status = job.get("status")
         status = status if isinstance(status, str) and status else "unknown"
-        result_payload, error_payload = self._terminal_job_payloads(manager, job_id, status)
+        result_payload, error_payload = _terminal_job_payloads(manager, job_id, status)
         return self._success(
             {
                 "job_id": job_id,
@@ -1253,37 +1938,53 @@ class MarketoPlugin(ServicePlugin, EdgeProcessProvider):
             }
         )
 
-    def _extract_job_record(self, job_result: dict[str, Any]) -> dict[str, Any] | None:
-        """Pull the job dict out of AsyncJobManager.get_job's envelope, or None."""
-        if job_result.get("action_status") != "completed":
-            return None
-        data = job_result.get("data", {})
-        candidate = data.get("job") if isinstance(data, dict) else None
-        return candidate if isinstance(candidate, dict) else None
 
-    def _terminal_job_payloads(
-        self, manager: AsyncJobManager, job_id: str, status: str,
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        """(result, error) for a terminal status; (None, None) otherwise.
+def _extract_job_record(job_result: dict[str, Any]) -> dict[str, Any] | None:
+    """Pull the job dict out of AsyncJobManager.get_job's envelope, or None."""
+    if job_result.get("action_status") != "completed":
+        return None
+    data = job_result.get("data", {})
+    candidate = data.get("job") if isinstance(data, dict) else None
+    return candidate if isinstance(candidate, dict) else None
 
-        Coordinator-seat advisory (2026-08-09): both keys must stay present on the
-        caller's response regardless — only the VALUE is conditional here.
-        """
-        if status == "completed":
-            return self._fetch_job_result_payload(manager, job_id, "result"), None
-        if status == "error":
-            return None, self._fetch_job_result_payload(manager, job_id, "error")
-        return None, None
 
-    def _fetch_job_result_payload(
-        self, manager: AsyncJobManager, job_id: str, payload_type: str,
-    ) -> dict[str, Any]:
-        payload_result = manager.get_job_payload(job_id, payload_type)
-        if payload_result.get("action_status") != "completed":
-            return {}
-        data = payload_result.get("data", {})
-        payload = data.get("payload") if isinstance(data, dict) else None
-        return payload if isinstance(payload, dict) else {}
+def _terminal_job_payloads(
+    manager: AsyncJobManager,
+    job_id: str,
+    status: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """(result, error) for a terminal status; (None, None) otherwise.
+
+    Coordinator-seat advisory (2026-08-09): both keys must stay present on the
+    caller's response regardless — only the VALUE is conditional here.
+    """
+    if status == "completed":
+        return _fetch_job_result_payload(manager, job_id, "result"), None
+    if status == "error":
+        return None, _fetch_job_result_payload(manager, job_id, "error")
+    return None, None
+
+
+def _fetch_job_result_payload(
+    manager: AsyncJobManager,
+    job_id: str,
+    payload_type: str,
+) -> dict[str, Any]:
+    payload_result = manager.get_job_payload(job_id, payload_type)
+    if payload_result.get("action_status") != "completed":
+        return {}
+    data = payload_result.get("data", {})
+    payload = data.get("payload") if isinstance(data, dict) else None
+    return payload if isinstance(payload, dict) else {}
+
+
+def _classify_transport(exc: MarketoTransportError) -> tuple[str, str]:
+    """A gateway 401/403 keeps its meaning; any other transport fault stays generic."""
+    if exc.status_code == _HTTP_UNAUTHORIZED:
+        return ERROR_AUTH_FAILED, "Marketo rejected the bearer credential (HTTP 401)."
+    if exc.status_code == _HTTP_FORBIDDEN:
+        return ERROR_PERMISSION_DENIED, "Marketo refused the call for this API user's Role (HTTP 403)."
+    return ERROR_API_ERROR, "Marketo API call failed (transport fault)."
 
 
 def _edge(

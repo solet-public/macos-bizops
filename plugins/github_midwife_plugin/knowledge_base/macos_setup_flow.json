@@ -673,7 +673,6 @@
       "minimum_selections": 1,
       "maximum_selections": 2,
       "recommended_option_refs": [
-        "codex",
         "claude_code"
       ],
       "option_source": {
@@ -807,7 +806,7 @@
     "git_mutation_control": {
       "title": "Git mutation control",
       "prompt": "How should Git mutations be controlled in this deployment?",
-      "description": "Choose a single-session exemption or designate one controller role; ask explicitly in both topologies.",
+      "description": "Choose Git work in a single session or record one designated controller role; ask explicitly in both topologies. Repository-owned controls govern Git mutations.",
       "selection_mode": "single",
       "required": true,
       "resolution_stage_ref": "decision_review",
@@ -820,25 +819,25 @@
         "options": {
           "single_session": {
             "label": "Single session",
-            "description": "Do not export a controller name; the Git-mutation gate remains unarmed.",
+            "description": "Do not export a controller name; Git work stays in the single session under repository-owned controls.",
             "availability": "supported",
             "implications": {
               "cost": "No additional controller session is required.",
               "privacy": "No additional Git-controller identity is exported to workers.",
-              "security": "The narrow single-session exemption leaves the mutation gate unarmed.",
+              "security": "Repository-owned controls govern Git mutations; omitting the controller name grants no exemption.",
               "operator_effort": "Git work stays in the one operator-controlled session.",
-              "performance": "Git-mutating work cannot be delegated safely to a fleet worker."
+              "performance": "Git work is handled by the single session."
             },
             "activates": {}
           },
           "designated_controller": {
             "label": "Designated controller",
-            "description": "Export one named Git controller to arm the shared-checkout mutation gate.",
+            "description": "Export the chosen Git-controller role name as a recorded coordination choice; repository-owned controls govern Git mutations.",
             "availability": "supported",
             "implications": {
               "cost": "A dedicated controller session is needed for Git mutations.",
               "privacy": "The controller role name is propagated to managed workers.",
-              "security": "The mutation gate blocks non-controller workers in the shared checkout.",
+              "security": "The exported role name does not enforce Git permissions; repository-owned controls govern mutations.",
               "operator_effort": "The controller must be provisioned before it can land work.",
               "performance": "Implementation can proceed in parallel while Git mutation remains serialized."
             },
@@ -2185,12 +2184,17 @@
         "~/.codex/config.toml",
         "Append [mcp_servers.<name>] and [mcp_servers.<name>.env] tables that point Codex at the newborn solet"
       ],
-      "required": true,
+      "required": false,
+      "required_when": {
+        "decision_ref": "coding_agents",
+        "operator": "contains",
+        "value": "codex"
+      },
       "explicit_assent": true,
       "decline": {
         "allowed": true,
         "state": "blocked",
-        "consequence": "Genesis does not run because every profile installs the named no-MCP launcher and its Codex MCP configuration together.",
+        "consequence": "Genesis pauses when Codex is selected because its MCP configuration requires consent. Claude Code alone needs no Codex configuration.",
         "reoffer": "settings_only"
       }
     },
@@ -3417,6 +3421,9 @@
         },
         "inference_implementation": {
           "decision_ref": "inference_implementation"
+        },
+        "selected_coding_agents": {
+          "decision_ref": "coding_agents"
         }
       },
       "idempotency": {
@@ -3443,6 +3450,11 @@
       "input_refs": [
         "git_controller_name"
       ],
+      "parameters": {
+        "selected_coding_agents": {
+          "decision_ref": "coding_agents"
+        }
+      },
       "idempotency": {
         "mode": "upsert",
         "precondition_probe_refs": [

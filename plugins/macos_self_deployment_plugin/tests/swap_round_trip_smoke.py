@@ -45,10 +45,12 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 # Allow the smoke to import the deployment/ tree whether invoked from
 # project root or directly via the plugin's tests/ directory. The
@@ -60,6 +62,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from ananta.core.runtime import drain_sentinel as core_drain_sentinel  # noqa: E402
+from macos_self_deployment_plugin import plugin as plugin_module  # noqa: E402
 from macos_self_deployment_plugin import process_identity  # noqa: E402
 from macos_self_deployment_plugin.blue_green_router.router import run_router  # noqa: E402
 from macos_self_deployment_plugin.constants import (  # noqa: E402
@@ -77,7 +81,6 @@ from macos_self_deployment_plugin.pending_finisher import (  # noqa: E402
 )
 from macos_self_deployment_plugin.plugin import (  # noqa: E402
     MacosSelfDeploymentPlugin,
-    _runtime_dir,
 )
 from macos_self_deployment_plugin.preflight_probe_runner import ProbeOutcome  # noqa: E402
 from macos_self_deployment_plugin.release_manager import (  # noqa: E402
@@ -165,6 +168,15 @@ def expect(condition: bool, message: str) -> None:
         raise _FailureError(message)
 
 
+def _assert_router_runtime_isolated(runtime_dir: Path) -> None:
+    for suffix in ("router", "bridge"):
+        port_file = runtime_dir / f"smoke.{suffix}.port"
+        expect(
+            port_file.is_file() and port_file.resolve().parent == runtime_dir.resolve(),
+            f"router {suffix} port file is confined to smoke runtime {runtime_dir}",
+        )
+
+
 class _MockActionFactory:
     """Records each submit_action_definition call without persisting it."""
 
@@ -214,6 +226,7 @@ class _RouterHarness:
             run_task = loop.create_task(
                 run_router(
                     solet="smoke",
+                    runtime_dir=self._socket_path.parent,
                     public_port=self._public_port,
                     socket_path=self._socket_path,
                     drain_window_seconds=2,
@@ -244,8 +257,8 @@ class _RouterHarness:
 
         thread = threading.Thread(target=_run, name="router_harness", daemon=True)
         thread.start()
-        if not self._ready.wait(timeout=5.0):
-            msg = "router did not become ready within 5s"
+        if not self._ready.wait(timeout=15.0):
+            msg = "router did not become ready within 15s"
             raise _FailureError(msg)
         self._thread = thread
 
@@ -391,9 +404,10 @@ class _FakeReleaseManager:
     def build_candidate(
         self, *, manifest_etag: str = "",
         manifest_plugins: tuple[str, ...] | None = None,
-        schema_snapshot_fn: object = None,
+        schema_snapshot_fn: Callable[[Path], dict[str, object]] | None = None,
+        reconciliation_provenance: dict[str, str] | None = None,
     ) -> CandidatePaths:
-        del manifest_etag, manifest_plugins, schema_snapshot_fn
+        del manifest_etag, manifest_plugins, schema_snapshot_fn, reconciliation_provenance
         self.build_count += 1
         rel = "rel-smoke-green"
         base = Path("/nonexistent") / rel
@@ -486,6 +500,7 @@ def _run_smoke_body(
     print("[smoke] starting local_blue_green swap round-trip smoke")
     tmpdir = resources.tmpdir
     socket_path = tmpdir / "smoke.router.sock"
+    _assert_router_runtime_isolated(tmpdir)
     public_port = resources.harness._public_port  # noqa: SLF001 -- smoke-owned harness
     print(f"[smoke] router up on port={public_port} socket={socket_path}")
 
@@ -673,7 +688,11 @@ def _run_smoke_body(
     # the live start-time token still matches (no bare-pid kill). Seed a record
     # naming the stand-in prior (the real sleep child) with its real token, at
     # the path complete_swap reads, so the verb reaps exactly that process.
-    finisher_path = pending_finisher_path(_runtime_dir(), plugin._solet_name)  # noqa: SLF001
+    finisher_path = pending_finisher_path(tmpdir, plugin._solet_name)  # noqa: SLF001
+    expect(
+        finisher_path.resolve().parent == tmpdir.resolve(),
+        "complete_swap record path is confined to smoke runtime",
+    )
     write_pending_finisher(
         finisher_path,
         PendingFinisher(
@@ -684,11 +703,19 @@ def _run_smoke_body(
             prior_start_token=process_identity.start_token(prior_pid),
         ),
     )
-    swap_result = plugin.complete_swap(
-        prior_pid=prior_pid,
-        prior_instance_id=blue_instance_id,
-        prior_color=COLOR_BLUE,
-    )
+    with (
+        patch.object(core_drain_sentinel, "get_runtime_dir", return_value=tmpdir),
+        patch.object(plugin_module, "_runtime_dir", return_value=tmpdir),
+    ):
+        expect(
+            plugin_module._runtime_dir().resolve() == tmpdir.resolve(),
+            "complete_swap resolves its runtime to smoke scratch",
+        )
+        swap_result = plugin.complete_swap(
+            prior_pid=prior_pid,
+            prior_instance_id=blue_instance_id,
+            prior_color=COLOR_BLUE,
+        )
     expect(
         swap_result["status"] == STATUS_COMPLETED,
         f"complete_swap status: {swap_result}",

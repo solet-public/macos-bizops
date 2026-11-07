@@ -63,6 +63,7 @@ import contextlib
 import json
 import logging
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -75,7 +76,10 @@ from threading import RLock
 from typing import TYPE_CHECKING, Any
 
 from .authority_contract import render_authority_delegation_contract
+from .claude_hook_commands import optional_hook_command
+from .coordination_receipt import declared_receipt_path, receipt_finding
 from .lane_worktrees import LaneWorktreeError, spawn_worktree_cwd, worktree_pythonpath
+from .register_unit_client import assignment_from_record
 from .schema import CAPTURE_SOURCE_INIT_EVENT
 from .solet_cli import (
     WakeCliResolver,
@@ -152,9 +156,8 @@ _WORKER_INJECTED_HOOK_FILENAMES: tuple[str, ...] = (
     "heartbeat_report_alive.py",
     "rotation_due_watch.py",
     "wake_waiter.py",
-    "check_messages_reminder.py",
+    "session_start_context.py",
     "step_zero_reminder.py",
-    "role_binding_reminder.py",
 )
 _PLUGIN_HOOKS_DIR_RELATIVE = Path(
     "plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks",
@@ -236,9 +239,9 @@ def _iter_managed_policies(
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             logger.warning(
-                "managed-settings preflight: %s exists but could not be read or "
-                "parsed — proceeding WITHOUT these checks (an unparseable policy "
-                "file is not evidence that anything is stripped)", path, exc_info=True,
+                "managed-settings preflight: %s exists but could not be read or parsed — proceeding WITHOUT these checks (an unparseable policy file is not evidence that anything is stripped)",
+                path,
+                exc_info=True,
             )
             continue
         if not isinstance(raw, dict):
@@ -271,7 +274,9 @@ def _managed_policy_voids_permission_rules(paths: tuple[Path, ...]) -> Path | No
 
 
 def _permission_state_report(
-    denied_tools: tuple[str, ...], *, denies_key: str,
+    denied_tools: tuple[str, ...],
+    *,
+    denies_key: str,
 ) -> dict[str, object]:
     """The §45.1 permission-state keys both drivers' capability reports carry.
 
@@ -362,8 +367,12 @@ def _warn_permission_denies_inert(
         "honoured on this host is the managed file's own permissions.deny — "
         "adding [%s] there is the fix, and it belongs to whoever administers "
         "that file.",
-        policy_path, _ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY, host, denied,
-        agent_instance_id, denied,
+        policy_path,
+        _ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY,
+        host,
+        denied,
+        agent_instance_id,
+        denied,
     )
     return policy_path
 
@@ -371,31 +380,19 @@ def _warn_permission_denies_inert(
 def _claude_bin_remedy(claude_bin: str) -> str | None:
     if claude_bin and os.access(claude_bin, os.X_OK):
         return None
-    return (
-        f"no executable 'claude' binary found (checked PATH via "
-        f"shutil.which, then {claude_bin!r}) — install Claude "
-        "Code or pass claude_bin explicitly."
-    )
+    return f"no executable 'claude' binary found (checked PATH via shutil.which, then {claude_bin!r}) — install Claude Code or pass claude_bin explicitly."
 
 
 def _solet_name_remedy(solet_name: str) -> str | None:
     if solet_name:
         return None
-    return (
-        "SOLET_NAME is not set — the spawned process cannot "
-        "discover its bridge port without it."
-    )
+    return "SOLET_NAME is not set — the spawned process cannot discover its bridge port without it."
 
 
 def _permission_mode_remedy(resolved_permission_mode: str) -> str | None:
     if resolved_permission_mode:
         return None
-    return (
-        f"no permission mode configured (neither a per-spawn override nor "
-        f"{_ENV_PERMISSION_MODE} is set) — an unattended headless worker "
-        "needs an explicit operator-ruled posture; this driver never "
-        "defaults to bypass."
-    )
+    return f"no permission mode configured (neither a per-spawn override nor {_ENV_PERMISSION_MODE} is set) — an unattended headless worker needs an explicit operator-ruled posture; this driver never defaults to bypass."
 
 
 def _mcp_config_remedy(resolved_transport: str, mcp_config_path: Path) -> str | None:
@@ -423,8 +420,7 @@ def _managed_policy_remedy(
     if degraded_hooks_acknowledged:
         return None
     policy_path = _managed_policy_strips_hooks(
-        managed_settings_paths if managed_settings_paths is not None
-        else _MANAGED_SETTINGS_PATHS,
+        managed_settings_paths if managed_settings_paths is not None else _MANAGED_SETTINGS_PATHS,
     )
     if policy_path is None:
         return None
@@ -452,15 +448,14 @@ def _resolve_local_label(spec: Mapping[str, object], *, agent_instance_id: str) 
     Shared by BOTH host drivers so the two can never disagree about what a
     worker is called — the tmux driver imports it from here.
     """
-    return (
-        str(spec.get("local_name") or "")
-        or str(spec.get("lane_id") or "")
-        or agent_instance_id
-    )
+    return str(spec.get("local_name") or "") or str(spec.get("lane_id") or "") or agent_instance_id
 
 
 def _announce_managed_policy(
-    degraded_ok: bool, *, agent_instance_id: str, host: str,
+    degraded_ok: bool,
+    *,
+    agent_instance_id: str,
+    host: str,
     denied_tools: tuple[str, ...],
 ) -> None:
     """Both spawn-time managed-policy announcements, in one call.
@@ -471,8 +466,10 @@ def _announce_managed_policy(
     """
     _log_degraded_spawn(degraded_ok, agent_instance_id=agent_instance_id)
     _warn_permission_denies_inert(
-        _MANAGED_SETTINGS_PATHS, agent_instance_id=agent_instance_id,
-        host=host, denied_tools=denied_tools,
+        _MANAGED_SETTINGS_PATHS,
+        agent_instance_id=agent_instance_id,
+        host=host,
+        denied_tools=denied_tools,
     )
 
 
@@ -483,10 +480,7 @@ def _log_degraded_spawn(degraded_ok: bool, *, agent_instance_id: str) -> None:
     if not degraded_ok or _managed_policy_strips_hooks(_MANAGED_SETTINGS_PATHS) is None:
         return
     logger.warning(
-        "DEGRADED SPAWN: %s is being spawned with degraded_hooks_acknowledged "
-        "set, onto a host whose managed policy strips non-plugin hooks. This "
-        "worker will run NONE of its injected hooks — it will not register, "
-        "heartbeat, or capture its session mapping. This was an explicit choice.",
+        "DEGRADED SPAWN: %s is being spawned with degraded_hooks_acknowledged set, onto a host whose managed policy strips non-plugin hooks. This worker will run NONE of its injected hooks — it will not register, heartbeat, or capture its session mapping. This was an explicit choice.",
         agent_instance_id,
     )
 
@@ -498,50 +492,28 @@ class WorkerHookResolutionError(RuntimeError):
 
 
 def _resolve_worker_hook_path(repo_root: Path, filename: str) -> Path:
-    """Two-rung resolution for one hook file a spawned worker's generated
-    ``--settings`` must reference by an EXISTING path.
+    """Prefer checkout then shipped plugin; missing optional hooks warn.
 
-    Rung 1: ``<repo_root>/.claude/hooks/<filename>`` -- the origin/dev
-    checkout's own copy. Always wins when present, preserving this
-    driver's pre-ladder behavior exactly for every dev checkout.
-
-    Rung 2: ``<repo_root>/plugins/github_midwife_plugin/claude_plugin/
-    coordination-hooks/hooks/<filename>`` -- the shipped fallback a born
-    clone still carries even with no ``.claude/hooks/`` directory at all.
-    Reads the CHECKOUT copy of the plugin tree deliberately, never the
-    version-keyed ``~/.claude/plugins/cache/<marketplace>/<plugin>/
-    <version>/`` install path -- immune to that path's own staleness trap
-    (Seed Publish Runbook: neither ``claude plugin install`` nor
-    ``claude plugin update`` re-copies changed hook content when
-    ``plugin.json``'s ``version`` is unchanged).
-
-    FAIL LOUD if neither rung resolves: never emit generated settings
-    pointing at a path that does not exist on disk -- that silent failure
-    (a `PreToolUse` hook naming a missing file blocks every subsequent
-    tool call) is exactly the defect this ladder exists to close."""
+    Keep an intended checkout path for the inline missing-target boundary.
+    Security guards retain the existing required-file refusal.
+    """
     rung1 = repo_root / ".claude" / "hooks" / filename
     if rung1.is_file():
         return rung1
     rung2 = repo_root / _PLUGIN_HOOKS_DIR_RELATIVE / filename
     if rung2.is_file():
         return rung2
+    if filename not in {"headless_tool_allowlist_gate.py", "lane_write_boundary.py", "remote_control_guard.py"}:
+        logger.warning("Optional worker hook %r missing at %s and %s; inline hook will advise and skip", filename, rung1, rung2)
+        return rung1
     raise WorkerHookResolutionError(
-        f"required worker hook {filename!r} resolves at neither rung "
-        f"probed: {rung1} (origin checkout) nor {rung2} (shipped plugin "
-        "fallback). Refusing to emit spawn settings pointing at a "
-        "nonexistent path.",
+        f"required worker hook {filename!r} resolves at neither rung probed: {rung1} (origin checkout) nor {rung2} (shipped plugin fallback). Refusing to emit spawn settings pointing at a nonexistent path.",
     )
 
 
 def _resolve_worker_hook_paths(repo_root: Path) -> dict[str, Path]:
-    """Resolve every hook a spawned worker's generated ``--settings`` needs,
-    keyed by filename. Raises :class:`WorkerHookResolutionError`, naming
-    the first file that resolves at neither rung, rather than resolving
-    the rest and reporting a partial/silent result."""
-    return {
-        name: _resolve_worker_hook_path(repo_root, name)
-        for name in _WORKER_INJECTED_HOOK_FILENAMES
-    }
+    """Keep every mapping key; only an unresolved security guard refuses."""
+    return {name: _resolve_worker_hook_path(repo_root, name) for name in _WORKER_INJECTED_HOOK_FILENAMES}
 
 
 def _resolve_worker_hook_paths_for_spawn(repo_root: Path) -> dict[str, Path]:
@@ -586,16 +558,21 @@ def _resolve_heartbeat_marker_dir() -> Path | None:
     return Path(app_home) / "data" / "heartbeat_marker"
 
 
-def _resolve_coordination_receipt_path() -> Path | None:
-    """The owner receipt is declared from APP_HOME, never inferred from cwd."""
-    app_home = os.environ.get("APP_HOME", "").strip()
-    if not app_home:
-        return None
-    return Path(app_home) / "data/coordination-hooks/claude/installation.v1.json"
+def _resolve_coordination_receipt_path(solet_name: str, reporter: Path) -> Path | None:
+    """The owner receipt, declared from APP_HOME (see ``coordination_receipt``).
+
+    A receipt the hooks will refuse is still declared -- they then name the
+    exact reason -- but never silently: the refusal reaches only a hook's
+    stderr, so the spawn is where it is said out loud (2026-10-02,
+    unt_c9c98375). ``reporter`` is the designated gauge hook the session runs."""
+    finding = receipt_finding(solet_name, reporter)
+    if finding is not None:
+        logger.warning("COORDINATION RECEIPT REFUSED: %s", finding)
+    return declared_receipt_path()
 
 
-def _add_coordination_receipt_env(env: dict[str, str]) -> None:
-    receipt_path = _resolve_coordination_receipt_path()
+def _add_coordination_receipt_env(env: dict[str, str], solet_name: str, reporter: Path) -> None:
+    receipt_path = _resolve_coordination_receipt_path(solet_name, reporter)
     if receipt_path is not None:
         env["AGENT_COORDINATION_RECEIPT_PATH"] = str(receipt_path)
 
@@ -612,9 +589,8 @@ def _authority_system_prompt(spec: Mapping[str, object]) -> str:
         agent_instance_id=str(spec.get("agent_instance_id") or ""),
         role_class=str(spec.get("role_class") or ""),
         lane_id=str(spec.get("lane_id") or ""),
-        brief_ref=str(spec.get("brief_ref") or ""),
+        assignment=assignment_from_record(spec),
         spawned_by_role=str(spec.get("spawned_by_role") or ""),
-        unit_id=str(spec.get("unit_id") or ""),
         repository_root=str(
             spec.get("repository_root") or spec.get("worktree_path") or "",
         ),
@@ -693,7 +669,9 @@ def _write_init_event_spool_file(*, agent_instance_id: str, claude_session_id: s
         (spool_dir / file_name).write_text(json.dumps(record))
     except OSError as exc:
         logger.warning(
-            "init-event spool write failed for agent_instance_id=%s: %s", agent_instance_id, exc,
+            "init-event spool write failed for agent_instance_id=%s: %s",
+            agent_instance_id,
+            exc,
         )
 
 
@@ -710,16 +688,13 @@ def _maybe_capture_init_event(line: str, *, agent_instance_id: str) -> bool:
         event = json.loads(line)
     except (json.JSONDecodeError, ValueError):
         return False
-    if not (
-        isinstance(event, dict)
-        and event.get("type") == "system"
-        and event.get("subtype") == "init"
-    ):
+    if not (isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "init"):
         return False
     claude_session_id = str(event.get("session_id") or "")
     if claude_session_id:
         _write_init_event_spool_file(
-            agent_instance_id=agent_instance_id, claude_session_id=claude_session_id,
+            agent_instance_id=agent_instance_id,
+            claude_session_id=claude_session_id,
         )
     return True
 
@@ -757,7 +732,9 @@ def _reap(proc: subprocess.Popen[str] | None) -> None:
 
 
 def _sigterm_then_kill(
-    pid: int, proc: subprocess.Popen[str] | None, grace_seconds: float,
+    pid: int,
+    proc: subprocess.Popen[str] | None,
+    grace_seconds: float,
 ) -> None:
     """SIGTERM, wait up to ``grace_seconds``, then SIGKILL — mirrors
     ``bridge_tracker._sigterm_then_kill``."""
@@ -817,21 +794,26 @@ def _arm_watcher(
         return None
     argv = [
         *watch_sidecar_argv(solet_bin, agent_id="claude_code", spool=True),
-        "--exit-with-parent", str(parent_pid),
+        "--exit-with-parent",
+        str(parent_pid),
     ]
     try:
         return popen_fn(
-            argv, cwd=str(cwd), env=dict(env),
+            argv,
+            cwd=str(cwd),
+            env=dict(env),
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1, start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
         )
     except OSError as exc:
         logger.warning(
-            "presence watcher failed to arm for headless worker pid=%d (%s) — "
-            "the worker will run UNREGISTERED: not in peer_list, unreachable "
-            "by peer_send, contributing no liveness",
-            parent_pid, exc,
+            "presence watcher failed to arm for headless worker pid=%d (%s) — the worker will run UNREGISTERED: not in peer_list, unreachable by peer_send, contributing no liveness",
+            parent_pid,
+            exc,
         )
         return None
 
@@ -886,7 +868,8 @@ class _StreamJsonDriverChannel:
             # exception escaping through the clear_session/compact_session
             # verb layer.
             logger.warning(
-                "driver channel send() failed — pid=%d is no longer accepting stdin", self.proc.pid,
+                "driver channel send() failed — pid=%d is no longer accepting stdin",
+                self.proc.pid,
             )
 
     def submit(self) -> None:
@@ -922,24 +905,16 @@ class HeadlessHostDriver:
         # ``resolve_host_driver`` already makes for ``host``. A truthy-``or``
         # chain would silently let ambient env win over a caller's explicit
         # blank override.
-        self._claude_bin = (
-            claude_bin if claude_bin is not None
-            else shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
-        )
-        self._solet_name = (
-            solet_name if solet_name is not None
-            else os.environ.get("SOLET_NAME") or ""
-        )
+        self._claude_bin = claude_bin if claude_bin is not None else shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
+        self._solet_name = solet_name if solet_name is not None else os.environ.get("SOLET_NAME") or ""
         # Wake CLI BINARY (never solet_name). Unresolvable is non-fatal here
         # -- see _arm_watcher / _spawn_env for why it degrades, not refuses.
         # R11 (2026-08-17): resolved per read, never once here — see below.
         self._cli_resolver = WakeCliResolver(
-            solet_bin, python_executable=python_executable,
+            solet_bin,
+            python_executable=python_executable,
         )
-        self._permission_mode = (
-            permission_mode if permission_mode is not None
-            else os.environ.get(_ENV_PERMISSION_MODE) or ""
-        )
+        self._permission_mode = permission_mode if permission_mode is not None else os.environ.get(_ENV_PERMISSION_MODE) or ""
         # fleet-watch-transport-migration phase 2 slice 1 (2026-08-06): the
         # spec-level value (spawn_session's policy resolution, normally
         # plugin.yaml's default_fleet_transport) always wins; this
@@ -951,9 +926,7 @@ class HeadlessHostDriver:
         # rather than refusing.
         self._transport = transport if transport is not None else ""
         self._cwd = cwd if cwd is not None else _resolve_default_cwd()
-        self._mcp_config_path = (
-            mcp_config_path if mcp_config_path is not None else (self._cwd / ".mcp.json")
-        )
+        self._mcp_config_path = mcp_config_path if mcp_config_path is not None else (self._cwd / ".mcp.json")
         self._popen_fn = popen_fn
         self._grace_seconds = grace_seconds
         self._lock = RLock()
@@ -1018,9 +991,15 @@ class HeadlessHostDriver:
         return _headless_capability_report()
 
     def _spawn_env(
-        self, *, agent_instance_id: str, agent_session_id: str, label: str,
-        allowed_tools: tuple[str, ...], transport: str,
-        context_gauge_reporter_path: Path, cwd: Path | None = None,
+        self,
+        *,
+        agent_instance_id: str,
+        agent_session_id: str,
+        label: str,
+        allowed_tools: tuple[str, ...],
+        transport: str,
+        context_gauge_reporter_path: Path,
+        cwd: Path | None = None,
     ) -> dict[str, str]:
         env = dict(os.environ)
         env["SOLET_NAME"] = self._solet_name
@@ -1072,52 +1051,23 @@ class HeadlessHostDriver:
         heartbeat_dir = _resolve_heartbeat_marker_dir()
         if heartbeat_dir is not None:
             env["AGENT_HEARTBEAT_MARKER_DIR"] = str(heartbeat_dir)
-        _add_coordination_receipt_env(env)
+        _add_coordination_receipt_env(env, self._solet_name, context_gauge_reporter_path)
         return _with_worktree_pythonpath(env, cwd or self._cwd)
 
     def _hook_settings_json(
-        self, resolved_hooks: Mapping[str, Path] | None = None,
+        self,
+        resolved_hooks: Mapping[str, Path] | None = None,
     ) -> str:
-        """The ``--settings`` JSON injecting the PreToolUse allowlist gate
-        (§6 permission-mode ruling, 2026-08-03), the SessionStart
-        usage-capture hook (T1 lane, ruling 2026-08-05), the PostToolUse
-        heartbeat hook (T2, seat's redesign ruling 2026-08-05) AND the
-        PostToolUse rotation-due watch hook (rotation-systematization P2
-        slice B, ruling 2, 2026-08-07 -- both share the SAME PostToolUse
-        group, heartbeat first), the Agent/Task tool deny (capability-
-        tier guardrail redesign, fleet-watch-transport-migration phase 2
-        slice 1+5, 2026-08-06), and (deaf-wake fix, 2026-08-08) the Stop
-        wake_waiter.py hook plus the SessionStart/UserPromptSubmit
-        check_messages_reminder.py, role_binding_reminder.py, and
-        step_zero_reminder.py hooks -- all scoped to THIS spawned worker
-        only, never the shared ``.claude/settings.json`` (that would
-        double-fire the wake hook for the seat, which already gets the
-        equivalent JS hooks via the user-scope coordination-hooks@<solet>
-        plugin). Merges with (does not replace) whatever
-        ``--setting-sources project`` loads (e.g. the git-controller
-        gate), per the standing "--settings MERGES" trap note.
-
-        The deny rule is carried HERE too, not just in this checkout's own
-        project-scope ``.claude/settings.json``, because ``--setting-sources
-        project`` resolves relative to whatever ``cwd`` the spawned worker
-        actually runs in -- a non-checkout spawn (a different clone, a
-        scratch cwd) would not inherit this origin's own tracked settings
-        file at all. Empirically verified: ``permissions.deny: ["Agent"]``
-        removes the tool from the session's own available-tool listing
-        entirely (a live scratch probe, 2026-08-06 -- a driven session asked
-        to use it reported ``ToolSearch`` returning no match, not a refused
-        call), the same clean-absence contract ``CLAUDE_CODE_DISABLE_
-        ADVISOR_TOOL`` uses for the advisor. ``"Task"`` is carried alongside
-        the confirmed-live ``"Agent"`` as a defensive alias only (this
-        repo's own docs use "Agent/Task" interchangeably, suggesting past
-        version drift in the tool's registered name); an unmatched deny
-        entry is inert, never harmful, so listing both costs nothing."""
+        """Pure per-worker settings: existing guards, capture and liveness;
+        bounded live SessionStart context replaces static message/role text.
+        Project settings merge independently; no session is created here.
+        """
         # R4 Package C (2026-08-10): resolved via the two-rung ladder
         # (origin checkout, then this plugin's shipped fallback copy) --
         # see _resolve_worker_hook_paths's own docstring. Raises
         # WorkerHookResolutionError, converted to HostCannotSpawnError by
-        # the caller (spawn()), if any file resolves at neither rung --
-        # never silently emits settings pointing at a missing path.
+        # the caller (spawn()), if a security guard resolves at neither rung.
+        # Optional missing paths remain defined and warn before execution.
         resolved_hooks = resolved_hooks or _resolve_worker_hook_paths(self._cwd)
         allowlist_hook_path = resolved_hooks["headless_tool_allowlist_gate.py"]
         capture_hook_path = resolved_hooks["capture_session_mapping.py"]
@@ -1134,48 +1084,47 @@ class HeadlessHostDriver:
         # workbench/2026-08-08_deaf_wake_diagnosis_findings_rotation-impl.md).
         # Mirrors tmux_adapter.py._spawn_command's identical wiring exactly.
         wake_hook_path = resolved_hooks["wake_waiter.py"]
-        check_messages_hook_path = resolved_hooks["check_messages_reminder.py"]
+        session_start_hook_path = resolved_hooks["session_start_context.py"]
         step_zero_hook_path = resolved_hooks["step_zero_reminder.py"]
-        role_binding_hook_path = resolved_hooks["role_binding_reminder.py"]
         settings = {
             "permissions": {
                 "deny": list(_HEADLESS_DENIED_TOOLS),
             },
             "hooks": {
                 "PreToolUse": [
-                    {"hooks": [{"type": "command", "command": f"python3 {allowlist_hook_path}"}]},
+                    {"hooks": [{"type": "command", "command": shlex.join(["python3", str(allowlist_hook_path)])}]},
                 ],
                 "SessionStart": [
-                    {"hooks": [{"type": "command", "command": f"python3 {capture_hook_path}"}]},
+                    {"hooks": [{"type": "command", "command": optional_hook_command(capture_hook_path, "SessionStart")}]},
                     {
                         # Matches coordination-hooks@<solet>'s own hooks.json
                         # matcher for this event exactly (fidelity, not a
-                        # new choice) -- check_messages_reminder.py also
-                        # fires here (in addition to UserPromptSubmit
-                        # below) matching the plugin's own dual wiring.
+                        # new choice) -- session_start_context.py
+                        # fires only here (never UserPromptSubmit
+                        # below), matching the shipped plugin.
                         "matcher": "startup|resume|clear",
                         "hooks": [
-                            {"type": "command", "command": f"python3 {check_messages_hook_path}"},
-                            {"type": "command", "command": f"python3 {role_binding_hook_path}"},
+                            {"type": "command", "command": optional_hook_command(session_start_hook_path, "SessionStart"), "timeout": 8},
                         ],
                     },
                 ],
                 "UserPromptSubmit": [
-                    {"hooks": [{"type": "command", "command": f"python3 {step_zero_hook_path}"}]},
-                    {"hooks": [{"type": "command", "command": f"python3 {check_messages_hook_path}"}]},  # noqa: E501
+                    {"hooks": [{"type": "command", "command": optional_hook_command(step_zero_hook_path, "UserPromptSubmit")}]},
                 ],
                 "PostToolUse": [
-                    {"hooks": [
-                        {"type": "command", "command": f"python3 {heartbeat_hook_path}"},
-                        {"type": "command", "command": f"python3 {rotation_due_hook_path}"},
-                    ]},
+                    {
+                        "hooks": [
+                            {"type": "command", "command": optional_hook_command(heartbeat_hook_path, "PostToolUse")},
+                            {"type": "command", "command": optional_hook_command(rotation_due_hook_path, "PostToolUse")},
+                        ]
+                    },
                 ],
                 "Stop": [
                     {
                         "hooks": [
                             {
                                 "type": "command",
-                                "command": f"python3 {wake_hook_path}",
+                                "command": optional_hook_command(wake_hook_path, "Stop"),
                                 # Matches wake_waiter.js's own required
                                 # shape exactly -- without this the Stop
                                 # hook applies Claude Code's short default
@@ -1192,7 +1141,11 @@ class HeadlessHostDriver:
         return json.dumps(settings)
 
     def _spawn_command(
-        self, spec: Mapping[str, object], *, label: str, transport: str,
+        self,
+        spec: Mapping[str, object],
+        *,
+        label: str,
+        transport: str,
         resolved_hooks: Mapping[str, Path] | None = None,
     ) -> list[str]:
         # spec-level permission_mode (§6 ruling, resolved from plugin.yaml's
@@ -1203,10 +1156,14 @@ class HeadlessHostDriver:
         permission_mode = str(spec.get("permission_mode") or "") or self._permission_mode
         cmd = [
             self._claude_bin,
-            "--input-format", "stream-json",
-            "--output-format", "stream-json",
-            "--verbose", "--include-hook-events",
-            "--permission-mode", permission_mode,
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-hook-events",
+            "--permission-mode",
+            permission_mode,
             # project-only: excludes BOTH user-scope (this operator's own
             # ~/.claude/settings.json carries permissions.defaultMode:
             # bypassPermissions) and local-scope (.claude/settings.local.json
@@ -1215,9 +1172,12 @@ class HeadlessHostDriver:
             # either. Confirmed live: --allowedTools alone does NOT restrict
             # anything (additive only); only --setting-sources scoping +
             # the injected PreToolUse hook actually enforce.
-            "--setting-sources", "project",
-            "--settings", self._hook_settings_json(resolved_hooks),
-            "--name", label,
+            "--setting-sources",
+            "project",
+            "--settings",
+            self._hook_settings_json(resolved_hooks),
+            "--name",
+            label,
         ]
         # fleet-watch-transport-migration phase 2 slice 1 (2026-08-06):
         # "mcp" gets the real MCP bridge config; "watch" gets an EXPLICIT
@@ -1292,13 +1252,13 @@ class HeadlessHostDriver:
         agent_instance_id = str(spec.get("agent_instance_id") or "")
         if not agent_instance_id:
             raise HostCannotSpawnError(
-                "spawn spec is missing agent_instance_id — the headless "
-                "driver cannot register the spawned process under the "
-                "ledger's identity without it.",
+                "spawn spec is missing agent_instance_id — the headless driver cannot register the spawned process under the ledger's identity without it.",
             )
         _announce_managed_policy(
-            degraded_ok, agent_instance_id=agent_instance_id,
-            host="headless", denied_tools=_HEADLESS_DENIED_TOOLS,
+            degraded_ok,
+            agent_instance_id=agent_instance_id,
+            host="headless",
+            denied_tools=_HEADLESS_DENIED_TOOLS,
         )
         label = _resolve_local_label(spec, agent_instance_id=agent_instance_id)
         # Minted exactly ONCE, here — never re-derived elsewhere (two
@@ -1307,30 +1267,50 @@ class HeadlessHostDriver:
         cwd = _resolve_spawn_cwd(spec, self._cwd)
         resolved_hooks = _resolve_worker_hook_paths_for_spawn(cwd)
         env = self._spawn_env(
-            agent_instance_id=agent_instance_id, agent_session_id=agent_session_id,
-            label=label, allowed_tools=_coerce_allowed_tools(spec), transport=transport,
-            context_gauge_reporter_path=resolved_hooks["rotation_due_watch.py"], cwd=cwd,
+            agent_instance_id=agent_instance_id,
+            agent_session_id=agent_session_id,
+            label=label,
+            allowed_tools=_coerce_allowed_tools(spec),
+            transport=transport,
+            context_gauge_reporter_path=resolved_hooks["rotation_due_watch.py"],
+            cwd=cwd,
         )
         cmd = self._spawn_command(
-            spec, label=label, transport=transport, resolved_hooks=resolved_hooks,
+            spec,
+            label=label,
+            transport=transport,
+            resolved_hooks=resolved_hooks,
         )
 
         try:
             proc = self._popen_fn(
-                cmd, cwd=str(cwd), env=env,
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, bufsize=1, start_new_session=True,
+                cmd,
+                cwd=str(cwd),
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                start_new_session=True,
             )
         except OSError as exc:
             raise HostCannotSpawnError(f"subprocess.Popen raised: {exc}") from exc
 
         host_ref = str(proc.pid)
         watcher = _arm_watcher(
-            self._popen_fn, self._solet_bin, cwd, proc.pid, env, transport,
+            self._popen_fn,
+            self._solet_bin,
+            cwd,
+            proc.pid,
+            env,
+            transport,
         )
         with self._lock:
             self._processes[host_ref] = _TrackedHeadlessProcess(
-                agent_instance_id=agent_instance_id, proc=proc, watcher=watcher,
+                agent_instance_id=agent_instance_id,
+                proc=proc,
+                watcher=watcher,
             )
         _drain_stdout_with_init_capture(proc.stdout, agent_instance_id=agent_instance_id)
         _drain_pipe(proc.stderr)

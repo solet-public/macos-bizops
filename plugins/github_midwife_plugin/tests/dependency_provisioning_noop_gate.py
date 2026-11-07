@@ -53,9 +53,7 @@ def _seed_compliant_profile(target: Path) -> None:
     ):
         package = target / relative
         package.mkdir(parents=True)
-        (package / "pyproject.toml").write_text(
-            f"[project]\nname = '{name}'\n", encoding="utf-8"
-        )
+        (package / "pyproject.toml").write_text(f"[project]\nname = '{name}'\n", encoding="utf-8")
         dist_info = site_packages / f"{name}-1.0.dist-info"
         dist_info.mkdir(parents=True)
         (dist_info / "direct_url.json").write_text(
@@ -100,6 +98,7 @@ def main() -> int:
             "HOMEBREW_NO_COLOR": "1",
             "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK": "1",
             "HOMEBREW_NO_INSTALL_UPGRADE": "1",
+            "HOMEBREW_NO_INSTALL_CLEANUP": "1",
             "HOME": "/target/account",
         },
         "bootstrap Brew guard pins target HOME and no-color policy without ambient PATH or color",
@@ -111,23 +110,15 @@ def main() -> int:
     _check(all(environment[key] == value for key, value in HOMEBREW_GUARD_ENV.items()), "all Brew guards are exact")
 
     allowed = CommandOutcome(0, False, 1, "Would install 1 formula:\ntmux\n", "")
-    hidden_upgrade = CommandOutcome(
-        0, False, 1, "Would install 1 formula:\ntmux\nWould upgrade 1 dependency:\npython@3.13\n", ""
-    )
+    hidden_upgrade = CommandOutcome(0, False, 1, "Would install 1 formula:\ntmux\nWould upgrade 1 dependency:\npython@3.13\n", "")
     _check(homebrew_install_plan_error(allowed, "tmux") is None, "exact dry-run is allowed")
     _check(homebrew_install_plan_error(hidden_upgrade, "tmux") is not None, "named hidden upgrade fails closed")
     _check(_homebrew_install_plan_allowed(allowed.stdout, "tmux"), "manager accepts exact dry-run")
     _check(not _homebrew_install_plan_allowed(hidden_upgrade.stdout, "tmux"), "manager rejects hidden upgrade")
 
-    counted_upgrade = CommandOutcome(
-        0, False, 1, "Would install 1 formula:\ntmux\nWould upgrade 2 dependencies for tmux:\nreadline\nxz\n", ""
-    )
-    mismatched_upgrade = CommandOutcome(
-        0, False, 1, "Would install 1 formula:\ntmux\nWould upgrade 2 dependencies for tmux:\nreadline\n", ""
-    )
-    foreign_upgrade = CommandOutcome(
-        0, False, 1, "Would install 1 formula:\ntmux\nWould upgrade 1 dependency for python@3.13:\nreadline\n", ""
-    )
+    counted_upgrade = CommandOutcome(0, False, 1, "Would install 1 formula:\ntmux\nWould upgrade 2 dependencies for tmux:\nreadline\nxz\n", "")
+    mismatched_upgrade = CommandOutcome(0, False, 1, "Would install 1 formula:\ntmux\nWould upgrade 2 dependencies for tmux:\nreadline\n", "")
+    foreign_upgrade = CommandOutcome(0, False, 1, "Would install 1 formula:\ntmux\nWould upgrade 1 dependency for python@3.13:\nreadline\n", "")
     _check(homebrew_install_plan_error(counted_upgrade, "tmux") is None, "counted dependency upgrade is allowed")
     _check(_homebrew_install_plan_allowed(counted_upgrade.stdout, "tmux"), "manager accepts counted dependency upgrade")
     for label, refused in (("count-mismatched", mismatched_upgrade), ("foreign-parent", foreign_upgrade)):
@@ -152,26 +143,19 @@ def main() -> int:
         "undeclared formula in closure fails closed",
     )
     _check(
-        homebrew_install_plan_error(
-            claude_cask, HomebrewAcquisition("cask", "claude-code")
-        ) is None,
+        homebrew_install_plan_error(claude_cask, HomebrewAcquisition("cask", "claude-code")) is None,
         "declared cask is allowed",
     )
     _check(
-        homebrew_install_plan_error(codex_cask, HomebrewAcquisition("cask", "codex"))
-        is None,
+        homebrew_install_plan_error(codex_cask, HomebrewAcquisition("cask", "codex")) is None,
         "dependency-free Codex cask is allowed; Node remains a separate declared operation",
     )
     _check(
-        homebrew_install_plan_error(
-            claude_cask, HomebrewAcquisition("formula", "claude-code")
-        ) is not None,
+        homebrew_install_plan_error(claude_cask, HomebrewAcquisition("formula", "claude-code")) is not None,
         "package kind mismatch fails closed",
     )
     _check(
-        _homebrew_install_plan_allowed(
-            sf_closure.stdout, "sf", approved_closure=("node",)
-        ),
+        _homebrew_install_plan_allowed(sf_closure.stdout, "sf", approved_closure=("node",)),
         "manager accepts declared sf Node closure",
     )
     _check(
@@ -182,18 +166,17 @@ def main() -> int:
     recording_runtime = _RecordingRuntime()
     run_homebrew_install_required(recording_runtime, "/fixture/brew", "pgvector", "pgvector install")  # type: ignore[arg-type]
     _check(len(recording_runtime.calls) == 2, "Brew dry-run precedes its only mutation")
-    _check(
-        all(
-            all(call[1]["env"][key] == value for key, value in HOMEBREW_GUARD_ENV.items())
-            for call in recording_runtime.calls
-        ),
-        "bootstrap Brew calls receive the exact guard environment",
-    )
+    for _command, kwargs in recording_runtime.calls:
+        command_environment = kwargs["env"]
+        assert isinstance(command_environment, dict)
+        _check(
+            all(command_environment[key] == value for key, value in HOMEBREW_GUARD_ENV.items()),
+            "bootstrap Brew calls receive the exact guard environment",
+        )
 
     stopped_with_pgvector = PostgresObservation(True, "/fixture/brew", True, True, 17, False, None)
     _check(
-        [item["id"] for item in postgres_install_actions(stopped_with_pgvector)]
-        == ["postgres.start_homebrew_service", "postgres.install_pgvector_formula"],
+        [item["id"] for item in postgres_install_actions(stopped_with_pgvector)] == ["postgres.start_homebrew_service", "postgres.install_pgvector_formula"],
         "stopped PostgreSQL plans pgvector while discovery is unknown, before apply approval",
     )
 
@@ -201,9 +184,7 @@ def main() -> int:
         target = Path(temporary)
         _seed_compliant_profile(target)
         with patch("github_midwife_plugin.profile_install.subprocess.run") as run:
-            installed = install_profile_allowlist(
-                venv_dir=target / ".venv", target=target, plugin_allowlist=["example_plugin"]
-            )
+            installed = install_profile_allowlist(venv_dir=target / ".venv", target=target, plugin_allowlist=["example_plugin"])
         _check(installed == [], "compliant Genesis package closure is a no-op")
         _check(run.call_count == 0, "compliant Genesis package closure invokes no pip mutation")
     print("dependency_provisioning_noop_gate OK")

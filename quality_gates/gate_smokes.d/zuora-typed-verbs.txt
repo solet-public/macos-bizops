@@ -1,0 +1,10 @@
+# Fragment of the gate-smoke register for the Zuora typed-verb builds
+# (frq_e3aea133, unt_8ecd1cf2, unt_8760e024, unt_7ab0db00, unt_37fa3a6a). Hermetic unittest modules: httpx.MockTransport
+# plays the tenant, no live vendor, no background thread.
+plugins/zuora_plugin/tests/smoke_workflows.py
+plugins/zuora_plugin/tests/smoke_query_jobs_files.py
+plugins/zuora_plugin/tests/smoke_commerce.py
+plugins/zuora_plugin/tests/smoke_payments_objects.py
+plugins/zuora_plugin/tests/smoke_billing_documents.py
+# Build 1's generic request smoke was never registered; same shape, same plugin.
+plugins/zuora_plugin/tests/smoke_request.py

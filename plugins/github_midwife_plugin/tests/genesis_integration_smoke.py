@@ -70,9 +70,7 @@ _PROFILE_NAME = "fixture-genesis-profile"
 _GENESIS_STEP_NAMES = tuple(step_name for step_name, _runner in GENESIS_STEP_RUNNERS)
 _COREAI_PLUGIN = "coreai_embeddings_plugin"
 _COREAI_DEFERRED = "deferred_coreai_asset_pending"
-_ASSET_MANIFEST = Path(
-    "plugins/coreai_embeddings_plugin/src/coreai_embeddings_plugin/assets/distribution_manifest.json"
-)
+_ASSET_MANIFEST = Path("plugins/coreai_embeddings_plugin/src/coreai_embeddings_plugin/assets/distribution_manifest.json")
 
 
 @dataclass(frozen=True)
@@ -127,9 +125,7 @@ def _make_fixture_clone(root: Path) -> Path:
     # The seed ships the MINTING solet's root_manifest.yaml verbatim;
     # the seed_root_manifest spine step must rewrite `solet_name:` to
     # the newborn's name and leave every other line untouched.
-    (clone / "root_manifest.yaml").write_text(
-        "schema_version: 1\nsolet_name: mintersaurus\nuniversal:\n  files: []\n"
-    )
+    (clone / "root_manifest.yaml").write_text("schema_version: 1\nsolet_name: mintersaurus\nuniversal:\n  files: []\n")
     (clone / ".venv" / "bin").mkdir(parents=True)
     (clone / ".venv" / "bin" / "python3").write_text("#!/bin/sh\n")
     # The `solet-bridge` console script the command-launcher birth step symlinks
@@ -143,14 +139,17 @@ def _make_fixture_clone(root: Path) -> Path:
     kb_root = plugin_dir / "knowledge_base"
     (kb_root / "profile_templates").mkdir(parents=True)
     (kb_root / "profile_templates" / f"{_PROFILE_NAME}.yaml").write_text(
-        yaml.safe_dump({
-            "profile_name": _PROFILE_NAME,
-            "description": "fixture profile for the genesis integration smoke",
-            "plugins": ["github_midwife_plugin"],
-            "service_bindings": {},
-            "plugin_config_overrides": {},
-            "starting_actions": [],
-        }, sort_keys=False)
+        yaml.safe_dump(
+            {
+                "profile_name": _PROFILE_NAME,
+                "description": "fixture profile for the genesis integration smoke",
+                "plugins": ["github_midwife_plugin"],
+                "service_bindings": {},
+                "plugin_config_overrides": {},
+                "starting_actions": [],
+            },
+            sort_keys=False,
+        )
     )
     (kb_root / "profile_baseline").mkdir(parents=True)
 
@@ -164,9 +163,13 @@ def _check_profile_resolution_from_provenance(root: Path) -> None:
         resolve_profile_name(clone) == "macos-free-solet",
     )
 
-    (clone / "PROVENANCE.json").write_text(json.dumps({
-        "bundle": {"name": "macos-bizops", "platform": "local"},
-    }))
+    (clone / "PROVENANCE.json").write_text(
+        json.dumps(
+            {
+                "bundle": {"name": "macos-bizops", "platform": "local"},
+            }
+        )
+    )
     _check(
         "canonical sealed-style provenance selects macos-bizops without an override",
         resolve_profile_name(clone) == "macos-bizops",
@@ -183,9 +186,13 @@ def _check_profile_resolution_from_provenance(root: Path) -> None:
     else:
         raise SmokeFailureError("declared-bundle-override: resolver did not raise")
 
-    (clone / "PROVENANCE.json").write_text(json.dumps({
-        "bundle": {"name": "unknown_bundle"},
-    }))
+    (clone / "PROVENANCE.json").write_text(
+        json.dumps(
+            {
+                "bundle": {"name": "unknown_bundle"},
+            }
+        )
+    )
     try:
         resolve_profile_name(clone)
     except GenesisError as exc:
@@ -210,8 +217,7 @@ def _check_run_genesis_refuses_before_allowlist(root: Path) -> None:
         json.dumps({"bundle": {"name": "macos-bizops", "platform": "local"}}),
         encoding="utf-8",
     )
-    with patch("github_midwife_plugin.genesis.load_plugin_allowlist") as load_allowlist, \
-         patch("github_midwife_plugin.genesis.install_profile_allowlist") as install_allowlist:
+    with patch("github_midwife_plugin.genesis.load_plugin_allowlist") as load_allowlist, patch("github_midwife_plugin.genesis.install_profile_allowlist") as install_allowlist:
         try:
             run_genesis(
                 name="bizops",
@@ -254,7 +260,9 @@ class _FakeLaunchctl:
             # coercing any nonzero exit into "not loaded").
             label = cmd[2] if len(cmd) > 2 else ""
             return subprocess.CompletedProcess(
-                args=cmd, returncode=113, stdout="",
+                args=cmd,
+                returncode=113,
+                stdout="",
                 stderr=f'Could not find service "{label}" in domain for ...',
             )
         if verb == "load":
@@ -280,6 +288,7 @@ def _run_sandboxed_genesis(
     *,
     autostart: bool = True,
     coreai: bool = False,
+    coding_agents: tuple[str, ...] = ("claude_code", "codex"),
 ) -> tuple[dict[str, object], Path, FakeKeychain, _FakeLaunchctl, str]:
     clone = _make_fixture_clone(root)
     if coreai:
@@ -289,10 +298,13 @@ def _run_sandboxed_genesis(
     alter_calls: list[str] = []
 
     captured_out, captured_err = io.StringIO(), io.StringIO()
-    with patch("subprocess.run", side_effect=_fake_pip_subprocess_run), \
-         patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW), \
-         patch("github_midwife_plugin.vault_passphrase_seed.token_urlsafe", return_value=_VAULT_SENTINEL), \
-         redirect_stdout(captured_out), redirect_stderr(captured_err):
+    with (
+        patch("subprocess.run", side_effect=_fake_pip_subprocess_run),
+        patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW),
+        patch("github_midwife_plugin.vault_passphrase_seed.token_urlsafe", return_value=_VAULT_SENTINEL),
+        redirect_stdout(captured_out),
+        redirect_stderr(captured_err),
+    ):
         result = run_genesis(
             name="testhum",
             clone_root=clone,
@@ -306,6 +318,7 @@ def _run_sandboxed_genesis(
             launchctl_run=fake_launchctl,
             command_launcher_bin_dir=root / "bin",
             autostart=autostart,
+            coding_agents=coding_agents,
         )
     combined_output = captured_out.getvalue() + captured_err.getvalue()
     return result, clone, keychain, fake_launchctl, combined_output
@@ -405,14 +418,12 @@ def _check_end_to_end_happy_path(root: Path) -> None:
     root_manifest_text = (clone / "root_manifest.yaml").read_text()
     _check(
         "seed_root_manifest renamed the newborn (minting name gone, newborn name present)",
-        "solet_name: testhum\n" in root_manifest_text
-        and "mintersaurus" not in root_manifest_text,
+        "solet_name: testhum\n" in root_manifest_text and "mintersaurus" not in root_manifest_text,
         root_manifest_text,
     )
     _check(
         "seed_root_manifest left every other root_manifest line verbatim",
-        root_manifest_text.startswith("schema_version: 1\n")
-        and root_manifest_text.endswith("universal:\n  files: []\n"),
+        root_manifest_text.startswith("schema_version: 1\n") and root_manifest_text.endswith("universal:\n  files: []\n"),
         root_manifest_text,
     )
 
@@ -549,14 +560,22 @@ def _assert_final_marker_complete(result: dict[str, object]) -> None:
     )
     marker_step_names = [s.get("step_name") for s in marker.get("steps", [])]
     _check(
-        "the FINAL attempt marker records the post-spine phases "
-        "(credential_seed, vault_passphrase, vault_stale_check, install_autostart, install_router, "
-        "install_command_launcher, git_init) after the 6-step spine",
-        marker_step_names == [
-            "validate_name", "resolve_target", "materialize_configs",
-            "seed_root_manifest", "materialize_kb_symlinks", "write_manifest_marker",
-            "credential_seed", "vault_passphrase", "vault_stale_check", "install_autostart", "install_router",
-            "install_command_launcher", "git_init",
+        "the FINAL attempt marker records the post-spine phases (credential_seed, vault_passphrase, vault_stale_check, install_autostart, install_router, install_command_launcher, git_init) after the 6-step spine",
+        marker_step_names
+        == [
+            "validate_name",
+            "resolve_target",
+            "materialize_configs",
+            "seed_root_manifest",
+            "materialize_kb_symlinks",
+            "write_manifest_marker",
+            "credential_seed",
+            "vault_passphrase",
+            "vault_stale_check",
+            "install_autostart",
+            "install_router",
+            "install_command_launcher",
+            "git_init",
         ]
         and all(s.get("status") == "completed" for s in marker.get("steps", [])),
         str(marker),
@@ -580,9 +599,7 @@ def _check_spine_failure_surfaces_as_genesis_error(root: Path) -> None:
     (plugin_dir / "pyproject.toml").write_text("[project]\nname='github_midwife_plugin'\n")
     kb_root = plugin_dir / "knowledge_base"
     (kb_root / "profile_templates").mkdir(parents=True)
-    (kb_root / "profile_templates" / f"{_PROFILE_NAME}.yaml").write_text(
-        yaml.safe_dump({"profile_name": _PROFILE_NAME, "plugins": ["github_midwife_plugin"]})
-    )
+    (kb_root / "profile_templates" / f"{_PROFILE_NAME}.yaml").write_text(yaml.safe_dump({"profile_name": _PROFILE_NAME, "plugins": ["github_midwife_plugin"]}))
     (kb_root / "profile_baseline").mkdir(parents=True)
     # deliberately no root_manifest.yaml (and no knowledge_bases/ — which is
     # now a legitimate seed-clone state, not a failure)
@@ -590,8 +607,11 @@ def _check_spine_failure_surfaces_as_genesis_error(root: Path) -> None:
     with patch("subprocess.run", side_effect=_fake_pip_subprocess_run):
         try:
             run_genesis(
-                name="testhum2", clone_root=clone, profile_name=_PROFILE_NAME,
-                keychain=FakeKeychain(), role_exists=lambda: True,
+                name="testhum2",
+                clone_root=clone,
+                profile_name=_PROFILE_NAME,
+                keychain=FakeKeychain(),
+                role_exists=lambda: True,
             )
         except GenesisError as exc:
             _check(
@@ -611,7 +631,10 @@ class _FailingLoadLaunchctl(_FakeLaunchctl):
         if len(cmd) > 1 and cmd[1] == "load":
             self.calls.append(cmd)
             return subprocess.CompletedProcess(
-                args=cmd, returncode=1, stdout="", stderr="Load failed: 5: Input/output error",
+                args=cmd,
+                returncode=1,
+                stdout="",
+                stderr="Load failed: 5: Input/output error",
             )
         return super().__call__(cmd, **_kwargs)
 
@@ -623,9 +646,7 @@ def _check_phase_failure_writes_failed_marker(root: Path) -> None:
     the spine-end marker said "success" and the runtime death was invisible.
     """
     clone = _make_fixture_clone(root)
-    with patch("subprocess.run", side_effect=_fake_pip_subprocess_run), \
-         patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW), \
-         patch("github_midwife_plugin.vault_passphrase_seed.token_urlsafe", return_value=_VAULT_SENTINEL):
+    with patch("subprocess.run", side_effect=_fake_pip_subprocess_run), patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW), patch("github_midwife_plugin.vault_passphrase_seed.token_urlsafe", return_value=_VAULT_SENTINEL):
         try:
             run_genesis(
                 name="testhum3",
@@ -659,9 +680,7 @@ def _check_phase_failure_writes_failed_marker(root: Path) -> None:
     failed_records = [s for s in marker.get("steps", []) if s.get("status") == "failed"]
     _check(
         "the failed install_autostart phase is recorded in the marker",
-        len(failed_records) == 1
-        and failed_records[0].get("step_name") == "install_autostart"
-        and "Load failed" in str(failed_records[0].get("error", "")),
+        len(failed_records) == 1 and failed_records[0].get("step_name") == "install_autostart" and "Load failed" in str(failed_records[0].get("error", "")),
         str(marker.get("steps")),
     )
 
@@ -669,9 +688,7 @@ def _check_phase_failure_writes_failed_marker(root: Path) -> None:
 def _check_vault_passphrase_failure_writes_failed_marker(root: Path) -> None:
     """A vault-passphrase filesystem failure is a classified phase failure."""
     clone = _make_fixture_clone(root)
-    with patch("subprocess.run", side_effect=_fake_pip_subprocess_run), \
-         patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW), \
-         patch("github_midwife_plugin.genesis.seed_vault_passphrase", side_effect=OSError("disk full")):
+    with patch("subprocess.run", side_effect=_fake_pip_subprocess_run), patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW), patch("github_midwife_plugin.genesis.seed_vault_passphrase", side_effect=OSError("disk full")):
         try:
             run_genesis(
                 name="testhum-vault-failure",
@@ -700,10 +717,7 @@ def _check_vault_passphrase_failure_writes_failed_marker(root: Path) -> None:
     failed_records = [step for step in marker.get("steps", []) if step.get("status") == "failed"]
     _check(
         "the vault-passphrase failure finalizes the attempt marker as failed",
-        marker.get("status") == "failed"
-        and len(failed_records) == 1
-        and failed_records[0].get("step_name") == "vault_passphrase"
-        and "disk full" in str(failed_records[0].get("error", "")),
+        marker.get("status") == "failed" and len(failed_records) == 1 and failed_records[0].get("step_name") == "vault_passphrase" and "disk full" in str(failed_records[0].get("error", "")),
         str(marker),
     )
 
@@ -711,9 +725,7 @@ def _check_vault_passphrase_failure_writes_failed_marker(root: Path) -> None:
 def _check_stale_vault_master_fails_before_autostart(root: Path) -> None:
     clone = _make_fixture_clone(root)
     fake_launchctl = _FakeLaunchctl()
-    with patch("subprocess.run", side_effect=_fake_pip_subprocess_run), \
-         patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW), \
-         patch("github_midwife_plugin.vault_passphrase_seed.token_urlsafe", return_value=_VAULT_SENTINEL):
+    with patch("subprocess.run", side_effect=_fake_pip_subprocess_run), patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW), patch("github_midwife_plugin.vault_passphrase_seed.token_urlsafe", return_value=_VAULT_SENTINEL):
         first_error = _run_stale_vault_genesis(root, clone, fake_launchctl)
     _check(
         "stale Keychain master fails genesis before autostart",
@@ -727,9 +739,7 @@ def _check_stale_vault_master_fails_before_autostart(root: Path) -> None:
     step_names = [s.get("step_name") for s in marker.get("steps", [])]
     _check(
         "the stale-vault failure records vault_stale_check and never reaches autostart",
-        marker.get("status") == "failed"
-        and "vault_stale_check" in step_names
-        and "install_autostart" not in step_names,
+        marker.get("status") == "failed" and "vault_stale_check" in step_names and "install_autostart" not in step_names,
         str(marker),
     )
     stale_record = next(s for s in marker.get("steps", []) if s.get("step_name") == "vault_stale_check")
@@ -744,9 +754,7 @@ def _check_stale_vault_master_fails_before_autostart(root: Path) -> None:
         str(fake_launchctl.calls),
     )
 
-    with patch("subprocess.run", side_effect=_fake_pip_subprocess_run), \
-         patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW), \
-         patch("github_midwife_plugin.vault_passphrase_seed.token_urlsafe", return_value=_VAULT_SENTINEL):
+    with patch("subprocess.run", side_effect=_fake_pip_subprocess_run), patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW), patch("github_midwife_plugin.vault_passphrase_seed.token_urlsafe", return_value=_VAULT_SENTINEL):
         retry_error = _run_stale_vault_genesis(root, clone, fake_launchctl)
     _check(
         "an unchanged retry still refuses the stale Keychain master",
@@ -765,28 +773,20 @@ def _check_stale_vault_precheck_is_scriptable() -> None:
 
     stale_stdout = io.StringIO()
     stale_stderr = io.StringIO()
-    with patch("github_midwife_plugin.genesis.SystemKeychain", return_value=_FakeStaleMasterKeychain()), \
-         patch.object(sys, "argv", ["genesis", "--check-vault-stale-state"]), \
-         patch.dict("os.environ", {"SOLET_NAME": "testhum4"}), \
-         redirect_stdout(stale_stdout), redirect_stderr(stale_stderr):
+    with patch("github_midwife_plugin.genesis.SystemKeychain", return_value=_FakeStaleMasterKeychain()), patch.object(sys, "argv", ["genesis", "--check-vault-stale-state"]), patch.dict("os.environ", {"SOLET_NAME": "testhum4"}), redirect_stdout(stale_stdout), redirect_stderr(stale_stderr):
         stale_exit = genesis_main()
     _check(
         "the stale-vault precheck fails before genesis",
-        stale_exit == 1
-        and "service testhum4-vault account 'master-key' already exists" in stale_stderr.getvalue(),
+        stale_exit == 1 and "service testhum4-vault account 'master-key' already exists" in stale_stderr.getvalue(),
         stale_stderr.getvalue(),
     )
 
     clean_stdout = io.StringIO()
-    with patch("github_midwife_plugin.genesis.SystemKeychain", return_value=_FakeCleanMasterKeychain()), \
-         patch.object(sys, "argv", ["genesis", "--check-vault-stale-state"]), \
-         patch.dict("os.environ", {"SOLET_NAME": "testhum4"}), \
-         redirect_stdout(clean_stdout):
+    with patch("github_midwife_plugin.genesis.SystemKeychain", return_value=_FakeCleanMasterKeychain()), patch.object(sys, "argv", ["genesis", "--check-vault-stale-state"]), patch.dict("os.environ", {"SOLET_NAME": "testhum4"}), redirect_stdout(clean_stdout):
         clean_exit = genesis_main()
     _check(
         "the clean precheck is scriptable and names its checked Keychain item",
-        clean_exit == 0
-        and "service testhum4-vault account master-key is absent" in clean_stdout.getvalue(),
+        clean_exit == 0 and "service testhum4-vault account master-key is absent" in clean_stdout.getvalue(),
         clean_stdout.getvalue(),
     )
 
@@ -832,10 +832,7 @@ def _add_blue_green_capability(clone: Path) -> Path:
     to the profile allowlist, ship its pyproject (profile_install's editable-check
     needs it; pip itself is mocked), and ship a stub router installer. Returns the
     stub installer path genesis should invoke."""
-    profile_path = (
-        clone / "plugins" / "github_midwife_plugin" / "knowledge_base"
-        / "profile_templates" / f"{_PROFILE_NAME}.yaml"
-    )
+    profile_path = clone / "plugins" / "github_midwife_plugin" / "knowledge_base" / "profile_templates" / f"{_PROFILE_NAME}.yaml"
     profile = yaml.safe_load(profile_path.read_text())
     profile["plugins"] = ["github_midwife_plugin", "macos_self_deployment_plugin"]
     profile_path.write_text(yaml.safe_dump(profile, sort_keys=False))
@@ -843,9 +840,7 @@ def _add_blue_green_capability(clone: Path) -> Path:
     sd_dir = clone / "plugins" / "macos_self_deployment_plugin"
     (sd_dir / "src" / "macos_self_deployment_plugin" / "blue_green_router").mkdir(parents=True)
     (sd_dir / "pyproject.toml").write_text("[project]\nname='macos_self_deployment_plugin'\n")
-    installer = (
-        sd_dir / "src" / "macos_self_deployment_plugin" / "blue_green_router" / "install_router.py"
-    )
+    installer = sd_dir / "src" / "macos_self_deployment_plugin" / "blue_green_router" / "install_router.py"
     installer.write_text("# stub installer\n")
     return installer
 
@@ -863,9 +858,7 @@ def _check_router_installed_for_blue_green_profile(root: Path) -> None:
     installer = _add_blue_green_capability(clone)
     router_runner = _FakeRouterInstaller()
 
-    with patch("subprocess.run", side_effect=_fake_pip_subprocess_run), \
-         patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW), \
-         patch("github_midwife_plugin.vault_passphrase_seed.token_urlsafe", return_value=_VAULT_SENTINEL):
+    with patch("subprocess.run", side_effect=_fake_pip_subprocess_run), patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW), patch("github_midwife_plugin.vault_passphrase_seed.token_urlsafe", return_value=_VAULT_SENTINEL):
         result = run_genesis(
             name="bizhum",
             clone_root=clone,
@@ -892,8 +885,11 @@ def _check_router_installed_for_blue_green_profile(root: Path) -> None:
     )
     _check(
         "the router installer got [newborn venv python, install_router.py, name]",
-        router_runner.calls[0] == [
-            str(clone / ".venv" / "bin" / "python3"), str(installer), "bizhum",
+        router_runner.calls[0]
+        == [
+            str(clone / ".venv" / "bin" / "python3"),
+            str(installer),
+            "bizhum",
         ],
         str(router_runner.calls),
     )
@@ -912,11 +908,12 @@ def _check_operation_scoped_launchagent_install(root: Path) -> None:
         prior_state="loaded",
         message="fixture",
     )
-    with patch(
-        "github_midwife_plugin.genesis._install_autostart", return_value=expected
-    ) as install, patch(
-        "github_midwife_plugin.genesis.run_genesis",
-        side_effect=AssertionError("full genesis replay must not run"),
+    with (
+        patch("github_midwife_plugin.genesis._install_autostart", return_value=expected) as install,
+        patch(
+            "github_midwife_plugin.genesis.run_genesis",
+            side_effect=AssertionError("full genesis replay must not run"),
+        ),
     ):
         result = run_autostart_install(name="scoped", clone_root=clone)
 
@@ -933,10 +930,7 @@ def _check_operation_scoped_launchagent_install(root: Path) -> None:
 
 def _add_coreai_selection(clone: Path) -> None:
     """Select Core AI in the fixture roster, as the three macOS profiles do."""
-    profile_path = (
-        clone / "plugins" / "github_midwife_plugin" / "knowledge_base"
-        / "profile_templates" / f"{_PROFILE_NAME}.yaml"
-    )
+    profile_path = clone / "plugins" / "github_midwife_plugin" / "knowledge_base" / "profile_templates" / f"{_PROFILE_NAME}.yaml"
     profile = yaml.safe_load(profile_path.read_text())
     profile["plugins"] = ["github_midwife_plugin", _COREAI_PLUGIN]
     profile["service_bindings"] = {"embedding_service": _COREAI_PLUGIN}
@@ -967,9 +961,7 @@ def _stage_fixture_asset(clone: Path) -> str:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         pins[relative] = {"sha256": hashlib.sha256(content).hexdigest(), "size_bytes": len(content)}
-    declaration = json.dumps(
-        {"model_id": "nomic-ai/nomic-embed-text-v1.5", "files": pins}, sort_keys=True
-    ).encode()
+    declaration = json.dumps({"model_id": "nomic-ai/nomic-embed-text-v1.5", "files": pins}, sort_keys=True).encode()
     source = clone / _ASSET_MANIFEST
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(declaration)
@@ -1016,11 +1008,7 @@ def _check_coreai_genesis_defers_autostart(root: Path) -> None:
     deferred = [step for step in steps if step.get("step_name") == "install_autostart"]
     _check(
         "the attempt marker records success with one truthful deferred autostart phase",
-        status == "success"
-        and len(deferred) == 1
-        and deferred[0].get("status") == "deferred"
-        and deferred[0].get("reason") == "coreai_asset_pending"
-        and "absent" in str(deferred[0].get("detail")),
+        status == "success" and len(deferred) == 1 and deferred[0].get("status") == "deferred" and deferred[0].get("reason") == "coreai_asset_pending" and "absent" in str(deferred[0].get("detail")),
         str(steps),
     )
     _check(
@@ -1065,9 +1053,7 @@ def _check_coreai_scoped_install_waits_for_asset(root: Path) -> None:
         )
     _check(
         "scoped install loads the LaunchAgent after the staged asset verifies",
-        installed.label == "local.solet.testhum"
-        and any(call[1] == "load" for call in launchctl.calls)
-        and plist.is_file(),
+        installed.label == "local.solet.testhum" and any(call[1] == "load" for call in launchctl.calls) and plist.is_file(),
         str(launchctl.calls),
     )
 
@@ -1078,10 +1064,12 @@ def _check_coreai_genesis_with_verified_asset_autostarts(root: Path) -> None:
     _add_coreai_selection(clone)
     digest = _stage_fixture_asset(clone)
     fake_launchctl = _FakeLaunchctl()
-    with patch("subprocess.run", side_effect=_fake_pip_subprocess_run), \
-         patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW), \
-         patch("github_midwife_plugin.vault_passphrase_seed.token_urlsafe", return_value=_VAULT_SENTINEL), \
-         patch.object(apple_setup_adapter, "_ASSET_MANIFEST_SHA256", digest):
+    with (
+        patch("subprocess.run", side_effect=_fake_pip_subprocess_run),
+        patch("github_midwife_plugin.credential_seed.secrets.token_urlsafe", return_value=_SENTINEL_PW),
+        patch("github_midwife_plugin.vault_passphrase_seed.token_urlsafe", return_value=_VAULT_SENTINEL),
+        patch.object(apple_setup_adapter, "_ASSET_MANIFEST_SHA256", digest),
+    ):
         result = run_genesis(
             name="testhum",
             clone_root=clone,
@@ -1097,8 +1085,7 @@ def _check_coreai_genesis_with_verified_asset_autostarts(root: Path) -> None:
         )
     _check(
         "Core AI Genesis with a verified staged asset installs the LaunchAgent",
-        result["autostart"] == {"status": "success", "label": "local.solet.testhum"}
-        and any(call[1] == "load" for call in fake_launchctl.calls),
+        result["autostart"] == {"status": "success", "label": "local.solet.testhum"} and any(call[1] == "load" for call in fake_launchctl.calls),
         str(result.get("autostart")),
     )
 
@@ -1107,18 +1094,23 @@ def _check_coreai_cli_autostart_install_refuses(root: Path) -> None:
     """The direct CLI scoped operation exits non-zero before any LaunchAgent write."""
     _result, clone, _keychain, _launchctl, _output = _run_sandboxed_genesis(root, coreai=True)
     stderr = io.StringIO()
-    with patch("github_midwife_plugin.genesis._resolve_clone_root", return_value=clone), \
-         patch(
-             "github_midwife_plugin.genesis._install_autostart",
-             side_effect=AssertionError("launchctl load must not be reached"),
-         ) as install, \
-         patch.object(sys, "argv", ["genesis"]), \
-         patch.dict("os.environ", {
-             "SOLET_NAME": "testhum",
-             "SOLET_OPERATION_REF": "genesis::autostart.install",
-             "SOLET_AUTOSTART": "enabled",
-         }), \
-         redirect_stderr(stderr):
+    with (
+        patch("github_midwife_plugin.genesis._resolve_clone_root", return_value=clone),
+        patch(
+            "github_midwife_plugin.genesis._install_autostart",
+            side_effect=AssertionError("launchctl load must not be reached"),
+        ) as install,
+        patch.object(sys, "argv", ["genesis"]),
+        patch.dict(
+            "os.environ",
+            {
+                "SOLET_NAME": "testhum",
+                "SOLET_OPERATION_REF": "genesis::autostart.install",
+                "SOLET_AUTOSTART": "enabled",
+            },
+        ),
+        redirect_stderr(stderr),
+    ):
         exit_code = genesis_main()
     _check(
         "direct CLI LaunchAgent install fails loud for an unverified Core AI asset",
@@ -1140,7 +1132,6 @@ def _check_malformed_roster_fails_loud(root: Path) -> None:
         "could not read the plugin roster" in str(error) and launchctl.calls == [],
         str(error),
     )
-
 
 
 class _LaunchctlPrintRuntime(SystemRuntime):
@@ -1178,9 +1169,7 @@ def _adapter_target(root: Path, *, coreai: bool) -> tuple[Path, _LaunchctlPrintR
     return clone, runtime
 
 
-def _genesis_operation(
-    clone: Path, runtime: _LaunchctlPrintRuntime, reference: str, phase: str = "probe"
-) -> JsonObject:
+def _genesis_operation(clone: Path, runtime: _LaunchctlPrintRuntime, reference: str, phase: str = "probe") -> JsonObject:
     inputs: JsonObject = {"autostart": "enabled", "setup_profile": _PROFILE_NAME}
     request = AdapterRequest(
         request_id="0b7f0c55-6f1e-4c47-9a53-6e7b3c1d2a90",
@@ -1201,7 +1190,7 @@ def _genesis_operation(
     return operation_handlers()[reference](request, runtime)
 
 
-def _records(value: JsonObject, key: str) -> list[dict[str, object]]:
+def _records(value: JsonObject, key: str) -> list[JsonObject]:
     records = value[key]
     if not isinstance(records, list):
         raise SmokeFailureError(f"{key} is not a list: {value}")
@@ -1227,10 +1216,7 @@ def _check_adapter_holds_coreai_launchagent(root: Path) -> None:
     items = _records(genesis, "evidence")
     _check(
         "Genesis verifies complete while truthfully reporting the deferred LaunchAgent",
-        genesis["checkpoint_status"] == "verified"
-        and [item.get("id") for item in items] == ["genesis_artifacts", "launchagent_deferred"]
-        and items[1].get("status") == "warning"
-        and "absent" in str(items[1].get("observed")),
+        genesis["checkpoint_status"] == "verified" and [item.get("id") for item in items] == ["genesis_artifacts", "launchagent_deferred"] and items[1].get("status") == "warning" and "absent" in str(items[1].get("observed")),
         str(genesis),
     )
     _check_adapter_releases_verified_asset(clone, runtime)
@@ -1242,9 +1228,7 @@ def _check_adapter_releases_verified_asset(clone: Path, runtime: _LaunchctlPrint
         rerun = _genesis_operation(clone, runtime, "genesis::solet.run")
     _check(
         "a verified staged asset returns the LaunchAgent to its install plan",
-        released["checkpoint_status"] == "pending"
-        and _action_ids(released) == ["genesis.install_launchagent"]
-        and rerun["checkpoint_status"] == "pending",
+        released["checkpoint_status"] == "pending" and _action_ids(released) == ["genesis.install_launchagent"] and rerun["checkpoint_status"] == "pending",
         str(released),
     )
 
@@ -1256,11 +1240,7 @@ def _check_adapter_legacy_launchagent(root: Path) -> None:
     full = _genesis_operation(clone, runtime, "genesis::solet.run")
     _check(
         "the legacy roster plans the LaunchAgent without consulting a Core AI asset",
-        scoped["checkpoint_status"] == "pending"
-        and _action_ids(scoped) == ["genesis.install_launchagent"]
-        and full["checkpoint_status"] == "pending"
-        and "genesis.install_launchagent" in _action_ids(full)
-        and not (clone / "profile/data/model-assets").exists(),
+        scoped["checkpoint_status"] == "pending" and _action_ids(scoped) == ["genesis.install_launchagent"] and full["checkpoint_status"] == "pending" and "genesis.install_launchagent" in _action_ids(full) and not (clone / "profile/data/model-assets").exists(),
         str(scoped),
     )
     (clone / "profile/config/manifest.yaml").write_text("plugins: coreai_embeddings_plugin\n")

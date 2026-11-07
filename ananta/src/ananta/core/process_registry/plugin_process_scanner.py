@@ -30,6 +30,10 @@ from ananta.core.process_registry.invocation_schema_generator import (
 from ananta.core.process_registry.plugin_registration_validator import (
     PluginRegistrationValidator,
 )
+from ananta.core.process_registry.registration_census import (
+    plugin_process_key,
+    should_skip_plugin_action,
+)
 from ananta.core.process_registry.service_interface_metadata_generator import (
     ServiceInterfaceMetadataGenerator,
 )
@@ -68,9 +72,7 @@ class PluginProcessScanner:
         for plugin_name, plugin_instance in self._plugin_manager.plugins.items():
             self._debug_individual_plugin(plugin_name, plugin_instance)
 
-    def _debug_individual_plugin(
-        self, plugin_name: str, plugin_instance: PluginBase
-    ) -> None:
+    def _debug_individual_plugin(self, plugin_name: str, plugin_instance: PluginBase) -> None:
         """Debug individual plugin information."""
 
     def scan_and_register(self, registry: dict[str, object]) -> int:
@@ -82,18 +84,13 @@ class PluginProcessScanner:
                 continue
 
             try:
-                processes_count = self._process_individual_plugin(
-                    plugin_name, plugin_instance, registry
-                )
+                processes_count = self._process_individual_plugin(plugin_name, plugin_instance, registry)
                 plugin_processes += processes_count
             except FrameworkError as e:
                 # FrameworkError from signature validation or plugin introspection is FATAL
                 # Re-raise immediately to fail system startup - no recovery, no continue
                 # This enforces fail-fast: plugins with invalid signatures MUST be fixed
-                logger.error(
-                    f"FATAL: Plugin '{plugin_name}' failed registration validation. "
-                    f"This is a critical error that prevents system startup. Error: {e}"
-                )
+                logger.error(f"FATAL: Plugin '{plugin_name}' failed registration validation. This is a critical error that prevents system startup. Error: {e}")
                 raise
             except Exception as e:
                 # Unexpected errors during plugin processing are also fatal
@@ -130,10 +127,7 @@ class PluginProcessScanner:
         # Both MUST be available at this point - if not, it's a startup sequence bug
         orchestrator = self._plugin_manager.orchestrator_ref
         if orchestrator is None:
-            raise RuntimeError(
-                f"orchestrator_ref not set when processing {plugin_name}. "
-                "This indicates a startup sequence bug."
-            )
+            raise RuntimeError(f"orchestrator_ref not set when processing {plugin_name}. This indicates a startup sequence bug.")
 
         # Only skip if this plugin IS the bound provider for some service
         if orchestrator.service_bindings.is_plugin_bound_to_service(plugin_name):
@@ -142,9 +136,7 @@ class PluginProcessScanner:
         # Plugin declares service_interfaces but isn't bound - keep in plugin:: namespace
         return False
 
-    def _process_individual_plugin(
-        self, plugin_name: str, plugin_instance: PluginBase, registry: dict[str, object]
-    ) -> int:
+    def _process_individual_plugin(self, plugin_name: str, plugin_instance: PluginBase, registry: dict[str, object]) -> int:
         """Process individual plugin and register its processes."""
 
         actions = self._scan_plugin_processes(plugin_instance)
@@ -169,9 +161,7 @@ class PluginProcessScanner:
             # RECOVERY MODE: Warn about missing return_value_schema but don't fail
             for action in actions:
                 if not action.return_value_schema:
-                    logger.error(
-                        f'RECOVERY-WARNING: Action "{action.name}" in plugin "{plugin_instance.name}" missing return_value_schema. This should be fixed after recovery.'
-                    )
+                    logger.error(f'RECOVERY-WARNING: Action "{action.name}" in plugin "{plugin_instance.name}" missing return_value_schema. This should be fixed after recovery.')
                     # TODO: Re-enable fail-fast validation after recovery
                     # raise FrameworkError(...
 
@@ -190,30 +180,22 @@ class PluginProcessScanner:
 
     def _should_skip_action(self, action: ActionMetadata) -> bool:
         """Check if action should be skipped (action definitions)."""
-        if action.name == "evaluate_input":
-            return True
-        return False
+        return should_skip_plugin_action(action)
 
-    def _register_plugin_process(
-        self, plugin_name: str, action: ActionMetadata, registry: dict[str, object]
-    ) -> None:
+    def _register_plugin_process(self, plugin_name: str, action: ActionMetadata, registry: dict[str, object]) -> None:
         """Register individual plugin process in registry."""
-        process_key = f"plugin::{plugin_name}::{action.name}"
+        process_key = plugin_process_key(plugin_name, action)
         processes_dict = registry["processes"]
         assert isinstance(processes_dict, dict), "Expected processes to be a dict"
 
         parameter_schema_dict = self._serialize_plugin_parameters(plugin_name, action)
-        process_entry = self._build_plugin_process_entry(
-            process_key, plugin_name, action, parameter_schema_dict
-        )
+        process_entry = self._build_plugin_process_entry(process_key, plugin_name, action, parameter_schema_dict)
         self._add_optional_plugin_fields(process_entry, action)
         self._add_plugin_documentation(process_entry, process_key, action, parameter_schema_dict)
 
         processes_dict[process_key] = process_entry
 
-    def _serialize_plugin_parameters(
-        self, plugin_name: str, action: ActionMetadata
-    ) -> dict[str, object]:
+    def _serialize_plugin_parameters(self, plugin_name: str, action: ActionMetadata) -> dict[str, object]:
         """Serialize parameter_schema at registration time.
 
         Args:
@@ -229,11 +211,7 @@ class PluginProcessScanner:
         parameter_schema_dict: dict[str, object] = {}
         for param_name, param_meta in action.parameters.items():
             if not hasattr(param_meta, "to_dict"):
-                raise TypeError(
-                    f"Action '{action.name}' in plugin '{plugin_name}' has parameter '{param_name}' "
-                    f"that is a {type(param_meta).__name__} instead of ParameterMetadata. "
-                    f"Value: {param_meta!r}"
-                )
+                raise TypeError(f"Action '{action.name}' in plugin '{plugin_name}' has parameter '{param_name}' that is a {type(param_meta).__name__} instead of ParameterMetadata. Value: {param_meta!r}")
             parameter_schema_dict[param_name] = param_meta.to_dict()
         return parameter_schema_dict
 
@@ -272,9 +250,7 @@ class PluginProcessScanner:
             "is_long_running": action.is_long_running,
             "is_async": action.is_async,
             "input_contract": self._metadata_generator.generate_input_contract(action),
-            "action_blueprint": self._metadata_generator.generate_action_blueprint(
-                process_key, action
-            ),
+            "action_blueprint": self._metadata_generator.generate_action_blueprint(process_key, action),
             "requires_result_processor": action.requires_result_processor,
             "processor_policy_category": action.processor_policy_category,
             "chaining_guidance": action.chaining_guidance if action.chaining_guidance else [],
@@ -282,9 +258,7 @@ class PluginProcessScanner:
             "include_in_system_prompt": False,  # Only service_interface processes can be in system prompt
         }
 
-    def _add_optional_plugin_fields(
-        self, process_entry: dict[str, object], action: ActionMetadata
-    ) -> None:
+    def _add_optional_plugin_fields(self, process_entry: dict[str, object], action: ActionMetadata) -> None:
         """Add optional fields to plugin process entry.
 
         Args:
@@ -295,14 +269,10 @@ class PluginProcessScanner:
             process_entry["result_processor"] = action.default_result_processor
 
         if action.result_processor_customizations:
-            process_entry["result_processor_customizations"] = (
-                action.result_processor_customizations.to_dict()
-            )
+            process_entry["result_processor_customizations"] = action.result_processor_customizations.to_dict()
 
         if action.error_processor_customizations:
-            process_entry["error_processor_customizations"] = (
-                action.error_processor_customizations.to_dict()
-            )
+            process_entry["error_processor_customizations"] = action.error_processor_customizations.to_dict()
 
     def _add_plugin_documentation(
         self,

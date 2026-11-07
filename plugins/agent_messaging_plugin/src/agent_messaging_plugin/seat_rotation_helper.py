@@ -51,8 +51,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
+from ananta.core.runtime.port_manager import ClientIOExecutor
+
 from .driver_texts import render_driver_text
 from .submit_conventions import ITERM2_SEAT_SUBMIT_CONVENTION
+
+SEAT_IO = ClientIOExecutor("seat-helper-io")
 
 try:
     import iterm2 as _iterm2_module  # pyright: ignore[reportMissingImports]
@@ -84,10 +88,7 @@ ITERM2_IMPORT_ERROR: Final[str | None] = _iterm2_import_error
 _iterm: Any = _iterm2_module
 
 ITERM2_UNAVAILABLE_MESSAGE: Final[str] = (
-    "the iTerm2 Python bindings are not installed, so no pane can be driven. This is "
-    "SEAT machinery for an operator's iTerm2 workstation and is meaningless on a "
-    "headless box; the 'iterm2' distribution ships with "
-    "iterm2_coding_agent_management_plugin, which this profile may deliberately exclude"
+    "the iTerm2 Python bindings are not installed, so no pane can be driven. This is SEAT machinery for an operator's iTerm2 workstation and is meaningless on a headless box; the 'iterm2' distribution ships with iterm2_coding_agent_management_plugin, which this profile may deliberately exclude"
 )
 
 USER_ROLE_VAR = "user.role"
@@ -218,9 +219,7 @@ class SettleDiagnostics:
             "samples_taken": self.samples_taken,
             "streak_reset_count": self.streak_reset_count,
             "current_streak_first_match_sample_index": self.current_streak_first_match_sample_index,
-            "current_streak_first_match_elapsed_seconds": (
-                self.current_streak_first_match_elapsed_seconds
-            ),
+            "current_streak_first_match_elapsed_seconds": (self.current_streak_first_match_elapsed_seconds),
             "elapsed_at_last_reset_seconds": self.elapsed_at_last_reset_seconds,
         }
 
@@ -298,9 +297,7 @@ async def _poll_until_match(
         now = now_fn()
         if now > deadline:
             raise _PollTimeoutError(
-                f"{what} not confirmed within {timeout_seconds}s "
-                f"({stable_count}/{stable_samples_required} consecutive stable samples "
-                f"at timeout, {samples_taken} total samples)",
+                f"{what} not confirmed within {timeout_seconds}s ({stable_count}/{stable_samples_required} consecutive stable samples at timeout, {samples_taken} total samples)",
                 SettleDiagnostics(
                     samples_taken=samples_taken,
                     streak_reset_count=streak_reset_count,
@@ -342,11 +339,7 @@ def resolve_pane_matches(rows: list[RoleRow], role_tag: str) -> list[PaneMatch]:
     Pure filter, no I/O -- the 0/1/N COUNT is what :func:`resolve_single_pane`
     gates on; this function itself never refuses, so a caller inspecting
     ambiguity (rather than failing on it) can still use it directly."""
-    return [
-        PaneMatch(session_id=row.session_id, tab_id=row.tab_id, window_id=row.window_id)
-        for row in rows
-        if row.role == role_tag
-    ]
+    return [PaneMatch(session_id=row.session_id, tab_id=row.tab_id, window_id=row.window_id) for row in rows if row.role == role_tag]
 
 
 def resolve_single_pane(rows: list[RoleRow], role_tag: str) -> PaneMatch:
@@ -358,7 +351,8 @@ def resolve_single_pane(rows: list[RoleRow], role_tag: str) -> PaneMatch:
     matches = resolve_pane_matches(rows, role_tag)
     if not matches:
         raise PaneResolutionError(
-            CODE_NO_PANE_MATCH, f"no pane tagged user.role={role_tag!r} found",
+            CODE_NO_PANE_MATCH,
+            f"no pane tagged user.role={role_tag!r} found",
         )
     if len(matches) > 1:
         raise PaneResolutionError(
@@ -452,15 +446,20 @@ async def wait_for_settle(
     Thin wrapper over :func:`_poll_until_match`, shared with
     :func:`wait_for_screen_stable`.
     """
+
     def _is_match(lines: list[str]) -> bool:
         return is_cleared_state(lines, cleared_signature)
 
     try:
         return await _poll_until_match(
-            session, is_match=_is_match, what="settle",
+            session,
+            is_match=_is_match,
+            what="settle",
             poll_interval_seconds=poll_interval_seconds,
             stable_samples_required=stable_samples_required,
-            timeout_seconds=timeout_seconds, now_fn=now_fn, sleep_fn=sleep_fn,
+            timeout_seconds=timeout_seconds,
+            now_fn=now_fn,
+            sleep_fn=sleep_fn,
         )
     except _PollTimeoutError as exc:
         raise SettleTimeoutError(str(exc), exc.diagnostics) from exc
@@ -499,10 +498,14 @@ async def wait_for_screen_stable(
 
     try:
         return await _poll_until_match(
-            session, is_match=_is_match, what="screen stability",
+            session,
+            is_match=_is_match,
+            what="screen stability",
             poll_interval_seconds=poll_interval_seconds,
             stable_samples_required=stable_samples_required,
-            timeout_seconds=timeout_seconds, now_fn=now_fn, sleep_fn=sleep_fn,
+            timeout_seconds=timeout_seconds,
+            now_fn=now_fn,
+            sleep_fn=sleep_fn,
         )
     except _PollTimeoutError as exc:
         raise ScreenStabilityTimeoutError(str(exc), exc.diagnostics) from exc
@@ -520,12 +523,14 @@ async def _live_role_rows(app: Any) -> tuple[list[RoleRow], dict[str, Any]]:
             for session in tab.sessions:
                 role = await session.async_get_variable(USER_ROLE_VAR)
                 session_id = str(session.session_id)
-                rows.append(RoleRow(
-                    role=str(role or ""),
-                    session_id=session_id,
-                    tab_id=_safe_int(tab.tab_id),
-                    window_id=_safe_int(window.window_id),
-                ))
+                rows.append(
+                    RoleRow(
+                        role=str(role or ""),
+                        session_id=session_id,
+                        tab_id=_safe_int(tab.tab_id),
+                        window_id=_safe_int(window.window_id),
+                    )
+                )
                 session_by_id[session_id] = session
     return rows, session_by_id
 
@@ -600,12 +605,10 @@ async def _submit_only_flow(
     lines = [contents.line(i).string for i in range(contents.number_of_lines)]
     if not any(expected_fragment in clean_screen_text(line) for line in lines):
         return {
-            "status": "refused", "step": STEP_CONFIRM_COMPOSER_CONTENT,
+            "status": "refused",
+            "step": STEP_CONFIRM_COMPOSER_CONTENT,
             "code": CODE_COMPOSER_CONTENT_MISMATCH,
-            "message": (
-                f"composer does not show the expected pickup content "
-                f"(looked for {expected_fragment!r}); refusing to send blind"
-            ),
+            "message": (f"composer does not show the expected pickup content (looked for {expected_fragment!r}); refusing to send blind"),
         }
     try:
         await session.async_send_text(ITERM2_SEAT_SUBMIT_CONVENTION.submit_value or "")
@@ -621,15 +624,19 @@ async def _submit_only_flow(
         )
     except SettleTimeoutError as exc:
         return {
-            "status": "refused", "step": STEP_CONFIRM_SUBMIT, "code": CODE_SUBMIT_TIMEOUT,
-            "message": str(exc), "submit_diagnostics": exc.diagnostics.to_dict(),
+            "status": "refused",
+            "step": STEP_CONFIRM_SUBMIT,
+            "code": CODE_SUBMIT_TIMEOUT,
+            "message": str(exc),
+            "submit_diagnostics": exc.diagnostics.to_dict(),
         }
     return {
         "status": "completed",
-        "session_id": match.session_id, "tab_id": match.tab_id, "window_id": match.window_id,
+        "session_id": match.session_id,
+        "tab_id": match.tab_id,
+        "window_id": match.window_id,
         "submit_diagnostics": submit_diagnostics.to_dict(),
     }
-
 
 
 async def _send_slash_command_leg(
@@ -668,7 +675,10 @@ async def _send_slash_command_leg(
 
 
 async def _send_clear_leg(
-    session: Any, *, cleared_signature: str, send_gap_seconds: float,
+    session: Any,
+    *,
+    cleared_signature: str,
+    send_gap_seconds: float,
 ) -> list[str]:
     """Capture-then-clear (2026-08-28), extracted from :func:`run_rotation`
     to keep that function under the cyclomatic-complexity gate — the
@@ -695,7 +705,7 @@ async def _send_clear_leg(
         raise HelperStepError(STEP_CAPTURE_COMPOSER, str(exc)) from exc
     composer_capture = composer_content_rows(lines, cleared_signature)
     if composer_capture:
-        print(json.dumps({"composer_capture": composer_capture}), flush=True)
+        await SEAT_IO.run(_print_composer_capture, composer_capture)
     await _send_slash_command_leg(
         session,
         render_driver_text("seat.clear"),
@@ -707,6 +717,10 @@ async def _send_clear_leg(
         send_gap_seconds=send_gap_seconds,
     )
     return composer_capture
+
+
+def _print_composer_capture(composer_capture: list[str]) -> None:
+    print(json.dumps({"composer_capture": composer_capture}), flush=True)
 
 
 async def _send_model_leg(session: Any, model: str, *, send_gap_seconds: float) -> None:
@@ -793,14 +807,19 @@ async def run_rotation(
         match = resolve_single_pane(rows, role_tag)
     except PaneResolutionError as exc:
         return {
-            "status": "refused", "step": STEP_RESOLVE_PANE, "code": exc.code,
-            "message": exc.message, "candidates": exc.candidates,
+            "status": "refused",
+            "step": STEP_RESOLVE_PANE,
+            "code": exc.code,
+            "message": exc.message,
+            "candidates": exc.candidates,
         }
     session = session_by_id[match.session_id]
 
     if submit_only:
         return await _submit_only_flow(
-            session, pickup_text, match,
+            session,
+            pickup_text,
+            match,
             cleared_signature=cleared_signature,
             poll_interval_seconds=poll_interval_seconds,
             stable_samples_required=stable_samples_required,
@@ -810,7 +829,9 @@ async def run_rotation(
     composer_capture: list[str] = []
     if not inject_only:
         composer_capture = await _send_clear_leg(
-            session, cleared_signature=cleared_signature, send_gap_seconds=send_gap_seconds,
+            session,
+            cleared_signature=cleared_signature,
+            send_gap_seconds=send_gap_seconds,
         )
 
     try:
@@ -823,7 +844,9 @@ async def run_rotation(
         )
     except SettleTimeoutError as exc:
         return {
-            "status": "refused", "step": STEP_SETTLE_WAIT, "code": CODE_SETTLE_TIMEOUT,
+            "status": "refused",
+            "step": STEP_SETTLE_WAIT,
+            "code": CODE_SETTLE_TIMEOUT,
             "message": str(exc),
             "settle_diagnostics": exc.diagnostics.to_dict(),
             "composer_capture": composer_capture,
@@ -842,7 +865,9 @@ async def run_rotation(
             )
         except SettleTimeoutError as exc:
             return {
-                "status": "refused", "step": STEP_MODEL_SETTLE_WAIT, "code": CODE_SETTLE_TIMEOUT,
+                "status": "refused",
+                "step": STEP_MODEL_SETTLE_WAIT,
+                "code": CODE_SETTLE_TIMEOUT,
                 "message": str(exc),
                 "settle_diagnostics": settle_diagnostics.to_dict(),
                 "model_settle_diagnostics": exc.diagnostics.to_dict(),
@@ -851,7 +876,8 @@ async def run_rotation(
 
     try:
         submit_diagnostics = await _send_pickup_and_confirm_submit(
-            session, pickup_text,
+            session,
+            pickup_text,
             cleared_signature=cleared_signature,
             poll_interval_seconds=poll_interval_seconds,
             stable_samples_required=stable_samples_required,
@@ -859,14 +885,20 @@ async def run_rotation(
         )
     except ScreenStabilityTimeoutError as exc:
         return {
-            "status": "refused", "step": STEP_PASTE_STABLE_WAIT, "code": CODE_PASTE_STABLE_TIMEOUT,
-            "message": str(exc), "paste_stable_diagnostics": exc.diagnostics.to_dict(),
+            "status": "refused",
+            "step": STEP_PASTE_STABLE_WAIT,
+            "code": CODE_PASTE_STABLE_TIMEOUT,
+            "message": str(exc),
+            "paste_stable_diagnostics": exc.diagnostics.to_dict(),
             "composer_capture": composer_capture,
         }
     except SettleTimeoutError as exc:
         return {
-            "status": "refused", "step": STEP_CONFIRM_SUBMIT, "code": CODE_SUBMIT_TIMEOUT,
-            "message": str(exc), "submit_diagnostics": exc.diagnostics.to_dict(),
+            "status": "refused",
+            "step": STEP_CONFIRM_SUBMIT,
+            "code": CODE_SUBMIT_TIMEOUT,
+            "message": str(exc),
+            "submit_diagnostics": exc.diagnostics.to_dict(),
             "composer_capture": composer_capture,
         }
 
@@ -898,20 +930,22 @@ def _safe_int(value: Any) -> int:
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Detached iTerm2 seat self-rotation helper (send /clear, "
-        "wait for settle, inject the pickup first turn).",
+        description="Detached iTerm2 seat self-rotation helper (send /clear, wait for settle, inject the pickup first turn).",
     )
     parser.add_argument(
-        "--role-tag", required=True,
+        "--role-tag",
+        required=True,
         help="user.role value to resolve the target pane by (live read, never cached).",
     )
     parser.add_argument(
-        "--pickup-prompt-file", required=True, type=Path,
-        help="Path to the first-turn text to inject post-clear. The helper only "
-        "reads this file; it never authors pickup content.",
+        "--pickup-prompt-file",
+        required=True,
+        type=Path,
+        help="Path to the first-turn text to inject post-clear. The helper only reads this file; it never authors pickup content.",
     )
     parser.add_argument(
-        "--cleared-signature", required=True,
+        "--cleared-signature",
+        required=True,
         help="EXACT string a screen line must equal (post NUL-strip and "
         "edge-whitespace-strip) to positively confirm the cleared, empty-composer "
         "state (ruling 4: quiescence alone never proves clear -- and a substring "
@@ -920,27 +954,34 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "pane, not guessed -- e.g. the bare prompt glyph '❯'.",
     )
     parser.add_argument(
-        "--poll-interval-seconds", type=float, default=DEFAULT_POLL_INTERVAL_SECONDS,
+        "--poll-interval-seconds",
+        type=float,
+        default=DEFAULT_POLL_INTERVAL_SECONDS,
     )
     parser.add_argument(
-        "--stable-samples-required", type=int, default=DEFAULT_STABLE_SAMPLES_REQUIRED,
+        "--stable-samples-required",
+        type=int,
+        default=DEFAULT_STABLE_SAMPLES_REQUIRED,
     )
     parser.add_argument(
-        "--settle-timeout-seconds", type=float, default=DEFAULT_SETTLE_TIMEOUT_SECONDS,
+        "--settle-timeout-seconds",
+        type=float,
+        default=DEFAULT_SETTLE_TIMEOUT_SECONDS,
     )
     parser.add_argument(
-        "--send-gap-seconds", type=float, default=DEFAULT_SEND_GAP_SECONDS,
-        help="Gap between the clear leg's individual sends (space, kill-line, /clear, CR, "
-        "menu-confirm CR) so no send lands mid-render of the prior one.",
+        "--send-gap-seconds",
+        type=float,
+        default=DEFAULT_SEND_GAP_SECONDS,
+        help="Gap between the clear leg's individual sends (space, kill-line, /clear, CR, menu-confirm CR) so no send lands mid-render of the prior one.",
     )
     parser.add_argument(
         "--model",
-        help="Optional Claude model name to select after /clear has positively settled and "
-        "before injecting the pickup prompt. Omit to preserve the existing rotation exactly.",
+        help="Optional Claude model name to select after /clear has positively settled and before injecting the pickup prompt. Omit to preserve the existing rotation exactly.",
     )
     recovery_group = parser.add_mutually_exclusive_group()
     recovery_group.add_argument(
-        "--inject-only", action="store_true",
+        "--inject-only",
+        action="store_true",
         help="Skip the /clear send entirely and go straight to settle-wait then inject "
         "the pickup prompt. The sanctioned recovery path after a settle-timeout refusal "
         "when the pane is ALREADY cleared (a prior /clear submitted; only the settle "
@@ -949,7 +990,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "assumes a prior refusal means the pane is fine now.",
     )
     recovery_group.add_argument(
-        "--submit-only", action="store_true",
+        "--submit-only",
+        action="store_true",
         help="Never send /clear or the pickup text -- only positively confirm the composer "
         "already shows the EXPECTED pickup content (its last non-blank line), then send a "
         "bare CR and confirm submission. The sanctioned recovery path for the STRANDED-"
@@ -964,22 +1006,30 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv)
     pickup_text = args.pickup_prompt_file.read_text(encoding="utf-8")
     try:
-        result = asyncio.run(run_rotation(
-            args.role_tag,
-            pickup_text,
-            cleared_signature=args.cleared_signature,
-            poll_interval_seconds=args.poll_interval_seconds,
-            stable_samples_required=args.stable_samples_required,
-            settle_timeout_seconds=args.settle_timeout_seconds,
-            send_gap_seconds=args.send_gap_seconds,
-            model=args.model,
-            inject_only=args.inject_only,
-            submit_only=args.submit_only,
-        ))
+        result = asyncio.run(
+            run_rotation(
+                args.role_tag,
+                pickup_text,
+                cleared_signature=args.cleared_signature,
+                poll_interval_seconds=args.poll_interval_seconds,
+                stable_samples_required=args.stable_samples_required,
+                settle_timeout_seconds=args.settle_timeout_seconds,
+                send_gap_seconds=args.send_gap_seconds,
+                model=args.model,
+                inject_only=args.inject_only,
+                submit_only=args.submit_only,
+            )
+        )
     except HelperStepError as exc:
-        print(json.dumps({
-            "status": "error", "step": exc.step, "message": exc.message,
-        }))
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "step": exc.step,
+                    "message": exc.message,
+                }
+            )
+        )
         return 1
     print(json.dumps(result))
     return 0 if result.get("status") == "completed" else 1

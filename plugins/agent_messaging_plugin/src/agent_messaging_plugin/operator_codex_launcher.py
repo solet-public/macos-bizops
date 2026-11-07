@@ -21,9 +21,10 @@ import tomllib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, cast
 
-from .codex_common import _without_parent_runtime_env
+from .codex_common import _without_parent_runtime_env  # pyright: ignore[reportPrivateUsage]
+from .operator_repository_mapping import OperatorRepositoryTarget, resolve_repository_target
 from .solet_cli import expose_worker_cli
 
 
@@ -42,6 +43,21 @@ class LaunchSpec:
     codex_binary: Path
     codex_args: tuple[str, ...]
     claim_role: bool = True
+
+
+def resolve_operator_target(cwd: Path) -> OperatorRepositoryTarget:
+    """Return the registered support solet, bridge, and controller for a cwd."""
+    try:
+        return resolve_repository_target(cwd)
+    except ValueError as exc:
+        raise OperatorLaunchError(str(exc)) from exc
+
+
+def _checked_target(spec: LaunchSpec) -> OperatorRepositoryTarget:
+    target = resolve_operator_target(spec.cwd)
+    if (spec.solet, spec.bridge_cli.resolve()) != (target.solet, target.bridge_cli.resolve()):
+        raise OperatorLaunchError("operator solet or bridge does not match the target repository")
+    return target
 
 
 def _explicit_model_effort(arguments: tuple[str, ...]) -> tuple[str, str]:
@@ -87,6 +103,7 @@ def _checked(argv: list[str]) -> str:
 def _preflight(spec: LaunchSpec) -> tuple[str, str, str]:
     if not spec.role.strip() or not spec.solet.strip() or not spec.cwd.is_dir():
         raise OperatorLaunchError("operator role, solet and existing checkout are required")
+    _checked_target(spec)
     _binary(spec.codex_binary)
     _binary(spec.bridge_cli)
     tmux = shutil.which("tmux")
@@ -104,22 +121,23 @@ def _launch_environment(
     spec: LaunchSpec, *, instance_id: str, session_id: str, model: str, effort: str,
 ) -> dict[str, str]:
     """Replace borrowed session identity with a fresh, complete operator pair."""
+    target = _checked_target(spec)
     environment = {
-        "SOLET_NAME": spec.solet,
+        "SOLET_NAME": target.solet,
         "AGENT_INSTANCE_ID": instance_id,
         "AGENT_SESSION_ID": session_id,
         "AGENT_SESSION_LABEL": spec.role,
         "AGENT_ROLE": spec.role,
         "AGENT_IDENTITY": "codex",
         "AGENT_ROLE_AUTOBIND": "0",
-        "AGENT_WAKE_CLI": str(spec.bridge_cli),
+        "AGENT_WAKE_CLI": str(target.bridge_cli),
         "FLEET_TRANSPORT": "watch",
-        "GIT_CONTROLLER_NAME": "Git-Controller",
+        "GIT_CONTROLLER_NAME": target.git_controller_name,
         "OPERATOR_CODEX_MODEL": model,
         "OPERATOR_CODEX_EFFORT": effort,
         "OPERATOR_CODEX_CWD": str(spec.cwd.resolve()),
     }
-    expose_worker_cli(environment, str(spec.bridge_cli))
+    expose_worker_cli(environment, str(target.bridge_cli))
     return environment
 
 
@@ -182,11 +200,11 @@ def _armed(log_path: Path, instance_id: str) -> bool:
         return False
     for line in log_path.read_text().splitlines():
         try:
-            value = json.loads(line)
+            value: object = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(value, dict) and value.get("watch") == "armed":
-            if value.get("agent_instance_id") != instance_id:
+        if isinstance(value, dict) and cast("dict[str, object]", value).get("watch") == "armed":
+            if cast("dict[str, object]", value).get("agent_instance_id") != instance_id:
                 raise OperatorLaunchError("watcher armed under an unexpected instance identity")
             return True
     return False
@@ -256,6 +274,18 @@ def launch(spec: LaunchSpec, *, output: TextIO = sys.stdout) -> str:
 
 
 def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "--resolve-target":
+        try:
+            target = resolve_operator_target(Path(sys.argv[2]))
+        except OperatorLaunchError as exc:
+            print(f"operator target refused: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({
+            "solet": target.solet,
+            "bridge_cli": str(target.bridge_cli),
+            "git_controller_name": target.git_controller_name,
+        }, sort_keys=True))
+        return 0
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--role", required=True)
     parser.add_argument("--solet", required=True)

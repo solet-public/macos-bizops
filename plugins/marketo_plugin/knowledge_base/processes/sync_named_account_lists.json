@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::sync_named_account_lists",
+  "display_name": "Marketo: Sync Named Account Lists",
+  "description": "Create and/or update up to 300 Marketo named account list records in one batch (POST /rest/v1/namedAccountLists.json). action is createOnly (default) or updateOnly; dedupe_by is dedupeFields (name) or idField (marketoGUID). Async write: poll check_marketo_job_status for per-record status and reasons. Vendor RBAC decides what the API user may write.",
+  "embedding_description": "Create or rename Marketo named account lists (ABM account lists), up to 300 per batch, with createOnly (vendor default) or updateOnly; name is the only updateable field. Async write returns per-record created, updated or skipped status. Keyed by name or marketoGUID. Distinct from add_named_account_list_members.",
+  "result_processor_customizations": {
+    "action_label": "Marketo named account lists sync job dispatched",
+    "result_type": "marketo_sync_named_account_lists_result",
+    "result_description": "Dict with job_id and status 'queued'. The completed job result is Marketo's per-record results array (seq, marketoGUID or id, status, reasons), row_count and tallies (status -> count).",
+    "presentation_guidance": "This changes vendor state. A queued job is not vendor success: poll check_marketo_job_status, then report the tallies and any skipped records with their reasons."
+  },
+  "error_processor_customizations": {
+    "action_context": "Create or rename Marketo named account lists on the configured instance.",
+    "error_interpretation": "marketo.invalid_params: refused at dispatch before any vendor call (missing or malformed parameters, more than 300 entries, an action/dedupe_by/delete_by value Marketo does not define; createOrUpdate is not defined for this object). On the finished job: marketo.permission_denied (vendor 603 or HTTP 403) means the API user's Role lacks the Access API permission; marketo.auth_failed (601/602 after one re-mint, or HTTP 401) means the credential was rejected; marketo.validation_failed and other vendor codes carry Marketo's own message. A transport fault after dispatch may follow a vendor mutation.",
+    "recovery_guidance": "marketo.permission_denied: grant Read-Write Named Account List under Admin > Users & Roles > Roles > the API role > Access API, then retry. Read the records back with get_named_account_lists before retrying a write that ended in a transport fault."
+  }
+}

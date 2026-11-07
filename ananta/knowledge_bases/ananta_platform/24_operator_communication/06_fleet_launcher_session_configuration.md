@@ -8,9 +8,9 @@ Article Role: operations_reference
 
 Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-reference, domain:local-solet, domain:client-deployment, consumer_profile:both
 
-Embedding Description: How to change the base model, effort level, advisor model, and declared transport (MCP vs watch) for one named role in an operator's multi-session fleet launcher — where that launcher actually lives, the CLI flags and environment variables involved, the one verified-correct way to fully disable the advisor tool for a single session, where the fleet-wide default transport is declared and how a per-role launcher export overrides it, why solet launchers deny the structured-choice AskUserQuestion prompt by default and the per-launch override that lifts it, why spawn_session's tmux host driver carries that same deny (with its own allow_askuserquestion override) while headless needs none — the tool is inert there by construction, and how a long-running session clears its own context with no helper agent in the injection path — the operator types the clear command and the resume prompt, or the session runs a deterministic detached script that does only that.
+Embedding Description: How to change the base model, effort level, advisor model, and declared transport (MCP vs watch) for one named role in an operator's multi-session fleet launcher — where that launcher actually lives, the CLI flags and environment variables involved, the one verified-correct way to fully disable the advisor tool for a single session, where the fleet-wide default transport is declared and how a per-role launcher export overrides it, why solet launchers deny the structured-choice AskUserQuestion prompt by default and the per-launch override that lifts it, why spawn_session's tmux host driver carries that same deny (with its own allow_askuserquestion override) while headless needs none — the tool is inert there by construction, and how a long-running session clears its own context with no helper agent in the injection path — the operator types the clear command and the resume prompt, or the session runs a deterministic detached script that does only that. It also points Main seats to the native candidate relay verbs delivered-to-review, reviewed-to-ready, and the Project-Solet-only landing run, with their authority boundaries and known gaps.
 
-**When you need this**: an operator asks to change the model, effort level, advisor configuration, or transport for a named session role (a coordinator, a reviewer, an implementation lane, any role launched by a wrapper function); a session needs to know where that configuration actually lives before searching for it in the wrong place; a session needs to turn the advisor tool off for one role without touching the operator's global default; a session needs to know why one role talks over MCP while another talks over the watch transport, or wants to change which one a role uses; a session wants a spawn_session-spawned worker to be able to use AskUserQuestion (or wants to confirm why one can't); a session's context has grown long and it needs to clear itself and continue working without waiting for the operator.
+**When you need this**: an operator asks to change the model, effort level, advisor configuration, or transport for a named session role (a coordinator, a reviewer, an implementation lane, any role launched by a wrapper function); a session needs to know where that configuration actually lives before searching for it in the wrong place; a session needs to turn the advisor tool off for one role without touching the operator's global default; a session needs to know why one role talks over MCP while another talks over the watch transport, or wants to change which one a role uses; a session wants a spawn_session-spawned worker to be able to use AskUserQuestion (or wants to confirm why one can't); a session's context has grown long and it needs to clear itself and continue working without waiting for the operator; or Main needs to hand a delivered candidate to review, prepare a reviewed candidate for landing, or distinguish the local Git-Controller procedure from Project-Solet's `landing run`.
 
 ---
 
@@ -295,6 +295,63 @@ prompt or it does not. If it does, it is by definition processing. If it does
 not, the operator sees an idle prompt and retypes it — a visible, recoverable
 failure rather than a silent one. The session's durable identity and any role
 binding survive the clear.
+
+## Candidate delivery, review, readiness, and landing
+
+When a candidate is delivered, Main uses `psolet delivered-to-review` to
+freeze the exact revision and create or reuse its review unit, select and spawn
+the reviewer, assign its owner, and send the generated GO. First inspect the
+write-free plan, then invoke the relay with the development checkout explicitly named:
+
+```sh
+psolet delivered-to-review --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT --dry-run
+psolet delivered-to-review --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT
+```
+
+The command is idempotent for an unchanged delivery. It does not handle a
+re-delivery after a FAIL or retired reviewer; it can leave the old review unit
+in place without a delta review (`iss_2b8b517d`). A partial relay also has no
+resume mode. Nothing starts the relay automatically: Main invokes it at the
+author handoff.
+
+After the reviewer records a typed PASS/CLEAR against that frozen revision,
+Main can prepare readiness under the repository's active landing policy:
+
+```sh
+psolet reviewed-to-ready --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT --dry-run
+psolet reviewed-to-ready --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT
+```
+
+The verb requires the newest candidate to be frozen and a typed clearing review
+outcome for that exact revision. It reuses current readiness for the same
+revision and review event. A message, review receipt, or readiness receipt is
+not acceptance or proof that a landing occurred.
+
+`psolet landing run --repo project-solet --unit UNIT [--dry-run]` is the
+Project-Solet-Git-Controller command, not the local Git-Controller procedure. It
+requires the live Project-Solet-Git-Controller binding and current
+`ready_to_land` register state. It verifies the frozen candidate's bytes and
+modes, runs one provisioned gate, records evidence, runs read-only preflight,
+fast-forwards Project Solet `master`, and records the landing. A red gate,
+conflict, or byte mismatch records a typed blocker and leaves `master`
+untouched. Dry-run writes nothing and runs no gate. Recovery after an already
+published merge consumes retained verdict evidence and does not run another
+gate. The command has not yet carried a real landing; the first actual landing
+was recorded by route A (`lnd_8976b957`). The local Git-Controller continues
+to use the repository-specific procedure and gates in the canonical
+Git-Controller commit skill.
+
+Until the exact-candidate metadata Unit `unt_d428a5c3` lands after
+`unt_44965222`, the author includes a proposed landing commit message (subject
+and body) and a doc-impact statement in the delivery report; Main passes both
+to Git-Controller in the READY message. The register stores neither
+(`iss_49b2e4c8`). No automatic trigger exists yet. The old G/ scripts and route
+A remain bounded fallback paths only; they are not the default when a native
+relay is available.
+
+Landing and deployment are still distinct from close-out. After cutover, the
+authorizing seat follows the canonical Change Close-Out Checklist for issue
+disposition, doc impact, reviewer follow-ups, and lane or worktree retirement.
 
 ## Reference
 

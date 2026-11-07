@@ -1,0 +1,4 @@
+plugins/agent_messaging_plugin/tests/bridge_reconnect_evidence_smoke.py
+plugins/agent_messaging_plugin/tests/forwarder_reconnect_announcement_smoke.py
+plugins/agent_messaging_plugin/tests/forwarder_reconnect_cursor_smoke.py
+plugins/agent_messaging_plugin/tests/bridge_lifecycle_sweep_smoke.py

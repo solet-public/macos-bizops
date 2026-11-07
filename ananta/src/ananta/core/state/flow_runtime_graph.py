@@ -164,12 +164,18 @@ class FlowRuntimeGraph:
         new_state: TokenState,
         result_summary: Mapping[str, object] | None = None,
     ) -> None:
-        """
-        Transition token to new state.
+        """Advance a live token; a concurrent terminal outcome always wins."""
+        self._transition_token_state(token_id, new_state, result_summary)
 
-        If new_state is terminal, also sets completed_at.
-        Raises on failure or if the token row is missing (affected != 1).
-        ``updated_at`` is omitted — a universal BEFORE-UPDATE trigger maintains it.
+    def _transition_token_state(
+        self,
+        token_id: str,
+        new_state: TokenState,
+        result_summary: Mapping[str, object] | None = None,
+    ) -> bool:
+        """Keep terminal tokens immutable; stamp other transitions and completion time.
+
+        Missing rows and failed writes raise. The provider maintains updated_at.
         """
         completed_at = (
             datetime.now(UTC).isoformat() if new_state in TERMINAL_STATES else None
@@ -178,7 +184,9 @@ class FlowRuntimeGraph:
 
         result = self._state_service.update_state(
             namespace="core",
-            query={"table": "flow_tokens", "filters": {"id": token_id}},
+            query={"table": "flow_tokens", "filters": {
+                "id": token_id, "state": [state.value for state in NON_TERMINAL_STATES],
+            }},
             updates={
                 "state": new_state.value,
                 "completed_at": completed_at,
@@ -192,9 +200,8 @@ class FlowRuntimeGraph:
             "frg.token_update_failed",
             {"token_id": token_id},
         )
-        # Identity update on the primary key: exactly one row must change. A
-        # 0-count means the token is missing (flow_tokens is never deleted, so
-        # this is a hard invariant, not a benign CAS miss) — fail loudly.
+        if affected == 0 and self._token_is_terminal(token_id):
+            return False
         if affected != 1:
             raise FrameworkError(
                 message=(
@@ -204,6 +211,14 @@ class FlowRuntimeGraph:
                 error_code="frg.token_update_missing",
                 details={"token_id": token_id, "updated": affected},
             )
+        return True
+
+    def _token_is_terminal(self, token_id: str) -> bool:
+        result = self._state_service.read_state("core", {
+            "table": "flow_tokens", "filters": {"id": token_id}, "limit": 1,
+        })
+        rows = self._query_rows(result, "Failed to read token after transition race", {"token_id": token_id})
+        return bool(rows) and rows[0].get("state") in TERMINAL_STATES
 
     def complete_token(
         self,
@@ -217,7 +232,8 @@ class FlowRuntimeGraph:
         After completion, checks if flow should complete.
         """
         new_state = TokenState.COMPLETED if success else TokenState.FAILED
-        self.update_token_state(token_id, new_state, result_summary)
+        if not self._transition_token_state(token_id, new_state, result_summary):
+            return
 
         # Get flow_id and check for completion
         flow_id = self._get_flow_id_for_token(token_id)

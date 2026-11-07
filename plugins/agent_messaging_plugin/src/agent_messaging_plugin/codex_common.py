@@ -220,8 +220,9 @@ def _codex_config_overrides(
     *, config: Mapping[str, object], solet_name: str, transport: str,
     agent_instance_id: str, agent_session_id: str, label: str, solet_bin: str,
 ) -> list[str]:
-    """Return Codex-native ``-c`` overrides for the selected transport."""
+    """Return Codex-native ``-c`` overrides and disable account-level Apps."""
     overrides = [
+        "features.apps=false",
         "shell_environment_policy.set.PATH="
         f"{_toml_string(_worker_path(solet_bin))}",
     ]

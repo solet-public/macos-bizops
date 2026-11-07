@@ -9,7 +9,7 @@
     "result_type": "seed_model_capability_catalog_result",
     "result_description": "run_id, seed_version, cells_seeded, accepted_cells_preserved (model@effort list).",
     "presentation_guidance": "State how many cells were written as pending_crosscheck and how many accepted cells were left untouched. Say plainly that seeded cells are not yet servable to dispatch.",
-    "output_action_guidance": "A seed alone makes nothing selectable. select_dispatch_tier refuses catalog_stale until a refresh run accepts cells; read_model_capability_catalog with include_unaccepted=true shows what was seeded."
+    "output_action_guidance": "A seed alone makes nothing selectable. select_dispatch_tier refuses catalog_unaccepted until a refresh run accepts cells; read_model_capability_catalog with include_unaccepted=true shows what was seeded."
   },
   "error_processor_customizations": {
     "action_context": "One JSON read, one refresh-run insert, then per cell an existence lookup, observation inserts and an upsert, all through the state interface.",

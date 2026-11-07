@@ -38,13 +38,13 @@ _ROOT = _FIXTURES_ROOT / "reconciliation_identity"
 _FIXTURE = _ROOT / "bizopsb15_postcutover_convergefail"
 _RETIRED = "open_files_permissions_settings"
 _RETAINED = "run_genesis"
-_CHECKS = 0
+_checks = 0
 _REQUIRED_CONTRACT_FILENAMES = frozenset(contract_filenames())
 
 
 def _check(condition: bool, message: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    global _checks
+    _checks += 1
     if not condition:
         raise AssertionError(f"red: {message}")
 
@@ -68,7 +68,7 @@ def _check_fixture_contract_bundle_completeness(root: Path) -> tuple[Path, ...]:
     for bundle in bundles:
         actual = {path.name for path in bundle.iterdir() if path.is_file()}
         _check(
-            actual == _REQUIRED_CONTRACT_FILENAMES,
+            frozenset(actual) == _REQUIRED_CONTRACT_FILENAMES,
             f"{bundle.relative_to(root)} exactly matches the required-at-load contract set",
         )
     return bundles
@@ -101,9 +101,7 @@ def _check_fixture_completeness_mutations_are_red() -> None:
 
 
 def _awaiting_in_plan_transaction(source: Transaction) -> Transaction:
-    prior_attempt = next(
-        attempt for attempt in source.operation_attempts if attempt["operation_id"] == _RETAINED
-    )
+    prior_attempt = next(attempt for attempt in source.operation_attempts if attempt["operation_id"] == _RETAINED)
     awaiting_attempt = dict(prior_attempt)
     awaiting_attempt["attempt"] = 99
     awaiting_attempt["checkpoint_status"] = CheckpointStatus.AWAITING_USER.value
@@ -135,9 +133,7 @@ def _check_fresh_transaction_receives_activation_carrier(
                 "solet_manager.create_execution.build_setup_plan",
                 return_value=SimpleNamespace(answers=source.answers),
             ),
-            patch(
-                "solet_manager.create_execution.Transaction.create", return_value=source
-            ) as create,
+            patch("solet_manager.create_execution.Transaction.create", return_value=source) as create,
             patch("solet_manager.create_execution.write_transaction"),
             patch("solet_manager.create_execution._provisional_record"),
         ):
@@ -208,45 +204,53 @@ def _check_seed_lock_resume_identity(source: Transaction) -> None:
             "journal round-trip resumes when installed seed matches persisted identity",
         )
         _check(
-            resumed.seed.channel_id is None
-            and resumed.seed.provenance is None
-            and resumed.seed.existing_install_contract is None
-            and resumed.seed.allowed_repository_migrations == (),
+            resumed.seed.channel_id is None and resumed.seed.provenance is None and resumed.seed.existing_install_contract is None and resumed.seed.allowed_repository_migrations == (),
             "journal round-trip omits non-identity seed-lock fields",
         )
 
-        mismatched_seed = replace(
-            installed_seed,
-            commit="f" * 40,
-            tree_hash="e" * 40,
-            archive_sha256="d" * 64,
+        mismatches = (
+            ("seed_repository", replace(installed_seed, repository="https://example.test/other.git")),
+            ("seed_tag", replace(installed_seed, release_tag="other-release")),
+            ("seed_commit", replace(installed_seed, commit="f" * 40)),
+            ("seed_tree_hash", replace(installed_seed, tree_hash="e" * 40)),
+            ("seed_archive_sha256", replace(installed_seed, archive_sha256="d" * 64)),
+            ("profile", replace(installed_seed, profile="other-profile")),
+            ("seed_tag", replace(installed_seed, release_tag=None)),
+            ("seed_archive_sha256", replace(installed_seed, archive_sha256=None)),
         )
-        with patch(
-            "solet_manager.create_execution.load_seed_lock", return_value=mismatched_seed
-        ):
-            try:
-                _load_or_create_transaction(
-                    paths=paths,
-                    contract_directory=None,
-                    seed_lock_path=root / "installed-seed.lock.json",
-                    registry=MagicMock(),
-                    config=config,
-                    approved_fingerprint="sha256:" + "f" * 64,
-                    selections={},
-                    decision_source="flag",
-                    sources={},
-                )
-            except StateConflictError as exc:
-                message = str(exc)
-                repair = exc.repair
-            else:
-                raise AssertionError("red: stale transaction silently resumed under new seed")
-    _check(retained.seed.commit in message, "conflict names the retained transaction seed")
-    _check(mismatched_seed.commit in message, "conflict names the installed seed lock")
-    _check(
-        repair is not None and "cannot reuse" in repair,
-        "conflict gives stale-transaction repair guidance",
-    )
+        for field, mismatched_seed in mismatches:
+            old_value = retained.seed.identity_dict()[field]
+            new_value = mismatched_seed.identity_dict()[field]
+            _check(
+                {key for key, value in retained.seed.identity_dict().items() if value != mismatched_seed.identity_dict()[key]} == {field},
+                f"{field} fixture changes only its identity value",
+            )
+            with patch("solet_manager.create_execution.load_seed_lock", return_value=mismatched_seed):
+                try:
+                    _load_or_create_transaction(
+                        paths=paths,
+                        contract_directory=None,
+                        seed_lock_path=root / "installed-seed.lock.json",
+                        registry=MagicMock(),
+                        config=config,
+                        approved_fingerprint="sha256:" + "f" * 64,
+                        selections={},
+                        decision_source="flag",
+                        sources={},
+                    )
+                except StateConflictError as exc:
+                    message = str(exc)
+                    repair = exc.repair
+                else:
+                    raise AssertionError(f"red: changed {field} silently resumed")
+            _check(
+                f"{field}: transaction={old_value!r}, installed={new_value!r}" in message,
+                f"conflict names changed {field} and both values: {message}",
+            )
+            _check(
+                repair is not None and "cannot reuse" in repair,
+                "conflict gives stale-transaction repair guidance",
+            )
 
 
 def main() -> int:
@@ -256,9 +260,7 @@ def main() -> int:
         source_revision="a" * 40,
         directory=_FIXTURE / "contract_bundle",
     )
-    source = Transaction.from_dict(
-        json.loads((_FIXTURE / "transaction_bizopsb15.json").read_text(encoding="utf-8"))
-    )
+    source = Transaction.from_dict(json.loads((_FIXTURE / "transaction_bizopsb15.json").read_text(encoding="utf-8")))
     _check(
         source.operation_statuses[_RETIRED] is CheckpointStatus.AWAITING_USER,
         "fixture-3 lacks the out-of-plan awaiting_user blocker",
@@ -339,7 +341,7 @@ def main() -> int:
         in_plan_approved.stages["genesis"] is CheckpointStatus.AWAITING_USER,
         "in-plan awaiting_user operation no longer blocks its declared stage",
     )
-    print(f"create_execution_operation_scope_smoke OK: {_CHECKS} checks passed")
+    print(f"create_execution_operation_scope_smoke OK: {_checks} checks passed")
     return 0
 
 

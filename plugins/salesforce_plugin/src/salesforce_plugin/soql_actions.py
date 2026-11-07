@@ -45,6 +45,7 @@ from .client import SalesforceCliExecutor
 from .constants import (
     DEFAULT_ROW_LIMIT,
     PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_INCLUDE_DELETED,
     PARAM_ROW_LIMIT,
     SOQL_EXPORT_ROW_CAP,
     SOQL_MAX_RECORDS_CAP,
@@ -71,7 +72,9 @@ def fetch_org_id(executor: SalesforceCliExecutor) -> str:
 
 
 def soql_query(
-    executor: SalesforceCliExecutor, params: dict[str, Any], path_gate: PathGate,
+    executor: SalesforceCliExecutor,
+    params: dict[str, Any],
+    path_gate: PathGate,
 ) -> dict[str, Any]:
     """Run a SOQL query; write the result to output_tsv_path, return a handle.
 
@@ -80,16 +83,17 @@ def soql_query(
     export_soql (up to SOQL_EXPORT_ROW_CAP with the same override).
     """
     effective_limit = _resolve_effective_limit(
-        params, default=DEFAULT_ROW_LIMIT, hard_cap=SOQL_MAX_RECORDS_CAP, verb="soql_query",
+        params,
+        default=DEFAULT_ROW_LIMIT,
+        hard_cap=SOQL_MAX_RECORDS_CAP,
+        verb="soql_query",
     )
     query = _require_str(params, "query")
     output_tsv_path = _require_str(params, "output_tsv_path")
-    return _run_and_write_tsv(executor, query, effective_limit, path_gate, output_tsv_path)
+    return _run_and_write_tsv(executor, query, effective_limit, path_gate, output_tsv_path, include_deleted=_include_deleted(params))
 
 
-def export_soql(
-    executor: SalesforceCliExecutor, params: dict[str, Any], path_gate: PathGate
-) -> dict[str, Any]:
+def export_soql(executor: SalesforceCliExecutor, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
     """Export a SOQL query's result as a workspace TSV — the N>>500 route.
 
     Same caller-supplied-path destination and override mechanism as
@@ -100,15 +104,30 @@ def export_soql(
     is sent.
     """
     effective_limit = _resolve_effective_limit(
-        params, default=DEFAULT_ROW_LIMIT, hard_cap=SOQL_EXPORT_ROW_CAP, verb="export_soql",
+        params,
+        default=DEFAULT_ROW_LIMIT,
+        hard_cap=SOQL_EXPORT_ROW_CAP,
+        verb="export_soql",
     )
     query = _require_str(params, "query")
     output_tsv_path = _require_str(params, "output_tsv_path")
-    return _run_and_write_tsv(executor, query, effective_limit, path_gate, output_tsv_path)
+    return _run_and_write_tsv(executor, query, effective_limit, path_gate, output_tsv_path, include_deleted=_include_deleted(params))
+
+
+def _include_deleted(params: dict[str, Any]) -> bool:
+    """queryAll selector: the vendor's /queryAll also returns deleted and archived records."""
+    value = params.get(PARAM_INCLUDE_DELETED, False)
+    if not isinstance(value, bool):
+        raise ValueError(f"'{PARAM_INCLUDE_DELETED}' must be a boolean")
+    return value
 
 
 def _resolve_effective_limit(
-    params: dict[str, Any], *, default: int, hard_cap: int, verb: str,
+    params: dict[str, Any],
+    *,
+    default: int,
+    hard_cap: int,
+    verb: str,
 ) -> int:
     """Resolve the effective fetch ceiling from the §5 override pair.
 
@@ -123,20 +142,13 @@ def _resolve_effective_limit(
     override_present = override is True
     row_limit_present = row_limit is not None
     if override_present != row_limit_present:
-        raise ValueError(
-            f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be "
-            f"given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, "
-            f"{PARAM_ROW_LIMIT}={row_limit!r}"
-        )
+        raise ValueError(f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, {PARAM_ROW_LIMIT}={row_limit!r}")
     if not override_present:
         return default
     if not isinstance(row_limit, int) or isinstance(row_limit, bool) or row_limit < 1:
         raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}' must be a positive integer")
     if row_limit > hard_cap:
-        raise ValueError(
-            f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of "
-            f"{hard_cap}; refusing rather than silently clamping"
-        )
+        raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of {hard_cap}; refusing rather than silently clamping")
     return row_limit
 
 
@@ -146,6 +158,8 @@ def _run_and_write_tsv(
     cap: int,
     path_gate: PathGate,
     output_tsv_path: str,
+    *,
+    include_deleted: bool = False,
 ) -> dict[str, Any]:
     """Admit the path, run the SOQL query up to ``cap`` records, write a TSV, return a handle.
 
@@ -155,11 +169,8 @@ def _run_and_write_tsv(
     resolved_path = path_gate(output_tsv_path)
     parent_dir = os.path.dirname(resolved_path)
     if not os.path.isdir(parent_dir):
-        raise ValueError(
-            f"the parent directory of output_tsv_path does not exist ({parent_dir}); "
-            "create it first — this verb writes one file, it does not create directories"
-        )
-    result = _run_soql(executor, query, cap)
+        raise ValueError(f"the parent directory of output_tsv_path does not exist ({parent_dir}); create it first — this verb writes one file, it does not create directories")
+    result = _run_soql(executor, query, cap, include_deleted=include_deleted)
     records = _strip_attributes(result.get("records") or [] if isinstance(result, dict) else [])
     total_size = _as_int(result.get("totalSize") if isinstance(result, dict) else None, default=len(records))
     # Salesforce's own incompleteness signal: done=false means more data
@@ -176,21 +187,18 @@ def _run_and_write_tsv(
         "columns": columns,
         "row_count": len(row_lists),
         "total_size": total_size,
-        "truncated": (
-            done_false
-            or len(row_lists) >= cap
-            or total_size > len(row_lists)
-        ),
+        "truncated": (done_false or len(row_lists) >= cap or total_size > len(row_lists)),
     }
 
 
-def _run_soql(executor: SalesforceCliExecutor, query: str, max_records: int) -> Any:
+def _run_soql(executor: SalesforceCliExecutor, query: str, max_records: int, *, include_deleted: bool = False) -> Any:
+    # --all-rows makes the CLI query through the vendor queryAll resource.
     fd, path = tempfile.mkstemp(suffix=".soql", prefix="salesforce_plugin_query_")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(query)
         return executor.run_json(
-            ["data", "query", "--file", path],
+            ["data", "query", "--file", path, *(["--all-rows"] if include_deleted else [])],
             env_overrides={"SF_ORG_MAX_QUERY_LIMIT": str(max_records)},
         )
     finally:
@@ -247,5 +255,3 @@ def _require_str(params: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"'{key}' is required and must be a non-empty string")
     return value
-
-

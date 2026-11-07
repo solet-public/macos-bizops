@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::get_authorization_history",
+  "display_name": "Read the history of an accepted authorization",
+  "description": "Accepted-authorization obligations (wgr_d854aa6c). Read-only history for a successor: the ordered immutable accepted_authorization_event rows of one entry (entry_id) or of every entry a message ever authorized (authorizing_message_id, current or superseded) — name exactly one of the two. Each event carries its revision, operation (record, correct, fire, withdraw, retire, reopen), the authorizing message in force after it, reason, actor, the changed fields (set, correct or clear) and full before/after snapshots, so an old message id shows the correction or withdrawal that replaced its predicate and who made it. current returns each entry's projection now; its predicate is the only one that may fire. Events come by entry then revision, limit per page (1-100, default 100), continued by next_cursor until it is null — never a silently capped prefix. An empty result means this queue holds no record of that message, not that no authorization was ever given. The history indexes recorded obligations; it is never proof that an authorization is valid and never landing permission.",
+  "embedding_description": "Reading the full history of an accepted authorization obligation by entry or by the message that authorized it: every predicate it ever had, which reissue withdrew which, who changed it and why, and the one current predicate that may still fire. Lets a successor trace an old authorization id to what replaced it.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Authorization history read",
+    "result_type": "get_authorization_history_result",
+    "result_description": "{\"selector\": {\"entry_id\"|\"authorizing_message_id\": ...}, \"entry_ids\": [...], \"current\": [accepted entries], \"events\": [{event_id, entry_id, revision, operation, authorizing_message_id, reason, actor, changes, before, after, recorded_at}, ...], \"count\": N, \"next_cursor\": \"aae_...\"|null}.",
+    "presentation_guidance": "Lead with the current predicate and state, then summarize what changed, who changed it and why. Present withdrawn predicates as history, never as something that may still fire."
+  },
+  "error_processor_customizations": {
+    "action_context": "Ordered, bounded reads of accepted_authorization_event (by entry_id, or by authorizing_message_id to find the entries it authorized) and of accepted_authorization for the current projections.",
+    "error_interpretation": "invalid_argument: neither or both of entry_id / authorizing_message_id, or a limit that is not an integer from 1 through 100. entry_not_found: no accepted entry has that entry_id. invalid_cursor: cursor is not a next_cursor this verb returned. state_service_unavailable: the state service is not bound.",
+    "recovery_guidance": "Fix argument errors and resend; on invalid_cursor restart from the first page. This verb issues no writes and is always safe to retry."
+  }
+}

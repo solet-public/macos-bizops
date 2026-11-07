@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from typing import cast
 
@@ -366,10 +367,11 @@ def _manifest_has_absolute_python(path: Path, target: Path) -> bool:
         return False
     expected = instance_interpreter(target)
     python_commands = [
-        command for command in commands if command.endswith("python3") or "python3 " in command
+        command for command in commands if "python3" in command
     ]
     return bool(python_commands) and all(
-        command.startswith(expected) for command in python_commands
+        command == expected or command.startswith(shlex.quote(expected) + " ")
+        for command in python_commands
     )
 
 

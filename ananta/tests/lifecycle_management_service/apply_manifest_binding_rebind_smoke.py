@@ -18,6 +18,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -26,6 +27,9 @@ sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 
 from ananta.services.lifecycle_management_service.binding_validator import (  # noqa: E402
     validate_bindings_satisfied,
+)
+from ananta.services.lifecycle_management_service.interfaces.public import (  # noqa: E402
+    LifecycleManagementAPI,
 )
 from ananta.services.lifecycle_management_service.manifest_writer import (  # noqa: E402
     CurrentManifestState,
@@ -201,11 +205,49 @@ def test_malformed_service_bindings_rejected() -> None:
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# SC-11b: the public contract and retrievable process description match v1.1
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_public_contract_describes_v11_binding_merge() -> None:
+    """The discoverable API and process fixture describe accepted caller bindings."""
+    metadata = LifecycleManagementAPI.apply_manifest._service_interface_metadata
+    metadata_description = metadata.parameters["new_manifest"].description
+    method_doc = LifecycleManagementAPI.apply_manifest.__doc__ or ""
+    process_path = (
+        REPO_ROOT
+        / "ananta"
+        / "knowledge_base"
+        / "processes"
+        / "lifecycle_management_service"
+        / "apply_manifest.json"
+    )
+    process = json.loads(process_path.read_text(encoding="utf-8"))
+    process_description = process["description"]
+
+    public_contract = f"{metadata_description}\n{method_doc}"
+    _check(
+        "bindings_change_rejected_in_v1" not in public_contract
+        and "service_bindings" in metadata_description
+        and "merge" in metadata_description.lower()
+        and "plugin_config_overrides" in public_contract
+        and "rejected" in public_contract.lower(),
+        "SC-11b: public metadata/docstring describe caller binding merge and retain config override rejection",
+    )
+    _check(
+        "service_bindings" in process_description
+        and "MERGED over" in process_description
+        and "plugin_config_overrides is rejected" in process_description,
+        "SC-11b: retrievable process contract documents v1.1 merge and remaining rejection",
+    )
+
+
 _SMOKES = [
     ("SC-10  Plugin-list-only rename rejected", test_sc10_plugin_list_only_rename_rejected),
     ("SC-11  Rename + caller rebind passes + diff reports rebound", test_sc11_rename_with_rebind_passes_and_reports_rebound),
     ("SC-10b plugin_config_overrides still rejected", test_plugin_config_overrides_still_rejected),
     ("SC-10c malformed service_bindings rejected", test_malformed_service_bindings_rejected),
+    ("SC-11b public contract describes v1.1 merge", test_public_contract_describes_v11_binding_merge),
 ]
 
 

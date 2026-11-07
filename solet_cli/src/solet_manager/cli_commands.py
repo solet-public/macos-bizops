@@ -17,13 +17,11 @@ from .models import CommandResult, ExitCode, JsonValue
 from .paths import ManagerPaths
 from .rendering import render_human
 from .seed_lock_parser import parse_seed_lock
+from .source_acquisition import SealedSeedBundle
 from .stage_resume import require_named_resume_stage
 
 _SEED_NAME = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
-_SEED_SET_UNAVAILABLE_REPAIR = (
-    "Run `solet --seed-lock <path> create <name>` with the intended lock, or "
-    "reinstall from a formula version that provides named seeds."
-)
+_SEED_SET_UNAVAILABLE_REPAIR = "Run `solet --seed-lock <path> create <name>` with the intended lock, or reinstall from a formula version that provides named seeds."
 
 
 def run_create_command(
@@ -45,6 +43,7 @@ def run_create_command(
         paths=paths,
         contract_directory=args.contract_dir,
         seed_lock_path=seed_lock,
+        sealed_seed_bundle=sealed_seed_bundle(args),
     )
     if args.resume_stage is not None:
         require_named_resume_stage(
@@ -137,6 +136,28 @@ def run_list_seeds_command() -> CommandResult:
     )
 
 
+def sealed_seed_bundle(args: argparse.Namespace) -> SealedSeedBundle | None:
+    """The guest-validation ladder's sealed seed bundle, from its three hidden flags.
+
+    All three or none: a partial set is refused rather than read as "no bundle".
+    """
+
+    values = (
+        args.guest_validation_sealed_seed_bundle,
+        args.guest_validation_sealed_seed_commit,
+        args.guest_validation_sealed_seed_tag,
+    )
+    if all(value is None for value in values):
+        return None
+    bundle, commit, tag = values
+    if bundle is None or commit is None or tag is None:
+        raise ConfigError(
+            "the guest-validation sealed seed bundle needs its path, commit and tag together",
+            repair="Pass all three --guest-validation-sealed-seed-* flags, or none of them.",
+        )
+    return SealedSeedBundle(path=Path(bundle), commit=str(commit), release_tag=str(tag))
+
+
 def _resolve_seed_lock(args: argparse.Namespace) -> Path:
     if args.seed_lock is not None:
         return args.seed_lock
@@ -151,13 +172,8 @@ def _resolve_seed_lock(args: argparse.Namespace) -> Path:
                 repair=_SEED_SET_UNAVAILABLE_REPAIR,
             )
         raise SourceError(
-            f"default seed lock expected at {default_lock}; found no file. Run "
-            "`solet list-seeds`, then rerun with `--seed <name>`, or provide "
-            "`solet --seed-lock <path> create <name>`.",
-            repair=(
-                "Run `solet list-seeds`, then rerun create with `--seed <name>` "
-                "or `solet --seed-lock <path> create <name>`."
-            ),
+            f"default seed lock expected at {default_lock}; found no file. Run `solet list-seeds`, then rerun with `--seed <name>`, or provide `solet --seed-lock <path> create <name>`.",
+            repair=("Run `solet list-seeds`, then rerun create with `--seed <name>` or `solet --seed-lock <path> create <name>`."),
         )
     return _resolve_named_seed_lock(args.seed)
 
@@ -179,9 +195,7 @@ def _resolve_named_seed_lock(name: str) -> Path:
         raise SourceError(f"seed `{name}` not found; available: {names}")
     fields = parse_seed_lock(candidate)
     if fields.profile != name:
-        raise SourceError(
-            f"seed directory {name!r} does not match lock profile {fields.profile!r}"
-        )
+        raise SourceError(f"seed directory {name!r} does not match lock profile {fields.profile!r}")
     return candidate
 
 
@@ -191,17 +205,9 @@ def _seed_set_root() -> Path:
 
 def _seed_set_unavailable_message(seed_root: Path) -> str | None:
     if seed_root.is_symlink() and not seed_root.exists():
-        return (
-            "the seed set for this install is no longer reachable (its tap appears "
-            "to have been removed); run `solet list-seeds` for the same diagnostic, "
-            "or `solet --seed-lock <path> create <name>` to bypass it"
-        )
+        return "the seed set for this install is no longer reachable (its tap appears to have been removed); run `solet list-seeds` for the same diagnostic, or `solet --seed-lock <path> create <name>` to bypass it"
     if not seed_root.is_dir():
-        return (
-            "this install has no seed set — `--seed <name>` is unavailable; use "
-            "`solet --seed-lock <path> create <name>` or reinstall from a formula "
-            "version that supports named seeds"
-        )
+        return "this install has no seed set — `--seed <name>` is unavailable; use `solet --seed-lock <path> create <name>` or reinstall from a formula version that supports named seeds"
     return None
 
 
@@ -216,9 +222,7 @@ def _create_name(args: argparse.Namespace) -> str | None:
     if name is not None or args.config is not None:
         return name
     if args.json or not sys.stdin.isatty():
-        raise ConfigError(
-            "create requires NAME or --config when prompting is unavailable"
-        )
+        raise ConfigError("create requires NAME or --config when prompting is unavailable")
     return input("Solet name: ").strip()
 
 
@@ -299,10 +303,7 @@ def _yes_approval_stop(
         message="The supplied approval fingerprint does not match the freshly recomputed preview.",
         exit_code=ExitCode.HUMAN_ACTION,
         error_kind="probe_drift",
-        repair=(
-            "Rerun --dry-run, review the changed preview, and use its new fingerprint "
-            "if acceptable."
-        ),
+        repair=("Rerun --dry-run, review the changed preview, and use its new fingerprint if acceptable."),
         data=preview.data,
     )
 
@@ -311,11 +312,7 @@ def parse_decisions(values: Sequence[str]) -> dict[str, JsonValue]:
     decisions: dict[str, JsonValue] = {}
     for raw in values:
         decision_id, separator, selected = raw.partition("=")
-        if (
-            separator != "="
-            or not decision_id
-            or re.fullmatch(r"[a-z][a-z0-9_.-]{1,127}", decision_id) is None
-        ):
+        if separator != "=" or not decision_id or re.fullmatch(r"[a-z][a-z0-9_.-]{1,127}", decision_id) is None:
             raise ConfigError(f"invalid --decision value: {raw!r}; expected ID=VALUE")
         if selected == "":
             _append_empty_decision(decisions, decision_id)
@@ -329,9 +326,7 @@ def _append_empty_decision(
     decision_id: str,
 ) -> None:
     if decision_id in decisions:
-        raise ConfigError(
-            f"decision {decision_id!r} cannot combine an explicit empty answer with selections"
-        )
+        raise ConfigError(f"decision {decision_id!r} cannot combine an explicit empty answer with selections")
     decisions[decision_id] = []
 
 
@@ -347,9 +342,7 @@ def _append_decision(
         decisions[decision_id] = [existing, selected]
     elif isinstance(existing, list):
         if not existing:
-            raise ConfigError(
-                f"decision {decision_id!r} cannot combine an explicit empty answer with selections"
-            )
+            raise ConfigError(f"decision {decision_id!r} cannot combine an explicit empty answer with selections")
         existing.append(selected)
     else:
         raise AssertionError("parsed decision has an unsupported internal shape")

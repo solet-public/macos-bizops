@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::list_custom_object_types",
+  "display_name": "Marketo: List Custom Object Types",
+  "description": "Dispatch an async listing of the instance's Marketo custom object types (GET /rest/v1/customobjects.json, optional names filter). The finished job writes each type's name, displayName, idField, dedupeFields, searchableFields and relationships to output_tsv_path and returns api_names, the api_name values the custom object record verbs take.",
+  "embedding_description": "List the custom object types defined in the Marketo instance, optionally filtered by API name. Async job writes each type's API name, display name, id field, dedupe fields, searchable fields and lead or company relationships to a workspace TSV and returns api_names, the api_name the custom object record verbs need.",
+  "result_processor_customizations": {
+    "action_label": "Marketo custom object types listing job dispatched",
+    "result_type": "marketo_list_custom_object_types_result",
+    "result_description": "Dict with job_id and status 'queued'. The completed job result is a TSV handle (path, columns, row_count) of the custom object types plus api_names, the list of type API names.",
+    "presentation_guidance": "Confirm the job was dispatched and give the job_id. Once completed, list the api_names and point at the TSV for each type's dedupe fields and relationships."
+  },
+  "error_processor_customizations": {
+    "action_context": "List the Marketo custom object types on the configured instance.",
+    "error_interpretation": "marketo.invalid_params: refused at dispatch before any vendor call (missing or malformed parameters, more than 300 entries, an action/dedupe_by/delete_by value Marketo does not define, or an output_tsv_path outside export_allowed_roots). On the finished job: marketo.permission_denied (vendor 603 or HTTP 403) means the API user's Role lacks the Access API permission; marketo.auth_failed (601/602 after one re-mint, or HTTP 401) means the credential was rejected; marketo.validation_failed and other vendor codes carry Marketo's own message.",
+    "recovery_guidance": "marketo.permission_denied: grant the Role's read permission for custom objects under Admin > Users & Roles > Roles > the API role > Access API (Adobe's Custom Objects page names no checkbox; look for Read-Only Custom Object or Read-Write Custom Object and confirm the label on that screen), then retry. Custom objects also require a subscription that includes them."
+  }
+}

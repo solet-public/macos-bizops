@@ -95,6 +95,7 @@ forward-completes to the router-validated candidate, which is benign
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -106,6 +107,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
+
+from ananta.core.root_manifest import MANIFEST_FILENAME, load_manifest
 
 from macos_self_deployment_plugin.constants import PLUGIN_NAME
 from macos_self_deployment_plugin.release_code_collection import (
@@ -139,33 +142,30 @@ SELECTED_FILE_MANIFEST_FILENAME: Final[str] = "SELECTED_FILES.json"
 #: put it there. The field is ``null`` on every ordinary deploy rather than
 #: absent, so "built by a reconciliation" stays a positive, readable claim
 #: instead of an inference from absence — the same rule ``tree_state`` follows.
-RECONCILIATION_PROVENANCE_NOTE: Final[str] = (
-    "reconciliation_provenance is null on ordinary deploys and carries "
-    "{reconciliation_id, source_surface_sha256, release_surface_sha256} on "
-    "releases built by an approved reconciliation cutover."
-)
+RECONCILIATION_PROVENANCE_NOTE: Final[str] = "reconciliation_provenance is null on ordinary deploys and carries {reconciliation_id, source_surface_sha256, release_surface_sha256} on releases built by an approved reconciliation cutover."
 STATE_FILENAME: Final[str] = "state.json"
 CURRENT_LINK_NAME: Final[str] = "current"
 PREVIOUS_LINK_NAME: Final[str] = "previous"
 
-# Source-tree subdirectories that make up the first-party ``code/`` clone
-# (design §4.2: ``code/`` = ``ananta/`` + ``plugins/`` + ``solet_cli/`` +
-# ``solet_setup_contracts/``, NOT ``.git``). ``solet_cli`` and
-# ``solet_setup_contracts`` ship because each is an ananta runtime dependency:
-# session_ledger_service/selected_sources.py loads manager transactions as
-# consent proof and imports setup contracts. A release without either fails the
-# L1.1 fresh-source import probe — the same root cause the born-clone gate's
-# layer-0 installs fixed on the clone path.
+# The source-tree roots that make up the first-party ``code/`` clone (design
+# §4.2, NOT ``.git``) are DERIVED, not listed: a fixed tuple silently dropped a
+# new top-level package from the release (iss_b2922e16). select_code_roots()
+# reads ``root_manifest.yaml``'s validated ``universal.directories`` and keeps
+# the Python distributions among them -- an own ``pyproject.toml`` (src or flat
+# layout), a ``src/`` package, or a container of such distributions
+# (``plugins/``). Data trees never ship. On this tree it selects ananta,
+# plugins, solet_cli and solet_setup_contracts; the last two ship because
+# ananta imports them at runtime (session_ledger_service/selected_sources.py).
 #
-# ONE constant, deliberately: it is the clone loop's path list AND the
-# dirty-tree gate's porcelain scope (Architect's dirty-tree ruling §2). Two
-# separate lists would mean that the day someone adds a fourth cloned subtree
-# the gate silently under-covers it — the same failure shape as a gate
-# registration that lands without its file. Both readers dereference this
-# module global at call time, so widening it widens both at once.
-CODE_SUBTREES: Final[tuple[str, ...]] = (
-    "ananta", "plugins", "solet_cli", "solet_setup_contracts",
-)
+# ONE snapshot per build, deliberately: it is the clone's root list AND the
+# dirty-tree gate's porcelain scope before and after the clone (Architect's
+# dirty-tree ruling §2) AND ``VERSION.tree_state_scope``. Separate lists would
+# let the gate under-cover a root the clone ships. The snapshot is re-derived
+# before finalize, and a build whose declaration moved underneath it refuses.
+CODE_ROOT_BASIS_MANIFEST: Final[str] = "root_manifest"
+CODE_ROOT_BASIS_STRUCTURAL: Final[str] = "structural_discovery"
+DISTRIBUTION_MARKER: Final[str] = "pyproject.toml"
+SOURCE_LAYOUT_DIRNAME: Final[str] = "src"
 VENV_SUBTREE: Final[str] = ".venv"
 
 # ``VERSION.tree_state`` tokens (dirty-tree ruling §3). The attestation is
@@ -322,6 +322,92 @@ class _Ledger:
     in_progress: _InProgress | None
 
 
+@dataclass(frozen=True, slots=True)
+class CodeRootSelection:
+    """The first-party roots ONE build clones, attests and records in ``VERSION``.
+
+    ``basis`` says where the roots came from: the validated manifest, or --
+    only when it is missing or invalid -- structural discovery, which always
+    carries an ``advisory`` and never claims manifest authority.
+    """
+
+    roots: tuple[str, ...]
+    basis: str
+    manifest_sha256: str | None
+    advisory: str | None
+
+    def version_record(self) -> dict[str, object]:
+        return {
+            "basis": self.basis,
+            "roots": list(self.roots),
+            "manifest_sha256": self.manifest_sha256,
+            "advisory": self.advisory,
+        }
+
+
+def select_code_roots(source_root: Path) -> CodeRootSelection:
+    """Derive the shipped code roots from ``root_manifest.yaml`` plus package layout."""
+    manifest_path = source_root / MANIFEST_FILENAME
+    manifest, error = load_manifest(manifest_path)
+    if manifest is None:
+        candidates = sorted(child.name for child in source_root.iterdir() if child.is_dir() and not child.name.startswith("."))
+        roots = tuple(name for name in candidates if _is_distribution_root(source_root / name))
+        advisory = f"{MANIFEST_FILENAME} unavailable ({error}); code roots discovered from package layout, not declared: {', '.join(roots) or 'none'}"
+        return CodeRootSelection(roots, CODE_ROOT_BASIS_STRUCTURAL, None, advisory)
+    roots = tuple(sorted(name for name in manifest.universal_directories if _is_distribution_root(source_root / name)))
+    digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    return CodeRootSelection(roots, CODE_ROOT_BASIS_MANIFEST, digest, None)
+
+
+def _is_distribution_root(directory: Path) -> bool:
+    if _is_distribution(directory):
+        return True
+    return directory.is_dir() and any(_is_distribution(child) for child in directory.iterdir() if child.is_dir())
+
+
+def _is_distribution(directory: Path) -> bool:
+    if (directory / DISTRIBUTION_MARKER).is_file():
+        return True
+    source = directory / SOURCE_LAYOUT_DIRNAME
+    return source.is_dir() and any((package / "__init__.py").is_file() for package in source.iterdir())
+
+
+def _select_code_roots_or_raise(source_root: Path, logger: logging.Logger) -> CodeRootSelection:
+    """The build's one root snapshot; refuses only when nothing would ship.
+
+    Passes whenever the source holds at least one Python distribution -- the
+    real tree's manifest selects four -- on every ``ReleaseBuilder.build``.
+    """
+    try:
+        selection = select_code_roots(source_root)
+    except OSError as exc:
+        raise ReleaseManagerError(f"cannot select release code roots under {source_root}: {exc}") from exc
+    if not selection.roots:
+        raise ReleaseManagerError(f"no Python distribution to ship under {source_root} ({selection.basis}); a release without first-party code cannot boot")
+    if selection.advisory is not None:
+        logger.warning("%s", selection.advisory)
+    return selection
+
+
+def _refuse_stale_selection(source_root: Path, staging: Path, selection: CodeRootSelection) -> None:
+    """Refuse to finalize a release whose root declaration moved mid-build.
+
+    Same reasoning as the post-clone dirty re-read: an artifact cloned under
+    one declaration and attested under another matches neither. Passes
+    whenever the declaration is quiet for the build -- every ordinary build.
+    """
+    try:
+        current = select_code_roots(source_root)
+    except OSError as exc:
+        raise ReleaseManagerError(f"cannot re-read release code roots under {source_root}: {exc}") from exc
+    if current == selection:
+        return
+    shutil.rmtree(staging, ignore_errors=True)
+    raise ReleaseManagerError(
+        f"code root declaration changed during the build: cloned {list(selection.roots)} ({selection.basis}, manifest {selection.manifest_sha256}) but the source now declares {list(current.roots)} ({current.basis}, manifest {current.manifest_sha256}). Re-run the build once the declaration is quiet."
+    )
+
+
 def _default_clock() -> datetime:
     return datetime.now(UTC)
 
@@ -350,9 +436,7 @@ def _default_git_sha(source_root: Path) -> str:
     return result.stdout.strip() or GIT_SHA_UNKNOWN
 
 
-def _default_dirty_paths(
-    source_root: Path, subtrees: tuple[str, ...]
-) -> tuple[str, ...] | None:
+def _default_dirty_paths(source_root: Path, subtrees: tuple[str, ...]) -> tuple[str, ...] | None:
     """Read-only ``git status --porcelain`` SCOPED to the shipped subtrees.
 
     The dirty-tree gate's measurement (ruling §1). Returns the porcelain
@@ -435,9 +519,7 @@ class ReleaseLedger:
             # (OSError, ValueError, KeyError) net. Raise ValueError (in that
             # net) so the F1 contract — "ledger reads only ever surface as
             # ReleaseManagerError" — holds for the parse-shape vector too.
-            raise ValueError(
-                f"state.json is not a JSON object (got {type(raw).__name__})"
-            )
+            raise ValueError(f"state.json is not a JSON object (got {type(raw).__name__})")
         in_progress_raw = raw.get("in_progress")
         in_progress = (
             _InProgress(
@@ -520,14 +602,13 @@ def _read_version_or_raise(version_file: Path) -> dict[str, object]:
         if not isinstance(raw, dict):
             raise ValueError(f"VERSION is not a JSON object: got {type(raw).__name__}")
     except (OSError, ValueError) as exc:
-        raise ReleaseManagerError(
-            f"VERSION read failed ({version_file}): {exc}"
-        ) from exc
+        raise ReleaseManagerError(f"VERSION read failed ({version_file}): {exc}") from exc
     return raw
 
 
 def _read_manifest_plugins(
-    payload: dict[str, object], release_id: str,
+    payload: dict[str, object],
+    release_id: str,
 ) -> tuple[tuple[str, ...] | None, str | None]:
     """Read a release's captured plugin set back, as ``(plugins, error)``.
 
@@ -564,16 +645,9 @@ def _read_manifest_plugins(
     if raw is None:
         return None, None
     if not isinstance(raw, list) or not all(isinstance(name, str) for name in raw):
-        return None, (
-            f"release {release_id} has a malformed 'manifest_plugins' in VERSION "
-            f"(expected a list of plugin names, got {type(raw).__name__})"
-        )
+        return None, (f"release {release_id} has a malformed 'manifest_plugins' in VERSION (expected a list of plugin names, got {type(raw).__name__})")
     if not raw:
-        return None, (
-            f"release {release_id} has an EMPTY 'manifest_plugins' in VERSION — no "
-            "writer can emit that, and an empty plugin set would collapse the §3 "
-            "snapshot to nothing and pass the additive check vacuously"
-        )
+        return None, (f"release {release_id} has an EMPTY 'manifest_plugins' in VERSION — no writer can emit that, and an empty plugin set would collapse the §3 snapshot to nothing and pass the additive check vacuously")
     return tuple(raw), None
 
 
@@ -667,9 +741,7 @@ class ReleaseGc:
             try:
                 shutil.rmtree(self._releases_root / release_id)
             except OSError as exc:
-                raise ReleaseManagerError(
-                    f"gc failed to delete {release_id}: {exc}"
-                ) from exc
+                raise ReleaseManagerError(f"gc failed to delete {release_id}: {exc}") from exc
             deleted.append(release_id)
         if deleted:
             self._logger.info("gc deleted %d release(s): %s", len(deleted), deleted)
@@ -696,9 +768,7 @@ class ReleaseGc:
                 if target is not None:
                     protected.add(target)
         except OSError as exc:
-            raise ReleaseManagerError(
-                f"gc protected-set symlink read failed: {exc}"
-            ) from exc
+            raise ReleaseManagerError(f"gc protected-set symlink read failed: {exc}") from exc
         return protected
 
     def _list_finalized_releases(self) -> list[str]:
@@ -711,19 +781,9 @@ class ReleaseGc:
         try:
             if not self._releases_root.is_dir():
                 return []
-            finalized = [
-                entry.name
-                for entry in self._releases_root.iterdir()
-                if entry.is_dir()
-                and not entry.is_symlink()
-                and entry.name.startswith(RELEASE_ID_PREFIX)
-                and not entry.name.endswith(STAGING_SUFFIX)
-                and (entry / VERSION_FILENAME).is_file()
-            ]
+            finalized = [entry.name for entry in self._releases_root.iterdir() if entry.is_dir() and not entry.is_symlink() and entry.name.startswith(RELEASE_ID_PREFIX) and not entry.name.endswith(STAGING_SUFFIX) and (entry / VERSION_FILENAME).is_file()]
         except OSError as exc:
-            raise ReleaseManagerError(
-                f"gc release enumeration failed: {exc}"
-            ) from exc
+            raise ReleaseManagerError(f"gc release enumeration failed: {exc}") from exc
         return sorted(finalized, reverse=True)
 
 
@@ -758,11 +818,7 @@ def _repoint_and_validate_pth(
     staging_code_root = venv_root.parent / CODE_DIRNAME
     missing: list[str] = []
     for pth in sorted(venv_root.glob(f"lib/python*/site-packages/*{os.extsep}pth")):
-        missing.extend(
-            _rewrite_one_pth(
-                pth, source_prefix, final_prefix, staging_code_root, excluded_roots
-            )
-        )
+        missing.extend(_rewrite_one_pth(pth, source_prefix, final_prefix, staging_code_root, excluded_roots))
     _assert_no_residual_prefix(venv_root, source_prefix)
     if missing and strict_pth_validation:
         raise ReleaseManagerError(f".pth targets do not resolve: {missing}")
@@ -786,11 +842,9 @@ def _rewrite_one_pth(
         if not line.startswith(source_prefix):
             rewritten.append(line)
             continue
-        remainder = line[len(source_prefix):]
+        remainder = line[len(source_prefix) :]
         if any(remainder == root or remainder.startswith(f"{root}{os.sep}") for root in excluded_roots):
-            raise ReleaseManagerError(
-                f".pth target points into excluded nested Python environment: {line}"
-            )
+            raise ReleaseManagerError(f".pth target points into excluded nested Python environment: {line}")
         new_line = final_prefix + remainder
         rewritten.append(new_line)
         changed = True
@@ -803,15 +857,9 @@ def _rewrite_one_pth(
 
 def _assert_no_residual_prefix(venv_root: Path, source_prefix: str) -> None:
     """Fail if a materialized venv would still import mutable source bytes."""
-    residual = [
-        str(pth)
-        for pth in venv_root.glob(f"lib/python*/site-packages/*{os.extsep}pth")
-        if source_prefix in pth.read_text()
-    ]
+    residual = [str(pth) for pth in venv_root.glob(f"lib/python*/site-packages/*{os.extsep}pth") if source_prefix in pth.read_text()]
     if residual:
-        raise ReleaseManagerError(
-            f"residual source-root references after .pth rewrite: {residual}"
-        )
+        raise ReleaseManagerError(f"residual source-root references after .pth rewrite: {residual}")
 
 
 class ReleaseBuilder:
@@ -857,7 +905,7 @@ class ReleaseBuilder:
     ) -> CandidatePaths:
         """CoW-clone the working tree into a fresh immutable release.
 
-        Steps (§4.7): ``cp -c`` the :data:`CODE_SUBTREES` subtrees
+        Steps (§4.7): ``cp -c`` the :func:`select_code_roots` snapshot
         into ``code/`` and ``.venv`` into ``venv/``; re-point every
         ``.pth`` repo-root prefix at the final ``code/``; capture the
         optional schema snapshot; validate every ``.pth`` target
@@ -867,7 +915,7 @@ class ReleaseBuilder:
         inverted so the platform ``collect_schemas`` import stays in the
         caller, NOT here) is invoked ONCE after ``code/`` is materialized,
         receiving the staging ``code/`` root (the physical location of the
-        cloned :data:`CODE_SUBTREES` at that moment — the final path
+        cloned code roots at that moment — the final path
         does not exist until the atomic rename). Its return value is
         stored verbatim in ``VERSION`` under ``schema_snapshot`` and on
         ``CandidatePaths``. A raise propagates and fails the build (a
@@ -903,17 +951,14 @@ class ReleaseBuilder:
         # parameter is caller-supplied. Refusing at BOTH ends is what stops an
         # invariant enforced on one side from rotting on the other.
         if manifest_plugins is not None and not manifest_plugins:
-            msg = (
-                "manifest_plugins must be a non-empty tuple or None — an empty capture "
-                "would write [] into VERSION, which the §3 derive rejects as malformed. "
-                "Pass None to mean 'ungated / not captured'."
-            )
+            msg = "manifest_plugins must be a non-empty tuple or None — an empty capture would write [] into VERSION, which the §3 derive rejects as malformed. Pass None to mean 'ungated / not captured'."
             raise ReleaseManagerError(msg)
         self._releases_root.mkdir(parents=True, exist_ok=True)
-        tree_state, dirty_paths = self._attest_tree_state(allow_dirty=allow_dirty)
+        selection = _select_code_roots_or_raise(self._source_root, self._logger)
+        tree_state, dirty_paths = self._attest_tree_state(selection.roots, allow_dirty=allow_dirty)
         collector = ReleaseCodeCollector(
             source_root=self._source_root,
-            code_subtrees=CODE_SUBTREES,
+            code_subtrees=selection.roots,
             cp_binary=self._cp_binary,
             clone_timeout_seconds=self._clone_timeout,
         )
@@ -935,14 +980,9 @@ class ReleaseBuilder:
 
         final_code_root = final_dir / CODE_DIRNAME
         self._build_into_staging(staging, collector, collection_plan)
-        tree_state, dirty_paths = self._reattest_after_clone(
-            staging, before=dirty_paths, before_state=tree_state, allow_dirty=allow_dirty
-        )
-        schema_snapshot = (
-            schema_snapshot_fn(staging / CODE_DIRNAME)
-            if schema_snapshot_fn is not None
-            else None
-        )
+        tree_state, dirty_paths = self._reattest_after_clone(staging, selection.roots, before=dirty_paths, before_state=tree_state, allow_dirty=allow_dirty)
+        _refuse_stale_selection(self._source_root, staging, selection)
+        schema_snapshot = schema_snapshot_fn(staging / CODE_DIRNAME) if schema_snapshot_fn is not None else None
         missing = _repoint_and_validate_pth(
             staging / VENV_DIRNAME,
             source_root=self._source_root,
@@ -976,13 +1016,16 @@ class ReleaseBuilder:
             dirty_paths=dirty_paths,
             reconciliation_provenance=reconciliation_provenance,
             selected_file_manifest_sha256=selected_file_manifest_sha256,
+            selection=selection,
         )
         self._fsync_staging(staging)
         os.replace(staging, final_dir)
         _fsync_dir(self._releases_root)
         self._logger.info(
             "built release %s (git_sha=%s, missing_pth=%d, schema_snapshot=%s)",
-            release_id, git_sha, len(missing),
+            release_id,
+            git_sha,
+            len(missing),
             "present" if schema_snapshot is not None else "none",
         )
         return self._compose_candidate(
@@ -1074,7 +1117,6 @@ class ReleaseBuilder:
         self._clone_tree(self._source_root / VENV_SUBTREE, staging / VENV_DIRNAME)
         _pin_staged_interpreter(staging / VENV_DIRNAME, self._logger)
 
-
     def _clone_tree(self, src: Path, dst: Path) -> None:
         """``cp -cR src dst`` (APFS copy-on-write clone, design §4.4).
 
@@ -1094,10 +1136,7 @@ class ReleaseBuilder:
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ReleaseManagerError(f"cp -cR {src} -> {dst} failed: {exc}") from exc
         if result.returncode != 0:
-            msg = (
-                f"cp -cR {src} -> {dst} exited {result.returncode}: "
-                f"{result.stderr.strip()}"
-            )
+            msg = f"cp -cR {src} -> {dst} exited {result.returncode}: {result.stderr.strip()}"
             raise ReleaseManagerError(msg)
 
     def _write_version(
@@ -1114,6 +1153,7 @@ class ReleaseBuilder:
         dirty_paths: tuple[str, ...],
         reconciliation_provenance: dict[str, str] | None,
         selected_file_manifest_sha256: str,
+        selection: CodeRootSelection,
     ) -> None:
         payload = {
             "release_id": release_id,
@@ -1126,9 +1166,7 @@ class ReleaseBuilder:
             # the next deploy wrote over the live one (BLG-02). ``null`` is
             # written explicitly when the caller supplied none, so a reader can
             # tell "not captured" from "captured as empty".
-            "manifest_plugins": (
-                sorted(manifest_plugins) if manifest_plugins is not None else None
-            ),
+            "manifest_plugins": (sorted(manifest_plugins) if manifest_plugins is not None else None),
             "missing_pth_targets": list(missing_pth),
             "schema_snapshot": schema_snapshot,
             # Written on EVERY build, clean included: absence must never be
@@ -1138,8 +1176,9 @@ class ReleaseBuilder:
             # What the attestation actually covers. ``.venv`` is cloned but
             # gitignored, so porcelain cannot attest it (ruling §5); recording
             # the scope keeps "tree_state: clean" from being read as "artifact
-            # fully attested".
-            "tree_state_scope": list(CODE_SUBTREES),
+            # fully attested". The same snapshot the clone used, with its basis.
+            "tree_state_scope": list(selection.roots),
+            "code_root_selection": selection.version_record(),
             "selected_file_manifest": {
                 "filename": SELECTED_FILE_MANIFEST_FILENAME,
                 "sha256": selected_file_manifest_sha256,
@@ -1161,15 +1200,15 @@ class ReleaseBuilder:
         stamp = self._clock().strftime("%Y%m%dT%H%M%SZ")
         return f"{RELEASE_ID_PREFIX}{stamp}-{git_sha}"
 
-    def _attest_tree_state(self, *, allow_dirty: bool) -> tuple[str, tuple[str, ...]]:
+    def _attest_tree_state(self, subtrees: tuple[str, ...], *, allow_dirty: bool) -> tuple[str, tuple[str, ...]]:
         """The dirty-tree gate: refuse by default on dirt the artifact SHIPS.
 
         Runs BEFORE anything is staged, so a refusal leaves no ``.incoming``
         dir and no finalized release behind.
 
-        Scoped to :data:`CODE_SUBTREES`, dereferenced here at call time so
-        the gate's population is the clone loop's population by construction
-        rather than by a second list somebody has to remember to update.
+        Scoped to the build's root snapshot -- the same tuple the collector
+        clones -- so the gate's population is the clone's population by
+        construction rather than by a second list.
 
         Returns the ``(tree_state, dirty_paths)`` pair recorded in
         ``VERSION``. Raises :class:`ReleaseManagerError` — naming the
@@ -1177,13 +1216,13 @@ class ReleaseBuilder:
         actionable — when the shipped subtrees are dirty and the caller did
         not pass ``allow_dirty``.
         """
-        subtrees = CODE_SUBTREES
         dirty = self._dirty_paths_resolver(self._source_root, subtrees)
         if dirty is None:
             self._logger.warning(
-                "tree state UNATTESTABLE for %s (git could not report on %s); "
-                "recording tree_state=%r — this release is NOT attested clean",
-                self._source_root, ", ".join(subtrees), TREE_STATE_UNKNOWN,
+                "tree state UNATTESTABLE for %s (git could not report on %s); recording tree_state=%r — this release is NOT attested clean",
+                self._source_root,
+                ", ".join(subtrees),
+                TREE_STATE_UNKNOWN,
             )
             return TREE_STATE_UNKNOWN, ()
         if not dirty:
@@ -1191,22 +1230,19 @@ class ReleaseBuilder:
         listed = "; ".join(dirty)
         if not allow_dirty:
             raise ReleaseManagerError(
-                f"refusing to build a release from a dirty working tree: "
-                f"{len(dirty)} uncommitted path(s) under {', '.join(subtrees)} "
-                f"would ship inside the artifact but be labelled with HEAD's sha "
-                f"— {listed}. Commit them, or pass allow_dirty=True to build "
-                f"anyway (the override is recorded in VERSION)."
+                f"refusing to build a release from a dirty working tree: {len(dirty)} uncommitted path(s) under {', '.join(subtrees)} would ship inside the artifact but be labelled with HEAD's sha — {listed}. Commit them, or pass allow_dirty=True to build anyway (the override is recorded in VERSION)."
             )
         self._logger.warning(
-            "allow_dirty override: building a release from a DIRTY working tree; "
-            "%d uncommitted path(s) ship under HEAD's sha — %s",
-            len(dirty), listed,
+            "allow_dirty override: building a release from a DIRTY working tree; %d uncommitted path(s) ship under HEAD's sha — %s",
+            len(dirty),
+            listed,
         )
         return TREE_STATE_DIRTY, dirty
 
     def _reattest_after_clone(
         self,
         staging: Path,
+        subtrees: tuple[str, ...],
         *,
         before: tuple[str, ...],
         before_state: str,
@@ -1243,14 +1279,15 @@ class ReleaseBuilder:
         """
         if before_state == TREE_STATE_UNKNOWN:
             return before_state, before
-        after = self._dirty_paths_resolver(self._source_root, CODE_SUBTREES)
+        after = self._dirty_paths_resolver(self._source_root, subtrees)
         if after is None:
             # Measurable before, unmeasurable after: we cannot say the clone
             # captured a clean tree, so we must not claim it did.
             self._logger.warning(
-                "tree state became UNATTESTABLE during the clone of %s; "
-                "downgrading tree_state to %r rather than keeping %r",
-                self._source_root, TREE_STATE_UNKNOWN, before_state,
+                "tree state became UNATTESTABLE during the clone of %s; downgrading tree_state to %r rather than keeping %r",
+                self._source_root,
+                TREE_STATE_UNKNOWN,
+                before_state,
             )
             return TREE_STATE_UNKNOWN, before
         if after == before:
@@ -1263,20 +1300,15 @@ class ReleaseBuilder:
             )
             return TREE_STATE_DIRTY, after
         shutil.rmtree(staging, ignore_errors=True)
-        raise ReleaseManagerError(
-            f"working tree changed while the release was being cloned: "
-            f"{'; '.join(appeared) or 'the dirty population changed'}. The "
-            f"artifact would be a torn snapshot matching neither HEAD nor the "
-            f"working tree, so it could not be reviewed against anything. "
-            f"Re-run the build once the tree is quiet."
-        )
+        raise ReleaseManagerError(f"working tree changed while the release was being cloned: {'; '.join(appeared) or 'the dirty population changed'}. The artifact would be a torn snapshot matching neither HEAD nor the working tree, so it could not be reviewed against anything. Re-run the build once the tree is quiet.")
 
     def _resolve_git_sha(self) -> str:
         sha = self._git_sha_resolver(self._source_root)
         if sha == GIT_SHA_UNKNOWN:
             self._logger.warning(
                 "could not resolve git sha for %s; release id uses %r",
-                self._source_root, GIT_SHA_UNKNOWN,
+                self._source_root,
+                GIT_SHA_UNKNOWN,
             )
         return sha
 
@@ -1343,7 +1375,9 @@ class ReleaseSwapper:
                     current=prior_current,
                     previous=prior_previous,
                     in_progress=_InProgress(
-                        old_rel=new_previous, new_rel=new_current, phase=PHASE_CUTOVER,
+                        old_rel=new_previous,
+                        new_rel=new_current,
+                        phase=PHASE_CUTOVER,
                     ),
                 ),
                 step=LEDGER_STEP_BEGIN,
@@ -1358,7 +1392,9 @@ class ReleaseSwapper:
                     current=new_current,
                     previous=new_previous,
                     in_progress=_InProgress(
-                        old_rel=new_previous, new_rel=new_current, phase=PHASE_DONE,
+                        old_rel=new_previous,
+                        new_rel=new_current,
+                        phase=PHASE_DONE,
                     ),
                 ),
                 step=LEDGER_STEP_DONE,
@@ -1378,14 +1414,10 @@ class ReleaseSwapper:
             # forward-complete, which is what the crash-consistency
             # invariant depends on.)
             self._compensate_failed_swap(prior_current, prior_previous)
-            raise ReleaseManagerError(
-                f"swap failed; compensated to pre-swap state: {exc}"
-            ) from exc
+            raise ReleaseManagerError(f"swap failed; compensated to pre-swap state: {exc}") from exc
         return SwapResult(current=new_current, previous=new_previous)
 
-    def _compensate_failed_swap(
-        self, prior_current: str | None, prior_previous: str | None
-    ) -> None:
+    def _compensate_failed_swap(self, prior_current: str | None, prior_previous: str | None) -> None:
         """Best-effort rollback to the pre-swap state after a failed swap.
 
         Three best-effort steps, each logged-and-swallowed so the caller
@@ -1431,7 +1463,8 @@ class ReleaseSwapper:
             )
         except (OSError, ValueError, KeyError) as exc:
             self._logger.error(
-                "swap compensation: writing compensate-intent failed: %s", exc,
+                "swap compensation: writing compensate-intent failed: %s",
+                exc,
             )
         restore_failed = False
         for link, target in (
@@ -1443,12 +1476,13 @@ class ReleaseSwapper:
             except OSError as exc:
                 restore_failed = True
                 self._logger.error(
-                    "swap compensation: restoring symlink %s failed: %s", link, exc,
+                    "swap compensation: restoring symlink %s failed: %s",
+                    link,
+                    exc,
                 )
         if restore_failed:
             self._logger.error(
-                "swap compensation: preserving compensate intent after incomplete "
-                "symlink restoration",
+                "swap compensation: preserving compensate intent after incomplete symlink restoration",
             )
             return
         try:
@@ -1458,7 +1492,8 @@ class ReleaseSwapper:
             )
         except (OSError, ValueError, KeyError) as exc:
             self._logger.error(
-                "swap compensation: clearing in_progress failed: %s", exc,
+                "swap compensation: clearing in_progress failed: %s",
+                exc,
             )
 
     def _ledger_write(self, ledger: _Ledger, *, step: str) -> None:
@@ -1533,23 +1568,19 @@ class ReleaseSwapper:
         except (OSError, ValueError, KeyError) as exc:
             # Idempotent: in_progress stays set on a partial failure, so a
             # subsequent reconcile re-applies cleanly.
-            raise ReleaseManagerError(
-                f"reconcile (phase={in_progress.phase}) failed: {exc}"
-            ) from exc
+            raise ReleaseManagerError(f"reconcile (phase={in_progress.phase}) failed: {exc}") from exc
         self._logger.info(
             "reconcile completed in_progress(phase=%s): current=%s previous=%s",
-            in_progress.phase, in_progress.new_rel, in_progress.old_rel,
+            in_progress.phase,
+            in_progress.new_rel,
+            in_progress.old_rel,
         )
         # The drive is direction-agnostic, but the OUTCOME token is not: a
         # PHASE_COMPENSATE intent drove BACK to the prior pair (rollback
         # recovery), every other phase drove FORWARD to the candidate
         # (cutover recovery). phase is already in hand — surface it so a
         # consumer needn't re-derive direction from the cleared ledger.
-        action = (
-            RECONCILE_COMPENSATED
-            if in_progress.phase == PHASE_COMPENSATE
-            else RECONCILE_FORWARD_COMPLETED
-        )
+        action = RECONCILE_COMPENSATED if in_progress.phase == PHASE_COMPENSATE else RECONCILE_FORWARD_COMPLETED
         return ReconcileResult(
             action=action,
             current=in_progress.new_rel,
@@ -1567,13 +1598,11 @@ class ReleaseSwapper:
             current_now = self._symlinks.read(self._symlinks.current)
             previous_now = self._symlinks.read(self._symlinks.previous)
         except OSError as exc:  # Q4: raw os.readlink → ReleaseManagerError
-            raise ReleaseManagerError(
-                f"reconcile abandon symlink read failed: {exc}"
-            ) from exc
+            raise ReleaseManagerError(f"reconcile abandon symlink read failed: {exc}") from exc
         self._logger.error(
-            "reconcile: in_progress new_rel=%s not finalized; clearing marker, "
-            "current unchanged (%s)",
-            new_rel, current_now,
+            "reconcile: in_progress new_rel=%s not finalized; clearing marker, current unchanged (%s)",
+            new_rel,
+            current_now,
         )
         try:
             self._ledger_write(
@@ -1581,11 +1610,11 @@ class ReleaseSwapper:
                 step=LEDGER_STEP_RECONCILE,
             )
         except (OSError, ValueError, KeyError) as exc:
-            raise ReleaseManagerError(
-                f"reconcile abandon-clear failed: {exc}"
-            ) from exc
+            raise ReleaseManagerError(f"reconcile abandon-clear failed: {exc}") from exc
         return ReconcileResult(
-            action=RECONCILE_ABANDONED, current=current_now, previous=previous_now,
+            action=RECONCILE_ABANDONED,
+            current=current_now,
+            previous=previous_now,
         )
 
 
@@ -1643,19 +1672,13 @@ class ReleaseManager:
         clone_timeout_seconds: float = CLONE_TIMEOUT_SECONDS_DEFAULT,
         clock: Callable[[], datetime] | None = None,
         git_sha_resolver: Callable[[Path], str] | None = None,
-        dirty_paths_resolver: (
-            Callable[[Path, tuple[str, ...]], tuple[str, ...] | None] | None
-        ) = None,
+        dirty_paths_resolver: (Callable[[Path, tuple[str, ...]], tuple[str, ...] | None] | None) = None,
         strict_pth_validation: bool = False,
         mid_swap_hook: Callable[[], None] | None = None,
         ledger_write_hook: Callable[[str], None] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
-        self._releases_root = (
-            releases_root.expanduser()
-            if releases_root is not None
-            else Path(RELEASES_ROOT_DEFAULT).expanduser() / solet_name
-        )
+        self._releases_root = releases_root.expanduser() if releases_root is not None else Path(RELEASES_ROOT_DEFAULT).expanduser() / solet_name
         self._keep_releases = keep_releases
         self._logger = logger or logging.getLogger(PLUGIN_NAME)
         self._ledger = ReleaseLedger(self._releases_root)
@@ -1878,9 +1901,7 @@ class ReleaseManager:
         try:
             return release_dir.is_dir() and (release_dir / VERSION_FILENAME).is_file()
         except OSError as exc:
-            raise ReleaseManagerError(
-                f"finalization check failed for {release_id}: {exc}"
-            ) from exc
+            raise ReleaseManagerError(f"finalization check failed for {release_id}: {exc}") from exc
 
     def _assert_finalized(self, release_id: str) -> None:
         if not self._is_finalized(release_id):

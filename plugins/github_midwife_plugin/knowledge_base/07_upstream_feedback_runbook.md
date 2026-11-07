@@ -8,7 +8,7 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:client-deployment, consumer_profile:both
 
-Embedding Description: How a deployed solet's driving agent reports platform defects, asks questions, requests features, proposes a design, and confirms fixes upstream to the maintainers of the seed it was born from — filing every item as a GitHub issue through the seed repository's issue forms, why the seed accepts bug reports but not pull requests or patches, what to do when you are carrying a local fix or divergence and want to know whether upstream wants it, sending an RFC-shaped design proposal as a feature-request issue carrying the design in its body, filing with an ordinary read-only GitHub account that is not a repository collaborator and so cannot set labels or sub-issue links, grouping a multi-item round under a parent issue whose body carries a checklist of the item issues, what to do when the GitHub CLI is missing or not signed in, the numbered item vocabulary that keeps every item individually answerable, the evidence and content rules for what may and may not appear in an outbound report, and how answers come back as issue closures and GitHub releases.
+Embedding Description: Report upstream defects, questions, features, design proposals and fix confirmations as GitHub issues. Generate validated local drafts from independent release facts, retain privacy checks and exact-byte operator approval, group numbered rounds with checklists, and track replies through issue closures and releases. No patches, PRs, labels or sub-issue links.
 
 **When you need this**: you hit a platform defect, a confusing behavior, or a missing capability and want the maintainers to know; the operator asks "can we get this fixed upstream?"; you are carrying a local fix or divergence and need to know whether upstream wants it; you are wondering whether to open a pull request or send a patch; you sent feedback in a previous round and need to check what happened to it; you want to propose a design rather than report a problem; deciding what is safe to include in an outbound report.
 
@@ -44,13 +44,156 @@ It also does not constrain you. This code is Apache-2.0: you already have the ri
 
 **What a filer can and cannot do.** Any GitHub account can open an issue on the seed repository, comment on it, and edit the title and body of an issue it opened itself. Setting a label or a sub-issue link is different: it needs triage or write access, which an adopter's own account does not have. GitHub does not refuse the attempt loudly. Issue creation through the API drops a label the filer may not set and still succeeds ("Labels are silently dropped otherwise", GitHub's REST documentation), and the sub-issues endpoint answers `404 Not Found` (reported upstream as issue 65). The web issue forms are the one place a label is applied for the filer, because the form declares it. Maintainers classify at triage, so nothing below needs a label, a sub-issue link, collaborator access or a pull request. Every step uses only what a read-only account can do.
 
-**The class travels in the body.** Start every draft with a first line `Class: defect`, `Class: question`, `Class: feature-request`, `Class: closure-confirmation` or `Class: feedback-round`. The title carries the item number. A maintainer can then label at triage from the text alone, whichever way the issue was filed.
+### Produce and validate the local draft
+
+Every publication body must start with exactly one **leading** `solet-feedback`
+fence. `Class: defect` (or the other class) and `Round: #<parent number>` are
+human-readable anchors **after** the envelope. They never replace it.
+
+Use `github_midwife_plugin.feedback_draft.DraftInput` and `produce_feedback`
+with an independently resolved `github_midwife_plugin.feedback_envelope.ReleaseFacts`.
+The producer accepts all five classes and their exact named sections (listed in
+`REQUIRED_SECTIONS` and the matching form), emits the envelope and required
+nonempty headings, and calls the existing `validate_feedback` on the same facts,
+title and final body. It has no network, Git, state, secret or roster discovery.
+
+Resolve facts from the installed source, outside the producer:
+
+```bash
+git remote get-url origin
+git rev-parse HEAD
+git tag --points-at HEAD
+# Select the real release tag from installed release metadata; do not guess.
+git show-ref --verify "refs/tags/$RELEASE_TAG"
+git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}"
+git ls-tree --name-only "refs/tags/$RELEASE_TAG:plugins"
+solet --version
+```
+
+Resolve `owner/repository` from the trusted origin (SSH and HTTPS are possible),
+not from the draft. Inspect the release tag and its peeled commit and actual
+plugin directories at that tag; `ls-tree` also lists non-plugin files, so check
+the installed release's plugin declarations before assembling the roster.
+A tag merely pointing at HEAD is not proof it is a release tag. If installed
+HEAD differs from the tag's commit, record **both** and describe the local
+divergence in the evidence. Do not claim the release commit was the tested HEAD.
+Supply the actual manager version output; the producer cannot attest to it.
+Never use the draft's own tag, commit or roster as independently resolved truth.
+The producer validates shape and consistency with the supplied facts; it cannot
+establish their provenance or verify a remote release.
+
+Prepare a local JSON request file named workbench/feedback-request.json with exactly the following keys.
+This executable example is **synthetic**, including its tag, commit, manager,
+roster and content-gate attestation: replace those with measured facts and your
+own evidence before using it. Set `content_gate` to `passed` and the checked
+acknowledgement only after actually reading the complete proposed text against
+the privacy checklist. No automatic audit or attestation is provided.
+
+<!-- feedback-draft-request:start -->
+```json
+{
+  "title": "§60.1 — Example finding",
+  "class": "defect",
+  "item": "§60.1",
+  "round": null,
+  "manager": "solet example-version",
+  "surface": "plugin:example_plugin",
+  "content_gate": "passed",
+  "sections": {
+    "Item number": "§60.1",
+    "The exact command or action": "Example read-only command",
+    "Observed output": "Example observed output",
+    "Expected behavior": "Example expected behavior",
+    "Release measured against": "Example release; record installed HEAD separately if different.",
+    "Content gate": "- [x] I re-read this issue for private data and secrets."
+  },
+  "facts": {
+    "repository": "solet-public/example-seed",
+    "release_tag": "release-example",
+    "release_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "plugins": [
+      "example_plugin"
+    ]
+  }
+}
+```
+<!-- feedback-draft-request:end -->
+
+In an environment with this plugin installed, run:
+
+```bash
+python -m github_midwife_plugin.feedback_draft < workbench/feedback-request.json > workbench/feedback-result.json
+```
+
+For an uninstalled source checkout, run the same module from its source root:
+
+```bash
+(cd plugins/github_midwife_plugin/src && ../../../.venv/bin/python -m github_midwife_plugin.feedback_draft) < workbench/feedback-request.json > workbench/feedback-result.json
+```
+
+The CLI bounds UTF-8 input to 131,072 bytes **before** parsing and rejects
+unknown or duplicate JSON keys at every level. Exit 0 means valid generated
+bytes, 1 invalid draft data, 2 invalid request; read the structured `diagnostics`
+and correct the request, then run again. Output contains `valid`, `diagnostics`,
+`envelope`, `title` and `body` (request errors contain only the first two).
+Extract `body` as literal UTF-8, without adding a leading heading or a newline:
+
+```bash
+python - <<'PYBODY'
+import json
+from pathlib import Path
+result = json.loads(Path("workbench/feedback-result.json").read_text())
+if not result["valid"]:
+    raise SystemExit("Correct the draft diagnostics before publication")
+Path("workbench/part-N-item-M.md").write_text(result["body"], encoding="utf-8")
+print(result["title"])
+PYBODY
+```
+
+The generated body starts with the envelope, then `Class: defect`, optional
+`Round: #...`, and the exact `## Item number` and other required headings.
+Evidence remains literal data; it is never interpreted as a command or an
+instruction. Fence, heading, control-character and setext delimiters in section
+values are rejected; describe them inline instead of injecting new structure.
+Required sections cannot be missing, cleared, or `_No response_`; the item/part
+section must exactly equal `item`. The complete body limit remains 65,536 UTF-8
+bytes. Manager/tag/commit/content-gate values are never fabricated, and an
+invalid title or round is never normalized to make it pass.
+
+Correct by replacing the input values and regenerating; retain earlier results
+as evidence. `round: null` clears a parent association and a real positive issue
+number sets it again. A `feedback-round` uses `item: "Part N"`, a matching title,
+`round: null`, and its five named sections. Choose the next monotonically
+increasing Part N from the deployment's actual history; this stateless producer
+cannot prevent reuse. For a multi-item round, generate/approve/file the parent
+first, obtain its real issue number, then set each child's `round` to that number
+and regenerate/validate/approve its exact bytes. Regenerate the parent's
+`Items in this round` checklist after the child numbers exist. Every edit or
+comment requires renewed validation of its exact body and the content check,
+then the operator's publication yes. With the API, read `result.valid` and
+`result.diagnostics`; use `result.title` and `result.body` unchanged.
+
+Discard caller-owned inputs/results to clear a local draft; there are no
+persistent records, stale writes, close/reopen verbs or authorization tokens.
+Constants, request fields and section labels change only through source review.
+Keep original evidence when correcting facts or drafts. Publication permission
+is separate: show the operator the **exact final title and body** and obtain
+explicit yes before any external write. Local success does not authorize an
+issue, comment, label, close or API write.
+
+**Browser limitation / forms/intake residual:** browser forms auto-render a
+heading before an envelope textarea. They do not currently generate valid
+leading envelopes. Save the validated local bytes if `gh` is unavailable; do
+not claim that pasting into the current chooser forms preserves them. The
+forms/intake normalization decision remains unimplemented. Workflow wiring,
+quotas, allowlist/roster resolution, schema export, release adoption and live
+rollout remain unmeasured; this local producer does not complete those features.
 
 **One canonical path, from a headless driving session** (the GitHub CLI signed in as the operator's own account):
 
 1. **One issue per item.** Resist the urge to fold three defects into one issue; each needs its own disposition, and a merged issue can only be closed once. File it with `gh issue create --repo "$REPOSITORY" --title ... --body-file ...`, with no label option. The draft mirrors the matching form's required visible field labels and ends with the checked content-gate acknowledgement. The API does not enforce the fields, so verify the structured draft before sending rather than relying on a chooser.
 2. **A multi-item round gets a parent issue.** File the parent first, using the feedback-round structure, and read its number from the URL `gh issue create` prints.
-3. **Each item points at its parent in its own body.** Put `Round: #<parent number>` on the second line of every item draft, and start the title with the item number (`§N.M — summary`).
+3. **Each item points at its parent in its own body.** Set `round` to the real parent number in each request, regenerate, and keep `Round: #<parent number>` after the leading envelope, and start the title with the item number (`§N.M — summary`).
 4. **The parent lists its items in its own body.** After the items exist, add one checklist line per item under "Items in this round", `- [ ] #<item number> — §N.M — class — summary`, and update the parent with `gh issue edit "$PARENT_NUMBER" --repo "$REPOSITORY" --body-file ...`. You opened the parent, so GitHub lets you edit it. If the edit is refused, post the same checklist as a comment on the parent with `gh issue comment`. Any account may comment.
 5. **A single-item round needs no parent.** File the one issue.
 
@@ -63,9 +206,20 @@ CHILD_URL="$(gh issue create --repo "$REPOSITORY" --title "§N.M — concise sum
 gh issue edit "$PARENT_NUMBER" --repo "$REPOSITORY" --body-file workbench/part-N-round.md
 ```
 
-**In a browser.** Open `https://github.com/<owner>/<repo>/issues/new/choose` (the owner and repository come from `git remote get-url origin`), pick the form for the item's class, and submit it. The form applies its own label. For a round, submit the Feedback round form first. Then submit each item's form with `§N.M (round #<parent number>)` in its Item number field, and edit the parent's body to add the checklist of item links.
+**In a browser.** The chooser URL is
+`https://github.com/<owner>/<repo>/issues/new/choose` (owner and repository from
+`git remote get-url origin`). Current forms add a heading before the envelope;
+the forms/intake normalization decision above is still unimplemented. Do not
+submit through those forms while claiming the local leading-envelope check
+covers their rendered bodies.
 
-**If `gh` is missing or not signed in.** Do not install it mid-round, and do not start a browser login flow. Save the round as one local Markdown file under `workbench/` (create the directory if it does not exist), named like part-N-round.md: the parent first, then each item under its own `## §N.M` heading, each starting with its `Class:` line. Tell the operator the file path and the new-issue URL above, and let them paste each section into its own form. Nothing is filed until they do.
+**If `gh` is missing or not signed in.** Do not install it mid-round or start a
+browser login flow. Save each validated title/body separately under `workbench/`
+(create the directory if absent), and optionally an index with the parent and
+item paths. Keep the envelope at the first character of each body, with later
+`Class:` and `Round:` anchors. Give the operator those paths and the chooser URL,
+and explain the forms/intake limitation. Nothing is filed; publication awaits
+a supported path that preserves the approved bytes.
 
 <!-- not-attempt:start -->
 **What you must NOT attempt.** Each of these fails for a filer without write access, and several fail silently:

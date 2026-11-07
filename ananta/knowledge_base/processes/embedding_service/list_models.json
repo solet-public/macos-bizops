@@ -2,7 +2,7 @@
   "process_key": "service_interface::embedding_service::list_models",
   "display_name": "List Embedding Models",
   "description": "List available embedding models and their capabilities.",
-  "embedding_description": "",
+  "embedding_description": "List the models available from the embedding service bound to this solet. Read each model's name, vector dimension, description, and capabilities, along with the current default model. Use this to inspect embedding options before generating vectors through the same bound service.",
   "result_processor_customizations": {
     "action_label": "Embedding models listed",
     "result_type": "models_listed",

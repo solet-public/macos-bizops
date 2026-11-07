@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::list_orders_by_invoice_owner",
+  "display_name": "Zuora: List Orders by Invoice Owner",
+  "description": "List the orders an account is invoiced for (GET /v1/orders/invoiceOwner/{accountNumber}), one page per call, filtered by date range and status; completion carries next_page. Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "List the Zuora orders billed to an invoice owner account, by account number, page by page with date-range and status filters. Use it for the paying account's view of order activity, including orders on subscriptions owned by other accounts in a parent-child or reseller hierarchy.",
+  "result_processor_customizations": {
+    "action_label": "Zuora orders listed for invoice owner",
+    "result_type": "zuora_list_orders_by_invoice_owner_result",
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id, data (Zuora's response body, redacted) and pagination {page, next_page, vendor}; next_page is the page number to pass back and null on the last page.",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+  },
+  "error_processor_customizations": {
+    "action_context": "List the orders an account is invoiced for (GET /v1/orders/invoiceOwner/{accountNumber}), one page per call, filtered by date range and status; completion carries next_page.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape: a bad identifier, header value or query pairing, or a body missing a required field. zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.validation_failed is a vendor 4xx or an HTTP 200 carrying success false, with Zuora's reasons. zuora.object_not_found, zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the needed Orders, Subscriptions or Accounts permission or enable the vendor feature the reason names. Read current vendor state with the matching get or list verb before retrying a write; pass an idempotency_key where offered. Back off on rate limits."
+  }
+}

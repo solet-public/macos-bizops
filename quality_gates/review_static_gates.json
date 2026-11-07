@@ -1,0 +1,181 @@
+{
+  "schema": "static-review-catalog/v1",
+  "aggregate_classes": "quality_gates.code_quality_scope:CLASS_NAMES",
+  "behavioral_membership": "quality_gates/gate_smokes.txt",
+  "gates": [
+    {
+      "key": "format",
+      "audience": "peer",
+      "applicability": "python_delta",
+      "argv": [
+        ".venv/bin/ruff",
+        "format",
+        "--check",
+        "--config",
+        "pyproject.toml",
+        "{paths}"
+      ]
+    },
+    {
+      "key": "lint",
+      "audience": "peer",
+      "applicability": "python_delta",
+      "argv": [
+        "quality_gates/ruff_repo.sh",
+        "{paths}"
+      ]
+    },
+    {
+      "key": "typing",
+      "audience": "peer",
+      "applicability": "python_delta",
+      "argv": [
+        ".venv/bin/python",
+        "quality_gates/pyright_repo.py",
+        "{paths}"
+      ]
+    },
+    {
+      "key": "god_class",
+      "audience": "peer",
+      "applicability": "python_delta",
+      "argv": [
+        ".venv/bin/python",
+        "quality_gates/god_class_check.py",
+        "--allowlist",
+        "quality_gates/god_class_allowlist.txt",
+        "{paths}"
+      ]
+    },
+    {
+      "key": "radon_cc",
+      "audience": "peer",
+      "applicability": "python_delta",
+      "argv": [
+        ".venv/bin/python",
+        "quality_gates/radon_cc_check.py",
+        "--allowlist",
+        "quality_gates/radon_cc_allowlist.txt",
+        "{paths}"
+      ]
+    },
+    {
+      "key": "radon_mi",
+      "audience": "peer",
+      "applicability": "python_delta",
+      "argv": [
+        ".venv/bin/python",
+        "quality_gates/radon_mi_check.py",
+        "--allowlist",
+        "quality_gates/radon_mi_allowlist.txt",
+        "{paths}"
+      ]
+    },
+    {
+      "key": "identity",
+      "audience": "peer",
+      "applicability": "candidate",
+      "argv": [
+        "python3",
+        "quality_gates/candidate_tree.py",
+        "--repo-root",
+        "{repo}",
+        "--base-ref",
+        "{commit}",
+        "--scope-file",
+        "{delta_file}",
+        "--rename-file",
+        "{rename_file}",
+        "--run-identity-gate"
+      ]
+    },
+    {
+      "key": "candidate_tree",
+      "audience": "controller",
+      "applicability": "candidate",
+      "argv": [
+        ".venv/bin/python",
+        "quality_gates/candidate_tree.py",
+        "--staged",
+        "--scope-file",
+        "{delta_file}",
+        "--run-identity-gate"
+      ]
+    },
+    {
+      "key": "aggregate",
+      "audience": "controller",
+      "applicability": "candidate",
+      "argv": [
+        ".venv/bin/python",
+        "quality_gates/code_quality_check.py"
+      ]
+    },
+    {
+      "key": "smokes",
+      "audience": "controller",
+      "applicability": "candidate",
+      "argv": [
+        ".venv/bin/python",
+        "quality_gates/run_smokes.py",
+        "--register",
+        "quality_gates/gate_smokes.txt"
+      ]
+    },
+    {
+      "key": "sql_access",
+      "audience": "controller",
+      "applicability": "candidate",
+      "argv": [
+        ".venv/bin/python",
+        "quality_gates/sql_access_gate.py",
+        "--allowlist",
+        "quality_gates/sql_access_allowlist.txt",
+        "--require-clean",
+        "ananta/src/ananta/llm/session_ledger",
+        "--require-clean",
+        "ananta/src/ananta/llm/agent_messaging",
+        "--require-clean",
+        "ananta/src/ananta/core/actions",
+        "--require-clean",
+        "plugins/default_knowledge_plugin/src",
+        "--require-clean",
+        "plugins/actr_memory_plugin/src",
+        "--require-clean",
+        "plugins/default_thinking_plugin/src"
+      ]
+    },
+    {
+      "key": "dependency_declaration",
+      "audience": "controller",
+      "applicability": "candidate",
+      "argv": [
+        ".venv/bin/python",
+        "quality_gates/dependency_declaration_gate.py",
+        "--repo-root",
+        ".",
+        "--allowlist",
+        "quality_gates/dependency_declaration_allowlist.txt"
+      ]
+    },
+    {
+      "key": "toolchain_preflight",
+      "audience": "controller",
+      "applicability": "candidate",
+      "argv": [
+        "deployment/scripts/check_gate_toolchain.sh",
+        "gate"
+      ]
+    },
+    {
+      "key": "root_manifest",
+      "audience": "controller",
+      "applicability": "candidate",
+      "argv": [
+        ".venv/bin/python",
+        "-m",
+        "ananta.core.root_manifest.pre_commit"
+      ]
+    }
+  ]
+}

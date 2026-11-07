@@ -2,7 +2,7 @@
   "process_key": "plugin::snowflake_plugin::list_databases",
   "display_name": "Snowflake: List Databases",
   "description": "List databases visible to the configured role in the Snowflake account. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the job finishing; the database list itself is delivered when the job completes.",
-  "embedding_description": "List the Snowflake databases the operator's read-only warehouse role can see. Dispatches asynchronously, returning a job_id while the listing runs in the background. The starting point for exploring the data warehouse: begin here, then drill into a database's schemas and tables.",
+  "embedding_description": "List the Snowflake databases visible to the operator's registered warehouse role. Dispatches asynchronously, returning a job_id while the listing runs in the background. The starting point for exploring the data warehouse: begin here, then drill into a database's schemas and tables.",
   "result_processor_customizations": {
     "action_label": "Snowflake database listing queued",
     "result_type": "snowflake_list_databases_result",

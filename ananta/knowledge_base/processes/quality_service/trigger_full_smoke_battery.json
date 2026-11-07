@@ -1,0 +1,17 @@
+{
+  "process_key": "service_interface::quality_service::trigger_full_smoke_battery",
+  "display_name": "Trigger Full Smoke Battery",
+  "description": "Queue a full battery or retry pending work off the action queue. The trigger is a terminal EDGE_SINK that submits durable work and returns immediately.",
+  "embedding_description": "Queue a full battery or retry pending work off the action queue. Uses the shared platform-smoke-proof/v1 producer with immutable Git input identities and explicit evidence. Current and historical results disclose reuse, skips, failures, unknown inputs and delegated commissioning; no caller-provided shell command is executed.",
+  "result_processor_customizations": {
+    "action_label": "Queue a full battery or retry pending work off the action queue.",
+    "result_type": "trigger_full_smoke_battery_result",
+    "result_description": "Queue a full battery or retry pending work off the action queue.",
+    "output_action_guidance": "Read the returned evidence and explicit uncertainty before choosing the next action."
+  },
+  "error_processor_customizations": {
+    "action_context": "Queue a full battery or retry pending work off the action queue.",
+    "error_interpretation": "Wrong immutable identity, unsafe paths, missing principal or stale expected_version are integrity failures. Unknown ancillary inputs produce advisories and disable unsafe reuse.",
+    "recovery_guidance": "Use the current readback/version and the shared frozen-request producer. Retain original errors and history."
+  }
+}

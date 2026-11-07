@@ -24,6 +24,7 @@ from ananta.interfaces.state_management_interface import (
     StateManagementInterface,
     StateTransaction,
 )
+from ananta.interfaces.state_service_protocol import StateServiceProtocol
 
 from .models import (
     ID_PREFIX_MESSAGE,
@@ -85,7 +86,8 @@ class ThreadStatusUpdate:
 
 
 def _peer_message_filters(
-    silent_only: bool, since_created_at: datetime | None,
+    silent_only: bool,
+    since_created_at: datetime | None,
 ) -> dict[str, object]:
     """Per-thread message filters for a peer inbox read.
 
@@ -99,6 +101,25 @@ def _peer_message_filters(
     if since_created_at is not None:
         filters["created_at"] = {"op": "gt", "value": since_created_at}
     return filters
+
+
+def _peer_inbox_ordering(
+    *,
+    after_created_at: datetime | None,
+    since_created_at: datetime | None,
+    since_after: tuple[datetime, str] | None,
+) -> tuple[bool, list[object] | None]:
+    """Validate the direct-inbox direction and build its ordered-query cursor."""
+    if after_created_at is not None and (since_created_at is not None or since_after is not None):
+        raise ValueError("after_created_at and since_created_at are opposite directions")
+    if since_after is not None and since_created_at is None:
+        raise ValueError("since_after requires since_created_at")
+    forward = since_created_at is not None
+    if forward and since_after is not None:
+        return True, [since_after[0], since_after[1]]
+    if after_created_at is not None:
+        return False, [after_created_at, ""]
+    return forward, None
 
 
 class AgentMessagingRepository:
@@ -217,6 +238,7 @@ class AgentMessagingRepository:
         limit: int,
         silent_only: bool = True,
         since_created_at: datetime | None = None,
+        since_after: tuple[datetime, str] | None = None,
     ) -> tuple[list[AgentMessageRow], bool]:
         """Return originator peer messages addressed to a specific caller.
 
@@ -243,19 +265,24 @@ class AgentMessagingRepository:
         want intentional silent-only status checks opt into this filter.
 
         Two directions, never both: ``after_created_at`` walks BACKWARD
-        (newest-first, rows older than the timestamp); ``since_created_at``
-        reads FORWARD (oldest-first, rows strictly newer than it, through the
-        ``gt`` range filter, so the boundary row is never re-read; it is a
-        timestamp-only cursor, so a page boundary inside a group of rows with
-        the same ``created_at`` skips the rest of that group). Both set is a
-        caller bug and raises ``ValueError``.
+        (newest-first, rows older than the timestamp). ``since_created_at`` is
+        the fixed FORWARD horizon (oldest-first, rows strictly newer through
+        the ``gt`` range filter), while ``since_after`` is the optional
+        tie-safe ``(created_at, id)`` continuation. Opposite directions, or a
+        continuation without its horizon, are caller bugs and raise
+        ``ValueError``.
         """
-        if after_created_at is not None and since_created_at is not None:
-            raise ValueError("after_created_at and since_created_at are opposite directions")
         capped = max(1, min(limit, _MAX_LIST_LIMIT))
         lookahead_limit = capped + 1
+        forward, after = _peer_inbox_ordering(
+            after_created_at=after_created_at,
+            since_created_at=since_created_at,
+            since_after=since_after,
+        )
         thread_ids = self._peer_inbox_thread_ids(
-            recipient_agent_id, recipient_agent_instance_id, recipient_agent_session_id,
+            recipient_agent_id,
+            recipient_agent_instance_id,
+            recipient_agent_session_id,
         )
         if not thread_ids:
             return [], True
@@ -270,13 +297,12 @@ class AgentMessagingRepository:
         # replaces the raw metadata->>'important' predicate. Both inbox
         # sections are newest-first: a cursor-less read must surface pending
         # work rather than strand it behind a historical prefix. The
-        # timestamp-only direct cursor deliberately retains its existing
+        # timestamp-only BACKWARD cursor deliberately retains its existing
         # duplicate-``created_at`` limitation; the empty-id sentinel skips the
         # equal-timestamp group while walking backward. The forward ``since``
-        # read is the one oldest-first exception and is timestamp-only too: its
-        # ``gt`` filter never re-reads the boundary row, but a page boundary
-        # inside a group of rows sharing one ``created_at`` skips the rest of
-        # that group on the next page, so it is not globally lossless either.
+        # read is the oldest-first exception: its fixed ``gt`` horizon plus the
+        # optional composite ``since_after`` cursor makes continuation lossless
+        # across equal timestamps.
         # query_ordered implicitly excludes is_deleted=1 (the raw SQL did not) —
         # a no-op today (core__agent_message has no soft-delete write path,
         # grep-confirmed), matching the R2 thread-read reconciliation. STILL a
@@ -288,12 +314,6 @@ class AgentMessagingRepository:
         # migration smoke pins this exclusion so a future message-soft-delete
         # path can't silently drop peer-inbox rows undetected.
         filters = _peer_message_filters(silent_only, since_created_at)
-        after: list[object] | None = (
-            [after_created_at, ""]
-            if after_created_at is not None
-            else None
-        )
-        forward = since_created_at is not None
         direction = "asc" if forward else "desc"
         merged: list[AgentMessageRow] = []
         for thread_id in thread_ids:
@@ -311,10 +331,7 @@ class AgentMessagingRepository:
             }
             if after is not None:
                 query["after"] = after
-            merged.extend(
-                _row_to_message(r)
-                for r in _records(self._state.query_ordered(_NAMESPACE, query))
-            )
+            merged.extend(_row_to_message(r) for r in _records(self._state.query_ordered(_NAMESPACE, query)))
         merged.sort(key=lambda m: (m.created_at, m.id), reverse=not forward)
         return merged[:capped], len(merged) <= capped
 
@@ -514,9 +531,7 @@ class AgentMessagingRepository:
             if observed is None:
                 raise RepositoryError(f"thread {thread_id} not found")
             raise RepositoryError(
-                f"thread {thread_id} precondition not met (status "
-                f"{observed.value!r}; required one of "
-                f"{[s.value for s in require_status_in]}); not applied",
+                f"thread {thread_id} precondition not met (status {observed.value!r}; required one of {[s.value for s in require_status_in]}); not applied",
             )
         fetched = self.get_thread(thread_id)
         if fetched is None:
@@ -584,7 +599,9 @@ class AgentMessagingRepository:
         )
 
     def merge_message_metadata(
-        self, message_id: str, patch: dict[str, object],
+        self,
+        message_id: str,
+        patch: dict[str, object],
     ) -> None:
         """Shallow-merge ``patch`` into ``core__agent_message.metadata``.
 
@@ -648,7 +665,10 @@ class AgentMessagingRepository:
         return [_row_to_message(r) for r in records]
 
     def recent_messages(
-        self, thread_id: str, *, limit: int,
+        self,
+        thread_id: str,
+        *,
+        limit: int,
     ) -> list[AgentMessageRow]:
         """Return the last ``limit`` messages, newest-first.
 
@@ -711,8 +731,7 @@ class AgentMessagingRepository:
                     f"append_message: thread {thread_id} not found",
                 ) from exc
             raise RepositoryError(
-                f"append_message: thread {thread_id} not found or status not in "
-                f"{[s.value for s in require_status_in]}",
+                f"append_message: thread {thread_id} not found or status not in {[s.value for s in require_status_in]}",
             ) from exc
 
     def _insert_message(
@@ -737,22 +756,26 @@ class AgentMessagingRepository:
             _NAMESPACE,
             {
                 "table": TABLE_AGENT_MESSAGE,
-                "record": {
-                    "id": message_id,
-                    "namespace": _NAMESPACE,
-                    "thread_id": thread_id,
-                    "cursor": cursor,
-                    "role": str(message.role),
-                    "kind": str(message.kind),
-                    "content": [_part_to_json(p) for p in message.content],
-                    "action_id": message.action_id,
-                    "backend_session_id": message.backend_session_id,
-                    "error": message.error,
-                    "artifacts": [_artifact_to_json(a) for a in message.artifacts],
-                    "metadata": dict(message.metadata),
-                    "important": bool(message.metadata.get("important", False)),
-                    "created_at": created_at,
-                },
+                "record": cast(StateServiceProtocol, self._state).prepare_record(
+                    _NAMESPACE,
+                    TABLE_AGENT_MESSAGE,
+                    {
+                        "id": message_id,
+                        "namespace": _NAMESPACE,
+                        "thread_id": thread_id,
+                        "cursor": cursor,
+                        "role": str(message.role),
+                        "kind": str(message.kind),
+                        "content": [_part_to_json(p) for p in message.content],
+                        "action_id": message.action_id,
+                        "backend_session_id": message.backend_session_id,
+                        "error": message.error,
+                        "artifacts": [_artifact_to_json(a) for a in message.artifacts],
+                        "metadata": dict(message.metadata),
+                        "important": bool(message.metadata.get("important", False)),
+                        "created_at": created_at,
+                    },
+                ),
             },
         )
 
@@ -773,7 +796,8 @@ class AgentMessagingRepository:
         return ThreadStatus(str(records[0]["status"]))
 
     def _build_thread_updates(
-        self, update: ThreadStatusUpdate,
+        self,
+        update: ThreadStatusUpdate,
     ) -> dict[str, object]:
         """Project a ThreadStatusUpdate to an ``update_state`` column dict.
 
@@ -800,7 +824,6 @@ class AgentMessagingRepository:
         if update.set_closed_at:
             updates["closed_at"] = _naive_utc(self._clock())
         return updates
-
 
 
 # ---------------------------------------------------------------------------
@@ -913,9 +936,7 @@ def _row_to_message(row: Mapping[str, object]) -> AgentMessageRow:
     content_raw = _coerce_json_list(row.get("content"))
     artifacts_raw = _coerce_json_list(row.get("artifacts"))
     error_raw = row.get("error")
-    error: dict[str, object] | None = (
-        _coerce_json_dict(error_raw) if error_raw is not None else None
-    )
+    error: dict[str, object] | None = _coerce_json_dict(error_raw) if error_raw is not None else None
     metadata = _coerce_json_dict(row.get("metadata"))
     return AgentMessageRow(
         id=str(row["id"]),
@@ -960,11 +981,7 @@ def _artifact_from_json(artifact: object) -> ArtifactRef:
     if not isinstance(artifact, dict):
         raise RepositoryError(f"unexpected artifact: {artifact!r}")
     metadata_raw = artifact.get("metadata", {})
-    metadata = (
-        cast(dict[str, object], metadata_raw)
-        if isinstance(metadata_raw, dict)
-        else {}
-    )
+    metadata = cast(dict[str, object], metadata_raw) if isinstance(metadata_raw, dict) else {}
     return ArtifactRef(
         blob_id=str(artifact["blob_id"]),
         filename=_optional_str(artifact.get("filename")),

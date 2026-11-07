@@ -2,10 +2,9 @@
 """Hermetic regression smoke for drive-on-delivery diagnostic detail.
 
 The established drive-on-delivery smoke supplies the real dispatch/state
-seam. This focused smoke changes only the driver fault to the exact
-``DriverChannelSendError`` emitted by the Codex stable gate, then proves that
-the existing enum remains ``driver_error`` while its original diagnostic is
-available in the sibling payload field.
+seam. This focused smoke proves that both the typed Codex stable-gate error
+and a generic channel exception retain their diagnostics beside the existing
+``driver_error`` outcome.
 """
 
 from __future__ import annotations
@@ -73,14 +72,59 @@ def test_driver_error_preserves_its_original_diagnostic() -> None:
         driver.channel.send = raise_driver_error  # type: ignore[method-assign]
         outcome, _manager = drive_smoke._send(state)  # noqa: SLF001
         payload: dict[str, Any] = outcome.to_payload()
+        # iss_ab680764: the send reports driver_scheduled; the drive's own
+        # finished record carries the enum and its diagnostic.
         _check(
-            payload.get("drive_on_delivery") == "driver_error",
+            payload.get("drive_on_delivery") == "driver_scheduled",
+            "the send reports driver_scheduled for a drive it has not run",
+        )
+        finished = drive_smoke._await_drive(outcome)  # noqa: SLF001
+        _check(
+            finished is not None and finished[0] == "driver_error",
             "the existing drive outcome enum remains driver_error",
         )
         _check(
-            payload.get("drive_on_delivery_detail") == _DRIVER_DETAIL,
-            "RED proof 3: caller receives the original DriverChannelSendError "
-            "detail beside driver_error",
+            finished is not None and finished[1] == f"_FakeChannel: {_DRIVER_DETAIL}",
+            "the finished drive keeps channel type and original "
+            "DriverChannelSendError detail beside driver_error",
+        )
+    finally:
+        drive_smoke._remove_fake_host()  # noqa: SLF001 -- real seam fixture
+
+
+def test_generic_driver_error_records_channel_and_reason() -> None:
+    """A generic channel exception retains both its source and reason."""
+    driver = drive_smoke._install_fake_host()  # noqa: SLF001 -- real seam fixture
+    try:
+        state = drive_smoke._state()  # noqa: SLF001 -- real seam fixture
+        drive_smoke._insert(state)  # noqa: SLF001 -- real seam fixture
+        transition_lifecycle_state(
+            state,
+            agent_instance_id=drive_smoke._RECIPIENT_AGI,  # noqa: SLF001
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="test:drive-on-delivery-generic-error",
+        )
+
+        def raise_driver_error(_notice: str) -> None:
+            raise RuntimeError("driver channel exploded")
+
+        driver.channel.send = raise_driver_error  # type: ignore[method-assign]
+        outcome, _manager = drive_smoke._send(state)  # noqa: SLF001
+        payload: dict[str, Any] = outcome.to_payload()
+        _check(
+            payload.get("drive_on_delivery") == "driver_scheduled",
+            "the send reports driver_scheduled for a drive it has not run",
+        )
+        finished = drive_smoke._await_drive(outcome)  # noqa: SLF001
+        _check(
+            finished is not None and finished[0] == "driver_error",
+            "the existing drive outcome enum remains driver_error",
+        )
+        _check(
+            finished is not None
+            and finished[1] == "_FakeChannel: driver channel exploded",
+            "RED proof: generic driver error detail includes channel type and original exception",
         )
     finally:
         drive_smoke._remove_fake_host()  # noqa: SLF001 -- real seam fixture
@@ -89,6 +133,7 @@ def test_driver_error_preserves_its_original_diagnostic() -> None:
 def main() -> int:
     print("=== drive-on-delivery detail smoke ===")
     test_driver_error_preserves_its_original_diagnostic()
+    test_generic_driver_error_records_channel_and_reason()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

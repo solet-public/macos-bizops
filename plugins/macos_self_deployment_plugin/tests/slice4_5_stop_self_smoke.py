@@ -7,7 +7,9 @@ SelfDeploymentServiceInterface, paired with the cloud sibling):
 
 * **Live path:** writes the cross-color drain sentinel at
   ``~/.ananta/runtime/<solet>.draining`` and invokes the watchdog
-  spawner with the current pid. The spawner is patched via
+  spawner with a request naming the current pid, its start-time
+  identity token and the owned-deploy lock descriptor the watchdog
+  inherits. The spawner is patched via
   ``set_watchdog_spawner_for_smoke`` so the smoke records the call
   without actually killing the test runner. The sentinel PERSISTS
   beyond the verb's return (distinct from drain_sentinel.held() in
@@ -46,6 +48,7 @@ from macos_self_deployment_plugin import drain_sentinel  # noqa: E402
 from macos_self_deployment_plugin.plugin import (  # noqa: E402
     MacosSelfDeploymentPlugin,
 )
+from macos_self_deployment_plugin.stop_self_watchdog import WatchdogRequest  # noqa: E402
 
 
 def _build_plugin() -> MacosSelfDeploymentPlugin:
@@ -74,9 +77,11 @@ def _scenario_live_path_writes_sentinel_and_spawns_watchdog() -> None:
             plugin = _build_plugin()
             sentinel = drain_sentinel.sentinel_path("smoketest")
             recorded_calls: list[int] = []
+            requests: list[WatchdogRequest] = []
 
-            def fake_spawner(target_pid: int) -> int:
-                recorded_calls.append(target_pid)
+            def fake_spawner(request: WatchdogRequest) -> int:
+                recorded_calls.append(request.target_pid)
+                requests.append(request)
                 return 99999  # synthetic watchdog pid
 
             plugin.set_watchdog_spawner_for_smoke(fake_spawner)
@@ -94,6 +99,10 @@ def _scenario_live_path_writes_sentinel_and_spawns_watchdog() -> None:
             _expect(
                 recorded_calls == [os.getpid()],
                 f"watchdog spawner invoked with current pid (calls={recorded_calls!r})",
+            )
+            _expect(
+                bool(requests[0].target_start_token) and requests[0].lock_fd >= 0,
+                "watchdog request carries the target's start token + the lock descriptor",
             )
             _expect(
                 result.status == StopSelfStatus.SUCCESS,
@@ -133,7 +142,7 @@ def _scenario_idempotent_already_stopped() -> None:
             plugin = _build_plugin()
             recorded_calls: list[int] = []
             plugin.set_watchdog_spawner_for_smoke(
-                lambda target_pid: (recorded_calls.append(target_pid), 88888)[1],
+                lambda request: (recorded_calls.append(request.target_pid), 88888)[1],
             )
 
             first = plugin.stop_self(reason="first")
@@ -157,8 +166,7 @@ def _scenario_idempotent_already_stopped() -> None:
             )
             _expect(
                 len(recorded_calls) == 1,
-                f"watchdog NOT re-spawned on idempotent re-invocation "
-                f"(calls={len(recorded_calls)})",
+                f"watchdog NOT re-spawned on idempotent re-invocation (calls={len(recorded_calls)})",
             )
         finally:
             if prior_xdg is None:

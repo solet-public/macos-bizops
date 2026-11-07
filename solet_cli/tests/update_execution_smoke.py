@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 import sys
 import uuid
@@ -24,9 +23,10 @@ from typing import cast
 from unittest.mock import patch
 
 _ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_ROOT))
 sys.path[:0] = [str(_ROOT / "solet_cli" / "src"), str(_ROOT / "solet_setup_contracts" / "src")]
 import solet_manager.update_execution as execution  # noqa: E402
-from _step5_support import bundle_digest, bundle_document, bundle_files, candidate_tree_files  # noqa: E402
+from _step5_support import bundle_digest, bundle_document, bundle_files, candidate_tree_files, scrubbed_git_environment  # noqa: E402
 from solet_manager._existing_install_inspection_metadata import InstalledUpdateDescriptor  # noqa: E402
 from solet_manager.errors import (  # noqa: E402
     InventoryChannelDescriptorMisbindingError,
@@ -76,7 +76,6 @@ ORIGIN_ID = "123e4567-e89b-12d3-a456-426614174001"
 CANONICAL = "https://github.com/example/seed.git"
 # Bound per fixture: the digest of the transition bundle sealed into the candidate.
 CONTRACT = "sha256:" + "e" * 64
-_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
 
 
 @dataclass(frozen=True)
@@ -103,7 +102,7 @@ class Fixture:
 
 
 def _git(repo: Path, *args: str) -> str:
-    completed = subprocess.run(("git", "-C", str(repo), *args), check=True, capture_output=True, text=True, env=_ENV)
+    completed = subprocess.run(("git", "-C", str(repo), *args), check=True, capture_output=True, text=True, env=scrubbed_git_environment())
     return completed.stdout.strip()
 
 
@@ -245,7 +244,7 @@ def _fixture(root: Path, *, misbound: bool = False) -> Fixture:
     tree["local.cfg"] = "candidate config\n"
     candidate = _seal(source, "c" * 40, "d" * 64, "r2", tree)
     target = root / "target"
-    subprocess.run(("git", "clone", "--quiet", str(source), str(target)), check=True, capture_output=True, env=_ENV)
+    subprocess.run(("git", "clone", "--quiet", str(source), str(target)), check=True, capture_output=True, env=scrubbed_git_environment())
     _git(target, "checkout", "--quiet", "-B", "main", baseline.commit)
     _git(target, "remote", "set-url", "origin", CANONICAL)
     # Step 7 (CH-10/11): a fresh --yes refuses without an instance interpreter, so the target carries the
@@ -508,7 +507,37 @@ def _assert_blocked_after_pointer(root: Path) -> None:
     _expect(UpdateBlockedError, lambda: apply_update(fixture.request, fingerprint), "terminal journal re-applied")
 
 
+def _assert_inherited_git_isolation() -> None:
+    """Reach import-time inheritance and both real init/clone fixture paths."""
+    from quality_gates.tests.candidate_repo_smoke import (
+        _fixture_env,
+        _foreign_repo,
+        _git_snapshot,
+    )
+
+    with TemporaryDirectory() as temporary:
+        workspace = Path(temporary).resolve()
+        foreign = _foreign_repo(workspace)
+        before = _git_snapshot(foreign)
+        hostile_cases = (
+            {"GIT_DIR": str(foreign / ".git"), "GIT_WORK_TREE": str(foreign)},
+            {"GIT_INDEX_FILE": str(foreign / ".git/index")},
+        )
+        for number, hostile in enumerate(hostile_cases):
+            fixture_root = workspace / f"fixture-{number}"
+            fixture_root.mkdir()
+            source = f"import sys\nfrom pathlib import Path\nsys.path.insert(0, {str(_ROOT / 'solet_cli/tests')!r})\nimport update_execution_smoke as fixture\n"
+            if number == 0:
+                source += f"root = Path({str(fixture_root)!r})\nfixture._git(root, 'init', '--quiet')\nfixture._git(root, 'config', 'fixture.origin', 'REQUESTED')\nprint('INIT_REACHED')\n"
+            else:
+                source += f"result = fixture._fixture(Path({str(fixture_root)!r}))\nassert fixture._git(result.target, 'rev-parse', 'HEAD') == result.baseline.commit\nprint('INIT_AND_CLONE_REACHED')\n"
+            child = subprocess.run((sys.executable, "-c", source), env=_fixture_env() | hostile, cwd=_ROOT, check=False, capture_output=True, text=True)
+            assert _git_snapshot(foreign) == before, ("FOREIGN_CONFIG_AND_HEAD_UNCHANGED", number, child.stdout, child.stderr)
+            assert child.returncode == 0 and "REACHED" in child.stdout, ("FIXTURE_INIT_AND_CLONE_VALID_SETUP", child.stdout, child.stderr)
+
+
 def main() -> int:
+    _assert_inherited_git_isolation()
     with TemporaryDirectory() as temporary:
         fixture = _fixture(Path(temporary).resolve())
         fingerprint = _assert_preview_ready(fixture)

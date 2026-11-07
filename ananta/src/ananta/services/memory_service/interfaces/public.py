@@ -110,16 +110,11 @@ class MemoryServiceAPI(ABC):
             description="Recent memory with formatted history",
             type=ParameterType.OBJECT,
             properties={
-                "history": ParameterMetadata(
-                    type=ParameterType.STRING, description="Formatted conversation history"
-                ),
-                "event_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of events in history"
-                ),
+                "history": ParameterMetadata(type=ParameterType.STRING, description="Formatted conversation history"),
+                "event_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of events in history"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def get_recent_memory(
@@ -158,15 +153,11 @@ class MemoryServiceAPI(ABC):
                     type=ParameterType.OBJECT,
                     description="Event counts broken down by source namespace",
                 ),
-                "oldest_event": ParameterMetadata(
-                    type=ParameterType.STRING, description="Timestamp of oldest event"
-                ),
-                "newest_event": ParameterMetadata(
-                    type=ParameterType.STRING, description="Timestamp of newest event"
-                ),
+                "oldest_event": ParameterMetadata(type=ParameterType.STRING, description="Timestamp of oldest event"),
+                "newest_event": ParameterMetadata(type=ParameterType.STRING, description="Timestamp of newest event"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def get_session_event_stats(self, session_id: str) -> dict[str, Any]:
@@ -215,15 +206,11 @@ class MemoryServiceAPI(ABC):
             description="Result with event_id",
             type=ParameterType.OBJECT,
             properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Operation status"
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="Contains event_id"
-                ),
+                "action_status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
+                "data": ParameterMetadata(type=ParameterType.OBJECT, description="Contains event_id"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def store_interaction(
@@ -274,18 +261,12 @@ class MemoryServiceAPI(ABC):
             properties={
                 "events": ParameterMetadata(
                     type=ParameterType.LIST,
-                    description=(
-                        "Event records with session_id, event_type, content, "
-                        "and ISO timestamp"
-                    ),
+                    description=("Event records with session_id, event_type, content, and ISO timestamp"),
                 ),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of events returned"
-                ),
+                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of events returned"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def get_recent_memory_structured(
@@ -307,9 +288,7 @@ class MemoryServiceAPI(ABC):
         is_discoverable=True,
         provider="memory_service",
         parameters={
-            "content": ParameterMetadata(
-                description="The content to remember", required=True, type=ParameterType.STRING
-            ),
+            "content": ParameterMetadata(description="The content to remember", required=True, type=ParameterType.STRING),
             "tags": ParameterMetadata(
                 description="Optional tags for organization",
                 required=False,
@@ -329,10 +308,7 @@ class MemoryServiceAPI(ABC):
                 default=None,
             ),
             "embed": ParameterMetadata(
-                description=(
-                    "Whether to generate a vector embedding. "
-                    "Set to false for focus-only working-context mirrors."
-                ),
+                description=("Whether to generate a vector embedding. Set to false for focus-only working-context mirrors."),
                 required=False,
                 type=ParameterType.BOOLEAN,
                 default=True,
@@ -342,15 +318,11 @@ class MemoryServiceAPI(ABC):
             description="Result with memory_id",
             type=ParameterType.OBJECT,
             properties={
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="UUID of the created memory"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
+                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="UUID of the created memory"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def remember(
@@ -413,12 +385,10 @@ class MemoryServiceAPI(ABC):
                     type=ParameterType.LIST,
                     description="List of memory records with content, strength, and scores",
                 ),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memories returned"
-                ),
+                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories returned"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def recall(
@@ -438,20 +408,16 @@ class MemoryServiceAPI(ABC):
         is_discoverable=True,
         provider="memory_service",
         parameters={
-            "memory_id": ParameterMetadata(
-                description="ID of memory to archive", required=True, type=ParameterType.STRING
-            ),
+            "memory_id": ParameterMetadata(description="ID of memory to archive", required=True, type=ParameterType.STRING),
         },
         return_value_schema=ReturnValueSchema(
             description="Confirmation of archival",
             type=ParameterType.OBJECT,
             properties={
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def forget(self, memory_id: str) -> dict[str, Any]:
@@ -473,18 +439,12 @@ class MemoryServiceAPI(ABC):
             description="Reinforcement confirmation with updated strength",
             type=ParameterType.OBJECT,
             properties={
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="ID of the reinforced memory"
-                ),
-                "new_strength": ParameterMetadata(
-                    type=ParameterType.FLOAT, description="Updated ACT-R activation strength"
-                ),
-                "retrieval_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Total number of retrievals"
-                ),
+                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the reinforced memory"),
+                "new_strength": ParameterMetadata(type=ParameterType.FLOAT, description="Updated ACT-R activation strength"),
+                "retrieval_count": ParameterMetadata(type=ParameterType.INTEGER, description="Total number of retrievals"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def reinforce(self, memory_id: str) -> dict[str, Any]:
@@ -513,18 +473,12 @@ class MemoryServiceAPI(ABC):
             description="Memorization confirmation with next review date",
             type=ParameterType.OBJECT,
             properties={
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="ID of the memory being memorized"
-                ),
-                "next_review_at": ParameterMetadata(
-                    type=ParameterType.STRING, description="ISO timestamp of next scheduled review"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
+                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the memory being memorized"),
+                "next_review_at": ParameterMetadata(type=ParameterType.STRING, description="ISO timestamp of next scheduled review"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def memorize(self, memory_id: str | None = None, content: str | None = None) -> dict[str, Any]:
@@ -570,22 +524,16 @@ class MemoryServiceAPI(ABC):
             description="Ingestion results",
             type=ParameterType.OBJECT,
             properties={
-                "path": ParameterMetadata(
-                    type=ParameterType.STRING, description="Path that was ingested"
-                ),
-                "memories_created": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memories created"
-                ),
+                "path": ParameterMetadata(type=ParameterType.STRING, description="Path that was ingested"),
+                "memories_created": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories created"),
                 "memorized": ParameterMetadata(
                     type=ParameterType.INTEGER,
                     description="Number of memories added to memorization queue",
                 ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Summary message"
-                ),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Summary message"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def learn(
@@ -604,9 +552,7 @@ class MemoryServiceAPI(ABC):
         is_discoverable=True,
         provider="memory_service",
         parameters={
-            "transcript": ParameterMetadata(
-                description="Conversation transcript text", required=True, type=ParameterType.STRING
-            ),
+            "transcript": ParameterMetadata(description="Conversation transcript text", required=True, type=ParameterType.STRING),
             "session_id": ParameterMetadata(
                 description="Session identifier for grouping",
                 required=False,
@@ -628,20 +574,14 @@ class MemoryServiceAPI(ABC):
                     type=ParameterType.STRING,
                     description="Session ID used for grouping the ingested memories (NOT the IO routing session)",
                 ),
-                "memories_created": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memories created"
-                ),
-                "memory_ids": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of created memory IDs"
-                ),
+                "memories_created": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories created"),
+                "memory_ids": ParameterMetadata(type=ParameterType.LIST, description="List of created memory IDs"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
-    def ingest_session(
-        self, transcript: str, session_id: str | None = None, chunk_by_turns: bool = True
-    ) -> dict[str, Any]:
+    def ingest_session(self, transcript: str, session_id: str | None = None, chunk_by_turns: bool = True) -> dict[str, Any]:
         """Ingest a conversation transcript as episodic memories."""
         pass
 
@@ -664,16 +604,14 @@ class MemoryServiceAPI(ABC):
             description="Deletion results",
             type=ParameterType.OBJECT,
             properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Operation status"
-                ),
+                "action_status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
                 "data": ParameterMetadata(
                     type=ParameterType.OBJECT,
                     description="Contains deleted_count",
                 ),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def delete_memories_by_tag(self, tag: str) -> dict[str, Any]:
@@ -695,16 +633,14 @@ class MemoryServiceAPI(ABC):
             description="Deletion results",
             type=ParameterType.OBJECT,
             properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Operation status"
-                ),
+                "action_status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
                 "data": ParameterMetadata(
                     type=ParameterType.OBJECT,
                     description="Contains deleted_count",
                 ),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def delete_memories_by_ids(self, ids: list[str]) -> dict[str, Any]:
@@ -732,17 +668,14 @@ class MemoryServiceAPI(ABC):
             description="Matching memories",
             type=ParameterType.OBJECT,
             properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Operation status"
-                ),
+                "action_status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
                 "data": ParameterMetadata(
                     type=ParameterType.OBJECT,
                     description="Contains memories list and count",
                 ),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def get_memories_by_tag(
@@ -785,16 +718,14 @@ class MemoryServiceAPI(ABC):
             description="Upsert result with deleted count and new memory ID",
             type=ParameterType.OBJECT,
             properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Operation status"
-                ),
+                "action_status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
                 "data": ParameterMetadata(
                     type=ParameterType.OBJECT,
                     description="Contains deleted_count, duplicates_reconciled, memory_id, tag",
                 ),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def upsert_memory_by_tag(
@@ -812,29 +743,19 @@ class MemoryServiceAPI(ABC):
         is_discoverable=True,
         provider="memory_service",
         parameters={
-            "tag": ParameterMetadata(
-                description="Tag to match", required=True, type=ParameterType.STRING
-            ),
+            "tag": ParameterMetadata(description="Tag to match", required=True, type=ParameterType.STRING),
         },
         return_value_schema=ReturnValueSchema(
             description="Batch memorization results",
             type=ParameterType.OBJECT,
             properties={
-                "tag": ParameterMetadata(
-                    type=ParameterType.STRING, description="Tag that was matched"
-                ),
-                "matching_memories": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memories with this tag"
-                ),
-                "newly_memorizing": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number newly added to queue"
-                ),
-                "already_memorizing": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number already in queue"
-                ),
+                "tag": ParameterMetadata(type=ParameterType.STRING, description="Tag that was matched"),
+                "matching_memories": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories with this tag"),
+                "newly_memorizing": ParameterMetadata(type=ParameterType.INTEGER, description="Number newly added to queue"),
+                "already_memorizing": ParameterMetadata(type=ParameterType.INTEGER, description="Number already in queue"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def memorize_by_tag(self, tag: str) -> dict[str, Any]:
@@ -856,12 +777,10 @@ class MemoryServiceAPI(ABC):
             description="Confirmation",
             type=ParameterType.OBJECT,
             properties={
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def stop_memorizing(self, memory_id: str) -> dict[str, Any]:
@@ -884,19 +803,12 @@ class MemoryServiceAPI(ABC):
             description="List of memorization records",
             type=ParameterType.OBJECT,
             properties={
-                "total": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Total in queue"
-                ),
-                "due_now": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number due for review"
-                ),
-                "memorizations": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of memorization records"
-                ),
+                "total": ParameterMetadata(type=ParameterType.INTEGER, description="Total in queue"),
+                "due_now": ParameterMetadata(type=ParameterType.INTEGER, description="Number due for review"),
+                "memorizations": ParameterMetadata(type=ParameterType.LIST, description="List of memorization records"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def list_memorizing(self, include_completed: bool = False) -> dict[str, Any]:
@@ -912,18 +824,12 @@ class MemoryServiceAPI(ABC):
             description="Processing results",
             type=ParameterType.OBJECT,
             properties={
-                "processed": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of reviews processed"
-                ),
-                "completed": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number that completed memorization"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Summary message"
-                ),
+                "processed": ParameterMetadata(type=ParameterType.INTEGER, description="Number of reviews processed"),
+                "completed": ParameterMetadata(type=ParameterType.INTEGER, description="Number that completed memorization"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Summary message"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def process_memorization_queue(self) -> dict[str, Any]:
@@ -958,26 +864,16 @@ class MemoryServiceAPI(ABC):
             description="Consolidation results",
             type=ParameterType.OBJECT,
             properties={
-                "candidates_found": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of weak memories found"
-                ),
-                "clusters_formed": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of clusters for summarization"
-                ),
-                "consolidations": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of consolidation actions taken"
-                ),
-                "dry_run": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="Whether this was a dry run"
-                ),
+                "candidates_found": ParameterMetadata(type=ParameterType.INTEGER, description="Number of weak memories found"),
+                "clusters_formed": ParameterMetadata(type=ParameterType.INTEGER, description="Number of clusters for summarization"),
+                "consolidations": ParameterMetadata(type=ParameterType.LIST, description="List of consolidation actions taken"),
+                "dry_run": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether this was a dry run"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
-    def consolidate(
-        self, strength_threshold: float = -1.5, min_age_days: int = 7, dry_run: bool = False
-    ) -> dict[str, Any]:
+    def consolidate(self, strength_threshold: float = -1.5, min_age_days: int = 7, dry_run: bool = False) -> dict[str, Any]:
         """Summarize weak episodic memories into semantic memories."""
         pass
 
@@ -990,17 +886,14 @@ class MemoryServiceAPI(ABC):
             description="Recomputation results",
             type=ParameterType.OBJECT,
             properties={
-                "total_memories": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Total memories processed"
-                ),
+                "total_memories": ParameterMetadata(type=ParameterType.INTEGER, description="Total memories processed"),
                 "updated": ParameterMetadata(
                     type=ParameterType.INTEGER,
                     description="Number of memories with updated strength",
                 ),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def recompute_strengths(self) -> dict[str, Any]:
@@ -1052,15 +945,9 @@ class MemoryServiceAPI(ABC):
             description="Processing results",
             type=ParameterType.OBJECT,
             properties={
-                "processed": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of reviews processed"
-                ),
-                "completed": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number that completed memorization"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Summary message"
-                ),
+                "processed": ParameterMetadata(type=ParameterType.INTEGER, description="Number of reviews processed"),
+                "completed": ParameterMetadata(type=ParameterType.INTEGER, description="Number that completed memorization"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Summary message"),
             },
         ),
         # No result_processor_customizations / error_processor_customizations
@@ -1093,18 +980,10 @@ class MemoryServiceAPI(ABC):
             description="Consolidation results",
             type=ParameterType.OBJECT,
             properties={
-                "candidates_found": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of weak memories found"
-                ),
-                "clusters_formed": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of clusters for summarization"
-                ),
-                "consolidations": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of consolidation actions taken"
-                ),
-                "dry_run": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="Whether this was a dry run"
-                ),
+                "candidates_found": ParameterMetadata(type=ParameterType.INTEGER, description="Number of weak memories found"),
+                "clusters_formed": ParameterMetadata(type=ParameterType.INTEGER, description="Number of clusters for summarization"),
+                "consolidations": ParameterMetadata(type=ParameterType.LIST, description="List of consolidation actions taken"),
+                "dry_run": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether this was a dry run"),
             },
         ),
         # No result_processor_customizations / error_processor_customizations
@@ -1130,9 +1009,7 @@ class MemoryServiceAPI(ABC):
             description="Recomputation results",
             type=ParameterType.OBJECT,
             properties={
-                "total_memories": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Total memories processed"
-                ),
+                "total_memories": ParameterMetadata(type=ParameterType.INTEGER, description="Total memories processed"),
                 "updated": ParameterMetadata(
                     type=ParameterType.INTEGER,
                     description="Number of memories with updated strength",
@@ -1169,9 +1046,7 @@ class MemoryServiceAPI(ABC):
             description="Scheduled memory-maintenance install result",
             type=ParameterType.OBJECT,
             properties={
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Install summary message"
-                ),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Install summary message"),
                 "schedules": ParameterMetadata(
                     type=ParameterType.LIST,
                     description="Names of the crons installed on this call",
@@ -1194,28 +1069,48 @@ class MemoryServiceAPI(ABC):
             description="Long-term memory statistics",
             type=ParameterType.OBJECT,
             properties={
-                "total": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Total number of long-term memories"
-                ),
+                "total": ParameterMetadata(type=ParameterType.INTEGER, description="Total number of long-term memories"),
                 "by_type": ParameterMetadata(
                     type=ParameterType.OBJECT,
                     description="Counts by memory type (episodic, semantic_l1, semantic_l2)",
                 ),
-                "by_status": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="Counts by status (active, archived)"
-                ),
+                "by_status": ParameterMetadata(type=ParameterType.OBJECT, description="Counts by status (active, archived)"),
                 "strength_distribution": ParameterMetadata(
                     type=ParameterType.OBJECT,
                     description="Counts by strength category (strong, medium, weak, very_weak)",
                 ),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def memory_stats(self) -> dict[str, Any]:
         """Get memory store statistics."""
+        pass
+
+    @service_interface_process(
+        name="corpus_counts",
+        is_discoverable=True,
+        provider="memory_service",
+        parameters={},
+        return_value_schema=ReturnValueSchema(
+            description="Bounded scalar counts for the memory corpus",
+            type=ParameterType.OBJECT,
+            properties={
+                "schema_version": ParameterMetadata(type=ParameterType.STRING, description="Response schema version"),
+                "scope": ParameterMetadata(type=ParameterType.STRING, description="Counted corpus scope"),
+                "observed_from": ParameterMetadata(type=ParameterType.STRING, description="UTC observation interval start"),
+                "observed_until": ParameterMetadata(type=ParameterType.STRING, description="UTC observation interval end"),
+                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Matching row count when complete"),
+                "complete": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the scalar count completed"),
+                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Bounded advisories"),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+    )
+    @abstractmethod
+    def corpus_counts(self) -> dict[str, Any]:
+        """Count nondeleted ACT-R memory rows without materializing records."""
         pass
 
     @service_interface_process(
@@ -1235,9 +1130,7 @@ class MemoryServiceAPI(ABC):
                 type=ParameterType.STRING,
                 default="active",
             ),
-            "tag": ParameterMetadata(
-                description="Filter by tag", required=False, type=ParameterType.STRING, default=None
-            ),
+            "tag": ParameterMetadata(description="Filter by tag", required=False, type=ParameterType.STRING, default=None),
             "sort_by": ParameterMetadata(
                 description="Sort by: 'strength', 'created_at', 'retrieval_count'",
                 required=False,
@@ -1255,18 +1148,12 @@ class MemoryServiceAPI(ABC):
             description="List of memories",
             type=ParameterType.OBJECT,
             properties={
-                "memories": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of memory records"
-                ),
-                "total": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Total matching memories"
-                ),
-                "showing": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number shown"
-                ),
+                "memories": ParameterMetadata(type=ParameterType.LIST, description="List of memory records"),
+                "total": ParameterMetadata(type=ParameterType.INTEGER, description="Total matching memories"),
+                "showing": ParameterMetadata(type=ParameterType.INTEGER, description="Number shown"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def list_memories(
@@ -1314,15 +1201,11 @@ class MemoryServiceAPI(ABC):
             description="Export results",
             type=ParameterType.OBJECT,
             properties={
-                "file_path": ParameterMetadata(
-                    type=ParameterType.STRING, description="Path to exported file"
-                ),
-                "memory_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memories exported"
-                ),
+                "file_path": ParameterMetadata(type=ParameterType.STRING, description="Path to exported file"),
+                "memory_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories exported"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def export_memories(
@@ -1340,9 +1223,7 @@ class MemoryServiceAPI(ABC):
         is_discoverable=True,
         provider="memory_service",
         parameters={
-            "file_path": ParameterMetadata(
-                description="Path to import file", required=True, type=ParameterType.STRING
-            ),
+            "file_path": ParameterMetadata(description="Path to import file", required=True, type=ParameterType.STRING),
             "regenerate_embeddings": ParameterMetadata(
                 description="Regenerate embeddings (required if not in export)",
                 required=False,
@@ -1354,18 +1235,12 @@ class MemoryServiceAPI(ABC):
             description="Import results",
             type=ParameterType.OBJECT,
             properties={
-                "imported": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memories imported"
-                ),
-                "skipped": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number skipped (already exist)"
-                ),
-                "total_in_file": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Total memories in file"
-                ),
+                "imported": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories imported"),
+                "skipped": ParameterMetadata(type=ParameterType.INTEGER, description="Number skipped (already exist)"),
+                "total_in_file": ParameterMetadata(type=ParameterType.INTEGER, description="Total memories in file"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def import_memories(self, file_path: str, regenerate_embeddings: bool = True) -> dict[str, Any]:
@@ -1395,7 +1270,8 @@ class MemoryServiceAPI(ABC):
             type=ParameterType.OBJECT,
             properties={
                 "dry_run": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="Whether this was a dry run (no mutation)"
+                    type=ParameterType.BOOLEAN,
+                    description="Whether this was a dry run (no mutation)",
                 ),
                 "cleared": ParameterMetadata(
                     type=ParameterType.INTEGER,
@@ -1407,12 +1283,10 @@ class MemoryServiceAPI(ABC):
                 ),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
-    def cleanup_orphaned_vectors(
-        self, dry_run: bool = False, confirm: bool = False
-    ) -> dict[str, Any]:
+    def cleanup_orphaned_vectors(self, dry_run: bool = False, confirm: bool = False) -> dict[str, Any]:
         """Rebuild the memory-vector namespace: clear then reindex every memory."""
         pass
 
@@ -1425,16 +1299,14 @@ class MemoryServiceAPI(ABC):
             description="Reindexing results",
             type=ParameterType.OBJECT,
             properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Operation status"
-                ),
+                "action_status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
                 "data": ParameterMetadata(
                     type=ParameterType.OBJECT,
                     description="Contains reindex_count and message",
                 ),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def reindex_orphaned_vectors(self) -> dict[str, Any]:
@@ -1456,21 +1328,13 @@ class MemoryServiceAPI(ABC):
             description="Purge operation results with counts of deleted items",
             type=ParameterType.OBJECT,
             properties={
-                "purged": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="True if purge completed"
-                ),
-                "deleted_memories": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memories deleted"
-                ),
-                "deleted_memorizations": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of memorizations deleted"
-                ),
-                "deleted_vectors": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of vectors deleted"
-                ),
+                "purged": ParameterMetadata(type=ParameterType.BOOLEAN, description="True if purge completed"),
+                "deleted_memories": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories deleted"),
+                "deleted_memorizations": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memorizations deleted"),
+                "deleted_vectors": ParameterMetadata(type=ParameterType.INTEGER, description="Number of vectors deleted"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def purge_memories(self, confirm: bool = False) -> dict[str, Any]:
@@ -1503,15 +1367,9 @@ class MemoryServiceAPI(ABC):
             description="Audit results for pinned notes",
             type=ParameterType.OBJECT,
             properties={
-                "total_pinned": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Total number of pinned memories"
-                ),
-                "active": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number actively being memorized"
-                ),
-                "completed": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number that completed memorization"
-                ),
+                "total_pinned": ParameterMetadata(type=ParameterType.INTEGER, description="Total number of pinned memories"),
+                "active": ParameterMetadata(type=ParameterType.INTEGER, description="Number actively being memorized"),
+                "completed": ParameterMetadata(type=ParameterType.INTEGER, description="Number that completed memorization"),
                 "weak_pins": ParameterMetadata(
                     type=ParameterType.INTEGER,
                     description="Number of pinned memories with low strength",
@@ -1522,8 +1380,7 @@ class MemoryServiceAPI(ABC):
                 ),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def audit_pinned_notes(
@@ -1556,9 +1413,7 @@ class MemoryServiceAPI(ABC):
             description="Review results for blocked intents",
             type=ParameterType.OBJECT,
             properties={
-                "total_blocked": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Total blocked intent memories"
-                ),
+                "total_blocked": ParameterMetadata(type=ParameterType.INTEGER, description="Total blocked intent memories"),
                 "stale_count": ParameterMetadata(
                     type=ParameterType.INTEGER,
                     description="Number of stale blocked intents (old and weak)",
@@ -1573,8 +1428,7 @@ class MemoryServiceAPI(ABC):
                 ),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def review_blocked_intents(
@@ -1600,10 +1454,7 @@ class MemoryServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -1612,22 +1463,24 @@ class MemoryServiceAPI(ABC):
             description="Focus result with memory_id and current focused count",
             type=ParameterType.OBJECT,
             properties={
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="ID of the focused memory"
-                ),
-                "session_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Session owning the pin"
-                ),
+                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the focused memory"),
+                "session_id": ParameterMetadata(type=ParameterType.STRING, description="Session owning the pin"),
                 "focused_count": ParameterMetadata(
                     type=ParameterType.INTEGER,
                     description="Number of memories focused in the acting session",
                 ),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
-    def focus(self, memory_id: str, *, session_id: str) -> dict[str, Any]:
+    def focus(
+        self,
+        memory_id: str,
+        *,
+        session_id: str = "",
+        state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Pin a memory into the acting session's focus buffer (JOS-02)."""
         pass
 
@@ -1642,10 +1495,7 @@ class MemoryServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -1654,22 +1504,21 @@ class MemoryServiceAPI(ABC):
             description="Unfocus confirmation",
             type=ParameterType.OBJECT,
             properties={
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="ID of the unfocused memory"
-                ),
-                "session_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Session the pin was released from"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
+                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the unfocused memory"),
+                "session_id": ParameterMetadata(type=ParameterType.STRING, description="Session the pin was released from"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
-    def unfocus(self, memory_id: str, *, session_id: str) -> dict[str, Any]:
+    def unfocus(
+        self,
+        memory_id: str,
+        *,
+        session_id: str = "",
+        state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Remove a memory from the acting session's focus buffer (JOS-02)."""
         pass
 
@@ -1679,10 +1528,7 @@ class MemoryServiceAPI(ABC):
         provider="memory_service",
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -1695,16 +1541,18 @@ class MemoryServiceAPI(ABC):
                     type=ParameterType.LIST,
                     description="Focused memory records with memory_id and full content",
                 ),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of focused memories"
-                ),
+                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of focused memories"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
-    def get_focused(self, *, session_id: str) -> dict[str, Any]:
+    def get_focused(
+        self,
+        *,
+        session_id: str = "",
+        state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Return the acting session's focused memories as {"memories": [...], "count": N}."""
         pass
 
@@ -1743,15 +1591,11 @@ class MemoryServiceAPI(ABC):
             description="Result with memory_id of stored summary",
             type=ParameterType.OBJECT,
             properties={
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="UUID of the created summary memory"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
+                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="UUID of the created summary memory"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def store_compaction_summary(

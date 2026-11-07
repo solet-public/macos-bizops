@@ -30,6 +30,7 @@ the smoke file, not on its data dependencies.
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Callable
@@ -172,6 +173,11 @@ def _assert_default_reader_queries_the_running_server() -> None:
     entry = entries[0]
     assert isinstance(entry, dict)
     _check(entry["status"] == "verified", "the queried pinned server was not verified")
+    argv = commands[0]
+    _check(
+        "--dbname" in argv and argv[argv.index("--dbname") + 1] == "postgres",
+        f"the probe did not name the postgres database, so psql would connect to an implicit OS-user one: {argv}",
+    )
     _check(
         commands
         == [
@@ -180,11 +186,17 @@ def _assert_default_reader_queries_the_running_server() -> None:
                 "--no-psqlrc",
                 "--tuples-only",
                 "--no-align",
+                "--dbname",
+                "postgres",
                 "--command",
                 "SHOW server_version_num",
             ]
         ],
         f"doctor did not issue the runtime server-version query: {commands}",
+    )
+    _check(
+        entry["source"] == shlex.join(argv),
+        f"the advisory source did not match the psql argv: {entry['source']!r} != {shlex.join(argv)!r}",
     )
 
 

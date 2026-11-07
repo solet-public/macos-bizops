@@ -1,0 +1,19 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::clear_fleet_stall_sweep_run",
+  "display_name": "Clear the fleet stall sweep's published run record",
+  "description": "Retires the fleet stall sweep's published last-completed-run record and returns what was retired. This is that row's terminal action, completing its lifecycle beside the create and the correction the sweep itself performs on every fire and the read read_fleet_stall_sweep_status performs: a column-only create path is not a finished feature, so the terminal verb exists and is tested. Retention is bounded at exactly one latest-run row, overwritten by every run, so there is no history to prune and no earlier run to lose. It is reversible only in the sense every run is: the next scheduled fire publishes a fresh record, and the verdict that fire computes is unaffected by the clear. Clearing a record that was never there is reported as cleared=false with a named advisory rather than as an error, because a terminal action on an absent row has already reached the state it was asked for; that also makes a retry safe. The record removed is read first and returned in full, so a caller is told exactly what it discarded instead of discovering it from the absence. Clearing the record does NOT stop or alter the sweep, and it does not touch any session or any register row; it only removes the published liveness evidence, which read_fleet_stall_sweep_status will then report as never-recorded until the next fire.",
+  "embedding_description": "Deleting the stored record of the fleet stall sweep's last completed run, returning the run it removed, so the sweep's published liveness evidence can be retired or reset; a repeat is safe and reports that there was nothing left to clear rather than failing.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Fleet stall sweep run cleared",
+    "result_type": "fleet_stall_sweep_run_clear_result",
+    "result_description": "cleared (whether a record was present and removed), cleared_run (the whole removed run record, or null), and advisories.",
+    "presentation_guidance": "Say plainly whether anything was removed, and name the verdict and timestamp of the run that was discarded when one was. cleared=false is a success, not a refusal: there was nothing recorded. Do not describe this as stopping, disabling or resetting the sweep; the sweep is unaffected and the next scheduled fire republishes.",
+    "output_action_guidance": "read_fleet_stall_sweep_status will now report that no completed run has been recorded, until the next fire. sweep_fleet_stall republishes immediately if a record is wanted straight away."
+  },
+  "error_processor_customizations": {
+    "action_context": "One key_value_store read followed by one key_value_store delete through StateManagementInterface, both on the single namespaced last-run key. No register call, no session contact.",
+    "error_interpretation": "state_service_unavailable: the deployment has no bound state service, so the record is unreachable. There is no refusal for an absent record: that is reported as cleared=false with an advisory.",
+    "recovery_guidance": "Retry is always safe and idempotent; a second call reports cleared=false. A state fault means the state service is unbound or down, not that the record is gone: confirm with read_fleet_stall_sweep_status before concluding anything about the sweep."
+  }
+}

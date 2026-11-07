@@ -17,6 +17,7 @@ from .operation_records import normalize_apply_result as _normalize_apply_result
 from .paths import ManagerPaths
 from .preview_engine import preview_create
 from .registry import InstanceRegistry
+from .source_acquisition import SealedSeedBundle
 from .state_io import instance_lock
 
 __all__ = ["CreateManager", "_normalize_apply_result", "run_completion_probes"]
@@ -31,10 +32,13 @@ class CreateManager:
         paths: ManagerPaths,
         contract_directory: Path | None,
         seed_lock_path: Path,
+        sealed_seed_bundle: SealedSeedBundle | None = None,
     ) -> None:
         self.paths = paths
         self.contract_directory = contract_directory
         self.seed_lock_path = seed_lock_path
+        # Set only by a release's guest-validation ladder (see SealedSeedBundle).
+        self.sealed_seed_bundle = sealed_seed_bundle
         self.registry = InstanceRegistry(
             paths.registry_path,
             maintenance_inventory_path=paths.maintenance_inventory_path,
@@ -92,6 +96,7 @@ class CreateManager:
             decision_source=decision_source,
             decision_sources=decision_sources,
             stage_limit=stop_after_stage,
+            sealed_seed_bundle=self.sealed_seed_bundle,
         )
         if result.kind != "create" or result.status != "verified":
             return result

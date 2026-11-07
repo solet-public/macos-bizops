@@ -68,6 +68,7 @@ from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
 from ananta.llm.agent_messaging.state_results import StateOperationError  # noqa: E402
 from ananta.services.store import open_store  # noqa: E402
 
+from agent_messaging_plugin._role_refresh_evidence import RoleRefreshEvidence  # noqa: E402
 from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
 from agent_messaging_plugin.peer_registry import (  # noqa: E402
     PeerRegistry,
@@ -400,6 +401,7 @@ def test_reroute_matches_with_session_id() -> None:
     claim_role_binding_v4(state, name=_ARBITRARY_ROLE, claim=_session_claim("claude_code", "agi-1", "sess-1", "L"))
     matched = refresh_role_binding_cas(
         state, agent_session_id="sess-1", new_agent_instance_id="agi-reconnect",
+        evidence=RoleRefreshEvidence("agi-1", 123, 123),
     )
     _check(matched == 1, "post-cutover: a v4 binding WITH a session id → reconnect CAS MATCHES (reroute heals a claimed role)")
     rows = cast(_StateWithInsert, state).rows(NS, TABLE_ROLE_BINDING)
@@ -410,7 +412,8 @@ def test_reroute_matches_with_session_id() -> None:
 def test_reroute_empty_session_id_matches_nothing() -> None:
     state = _state()
     _check(
-        refresh_role_binding_cas(state, agent_session_id="", new_agent_instance_id="agi-y") == 0,
+        refresh_role_binding_cas(state, agent_session_id="", new_agent_instance_id="agi-y",
+                                 evidence=RoleRefreshEvidence(None, None, None)) == 0,
         "refresh with an EMPTY session id → matches NOTHING (the guard; carry-fwd (c) now also rejects empty-session claims upstream)",
     )
 

@@ -194,14 +194,23 @@ def _scenario_sentinel_filename_is_cross_color() -> None:
 
 
 def main() -> int:
-    print(
-        "Slice 4 smoke: drain sentinel held across SIGTERM + unregister\n",
-    )
-    _scenario_sentinel_held_around_signal_and_unregister()
-    print()
-    _scenario_sentinel_removed_on_exception()
-    print()
-    _scenario_sentinel_filename_is_cross_color()
+    with tempfile.TemporaryDirectory(prefix="slice4_runtime_") as runtime_dir:
+        prior_xdg = os.environ.get("XDG_RUNTIME_DIR")
+        os.environ["XDG_RUNTIME_DIR"] = runtime_dir
+        try:
+            print(
+                "Slice 4 smoke: drain sentinel held across SIGTERM + unregister\n",
+            )
+            _scenario_sentinel_held_around_signal_and_unregister()
+            print()
+            _scenario_sentinel_removed_on_exception()
+            print()
+            _scenario_sentinel_filename_is_cross_color()
+        finally:
+            if prior_xdg is None:
+                os.environ.pop("XDG_RUNTIME_DIR", None)
+            else:
+                os.environ["XDG_RUNTIME_DIR"] = prior_xdg
     print("\nAll scenarios passed.")
     return 0
 

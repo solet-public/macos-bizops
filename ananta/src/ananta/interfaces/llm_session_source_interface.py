@@ -13,12 +13,14 @@ plugins MUST be located through that path, never bare ``isinstance``.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import ClassVar
 
 from ananta.llm.session_ledger.types import (
     ExternalSessionRef,
     NormalizedSessionEvent,
+    OversizedSelection,
+    PollDiscoveryProgress,
     RawSessionEvent,
     SessionSourceDescriptor,
 )
@@ -56,6 +58,86 @@ class PullingSourceMixin(ABC):
     method genuinely does not resolve a root (pure cursor math, symbolic or
     seed-path sources) accept the param and ignore it.
     """
+
+    supports_whole_session_poll: ClassVar[bool] = False
+
+    def discover_sessions_for_poll(
+        self,
+        root_uri: str,
+        cursor_payload: dict[str, object] | None,
+        *,
+        read_event_cursor: Callable[[str], dict[str, object] | None],
+        can_admit_next: Callable[[], bool],
+        progress: PollDiscoveryProgress,
+    ) -> Iterator[ExternalSessionRef]:
+        """Default unchanged discovery; opt-in adapters own metadata ordering.
+
+        Hooks receive a cursor callback, never a database provider. An opted-in
+        adapter checks can_admit_next between metadata candidates and raises
+        poll_budget.DiscoveryBudgetYield on partial progress. It acknowledges
+        unchanged/deferred metadata before yielding; the importer acknowledges
+        a selected PollSessionRef only after whole-session success.
+        """
+        return self.discover_sessions(root_uri, cursor_payload)
+
+    def completed_discovery_cursor(
+        self,
+        root_uri: str,
+        previous_cursor: dict[str, object] | None,
+        *,
+        exhausted: bool,
+        pending: bool,
+        progress: PollDiscoveryProgress,
+    ) -> dict[str, object] | None:
+        """Optional regular-sweep checkpoint, including an empty walk.
+
+        Opt-in cursor JSON uses version, state (backfilling/caught_up), and
+        after. Actual EOF clears after. caught_up covers regular work only.
+        The low-priority recheck may change ONLY state to backfilling, keeping
+        version/after byte-equivalent; oversized success changes neither.
+        Default None means no hook-owned write.
+        """
+        return None
+
+    def prepare_poll_event_cursor(
+        self,
+        root_uri: str,
+        ref: ExternalSessionRef,
+        stored_cursor: dict[str, object] | None,
+    ) -> dict[str, object] | None:
+        """Choose snapshot replay versus valid continuation from complete metadata.
+
+        The importer passes the COMPLETE stored cursor, then strips its reserved
+        _poll_completed_version before read_events. Default copies unchanged.
+        """
+        return dict(stored_cursor) if stored_cursor is not None else None
+
+    def completed_session_fingerprint(
+        self,
+        root_uri: str,
+        ref: ExternalSessionRef,
+    ) -> dict[str, object] | None:
+        """Stable, complete observed version after iterator EOF, or None/pending.
+
+        Adapters distinguish physical complete-record EOF from early return and
+        unstable input. Importer stores this with vendor EOF in ONE checkpoint;
+        failure/partial session never publishes a completed marker.
+        """
+        return None
+
+    def select_oversized_session(
+        self,
+        root_uri: str,
+        *,
+        read_event_cursor: Callable[[str], dict[str, object] | None],
+        threshold: int,
+    ) -> OversizedSelection:
+        """Under source lease, recheck regular work before selecting one large ref.
+
+        Default is dormant. Return regular_pending OR a candidate OR neither.
+        Eligibility is recomputed next heartbeat, not kept in an in-memory queue.
+        """
+        return OversizedSelection()
 
     @abstractmethod
     def discover_sessions(

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "snowflake_plugin"
 version = "1.0.0"
-description = "Read-only Snowflake warehouse query plugin for Ananta"
+description = "Snowflake SQL and authenticated REST plugin for Ananta"
 authors = [
     {name = "Ananta Development Team", email = "dev@ananta.ai"},
 ]
@@ -16,6 +16,7 @@ dependencies = [
     # Official Snowflake connector — the executor. cryptography arrives
     # transitively (PEM private-key decode for key-pair JWT auth).
     "snowflake-connector-python>=3.12",
+    "httpx>=0.27",
 ]
 
 [project.entry-points."ananta.plugins"]

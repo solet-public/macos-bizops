@@ -22,7 +22,8 @@ artifacts_design.md``):
 * ``RunAtLoad=true`` retained — cold-start-at-login.
 
 Also asserts the plist is valid XML and parseable via the stdlib
-``plistlib``.
+``plistlib``. Its test-only cross-package assertion also keeps the genesis
+birth-spine PATH literal equal to this plugin's autostart PATH constant.
 
 Run:
     .venv/bin/python3 plugins/macos_self_deployment_plugin/tests/autostart_plist_render_smoke.py
@@ -36,10 +37,12 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT / "plugins" / "github_midwife_plugin" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "macos_self_deployment_plugin" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 
 from ananta.core.runtime import get_runtime_dir  # noqa: E402
+from github_midwife_plugin.autostart import _PATH_ENV  # noqa: E402
 from macos_self_deployment_plugin.autostart_manager import AutostartManager  # noqa: E402
 from macos_self_deployment_plugin.constants import AUTOSTART_PATH_ENV  # noqa: E402
 
@@ -80,6 +83,15 @@ def _render() -> tuple[bytes, str]:
     )
     raw = mgr._render_plist()  # noqa: SLF001
     return raw, raw.decode("utf-8")
+
+
+def test_cross_package_path_constants_match() -> None:
+    _check(
+        _PATH_ENV == AUTOSTART_PATH_ENV,
+        "github_midwife_plugin._PATH_ENV matches "
+        "macos_self_deployment_plugin.constants.AUTOSTART_PATH_ENV "
+        f"({_PATH_ENV!r} vs {AUTOSTART_PATH_ENV!r})",
+    )
 
 
 def test_render_plist_xml_strings_present() -> None:
@@ -265,6 +277,7 @@ def test_path_is_not_an_ambient_capture() -> None:
 
 def main() -> int:
     print("=== autostart_plist_render_smoke (Option-B supervisor KeepAlive + §5 CWD + §39.2 PATH) ===")
+    test_cross_package_path_constants_match()
     test_render_plist_xml_strings_present()
     test_render_plist_parses_as_dict()
     test_parsed_keepalive_is_unconditional_true()

@@ -29,6 +29,7 @@ from .update_execution import (
     target_head,
     terminal_repair,
 )
+from .update_hook_pin_carry import pin_rows, pin_untouched
 from .update_hydration_carry import UNCARRIABLE_REASON, uncarriable_repair
 from .update_journal import DOCTOR_STATUSES, RUNTIME_STATUSES, TERMINAL_UPDATE_STATUSES, read_update_journal
 from .update_preview import VERIFY_PREVIEW_MESSAGE, VERIFY_PREVIEW_STATUS
@@ -128,6 +129,7 @@ def _preview_data(probe: UpdateProbe, paths: ManagerPaths) -> dict[str, JsonValu
         # iss_f89ab692: each file whose create hydration block the planned ``target.carry_hydration_block`` merges onto the
         # candidate's bytes -- the basis that attested the block and the digests before and after (bound by the fingerprint).
         "hydration_carry": probe.hydration.rows(),
+        "hook_pin_carry": pin_rows(probe.hook_pins),
         "planned_actions": _rendered_planned_actions(probe),
         "source_mode": probe.source_mode,
         "candidate_ref": candidate.candidate_ref,
@@ -136,7 +138,7 @@ def _preview_data(probe: UpdateProbe, paths: ManagerPaths) -> dict[str, JsonValu
             "target_byte_writes": 0,
             "manager_state_writes": 0,
             "manager_cache_writes": 1 if candidate.cache_status == "acquired" else 0,
-            "non_touch_surfaces": list(probe.hydration.untouched(NON_TOUCH_SURFACES)),
+            "non_touch_surfaces": list(pin_untouched(probe.hook_pins, probe.hydration.untouched(NON_TOUCH_SURFACES))),
             "capabilities": list(STEP4_CAPABILITIES),
             "unreachable": ["adapters", "dependencies", "migrations", "hydration", "launchd_router", "restart", "doctor", "promotion"],
         },
@@ -180,10 +182,10 @@ _OVERLAP_REPAIR = (
 )
 #: iss_f1d8cfc2 / iss_c1a7df20: a candidate that changes a manifest carrying the installer's own interpreter pin.
 _PIN_OVERLAP_REPAIR = (
-    "The candidate release changes {paths}, which this installation's own installer bound to its Python interpreter "
-    "(the coordination-hook interpreter pin); this Manager cannot yet carry that pin onto a changed manifest. "
-    "Do not restore or edit the file -- the pin is required. Upgrade the Manager (`brew tab --installed-on-request python@3.13 && brew upgrade solet`), then re-run "
-    "`solet-manager update {name} --dry-run`."
+    "The candidate release deletes, retypes or overlaps {paths}, which this installation's installer bound to its Python interpreter. "
+    "The Manager carries exact pins across ordinary manifest content updates, but cannot carry this structural transition. "
+    "Keep the pinned files and inspect the release change (`git diff <baseline>..<candidate> -- <path>`); "
+    "resolve the release layout before re-running `solet-manager update {name} --dry-run`."
 )
 _REPAIRS = {
     "staged_changes_present": "Staged changes are refused (A7.1): `git restore --staged {paths}` is the operator's call; the Manager never runs it.",

@@ -1,0 +1,1 @@
+# Claude-only E3 fixture; setup-plan assertions expose pending prb_cdb23ea5 fixes.

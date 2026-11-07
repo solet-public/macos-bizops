@@ -12,8 +12,8 @@ Exercises:
      upsert argv carries --external-id
   2. bulk_ingest_submit — upsert REQUIRES external_id_field (rejected absent);
      external_id_field REJECTED for every non-upsert operation
-  3. bulk_ingest_submit — hardDelete is explicitly excluded (ValueError, never
-     reaches the executor)
+  3. bulk_ingest_submit — hardDelete is first-class: `sf data delete bulk
+     --hard-delete --async` (vendor RBAC decides; no local refusal)
   4. bulk_ingest_submit — unknown operation rejected
   5. bulk_ingest_submit — csv_path containment: refused outside every
      import_allowed_roots entry, refused when import_allowed_roots is empty
@@ -93,8 +93,12 @@ def _job_info(**overrides: Any) -> dict[str, Any]:
 def _real_import_gate(allowed_roots: list[str]):
     def gate(csv_path: str) -> str:
         return assert_import_path_allowed(
-            csv_path, allowed_roots, config_key="import_allowed_roots", plugin_name="salesforce_plugin",
+            csv_path,
+            allowed_roots,
+            config_key="import_allowed_roots",
+            plugin_name="salesforce_plugin",
         )
+
     return gate
 
 
@@ -107,6 +111,7 @@ def _real_export_gate(allowed_roots: list[str]):
             plugin_name="salesforce_plugin",
             required_suffix=CSV_SUFFIX,
         )
+
     return gate
 
 
@@ -123,7 +128,9 @@ def test_submit_argv_shape_per_operation() -> None:
             executor = _fake_executor()
             executor.run_json.return_value = _job_info()
             bulk_actions.bulk_ingest_submit(
-                executor, {"operation": operation, "sobject": "Account", "csv_path": csv_path}, gate,
+                executor,
+                {"operation": operation, "sobject": "Account", "csv_path": csv_path},
+                gate,
             )
             argv = executor.run_json.call_args.args[0]
             _assert(
@@ -137,7 +144,9 @@ def test_submit_argv_shape_per_operation() -> None:
         bulk_actions.bulk_ingest_submit(
             executor,
             {
-                "operation": "upsert", "sobject": "Account", "csv_path": csv_path,
+                "operation": "upsert",
+                "sobject": "Account",
+                "csv_path": csv_path,
                 "external_id_field": "External_Id__c",
             },
             gate,
@@ -145,9 +154,18 @@ def test_submit_argv_shape_per_operation() -> None:
         argv = executor.run_json.call_args.args[0]
         _assert(
             "upsert: argv carries --external-id",
-            argv == [
-                "data", "upsert", "bulk", "--sobject", "Account", "--file", resolved_csv_path, "--async",
-                "--external-id", "External_Id__c",
+            argv
+            == [
+                "data",
+                "upsert",
+                "bulk",
+                "--sobject",
+                "Account",
+                "--file",
+                resolved_csv_path,
+                "--async",
+                "--external-id",
+                "External_Id__c",
             ],
             str(argv),
         )
@@ -163,7 +181,9 @@ def test_upsert_external_id_field_pairing() -> None:
         raised = False
         try:
             bulk_actions.bulk_ingest_submit(
-                executor, {"operation": "upsert", "sobject": "Account", "csv_path": csv_path}, gate,
+                executor,
+                {"operation": "upsert", "sobject": "Account", "csv_path": csv_path},
+                gate,
             )
         except ValueError:
             raised = True
@@ -175,7 +195,9 @@ def test_upsert_external_id_field_pairing() -> None:
             bulk_actions.bulk_ingest_submit(
                 executor,
                 {
-                    "operation": "insert", "sobject": "Account", "csv_path": csv_path,
+                    "operation": "insert",
+                    "sobject": "Account",
+                    "csv_path": csv_path,
                     "external_id_field": "Whatever__c",
                 },
                 gate,
@@ -186,25 +208,32 @@ def test_upsert_external_id_field_pairing() -> None:
         _assert("rejected before the executor is ever called (non-upsert case)", not executor.run_json.called)
 
 
-def test_hard_delete_and_unknown_operation_excluded() -> None:
+def test_hard_delete_is_first_class_and_unknown_operation_excluded() -> None:
+    with tempfile.TemporaryDirectory(prefix="sf_bulk_smoke_") as workspace:
+        csv_path = str(Path(workspace) / "ids.csv")
+        Path(csv_path).write_text("Id\n001x\n", encoding="utf-8")
+        executor = _fake_executor()
+        executor.run_json.return_value = _job_info(operation="hardDelete")
+        result = bulk_actions.bulk_ingest_submit(
+            executor,
+            {"operation": "hardDelete", "sobject": "Account", "csv_path": csv_path},
+            _real_import_gate([workspace]),
+        )
+        argv = executor.run_json.call_args.args[0]
+        _assert("hardDelete runs the CLI's bulk delete command", argv[:3] == ["data", "delete", "bulk"], str(argv))
+        _assert("hardDelete passes --hard-delete", "--hard-delete" in argv, str(argv))
+        _assert("hardDelete is never waited on inline", "--async" in argv and "--wait" not in argv, str(argv))
+        _assert("hardDelete returns the job summary", result["job_id"] == _job_info()["id"], str(result))
+
     gate = _real_import_gate(["/nonexistent"])
     executor = _fake_executor()
 
     raised = None
     try:
         bulk_actions.bulk_ingest_submit(
-            executor, {"operation": "hardDelete", "sobject": "Account", "csv_path": "/tmp/x.csv"}, gate,
-        )
-    except ValueError as exc:
-        raised = exc
-    _assert("hardDelete is excluded", raised is not None)
-    _assert("hardDelete refusal names the exclusion reason", "hardDelete" in str(raised), str(raised))
-    _assert("hardDelete never reaches the executor", not executor.run_json.called)
-
-    raised = None
-    try:
-        bulk_actions.bulk_ingest_submit(
-            executor, {"operation": "merge", "sobject": "Account", "csv_path": "/tmp/x.csv"}, gate,
+            executor,
+            {"operation": "merge", "sobject": "Account", "csv_path": "/tmp/x.csv"},
+            gate,
         )
     except ValueError as exc:
         raised = exc
@@ -225,7 +254,9 @@ def test_submit_csv_path_containment_refusals() -> None:
         raised = False
         try:
             bulk_actions.bulk_ingest_submit(
-                executor, {"operation": "insert", "sobject": "Account", "csv_path": outside_path}, gate,
+                executor,
+                {"operation": "insert", "sobject": "Account", "csv_path": outside_path},
+                gate,
             )
         except ImportPathRefusedError:
             raised = True
@@ -237,7 +268,9 @@ def test_submit_csv_path_containment_refusals() -> None:
         raised = False
         try:
             bulk_actions.bulk_ingest_submit(
-                executor, {"operation": "insert", "sobject": "Account", "csv_path": outside_path}, empty_gate,
+                executor,
+                {"operation": "insert", "sobject": "Account", "csv_path": outside_path},
+                empty_gate,
             )
         except ImportPathRefusedError as exc:
             raised = True
@@ -249,7 +282,9 @@ def test_submit_csv_path_containment_refusals() -> None:
         raised = False
         try:
             bulk_actions.bulk_ingest_submit(
-                executor, {"operation": "insert", "sobject": "Account", "csv_path": missing_path}, gate,
+                executor,
+                {"operation": "insert", "sobject": "Account", "csv_path": missing_path},
+                gate,
             )
         except ImportPathRefusedError:
             raised = True
@@ -265,7 +300,9 @@ def test_submit_csv_path_containment_admits() -> None:
         executor = _fake_executor()
         executor.run_json.return_value = _job_info()
         result = bulk_actions.bulk_ingest_submit(
-            executor, {"operation": "insert", "sobject": "Account", "csv_path": csv_path}, gate,
+            executor,
+            {"operation": "insert", "sobject": "Account", "csv_path": csv_path},
+            gate,
         )
         _assert("admitted csv_path reaches the executor", executor.run_json.called)
         _assert("submit returns the created job_id", result["job_id"] == "750xx000001AAAA", str(result))
@@ -275,7 +312,9 @@ def test_submit_csv_path_containment_admits() -> None:
 def test_bulk_job_status_state_passthrough() -> None:
     executor = _fake_executor()
     executor.run_rest.return_value = _job_info(
-        state="JobComplete", numberRecordsProcessed=100, numberRecordsFailed=3,
+        state="JobComplete",
+        numberRecordsProcessed=100,
+        numberRecordsFailed=3,
     )
     result = bulk_actions.bulk_job_status(executor, {"job_id": "750xx000001AAAA"})
     _assert("status carries job_id", result["job_id"] == "750xx000001AAAA")
@@ -326,7 +365,9 @@ def test_bulk_job_status_non_terminal_branch_emits_every_schema_key() -> None:
         Path(csv_path).write_text("Id\n001x\n", encoding="utf-8")
         executor.run_json.return_value = {"id": "750xx000001AAAA", "state": "Open"}  # no counts/error yet
         submit_result = bulk_actions.bulk_ingest_submit(
-            executor, {"operation": "insert", "sobject": "Account", "csv_path": csv_path}, _real_import_gate([workspace]),
+            executor,
+            {"operation": "insert", "sobject": "Account", "csv_path": csv_path},
+            _real_import_gate([workspace]),
         )
         _assert(
             "bulk_ingest_submit's freshly-created-job branch emits every schema-declared key",
@@ -439,7 +480,7 @@ def test_edge_parity_bulk_verbs_present() -> None:
     names = {action.name for action in actions}
     expected_bulk = {"bulk_ingest_submit", "bulk_job_status", "bulk_job_results", "bulk_job_abort"}
     _assert("all four bulk verbs discovered", expected_bulk.issubset(names), str(sorted(names)))
-    _assert("thirteen verbs total (9 pre-existing + 4 bulk)", len(actions) == 13, str(len(actions)))
+    _assert("twenty-three verbs total (including provisioning, authenticated request and the typed families)", len(actions) == 23, str(len(actions)))
 
 
 def main() -> int:
@@ -447,7 +488,7 @@ def main() -> int:
     print("=" * 51)
     test_submit_argv_shape_per_operation()
     test_upsert_external_id_field_pairing()
-    test_hard_delete_and_unknown_operation_excluded()
+    test_hard_delete_is_first_class_and_unknown_operation_excluded()
     test_submit_csv_path_containment_refusals()
     test_submit_csv_path_containment_admits()
     test_bulk_job_status_state_passthrough()

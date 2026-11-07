@@ -13,7 +13,7 @@ writes → ``update_state`` tolerate-0):
 * ``_retrieve_action_details``       — 11-col point SELECT → tuple marshalled by COLUMN NAME.
 * ``_retrieve_failed_action_details``— 9-col point SELECT → dict marshalling.
 * ``_get_flow_error_count``          — ``COUNT(*) … status='failed'`` → ``len``.
-* ``_token_has_pending_jobs``        — ``NOT IN`` → ``= ANY`` closed-complement {queued,processing,error}.
+* ``_token_has_linked_jobs``        — all linked jobs retain token ownership through completion routing.
 * ``_mark_action_processing`` / ``_update_action_status_to_completed`` /
   ``_update_action_status_to_failed`` — status writes, ALL tolerate a 0-affected
   (missing-row) update without raising (the serial poll loop must not crash).
@@ -427,28 +427,23 @@ def test_get_flow_error_count(provider: PostgresProvider, schema: str) -> None:
            "_get_flow_error_count → 0 for a flow with no failed actions")
 
 
-def test_token_has_pending_jobs_closed_complement(provider: PostgresProvider, schema: str) -> None:
-    """Non-terminal complement {queued, processing, error}; terminal {completed, cancelled}.
-
-    The 'error'-status job is the case the closed-domain complement makes explicit
-    (the raw NOT-IN's 'failed' term was a no-op — 'failed' is not in the job
-    domain), so an 'error'-only token MUST read as pending.
-    """
+def test_token_has_linked_jobs_all_outcomes(provider: PostgresProvider, schema: str) -> None:
+    """Every linked job owns resolution, including already committed outcomes."""
     _seed_job(provider, schema, jid="j-q", token="tok-queued", status="queued")
     _seed_job(provider, schema, jid="j-p", token="tok-proc", status="processing")
     _seed_job(provider, schema, jid="j-e", token="tok-error", status="error")
     _seed_job(provider, schema, jid="j-c1", token="tok-term", status="completed")
     _seed_job(provider, schema, jid="j-c2", token="tok-term", status="cancelled")
     poller = _poller(provider)
-    _check(poller._token_has_pending_jobs("tok-queued") is True,  # noqa: SLF001
+    _check(poller._token_has_linked_jobs("tok-queued") is True,  # noqa: SLF001
            "queued job → pending True")
-    _check(poller._token_has_pending_jobs("tok-proc") is True,  # noqa: SLF001
+    _check(poller._token_has_linked_jobs("tok-proc") is True,  # noqa: SLF001
            "processing job → pending True")
-    _check(poller._token_has_pending_jobs("tok-error") is True,  # noqa: SLF001
-           "error job → pending True (the closed-complement case)")
-    _check(poller._token_has_pending_jobs("tok-term") is False,  # noqa: SLF001
-           "only completed+cancelled jobs → pending False")
-    _check(poller._token_has_pending_jobs("tok-none") is False,  # noqa: SLF001
+    _check(poller._token_has_linked_jobs("tok-error") is True,  # noqa: SLF001
+           "error job owns token resolution")
+    _check(poller._token_has_linked_jobs("tok-term") is True,  # noqa: SLF001
+           "completed+cancelled jobs still own token resolution")
+    _check(poller._token_has_linked_jobs("tok-none") is False,  # noqa: SLF001
            "no jobs for the token → pending False")
 
 
@@ -630,7 +625,7 @@ def main() -> int:
         test_retrieve_action_details_invalid_process_key_raises(provider, schema_name)
         test_retrieve_failed_action_details_dict_marshalling(provider, schema_name)
         test_get_flow_error_count(provider, schema_name)
-        test_token_has_pending_jobs_closed_complement(provider, schema_name)
+        test_token_has_linked_jobs_all_outcomes(provider, schema_name)
         test_mark_action_processing(provider, schema_name)
         test_update_action_status_to_completed(provider, schema_name)
         test_update_action_status_to_failed(provider, schema_name)

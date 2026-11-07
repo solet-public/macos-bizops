@@ -7,28 +7,90 @@ API before preparation. Runtime preparation and inference never download assets.
 
 ## Why the default is CPU (`iss_f3e65e52`)
 
-Core AI's GPU inference leaks one IOSurface per embed call, and only process exit
-frees it. After about 16.3k GPU embeds in one process the next output allocation
-hits a Swift `fatalError` (`NDArray+Pool.swift:77`, "Failed to allocate storage for
-NDArray ... ioSurface"), an uncatchable SIGTRAP that kills the host process. A
-re-index of a moved knowledge base can pass 16k embeds in minutes. CPU compute does
-not leak, at about 8 embeds/s against about 100/s on GPU. Every default and every
-config the seed writes (the three macOS profile templates, the fresh-setup and
-`openai_to_coreai` transition renders, this plugin's defaults) is therefore `cpu`
-until a recycled GPU worker lands (`iss_f531e57f`). `gpu` stays an accepted value,
-and an install that already has `gpu` is still valid: the doctor and the transition
-classifier accept either value. An update does not rewrite an existing `gpu` config.
+Before this fix every GPU embed leaked one IOSurface, and only process exit freed
+it. After about 16.3k GPU embeds in one process the next output allocation hit a
+Swift `fatalError` (`NDArray+Pool.swift:77`, "Failed to allocate storage for
+NDArray ... ioSurface"), an uncatchable SIGTRAP that killed the host process. A
+re-index of a moved knowledge base can pass 16k embeds in minutes.
+
+The leak is a retained Python reference in `coreai-core` 1.0.0b3, not Core AI's
+allocator. The binding keeps every result dict alive through the asyncio Future it
+resolves, and that dict holds the output `NDArray`. On GPU the output is an
+IOSurface; on CPU it is about 3 KB of heap. Apple's `InferenceFunction` wrapper
+drops the raw dict, so the plugin calls the raw function, copies the vector out and
+clears the dict. Those members are private, so loading checks them. A coreai-core
+that lacks them, or whose raw call no longer takes the same arguments, leaves the
+plugin unavailable with an error that names the installed coreai-core version. Measured in a standalone process on GPU: 20,480 embeds through the
+plugin hold IOSurface regions flat, where the previous code grew one region per
+embed. The Future, its callback tuple and the emptied dict still stay alive, about
+1.2 KB of heap per embed on either compute unit.
+
+An output still held after its dict is cleared counts as pinned. The count is per
+process, because a pinned surface outlives every model and runtime. At 8,000 pinned
+outputs (`PINNED_OUTPUT_BUDGET`, about half the trap point) GPU inference is refused
+with a typed `coreai_embeddings.unavailable`. The plugin then continues on CPU, which
+allocates no IOSurface, through the CPU-only retry described under Native execution.
+`get_runtime_status()` reports `pinned_gpu_outputs` and `pinned_gpu_output_budget`.
+A healthy runtime reports 0.
+
+Every default and every config the seed writes (the three macOS profile templates,
+the fresh-setup and `openai_to_coreai` transition renders, and this plugin's
+defaults) stays `cpu`, at about 8 embeds/s against about 100/s on GPU. Re-enabling
+`gpu` is a separate decision. It needs a GPU soak of a live-shaped solet process on
+real eligible hardware that holds IOSurface regions flat with `pinned_gpu_outputs` 0.
+`gpu` stays an accepted value, and the doctor and the transition classifier accept
+either value. Since r71 an update rewrites an inherited `gpu` config to `cpu`
+(`iss_34f1e3c7`).
+
+## Native profiler callbacks
+
+Core AI invokes the registered Python `Profiler` callbacks on native compute
+threads. Those callbacks only attempt a nonblocking enqueue; they do not read
+`event.event_id`, update compute evidence, log, or schedule one task per event.
+A plain `coreai-profiler` worker processes at most 32 events per batch and
+waits up to 1 ms between batches. It has no asyncio loop. Its queue holds at
+most 256 events, with one worker per serialized native load or inference.
+Success, failure, and cancellation request retirement and a bounded final
+drain; the owner awaits a completion signal without joining a thread on its
+loop. The `coreai-embedding` owner retains its native dispatch and private
+asyncio runner, but never inspects profiler event payloads.
+
+Profiling remains advisory: if the queue fills, excess profiler events are
+counted and the worker logs that compute evidence may be incomplete. A worker
+startup failure likewise logs an advisory and leaves queued events for a later
+call, without inspecting them on the owner loop. Inference
+continues with the same vector validation, CPU retry, and output-release
+behavior. The native binding's own completion Future remains inside the
+pinned SDK; this handoff covers the Python profiler callbacks registered by
+the plugin, and does not claim to remove every native GIL acquisition.
+
+Startup environment overrides are `SOLET_COREAI_CALLBACK_QUEUE_CAPACITY`
+(256) and `SOLET_COREAI_CALLBACK_DRAIN_BATCH` (32). Both must be positive
+integers. The per-call profiler worker sleeps until a callback enqueues an
+event or the call ends; it does not poll, because a 1 ms poll took the GIL
+about a thousand times a second for every 3-6 s inference (prb_f6964132).
+The former `SOLET_COREAI_CALLBACK_POLL_SECONDS` override no longer exists and
+is ignored if set. Correct or clear an invalid
+override and restart the platform to apply the corrected value or default.
 
 ## Lifecycle and failures
 
 `initialize(config)` replaces configuration and closes the previous runtime.
-`prepare_for_readiness()` verifies installed asset hashes, proves the compiled
+Startup prepares a plugin before `initialize()` delivers its config. That early
+preparation leaves the plugin unavailable with "Plugin configuration not yet
+delivered", logged at DEBUG, and the configuration warning is reserved for a config
+the plugin was actually given (`iss_9c150bba`). `prepare_for_readiness()` verifies installed asset hashes, proves the compiled
 cache with an out-of-process canary, loads the combined model, and performs a
 real embedding probe before setting readiness. Missing or
 corrupt assets leave the service unavailable, with a warning and repair text in
 `get_runtime_status()`. Repair the asset/configuration and prepare again to retry.
 `cleanup()` closes the runtime; repeated cleanup is safe and preparation can
-reopen it. No database records or optional mutable persistence are introduced.
+reopen it. Lifecycle changes reserve exclusive admission before waiting for
+active generation and token-count leases to drain. New calls wait for the
+transition and use its resulting readiness and runtime, so a close or config
+replacement cannot interrupt an active call. `initialize()` can reenter
+preparation under that same transition. No database records or optional mutable
+persistence are introduced.
 
 ## Compiled-cache canary and self-repair
 
@@ -117,17 +179,30 @@ therefore never nears the bound. Measured on CPU (M3 Ultra, macOS 27.0, idle):
 0.13 s per embedding at the 256-token bucket, 0.43 s at 512, 1.6 s at 1024 and
 6.4 s at 2048. Before r67 the whole batch was one operation, and the ledger drain's
 sixteen full 2048-token chunks (`EVENT_MAX_CHUNKS`) took about 100 s, so a loaded
-host passed 120 s (`iss_a457a147`). The runtime releases its own lock between inputs,
-but the plugin holds its lock for the whole `generate_embeddings` batch and a token
-count takes the same lock, so a count from another thread still waits for the whole
-batch (`iss_3b47dcc9`).
+host passed 120 s (`iss_a457a147`). The runtime releases its own lock between inputs.
+The plugin snapshots the ready runtime under a shared operation lease, then
+releases its admission lock during generation or counting (`iss_3b47dcc9`). A
+count can therefore run between batch inputs while the batch remains active.
+The unchanged runtime lock and single worker serialize tokenizer and native
+operations; this makes no lock-fairness or live latency guarantee. Every lease
+is released in `finally`, including when an operation fails.
 
 A native operation that really exceeds the bound is reported as
 `coreai_embeddings.operation_timeout` and poisons that runtime instance, because its
 worker is still inside the call. The plugin then prepares a new runtime once,
 logged as "Core AI native call timed out ... preparing a new runtime once" and, when
 that succeeds, "Core AI runtime prepared again after a timed-out native call".
-The call that timed out is reported and is not retried; the next call is served. This
+Recovery releases the failing call's lease before entering a lifecycle transition,
+waits for other leases, and rechecks the failing runtime's identity after that
+wait. Concurrent failures of one runtime prepare only one replacement, and a
+late failure from a retired runtime cannot close a healthy successor or undo an
+external config reload. A timeout publishes its recovery intent before releasing
+its lease. If an already-leased follower receives `unavailable` from the poisoned
+runtime and reserves the failure transition first, it waits for the other leases
+and honors that timeout intent instead of leaving the capability unavailable.
+Closing or replacing the runtime clears its timeout intent. Both callers retain
+their own errors, and only one replacement is prepared. The call that timed out retains its original error and
+is not retried; the next call is served. This
 applies to a timeout in `generate_embeddings` and in a token count. If the new
 preparation fails, including by timing out itself, the plugin stays unavailable with
 that error: later calls report it at once and none prepares again, until

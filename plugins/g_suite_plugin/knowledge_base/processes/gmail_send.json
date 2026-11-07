@@ -1,18 +1,18 @@
 {
   "process_key": "plugin::g_suite_plugin::gmail_send",
   "display_name": "Gmail: Send Message",
-  "description": "Send a plain-text email from the connected account. Optional 'attachments' is a list of blob ids (from blob storage) that are attached by filename + mime type. Runs as a background job: dispatch returns a job_id immediately, and the sent message id + thread id arrive via a follow-up message once delivery completes. Requires a connected account. This is a write action — it delivers real mail.",
-  "embedding_description": "Compose and send an outgoing email through the connected Gmail account as a background job: a recipient address, a subject, a plain-text body, and optionally files pulled from platform blob storage to attach. Dispatch returns a job_id for tracking; completion delivers the sent message id once Gmail accepts delivery. The outbound mail verb.",
+  "description": "Send an email from the connected account: plain text and optional HTML alternative, cc and bcc, blob-backed attachments, and replies kept in their conversation via thread_id plus in_reply_to/references. Returns the sent message id, thread id and labels. Runs as a background job: returns a job_id at once and the result arrives as a follow-up message. Optional account (email or alias) picks the connected Google account; the result names the account used. Parameters: account, to, cc, bcc, subject, body, html_body, attachments, thread_id, in_reply_to, references.",
+  "embedding_description": "Send an email from a linked Gmail account, with optional HTML body, cc, bcc and file attachments, or reply within an existing conversation by passing the thread id and the original Message-ID. Returns the new message and thread ids.",
   "result_processor_customizations": {
-    "action_label": "Gmail send started",
+    "action_label": "Gmail: Send Message queued",
     "result_type": "g_suite_gmail_send_result",
-    "result_description": "Job queued for the message send; completion will be delivered automatically.",
+    "result_description": "Job queued; completion is delivered automatically and names the account used.",
     "presentation_guidance": "",
     "output_action_guidance": "Return exactly one action using the active IO plugin's post_message (process_key: plugin::<io_plugin>::post_message). Use the provided session_id. Keep the message short and friendly. Do NOT invent process identifiers (no present_result, no status actions)."
   },
   "error_processor_customizations": {
-    "action_context": "Dispatch a background job to send an email from the connected Gmail account.",
-    "error_interpretation": "gsuite.invalid_params: missing 'to', an unresolvable attachment blob id, or missing session_id/flow_id context. gsuite.permission_denied: the granted scope does not allow sending. gsuite.not_connected: no account linked. gsuite.api_error: AsyncJobManager unavailable or job creation failed.",
-    "recovery_guidance": "gsuite.invalid_params: supply a 'to' address and valid attachment blob ids. gsuite.permission_denied: re-run connect_account so gmail.modify is granted. gsuite.not_connected: run connect_account. gsuite.api_error: retry once platform startup has completed."
+    "action_context": "Dispatch a background Gmail job: Gmail: Send Message.",
+    "error_interpretation": "gsuite.not_connected: no Google account linked. gsuite.unknown_account: the account argument names no connected account (the message lists them). gsuite.invalid_params: a parameter broke a rule (the message names it) or Google rejected the request (400). gsuite.missing_scope: the account's grant lacks a scope this call needs (the message names it and the reconnect step). gsuite.auth_expired: Google rejected the token (Testing-mode OAuth apps expire refresh tokens after 7 days). gsuite.not_found: the id does not exist in this account. gsuite.rate_limited: Gmail quota hit. gsuite.permission_denied: Google refused for another reason.",
+    "recovery_guidance": "Follow the message: reconnect with connect_account for auth_expired or missing_scope (gmail_permanent_delete=true for permanent delete), pick a listed account for unknown_account, fix the named parameter for invalid_params, retry later for rate_limited."
   }
 }

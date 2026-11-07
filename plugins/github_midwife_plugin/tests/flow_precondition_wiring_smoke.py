@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import shutil
 import sys
@@ -36,7 +37,7 @@ _FLOW_PATH = _ROOT / "plugins/github_midwife_plugin/knowledge_base/macos_setup_f
 _FIELD_KINDS_PATH = _ROOT / "plugins/github_midwife_plugin/knowledge_base/setup_flow_field_kinds.json"
 _HYDRATION_SMOKE_PATH = _ROOT / "plugins/github_midwife_plugin/tests/executable_hydration_smoke.py"
 _REGISTRY_ALLOWLIST_PATH = _ROOT / "quality_gates/flow_probe_registry_gate_allowlist.txt"
-_CHECKS = 0
+_checks = 0
 
 
 def _rmtree(path: Path) -> None:
@@ -45,8 +46,8 @@ def _rmtree(path: Path) -> None:
 
 
 def _check(condition: object, label: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    global _checks
+    _checks += 1
     if not condition:
         raise AssertionError(label)
 
@@ -199,6 +200,36 @@ def _check_keychain_and_auth_cleanup(flow: dict[str, Any]) -> None:
     )
 
 
+def _has_typed_empty_orphan_preconditions() -> bool:
+    """Read the allowlist declaration as Python syntax, including its type."""
+    source = _HYDRATION_SMOKE_PATH.read_text(encoding="utf-8")
+    module = ast.parse(source)
+    return any(
+        _defines_orphan_preconditions(statement)
+        and _is_empty_typed_frozenset(statement.value)
+        for statement in module.body
+    )
+
+
+def _defines_orphan_preconditions(statement: ast.stmt) -> bool:
+    return isinstance(statement, ast.Assign) and any(
+        isinstance(target, ast.Name)
+        and target.id == "_PREEXISTING_ORPHAN_PRECONDITIONS"
+        for target in statement.targets
+    )
+
+
+def _is_empty_typed_frozenset(value: ast.expr) -> bool:
+    return (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Subscript)
+        and isinstance(value.func.value, ast.Name)
+        and value.func.value.id == "frozenset"
+        and not value.args
+        and not value.keywords
+    )
+
+
 def _check_r4_closeout() -> None:
     field_kinds = json.loads(_FIELD_KINDS_PATH.read_text(encoding="utf-8"))
     level_kind = field_kinds["fields"]["probes.level"]
@@ -211,8 +242,7 @@ def _check_r4_closeout() -> None:
         "red: restore R4 precondition-level tracked debt after wiring every orphan",
     )
     _check(
-        "_PREEXISTING_ORPHAN_PRECONDITIONS = frozenset()"
-        in _HYDRATION_SMOKE_PATH.read_text(encoding="utf-8"),
+        _has_typed_empty_orphan_preconditions(),
         "red: restore any R4 orphan-precondition allowlist entry",
     )
     stale_keychain_ref = "plugin::macos_vault_plugin::" + "check_keychain"
@@ -257,17 +287,22 @@ def _check_salesforce_inner_predicate(target: Path, runtime: FakeRuntime) -> Non
     )
     evidence_items = verified_envelope.get("evidence")
     evidence_item = evidence_items[0] if isinstance(evidence_items, list) else None
-    observed = evidence_item.get("observed") if isinstance(evidence_item, dict) else None
-    _check(
-        isinstance(observed, list)
-        and all(isinstance(item, str) for item in observed)
-        and observed == sorted(set(observed)),
-        "Salesforce CLI evidence uses deterministic unique public strings",
-    )
+    _check(_salesforce_evidence_is_deterministic(evidence_item),
+           "Salesforce CLI evidence uses deterministic unique public strings")
     if not isinstance(evidence_item, dict):
         raise AssertionError("Salesforce CLI probe must emit one evidence object")
     validate_evidence(evidence_item)
     _check(True, "Salesforce CLI evidence is accepted by the manager validator")
+
+
+def _salesforce_evidence_is_deterministic(evidence_item: object) -> bool:
+    if not isinstance(evidence_item, dict):
+        return False
+    observed = evidence_item.get("observed")
+    if not isinstance(observed, list) or not all(isinstance(item, str) for item in observed):
+        return False
+    observed_strings = [item for item in observed if isinstance(item, str)]
+    return observed_strings == sorted(set(observed_strings))
 
 
 def _session_root_requests(target: Path) -> tuple[AdapterRequest, AdapterRequest]:
@@ -452,7 +487,7 @@ def main() -> int:
         _check_session_roots_absent_is_not_a_denial(target, runtime)
         _check_session_root_block_kinds(target, runtime)
         _check_empty_history_exit_predicate(runtime)
-    print(f"flow_precondition_wiring_smoke OK: {_CHECKS} checks passed")
+    print(f"flow_precondition_wiring_smoke OK: {_checks} checks passed")
     return 0
 
 

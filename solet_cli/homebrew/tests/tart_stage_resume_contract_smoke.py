@@ -79,6 +79,59 @@ def _origin() -> dict[str, object]:
     }
 
 
+def _stable_origin() -> dict[str, object]:
+    origin = _origin()
+    origin["install_mode"] = "release"
+    origin["manager_url"] = (
+        "https://github.com/solet-public/homebrew-tap/releases/download/manager-v0.1.0-r71/solet-0.1.0-r71.tar.gz"
+    )
+    return origin
+
+
+def _check_stable_origin() -> None:
+    """A stable staged origin is a valid transport origin: the manager comes from the
+    staged payload that stands in for the not-yet-published release asset."""
+    stable = _stable_origin()
+    try:
+        guest = guest_metadata(stable, "solet-0.1.0-r71.tar.gz")
+    except ContractError as exc:
+        raise AssertionError(f"a stable origin is a valid transport origin: {exc}") from exc
+    _check(
+        guest["manager_url"] == "file:///Volumes/solet-stage/origin/payload/solet-0.1.0-r71.tar.gz",
+        "stable origin is carried by the staged payload",
+    )
+    _check(
+        guest["install_mode"] == "dev",
+        "stable guest metadata pairs the staged file URL with dev mode",
+    )
+    _check(
+        {key for key in stable if stable[key] != guest[key]} == {"manager_url", "install_mode"},
+        "stable transport rewrite changes only manager_url and install_mode",
+    )
+    _check(stable["install_mode"] == "release", "the stable origin metadata is not mutated")
+    _check(
+        all(guest[key] == stable[key] for key in ("release_archive_sha256", "seed_commit", "seed_tree_hash")),
+        "stable transport keeps the payload digest and the seed identity",
+    )
+    for label, url in (
+        ("a file URL", "file:///host/stage/payload/solet-0.1.0-r71.tar.gz"),
+        ("a non-GitHub host", "https://example.com/solet-public/homebrew-tap/releases/download/t/solet-0.1.0-r71.tar.gz"),
+        ("a plain http URL", "http://github.com/solet-public/homebrew-tap/releases/download/t/solet-0.1.0-r71.tar.gz"),
+        ("a non-release GitHub path", "https://github.com/solet-public/homebrew-tap/archive/solet-0.1.0-r71.tar.gz"),
+        ("a URL with a query", "https://github.com/solet-public/homebrew-tap/releases/download/t/solet-0.1.0-r71.tar.gz?x=1"),
+    ):
+        bad = _stable_origin()
+        bad["manager_url"] = url
+        _reject(lambda bad=bad: guest_metadata(bad, "solet-0.1.0-r71.tar.gz"), f"stable origin with {label} is refused")
+    unknown = _stable_origin()
+    unknown["install_mode"] = "daily"
+    _reject(lambda: guest_metadata(unknown, "solet-0.1.0-r71.tar.gz"), "an unknown install mode is refused")
+    _reject(
+        lambda: guest_metadata(stable, "solet-0.1.0.tar.gz"),
+        "stable asset mismatch is refused before a guest can install",
+    )
+
+
 def main() -> int:
     origin = _origin()
     guest = guest_metadata(origin, "solet-0.1.0.tar.gz")
@@ -108,9 +161,7 @@ def main() -> int:
         "canonical metadata with an extra key is refused",
     )
     _reject(lambda: selected_adapters("homebrew,lm_studio"), "combined selector is refused")
-    release = _origin()
-    release["install_mode"] = "release"
-    _reject(lambda: guest_metadata(release, "solet-0.1.0.tar.gz"), "release metadata is refused")
+    _check_stable_origin()
     _reject(
         lambda: guest_metadata(origin, "other.tar.gz"),
         "asset mismatch is refused before a guest can install",

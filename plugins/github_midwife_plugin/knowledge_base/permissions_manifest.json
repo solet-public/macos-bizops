@@ -301,7 +301,7 @@
       "why": "Authorize read-only ingestion of the displayed Claude projects, history, and tasks roots. No source files will be moved, deleted, or modified."
     },
     {
-      "denial_behavior": "Decline state: `blocked`. Genesis does not run because every profile installs the named no-MCP launcher and its Codex MCP configuration together.",
+      "denial_behavior": "Decline state: `blocked`. Genesis pauses when Codex is selected because its MCP configuration requires consent. Claude Code alone needs no Codex configuration.",
       "entry_type": "consent",
       "grant_actor": "operator (explicit assent)",
       "id": "codex_mcp_configuration_consent",
@@ -309,12 +309,16 @@
         "category": "system_change",
         "decline": {
           "allowed": true,
-          "consequence": "Genesis does not run because every profile installs the named no-MCP launcher and its Codex MCP configuration together.",
+          "consequence": "Genesis pauses when Codex is selected because its MCP configuration requires consent. Claude Code alone needs no Codex configuration.",
           "reoffer": "settings_only",
           "state": "blocked"
         },
-        "required": true,
-        "required_when": null,
+        "required": false,
+        "required_when": {
+          "decision_ref": "coding_agents",
+          "operator": "contains",
+          "value": "codex"
+        },
         "scope": [
           "~/.codex/config.toml",
           "Append [mcp_servers.<name>] and [mcp_servers.<name>.env] tables that point Codex at the newborn solet"
@@ -322,7 +326,7 @@
       },
       "system_settings_pane": "Not applicable (consent, not a macOS permission entry).",
       "what": "Configure Codex MCP access",
-      "when": "Always required.",
+      "when": "When `coding_agents` contains `codex`.",
       "why": "Authorize the Genesis append to ~/.codex/config.toml that registers this solet as a Codex MCP server."
     },
     {

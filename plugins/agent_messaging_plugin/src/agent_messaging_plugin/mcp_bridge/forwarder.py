@@ -25,15 +25,19 @@ from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import quote, urlencode
 
 import httpx
+from ananta.core.runtime.port_manager import ClientIOExecutor
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage, JSONRPCNotification
 
+from ..bridge_diagnostics import BridgeDiagnostics, Category, ClientReason, Event
 from .owed_delivery import OwedDeliveryCoordinator
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from anyio.streams.memory import MemoryObjectSendStream
+
+CLIENT_IO = ClientIOExecutor("bridge-client-io")
 
 # Long-poll timeout for /events. The route holds the connection open
 # until an event arrives or this elapses; on timeout we reconnect with
@@ -113,12 +117,7 @@ def _is_bridge_gone(exc: BaseException) -> bool:
     """
     status_code = getattr(exc, "status_code", None)
     path = getattr(exc, "path", None)
-    if (
-        status_code == 404
-        and isinstance(path, str)
-        and _BRIDGE_ID_ROUTE_PATTERN.match(path)
-        and getattr(exc, "response_code", None) == _BRIDGE_NOT_FOUND_CODE
-    ):
+    if status_code == 404 and isinstance(path, str) and _BRIDGE_ID_ROUTE_PATTERN.match(path) and getattr(exc, "response_code", None) == _BRIDGE_NOT_FOUND_CODE:
         return True
     return False
 
@@ -181,6 +180,7 @@ class Forwarder:
         wake_capable: bool = True,
         session_role: str = "",
         monotonic_clock: Callable[[], float] = time.monotonic,
+        diagnostics: BridgeDiagnostics | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._solet_name = solet_name
@@ -233,6 +233,40 @@ class Forwarder:
         # via the bridge_ready / running / emit_event / drain_page /
         # flip_delivered surface.
         self._owed_delivery = OwedDeliveryCoordinator(self)
+        self._diagnostics = diagnostics
+        self._server_lifecycle_id: str | None = None
+        self._diagnostic("start")
+
+    def _diagnostic(self, event: Event, *, exc: BaseException | None = None, count: int | None = None, attempt: int | None = None, request_bridge_id: str | None = None, request_generation: int | None = None, request_lifecycle_id: str | None = None, client_reported_reason: ClientReason | None = None) -> None:
+        if self._diagnostics is None:
+            return
+        category: Category | None = None
+        if exc is not None:
+            category = "other"
+            if isinstance(exc, BridgeHTTPError):
+                category = "http"
+            elif isinstance(exc, httpx.TimeoutException):
+                category = "timeout"
+            elif isinstance(exc, httpx.NetworkError):
+                category = "connection"
+        status = exc.status_code if isinstance(exc, BridgeHTTPError) else None
+        self._diagnostics.emit(
+            event,
+            source="client",
+            server_lifecycle_id=self._server_lifecycle_id,
+            bridge_id=self._bridge_id,
+            agent_instance_id=self._agent_instance_id,
+            generation=self._generation,
+            category=category,
+            status=status,
+            count=count,
+            attempt=attempt,
+            threshold=CONSECUTIVE_POLL_FAILURES_BEFORE_RECONNECT,
+            request_bridge_id=request_bridge_id,
+            request_generation=request_generation,
+            request_lifecycle_id=request_lifecycle_id,
+            client_reported_reason=client_reported_reason,
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -263,7 +297,7 @@ class Forwarder:
             raise BridgeHTTPError(msg)
         return self._bridge_id
 
-    async def close(self) -> None:
+    async def close(self, *, client_reported_reason: ClientReason = "client_shutdown") -> None:
         """Stop the poll + repair loops, close the bridge, dispose the client."""
         self._poll_active = False
         await self._owed_delivery.stop()
@@ -273,9 +307,11 @@ class Forwarder:
                 await self._poll_task
         if self._bridge_id is not None:
             try:
-                await self._post(f"/api/v1/bridge/{self._bridge_id}/close", {})
+                await self._post(f"/api/v1/bridge/{self._bridge_id}/close", {"client_reported_reason": client_reported_reason})
             except Exception as exc:  # noqa: BLE001
+                self._diagnostic("close_failed", exc=exc)
                 _log(f"close (best-effort) failed: {exc}")
+        self._diagnostic("close", client_reported_reason=client_reported_reason)
         await self._client.aclose()
 
     # ------------------------------------------------------------------
@@ -299,10 +335,16 @@ class Forwarder:
                 self._bridge_id = bridge_id
                 self._cursor = -1
                 self._generation += 1
+                lifecycle = payload.get("server_lifecycle_id")
+                self._server_lifecycle_id = lifecycle if isinstance(lifecycle, str) else None
+                self._diagnostic("open", attempt=attempt)
+                if self._server_lifecycle_id is None:
+                    self._diagnostic("lifecycle_unknown")
                 _log(f"bridge opened (parent_pid={self._parent_pid}): {bridge_id}")
                 return
             except Exception as exc:  # noqa: BLE001
                 _log(f"waiting for solet bridge API (attempt {attempt}): {exc}")
+                self._diagnostic("open_failed", exc=exc, attempt=attempt)
                 await asyncio.sleep(BRIDGE_CONNECT_RETRY_S)
 
     async def _register_identity(self) -> str | None:
@@ -334,32 +376,24 @@ class Forwarder:
                     body,
                 )
             except Exception as exc:  # noqa: BLE001
+                self._diagnostic("register_failed", exc=exc, attempt=attempt)
                 _log(
-                    "peer identity registration failed "
-                    f"(attempt {attempt}/{REGISTER_IDENTITY_ATTEMPTS}): {exc}",
+                    f"peer identity registration failed (attempt {attempt}/{REGISTER_IDENTITY_ATTEMPTS}): {exc}",
                 )
                 if attempt == REGISTER_IDENTITY_ATTEMPTS:
                     _log(
-                        "PEER IDENTITY UNREGISTERED after "
-                        f"{REGISTER_IDENTITY_ATTEMPTS} attempts: this session can "
-                        "call processes but is INVISIBLE to peer_list/peer_send "
-                        "and cannot receive peer messages. Recover with the "
-                        "peer_register tool.",
+                        f"PEER IDENTITY UNREGISTERED after {REGISTER_IDENTITY_ATTEMPTS} attempts: this session can call processes but is INVISIBLE to peer_list/peer_send and cannot receive peer messages. Recover with the peer_register tool.",
                     )
                     return None
                 await asyncio.sleep(BRIDGE_CONNECT_RETRY_S)
                 continue
             effective_label_raw = payload.get("session_label")
-            effective_label = (
-                str(effective_label_raw)
-                if isinstance(effective_label_raw, str)
-                else ""
-            )
+            effective_label = str(effective_label_raw) if isinstance(effective_label_raw, str) else ""
             self._cache_effective_agent_session_id(payload)
             self._cache_session_role_held(payload)
+            self._diagnostic("identity_bound", attempt=attempt)
             _log(
-                f"peer identity registered: {self._agent_id}/{self._agent_instance_id}"
-                f' (label="{effective_label}")',
+                f'peer identity registered: {self._agent_id}/{self._agent_instance_id} (label="{effective_label}")',
             )
             return effective_label
         return None
@@ -414,8 +448,7 @@ class Forwarder:
             return False
         if not self._agent_session_id:
             _log(
-                f'ROLE UNCLAIMED: "{self._session_role}" requires a non-empty '
-                "agent_session_id",
+                f'ROLE UNCLAIMED: "{self._session_role}" requires a non-empty agent_session_id',
             )
             return False
 
@@ -440,13 +473,11 @@ class Forwarder:
 
         if not _role_claim_succeeded(payload):
             _log(
-                f'ROLE UNCLAIMED: "{self._session_role}" claim returned '
-                f"{payload!r}",
+                f'ROLE UNCLAIMED: "{self._session_role}" claim returned {payload!r}',
             )
             return False
         _log(
-            f'peer role claimed: "{self._session_role}" '
-            f"for {self._agent_id}/{self._agent_instance_id}",
+            f'peer role claimed: "{self._session_role}" for {self._agent_id}/{self._agent_instance_id}',
         )
         return True
 
@@ -477,11 +508,7 @@ class Forwarder:
         raw_agent_session_id = payload.get("agent_session_id")
         if not isinstance(raw_agent_session_id, str):
             return
-        if (
-            not raw_agent_session_id
-            or raw_agent_session_id == UNCLAIMED_AGENT_SESSION_ID
-            or raw_agent_session_id == self._agent_session_id
-        ):
+        if not raw_agent_session_id or raw_agent_session_id == UNCLAIMED_AGENT_SESSION_ID or raw_agent_session_id == self._agent_session_id:
             return
         self._agent_session_id = raw_agent_session_id
 
@@ -504,6 +531,7 @@ class Forwarder:
                 if self._claim_needed():
                     await self._claim_session_role()
                 await self._announce_reconnect(effective_label)
+            self._diagnostic("reconnected")
 
     async def _announce_reconnect(self, effective_label: str) -> None:
         """Emit a channel_message announcing the successful reconnect.
@@ -517,11 +545,7 @@ class Forwarder:
         """
         if self._write_stream is None:
             return
-        suffix = (
-            f"peer_registry restored as {effective_label}"
-            if effective_label
-            else "no prior label found"
-        )
+        suffix = f"peer_registry restored as {effective_label}" if effective_label else "no prior label found"
         content = f"Solet reconnected -- {suffix}"
         # Wire-meta shape MUST match the 5-key contract Claude Code accepts
         # (see ``_claude_channel_meta`` — empty ``flow_id`` is silently
@@ -559,22 +583,24 @@ class Forwarder:
             if self._bridge_id is None:
                 await asyncio.sleep(0.5)
                 continue
+            bridge_id = self._bridge_id
+            generation = self._generation
+            lifecycle = self._server_lifecycle_id
             try:
-                bridge_id = self._bridge_id
-                generation = self._generation
                 await self._drain_once(bridge_id, generation)
                 consecutive_failures = 0
                 if self._monotonic_clock() >= next_reassert_at:
                     await self._reassert_identity()
-                    next_reassert_at = (
-                        self._monotonic_clock() + REGISTER_REASSERT_INTERVAL_S
-                    )
+                    next_reassert_at = self._monotonic_clock() + REGISTER_REASSERT_INTERVAL_S
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 consecutive_failures = await self._handle_poll_failure(
                     exc,
                     consecutive_failures,
+                    request_bridge_id=bridge_id,
+                    request_generation=generation,
+                    request_lifecycle_id=lifecycle,
                 )
 
     async def _drain_once(self, bridge_id: str, generation: int | None = None) -> None:
@@ -589,9 +615,7 @@ class Forwarder:
         events_payload = await self._fetch_events(bridge_id, self._cursor)
         if self._generation != poll_generation:
             _log(
-                "discarding stale events page "
-                f"(bridge={bridge_id}, generation={poll_generation}, "
-                f"current_generation={self._generation})",
+                f"discarding stale events page (bridge={bridge_id}, generation={poll_generation}, current_generation={self._generation})",
             )
             return
         events = events_payload.get("events") or []
@@ -603,9 +627,7 @@ class Forwarder:
         if isinstance(next_cursor, int):
             if self._generation != poll_generation:
                 _log(
-                    "skipping stale page cursor update "
-                    f"(bridge={bridge_id}, generation={poll_generation}, "
-                    f"current_generation={self._generation})",
+                    f"skipping stale page cursor update (bridge={bridge_id}, generation={poll_generation}, current_generation={self._generation})",
                 )
                 return
             self._cursor = max(self._cursor, next_cursor - 1)
@@ -626,20 +648,20 @@ class Forwarder:
             return
         external_id, recipient_key = role_keys
         await self._owed_delivery.settle_live(
-            event=event, external_id=external_id, recipient_key=recipient_key,
+            event=event,
+            external_id=external_id,
+            recipient_key=recipient_key,
         )
 
-    async def _handle_poll_failure(self, exc: BaseException, failures_so_far: int) -> int:
+    async def _handle_poll_failure(self, exc: BaseException, failures_so_far: int, *, request_bridge_id: str | None = None, request_generation: int | None = None, request_lifecycle_id: str | None = None) -> int:
         """Decide whether to reconnect or just back off; return updated counter."""
         failures = failures_so_far + 1
+        self._diagnostic("failed_poll", exc=exc, count=failures, request_bridge_id=request_bridge_id, request_generation=request_generation, request_lifecycle_id=request_lifecycle_id)
         bridge_gone = _is_bridge_gone(exc)
         if bridge_gone or failures >= CONSECUTIVE_POLL_FAILURES_BEFORE_RECONNECT:
-            reason = (
-                "bridge lost during poll"
-                if bridge_gone
-                else f"{failures} consecutive poll failures"
-            )
+            reason = "bridge lost during poll" if bridge_gone else f"{failures} consecutive poll failures"
             _log(f"{reason}, reconnecting...")
+            self._diagnostic("reconnect_poll", exc=exc, count=failures)
             try:
                 await self._reconnect()
                 failures = 0
@@ -659,7 +681,7 @@ class Forwarder:
             params=params,
             timeout=EVENTS_POLL_TIMEOUT_S + 5.0,
         )
-        return self._unwrap(response, path)
+        return await CLIENT_IO.run(self._unwrap, response, path)
 
     async def _emit_event(
         self,
@@ -698,19 +720,14 @@ class Forwarder:
         if isinstance(cursor, int):
             if self._generation != emit_generation:
                 _log(
-                    "skipping stale event cursor update "
-                    f"(generation={emit_generation}, "
-                    f"current_generation={self._generation})",
+                    f"skipping stale event cursor update (generation={emit_generation}, current_generation={self._generation})",
                 )
                 return
             self._cursor = max(self._cursor, cursor)
 
     def _notification_method_for(self, source_event_type: str) -> str:
         """Return the MCP notification method this bridge should emit."""
-        if (
-            self._agent_id == "codex"
-            and source_event_type in CODEX_NATIVE_PEER_EVENT_TYPES
-        ):
+        if self._agent_id == "codex" and source_event_type in CODEX_NATIVE_PEER_EVENT_TYPES:
             return SOLET_PEER_MESSAGE_NOTIFICATION_METHOD
         return CLAUDE_CHANNEL_NOTIFICATION_METHOD
 
@@ -776,9 +793,7 @@ class Forwarder:
                 "cursor": cursor,
                 "bridge_cursor": cursor,
                 "recipient_agent_id": event_meta.get("to_agent_id") or self._agent_id,
-                "recipient_agent_instance_id": (
-                    event_meta.get("to_agent_instance_id") or self._agent_instance_id
-                ),
+                "recipient_agent_instance_id": (event_meta.get("to_agent_instance_id") or self._agent_instance_id),
                 "trigger_turn": True,
             },
         )
@@ -814,11 +829,11 @@ class Forwarder:
 
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         response = await self._client.post(path, json=body)
-        return self._unwrap(response, path)
+        return await CLIENT_IO.run(self._unwrap, response, path)
 
     async def _get(self, path: str) -> dict[str, Any]:
         response = await self._client.get(path)
-        return self._unwrap(response, path)
+        return await CLIENT_IO.run(self._unwrap, response, path)
 
     @staticmethod
     def _unwrap(response: httpx.Response, path: str) -> dict[str, Any]:
@@ -876,6 +891,7 @@ class Forwarder:
             if not _is_bridge_gone(exc):
                 raise
             _log(f"{op}: bridge gone, reconnecting and retrying once")
+            self._diagnostic("reconnect_tool", exc=exc)
             await self._reconnect()
             return await coroutine_factory()
 
@@ -906,6 +922,7 @@ class Forwarder:
 
         ``{"undelivered": [...role rows], "re_emit_cap": N}``.
         """
+
         async def call() -> dict[str, Any]:
             return await self._post(self._bridge_path("/peer/drain"), {"limit": limit})
 
@@ -913,6 +930,7 @@ class Forwarder:
 
     async def flip_delivered(self, *, external_id: str, recipient_key: str) -> None:
         """POST ``/peer/delivered`` to confirm ``delivered=true`` for a ROLE row."""
+
         async def call() -> dict[str, Any]:
             return await self._post(
                 self._bridge_path("/peer/delivered"),
@@ -999,6 +1017,7 @@ class Forwarder:
 
     async def download(self, *, blob_id: str, output_path: str) -> dict[str, Any]:
         """Stream a blob to a local file; mirrors the Node bridge's shape."""
+
         async def call() -> dict[str, Any]:
             path = self._bridge_path(f"/download/{quote(blob_id, safe='')}")
             response = await self._client.get(
@@ -1013,11 +1032,8 @@ class Forwarder:
                     path=path,
                 )
             body = response.content
-            # Write to disk synchronously — the file is bounded in size and
-            # the bridge subprocess has no other concurrent work that
-            # benefits from offloading this to a thread.
             target = Path(output_path)
-            target.write_bytes(body)
+            await CLIENT_IO.run(target.write_bytes, body)
             filename = blob_id
             disposition = response.headers.get("content-disposition", "")
             if "filename=" in disposition:
@@ -1097,6 +1113,7 @@ class Forwarder:
         *,
         after: str | None = None,
         since: str | None = None,
+        since_cursor: str | None = None,
         limit: int | None = None,
         include_important: bool = True,
         role_after: str | None = None,
@@ -1107,6 +1124,8 @@ class Forwarder:
             params["after"] = after
         if since is not None:
             params["since"] = since
+        if since_cursor is not None:
+            params["since_cursor"] = since_cursor
         if limit is not None:
             params["limit"] = str(limit)
         if not include_important:

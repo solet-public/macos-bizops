@@ -26,16 +26,22 @@ Every one of these is an instance of the SAME missing fact: whether a given
 battery run executed under measurable host contention was never recorded
 anywhere the run's own result could carry it. This module measures that fact
 along the two axes already present in this codebase's own concurrency model
-(module docstring of ``run_smokes.py``):
+(module docstring of ``run_smokes.py``), plus overall host load:
 
 - ``concurrent_live_batteries``: how many OTHER full-battery runs were
   genuinely alive (pid-liveness verified, not just "receipt says running") at
-  the moment measured — the general "how many lanes/sessions were sharing
-  this host" signal (342, 756, 760).
+  the moment measured. This counts batteries only; other lane work is not
+  represented by this count.
 - ``host_lock_wait_seconds``: how long THIS battery waited to acquire the
   host-global serial-only lock (``run_smokes.py``'s ``_HOST_SERIAL_LOCK_PATH``)
   — a direct, always-present measurement of contention for the specific
   host-exclusive resource the ``_SERIAL_ONLY`` smokes share (357, 358).
+
+Overall one-minute load is sampled at both boundaries and once per second
+throughout the run, including lock wait. Its sampled maximum and logical CPU
+count are recorded even when no other battery exists (iss_b21d7aed). Load
+does not identify a process or prove that contention caused a failure; it
+never raises a timeout budget, waives a failure, or converts it to a skip.
 
 The liveness probe (``holder_pid_is_alive``) is the one new primitive: a
 receipt or lock file that says "running"/"held" is trusted only when the pid
@@ -53,6 +59,8 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+
+from host_load import HostLoad
 
 # Anything at or below this is "acquired essentially immediately" — real
 # contention on this lock has measured in the seconds, not milliseconds
@@ -72,6 +80,7 @@ class BatteryContention:
     concurrent_live_batteries_finish: int
     host_lock_wait_seconds: float
     host_lock_contended: bool
+    host_load: HostLoad
 
     @property
     def concurrent_live_batteries_peak(self) -> int:
@@ -96,7 +105,11 @@ class BatteryContention:
         contended = " (CONTENDED)" if self.host_lock_contended else ""
         return (
             f"contention: {peak} concurrent live batter{plural} (peak), "
-            f"host-lock wait {self.host_lock_wait_seconds:.2f}s{contended}"
+            f"host-lock wait {self.host_lock_wait_seconds:.2f}s{contended}; "
+            f"overall host load1m {self.host_load.start_1m:.2f} -> "
+            f"{self.host_load.finish_1m:.2f}, sampled max "
+            f"{self.host_load.max_sampled_1m:.2f} across "
+            f"{self.host_load.sample_count} samples / {self.host_load.logical_cpu_count} CPUs"
         )
 
 
@@ -170,6 +183,7 @@ def measure(
     concurrent_live_batteries_start: int,
     concurrent_live_batteries_finish: int,
     host_lock_wait_seconds: float,
+    host_load: HostLoad,
 ) -> BatteryContention:
     """Assemble one battery's contention snapshot.
 
@@ -184,6 +198,7 @@ def measure(
         concurrent_live_batteries_finish=concurrent_live_batteries_finish,
         host_lock_wait_seconds=host_lock_wait_seconds,
         host_lock_contended=host_lock_wait_seconds > CONTENDED_THRESHOLD_SECONDS,
+        host_load=host_load,
     )
 
 
@@ -197,9 +212,7 @@ def skip_event_log_path() -> Path:
     return Path(configured) if configured else _DEFAULT_SKIP_EVENT_LOG
 
 
-def record_host_lock_skip_event(
-    *, holder_pid: int | None, holder_alive: bool | None, waited_seconds: float, log_path: Path | None = None
-) -> None:
+def record_host_lock_skip_event(*, holder_pid: int | None, holder_alive: bool | None, waited_seconds: float, log_path: Path | None = None) -> None:
     """Append one disclosed host-lock skip to a durable, cross-run log.
 
     iss_c35292ca: every prior signal was a single packet's SKIP line with no

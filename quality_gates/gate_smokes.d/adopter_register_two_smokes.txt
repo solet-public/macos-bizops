@@ -1,0 +1,4 @@
+# prb_f6964132 (chg_9c92fd18, upl_ce32a7ae80004159868de1eddfa642d5): two shipped smokes were not selected by the native
+# landing battery because they were unregistered. Both run offline and exit 0 when run once under the gate environment.
+plugins/default_knowledge_plugin/tests/incremental_kb_reindex_smoke.py
+ananta/tests/llm/session_ledger/event_embedding_checkpoint_serialization_smoke.py

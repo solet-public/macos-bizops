@@ -60,7 +60,7 @@ the same contract): every runtime this plugin now uses (`python3`) is a
 declared, guaranteed prerequisite -- unlike Node, which was never guaranteed
 by Claude Code or any consuming platform and could silently fail to launch
 this hook with no visible signal (see this checkout's deaf-wake findings,
-2026-08-08). See `git_controller_gate.py` for the sibling hook that already
+2026-08-08). See `headless_tool_allowlist_gate.py` for the sibling hook that already
 proved this exact python3 + `${CLAUDE_PLUGIN_ROOT}` invocation shape works
 in this manifest.
 """

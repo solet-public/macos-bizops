@@ -3,7 +3,7 @@
 
 Coverage:
 
-* All 10 tables register under namespace ``session_ledger``.
+* All 12 tables register under namespace ``session_ledger``.
 * Every protected standard field (id, namespace, created_at, updated_at,
   created_by, updated_by, is_deleted) is auto-injected by SchemaStandardizer
   and survives the standardization pass on every business table.
@@ -37,6 +37,7 @@ from ananta.llm.session_ledger.schema import (  # noqa: E402
     TABLE_EVENT,
     TABLE_IMPORT_BATCH,
     TABLE_SESSION,
+    TABLE_SESSION_LABEL_CLEAR,
     TABLE_SESSION_SOURCE_KIND,
     TABLE_SOURCE,
     TABLE_SOURCE_CURSOR,
@@ -71,6 +72,7 @@ _EXPECTED_TABLES = {
     TABLE_SOURCE_CURSOR,
     TABLE_IMPORT_BATCH,
     TABLE_SESSION,
+    TABLE_SESSION_LABEL_CLEAR,
     TABLE_EVENT,
     TABLE_TOOL_CALL,
     TABLE_ATTACHMENT,
@@ -86,7 +88,7 @@ _PROTECTED = SchemaStandardizer.PROTECTED_STANDARD_FIELDS
 def test_namespace_and_table_set() -> None:
     schema = get_session_ledger_schema()
     _check(schema.namespace == NAMESPACE, "namespace is session_ledger")
-    _check(set(schema.tables.keys()) == _EXPECTED_TABLES, "all 11 tables registered")
+    _check(set(schema.tables.keys()) == _EXPECTED_TABLES, "all 12 tables registered")
     _check(schema.version == "1.0.0", "version is 1.0.0")
 
 
@@ -110,8 +112,7 @@ def test_standardizer_round_trip() -> None:
         missing = _PROTECTED - set(table.columns.keys())
         _check(
             not missing,
-            f"standardized {table_name!r} has every protected standard field "
-            f"(missing: {sorted(missing)} if any)",
+            f"standardized {table_name!r} has every protected standard field (missing: {sorted(missing)} if any)",
         )
 
 
@@ -120,26 +121,17 @@ def test_partial_unique_indexes_present() -> None:
     cursor_table = schema.tables[TABLE_SOURCE_CURSOR]
     cursor_index_names = {idx.name: idx for idx in cursor_table.indexes}
     _check(
-        "idx_cursor_event_read_unique" in cursor_index_names
-        and cursor_index_names["idx_cursor_event_read_unique"].unique
-        and cursor_index_names["idx_cursor_event_read_unique"].where
-        == "cursor_scope = 'event_read'",
+        "idx_cursor_event_read_unique" in cursor_index_names and cursor_index_names["idx_cursor_event_read_unique"].unique and cursor_index_names["idx_cursor_event_read_unique"].where == "cursor_scope = 'event_read'",
         "source_cursor has partial unique index on event_read scope",
     )
     _check(
-        "idx_cursor_discovery_unique" in cursor_index_names
-        and cursor_index_names["idx_cursor_discovery_unique"].unique
-        and cursor_index_names["idx_cursor_discovery_unique"].where
-        == "cursor_scope = 'discovery'",
+        "idx_cursor_discovery_unique" in cursor_index_names and cursor_index_names["idx_cursor_discovery_unique"].unique and cursor_index_names["idx_cursor_discovery_unique"].where == "cursor_scope = 'discovery'",
         "source_cursor has partial unique index on discovery scope",
     )
     deployment_table = schema.tables[TABLE_DEPLOYMENT]
     deployment_index_names = {idx.name: idx for idx in deployment_table.indexes}
     _check(
-        "idx_deployment_oauth_client_unique" in deployment_index_names
-        and deployment_index_names["idx_deployment_oauth_client_unique"].unique
-        and deployment_index_names["idx_deployment_oauth_client_unique"].where
-        == "oauth_client_id IS NOT NULL",
+        "idx_deployment_oauth_client_unique" in deployment_index_names and deployment_index_names["idx_deployment_oauth_client_unique"].unique and deployment_index_names["idx_deployment_oauth_client_unique"].where == "oauth_client_id IS NOT NULL",
         "deployment has partial unique index on non-null oauth_client_id",
     )
 
@@ -162,8 +154,7 @@ def test_standardizer_accepts_external_id_unique_false_override() -> None:
     standardized = standardizer.standardize_schema(schema)  # must not raise
     _check(
         standardized.tables["probe"].columns["external_id"].unique is False,
-        "standardizer honors an explicit external_id unique=False override "
-        "(does not silently force it back to True)",
+        "standardizer honors an explicit external_id unique=False override (does not silently force it back to True)",
     )
 
 
@@ -189,8 +180,7 @@ def test_event_composite_external_id_index_survives_standardization() -> None:
     if composite is not None:
         _check(
             list(composite.columns) == ["session_id", "external_id"] and composite.unique,
-            f"idx_event_session_external_unique is UNIQUE(session_id, external_id) "
-            f"(got columns={composite.columns!r}, unique={composite.unique!r})",
+            f"idx_event_session_external_unique is UNIQUE(session_id, external_id) (got columns={composite.columns!r}, unique={composite.unique!r})",
         )
 
     standardizer = SchemaStandardizer()
@@ -201,11 +191,7 @@ def test_event_composite_external_id_index_survives_standardization() -> None:
         "unique=False survives standardization (not reset to the platform default)",
     )
     standardized_composite = next(
-        (
-            idx
-            for idx in standardized_event.indexes
-            if idx.name == "idx_event_session_external_unique"
-        ),
+        (idx for idx in standardized_event.indexes if idx.name == "idx_event_session_external_unique"),
         None,
     )
     _check(

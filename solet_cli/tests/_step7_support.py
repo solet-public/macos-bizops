@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import atexit
 import hashlib
+import importlib
 import json
 import os
 import random
@@ -53,7 +54,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -61,6 +62,7 @@ from typing import Any, Literal, cast
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _step7_temp_retention as retention  # noqa: E402
 from _step5_support import (  # noqa: E402
     CANONICAL,
     HOOKS,
@@ -81,7 +83,55 @@ from _step5_support import (  # noqa: E402
     installed,
     seal,
 )
-from _step6_support import byte_map  # noqa: E402
+from _step6_support import byte_map as byte_map  # noqa: E402
+from _step7_temp_retention import (
+    _assert_attribution as _assert_attribution,
+)
+from _step7_temp_retention import (
+    _bare_clone_shape as _bare_clone_shape,
+)
+from _step7_temp_retention import (
+    _builder_digest as _builder_digest,
+)
+from _step7_temp_retention import (
+    _cache_root as _cache_root,
+)
+from _step7_temp_retention import (
+    _cached as _cached,
+)
+from _step7_temp_retention import (
+    _clone as _clone,
+)
+from _step7_temp_retention import (  # noqa: E402
+    _head_commit as _head_commit,
+)
+from _step7_temp_retention import (
+    _release_from_json as _release_from_json,
+)
+from _step7_temp_retention import (
+    _release_json as _release_json,
+)
+from _step7_temp_retention import (
+    _seed_key as _seed_key,
+)
+from _step7_temp_retention import (
+    _temp_housekeeping as _temp_housekeeping,
+)
+from _step7_temp_retention import (
+    checks_by_id as checks_by_id,
+)
+from _step7_temp_retention import (
+    fixture_bytes as fixture_bytes,
+)
+from _step7_temp_retention import (
+    make_offline as make_offline,
+)
+from _step7_temp_retention import (
+    porcelain as porcelain,
+)
+from _step7_temp_retention import (
+    tree_snapshot as tree_snapshot,
+)
 from github_midwife_plugin.setup_adapter_runtime import CommandOutcome, bounded_command_outcome  # noqa: E402
 from solet_manager._existing_install_inspection_metadata import InstalledUpdateDescriptor  # noqa: E402
 from solet_manager.existing_install_inspection import (  # noqa: E402
@@ -271,38 +321,6 @@ class RealStyleFixture(Fixture):
 # --- the seed ---------------------------------------------------------------------------------------------
 
 
-def _head_commit() -> str:
-    return git(_ROOT, "rev-parse", "HEAD")
-
-
-def _cache_root() -> Path:
-    """The per-user, per-HEAD cross-process cache: the assembled seed and every sealed source are built once per
-    checkout commit on this host and reused by every smoke process (the registered battery runs the Step-7 smokes
-    twelve-wide, and rebuilding a ~4,000-file seed per process is what pushed them past the gate budget).  Keyed by
-    the commit ``assemble()`` reads, so a different tree never reuses it; entries are completed by an atomic rename
-    and left for the OS temp cleaner."""
-    root = Path(tempfile.gettempdir()) / f"step7-cache-{_head_commit()[:12]}"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def _cached(name: str, build: Callable[[Path], None]) -> Path:
-    """``<cache>/<name>``, built into a private sibling and renamed into place; a concurrent winner is reused."""
-    final = _cache_root() / name
-    if (final / ".complete").is_file():
-        return final
-    staging = Path(tempfile.mkdtemp(prefix=f"{name}.build-", dir=_cache_root()))
-    build(staging)
-    (staging / ".complete").write_text("complete\n", encoding="utf-8")
-    try:
-        os.rename(staging, final)
-    except OSError:
-        shutil.rmtree(staging, True)
-        if not (final / ".complete").is_file():
-            raise
-    return final
-
-
 def assembled_seed() -> tuple[Path, str]:
     """The seed factory's ``macos-bizops`` bundle from this checkout's ``HEAD``, assembled once per host and commit."""
     if "bundle" not in _SEED_CACHE:
@@ -319,18 +337,6 @@ def assembled_seed() -> tuple[Path, str]:
     return _SEED_CACHE["bundle"], str(_SEED_CACHE["commit"])
 
 
-def _seed_key(knobs: Knobs) -> tuple[object, ...]:
-    return (knobs.git_metadata == "gitattributes_tracked_edit", knobs.router, knobs.shipped_strategy, knobs.knowledge_removal, knobs.overlap, knobs.untracked_collision, knobs.kb_addition is not None, knobs.candidate_files)
-
-
-def _release_json(release: Release) -> dict[str, str]:
-    return {"commit": release.commit, "tree": release.tree, "provenance": release.provenance.decode("utf-8"), "seed_id": release.seed_id, "manifest": release.manifest, "source_commit": release.source_commit, "tag": release.tag}
-
-
-def _release_from_json(value: dict[str, str]) -> Release:
-    return Release(value["commit"], value["tree"], value["provenance"].encode("utf-8"), value["seed_id"], value["manifest"], value["source_commit"], value["tag"])
-
-
 def sealed_source(knobs: Knobs) -> tuple[Path, Release, Release, dict[str, bytes], str]:
     """The sealed two-release seed repository for the seed-affecting knobs: sealed once per host and commit, copied
     once per process into a private scratch (a smoke may seal a third release onto its copy), never written otherwise."""
@@ -344,40 +350,64 @@ def sealed_source(knobs: Knobs) -> tuple[Path, Release, Release, dict[str, bytes
             (staging / "releases.json").write_text(json.dumps(document, indent=2, sort_keys=True), encoding="utf-8")
 
         cached = _cached(name, build)
+        retention.prune_sources()
         scratch = Path(tempfile.mkdtemp(prefix="step7-source-"))
         atexit.register(shutil.rmtree, scratch, True)
         source = scratch / "source"
-        shutil.copytree(cached / "source", source, symlinks=True)
+        retention.clone_tree(cached / "source", source)
         document = json.loads((cached / "releases.json").read_text(encoding="utf-8"))
         files = {name: content.encode("utf-8") for name, content in document["files"].items()}
         _SOURCE_CACHE[key] = (source, _release_from_json(document["baseline"]), _release_from_json(document["candidate"]), files, str(document["contract"]))
     return _SOURCE_CACHE[key]
 
 
+def _sealed_base(knobs: Knobs) -> tuple[Path, Release]:
+    """The assembled bundle sealed as r1 and packed, built once per cache root and ``.gitattributes`` knob.
+
+    r1 reads only the bundle and that knob, so every source variant clones this base copy-on-write instead of
+    copying the bundle and hashing its ~4,500 files into as many loose objects again (prb_8e1e8cae: 16 variants
+    each wrote and then repacked away that object set).  The baseline is the release the per-variant seal made;
+    only its wall-clock commit date differs, as it already did between any two builds.
+    """
+    tracked_attributes = knobs.git_metadata == "gitattributes_tracked_edit"
+
+    def build(staging: Path) -> None:
+        bundle, _ = assembled_seed()
+        source = staging / "source"
+        retention.clone_tree(bundle, source)
+        git(source, "init", "--quiet", "-b", "main")
+        git(source, "config", "user.name", "Fixture")
+        git(source, "config", "user.email", "fixture@example.invalid")
+        # Sealing two releases of a ~4,000-file tree crosses ``gc.auto``'s loose-object threshold; a detached
+        # background ``git gc`` then prunes objects while the first clone reads them (measured 2026-09-19: eight
+        # smokes in parallel, every clone "unable to read tree").  The fixture never needs an automatic repack.
+        git(source, "config", "gc.auto", "0")
+        baseline_files: dict[str, str | bytes] = {".gitattributes": "* text=auto\n"} if tracked_attributes else {}
+        baseline = seal(source, "a" * 40, "b" * 64, "r1", baseline_files)
+        git(source, "repack", "-a", "-d", "-q")
+        (staging / "baseline.json").write_text(json.dumps(_release_json(baseline), indent=2, sort_keys=True), encoding="utf-8")
+
+    cached = _cached("base-r1-gitattributes" if tracked_attributes else "base-r1", build)
+    return cached / "source", _release_from_json(json.loads((cached / "baseline.json").read_text(encoding="utf-8")))
+
+
 def _seed_repository(source: Path, knobs: Knobs) -> tuple[Release, Release, dict[str, bytes], str]:
-    """Copy the assembled bundle into ``source``, seal r1, then seal the append-only r2 (section 3.2).
+    """Clone the bundle sealed as r1 into ``source``, then seal the append-only r2 (section 3.2).
 
     The r2 transition bundle declares the lifecycle strategy the knobs ask for.  A fixture that only stands in for a
     router install (``router``) or for the shipped bundle on a solet with no router identity (``shipped_strategy``)
     seals ``router_preferred``, which is what the real flow declares; every other fixture seals
     ``single_color_required``, the strategy that routes around the router branch a real created solet takes.
     """
-    bundle, _ = assembled_seed()
-    shutil.copytree(bundle, source, symlinks=True)
-    git(source, "init", "--quiet", "-b", "main")
-    git(source, "config", "user.name", "Fixture")
-    git(source, "config", "user.email", "fixture@example.invalid")
-    # Sealing two releases of a ~4,000-file tree crosses ``gc.auto``'s loose-object threshold; a detached
-    # background ``git gc`` then prunes objects while the first clone reads them (measured 2026-09-19: eight
-    # smokes in parallel, every clone "unable to read tree").  The fixture never needs a repack.
-    git(source, "config", "gc.auto", "0")
-    baseline_files: dict[str, str | bytes] = {}
-    if knobs.git_metadata == "gitattributes_tracked_edit":
-        baseline_files[".gitattributes"] = "* text=auto\n"
-    baseline = seal(source, "a" * 40, "b" * 64, "r1", baseline_files)
+    bundle_base, baseline = _sealed_base(knobs)
+    retention.clone_tree(bundle_base, source)
     strategy = "router_preferred" if knobs.router or knobs.shipped_strategy else "single_color_required"
-    document = bundle_document(baseline, strategy=strategy, knowledge_removals=["github_midwife_plugin"] if knobs.knowledge_removal else None, operations=default_operations())
-    files = bundle_files(document)
+    # Every byte of r2 that the Step-5 helpers read (templates, KB schemas, the adapter, the hooks) comes from ``source``,
+    # the assembled bundle at ``HEAD``, never from the live working tree: this build is cached under ``HEAD`` alone, so
+    # a tree that differs from ``HEAD`` while it runs would seal its own hooks into every later run at that commit
+    # (iss_ae6a4b13: a settled clone then plans a reinstall because r2 changed a shipped hook).
+    document = bundle_document(baseline, strategy=strategy, knowledge_removals=["github_midwife_plugin"] if knobs.knowledge_removal else None, operations=default_operations(), root=source)
+    files = bundle_files(document, source)
     contract = bundle_digest(files)
     if knobs.knowledge_removal:
         (source / _REMOVED_ARTICLE).unlink()
@@ -391,23 +421,15 @@ def _seed_repository(source: Path, knobs: Knobs) -> tuple[Release, Release, dict
         extra[f"plugins/{NEW_PLUGIN}/knowledge_base/manifest.yaml"] = f"name: {NEW_PLUGIN}\nversion: 1\ndescription: fixture knowledge base\n"
         extra[f"plugins/{NEW_PLUGIN}/knowledge_base/01_article.md"] = "# New plugin article\n\nFixture content.\n"
         extra[f"plugins/{NEW_PLUGIN}/src/{NEW_PLUGIN}/__init__.py"] = "\n"
-    candidate = seal(source, "c" * 40, "d" * 64, "r2", candidate_tree_files(files, extra=extra))
-    # One pack instead of ~4,400 loose objects: a local clone then copies one file (measured: 1.0s -> 0.3s per
-    # fixture on APFS, where hardlinking every object is slower than copying it), and the per-process copy of
-    # the sealed source is a handful of files.  Done here, once, inside the cache build; never at clone time.
-    git(source, "repack", "-a", "-d", "-q")
+    candidate = seal(source, "c" * 40, "d" * 64, "r2", candidate_tree_files(files, extra=extra, root=source))
+    # Packs instead of ~4,400 loose objects: a local clone then copies a few files (measured: 1.0s -> 0.3s per
+    # fixture on APFS, where hardlinking every object is slower than copying it).  The base already holds r1 as
+    # one pack, so only r2's loose objects are packed beside it; done once, inside the cache build.
+    git(source, "repack", "-d", "-q")
     return baseline, candidate, files, contract
 
 
 # --- the clone -------------------------------------------------------------------------------------------
-
-
-def _clone(source: Path, target: Path, baseline: Release, canonical: str = CANONICAL) -> None:
-    completed = subprocess.run(("git", "clone", "--quiet", "--no-hardlinks", str(source), str(target)), check=False, capture_output=True, text=True, env=_ENV)
-    if completed.returncode != 0:
-        raise AssertionError(f"fixture clone of {source} failed: {completed.stderr.strip()}")
-    git(target, "checkout", "--quiet", "-B", "main", baseline.commit)
-    git(target, "remote", "set-url", "origin", canonical)
 
 
 def _run_genesis_writers(target: Path, knobs: Knobs) -> dict[str, str]:
@@ -462,9 +484,8 @@ def prime_genesis_imports() -> None:
     A sweep builds fixtures INSIDE the spy; the writers must already be cached so no poisoned module is touched.
     """
     sys.path.insert(0, str(_ROOT / "plugins" / "github_midwife_plugin" / "src"))
-    import github_midwife_plugin.genesis  # noqa: F401, PLC0415
-    import github_midwife_plugin.setup_shell_operations  # noqa: F401, PLC0415
-    from github_midwife_plugin import autostart  # noqa: F401, PLC0415
+    for module in ("genesis", "setup_shell_operations", "autostart"):
+        importlib.import_module(f"github_midwife_plugin.{module}")
 
     assembled_seed()
     _evict_platform_state_modules()
@@ -491,23 +512,6 @@ def _run_create_shape(target: Path) -> dict[str, str]:
         destination.chmod(mode)
         expected[str(destination.relative_to(target))] = "setup_shell_operations._rendered_files (solet create)"
     return expected
-
-
-def porcelain(target: Path, *, ignored: bool = False) -> dict[str, str]:
-    """``git status --porcelain=v1 --untracked-files=all`` as ``{path: XY}`` (the leading status space is significant)."""
-    args = ["status", "--porcelain=v1", "--untracked-files=all", *(["--ignored"] if ignored else [])]
-    completed = subprocess.run(("git", "-C", str(target), *args), check=True, capture_output=True, text=True, env=_ENV)
-    return {line[3:]: line[:2] for line in completed.stdout.splitlines() if len(line) > 3}
-
-
-def _assert_attribution(target: Path, expected: dict[str, str]) -> None:
-    """Section 3.3's completeness proof, both directions, on every build (criterion 16)."""
-    observed = porcelain(target)
-    ignored = {path for path, code in porcelain(target, ignored=True).items() if code == "!!"}
-    unattributed = sorted(set(observed) - set(expected))
-    unseen = sorted(path for path in expected if path not in observed and path not in ignored)
-    assert not unattributed, f"porcelain entries no writer accounts for: {unattributed}"
-    assert not unseen, f"writer outputs neither observed nor ignored: {unseen}"
 
 
 def _apply_knobs(target: Path, knobs: Knobs) -> dict[str, str]:
@@ -595,7 +599,7 @@ def _lay_down_ignored_runtime(target: Path, knobs: Knobs, host_python: Path) -> 
     (target / ".venv" / "pyvenv.cfg").write_text(f"home = {host_python.parent}\nversion = 3.13.0\n", encoding="utf-8")
     python = venv_bin / "python3"
     if knobs.instance_python == "present":
-        python.write_text("#!/bin/sh\nexec python3 \"$@\"\n", encoding="utf-8")
+        python.write_text('#!/bin/sh\nexec python3 "$@"\n', encoding="utf-8")
         python.chmod(0o755)
     elif knobs.instance_python == "dangling":
         python.symlink_to(target / ".venv" / "gone" / "python3.13")
@@ -671,20 +675,6 @@ def _cold_host(root: Path, knobs: Knobs) -> ColdHost:
     return host
 
 
-def make_offline(fake: FakeHost) -> None:
-    """``service="offline"``: the bridge does not answer (every bridge read raises) and the process table is unreadable,
-    while launchd still lists the label -- the "unreachable" shape whose doctor reading is ``unknown service_offline``
-    on sections 9/11/14.  A label launchd no longer lists is the ``launchagent_not_loaded`` finding, not an unknown."""
-    from solet_manager.errors import AdapterError  # noqa: PLC0415
-
-    def unreachable(*_args: object, **_kwargs: object) -> dict[str, JsonValue]:
-        raise AdapterError("bridge call did not succeed: connection refused")
-
-    fake.read_health = unreachable  # type: ignore[method-assign]
-    fake.invoke_bridge = unreachable  # type: ignore[method-assign]
-    fake.ps_fails = True
-
-
 def _fake_host(knobs: Knobs) -> FakeHost:
     fake = FakeHost()
     if knobs.service == "offline":
@@ -726,7 +716,7 @@ def import_metadata(fixture_baseline: Release, candidate: Release, raw: bytes, c
 
 
 @contextmanager
-def _import_loader(descriptor_value: InstalledUpdateDescriptor) -> Iterator[None]:
+def _import_loader(descriptor_value: InstalledUpdateDescriptor) -> Generator[None]:
     from solet_manager import import_enrollment  # noqa: PLC0415
 
     def loader(channel: str, tracker: object) -> InstalledInspectionMetadata:
@@ -882,7 +872,7 @@ def build_real_style(root: Path, *, host: FakeHost | None = None, knobs: Knobs =
     """Section 3: the real-style clone, HOME, host, stores and (per ``manager_state``) Manager state."""
     root.mkdir(parents=True, exist_ok=True)
     target = root / "target"
-    source, baseline, candidate, files, contract = sealed_source(knobs)
+    source, baseline, candidate, _files, contract = sealed_source(knobs)
     _clone(source, target, baseline)
     expected = _birth_shape(target, knobs)
     cold = _cold_host(root, knobs)
@@ -953,14 +943,6 @@ def _enter_manager_state(fixture: RealStyleFixture, knobs: Knobs) -> None:
         run_reference_update(fixture)
 
 
-def _bare_clone_shape(target: Path) -> None:
-    """``genesis_untracked=False``: the only tree a v4 journal can have been written on (CH-43) -- a clean clone with the ignored runtime only."""
-    (target / "profile" / "config").mkdir(parents=True, exist_ok=True)
-    (target / "profile" / "config" / "manifest.yaml").write_text(f"profile_name: {PROFILE}\nplugins:\n- github_midwife_plugin\n", encoding="utf-8")
-    exclude = target / ".git" / "info" / "exclude"
-    exclude.write_text(".venv/\nprofile/\n", encoding="utf-8")
-
-
 def run_reference_update(fixture: RealStyleFixture) -> str:
     """The reference path: source preview/apply, runtime preview/apply through ``promoted``."""
     preview = preview_update_instance(fixture.request)
@@ -1020,9 +1002,7 @@ def build_keg(root: Path, *, seed_lock: bytes, anchors: dict[str, JsonValue], ve
         "schema_version": 1,
         "channels": [{"channel_id": "stable", "seed_lock_sha256": hashlib.sha256(seed_lock).hexdigest()}],
     }
-    (share / "existing_install_inspection_seed_lock_catalog.v1.json").write_text(
-        json.dumps(seed_lock_catalog, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    (share / "existing_install_inspection_seed_lock_catalog.v1.json").write_text(json.dumps(seed_lock_catalog, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     # The receipt the real Formula writes (solet.rb.template), paired with the seed lock's own
     # provenance.source_commit so the design section 7.3 consumption gate sees one cut, not two.
     receipt = {"schema_version": 1, "mode": "release", "source_commit": cast(dict[str, Any], json.loads(seed_lock))["provenance"]["source_commit"]}
@@ -1079,49 +1059,6 @@ def cli(fixture: RealStyleFixture, argv: list[str]) -> tuple[int, dict[str, Any]
     ):
         code = manager_cli.main([*argv, "--json"])
     return code, json.loads("\n".join(captured))
-
-
-def tree_snapshot(root: Path, *, exclude: tuple[str, ...] = ("profile/data",)) -> dict[str, str]:
-    """sha256 (files) / target (symlinks) of everything under ``root`` outside ``.git`` and ``exclude`` prefixes."""
-    result: dict[str, str] = {}
-    if not root.exists():
-        return result
-    for path in sorted(root.rglob("*")):
-        relative = str(path.relative_to(root))
-        if ".git" in path.parts or any(relative.startswith(prefix) for prefix in exclude):
-            continue
-        if path.is_symlink():
-            result[relative] = "link:" + os.readlink(path)
-        elif path.is_file():
-            result[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
-    return result
-
-
-def fixture_bytes(fixture: RealStyleFixture) -> dict[str, str]:
-    """Step 6's ``byte_map`` (target + HOME) plus every symlink by its target, for the sweep and the shared verdict rows.
-
-    ``.solet/genesis.json`` is hashed without its ``completed_at`` stamp (genesis writes the wall clock) so two
-    fixtures of one scenario compare equal.
-    """
-    combined = byte_map(fixture)
-    for path in sorted(fixture.target.rglob("*")):
-        if path.is_symlink() and ".git" not in path.parts:
-            combined[f"target/{path.relative_to(fixture.target)}"] = "link:" + os.readlink(path)
-    marker = fixture.target / ".solet" / "genesis.json"
-    if marker.is_file():
-        payload = json.loads(marker.read_text(encoding="utf-8"))
-        payload.pop("completed_at", None)
-        combined["target/.solet/genesis.json"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
-    return combined
-
-
-def checks_by_id(doctor: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """The doctor's sections flattened to ``{check_id: check}``."""
-    found: dict[str, dict[str, Any]] = {}
-    for section in cast(list[dict[str, Any]], doctor.get("sections", [])):
-        for check in cast(list[dict[str, Any]], section["checks"]):
-            found[cast(str, check["check_id"])] = check
-    return found
 
 
 Builder = Callable[[Path], RealStyleFixture]

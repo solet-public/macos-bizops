@@ -41,29 +41,29 @@ def assert_export_path_allowed(
     *,
     config_key: str,
     plugin_name: str,
+    param_name: str = "output_tsv_path",
+    suffix: str | None = TSV_SUFFIX,
 ) -> str:
-    """Admit an absolute ``.tsv`` path contained under one allowed root.
+    """Admit an absolute path (``.tsv`` unless ``suffix`` says otherwise) under one allowed root.
+
+    ``suffix=None`` admits any file name: typed file downloads keep the
+    vendor's own format (PDF, CSV, gzip). ``param_name`` names the caller's
+    parameter in every refusal.
 
     Returns the realpath-resolved path to write. Refusals name the config key
     so the operator knows exactly which knob opts a workspace root in.
     """
     if not os.path.isabs(output_tsv_path):
         raise ExportPathRefusedError(
-            f"output_tsv_path must be an ABSOLUTE path (got {output_tsv_path!r}); "
-            "pass a path under one of the operator-configured workspace roots "
-            f"({config_key} in the {plugin_name} config)",
+            f"{param_name} must be an ABSOLUTE path (got {output_tsv_path!r}); pass a path under one of the operator-configured workspace roots ({config_key} in the {plugin_name} config)",
         )
-    if not output_tsv_path.endswith(TSV_SUFFIX):
+    if suffix is not None and not output_tsv_path.endswith(suffix):
         raise ExportPathRefusedError(
-            f"output_tsv_path must end in '{TSV_SUFFIX}' (got {output_tsv_path!r}); "
-            "this verb writes tab-separated values",
+            f"{param_name} must end in '{suffix}' (got {output_tsv_path!r}); this verb writes that file type",
         )
     if not allowed_roots:
         raise ExportPathRefusedError(
-            f"no workspace roots are configured — {config_key} in the "
-            f"{plugin_name} config is empty, which refuses every export by "
-            "default. Add the workspace directory (or directories) exports may "
-            f"land in to {config_key}, then re-run.",
+            f"no workspace roots are configured — {config_key} in the {plugin_name} config is empty, which refuses every export by default. Add the workspace directory (or directories) exports may land in to {config_key}, then re-run.",
         )
     candidate = os.path.realpath(output_tsv_path)
     for allowed in allowed_roots:
@@ -73,16 +73,11 @@ def assert_export_path_allowed(
             # process cwd — exactly the implicit-cwd containment hole the
             # 2026-07-15 ruling prohibits. Config fault: fail loud.
             raise ExportPathRefusedError(
-                f"misconfigured {config_key} entry {allowed!r} in the "
-                f"{plugin_name} config: every root must be an ABSOLUTE "
-                "directory path (after ~/$VAR expansion); relative or empty "
-                "roots would resolve against the server process cwd",
+                f"misconfigured {config_key} entry {allowed!r} in the {plugin_name} config: every root must be an ABSOLUTE directory path (after ~/$VAR expansion); relative or empty roots would resolve against the server process cwd",
             )
         allowed_real = os.path.realpath(expanded)
         if os.path.commonpath([allowed_real, candidate]) == allowed_real:
             return candidate
     raise ExportPathRefusedError(
-        f"output_tsv_path {output_tsv_path!r} is not contained in any "
-        f"operator-configured workspace root ({config_key} in the "
-        f"{plugin_name} config)",
+        f"{param_name} {output_tsv_path!r} is not contained in any operator-configured workspace root ({config_key} in the {plugin_name} config)",
     )

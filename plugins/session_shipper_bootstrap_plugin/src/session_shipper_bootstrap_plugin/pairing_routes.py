@@ -35,8 +35,13 @@ itself (spec §14.1 pin 2 — target server-derived from bearer claim).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
+import threading
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel, Field
@@ -45,6 +50,27 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
 logger = logging.getLogger(__name__)
+
+# One worker preserves the pre-offload callback/ledger mutation ordering.
+_REQUEST_WORKERS = 1
+_REQUEST_MAX_PENDING = 32
+_REQUEST_EXECUTOR = ThreadPoolExecutor(max_workers=_REQUEST_WORKERS, thread_name_prefix="pairing")
+_REQUEST_SLOTS = threading.BoundedSemaphore(_REQUEST_WORKERS + _REQUEST_MAX_PENDING)
+logger.info("pairing executor created: workers=%d queue_bound=%d", _REQUEST_WORKERS, _REQUEST_MAX_PENDING)
+
+
+async def _run_request_work[**P, T](function: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+    """Wait asynchronously for bounded admission; retain admitted mutations."""
+    while not _REQUEST_SLOTS.acquire(blocking=False):
+        await asyncio.sleep(0.005)
+    context = copy_context()
+    try:
+        future = _REQUEST_EXECUTOR.submit(lambda: context.run(function, *args, **kwargs))
+    except BaseException:
+        _REQUEST_SLOTS.release()
+        raise
+    future.add_done_callback(lambda _done: _REQUEST_SLOTS.release())
+    return await asyncio.shield(asyncio.wrap_future(future))
 
 
 PAIRING_INITIATE_ROUTE = "/api/v1/ledger/pairing/initiate"
@@ -124,10 +150,7 @@ class CrossStoreOrphanMintError(RuntimeError):
     """
 
     def __init__(self, *, client_id: str, deployment_id: str, original: BaseException) -> None:
-        super().__init__(
-            f"vault mint succeeded but state transition failed for deployment "
-            f"{deployment_id!r}; orphan client_id={client_id!r} (cause: {original!r})"
-        )
+        super().__init__(f"vault mint succeeded but state transition failed for deployment {deployment_id!r}; orphan client_id={client_id!r} (cause: {original!r})")
         self.client_id = client_id
         self.deployment_id = deployment_id
         self.original = original
@@ -173,14 +196,18 @@ def register_session_ledger_pairing_routes(
     from fastapi import HTTPException  # noqa: PLC0415
     from fastapi.responses import JSONResponse  # noqa: PLC0415
 
+    request_order = asyncio.Lock()
+
     @app.post(PAIRING_INITIATE_ROUTE)
     async def pairing_initiate(body: _InitiateBody) -> JSONResponse:
+        async with request_order:
+            return await _run_request_work(_pairing_initiate, body)
+
+    def _pairing_initiate(body: _InitiateBody) -> JSONResponse:
         """Shipper-initiated pairing: persist a fresh token + return display values."""
         row = ledger.pairing_get_deployment(body.deployment_id)
         if row is None:
-            raise HTTPException(
-                status_code=404, detail={"error": _ERR_DEPLOYMENT_NOT_FOUND}
-            )
+            raise HTTPException(status_code=404, detail={"error": _ERR_DEPLOYMENT_NOT_FOUND})
         if row.get("pairing_status") != "pending":
             raise HTTPException(
                 status_code=409,
@@ -207,7 +234,9 @@ def register_session_ledger_pairing_routes(
         )
         logger.info(
             "pairing initiated: deployment_id=%s machine_id=%s ttl_s=%d",
-            body.deployment_id, body.machine_id, _PAIRING_TTL_SECONDS,
+            body.deployment_id,
+            body.machine_id,
+            _PAIRING_TTL_SECONDS,
         )
         return JSONResponse(
             status_code=200,
@@ -220,18 +249,18 @@ def register_session_ledger_pairing_routes(
 
     @app.post(PAIRING_POLL_ROUTE)
     async def pairing_poll(body: _PollBody) -> JSONResponse:
+        async with request_order:
+            return await _run_request_work(_pairing_poll, body)
+
+    def _pairing_poll(body: _PollBody) -> JSONResponse:
         """Atomic poll: verify token → mint OAuth client → transition to paired."""
         row = ledger.pairing_get_deployment(body.deployment_id)
         if row is None:
-            raise HTTPException(
-                status_code=404, detail={"error": _ERR_DEPLOYMENT_NOT_FOUND}
-            )
+            raise HTTPException(status_code=404, detail={"error": _ERR_DEPLOYMENT_NOT_FOUND})
         status = row.get("pairing_status")
         if status == "pending":
             # Operator hasn't approved yet — poll again.
-            return JSONResponse(
-                status_code=200, content={"status": "pending"}
-            )
+            return JSONResponse(status_code=200, content={"status": "pending"})
         if status == "paired":
             # Single-use semantics: token consumed at first paired poll.
             return JSONResponse(
@@ -253,9 +282,7 @@ def register_session_ledger_pairing_routes(
             deployment_id=body.deployment_id,
             cleartext_token=body.pairing_token,
         ):
-            raise HTTPException(
-                status_code=401, detail={"error": _ERR_TOKEN_MISMATCH}
-            )
+            raise HTTPException(status_code=401, detail={"error": _ERR_TOKEN_MISMATCH})
         try:
             credentials = ledger.pairing_mint_and_transition_to_paired(
                 deployment_id=body.deployment_id,
@@ -278,42 +305,36 @@ def register_session_ledger_pairing_routes(
                 # This is the genuine HIGH-severity case — log loudly so
                 # an operational alert can fire; never return secrets.
                 logger.error(
-                    "ORPHAN_OAUTH_CLIENT_HIGH_SEVERITY: pairing poll mint "
-                    "succeeded but state-update AND compensation both "
-                    "failed: client_id=%s deployment_id=%s",
-                    orphan_exc.client_id, body.deployment_id,
+                    "ORPHAN_OAUTH_CLIENT_HIGH_SEVERITY: pairing poll mint succeeded but state-update AND compensation both failed: client_id=%s deployment_id=%s",
+                    orphan_exc.client_id,
+                    body.deployment_id,
                 )
-                raise HTTPException(
-                    status_code=500, detail={"error": _ERR_INTERNAL}
-                ) from None
+                raise HTTPException(status_code=500, detail={"error": _ERR_INTERNAL}) from None
             if outcome == "revoked":
                 logger.info(
-                    "transient cross-store mint failure; vault compensated: "
-                    "client_id=%s deployment_id=%s",
-                    orphan_exc.client_id, body.deployment_id,
+                    "transient cross-store mint failure; vault compensated: client_id=%s deployment_id=%s",
+                    orphan_exc.client_id,
+                    body.deployment_id,
                 )
             else:
                 # Compensation declined or deferred to sweep — surface clearly.
                 logger.error(
-                    "ORPHAN_OAUTH_CLIENT_SWEEP_SCHEDULED: revoke failed; "
-                    "memory-tagged for periodic sweep: client_id=%s "
-                    "deployment_id=%s outcome=%s",
-                    orphan_exc.client_id, body.deployment_id, outcome,
+                    "ORPHAN_OAUTH_CLIENT_SWEEP_SCHEDULED: revoke failed; memory-tagged for periodic sweep: client_id=%s deployment_id=%s outcome=%s",
+                    orphan_exc.client_id,
+                    body.deployment_id,
+                    outcome,
                 )
-            raise HTTPException(
-                status_code=500, detail={"error": _ERR_INTERNAL}
-            ) from None
+            raise HTTPException(status_code=500, detail={"error": _ERR_INTERNAL}) from None
         except Exception:  # noqa: BLE001 — defensive backstop for non-orphan paths
             logger.exception(
                 "pairing poll: mint+transition failed for deployment_id=%s",
                 body.deployment_id,
             )
-            raise HTTPException(
-                status_code=500, detail={"error": _ERR_INTERNAL}
-            ) from None
+            raise HTTPException(status_code=500, detail={"error": _ERR_INTERNAL}) from None
         logger.info(
             "pairing complete: deployment_id=%s client_id=%s",
-            body.deployment_id, credentials["client_id"],
+            body.deployment_id,
+            credentials["client_id"],
         )
         return JSONResponse(
             status_code=200,
@@ -435,9 +456,9 @@ class _LiveLedgerFacade:
             self._vault.revoke_client(client_id)
         except Exception:  # noqa: BLE001 — revoke failure surfaces as sweep handoff
             logger.exception(
-                "vault.revoke_client failed during compensation: "
-                "client_id=%s deployment_id=%s",
-                client_id, deployment_id,
+                "vault.revoke_client failed during compensation: client_id=%s deployment_id=%s",
+                client_id,
+                deployment_id,
             )
             record_orphan_for_sweep(
                 client_id=client_id,
@@ -468,26 +489,21 @@ def record_orphan_for_sweep(
     """
     if memory_service is None:
         logger.warning(
-            "orphan sweep tag NOT written (no memory_service bound): "
-            "client_id=%s deployment_id=%s",
-            client_id, deployment_id,
+            "orphan sweep tag NOT written (no memory_service bound): client_id=%s deployment_id=%s",
+            client_id,
+            deployment_id,
         )
         return
     try:
         memory_service.remember(
-            content=(
-                f"Orphan OAuth client awaiting sweep: client_id={client_id} "
-                f"deployment_id={deployment_id}. Vault.revoke_client failed "
-                f"during pairing-poll compensation; periodic-poll heartbeat "
-                f"should retry revoke until success."
-            ),
+            content=(f"Orphan OAuth client awaiting sweep: client_id={client_id} deployment_id={deployment_id}. Vault.revoke_client failed during pairing-poll compensation; periodic-poll heartbeat should retry revoke until success."),
             tags=("session_ledger:orphan_oauth_client",),
         )
     except Exception:  # noqa: BLE001
         logger.exception(
-            "memory_service.remember failed for orphan sweep tag: "
-            "client_id=%s deployment_id=%s",
-            client_id, deployment_id,
+            "memory_service.remember failed for orphan sweep tag: client_id=%s deployment_id=%s",
+            client_id,
+            deployment_id,
         )
 
 

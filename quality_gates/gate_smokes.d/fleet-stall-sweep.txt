@@ -1,0 +1,25 @@
+# Fragment of the gate-smoke register, owned by one candidate
+# (Problem prb_fdb5b401, Unit unt_52891d90, work-keyed fleet stall sweep).
+#
+# Same grammar and meaning as quality_gates/gate_smokes.txt: one repo-relative
+# *_smoke.py path per line, text after `#` is a comment. The loader
+# (quality_gates/gate_smoke_register.py) unions this with the main register.
+# This candidate registers here rather than in gate_smokes.txt so that it
+# shares no path with the other efficiency candidates dispatched in parallel,
+# which is what the fragment route exists for (prb_ae6d81ea).
+#
+# This file carries no reserved origin identity token, in its name or its
+# body, because it ships: see quality_gates/shipped_doc_gate.py (GTE-10).
+
+# Private-PostgreSQL proof of the runtime-neutral, work-keyed fleet stall
+# sweep: a real managed_session ledger written by insert_managed_session with
+# rows of more than one agent_runtime, and the real PsoletFleetStallReader
+# driven as a subprocess against an executable register-CLI fixture whose
+# output the production parser reads. Covers the Codex-only, Claude-only and
+# mixed stall verdict, produced-work-inside-window, nothing-ready-and-owned,
+# the who-has-work cursor loop, a refused register read (no verdict, never a
+# manufactured stall), an empty fleet, the sweep's own published last run and
+# its silence advisory, the published record's full lifecycle including its
+# terminal action, and the audit that no session-acting call is reachable.
+# Exits 77 UNMEASURED without the private fixture.
+plugins/agent_messaging_plugin/tests/fleet_stall_sweep_smoke.py

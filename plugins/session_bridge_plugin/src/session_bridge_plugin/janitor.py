@@ -28,12 +28,16 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
+import math
 import os
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from fnmatch import fnmatchcase
 from pathlib import Path
+from time import monotonic, sleep
 
 from .cursor import (
     INITIAL_POSITION,
@@ -58,6 +62,43 @@ RETENTION_CEILING_BYTES = 100 * 1024 * 1024  # 100 MB of spool ...
 RETENTION_CEILING_SECONDS = 7 * 24 * 60 * 60  # ... or 7 days, whichever first, triggers force-advance.
 
 _GAP_MARKER_TS_FORMAT = "%Y%m%dT%H%M%S_%f"
+_logger = logging.getLogger(__name__)
+
+
+def spool_setting(name: str, default: float, *, integral: bool = False) -> float:
+    """Positive finite startup settings; clear an override to restore its default."""
+    raw = os.environ.get(name, str(default))
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be positive and finite, got {raw!r}") from exc
+    if not math.isfinite(value) or value <= 0 or integral and not value.is_integer():
+        raise ValueError(f"{name} must be positive, finite and {'integral' if integral else 'numeric'}, got {raw!r}")
+    return value
+
+
+DEFAULT_SPOOL_ENTRY_LIMIT = 128
+DEFAULT_SPOOL_SLICE_SECONDS = 0.002
+DEFAULT_SPOOL_YIELD_SECONDS = 0.001
+SPOOL_ENTRY_LIMIT = int(spool_setting("SOLET_SESSION_SPOOL_ENTRY_LIMIT", DEFAULT_SPOOL_ENTRY_LIMIT, integral=True))
+SPOOL_SLICE_SECONDS = spool_setting("SOLET_SESSION_SPOOL_SLICE_SECONDS", DEFAULT_SPOOL_SLICE_SECONDS)
+SPOOL_YIELD_SECONDS = spool_setting("SOLET_SESSION_SPOOL_YIELD_SECONDS", DEFAULT_SPOOL_YIELD_SECONDS)
+
+
+class SpoolSlices:
+    """Cooperative entry/time slices, shared by enumeration, draining and deletion."""
+
+    def __init__(self) -> None:
+        self._entries = 0
+        self._deadline = monotonic() + SPOOL_SLICE_SECONDS
+
+    def checkpoint(self) -> None:
+        self._entries += 1
+        if self._entries < SPOOL_ENTRY_LIMIT and monotonic() < self._deadline:
+            return
+        sleep(SPOOL_YIELD_SECONDS)
+        self._entries = 0
+        self._deadline = monotonic() + SPOOL_SLICE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -92,7 +133,17 @@ def list_spool_files(spool_dir: Path) -> list[Path]:
     janitor (to compute the deletion set)."""
     if not spool_dir.is_dir():
         return []
-    files = [p for p in spool_dir.glob(SPOOL_GLOB) if not p.name.startswith(".")]
+    files: list[Path] = []
+    budget = SpoolSlices()
+    try:
+        with os.scandir(spool_dir) as entries:
+            for entry in entries:
+                budget.checkpoint()
+                if not entry.name.startswith(".") and fnmatchcase(entry.name, SPOOL_GLOB):
+                    files.append(Path(entry.path))
+    except OSError as exc:
+        _logger.warning("Spool enumeration unavailable for %s; retrying next drain: %s", spool_dir, exc)
+        return []
     return sorted(files, key=lambda path: path.name)
 
 
@@ -115,7 +166,9 @@ def _delete_below(files: list[Path], watermark: str) -> list[str]:
     last fully-drained file of the slowest live drainer and is retained as the
     resume anchor (the "files at/above X remain" invariant — design §3 D2.2)."""
     deleted: list[str] = []
+    budget = SpoolSlices()
     for spool_file in files:
+        budget.checkpoint()
         if spool_file.name < watermark:
             spool_file.unlink()
             deleted.append(spool_file.name)
@@ -131,7 +184,9 @@ def _apply_retirement(
     """Retire cursors with a stale heartbeat; return (updated cursors, retired ids)."""
     updated: list[CursorState] = []
     newly_retired: list[str] = []
+    budget = SpoolSlices()
     for cursor in cursors:
+        budget.checkpoint()
         is_stale = heartbeat_age_seconds(cursor, now) > retirement_threshold_seconds
         if not cursor["retired"] and is_stale:
             retired = retired_cursor(cursor)
@@ -152,9 +207,16 @@ def _ceiling_exceeded(
     """True if the spool is over the size OR age retention ceiling."""
     if not files:
         return False
-    if sum(spool_file.stat().st_size for spool_file in files) > retention_ceiling_bytes:
+    budget = SpoolSlices()
+    total_bytes = 0
+    oldest_mtime = float("inf")
+    for spool_file in files:
+        budget.checkpoint()
+        observed = spool_file.stat()
+        total_bytes += observed.st_size
+        oldest_mtime = min(oldest_mtime, observed.st_mtime)
+    if total_bytes > retention_ceiling_bytes:
         return True
-    oldest_mtime = min(spool_file.stat().st_mtime for spool_file in files)
     return now.timestamp() - oldest_mtime > retention_ceiling_seconds
 
 
@@ -191,7 +253,9 @@ def _force_advance(
     newest = files[-1].name
     prior_min = _min_position(cursors)
     advanced_ids: list[str] = []
+    budget = SpoolSlices()
     for cursor in cursors:
+        budget.checkpoint()
         if cursor["position"] < newest:
             write_cursor(cursor_dir, force_advanced_cursor(cursor, newest))
             advanced_ids.append(cursor["drainer_id"])
@@ -215,9 +279,7 @@ def _run_locked(
     retention_ceiling_seconds: float,
 ) -> JanitorReport:
     files = list_spool_files(spool_dir)
-    cursors, retired = _apply_retirement(
-        cursor_dir, read_all_cursors(cursor_dir), now, retirement_threshold_seconds
-    )
+    cursors, retired = _apply_retirement(cursor_dir, read_all_cursors(cursor_dir), now, retirement_threshold_seconds)
     if _ceiling_exceeded(files, now, retention_ceiling_bytes, retention_ceiling_seconds):
         return _force_advance(spool_dir, cursor_dir, files, cursors, now, retired)
     watermark = _live_watermark(cursors)

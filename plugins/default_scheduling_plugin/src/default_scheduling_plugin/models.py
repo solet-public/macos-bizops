@@ -17,12 +17,8 @@ class ActionData(BaseModel):
     """Represents a single action to be executed."""
 
     name: str = Field(..., description="Fully qualified process key for the action")
-    parameters: dict[str, Any] = Field(
-        default_factory=dict, description="Arguments to pass to the action"
-    )
-    result_processor: dict[str, Any] | None = Field(
-        None, description="Optional result processor for chaining actions"
-    )
+    parameters: dict[str, Any] = Field(default_factory=dict, description="Arguments to pass to the action")
+    result_processor: dict[str, Any] | None = Field(None, description="Optional result processor for chaining actions")
     result_processor_kind: str | None = Field(
         None,
         description=(
@@ -58,9 +54,7 @@ class ScheduleData(BaseModel):
 
     # Legacy compatibility
     action_name: str = Field("", description="Legacy single action name")
-    action_parameters: dict[str, Any] = Field(
-        default_factory=dict, description="Legacy single action parameters"
-    )
+    action_parameters: dict[str, Any] = Field(default_factory=dict, description="Legacy single action parameters")
 
     # Schedule-type specific fields
     run_at: str | None = Field(None, description="ISO timestamp for one_time schedules")
@@ -71,6 +65,7 @@ class ScheduleData(BaseModel):
     session_id: str | None = Field(None, description="Session context for action execution")
     flow_id: str | None = Field(None, description="Flow context for action execution")
     error_message: str | None = Field(None, description="Error message if schedule failed")
+    revision: int = Field(default=0, ge=0, description="Owner-managed revision for conditional mutations")
 
     @field_validator("type")
     @classmethod

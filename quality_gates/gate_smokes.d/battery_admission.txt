@@ -1,0 +1,2 @@
+# Capacity admission, priority, bounded waits and shared-ticket lifecycle.
+quality_gates/tests/run_smokes_admission_smoke.py

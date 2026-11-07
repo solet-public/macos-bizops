@@ -1,0 +1,19 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::ensure_fleet_stall_sweep_schedule",
+  "display_name": "Ensure Fleet Stall Sweep Schedule",
+  "description": "Idempotently installs the fleet stall sweep's cron on the platform's own scheduler, never a coding-agent loop. Looks the schedule up by tag (default 'fleet_stall_sweep') and creates one only if none exists, returning status='already_present' otherwise; it does not normalize a stale or duplicate entry. The installed schedule carries one literal EDGE_SINK action, plugin::agent_messaging_plugin::sweep_fleet_stall_cron, with empty arguments and no result_processor_kind, which is the canonical cron-action shape and keeps a report-only detector off the inference path on every fire. Default expression '*/15 * * * *' (UTC). Nothing here refuses: the sweep needs no configured alert target, so there is no configuration under which the installed cron would be inert. scheduling_service exists only after startup's init_service_manager step, so this runs as a starting action (it is carried in the shipped local profile) or later, never from a plugin lifecycle method. Cron wiring only (is_discoverable=False).",
+  "embedding_description": "Installing the recurring platform schedule that runs the work-keyed fleet stall sweep every fifteen minutes, looked up by tag so a second call is a no-op, so stall detection keeps running on the platform scheduler instead of depending on a session remembering to invoke it by hand.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Ensure fleet stall sweep schedule",
+    "result_type": "fleet_stall_sweep_schedule_ensure_result",
+    "result_description": "status (created | already_present), tag, cron_expression and, when one was created, schedule_id.",
+    "presentation_guidance": "State plainly whether the cron was just created or was already there, and name the expression and tag. 'already_present' is a success, not a refusal. Do not claim the sweep has run: installing a schedule only means the next fire will happen.",
+    "output_action_guidance": "read_fleet_stall_sweep_status shows whether fires are actually landing after the first interval. sweep_fleet_stall runs the sweep once immediately without waiting for the schedule."
+  },
+  "error_processor_customizations": {
+    "action_context": "One get_schedules_by_tag read and, only when no schedule exists under the tag, one create_cron_schedule write on the platform scheduling service. Nothing else is touched.",
+    "error_interpretation": "scheduling_service_unavailable: this ran before startup's init_service_manager step, or the orchestrator is not injected. schedule_ensure_failed: the scheduling service returned an error-status response, which is raised loudly rather than read as 'no existing schedule found'.",
+    "recovery_guidance": "Retry is safe: the tag lookup makes a repeat a no-op once a schedule exists. For scheduling_service_unavailable, run this after startup completes, as a starting action in the profile's starting_actions, never from a plugin lifecycle method."
+  }
+}

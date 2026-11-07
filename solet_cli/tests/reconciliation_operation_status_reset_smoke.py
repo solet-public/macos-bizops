@@ -8,6 +8,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
+from typing import cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -25,14 +26,20 @@ from solet_manager.transaction import Transaction, canonical_sha256  # noqa: E40
 
 _ROOT = Path(__file__).resolve().parents[2]
 _CONTRACTS = _ROOT / "plugins/github_midwife_plugin/knowledge_base"
-_HISTORICAL_FIXTURES = (
-    _ROOT / "solet_cli/tests/fixtures/reconciliation_operation_status_reset"
-)
+_HISTORICAL_FIXTURES = _ROOT / "solet_cli/tests/fixtures/reconciliation_operation_status_reset"
 _MIGRATION_ID = "macos-repository-setup-pgvector-package-postcondition-v1"
 _SOURCE_DIGEST = "sha256:c2a0386e86e0378e694f1793732fac223ec70ff3358e856b54ccf588e51024a4"
-_DESTINATION_DIGEST = "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+_DESTINATION_DIGEST = "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
 _ACTIVE_DESTINATION_MIGRATION_IDS = frozenset(
     {
+        "macos-repository-setup-codex-optional-from-ebb5a8a2-v1",
+        "macos-repository-setup-codex-optional-from-20afa263-v1",
+        "macos-repository-setup-codex-optional-from-ece0927b-v1",
+        "macos-repository-setup-codex-optional-from-81b725eb-v1",
+        "macos-repository-setup-git-control-wording-from-92321d42-v1",
+        "macos-repository-setup-git-control-wording-from-a6cfa885-v1",
+        "macos-repository-setup-git-control-wording-from-3bfd5670-v1",
+        "macos-repository-setup-git-control-wording-from-50383f0b-v1",
         "macos-repository-setup-pgvector-package-postcondition-v1",
         "macos-repository-setup-pre-ram-preflight-pgvector-package-postcondition-v1",
         "macos-lm-studio-provisioning-to-pgvector-package-from-92634d2b-v1",
@@ -47,31 +54,28 @@ _ACTIVE_DESTINATION_MIGRATION_IDS = frozenset(
         "macos-repository-setup-lm-studio-not-recommended-from-ee00d702-v1",
         "macos-repository-setup-lm-studio-not-recommended-from-1e167174-v1",
         "macos-repository-setup-lm-studio-not-recommended-from-a5732c9f-v1",
+        # iss_3e524749: stable r43 (5a46321f) and r48 (e42e7515) setup contracts reach the active one directly.
+        "macos-repository-setup-stable-r43-from-8207c151-v1",
+        "macos-repository-setup-stable-r48-from-ea6ee0cb-v1",
     }
 )
 _SOURCE_BUNDLE_COMMITS = {
-    "sha256:19350a8d3b0b29139afe25b6f11648c0f3f2e1fdb8ca91f81d5bfa1280fc7492": (
-        "dfe109303"
-    ),
-    "sha256:515ab65fcf6d82756b3ffc6bf42f782ddc33b69907b5d32a372b019bea6a8e72": (
-        "8f12bbd0f"
-    ),
-    "sha256:5652d22cdc1c0a7e99820e0cee5d39751c65c066302ef6aba59e9863a17fa27c": (
-        "13e82cb5c"
-    ),
-    "sha256:c2a0386e86e0378e694f1793732fac223ec70ff3358e856b54ccf588e51024a4": (
-        "32fabad2c"
-    ),
-    "sha256:ce6d9d88fd77b2feeab964e2cd2f75e4d0ca6149634b0bcfac520cd047d720bb": (
-        "cc478b616"
-    ),
+    "sha256:ca8c9b246b4aed63c5d39582e14fbe87b899d29ccd172cb3bf384839cdaceb5d": "ebb5a8a2c7e8403e8bbd91d61b1da9f3a7b72044",
+    "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148": "9bac14cf3",
+    "sha256:5a46321f248b5a0dbeda2b2ff233e032c5ee1145a658b446254274cade7e2603": ("961af9290"),
+    "sha256:e42e751583ad12e446f67bf73b131a0dfdbdc3c0a08e3737c92756acad022656": ("b6a7bd43d"),
+    "sha256:19350a8d3b0b29139afe25b6f11648c0f3f2e1fdb8ca91f81d5bfa1280fc7492": ("dfe109303"),
+    "sha256:515ab65fcf6d82756b3ffc6bf42f782ddc33b69907b5d32a372b019bea6a8e72": ("8f12bbd0f"),
+    "sha256:5652d22cdc1c0a7e99820e0cee5d39751c65c066302ef6aba59e9863a17fa27c": ("13e82cb5c"),
+    "sha256:c2a0386e86e0378e694f1793732fac223ec70ff3358e856b54ccf588e51024a4": ("32fabad2c"),
+    "sha256:ce6d9d88fd77b2feeab964e2cd2f75e4d0ca6149634b0bcfac520cd047d720bb": ("cc478b616"),
 }
-_CHECKS = 0
+_CHECKS: int = 0
 
 
-def _check(condition: bool, label: str) -> None:
+def _check(condition: object, label: str) -> None:
     global _CHECKS
-    _CHECKS += 1
+    _CHECKS += 1  # pyright: ignore[reportConstantRedefinition] -- Preserve the mutable support API read by contract_reconciliation_after_update_smoke.py:226.
     if not condition:
         raise AssertionError(label)
 
@@ -107,11 +111,7 @@ def _seed() -> SeedLock:
 
 
 def _install_stage(bundle: ContractBundle) -> str:
-    matches = [
-        stage_id
-        for stage_id, stage in bundle.stages.items()
-        if "install_postgresql" in stage.get("operation_refs", [])
-    ]
+    matches = [stage_id for stage_id, stage in bundle.stages.items() if "install_postgresql" in cast(list[str], stage.get("operation_refs", []))]
     if len(matches) != 1:
         raise AssertionError("fixture requires exactly one install_postgresql stage")
     return matches[0]
@@ -151,22 +151,17 @@ def _historical_contract(source_revision: str, digest: str) -> ContractBundle:
 
 def _postcondition_probe_refs(bundle: ContractBundle, operation_id: str) -> set[str]:
     operation = bundle.operations[operation_id]
-    idempotency = operation["idempotency"]
-    return set(idempotency["postcondition_probe_refs"])
+    idempotency = cast(dict[str, JsonValue], operation["idempotency"])
+    return set(cast(list[str], idempotency["postcondition_probe_refs"]))
 
 
 def _assert_grown_postconditions_reset(destination: ContractBundle) -> None:
     """Require every bridge to the active contract to invalidate grown operations."""
 
-    active_bridges = [
-        item
-        for item in load_contract_reconciliations()
-        if item.destination_digest == destination.contract_digest
-    ]
+    active_bridges = [item for item in load_contract_reconciliations() if item.destination_digest == destination.contract_digest]
     _check(active_bridges, "the active contract has declared reconciliation bridges")
     _check(
-        {migration.migration_id for migration in active_bridges}
-        == _ACTIVE_DESTINATION_MIGRATION_IDS,
+        cast("set[str] | frozenset[str]", {migration.migration_id for migration in active_bridges}) == _ACTIVE_DESTINATION_MIGRATION_IDS,
         "every historical reconciliation bridge pins the active candidate destination",
     )
     for migration in active_bridges:
@@ -193,13 +188,9 @@ def main() -> int:
         active_destination.contract_digest == _DESTINATION_DIGEST,
         "destination pin is computed from unmodified active contract bundle bytes",
     )
-    migration = next(
-        item for item in load_contract_reconciliations() if item.migration_id == _MIGRATION_ID
-    )
+    migration = next(item for item in load_contract_reconciliations() if item.migration_id == _MIGRATION_ID)
     _check(
-        migration.source_digest == _SOURCE_DIGEST
-        and migration.destination_digest == _DESTINATION_DIGEST
-        and migration.operation_statuses_to_reset == ("install_postgresql",),
+        migration.source_digest == _SOURCE_DIGEST and migration.destination_digest == _DESTINATION_DIGEST and migration.operation_statuses_to_reset == ("install_postgresql",),
         "the released pgvector migration pins its exact reset authority",
     )
     with tempfile.TemporaryDirectory(prefix="reconciliation-operation-reset-") as raw:
@@ -249,8 +240,7 @@ def main() -> int:
             "the reset retains the verified operation attempt as history",
         )
         _check(
-            Transaction.from_dict(reconciled.to_dict()).operation_statuses["install_postgresql"]
-            is CheckpointStatus.PENDING,
+            Transaction.from_dict(reconciled.to_dict()).operation_statuses["install_postgresql"] is CheckpointStatus.PENDING,
             "the explicit reconciliation reset transition survives journal validation",
         )
     print(f"reconciliation_operation_status_reset_smoke: {_CHECKS}/{_CHECKS} checks passed")

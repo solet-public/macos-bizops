@@ -9,10 +9,16 @@ lane forgot to register.  This gate closes that gap.
 Every in-repository ``*_smoke.py`` file must appear exactly once in one of two
 places:
 
-* ``gate_smokes.txt`` when it belongs in the normal battery; or
+* the gate-smoke register when it belongs in the normal battery -- either
+  ``gate_smokes.txt`` itself or, equally, a fragment file under
+  ``gate_smokes.d/`` beside it, which is the per-candidate registration route
+  that avoids two candidates colliding on one shared path (prb_ae6d81ea).  Both
+  are read through ``gate_smoke_register.load``, so a fragment-registered smoke
+  is reported as registered and never as unregistered; or
 * ``gate_smoke_exclusions.txt`` when it deliberately cannot.  Exclusions use
   the shared mandatory owner/reason/expiry schema, are exact paths (not glob
-  patterns), and expire back into a blocking finding.
+  patterns), and expire back into a blocking finding.  Exclusion behaviour is
+  unchanged by the fragment route: exclusions have no fragments.
 
 The population is the same tracked-or-unignored rule used by ``gate_scope``.
 That makes a newly-created, not-yet-staged smoke visible immediately instead
@@ -57,30 +63,41 @@ def _git_smoke_paths(root: Path) -> frozenset[str]:
     )
     if result.returncode != 0:
         raise RuntimeError(
-            "git ls-files for gate-smoke census failed "
-            f"(exit {result.returncode}): {result.stderr.strip() or '(no stderr)'}",
+            f"git ls-files for gate-smoke census failed (exit {result.returncode}): {result.stderr.strip() or '(no stderr)'}",
         )
-    return frozenset(
-        path
-        for path in result.stdout.split("\0")
-        if path.endswith(_SMOKE_SUFFIX)
-        and not any(part.startswith(_BUNDLED_VENV_PREFIX) for part in Path(path).parts)
-    )
+    return frozenset(path for path in result.stdout.split("\0") if path.endswith(_SMOKE_SUFFIX) and not any(part.startswith(_BUNDLED_VENV_PREFIX) for part in Path(path).parts))
 
 
 def _read_registered(path: Path) -> frozenset[str]:
+    """The effective register's entries: ``path`` plus every fragment beside it.
+
+    Import lazily, for the same reason ``_read_exclusions`` does: the module
+    stays directly runnable against a temporary fixture repository in its smoke.
+
+    This reads through the shared loader rather than re-implementing the
+    grammar, which also means a trailing ``#`` comment on an entry line is
+    stripped here exactly as every other reader strips it.  No entry in the
+    current register has one (measured: 0 of 1028), so the census population is
+    unchanged; previously such a line would have been counted as the entry PLUS
+    its comment text and the smoke would have been misreported as unregistered.
+    """
+    from quality_gates.gate_smoke_register import load as load_effective_register
+
     if not path.is_file():
         raise FileNotFoundError(f"gate-smoke register not found: {path}")
-    entries = {
-        raw.strip()
-        for raw in path.read_text(encoding="utf-8").splitlines()
-        if raw.strip() and not raw.lstrip().startswith("#")
-    }
     # The historical register also contains a small set of ``smoke_*.py``
     # files.  The completeness contract deliberately owns the ``*_smoke.py``
     # population named by iss_fb75bf89; those valid older entries remain
     # runnable but are outside this census rather than being misreported.
-    return frozenset(entries)
+    #
+    # An unreadable fragment is an advisory, never a refusal (rul_becb4bed): the
+    # entries that could be read are used, so a damaged fragment cannot turn a
+    # registered smoke into a blocking "unregistered" finding for the whole tree
+    # -- it can only fail to clear the one smoke it was registering.
+    effective = load_effective_register(path)
+    for advisory in effective.advisories:
+        print(advisory, file=sys.stderr, flush=True)
+    return frozenset(effective.entries)
 
 
 def _read_exclusions(path: Path, *, today: date | None = None) -> frozenset[str]:
@@ -123,9 +140,7 @@ def inspect_registration(
 
 def _print_report(report: RegistrationReport) -> int:
     print(
-        "gate-smoke registration census: "
-        f"{len(report.smoke_paths)} smoke(s), {len(report.registered)} registered, "
-        f"{len(report.excluded)} deliberately excluded",
+        f"gate-smoke registration census: {len(report.smoke_paths)} smoke(s), {len(report.registered)} registered, {len(report.excluded)} deliberately excluded",
     )
     problems: list[tuple[str, tuple[str, ...]]] = [
         ("registered AND excluded", report.overlaps),

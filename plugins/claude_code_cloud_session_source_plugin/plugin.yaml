@@ -1,5 +1,10 @@
 name: claude_code_cloud_session_source_plugin
 description: |
+  Returns a durable queued backfill job promptly; poll backfill_status(job_id).
+  One shared canonical APP_HOME/data/cloud_backfill.lock excludes both local
+  cloud vendors until worker effects and terminal routing settle. Interrupted
+  jobs retain history/effects; retry explicitly with a fresh force=True request.
+  No automatic resume, public cancel or distributed fencing is provided.
   LLM session ledger source for Claude Code on the web (cloud-VM sessions
   created at https://claude.ai/code). The verb
   ``plugin::claude_code_cloud_session_source_plugin::backfill_from_cloud``

@@ -12,8 +12,11 @@ Hermetic, on the same fake runtime and Git target as ``existing_install_operatio
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import plistlib
+import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -204,6 +207,73 @@ def _check_manager_validator(root: Path) -> None:
     _check_marketplace_validator(root / "market")
 
 
+def _fixture_git_env(extra_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Build a fresh fixture Git environment without caller-selected repositories."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update({"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"})
+    if extra_env:
+        env.update(extra_env)
+    return env
+
+
+def test_hostile_git_environment_isolation() -> None:
+    """A caller's GIT_DIR must not redirect the fixture's real Git setup."""
+    with TemporaryDirectory() as temporary:
+        root = Path(temporary).resolve()
+        if root.is_relative_to(_REPO.resolve()) or any(parent.name == ".git" for parent in root.parents):
+            raise RuntimeError(f"fixture-only temporary directory is inside Git metadata or the checkout: {root}")
+        clean_env = _fixture_git_env()
+        control_root = root / "negative-control"
+        control_root.mkdir()
+        control = subprocess.run(
+            (sys.executable, str(Path(__file__).resolve()), "--fixture-git-target", str(control_root)),
+            cwd=root,
+            capture_output=True,
+            text=True,
+            env=clean_env,
+            check=False,
+        )
+        _check(control.returncode == 0 and (control_root / "target" / ".git").is_dir(), "no-GIT control child creates the normal target")
+
+        sentinel = root / "sentinel.git"
+        initialized = subprocess.run(
+            ("git", "init", "--quiet", "--bare", str(sentinel)),
+            cwd=root,
+            capture_output=True,
+            text=True,
+            env=clean_env,
+            check=False,
+        )
+        if initialized.returncode != 0:
+            raise RuntimeError(f"fixture-only bare sentinel setup failed: {initialized.stderr}")
+        sentinel = sentinel.resolve()
+        if not sentinel.is_relative_to(root) or sentinel == (_REPO / ".git").resolve():
+            raise RuntimeError(f"fixture-only sentinel escaped its temporary directory: {sentinel}")
+        config = sentinel / "config"
+        before_config = config.read_bytes()
+
+        hostile_root = root / "hostile"
+        hostile_root.mkdir()
+        hostile_env = _fixture_git_env({"GIT_DIR": str(sentinel)})
+        child = subprocess.run(
+            (sys.executable, str(Path(__file__).resolve()), "--fixture-git-target", str(hostile_root)),
+            cwd=root,
+            capture_output=True,
+            text=True,
+            env=hostile_env,
+            check=False,
+        )
+        after_config = config.read_bytes()
+        print(
+            "sentinel_config_sha256_before="
+            f"{hashlib.sha256(before_config).hexdigest()} "
+            f"after={hashlib.sha256(after_config).hexdigest()}",
+            flush=True,
+        )
+        _check(after_config == before_config, "hostile GIT_DIR leaves scratch Git config byte-identical")
+        _check(child.returncode == 0, "fixture-only hostile child exits successfully after config comparison")
+
+
 def _check_marketplace_validator(root: Path) -> None:
     target, runtime = _cache_target(root)
     plugin_json = target / "plugins/github_midwife_plugin/claude_plugin/coordination-hooks/.claude-plugin/plugin.json"
@@ -225,9 +295,13 @@ def main() -> int:
         _check_cli_refusals(root / "cli")
         _check_marketplace_refusals(root / "marketplace")
         _check_manager_validator(root / "validator")
+    test_hostile_git_environment_isolation()
     print(f"existing_install_repair_text_smoke OK: {_CHECKS} checks passed")
     return 0
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--fixture-git-target":
+        base._target(Path(sys.argv[2]))  # noqa: SLF001
+        raise SystemExit(0)
     raise SystemExit(main())

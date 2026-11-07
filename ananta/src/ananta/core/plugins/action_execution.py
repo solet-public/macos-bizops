@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 from ananta.core.domain.enums import ErrorSeverity
 from ananta.core.plugins.plugin_contracts import ActionStatus
+from ananta.core.runtime.loop_invariant import record_handler_entry
 from ananta.error_handling import AnantaError, PluginError
 
 if TYPE_CHECKING:
@@ -61,13 +62,10 @@ def _validate_pre_action(
 
     action_request: dict[str, object] = {"name": action_name, "arguments": parameters}
     source_context: dict[str, object] = {"plugin": plugin.name, "action": action_name}
-    validation_result = plugin.validation_registry.validate_with_plugins(
-        action_request, ValidationPhase.PARAMETER, source_context
-    )
+    validation_result = plugin.validation_registry.validate_with_plugins(action_request, ValidationPhase.PARAMETER, source_context)
     if not validation_result.success:
         raise PluginError(
-            message=validation_result.error_message
-            or f"Validation failed for action {action_name}",
+            message=validation_result.error_message or f"Validation failed for action {action_name}",
             error_code="plugin.validation_failed",
             details={"plugin": plugin.name, "action": action_name},
             severity=ErrorSeverity.ERROR,
@@ -89,6 +87,7 @@ async def _execute_action_method(
             severity=ErrorSeverity.ERROR,
         )
 
+    record_handler_entry(f"plugin::{plugin.name}::{action_name}", "handler")
     if inspect.iscoroutinefunction(method):
         return await method(parameters)
     return method(parameters)
@@ -123,13 +122,10 @@ def _validate_post_action(
         "action": action_name,
         "is_response": "true",
     }
-    validation_result = plugin.validation_registry.validate_with_plugins(
-        action_request, ValidationPhase.FINAL, source_context
-    )
+    validation_result = plugin.validation_registry.validate_with_plugins(action_request, ValidationPhase.FINAL, source_context)
     if not validation_result.success:
         raise PluginError(
-            message=validation_result.error_message
-            or f"Response validation failed for action {action_name}",
+            message=validation_result.error_message or f"Response validation failed for action {action_name}",
             error_code="plugin.response_validation_failed",
             details={"plugin": plugin.name, "action": action_name},
             severity=ErrorSeverity.ERROR,

@@ -76,10 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--config", type=Path)
     create.add_argument(
         "--resume-stage",
-        help=(
-            "Require an existing transaction whose sole executable frontier is this "
-            "named stage before resuming it."
-        ),
+        help=("Require an existing transaction whose sole executable frontier is this named stage before resuming it."),
     )
     create.add_argument(
         "--seed",
@@ -99,6 +96,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Select one exact value returned by a discovered-decision probe.",
     )
     create.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    # A release's fresh-guest ladder only: fetch the locked tag from the sealed bundle it
+    # carries into the guest (the tag is not public before the release's public acts).
+    create.add_argument("--guest-validation-sealed-seed-bundle", help=argparse.SUPPRESS)
+    create.add_argument("--guest-validation-sealed-seed-commit", help=argparse.SUPPRESS)
+    create.add_argument("--guest-validation-sealed-seed-tag", help=argparse.SUPPRESS)
     autostart = create.add_mutually_exclusive_group()
     autostart.add_argument("--autostart", dest="autostart", action="store_true")
     autostart.add_argument("--no-autostart", dest="autostart", action="store_false")
@@ -131,8 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     attest = commands.add_parser(
         "attest",
-        help="Write installation_attestation.json: real hashes of the installed manager, "
-        "seed checkout, running process and host, compared to the release manifest.",
+        help="Write installation_attestation.json: real hashes of the installed manager, seed checkout, running process and host, compared to the release manifest.",
     )
     attest.add_argument("name", nargs="?", help="One managed instance; default: every registered instance.")
     attest.add_argument("--against", help="A release_manifest.json path, or a manager release tag.")
@@ -145,11 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
     inspect = commands.add_parser(
         "inspect",
         help="Actively probe a seed-built target by filesystem path; may run target binaries.",
-        description=(
-            "Active, identity-validated probe of a seed-built target. It may run binaries "
-            "inside the target, and target mutation is not prevented. For a read-only "
-            "classification of an existing solet checkout use `solet-manager inspect`."
-        ),
+        description=("Active, identity-validated probe of a seed-built target. It may run binaries inside the target, and target mutation is not prevented. For a read-only classification of an existing solet checkout use `solet-manager inspect`."),
     )
     inspect.add_argument("--target", type=Path, required=True)
     inspect.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
@@ -247,9 +244,7 @@ def _run_diagnostic_command(args: argparse.Namespace, paths: ManagerPaths) -> Co
             paths=paths,
             contract_directory=args.contract_dir,
         ).run(args.name)
-    return run_attest(
-        AttestRequest(paths, args.name, args.against, args.release_repository, args.output)
-    )
+    return run_attest(AttestRequest(paths, args.name, args.against, args.release_repository, args.output))
 
 
 def _run_reconcile_contract(args: argparse.Namespace, paths: ManagerPaths) -> CommandResult:

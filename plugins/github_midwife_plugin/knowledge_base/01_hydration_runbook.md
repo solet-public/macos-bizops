@@ -8,11 +8,11 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:client-deployment, consumer_profile:both
 
-Embedding Description: Agent-facing runbook for setting up the user's own environment around a solet birth, covering per-solet database provisioning, launchers, optional multi-role fleets, additive shell integration, plugin hydration, generated CLAUDE.md and AGENTS.md knowledge-bootstrap files, and the default no-MCP CLI/watch transport. It distinguishes runner-specific delivery behavior: Claude may re-wake from its Stop hook; stock Codex currently ships no Stop-hook delivery mechanism at all (async command hooks are unsupported on measured stock builds), while managed spawn_session Codex workers are auto-driven through their host channel regardless. Also covers MCP as an explicit opt-in, bridge/router/role connectivity, session-ledger ingestion, verification, and the deployment report card.
+Embedding Description: Agent-facing runbook for setting up the user's own environment around a solet birth, covering per-solet database provisioning, launchers, optional multi-role fleets, additive shell integration, plugin hydration, generated CLAUDE.md and AGENTS.md knowledge-bootstrap files, and the default no-MCP CLI/watch transport. It distinguishes runner-specific delivery behavior: Claude may re-wake from its Stop hook; when Codex is selected, stock Codex currently ships no Stop-hook delivery mechanism at all (async command hooks are unsupported on measured stock builds), while managed spawn_session Codex workers are auto-driven through their host channel regardless. Also covers MCP as an explicit opt-in, bridge/router/role connectivity, session-ledger ingestion, verification, and the deployment report card.
 
 ## When to use this runbook
 
-Run this ladder after genesis completes and the newborn solet boots, when the user's own environment still lacks the launch tooling. Genesis provisions the solet side only, so a fresh clone gives the user no command to start a named Claude Code session, no project `CLAUDE.md` or `AGENTS.md`, and no Claude Code hooks. This runbook is written TO the driving coding agent, the same audience as the genesis section of the seed README, and applies equally whether that agent is Claude Code or Codex. Everything here follows the genesis ladder shape: probe first, offer, act only under the user's normal tool-approval flow, verify, and stop and ask rather than guess.
+Run this ladder after genesis completes and the newborn solet boots, when the user's own environment still lacks the launch tooling. Genesis provisions the solet side only, so a fresh clone gives the user no command to start a named Claude Code session, no project `CLAUDE.md`, and no Claude Code hooks. Codex-specific launchers, `AGENTS.md`, plugins, and configuration are rendered only when Codex is selected. This runbook is written TO the driving coding agent, the same audience as the genesis section of the seed README, and applies to Claude Code and, when selected, Codex. Everything here follows the genesis ladder shape: probe first, offer, act only under the user's normal tool-approval flow, verify, and stop and ask rather than guess.
 
 Hydration is deliberately NOT genesis code. The files this ladder writes belong to the user's side of the genesis boundary, just like optional client registration does: the agent performs them with its own tools, in conversation, under the user's approval.
 
@@ -145,12 +145,11 @@ a Claude Code plugin.** Step 2's settings artifact now installs two keys, an
 `extraKnownMarketplaces` entry naming the deployment's own catalogue and an
 `enabledPlugins` entry switching on `coordination-hooks`; the hooks themselves
 (knowledge-base-first reminder, check-your-messages reminder, role-binding
-reminder, idle-wake waiter, git-mutation gate) live in that plugin, are reviewed
+reminder, idle-wake waiter) live in that plugin, are reviewed
 as code rather than as JSON strings, and update with the deployment. Every
 shipped entrypoint but one no-ops unless `AGENT_SESSION_LABEL` is set — so a
 plain `claude` session anywhere on the machine gets zero output and zero
-errors — and that one, the git gate, is label-independent by design: it arms on
-`GIT_CONTROLLER_NAME`'s presence instead (Step 4a). Read the roster from the
+errors. Read the roster from the
 plugin's own `hooks/hooks.json`; do not restate a count here.
 
 The wake half of messaging is one of those plugin hooks: a `Stop` hook running
@@ -163,8 +162,9 @@ provider; without it an idle session only sees messages at its next look.
 
 Writing inside the deployment directory needs no offer beyond the user's normal
 tool-approval flow. The three Claude user-scope writes touch the user's own
-Claude configuration; the Codex marketplace/plugin commands below separately
-update Codex's user configuration through its supported CLI. Back up an existing
+Claude configuration; when Codex is selected, the Codex marketplace/plugin
+commands below separately update Codex's user configuration through its
+supported CLI. Back up an existing
 `~/.claude/settings.json` before first modification, and merge structurally —
 never whole-file-replace it. If a destination path is absent, write the rendered template directly. If
 `CLAUDE.md`, `AGENTS.md`, `~/.claude/settings.json`, or `~/.claude/CLAUDE.md`
@@ -175,6 +175,10 @@ replacing the whole thing.
 document references it; none restates its membership or its count. If you are
 about to write "N artifacts" anywhere else, write a pointer to this table
 instead — a restated count is a future stale arity.
+
+Codex-specific rows are conditional: render and install them only when the
+operator selects Codex. The Claude Code and generic rows are the complete
+Claude-only path.
 
 | Template | Destination | Mode |
 |---|---|---|
@@ -246,8 +250,9 @@ file the user owns. Two overrides, tell the user both exist:
   setting `askUserQuestionTimeout` in their user settings so an unanswered
   dialog eventually auto-continues instead of hanging.
 
-Codex has no equivalent structured-choice tool, so the Codex launcher renders
-without an overlay — that asymmetry is correct, not an omission.
+When Codex is selected, Codex has no equivalent structured-choice tool, so the
+Codex launcher renders without an overlay — that asymmetry is correct, not an
+omission.
 
 ⚠️ **Precondition — tell the user this while you are rendering the overlay, not
 after they report the picker firing.** This mechanism is wholly inoperative on
@@ -278,7 +283,7 @@ time — they do not refuse — and either driver's `capability_report()` answer
 the question without spawning anything, via `permission_denies_operative` and
 `permission_policy_path`.
 
-**Install the stock-Codex plugin through Codex, not by copying cache state.**
+**When Codex is selected, install the stock-Codex plugin through Codex, not by copying cache state.**
 After rendering `.agents/plugins/marketplace.json`, run these from a normal
 shell with `<clone>` and `<marketplace-name>` replaced by the exact rendered
 values:
@@ -297,12 +302,14 @@ definition in `/hooks`; uninstall alone retains its prior enabled/trusted state
 and an identical reinstall can reactivate it. Do not copy another installation's
 cache, trust hash, or private config stanza.
 
-The final `/hooks` listing shows no `Stop` definition — this plugin currently
-ships none (codex-0147-async-hook-regression, 2026-08-13). Stock Codex does
+For a selected Codex install, the final `/hooks` listing shows no `Stop`
+definition — this plugin currently ships none
+(codex-0147-async-hook-regression, 2026-08-13). Stock Codex does
 not execute async command hooks on any measured build (0.141.0, 0.147.0); a
 prior `async: true` `Stop` binding never fired and was removed rather than
 left registered-but-dead, and a synchronous one is not an acceptable
-substitute (it would block the turn boundary). Autonomous Codex workers must
+substitute (it would block the turn boundary). Autonomous Codex workers, when
+Codex is selected, must
 be launched through `spawn_session`, where `drive_on_delivery` uses the host
 driver channel independent of this plugin's hooks; an operator-launched Codex
 TUI has no per-turn delivery notice and drains the durable inbox on its own
@@ -314,16 +321,21 @@ deployment registers its own marketplace and plugin under its own name in
 `~/.claude/settings.json`, and each owns its own name-keyed section in
 `~/.claude/CLAUDE.md` — but every labeled session then loads every
 deployment's Claude plugin, so those reminders are per-deployment and they add
-up. Codex marketplaces remain separately named, but an operator can likewise
-install several coordination plugins into one Codex home and should enable only
+up. When Codex is selected, its marketplaces remain separately named, but an
+operator can likewise install several coordination plugins into one Codex home
+and should enable only
 the deployment(s) intended for that session. The user-scope `rename` skill is a
 singleton, so the LAST hydrated solet owns it. Single-solet machines — the normal case — are unaffected. If the
 operator runs several solets and this bites, surface it as a decision rather
 than inventing a scheme ad hoc.
 
-### Generating the knowledge-bootstrap files: `CLAUDE.md` for Claude Code, `AGENTS.md` for a Codex session
+### Generating the knowledge-bootstrap files: `CLAUDE.md` for Claude Code, `AGENTS.md` for a Codex session (when selected)
 
-Step 2 renders both files for the newborn clone from templates: `CLAUDE.md.template` produces the generated `CLAUDE.md` a Claude Code session reads, and `AGENTS.md.template` produces the generated `AGENTS.md` a Codex session reads — the same knowledge-bootstrap contract, rendered once per runner.
+Step 2 renders the runner-specific files for the newborn clone from templates:
+`CLAUDE.md.template` produces the generated `CLAUDE.md` a Claude Code session
+reads, while `AGENTS.md.template` produces the generated `AGENTS.md` a Codex
+session reads when Codex is selected — the same knowledge-bootstrap contract,
+rendered once per runner.
 
 **Existing `CLAUDE.md` / `AGENTS.md` guidance.** The rendered `CLAUDE.md.template` and `AGENTS.md.template` each contain a solet-owned block bounded by the identical markers:
 
@@ -333,11 +345,12 @@ Step 2 renders both files for the newborn clone from templates: `CLAUDE.md.templ
 <!-- END SOLET HYDRATION -->
 ```
 
-If `<clone>/CLAUDE.md` or `<clone>/AGENTS.md` already exists, preserve its project-specific instructions and insert or update only that managed block — the same rule, applied independently to each file. On a re-run, replace the existing block exactly. On a first merge, insert the block after the first top-level heading when one exists; otherwise insert it at the top. Leave the rest of the file in place. Do not decide that an existing `CLAUDE.md` or `AGENTS.md` is "probably fine" and leave it untouched: the solet operating block is how future Claude Code and Codex sessions learn the access-mode contract — the no-MCP `<name> call` CLI as the default for knowledge/process/session-ledger access, MCP as strictly opt-in on explicit operator request, and source-artifact recovery (reading the KB's raw markdown directly) as the last-resort fallback when the solet runtime itself is unavailable — plus the implementation/debugging requirement to search the solet's own knowledge base first and the hook/messaging expectations for that tool.
+If `<clone>/CLAUDE.md` or `<clone>/AGENTS.md` already exists, preserve its project-specific instructions and insert or update only that managed block — the same rule, applied independently to each file. On a re-run, replace the existing block exactly. On a first merge, insert the block after the first top-level heading when one exists; otherwise insert it at the top. Leave the rest of the file in place. Do not decide that an existing `CLAUDE.md` or `AGENTS.md` is "probably fine" and leave it untouched: the solet operating block is how future Claude Code sessions and, when selected, Codex sessions learn the access-mode contract — the no-MCP `<name> call` CLI as the default for knowledge/process/session-ledger access, MCP as strictly opt-in on explicit operator request, and source-artifact recovery (reading the KB's raw markdown directly) as the last-resort fallback when the solet runtime itself is unavailable — plus the implementation/debugging requirement to search the solet's own knowledge base first and the hook/messaging expectations for that tool.
 
-Both templates carry the SAME access-mode contract in near-identical wording;
+When Codex is selected, both templates carry the SAME access-mode contract in
+near-identical wording;
 they diverge only on genuinely tool-specific mechanics: Claude Code's
-`claude-<name>` integration versus stock Codex's generated `codex-<name>`
+`claude-<name>` integration versus, when Codex is selected, stock Codex's generated `codex-<name>`
 launcher and exact durable-inbox command (currently no Stop-hook delivery
 notice — see the Stock Codex durable inbox section of `AGENTS.md.template`).
 If you find yourself rewriting one file's access-mode section without the
@@ -470,7 +483,7 @@ though `inherit` sounds like the more conservative choice.
 only if the operator already has it set somewhere, not as the primary route
 for a new setup.
 
-`codex-<name>` is unchanged and still passes no dangerous approval, sandbox,
+When Codex is selected, `codex-<name>` is unchanged and still passes no dangerous approval, sandbox,
 hook-trust, or MCP bypass. `CODEX_BIN` may select an explicit stock executable;
 never point it at a locally patched receive build.
 
@@ -481,7 +494,7 @@ as `label="--permission-mode"`, `model="bypassPermissions"` — a garbage sessio
 name and an invalid model, whose error message names neither cause. Use the
 environment variable.
 
-The coordination hooks no-op silently for bare sessions, and at user scope this guard is load-bearing for the user's ENTIRE Claude Code use: a plain `claude` session anywhere on the machine has no session-label environment variable set, and it must get zero output and zero errors. **The rule, not a count:** every shipped entrypoint but one (`step_zero_reminder.js`, `check_messages_reminder.js`, `role_binding_reminder.js`) returns nothing unless `AGENT_SESSION_LABEL` is set. Read the roster from the plugin's own `hooks/hooks.json` rather than trusting a number in prose: entrypoints, registrations, and matcher groups are three different counts, and all three move as hooks land (the Codex plugin currently ships no `Stop`-bound entrypoint at all — codex-0147-async-hook-regression, 2026-08-13). The exception, `git_controller_gate.py`, reads no label at all: it holds the same invariant by a different boundary — it does nothing unless `GIT_CONTROLLER_NAME` is present in the environment (Step 4a), which on a deployment that never sets it is never. If you edit a hook, keep whichever of the two boundaries it already has; a hook that gains output on an unlabeled, unarmed session is a defect against this paragraph, not a feature.
+The coordination hooks no-op silently for bare sessions, and at user scope this guard is load-bearing for the user's ENTIRE Claude Code use: a plain `claude` session anywhere on the machine has no session-label environment variable set, and it must get zero output and zero errors. **The rule, not a count:** every shipped entrypoint but one (`step_zero_reminder.js`, `check_messages_reminder.js`, `role_binding_reminder.js`) returns nothing unless `AGENT_SESSION_LABEL` is set. Read the roster from the plugin's own `hooks/hooks.json` rather than trusting a number in prose: entrypoints, registrations, and matcher groups are three different counts, and all three move as hooks land (when Codex is selected, the Codex plugin currently ships no `Stop`-bound entrypoint at all — codex-0147-async-hook-regression, 2026-08-13). If you edit a hook, keep whichever of the two boundaries it already has (a label guard, or an arming variable that an unlabeled session never sets); a hook that gains output on an unlabeled, unarmed session is a defect against this paragraph, not a feature.
 
 ## Step 3 — review, recommend, then offer shell integration
 
@@ -575,6 +588,8 @@ dead coordination, and only this line distinguishes that from a healthy install.
 
 Requirement 3 is satisfied by the launcher that step 2 installed on the user's machine. With the accepted zshrc (new terminal window, or `source ~/.zshrc`), the command `claude-<name>` is on PATH; declined, the absolute path form works identically. Optional arguments: a session label (default `Operator`), then a model alias, then an effort level. The launcher exports the session-label and stable session-id environment variables and execs `claude --name <label>`, which is what makes the session properly named in both Claude Code and the solet's peer registry.
 
+The Claude desktop app is also a supported client. Open the session in the clone directory. A desktop or hand-started session without launcher variables gets a durable identity of its own, persisted per Claude session id and shared by its hooks, its `<name>` CLI and its MCP bridge. Its SessionStart context names that identity, and `<name> watch --role <Role>`, run in the background, claims a role from the CLI alone. The agent-messaging article "Claude desktop app and hand-started Claude Code sessions" has the details.
+
 ## Step 4a — offer: multi-role fleet coordination (optional)
 
 Fleet coordination needs NO MCP by default: each session's SessionStart hook
@@ -652,22 +667,7 @@ Let the operator pick names and count; do not invent roles they did not ask for.
 - `--dangerously-skip-permissions` is opt-in and separately gated in the template (an env var the operator sets, not a hardcoded flag). When enabled, it selects the same effective `bypassPermissions` mode as `--permission-mode bypassPermissions`; on installed Claude Code 2.1.243 the two spellings are behaviorally equivalent. Neither spelling retains a permission classifier that the other removes — the background classifier belongs to `auto` mode, not bypass. The fleet flag still matters because the fleet launcher otherwise inherits this machine's resolved permission mode, while the Step 2 single-session launcher explicitly defaults to bypass; enabling the flag may therefore change a fleet session from its inherited mode to bypass, but it is never “more permissive than bypassPermissions.” If a session already in effective `bypassPermissions` is denied, do not switch spellings and call that a repair. Establish the effective mode, capture the exact independent denial, and classify the actual boundary (hook, managed policy, tool availability, OS/sandbox, credential, service, or another evidenced cause). For permission-mode facts, use this evidence order: installed-binary behavior first, current vendor documentation second, and this knowledge-base text last. Do not default the fleet opt-in on.
 - Peer messaging, role binding, AND idle wake come from each session's watcher (armed by the SessionStart hook → rename skill) plus the user-scope `<name> wake` Stop hook — not from any launcher flag — on the default transport. The template's `{{SOLET_NAME}}_FLEET_TRANSPORT` knob (default `watch`) declares the transport per Step 4a's offer paragraph; setting it to `mcp` re-points the rename skill to the MCP bridge and disarms the wake Stop hook via its guard. The optional MCP development-channel flag (`{{SOLET_NAME}}_FLEET_MCP_CHANNELS=1`) is the matching wake half and exists in the template gated OFF; the flag alone is inert (it also needs a registered MCP server via `claude mcp add` AND Anthropic-direct auth — unusable on Bedrock, impossible on an MCP-blocked machine), and it is only for an operator who explicitly asks for MCP and whose policy permits it — never suggest it unprompted.
 
-**Git safety when more than one session shares this deployment directory — a nameable gate that hydration arms, and whose ONLY exemption is leaving it unset.** If the operator is choosing more than one role, ask directly: will more than one of these sessions ever run git commands (commit, push, checkout, stash, branch) against the SAME directory? If yes, concurrent mutating git from several sessions is a real collision risk — a stash or checkout from one session can silently clobber another session's in-progress work. The gate for exactly this ships in the `coordination-hooks` plugin Step 2 installs (`hooks/git_controller_gate.py`, registered on `PreToolUse`); the operator names the controller themselves: designate ONE role — **any name they choose** (`Git-Controller`, `gitops`, whatever) — as the sole git-mutator, and every other session is blocked from mutating git.
-
-**How it arms, and who writes that (RULED 2026-08-01, operator — this REVERSES the previous ship-unarmed position).** The gate reads exactly one variable, **`GIT_CONTROLLER_NAME`**, and its **presence is the arming boundary**. You — the configuring session — set it during hydration by rendering `{{GIT_CONTROLLER_NAME}}` into **all three** coordination launchers (`claude_launcher.template`, `codex_launcher.template`, and `fleet_functions.zsh.template`). Two consequences worth stating to the operator in these words:
-
-- ⚠ **`GIT_CONTROLLER_NAME` is the name the SHIPPED gate reads.** The platform ORIGIN repository's own private copy (`.claude/hooks/git_controller_gate.py`) reads `SOLET_GIT_CONTROLLER_NAME` and **never ships** — a deliberate per-copy binding. Setting the origin's name on a seed-born deployment arms **nothing**, and because the gate is **fail-OPEN when its variable is unset**, the result is a gate the operator believes is armed and which silently allows everything. Do not carry the origin name into this conversation.
-- ⚠ **There is no project-scope fallback on a seed-born deployment.** The seed's copy allowlist is `ananta/`, `plugins/`, `disabled_plugins/`, `root_manifest.yaml` — `.claude/` is not in it, so the plugin copy is the *only* copy of this gate a deployment has. Do not tell the operator that protection also "travels with the directory"; here it does not.
-
-**SOLO EXEMPTION — the mechanism is the variable's ABSENCE.** A deployment where only one session ever runs simply omits the `GIT_CONTROLLER_NAME=` line from all three launchers: nothing is armed, day-one setup is unobstructed, and there is zero runtime machinery to go wrong. **Do not add a session-count probe to "implement" this** — configuration already implements it, and every runtime session-count source available here is known to lie. A *transiently*-solo fleet (a fleet deployment that happens to have one session up right now) is handled by policy language, not by deleting the export: the session claiming soloness cites a checkable basis for it (a just-run peer listing, or an operator statement), which makes the claim auditable afterwards.
-
-**The policy is a default, not an absolute.** An operator instruction to do it anyway overrides the gate — that is a command, not a failure, and it does not need a mechanism.
-
-**Scope, stated plainly rather than implied — this is a FLEET-CHECKOUT control.** It arms exactly the sessions launched by this deployment's launchers, which are the sessions that operate in the shared directory the gate exists to protect. Sessions the operator starts in their own work repositories are **out of scope by design**: their git safety belongs to Claude Code's own permission model, not to this gate. Say that, rather than leaving the operator to infer machine-wide protection this does not provide.
-
-**State the tradeoff up front, plainly:** an armed gate BLOCKS the Task tool (Anthropic subagents) for every non-controller session — **and that block is the gate's PRIMARY PURPOSE, not a side effect.** Those subagents spawn their own git worktrees and run git, which is exactly how in-progress work gets lost. So the choice is honest and either-way: an operator running several git-mutating sessions against one directory names a controller and gives up subagents; an operator who wants subagents leaves the variable unset and works some other way (a separate directory per session, or a single git-mutating session). Do NOT skip this conversation when more than one session will share the directory.
-
-**Then prove ONE real block before telling the operator it is on.** Because the gate is fail-open when unset, an unarmed gate and a correctly-disarmed one produce the identical observable: nothing happens. From a session launched under a NON-controller role, attempt a gated git mutation and confirm it is refused with the gate's policy message. Use a **throwaway repository** as the target (`git init` a scratch directory, then `git commit --allow-empty -m probe` inside it) rather than the operator's real work: the gate's decision is read from the *command shape and the session's role*, with **no repository-path scoping at all** (verified at source in `hooks/_git_policy.py`), so a scratch target proves the same block while an allowed command harms nothing. "No error appeared" is not evidence of protection.
+**Git safety when more than one session shares this deployment directory — no hook arms or checks it.** The coordination-hooks plugin no longer carries a git-text gate (removed in `0.9.0`, operator ruling rul_e71e43be). Hydration does not arm one, and no hook blocks a git mutation from any session. If more than one session will run git commands (commit, push, checkout, stash, branch) against the SAME directory, a stash or checkout from one session can silently clobber another session's in-progress work. Git control among those sessions is the repository's own responsibility (rul_d8893e33): name the one git-mutating role by convention, and tell the operator that no hook enforces it.
 
 **Operational guidance: leave sessions running, use `/clear`.** Once a role's session is started, tell the operator to leave it running in its own iTerm2 (or other terminal) tab rather than closing it between conversations. Quitting a session loses its process and its role's live identity until it is manually relaunched; the `/clear` slash command instead resets the conversation while the process (and its stable `AGENT_SESSION_ID`) keeps running — the coordination-hooks plugin's `SessionStart` matcher already covers `clear` (`hooks/hooks.json`, `startup|resume|clear`), so the role-binding reminder fires automatically and the session is addressable again within moments. This is the operational rhythm this platform runs on: long-lived tabs, `/clear` between tasks, restart only when a session is genuinely stuck.
 

@@ -280,6 +280,12 @@ class PeerInboxRequest:
     # oldest-first. ``after_created_at`` walks BACKWARD (rows older than it,
     # newest-first), so naming both is a contradiction the service refuses.
     since_created_at: datetime | None = None
+    # Opaque continuation for a forward read. It preserves the original
+    # ``since_created_at`` horizon and the last emitted ``(created_at, id)``
+    # total-order key, so equal-timestamp rows cannot be skipped. A caller
+    # starts with ``since_created_at`` and continues with this token; the two
+    # are mutually exclusive.
+    since_cursor: str | None = None
     limit: int = 50
     include_important: bool = True
     # v10 Control #1a: the opaque, scope-bound cursor for the role-inbox
@@ -360,6 +366,85 @@ class PeerInboxEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class RoleReadCoverage:
+    """What one role contributed to a ``peer_inbox`` role-section read.
+
+    One entry per role the role section read, so a caller whose expected role
+    reply is absent can tell "that role was never read" from "its rows were
+    hidden". ``floor_hidden`` counts rows the covered-mark floor removed and
+    ``receipt_hidden`` rows a read receipt removed. Both are COUNTS ONLY, taken
+    inside the window this call already scanned (the per-role page of at most
+    ``limit + 1`` rows plus the bounded receipt refill), so a nonzero value is
+    exact and a count is a lower bound on the role's whole hidden history: no
+    extra history scan is made to produce it. A row a receipt hid is counted
+    only as ``receipt_hidden``; ``floor_hidden`` counts rows that survived the
+    receipt filter. ``covered_mark_present`` says the floor had a mark to apply
+    (False under ``include_covered`` or a history read, which read no mark).
+    ``scan_truncated`` says the receipt refill spent its page budget before it
+    held a full page of visible rows: the rows returned are every unserved row
+    the scan found, but older rows were not scanned, so the section carries a
+    continuation cursor rather than claiming the role is exhausted.
+    """
+
+    role: str
+    covered_mark_present: bool
+    floor_hidden: int
+    receipt_hidden: int
+    scan_truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class InboxReturnedKey:
+    """One returned row's UTC storage timestamp and stable message id."""
+
+    created_at: str
+    id: str
+
+
+@dataclass(frozen=True, slots=True)
+class InboxSectionCoverage:
+    """Immutable evidence for this response, never a scanned interval or unread total."""
+
+    status: str
+    direction: str
+    cursor_mode: str
+    continuation_safety: str
+    advisory: str | None
+    requested_since: str | None
+    effective_since: str | None
+    after: str | None
+    since_cursor: str | None
+    role_after: str | None
+    continuation_after: InboxReturnedKey | None
+    first: InboxReturnedKey | None
+    last: InboxReturnedKey | None
+    count: int | None
+    limit: int
+    next_cursor: str | None
+    exhausted: bool | None
+    observer: bool
+    include_covered: bool
+    include_important: bool
+    role_floor_applied: bool | None
+    role_history_cursor: str | None
+    role_read_coverage: tuple[RoleReadCoverage, ...]
+    range_semantics: str = "returned_rows_only"
+    since_semantics: str = "exclusive_horizon"
+    scope: str = "addressed_instance_history"
+    outside_query: str = "unknown"
+    human_read: str = "unknown"
+    unread_count: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InboxReadCoverage:
+    """Independent direct and role page evidence under their requested scopes."""
+
+    direct: InboxSectionCoverage
+    role: InboxSectionCoverage
+
+
+@dataclass(frozen=True, slots=True)
 class PeerInbox:
     """Response from ``AgentMessagingService.peer_inbox``.
 
@@ -370,12 +455,17 @@ class PeerInbox:
     timestamp-only cursor deliberately retains its pre-existing
     duplicate-``created_at`` skip at a page boundary.
 
+    ``since_created_at`` is a first-page horizon for BOTH sections: the role section
+    returns only rows strictly newer than it (still newest-first, still paged
+    by ``role_after``) and ``role_since_created_at`` echoes it back as proof.
+
     A request that names ``since_created_at`` instead reads the instance
-    section FORWARD: ``entries`` are oldest-first, ``next_since_created_at``
-    is the last returned row's timestamp (the request's own ``since`` when the
-    page is empty), ``next_after_created_at`` is ``None``, and
+    section FORWARD: ``entries`` are oldest-first, ``next_since_cursor`` is a
+    tie-safe opaque continuation carrying the fixed horizon and last emitted
+    ``(created_at, id)`` key, ``next_since_created_at`` is the last returned
+    timestamp retained for compatibility, ``next_after_created_at`` is ``None``, and
     ``instance_exhausted`` means no newer row remains. Every other request
-    leaves ``next_since_created_at`` ``None``.
+    leaves both forward cursor fields ``None``.
 
     v10 adds the role section ADDITIVELY:
     ``role_entries`` is the global ``(created_at, id)`` k-way merge across
@@ -423,6 +513,20 @@ class PeerInbox:
     role_read_page_token: str | None = None
     role_read_page_status: str = "disabled"
     next_since_created_at: datetime | None = None
+    # Tie-safe continuation for the forward direct section. This is the value
+    # callers echo as ``since_cursor``; ``next_since_created_at`` remains the
+    # timestamp observation for compatibility, not a lossless page boundary.
+    next_since_cursor: str | None = None
+    # The horizon the role section actually applied: the request's
+    # ``since_created_at`` echoed back when the role section was computed under
+    # it, ``None`` when no horizon was asked for or the role section failed. A
+    # caller that sent ``since`` and reads ``None`` here knows the role rows it
+    # holds were NOT bounded by it.
+    role_since_created_at: datetime | None = None
+    # One entry per role the role section read (empty when the holder holds no
+    # role or the role section failed). Counts only; see ``RoleReadCoverage``.
+    role_read_coverage: tuple[RoleReadCoverage, ...] = ()
+    read_coverage: InboxReadCoverage | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -28,7 +28,15 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ananta.llm.agent_messaging.models import InboxReadCoverage
+
+from ananta.llm.agent_messaging.peer_inbox_cursor import (
+    PeerInboxCursorRejectedError,
+    decode_peer_inbox_since_cursor,
+)
 
 
 class InvalidInboxCursorError(ValueError):
@@ -51,19 +59,34 @@ def parse_since_cursor(raw: object) -> datetime | None:
     ``+00:00``) is converted to naive UTC here: handed to a timestamp column as
     an aware datetime it would be compared in the database session's timezone.
     """
-    if raw is None or raw == "":
+    if raw is None:
         return None
     try:
         parsed = datetime.fromisoformat(str(raw))
     except ValueError as exc:
         raise InvalidInboxCursorError(
             "since",
-            "'since' must be an ISO-8601 datetime (the previous forward "
-            f"page's next_since_created_at): {exc}",
+            f"'since' must be an ISO-8601 datetime horizon for the first forward page: {exc}",
         ) from exc
     if parsed.tzinfo is None:
         return parsed
     return parsed.astimezone(UTC).replace(tzinfo=None)
+
+
+def parse_since_continuation_cursor(raw: object) -> str | None:
+    """Validate the opaque tie-safe continuation, returning it unchanged."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise InvalidInboxCursorError(
+            "since_cursor",
+            "'since_cursor' must be the opaque string returned as next_since_cursor",
+        )
+    try:
+        decode_peer_inbox_since_cursor(raw)
+    except PeerInboxCursorRejectedError as exc:
+        raise InvalidInboxCursorError("since_cursor", str(exc)) from exc
+    return raw
 
 
 def serialize_message(message: Any) -> dict[str, Any]:
@@ -94,17 +117,30 @@ def serialize_peer_inbox_entry(entry: Any) -> dict[str, Any]:
     }
 
 
+def _serialize_read_coverage(coverage: InboxReadCoverage | None) -> dict[str, Any]:
+    """Return the same JSON-native projection before any transport encodes it."""
+    if coverage is None:
+        return {"status": "unknown", "advisory": "Page read coverage unavailable."}
+    sections = dataclasses.asdict(coverage)
+    for section in sections.values():
+        section["role_read_coverage"] = list(section["role_read_coverage"])
+    return sections
+
+
 def serialize_peer_inbox_page(
-    page: Any, recipient_agent_instance_id: str,
+    page: Any,
+    recipient_agent_instance_id: str,
 ) -> dict[str, Any]:
     """Render a ``PeerInbox`` page, both sections, with their two cursors.
 
     ``instance_exhausted`` is the instance section's progress signal. It means
     exhausted under the instance cursor the request used: the newest-first
     backward ``after`` cursor (echo ``next_after_created_at``), or the forward
-    oldest-first ``since`` cursor (echo ``next_since_created_at``). Exactly one
-    of the two ``next_*`` keys is populated per page, so a forward page never
-    offers a backward cursor to misuse. The legacy ``after`` cursor can skip
+    oldest-first ``since`` read (continue with ``next_since_cursor``). The
+    timestamp-only ``next_since_created_at`` stays as a compatibility
+    observation; the opaque cursor carries the lossless ``(created_at, id)``
+    boundary. A forward page never offers a backward cursor to misuse. The
+    legacy ``after`` cursor can skip
     equal-``created_at`` rows at a page boundary, so it is not
     a claim of globally lossless observation. The role section (``role_entries`` + ``next_role_cursor``) is emitted
     ADDITIVELY; the instance section keys are byte-for-byte unchanged.
@@ -121,22 +157,14 @@ def serialize_peer_inbox_page(
     """
     return {
         "recipient_agent_id": page.recipient_agent_id,
+        "read_coverage": _serialize_read_coverage(page.read_coverage),
         "recipient_agent_instance_id": recipient_agent_instance_id,
         "entries": [serialize_peer_inbox_entry(entry) for entry in page.entries],
-        "next_after_created_at": (
-            page.next_after_created_at.isoformat()
-            if page.next_after_created_at is not None
-            else None
-        ),
-        "next_since_created_at": (
-            page.next_since_created_at.isoformat()
-            if page.next_since_created_at is not None
-            else None
-        ),
+        "next_after_created_at": (page.next_after_created_at.isoformat() if page.next_after_created_at is not None else None),
+        "next_since_created_at": (page.next_since_created_at.isoformat() if page.next_since_created_at is not None else None),
+        "next_since_cursor": page.next_since_cursor,
         "instance_exhausted": page.instance_exhausted,
-        "role_entries": [
-            serialize_peer_inbox_entry(entry) for entry in page.role_entries
-        ],
+        "role_entries": [serialize_peer_inbox_entry(entry) for entry in page.role_entries],
         "next_role_cursor": page.next_role_cursor,
         "role_section_status": page.role_section_status.value,
         "role_section_error": page.role_section_error,
@@ -152,12 +180,32 @@ def serialize_peer_inbox_page(
         "role_history_cursor": page.role_history_cursor,
         "role_limit": page.role_limit,
         "role_page_truncated": page.role_page_truncated,
-        "role_truncation_reason": (
-            page.role_truncation_reason.value
-            if page.role_truncation_reason is not None
-            else None
-        ),
+        "role_truncation_reason": (page.role_truncation_reason.value if page.role_truncation_reason is not None else None),
         "role_byte_ceiling": page.role_byte_ceiling,
         "role_read_page_token": page.role_read_page_token,
         "role_read_page_status": page.role_read_page_status,
+        # The horizon the role section applied (the request's ``since``), null
+        # when none was asked for or the role section failed. A caller that sent
+        # ``since`` and reads null here must not treat role_entries as bounded.
+        "role_since_created_at": (page.role_since_created_at.isoformat() if page.role_since_created_at is not None else None),
+        # Which roles the role section read and, per role, how many rows the
+        # covered-mark floor and a read receipt hid inside the window this call
+        # scanned. Counts only, never hidden content; empty when the holder
+        # holds no role or the role section failed. A role missing from this
+        # list was not read; a role listed with floor_hidden>0 and no
+        # role_entries is the "notified but empty" case (iss_14bedd40).
+        # ``scan_truncated`` is present, and true, only for a role whose receipt
+        # refill spent its page budget: its role_entries are every unserved row
+        # the scan found, older rows were not scanned, and next_role_cursor
+        # continues the scan. An absent key means the scan completed.
+        "role_read_coverage": [
+            {
+                "role": coverage.role,
+                "covered_mark_present": coverage.covered_mark_present,
+                "floor_hidden": coverage.floor_hidden,
+                "receipt_hidden": coverage.receipt_hidden,
+                **({"scan_truncated": True} if coverage.scan_truncated else {}),
+            }
+            for coverage in page.role_read_coverage
+        ],
     }

@@ -60,6 +60,10 @@ NOT contribute to the exit verdict. Under the KB "Gate Allowlist
 Conventions", adding entries without operator approval defeats the gate's
 purpose.
 
+The checkout's tracked-debt register is loaded by default; ``--allowlist``
+selects a replacement. Key resolution treats an explicit ``key=`` keyword
+like the first positional key, including module-level constants and aliases.
+
 Exit codes (mirror wint2_driver_import_check.py):
   0  — clean, all findings allowlisted, OR ``--warn-only`` mode
   1  — non-allowlisted findings present AND ``--warn-only`` NOT passed
@@ -87,6 +91,7 @@ if str(REPO_ROOT) not in sys.path:
 from quality_gates.allowlist_schema import load_allowlist as _load_tagged_allowlist  # noqa: E402
 
 CHECK_ID = "D1.2"
+_DEFAULT_ALLOWLIST = REPO_ROOT / "quality_gates/wint2_vault_key_declaration_allowlist.txt"
 
 # Sentinel inserted into a resolved string when an f-string
 # interpolation slot cannot be evaluated statically (e.g.
@@ -99,38 +104,53 @@ CHECK_ID = "D1.2"
 _UNRESOLVED_PART = "\x00UNRESOLVED\x00"
 
 # Verb methods that operate on a vault key (first positional arg).
-_VAULT_VERBS = frozenset({
-    "store", "retrieve", "delete", "exists", "rotate", "rename", "list",
-    "store_random",
-})
+_VAULT_VERBS = frozenset(
+    {
+        "store",
+        "retrieve",
+        "delete",
+        "exists",
+        "rotate",
+        "rename",
+        "list",
+        "store_random",
+    }
+)
 
 # Verbs whose first positional is NOT a key (excluded from key-arg
 # scanning even when the receiver matches the vault heuristic).
-_NON_KEY_VERBS = frozenset({
-    "list",  # `vault.list(tag=...)` — first arg is a tag string, not a key.
-})
+_NON_KEY_VERBS = frozenset(
+    {
+        "list",  # `vault.list(tag=...)` — first arg is a tag string, not a key.
+    }
+)
 
 # Attribute / Name final-segment match for the vault-proxy heuristic.
 # Receivers whose name ends in any of these are treated as plausible
 # vault proxies (the verb-name match adds the second confirmation).
-_VAULT_RECEIVER_SEGMENTS = frozenset({
-    "vault_service",
-    "_vault_service",
-    "vault_proxy",
-    "_vault",
-})
+_VAULT_RECEIVER_SEGMENTS = frozenset(
+    {
+        "vault_service",
+        "_vault_service",
+        "vault_proxy",
+        "_vault",
+    }
+)
 
 # Line-suffix annotation. Strict syntax per Codex correction #5: only
 # ``# vault-key:`` accepted, never ``@vault-key`` or other variants.
 _ANNOTATION_TOKEN = "# vault-key:"
 
-_SCAN_ROOTS = (
-    REPO_ROOT / "plugins",
-)
+_SCAN_ROOTS = (REPO_ROOT / "plugins",)
 
-_OPERATOR_TOOLING_PLUGIN_SEGMENTS = frozenset({
-    "research", "tools", "migrations", "parity_tests",
-})
+_OPERATOR_TOOLING_PLUGIN_SEGMENTS = frozenset(
+    {
+        "research",
+        "tools",
+        "migrations",
+        "parity_tests",
+    }
+)
 
 _BUNDLED_VENV_PREFIX = ".venv"
 _PRUNE_DIRS = frozenset({"__pycache__", ".mypy_cache", ".pytest_cache"})
@@ -191,14 +211,17 @@ def load_allowlist(path: Path) -> Allowlist:
         parts = key.split("::", 2)
         if len(parts) < 3:
             print(
-                f"WARN: malformed allowlist line "
-                f"(need <check>::<scope>::<spec>): {key!r}",
+                f"WARN: malformed allowlist line (need <check>::<scope>::<spec>): {key!r}",
                 file=sys.stderr,
             )
             continue
-        entries.add(AllowlistEntry(
-            parts[0].strip(), parts[1].strip(), parts[2].strip(),
-        ))
+        entries.add(
+            AllowlistEntry(
+                parts[0].strip(),
+                parts[1].strip(),
+                parts[2].strip(),
+            )
+        )
     return Allowlist(frozenset(entries))
 
 
@@ -220,7 +243,7 @@ def _is_in_scope(path: Path) -> bool:
         scope_segment = parts[plugins_idx + 2]
         if scope_segment not in _PLUGIN_SCOPE_SEGMENTS:
             return False
-        remaining = parts[plugins_idx + 3:]
+        remaining = parts[plugins_idx + 3 :]
         if any(seg in _OPERATOR_TOOLING_PLUGIN_SEGMENTS for seg in remaining):
             return False
     return True
@@ -330,13 +353,7 @@ def _resolve_imports(module: ast.Module) -> dict[str, tuple[str, str]]:
 
 def _plugin_py_files(src_root: Path) -> list[Path]:
     """Walk src_root for .py files, excluding bundled venvs + cache dirs."""
-    return [
-        p for p in src_root.rglob("*.py")
-        if not any(part in _PRUNE_DIRS for part in p.parts)
-        and not any(
-            part.startswith(_BUNDLED_VENV_PREFIX) for part in p.parts
-        )
-    ]
+    return [p for p in src_root.rglob("*.py") if not any(part in _PRUNE_DIRS for part in p.parts) and not any(part.startswith(_BUNDLED_VENV_PREFIX) for part in p.parts)]
 
 
 def _build_module_index(
@@ -365,8 +382,11 @@ def _make_cross_module_resolver(
     module_imports: dict[Path, dict[str, tuple[str, str]]],
 ) -> Any:
     """Build a `_resolve(path, name)` closure that chases relative imports."""
+
     def _resolve(
-        path: Path, name: str, visited: set[tuple[Path, str]] | None = None,
+        path: Path,
+        name: str,
+        visited: set[tuple[Path, str]] | None = None,
     ) -> str | None:
         visited = visited or set()
         key = (path, name)
@@ -382,16 +402,17 @@ def _make_cross_module_resolver(
         mod, orig = imports[name]
         target_tail = mod.replace(".", "/") + ".py"
         for candidate in py_files:
-            if candidate.as_posix().endswith(target_tail) or (
-                candidate.name == mod.split(".")[-1] + ".py"
-            ):
+            if candidate.as_posix().endswith(target_tail) or (candidate.name == mod.split(".")[-1] + ".py"):
                 return _resolve(candidate, orig, visited)
         return None
+
     return _resolve
 
 
 def _binop_part_value(
-    node: ast.expr, path: Path, resolve: Any,
+    node: ast.expr,
+    path: Path,
+    resolve: Any,
 ) -> str | None:
     if isinstance(node, ast.Name):
         return resolve(path, node.id)
@@ -401,7 +422,9 @@ def _binop_part_value(
 
 
 def _resolve_list_element(
-    elt: ast.expr, path: Path, resolve: Any,
+    elt: ast.expr,
+    path: Path,
+    resolve: Any,
 ) -> str | None:
     """Resolve one list-element AST node to its literal string value, or None."""
     if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
@@ -417,16 +440,17 @@ def _resolve_list_element(
 
 
 def _is_declaration_method(method: ast.AST) -> bool:
-    return (
-        isinstance(method, ast.FunctionDef)
-        and method.name in {
-            "get_required_vault_keys", "get_declared_vault_keys",
-        }
-    )
+    return isinstance(method, ast.FunctionDef) and method.name in {
+        "get_required_vault_keys",
+        "get_declared_vault_keys",
+    }
 
 
 def _collect_declaration_returns(
-    method: ast.FunctionDef, path: Path, resolve: Any, out: set[str],
+    method: ast.FunctionDef,
+    path: Path,
+    resolve: Any,
+    out: set[str],
 ) -> None:
     for sub in ast.walk(method):
         if not isinstance(sub, ast.Return) or not isinstance(sub.value, ast.List):
@@ -446,7 +470,9 @@ def _gather_plugin_declared_keys(plugin_dir: Path) -> set[str]:
     py_files = _plugin_py_files(src_root)
     module_ast, module_consts, module_imports = _build_module_index(py_files)
     resolve = _make_cross_module_resolver(
-        py_files, module_consts, module_imports,
+        py_files,
+        module_consts,
+        module_imports,
     )
     for path, node in module_ast.items():
         for cls in (n for n in ast.walk(node) if isinstance(n, ast.ClassDef)):
@@ -482,7 +508,8 @@ def _key_matches_declared(key: str, declared: set[str]) -> bool:
 
 
 def _joinedstr_to_literal(
-    arg: ast.JoinedStr, module_consts: dict[str, str | None],
+    arg: ast.JoinedStr,
+    module_consts: dict[str, str | None],
 ) -> str | None:
     """Resolve an f-string arg to a literal; sentinel-substitutes unknown parts."""
     parts: list[str] = []
@@ -498,12 +525,20 @@ def _joinedstr_to_literal(
 
 
 def _key_arg_literal(
-    call: ast.Call, module_consts: dict[str, str | None],
+    call: ast.Call,
+    module_consts: dict[str, str | None],
 ) -> str | None:
-    """Resolve the first positional arg of `call` to a literal if possible."""
-    if not call.args:
+    """Resolve the first positional or explicit ``key=`` argument identically."""
+    arg = (
+        call.args[0]
+        if call.args
+        else next(
+            (keyword.value for keyword in call.keywords if keyword.arg == "key"),
+            None,
+        )
+    )
+    if arg is None:
         return None
-    arg = call.args[0]
     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
         return arg.value
     if isinstance(arg, ast.Name):
@@ -522,7 +557,7 @@ def _annotation_for_line(source_lines: list[str], lineno: int) -> str | None:
             line = source_lines[idx]
             pos = line.find(_ANNOTATION_TOKEN)
             if pos != -1:
-                return line[pos + len(_ANNOTATION_TOKEN):].strip()
+                return line[pos + len(_ANNOTATION_TOKEN) :].strip()
     return None
 
 
@@ -549,8 +584,13 @@ def _classify_rename_args(
         arg = call.args[arg_idx]
         resolved = _resolve_single_arg(arg, constants)
         _classify_and_append(
-            hits, call.lineno, "rename", resolved, declared,
-            source_lines, marker=f"arg{arg_idx}",
+            hits,
+            call.lineno,
+            "rename",
+            resolved,
+            declared,
+            source_lines,
+            marker=f"arg{arg_idx}",
         )
 
 
@@ -561,10 +601,7 @@ def _scan_module_for_vault_calls(
     resolved_consts: dict[str, str | None] | None = None,
 ) -> list[tuple[int, str, str, str | None]]:
     """Return (lineno, verb, status, detail) tuples for every vault call."""
-    constants = (
-        resolved_consts if resolved_consts is not None
-        else _collect_module_constants(module)
-    )
+    constants = resolved_consts if resolved_consts is not None else _collect_module_constants(module)
     hits: list[tuple[int, str, str, str | None]] = []
     for node in ast.walk(module):
         if not _is_vault_verb_call(node):
@@ -577,7 +614,12 @@ def _scan_module_for_vault_calls(
             continue
         resolved = _key_arg_literal(node, constants)
         _classify_and_append(
-            hits, node.lineno, verb, resolved, declared, source_lines,
+            hits,
+            node.lineno,
+            verb,
+            resolved,
+            declared,
+            source_lines,
         )
     return hits
 
@@ -591,14 +633,15 @@ def _resolve_single_arg(arg: ast.expr, consts: dict[str, str | None]) -> str | N
 
 
 def _classify_resolved_key(
-    resolved: str, declared: set[str], lineno: int, verb: str,
+    resolved: str,
+    declared: set[str],
+    lineno: int,
+    verb: str,
 ) -> tuple[int, str, str, str | None] | None:
     """Return an ok-* tuple if `resolved` matches declared, else None."""
     if _key_matches_declared(resolved, declared):
         return (lineno, verb, "ok-literal", resolved)
-    if any(
-        d.endswith("*") and resolved.startswith(d[:-1]) for d in declared
-    ):
+    if any(d.endswith("*") and resolved.startswith(d[:-1]) for d in declared):
         return (lineno, verb, "ok-prefix", resolved)
     return None
 
@@ -654,7 +697,10 @@ def _findings_from_module(
         source_lines = []
     findings: list[Finding] = []
     for lineno, verb, status, detail in _scan_module_for_vault_calls(
-        module, declared, source_lines, resolved_consts,
+        module,
+        declared,
+        source_lines,
+        resolved_consts,
     ):
         if status.startswith("ok-"):
             continue
@@ -669,22 +715,18 @@ def _findings_from_module(
                 f"line (or the immediately preceding line)."
             )
         else:  # unresolved
-            msg = (
-                f"{rel}:{lineno} calls vault.{verb}(...) with a key "
-                f"argument the static gate could not resolve to a "
-                f"literal. Add a `# vault-key: <declared-key-or-prefix>` "
-                f"annotation or refactor the call to use a module-level "
-                f"`Final[str]` constant."
-            )
+            msg = f"{rel}:{lineno} calls vault.{verb}(...) with a key argument the static gate could not resolve to a literal. Add a `# vault-key: <declared-key-or-prefix>` annotation or refactor the call to use a module-level `Final[str]` constant."
         spec = f"{lineno}::{verb}::{detail or 'dynamic'}"
-        findings.append(Finding(
-            check_id=CHECK_ID,
-            scope_qualifier=rel,
-            specifier=spec,
-            message=msg,
-            file_path=rel,
-            lineno=lineno,
-        ))
+        findings.append(
+            Finding(
+                check_id=CHECK_ID,
+                scope_qualifier=rel,
+                specifier=spec,
+                message=msg,
+                file_path=rel,
+                lineno=lineno,
+            )
+        )
     return findings
 
 
@@ -706,7 +748,9 @@ def _build_plugin_const_index(
     py_files = _plugin_py_files(src_root)
     _, per_module_consts, per_module_imports = _build_module_index(py_files)
     resolve = _make_cross_module_resolver(
-        py_files, per_module_consts, per_module_imports,
+        py_files,
+        per_module_consts,
+        per_module_imports,
     )
 
     # Materialize a flat per-module map that includes both the module's
@@ -743,9 +787,14 @@ def collect_findings() -> list[Finding]:
             module = _parse_safely(path)
             if module is None:
                 continue
-            out.extend(_findings_from_module(
-                module, path, declared, per_module_resolved.get(path, {}),
-            ))
+            out.extend(
+                _findings_from_module(
+                    module,
+                    path,
+                    declared,
+                    per_module_resolved.get(path, {}),
+                )
+            )
     return out
 
 
@@ -761,8 +810,7 @@ def _emit_human(findings: list[Finding], allowlist: Allowlist) -> tuple[int, int
         is_allow = allowlist.covers(finding)
         marker = " [allowlisted]" if is_allow else ""
         print(
-            f"{finding.check_id}::{finding.scope_qualifier}::"
-            f"{finding.specifier}{marker}",
+            f"{finding.check_id}::{finding.scope_qualifier}::{finding.specifier}{marker}",
         )
         print(f"   {finding.message}")
         if is_allow:
@@ -782,20 +830,27 @@ def _emit_json(findings: list[Finding], allowlist: Allowlist) -> tuple[int, int]
             allowlisted += 1
         else:
             blocking += 1
-        payload_findings.append({
-            "check_id": finding.check_id,
-            "scope_qualifier": finding.scope_qualifier,
-            "specifier": finding.specifier,
-            "message": finding.message,
-            "file_path": finding.file_path,
-            "lineno": finding.lineno,
-            "allowlisted": is_allow,
-        })
-    print(json.dumps({
-        "blocking": blocking,
-        "allowlisted": allowlisted,
-        "findings": payload_findings,
-    }, indent=2))
+        payload_findings.append(
+            {
+                "check_id": finding.check_id,
+                "scope_qualifier": finding.scope_qualifier,
+                "specifier": finding.specifier,
+                "message": finding.message,
+                "file_path": finding.file_path,
+                "lineno": finding.lineno,
+                "allowlisted": is_allow,
+            }
+        )
+    print(
+        json.dumps(
+            {
+                "blocking": blocking,
+                "allowlisted": allowlisted,
+                "findings": payload_findings,
+            },
+            indent=2,
+        )
+    )
     return blocking, allowlisted
 
 
@@ -807,21 +862,20 @@ def _emit_json(findings: list[Finding], allowlist: Allowlist) -> tuple[int, int]
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--allowlist", type=Path, default=None,
-        help="Path to tracked-debt allowlist file.",
+        "--allowlist",
+        type=Path,
+        default=_DEFAULT_ALLOWLIST,
+        help="Path to tracked-debt allowlist file (default: this checkout's register).",
     )
     parser.add_argument(
-        "--json", action="store_true",
+        "--json",
+        action="store_true",
         help="Emit machine-readable JSON instead of human text.",
     )
     parser.add_argument(
-        "--warn-only", action="store_true",
-        help=(
-            "Always exit 0; print findings but do NOT contribute to "
-            "the blocking verdict. This is the W-PLUGIN-LAUNCH-KEYS "
-            "sub-1 mode. Sub-2 (W-VAULT-CALLER-ENFORCE) drops this "
-            "flag to flip to fail-mode."
-        ),
+        "--warn-only",
+        action="store_true",
+        help=("Always exit 0; print findings but do NOT contribute to the blocking verdict. This is the W-PLUGIN-LAUNCH-KEYS sub-1 mode. Sub-2 (W-VAULT-CALLER-ENFORCE) drops this flag to flip to fail-mode."),
     )
     return parser
 
@@ -849,20 +903,16 @@ def main(argv: list[str]) -> int:
         if blocking == 0:
             if not findings:
                 print(
-                    "OK: 0 findings; W-PLUGIN-LAUNCH-KEYS vault-key "
-                    "declaration gate clean.",
+                    "OK: 0 findings; W-PLUGIN-LAUNCH-KEYS vault-key declaration gate clean.",
                 )
             else:
                 print(
-                    f"OK: {len(findings)} finding(s) — all allowlisted; "
-                    "W-PLUGIN-LAUNCH-KEYS vault-key declaration gate clean.",
+                    f"OK: {len(findings)} finding(s) — all allowlisted; W-PLUGIN-LAUNCH-KEYS vault-key declaration gate clean.",
                 )
         else:
             mode = "warn" if args.warn_only else "fail"
             print(
-                f"\n{len(findings)} W-PLUGIN-LAUNCH-KEYS finding(s) "
-                f"({allowlisted} allowlisted; {blocking} non-allowlisted; "
-                f"mode={mode}).",
+                f"\n{len(findings)} W-PLUGIN-LAUNCH-KEYS finding(s) ({allowlisted} allowlisted; {blocking} non-allowlisted; mode={mode}).",
                 file=sys.stderr,
             )
     if args.warn_only:

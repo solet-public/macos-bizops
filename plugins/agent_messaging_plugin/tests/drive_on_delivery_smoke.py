@@ -41,10 +41,13 @@ import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import current_thread
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+_ROOT = REPO_ROOT
+sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
@@ -52,12 +55,19 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
+from _register_unit_double import fixture_assignment  # noqa: E402
 from ananta.llm.agent_messaging.models import RoleMessagePersisted, TextPart  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
+from codex_eventual_pickup_smoke import _State  # noqa: E402 -- production-shaped transaction fixture
 
 import agent_messaging_plugin.session_hosts as session_hosts  # noqa: E402
 from agent_messaging_plugin.bridge_sessions import (  # noqa: E402
     DEFAULT_BINDING_LIVENESS_WINDOW_S,
+)
+from agent_messaging_plugin.delivery_drive import (  # noqa: E402
+    CodexPickupStore,
+    drive_queue_snapshot,
+    finished_drive_outcome,
 )
 from agent_messaging_plugin.local_cli.spool import (  # noqa: E402
     default_spool_path,
@@ -116,7 +126,7 @@ def _check(condition: object, label: str) -> None:
 
 
 def _state() -> StateManagementInterface:
-    return cast("StateManagementInterface", RealShapeState())
+    return cast("StateManagementInterface", _State())
 
 
 _TEST_HOST = "test-drive-on-delivery-host"
@@ -145,12 +155,15 @@ class _FakeParkInterruptingChannel(_FakeChannel):
 
 
 class _FakeDriverWithChannel:
-    def __init__(self, *, raise_on_send: bool = False, park_interrupt: bool = False) -> None:
-        self.channel = (
-            _FakeParkInterruptingChannel()
-            if park_interrupt
-            else _FakeChannel(raise_on_send=raise_on_send)
-        )
+    def __init__(
+        self,
+        *,
+        raise_on_send: bool = False,
+        park_interrupt: bool = False,
+        raise_on_delivery_drive_thread: bool = False,
+    ) -> None:
+        self.channel = _FakeParkInterruptingChannel() if park_interrupt else _FakeChannel(raise_on_send=raise_on_send)
+        self._raise_on_delivery_drive_thread = raise_on_delivery_drive_thread
 
     def spawn(self, spec: object) -> str:
         del spec
@@ -165,6 +178,8 @@ class _FakeDriverWithChannel:
 
     def driver_channel(self, host_ref: str) -> _FakeChannel:
         del host_ref
+        if self._raise_on_delivery_drive_thread and current_thread().name.startswith("peer-delivery-drive"):
+            raise RuntimeError("delivery-drive executor channel lookup exploded")
         return self.channel
 
     def capability_report(self) -> dict[str, object]:
@@ -175,10 +190,15 @@ class _FakeDriverWithChannel:
 
 
 def _install_fake_host(
-    *, raise_on_send: bool = False, park_interrupt: bool = False,
+    *,
+    raise_on_send: bool = False,
+    park_interrupt: bool = False,
+    raise_on_delivery_drive_thread: bool = False,
 ) -> _FakeDriverWithChannel:
     driver = _FakeDriverWithChannel(
-        raise_on_send=raise_on_send, park_interrupt=park_interrupt,
+        raise_on_send=raise_on_send,
+        park_interrupt=park_interrupt,
+        raise_on_delivery_drive_thread=raise_on_delivery_drive_thread,
     )
     session_hosts._REGISTRY[_TEST_HOST] = driver  # noqa: SLF001 -- test-only monkeypatch
     return driver
@@ -297,7 +317,8 @@ class _FakeMultiPeerRegistry:
 
     def register(self, agent_instance_id: str, *, bridge_id: str) -> None:
         self._by_instance[agent_instance_id] = _bound_binding(
-            agent_instance_id, bridge_id=bridge_id,
+            agent_instance_id,
+            bridge_id=bridge_id,
         )
 
     def resolve(self, agent_id: str, agent_instance_id: str | None) -> BridgeBinding:
@@ -363,7 +384,10 @@ class _FakeSingleBindingRegistry:
 
 
 def _send_wc(
-    state: StateManagementInterface, binding: BridgeBinding, *, content: str,
+    state: StateManagementInterface,
+    binding: BridgeBinding,
+    *,
+    content: str,
 ) -> tuple[Any, _FakeBridgeManager]:
     manager = _FakeBridgeManager()
     registry = _FakeSingleBindingRegistry(binding)
@@ -408,7 +432,9 @@ def test_wake_capable_recipient_writes_no_spool() -> None:
     with patch.dict(os.environ, {"SOLET_NAME": _WC_SOLET_NAME}):
         state = _state()
         outcome, manager = _send_wc(
-            state, _wc_binding(wake_capable=True), content="IMPORTANT: wc capable ping",
+            state,
+            _wc_binding(wake_capable=True),
+            content="IMPORTANT: wc capable ping",
         )
     _check(not spool.exists(), "wake_capable=true recipient: no spool file created")
     _check(
@@ -435,12 +461,13 @@ def test_wake_incapable_dispatch_writes_no_spool() -> None:
     with patch.dict(os.environ, {"SOLET_NAME": _WC_SOLET_NAME}):
         state = _state()
         outcome, manager = _send_wc(
-            state, _wc_binding(wake_capable=False), content="IMPORTANT: codex wc ping",
+            state,
+            _wc_binding(wake_capable=False),
+            content="IMPORTANT: codex wc ping",
         )
     _check(
         not spool.exists(),
-        "wake_capable=false: dispatch writes nothing at the path the retired tee "
-        "used to derive -- no dead spool left behind",
+        "wake_capable=false: dispatch writes nothing at the path the retired tee used to derive -- no dead spool left behind",
     )
     _check(
         outcome.delivery == DELIVERY_QUEUED_NOTIFICATION,
@@ -471,6 +498,22 @@ def test_wake_incapable_role_send_writes_no_spool() -> None:
     )
     with patch.dict(os.environ, {"SOLET_NAME": _WC_SOLET_NAME}):
         state = _state()
+        state.upsert_state(
+            AGENT_ROLE_BINDING_NAMESPACE,
+            {
+                "table": "role_binding",
+                "conflict_columns": ["external_id"],
+                "record": {
+                    "external_id": "role:Codex-Reviewer",
+                    "role": "Codex-Reviewer",
+                    "holder_kind": "session",
+                    "agent_instance_id": binding.agent_instance_id,
+                    "agent_session_id": binding.agent_session_id,
+                    "holder_identity": {"agent_id": "codex", "session_label": "Codex-Reviewer"},
+                    "claim_epoch": 1,
+                },
+            },
+        )
         manager = _FakeBridgeManager()
         registry = _FakeSingleBindingRegistry(binding)
         outcome = dispatch_role_send(
@@ -490,8 +533,7 @@ def test_wake_incapable_role_send_writes_no_spool() -> None:
         )
     _check(
         not spool.exists(),
-        "role-send to wake_capable=false recipient: no spool file appears at the "
-        "path the retired tee used to derive",
+        "role-send to wake_capable=false recipient: no spool file appears at the path the retired tee used to derive",
     )
     _check(
         outcome.delivery == DELIVERY_QUEUED_NOTIFICATION,
@@ -502,8 +544,23 @@ def test_wake_incapable_role_send_writes_no_spool() -> None:
         "role-send: the existing channel-event notify still fires unchanged",
     )
     _check(
-        outcome.to_payload().get("drive_on_delivery") == "not_managed",
-        "role-send exposes not_managed alongside delivery",
+        outcome.to_payload().get("drive_on_delivery") == "driver_scheduled",
+        "Codex role-send schedules the retained pickup lookup alongside delivery",
+    )
+    finished = _await_drive(outcome)
+    _check(
+        finished is not None and finished[0] == "not_managed",
+        "finished Codex role lookup preserves not_managed without touching any channel",
+    )
+    pickup = CodexPickupStore(state).read("arm-wc-role-test")
+    _check(
+        pickup is not None and pickup["pending"] and pickup["phase"] == "pending_resolution" and pickup["reason"] == "not_managed",
+        "unmanaged Codex role recipient retains a truthful pending pickup projection",
+    )
+    history = CodexPickupStore(state).history("arm-wc-role-test")
+    _check(
+        [event["version"] for event in history] == [1, 2] and history[0]["evidence"]["phase"] == "queued" and history[1]["evidence"]["phase"] == "pending_resolution" and history[1]["evidence"]["reason"] == "not_managed",
+        "unmanaged role lookup appends evidence without claiming pane submission or inbox pickup",
     )
 
 
@@ -534,7 +591,11 @@ class _FakeBridgeManager:
         del agent_instance_id
 
     def append_event(
-        self, bridge_id: str, event: str, prose: str, meta: dict[str, object],
+        self,
+        bridge_id: str,
+        event: str,
+        prose: str,
+        meta: dict[str, object],
     ) -> None:
         self.events.append((bridge_id, event, prose, meta))
 
@@ -563,15 +624,27 @@ def _send(
     return outcome, manager
 
 
+def _await_drive(outcome: Any) -> tuple[str, str | None] | None:
+    """iss_ab680764: a send reports ``driver_scheduled``; the channel half runs
+    on the delivery-drive executor. Wait for that drive's finished record."""
+    return finished_drive_outcome(outcome.message_id, timeout_s=5.0)
+
+
 def _insert(
-    state: StateManagementInterface, *, host: str = _TEST_HOST,
+    state: StateManagementInterface,
+    *,
+    host: str = _TEST_HOST,
     agent_instance_id: str = _RECIPIENT_AGI,
 ) -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id=agent_instance_id, lane_id="lane-dod", brief_ref="",
-            work_class="read_only", budget_line="b1", host=host,
+            agent_instance_id=agent_instance_id,
+            lane_id="lane-dod",
+            assignment=fixture_assignment(),
+            work_class="read_only",
+            budget_line="b1",
+            host=host,
         ),
     )
 
@@ -584,36 +657,45 @@ def test_eligible_recipient_channel_receives_notice_alongside_notify() -> None:
             state = _state()
             _insert(state)
             transition_lifecycle_state(
-                state, agent_instance_id=_RECIPIENT_AGI, from_state=LIFECYCLE_SPAWNING,
-                to_state=LIFECYCLE_LIVE, directed_by="test:none",
+                state,
+                agent_instance_id=_RECIPIENT_AGI,
+                from_state=LIFECYCLE_SPAWNING,
+                to_state=LIFECYCLE_LIVE,
+                directed_by="test:none",
             )
             if eligible_state != LIFECYCLE_LIVE:
                 transition_lifecycle_state(
-                    state, agent_instance_id=_RECIPIENT_AGI, from_state=LIFECYCLE_LIVE,
-                    to_state=eligible_state, directed_by="test:none",
+                    state,
+                    agent_instance_id=_RECIPIENT_AGI,
+                    from_state=LIFECYCLE_LIVE,
+                    to_state=eligible_state,
+                    directed_by="test:none",
                 )
             outcome, manager = _send(state)
+            _check(
+                outcome.to_payload().get("drive_on_delivery") == "driver_scheduled",
+                f"({eligible_state}) the send reports driver_scheduled, not a drive it has not run",
+            )
+            finished = _await_drive(outcome)
             _check(
                 len(driver.channel.sent) == 1 and "drain peer_inbox" in driver.channel.sent[0],
                 f"({eligible_state}) drive-on-delivery notice reaches the channel",
             )
             _check(
-                "IMPORTANT: ping" not in driver.channel.sent[0]
-                and "ping" not in driver.channel.sent[0],
+                "IMPORTANT: ping" not in driver.channel.sent[0] and "ping" not in driver.channel.sent[0],
                 f"({eligible_state}) the channel notice is NOT the message body",
             )
             _check(
                 len(manager.events) == 1,
-                f"({eligible_state}) the existing channel-event notify STILL fires "
-                "(ALONGSIDE, not replaced)",
+                f"({eligible_state}) the existing channel-event notify STILL fires (ALONGSIDE, not replaced)",
             )
             _check(
                 outcome.delivery == DELIVERY_QUEUED_NOTIFICATION,
                 f"({eligible_state}) delivery_kind is untouched by the drive nudge",
             )
             _check(
-                outcome.to_payload().get("drive_on_delivery") == "driver_sent",
-                f"({eligible_state}) sender sees driver_sent alongside delivery",
+                finished is not None and finished[0] == "driver_sent",
+                f"({eligible_state}) the finished drive records driver_sent alongside delivery",
             )
         finally:
             _remove_fake_host()
@@ -640,12 +722,18 @@ def test_ineligible_recipient_channel_receives_nothing() -> None:
             _insert(state)
             if needs_transition:
                 transition_lifecycle_state(
-                    state, agent_instance_id=_RECIPIENT_AGI, from_state=LIFECYCLE_SPAWNING,
-                    to_state=LIFECYCLE_LIVE, directed_by="test:none",
+                    state,
+                    agent_instance_id=_RECIPIENT_AGI,
+                    from_state=LIFECYCLE_SPAWNING,
+                    to_state=LIFECYCLE_LIVE,
+                    directed_by="test:none",
                 )
                 transition_lifecycle_state(
-                    state, agent_instance_id=_RECIPIENT_AGI, from_state=LIFECYCLE_LIVE,
-                    to_state=ineligible_state, directed_by="test:none",
+                    state,
+                    agent_instance_id=_RECIPIENT_AGI,
+                    from_state=LIFECYCLE_LIVE,
+                    to_state=ineligible_state,
+                    directed_by="test:none",
                 )
             outcome, manager = _send(state)
             _check(
@@ -680,26 +768,37 @@ def test_parked_capable_recipient_interrupts_and_reports_detail() -> None:
         state = _state()
         _insert(state)
         transition_lifecycle_state(
-            state, agent_instance_id=_RECIPIENT_AGI, from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="test:none",
+            state,
+            agent_instance_id=_RECIPIENT_AGI,
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="test:none",
         )
         transition_lifecycle_state(
-            state, agent_instance_id=_RECIPIENT_AGI, from_state=LIFECYCLE_LIVE,
-            to_state=LIFECYCLE_PARKED, directed_by="test:none",
+            state,
+            agent_instance_id=_RECIPIENT_AGI,
+            from_state=LIFECYCLE_LIVE,
+            to_state=LIFECYCLE_PARKED,
+            directed_by="test:none",
         )
         outcome, manager = _send(state)
+        _check(
+            outcome.to_payload().get("drive_on_delivery") == "driver_scheduled",
+            "parked capable delivery is scheduled at send time",
+        )
+        finished = _await_drive(outcome)
         _check(driver.channel.interrupts == 1, "parked capable channel receives one interrupt")
         _check(
             driver.channel.sent == ["delivery waiting from Sender — drain peer_inbox"],
             "parked capable channel receives the ordinary fixed notice after interrupt",
         )
         _check(
-            outcome.to_payload().get("drive_on_delivery") == "driver_sent",
-            "parked capable delivery reports driver_sent without changing durable delivery",
+            finished is not None and finished[0] == "driver_sent",
+            "parked capable delivery records driver_sent without changing durable delivery",
         )
         _check(
-            outcome.to_payload().get("drive_on_delivery_detail") == "interrupted_park",
-            "parked capable delivery exposes interrupted_park truthfully",
+            finished is not None and finished[1] == "interrupted_park",
+            "parked capable delivery records interrupted_park truthfully",
         )
         _check(len(manager.events) == 1, "park recovery stays alongside the durable notify")
     finally:
@@ -717,8 +816,11 @@ def test_raising_channel_never_fails_the_send() -> None:
         state = _state()
         _insert(state)
         transition_lifecycle_state(
-            state, agent_instance_id=_RECIPIENT_AGI, from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="test:none",
+            state,
+            agent_instance_id=_RECIPIENT_AGI,
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="test:none",
         )
         raised = False
         outcome = None
@@ -727,6 +829,7 @@ def test_raising_channel_never_fails_the_send() -> None:
         except Exception:  # noqa: BLE001 — the whole point is it must NOT raise
             raised = True
         _check(not raised, "a raising driver channel does not propagate out of dispatch_peer_send")
+        finished = _await_drive(outcome) if outcome is not None else None
         _check(
             outcome is not None and outcome.delivery == DELIVERY_QUEUED_NOTIFICATION,
             "the caller's own delivery outcome is untouched by the channel fault",
@@ -736,9 +839,76 @@ def test_raising_channel_never_fails_the_send() -> None:
             "nothing recorded as sent (the raise happened inside send)",
         )
         _check(
-            outcome is not None
-            and outcome.to_payload().get("drive_on_delivery") == "driver_error",
-            "a contained channel exception is visible as driver_error",
+            outcome is not None and outcome.to_payload().get("drive_on_delivery") == "driver_scheduled",
+            "the send itself reports driver_scheduled; the fault happens on the executor",
+        )
+        _check(
+            finished is not None and finished[0] == "driver_error",
+            "a contained channel exception is recorded as driver_error",
+        )
+    finally:
+        _remove_fake_host()
+
+
+def test_drive_fault_releases_the_queue_slot() -> None:
+    """The executor-thread lookup fault reaches _run_and_log's except path."""
+    _install_fake_host(raise_on_delivery_drive_thread=True)
+    try:
+        state = _state()
+        _insert(state)
+        transition_lifecycle_state(
+            state,
+            agent_instance_id=_RECIPIENT_AGI,
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="test:none",
+        )
+        with patch("agent_messaging_plugin.delivery_drive.logger.exception") as logged_fault:
+            pending_before = drive_queue_snapshot()["pending"]
+            outcome, _manager = _send(state)
+            finished = _await_drive(outcome)
+            pending_after = drive_queue_snapshot()["pending"]
+        fault_log = logged_fault.call_args
+        _check(
+            logged_fault.call_count == 1 and fault_log is not None and "faulted after" in str(fault_log.args[0]),
+            "drive fault releases the queue slot: _run_and_log exception branch was entered",
+        )
+        _check(
+            outcome.to_payload().get("drive_on_delivery") == "driver_scheduled" and finished is not None and finished[0] == "driver_error",
+            "drive fault releases the queue slot: executor driver fault was recorded",
+        )
+        _check(
+            pending_after == pending_before,
+            f"drive fault releases the queue slot: pending counter returns to its prior value (before={pending_before}, after={pending_after})",
+        )
+    finally:
+        _remove_fake_host()
+
+
+def test_successful_drive_releases_the_queue_slot() -> None:
+    """The queue pending counter returns to its prior value after a normal drive."""
+    _install_fake_host()
+    try:
+        state = _state()
+        _insert(state)
+        transition_lifecycle_state(
+            state,
+            agent_instance_id=_RECIPIENT_AGI,
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="test:none",
+        )
+        pending_before = drive_queue_snapshot()["pending"]
+        outcome, _manager = _send(state)
+        finished = _await_drive(outcome)
+        pending_after = drive_queue_snapshot()["pending"]
+        _check(
+            outcome.to_payload().get("drive_on_delivery") == "driver_scheduled" and finished is not None and finished[0] == "driver_sent",
+            "successful drive releases the queue slot: scheduled drive completed",
+        )
+        _check(
+            pending_after == pending_before,
+            f"successful drive releases the queue slot: pending counter returns to its prior value (before={pending_before}, after={pending_after})",
         )
     finally:
         _remove_fake_host()
@@ -774,7 +944,8 @@ def test_exact_query_empty_is_not_managed() -> None:
 def test_exact_query_fault_is_driver_unavailable() -> None:
     """An exact-lookup provider fault is unknown, never absence."""
     state = cast(
-        "StateManagementInterface", _FaultNthQueryState(fault_query_number=1),
+        "StateManagementInterface",
+        _FaultNthQueryState(fault_query_number=1),
     )
     outcome, _manager = _send(state)
     _check(
@@ -822,16 +993,23 @@ def test_report_by_unchanged_after_drive_on_delivery() -> None:
         state = _state()
         _insert(state)
         transition_lifecycle_state(
-            state, agent_instance_id=_RECIPIENT_AGI, from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="test:none",
+            state,
+            agent_instance_id=_RECIPIENT_AGI,
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="test:none",
         )
         report_by_before = read_managed_session(state, _RECIPIENT_AGI).get("report_by")
-        _send(state)
+        outcome, _manager = _send(state)
+        finished = _await_drive(outcome)
+        _check(
+            finished is not None and finished[0] == "driver_sent",
+            "the scheduled drive actually ran before report_by is re-read",
+        )
         report_by_after = read_managed_session(state, _RECIPIENT_AGI).get("report_by")
         _check(
             report_by_before == report_by_after,
-            "report_by is byte-identical before/after a drive-on-delivery notice "
-            f"(before={report_by_before!r}, after={report_by_after!r})",
+            f"report_by is byte-identical before/after a drive-on-delivery notice (before={report_by_before!r}, after={report_by_after!r})",
         )
     finally:
         _remove_fake_host()
@@ -858,8 +1036,10 @@ def test_watcher_identity_resolves_exact_managed_session() -> None:
             {"agent_session_id": stable_session_id},
         )
         transition_lifecycle_state(
-            state, agent_instance_id=spawned_instance_id,
-            from_state=LIFECYCLE_SPAWNING, to_state=LIFECYCLE_LIVE,
+            state,
+            agent_instance_id=spawned_instance_id,
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
             directed_by="test:none",
         )
         outcome, manager = _send(
@@ -869,6 +1049,7 @@ def test_watcher_identity_resolves_exact_managed_session() -> None:
                 agent_session_id=stable_session_id,
             ),
         )
+        _await_drive(outcome)
         _check(
             len(driver.channel.sent) == 1 and "drain peer_inbox" in driver.channel.sent[0],
             "watcher stable session id resolves the managed spawn driver's channel",
@@ -905,8 +1086,10 @@ def test_watcher_identity_ambiguity_never_drives() -> None:
                 {"agent_session_id": stable_session_id},
             )
             transition_lifecycle_state(
-                state, agent_instance_id=spawned_instance_id,
-                from_state=LIFECYCLE_SPAWNING, to_state=LIFECYCLE_LIVE,
+                state,
+                agent_instance_id=spawned_instance_id,
+                from_state=LIFECYCLE_SPAWNING,
+                to_state=LIFECYCLE_LIVE,
                 directed_by="test:none",
             )
         outcome, manager = _send(
@@ -958,8 +1141,7 @@ def test_state_service_none_never_raises() -> None:
         raised = True
     _check(not raised, "state_service=None degrades silently, never raises")
     _check(
-        outcome is not None
-        and outcome.to_payload().get("drive_on_delivery") == "driver_unavailable",
+        outcome is not None and outcome.to_payload().get("drive_on_delivery") == "driver_unavailable",
         "state_service=None is visible as driver_unavailable",
     )
 
@@ -970,8 +1152,11 @@ def test_managed_recipient_without_driver_is_visible() -> None:
     state = _state()
     _insert(state, host="operator")
     transition_lifecycle_state(
-        state, agent_instance_id=_RECIPIENT_AGI, from_state=LIFECYCLE_SPAWNING,
-        to_state=LIFECYCLE_LIVE, directed_by="test:none",
+        state,
+        agent_instance_id=_RECIPIENT_AGI,
+        from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_LIVE,
+        directed_by="test:none",
     )
     outcome, manager = _send(state)
     _check(len(manager.events) == 1, "driver-unavailable recipient still receives notify")
@@ -1004,14 +1189,17 @@ def test_sweep_deadline_edge_drives_a_live_managed_waiter() -> None:
         # registration hook's own job) -- no separate manual transition
         # needed, calling both would race the row's own state.
         backfill_registration(
-            state, agent_instance_id=waiter, agent_id="claude_code",
+            state,
+            agent_instance_id=waiter,
+            agent_id="claude_code",
             agent_session_id="ases-sweep-waiter01",
         )
         past_deadline = "2020-01-01T00:00:00+00:00"
         armed = verb_arm_session_dependency(
             state,
             ArmSessionDependencyRequest(
-                waiter_instance_id=waiter, condition_kind=CONDITION_DEADLINE,
+                waiter_instance_id=waiter,
+                condition_kind=CONDITION_DEADLINE,
                 condition_ref=past_deadline,
             ),
         )
@@ -1024,8 +1212,7 @@ def test_sweep_deadline_edge_drives_a_live_managed_waiter() -> None:
         _check(fired == 1, f"sweep_deadline_dependencies fired exactly 1 edge (got {fired})")
         _check(
             len(manager.events) == 1 and manager.events[0][1] == EVENT_SESSION_DEPENDENCY_WAKE,
-            "the existing session_dependency_wake append_event STILL fires "
-            "(ALONGSIDE, not replaced)",
+            "the existing session_dependency_wake append_event STILL fires (ALONGSIDE, not replaced)",
         )
         _check(
             len(driver.channel.sent) == 1 and "drain peer_inbox" in driver.channel.sent[0],
@@ -1046,8 +1233,11 @@ def test_sweep_overdue_steward_notice_unmanaged_steward_byte_unchanged() -> None
     state = _state()
     _insert(state, host="operator", agent_instance_id=overdue_worker)
     transition_lifecycle_state(
-        state, agent_instance_id=overdue_worker, from_state=LIFECYCLE_SPAWNING,
-        to_state=LIFECYCLE_LIVE, directed_by="test:none",
+        state,
+        agent_instance_id=overdue_worker,
+        from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_LIVE,
+        directed_by="test:none",
     )
     state.update_state(
         AGENT_ROLE_BINDING_NAMESPACE,
@@ -1079,13 +1269,19 @@ def test_sweep_overdue_steward_notice_drives_a_managed_steward() -> None:
         state = _state()
         _insert(state, agent_instance_id=managed_steward)
         transition_lifecycle_state(
-            state, agent_instance_id=managed_steward, from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="test:none",
+            state,
+            agent_instance_id=managed_steward,
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="test:none",
         )
         _insert(state, host="operator", agent_instance_id=overdue_worker)
         transition_lifecycle_state(
-            state, agent_instance_id=overdue_worker, from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE, directed_by="test:none",
+            state,
+            agent_instance_id=overdue_worker,
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="test:none",
         )
         state.update_state(
             AGENT_ROLE_BINDING_NAMESPACE,
@@ -1118,6 +1314,8 @@ def main() -> int:
     test_ineligible_recipient_channel_receives_nothing()
     test_parked_capable_recipient_interrupts_and_reports_detail()
     test_raising_channel_never_fails_the_send()
+    test_drive_fault_releases_the_queue_slot()
+    test_successful_drive_releases_the_queue_slot()
     test_non_managed_recipient_unaffected()
     test_exact_query_empty_is_not_managed()
     test_exact_query_fault_is_driver_unavailable()

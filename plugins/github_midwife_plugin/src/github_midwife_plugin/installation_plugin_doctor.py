@@ -20,6 +20,7 @@ from .installation_doctor import (
 from .setup_adapter_contract import AdapterRequest, JsonObject, JsonValue, evidence, result
 from .setup_adapter_runtime import CommandOutcome, Runtime, read_json_object, resolve_executable
 from .setup_plugin_operations import (
+    _manifest_has_absolute_python,
     command_output_truncated,
     plugin_list_rows,
     plugin_row_visible,
@@ -213,41 +214,8 @@ def _codex_plugin_row_matches(row: object, selector: str, expected: Path) -> boo
 
 
 def _manifest_absolute(path: Path, target: Path) -> bool:
-    manifest = read_json_object(path)
-    if manifest is None:
-        return False
-    expected = str(target / ".venv/bin/python3")
-    commands = _manifest_commands(manifest)
-    python_commands = [command for command in commands if "python3" in command]
-    return bool(python_commands) and all(
-        command.startswith(expected) for command in python_commands
-    )
-
-
-def _manifest_commands(manifest: JsonObject) -> list[str]:
-    hooks = manifest.get("hooks")
-    if not isinstance(hooks, dict):
-        return []
-    commands: list[str] = []
-    for event_entries in hooks.values():
-        commands.extend(_event_commands(event_entries))
-    return commands
-
-
-def _event_commands(event_entries: JsonValue) -> list[str]:
-    if not isinstance(event_entries, list):
-        return []
-    commands: list[str] = []
-    for entry in event_entries:
-        nested = entry.get("hooks") if isinstance(entry, dict) else None
-        if not isinstance(nested, list):
-            continue
-        commands.extend(
-            str(hook["command"])
-            for hook in nested
-            if isinstance(hook, dict) and isinstance(hook.get("command"), str)
-        )
-    return commands
+    """Use the installer's pin contract for doctor qualification, too."""
+    return _manifest_has_absolute_python(path, target)
 
 
 def selected_plugins(request: AdapterRequest, runtime: Runtime) -> JsonObject:

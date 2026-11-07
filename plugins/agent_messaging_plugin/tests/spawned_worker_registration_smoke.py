@@ -23,8 +23,10 @@ Named mutations this suite must catch:
   (``--no-claim`` is what keeps role ownership model-initiated);
 * arming the sidecar on the ``mcp`` transport, where the bridge registers;
 * the ``/rename`` skill and its seed template drifting out of lock-step, or
-  either one telling the model to claim against ``$AGENT_INSTANCE_ID``
-  (the launcher's id) rather than the watcher's derived ``agi-watch-*`` id.
+  either one deriving ``WATCH_ID`` when a managed ``AGENT_INSTANCE_ID`` is
+  available; bare watches must retain the derived ``agi-watch-*`` fallback;
+* an existing watcher and an existing application bridge being confused
+  before a second watcher is armed.
 
 No tmux server, bridge, database, or model turn is used.
 """
@@ -50,6 +52,7 @@ from agent_messaging_plugin.headless_adapter import (  # noqa: E402
     _arm_watcher,
 )
 from agent_messaging_plugin.local_cli.spool import (  # noqa: E402
+    resolve_watch_instance_id,
     watch_instance_digest,
 )
 from agent_messaging_plugin.models import (  # noqa: E402
@@ -117,6 +120,72 @@ def _tmux_env(solet_bin: str, *, transport: str = "watch") -> dict[str, str]:
         cwd=Path(solet_bin).parent,
     ))
 
+
+def _managed_identity_precedence_is_documented(body: str) -> bool:
+    return all(
+        fragment in body
+        for fragment in (
+            'WATCH_ID="${AGENT_INSTANCE_ID:-}"',
+            'if [[ -z "$WATCH_ID" ]]; then',
+            'shasum -a 256 | cut -c1-24',
+        )
+    )
+
+
+def _rename_recipe(body: str, cli_name: str) -> str:
+    for block in body.split("```bash")[1:]:
+        if 'WATCH_CLI=' in block and 'PEER_LIST=' in block and 'WATCH_BRANCH=' in block:
+            return block.split("```", 1)[0].replace("{{SOLET_NAME}}", cli_name)
+    return ""
+
+
+def _run_rename_recipe(
+    recipe: str, *, cli_name: str, case: str, session_id: str, managed_id: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str], str]:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        bindir = root / "bin"
+        bindir.mkdir()
+        call_log = root / "calls.log"
+        peer_file = root / "peer.json"
+        process_file = root / "process.txt"
+        resolved_id = managed_id if case != "bare-watcher" else resolve_watch_instance_id(session_id, None)
+        has_row = case != "absence"
+        peer_data = {"result": {"success": True, "data": {"instances": {
+            "claude_code": ([{"agent_instance_id": resolved_id, "parent_pid": 4242}] if has_row else [])
+        }}}}
+        peer_file.write_text(__import__("json").dumps(peer_data), encoding="utf-8")
+        process_command = f"{cli_name} watch --no-claim" if case in {"managed-watcher", "bare-watcher"} else "claude mcp application-bridge"
+        process_file.write_text(process_command, encoding="utf-8")
+        cli = bindir / cli_name
+        cli.write_text(
+            "#!/bin/sh\n"
+            'printf \'%s\\n\' "$*" >> "$CALL_LOG"\n'
+            'if [ "$1" = call ] && [ "$2" = plugin::agent_messaging_plugin::peer_list ]; then cat "$PEER_FILE"; fi\n',
+            encoding="utf-8",
+        )
+        cli.chmod(0o755)
+        ps = bindir / "ps"
+        ps.write_text('#!/bin/sh\ncat "$PROCESS_FILE"\n', encoding="utf-8")
+        ps.chmod(0o755)
+        env = {
+            **os.environ,
+            "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
+            "CALL_LOG": str(call_log),
+            "PEER_FILE": str(peer_file),
+            "PROCESS_FILE": str(process_file),
+            "AGENT_SESSION_ID": session_id,
+            "AGENT_IDENTITY": "claude_code",
+            "ARGUMENTS": "role-fixture",
+            "ROLE": "role-fixture",
+        }
+        if case != "bare-watcher":
+            env["AGENT_INSTANCE_ID"] = managed_id
+        else:
+            env.pop("AGENT_INSTANCE_ID", None)
+        result = subprocess.run(["bash", "-c", recipe], env=env, capture_output=True, text=True, check=False)
+        calls = call_log.read_text(encoding="utf-8").splitlines() if call_log.exists() else []
+        return result, calls, resolved_id
 
 def test_tmux_env_exports_absolute_cli_and_path() -> None:
     print("\ntmux adapter exports an absolute CLI and a PATH that finds it")
@@ -390,69 +459,101 @@ def test_presence_and_liveness_regress_independently() -> None:
     )
 
 
+def _rename_claim_contract(calls: list[str], identity: str, live: bool) -> bool:
+    claims = [call for call in calls if "peer_claim_role" in call]
+    if len(claims) != (1 if live else 0):
+        return False
+    return not live or f'"agent_instance_id": "{identity}"' in claims[0]
+
+
+def _rename_arm_contract(calls: list[str], live: bool) -> bool:
+    arms = [call for call in calls if call.startswith("watch ")]
+    return len(arms) == (0 if live else 1)
+
+
+def _rename_case_contract_holds(
+    result: subprocess.CompletedProcess[str], calls: list[str],
+    expected_branch: str, identity: str, expected_live: bool,
+) -> bool:
+    branch = f"WATCH_BRANCH={expected_branch} WATCH_ID={identity}"
+    return (
+        result.returncode == 0
+        and branch in result.stdout
+        and _rename_claim_contract(calls, identity, expected_live)
+        and _rename_arm_contract(calls, expected_live)
+    )
+
+
+def _unsafe_bridge_mutant_violates_contract(
+    recipe: str, cli_name: str, session_id: str, managed_id: str, identity: str,
+) -> bool:
+    mutant = recipe.replace("*) BRANCH=1c ;;", "*) BRANCH=1b ;;")
+    result, calls, _ = _run_rename_recipe(
+        mutant, cli_name=cli_name, case="managed-bridge",
+        session_id=session_id, managed_id=managed_id,
+    )
+    return not _rename_case_contract_holds(result, calls, "1c", identity, True)
+
+
+def _qualify_rename_case(
+    name: str, recipe: str, cli_name: str, case: str,
+    expected_branch: str, session_id: str, managed_id: str,
+) -> None:
+    result, calls, identity = _run_rename_recipe(
+        recipe, cli_name=cli_name, case=case,
+        session_id=session_id, managed_id=managed_id,
+    )
+    live = case != "absence"
+    _check(
+        _rename_case_contract_holds(result, calls, expected_branch, identity, live),
+        f"{name}: {case} selects {expected_branch}, claims the resolved id, and "
+        f"{'never arms a live incumbent' if live else 'arms only when absent'}",
+    )
+    if case == "managed-bridge":
+        _check(
+            _unsafe_bridge_mutant_violates_contract(recipe, cli_name, session_id, managed_id, identity),
+            f"{name}: unsafe-bridge-arm mutant is killed",
+        )
+
+
 def test_rename_skill_and_template_stay_in_lockstep() -> None:
-    print("\n/rename skill + seed template teach the sidecar-aware claim")
+    print("\n/rename recipes execute incumbent reuse in origin-present and template-only modes")
     template = _RENAME_TEMPLATE.read_text(encoding="utf-8")
-    if not _RENAME_SKILL.is_file():
-        # Born clone: .claude/ is origin-only and never ships, so the lockstep
-        # narrows to its shipped half — the template the clone actually carries.
-        print("  NOTE: origin rename skill absent (.claude/ never ships) — "
-              "checking the shipped template half only")
-        surfaces: tuple[tuple[str, str], ...] = (("template", template),)
-        skill = None
-    else:
-        skill = _RENAME_SKILL.read_text(encoding="utf-8")
-        surfaces = (("skill", skill), ("template", template))
-    for name, body in surfaces:
-        _check(
-            "peer_claim_role" in body and "agi-watch-" in body,
-            f"{name}: claims via peer_claim_role against the derived agi-watch id",
-        )
-        _check(
-            "$WATCH_ID" in body,
-            f"{name}: uses the computed watcher id, not $AGENT_INSTANCE_ID, for the claim",
-        )
-        _check(
-            "--no-claim" in body,
-            f"{name}: explains that the spawned sidecar holds presence without a role",
-        )
-        _check(
-            "watch --role" in body,
-            f"{name}: PRESERVES the arm-with-role branch for operator-launched sessions",
-        )
-        _check(
-            "1a" in body and "1b" in body,
-            f"{name}: branches rather than replacing the existing path",
-        )
-    if skill is not None:
-        _check(
-            ("$ARGUMENTS" in skill) and ("$ROLE" in template),
-            "each render keeps its own role variable (the documented divergence)",
-        )
-    else:
-        _check(
-            "$ROLE" in template,
-            "template keeps its role variable (skill half absent in this tree)",
-        )
+    origin = _RENAME_SKILL.read_text(encoding="utf-8") if _RENAME_SKILL.is_file() else None
+    modes: list[tuple[str, list[tuple[str, str, str]]]] = []
+    if origin is not None:
+        modes.append(("origin-present", [("skill", origin, "solet-bridge"), ("template", template, "solet-fixture")]))
+    modes.append(("template-only", [("template", template, "solet-fixture")]))
+    session_id = "ases-agi-574487c6c5c922c8533b70e39e981031"
+    managed_id = "agi-managed-watch-fixture-01"
+    for mode, surfaces in modes:
+        _check(bool(surfaces), f"{mode}: surface set is populated")
+        for name, body, cli_name in surfaces:
+            label = f"{mode}/{name}"
+            role_variable = "$ARGUMENTS" if name == "skill" else "$ROLE"
+            _check(role_variable in body, f"{label}: uses its render-specific role variable")
+            _check(_managed_identity_precedence_is_documented(body), f"{label}: managed id wins; digest is bare-watch fallback")
+            _check("A watcher does NOT register under `$AGENT_INSTANCE_ID`." not in body, f"{label}: does not contradict managed-id precedence")
+            _check("{{SOLET_NAME}}" in body if name == "template" else "solet call" not in body, f"{label}: uses the appropriate client executable")
+            recipe = _rename_recipe(body, cli_name)
+            _check(bool(recipe), f"{label}: complete lookup/decision/claim/arm recipe is executable")
+            for case, branch in (("managed-watcher", "1a"), ("managed-bridge", "1c"), ("bare-watcher", "1a"), ("absence", "1b")):
+                _qualify_rename_case(label, recipe, cli_name, case, branch, session_id, managed_id)
 
 
 def test_watch_id_recipe_matches_the_code() -> None:
-    print("\nthe skill's shell recipe reproduces the code's watcher identity")
+    print("\nrename managed and bare identities match the Python resolver")
     session_id = "ases-agi-574487c6c5c922c8533b70e39e981031"
-    from_code = f"{WATCH_AGENT_INSTANCE_PREFIX}{watch_instance_digest(session_id)}"
-    from_python = "agi-watch-" + hashlib.sha256(
-        session_id.encode("utf-8"),
-    ).hexdigest()[:24]
-    _check(from_code == from_python, "digest recipe matches watch_instance_digest")
-    shell = subprocess.run(
-        ["sh", "-c",
-         'printf %s "$1" | shasum -a 256 | cut -c1-24', "_", session_id],
-        capture_output=True, text=True, check=False,
+    managed_id = "agi-managed-watch-fixture-01"
+    derived = "agi-watch-" + hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24]
+    _check(
+        resolve_watch_instance_id(session_id, None) == derived
+        == f"{WATCH_AGENT_INSTANCE_PREFIX}{watch_instance_digest(session_id)}",
+        "bare-watch fixture matches the Python digest implementation",
     )
     _check(
-        shell.returncode == 0
-        and f"agi-watch-{shell.stdout.strip()}" == from_code,
-        "the SHELL one-liner the skill hands the model matches the code exactly",
+        resolve_watch_instance_id(session_id, managed_id) == managed_id,
+        "managed identity takes precedence in the Python resolver",
     )
 
 

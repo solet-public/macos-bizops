@@ -15,6 +15,9 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
+from ananta.core.runtime.loop_executors import ExecutorFamily, run_blocking
+
+from .bridge_diagnostics import BridgeDiagnostics, Reason
 from .models import EVENTS_AFTER_PAGE_LIMIT, BridgeSessionState, QueuedEvent
 
 if TYPE_CHECKING:
@@ -23,6 +26,16 @@ if TYPE_CHECKING:
     from .mcp_streamable.auth import BearerClaim
 
 logger = logging.getLogger(__name__)
+
+
+async def run_bridge_work[**P, T](function: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+    """Run the existing bridge body on this loop's bounded bridge workers.
+
+    Request context, values and exceptions cross the same boundary. Queued
+    cancellation removes work before submission; a submitted mutation retains
+    its slot until native completion. Full admission waits asynchronously.
+    """
+    return await run_blocking(ExecutorFamily.BRIDGE, function, *args, **kwargs)
 
 
 # The ONE literal for the binding-liveness window (WS-2a W3 / WS-2e §4.3.2).
@@ -130,6 +143,7 @@ class BridgeSessionManager:
         long_poll_timeout_s: int,
         binding_liveness_window_s: int = DEFAULT_BINDING_LIVENESS_WINDOW_S,
         policy_resolver: Callable[[BearerClaim], tuple[str, ...]] | None = None,
+        diagnostics: BridgeDiagnostics | None = None,
     ) -> None:
         self._session_id_factory = session_id_factory
         self._idle_timeout_s = idle_timeout_s
@@ -143,12 +157,13 @@ class BridgeSessionManager:
         self._binding_liveness_window_s = binding_liveness_window_s
         self._bridges: dict[str, BridgeSessionState] = {}
         self._registry_lock = threading.Lock()
+        # Writers serialize semantic diagnostics separately. Registry readers
+        # on a serving loop must never wait for a writer's disk I/O.
+        self._diagnostic_lock = threading.Lock()
         # Per-bridge wakeup primitives: each entry is the asyncio.Event
         # the long-poll waits on plus the loop that owns it (needed for
         # cross-thread set scheduling from the action-queue thread).
-        self._wakeups: dict[
-            str, tuple[asyncio.Event, asyncio.AbstractEventLoop]
-        ] = {}
+        self._wakeups: dict[str, tuple[asyncio.Event, asyncio.AbstractEventLoop]] = {}
         self._wakeups_lock = threading.Lock()
         # M5 §14.4: pluggable policy resolver. Production wires a
         # vault-backed resolver that distinguishes operator-equivalent,
@@ -156,6 +171,11 @@ class BridgeSessionManager:
         # default (EMPTY_ALLOWLIST) — used by stdio bridges and tests
         # that don't need bearer-driven policy.
         self._policy_resolver = policy_resolver
+        self._diagnostics = diagnostics
+        self.server_lifecycle_id = uuid.uuid4().hex
+        self._diagnostic_identities: dict[str, str] = {}
+        if diagnostics is not None:
+            diagnostics.emit("lifecycle_start", source="server", server_lifecycle_id=self.server_lifecycle_id)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -173,11 +193,16 @@ class BridgeSessionManager:
             session_id=session_id,
             parent_pid=parent_pid,
         )
-        with self._registry_lock:
-            self._bridges[bridge_id] = bridge
+        with self._diagnostic_lock:
+            with self._registry_lock:
+                self._bridges[bridge_id] = bridge
+            if self._diagnostics is not None:
+                self._diagnostics.emit("open", source="server", server_lifecycle_id=self.server_lifecycle_id, bridge_id=bridge_id)
         logger.info(
             "bridge opened: %s -> session %s (parent_pid=%s)",
-            bridge_id, session_id, parent_pid,
+            bridge_id,
+            session_id,
+            parent_pid,
         )
         return bridge
 
@@ -199,14 +224,12 @@ class BridgeSessionManager:
         bridge.session_label = claim.session_label
         bridge.client_id = claim.client_id
         bridge.process_export_allowlist = self._resolve_session_policy(claim)
+        self.record_identity_bound(bridge.bridge_id, claim.agent_instance_id)
         logger.info(
-            "bridge bound to OAuth client: bridge_id=%s client_id=%s "
-            "allowlist=%s",
+            "bridge bound to OAuth client: bridge_id=%s client_id=%s allowlist=%s",
             bridge.bridge_id,
             claim.client_id,
-            "_UNRESTRICTED"
-            if bridge.process_export_allowlist is _UNRESTRICTED
-            else list(bridge.process_export_allowlist),
+            "_UNRESTRICTED" if bridge.process_export_allowlist is _UNRESTRICTED else list(bridge.process_export_allowlist),
         )
         return bridge
 
@@ -222,9 +245,27 @@ class BridgeSessionManager:
             return EMPTY_ALLOWLIST
         return self._policy_resolver(claim)
 
-    def close(self, bridge_id: str) -> bool:
-        with self._registry_lock:
-            bridge = self._bridges.pop(bridge_id, None)
+    def record_identity_bound(self, bridge_id: str, agent_instance_id: str) -> None:
+        """Append only accepted identity, independently of pre-refusal caches."""
+        with self._diagnostic_lock:
+            with self._registry_lock:
+                if bridge_id not in self._bridges:
+                    return
+                self._diagnostic_identities[bridge_id] = agent_instance_id
+            if self._diagnostics is not None:
+                self._diagnostics.emit("identity_bound", source="server", server_lifecycle_id=self.server_lifecycle_id, bridge_id=bridge_id, agent_instance_id=agent_instance_id)
+
+    def _record_close(self, bridge_id: str, identity: str | None, reason: Reason, client_reported_reason: str | None = None) -> None:
+        if self._diagnostics is not None:
+            self._diagnostics.emit("close", source="server", server_lifecycle_id=self.server_lifecycle_id, bridge_id=bridge_id, agent_instance_id=identity, reason=reason, client_reported_reason=client_reported_reason)
+
+    def close(self, bridge_id: str, *, reason: Reason = "explicit_close", client_reported_reason: str | None = None) -> bool:
+        with self._diagnostic_lock:
+            with self._registry_lock:
+                bridge = self._bridges.pop(bridge_id, None)
+                identity = self._diagnostic_identities.pop(bridge_id, None)
+            if bridge is not None:
+                self._record_close(bridge_id, identity, reason, client_reported_reason)
         if bridge is None:
             return False
         bridge.closed = True
@@ -268,16 +309,21 @@ class BridgeSessionManager:
         cutoff = now or datetime.now(UTC)
         threshold = idle_timeout_s if idle_timeout_s is not None else self._idle_timeout_s
         expired: list[str] = []
-        with self._registry_lock:
-            for bridge_id, bridge in self._bridges.items():
-                if bridge.closed:
-                    continue
-                last_seen = datetime.fromisoformat(bridge.last_seen_at)
-                if (cutoff - last_seen).total_seconds() > threshold:
-                    expired.append(bridge_id)
+        with self._diagnostic_lock:
+            with self._registry_lock:
+                for bridge_id, bridge in self._bridges.items():
+                    if bridge.closed:
+                        continue
+                    last_seen = datetime.fromisoformat(bridge.last_seen_at)
+                    if (cutoff - last_seen).total_seconds() > threshold:
+                        expired.append(bridge_id)
+                identities: dict[str, str | None] = {}
+                for bridge_id in expired:
+                    bridge = self._bridges.pop(bridge_id)
+                    bridge.closed = True
+                    identities[bridge_id] = self._diagnostic_identities.pop(bridge_id, None)
             for bridge_id in expired:
-                bridge = self._bridges.pop(bridge_id)
-                bridge.closed = True
+                self._record_close(bridge_id, identities[bridge_id], "idle_timeout")
         for bridge_id in expired:
             self._signal_wakeup(bridge_id)
             with self._wakeups_lock:
@@ -295,6 +341,8 @@ class BridgeSessionManager:
         event_type: str,
         content: str,
         meta: dict[str, object] | None = None,
+        *,
+        signal_waiter: bool = True,
     ) -> QueuedEvent:
         bridge = self.get(bridge_id)
         if bridge is None:
@@ -302,7 +350,8 @@ class BridgeSessionManager:
         if bridge.pending_event_count() >= self._max_pending_events:
             raise BridgeQueueFullError(bridge_id)
         event = bridge.append_event(event_type, content, meta)
-        self._signal_wakeup(bridge_id)
+        if signal_waiter:
+            self._signal_wakeup(bridge_id)
         return event
 
     async def events_after(

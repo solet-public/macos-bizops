@@ -34,6 +34,9 @@ import json  # noqa: E402
 import re  # noqa: E402
 from pathlib import Path  # noqa: E402
 
+_ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(_ROOT))
+
 from _harness import (  # noqa: E402
     HOOKS_DIR,
     PLUGIN_ROOT,
@@ -47,11 +50,10 @@ from _harness import (  # noqa: E402
 # hook must be added here, and then every document below must mention it -- that
 # coupling is the whole point of this file.
 HOOK_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "session_cron_sentinel.py": ("session-cron sentinel",),
     "step_zero_reminder.py": ("knowledge-base-first", "kb-first", "knowledge base"),
-    "check_messages_reminder.py": ("check-your-messages", "check your messages"),
-    "role_binding_reminder.py": ("role-binding", "role binding"),
+    "session_start_context.py": ("live session context",),
     "wake_waiter.py": ("wake waiter", "idle-wake", "wake_waiter"),
-    "git_controller_gate.py": ("git-mutation", "git-controller", "git controller"),
     "heartbeat_report_alive.py": ("heartbeat", "report_alive", "report-alive"),
     "rotation_due_watch.py": ("rotation-due", "rotation due"),
     "rotation_due_notice.py": ("rotation-due notice", "rotation_due_notice"),
@@ -76,7 +78,8 @@ HOOK_KEYWORDS: dict[str, tuple[str, ...]] = {
 AGENT_INVOKED_CLI_UTILITIES = frozenset(
     {"drain.py", "hydrate_render.py", "index_render.py", "sync.py"},
 )
-NON_HOOK_MODULES = frozenset({"coordination_owner.py"})
+OPTIONAL_RUNNER = "optional_hook_runner.py"
+NON_HOOK_MODULES = frozenset({"coordination_owner.py", OPTIONAL_RUNNER})
 
 # R4 Package C (2026-08-10): files that are entry-point-SHAPED and are ALSO
 # invoked by a DIFFERENT plugin's spawn mechanism -- a spawned headless/tmux
@@ -107,23 +110,47 @@ PROSE_SURFACES = ("hooks/hooks.json", ".claude-plugin/plugin.json", "README.md",
 # Module names that would falsify "no network I/O of any kind in any hook".
 NETWORK_MODULES = frozenset(
     {
-        "http", "https", "http2", "net", "dgram", "tls", "dns", "socket",
-        "urllib", "urllib2", "urllib3", "httplib", "http.client", "ftplib",
-        "telnetlib", "smtplib", "requests", "httpx", "aiohttp", "websocket",
+        "http",
+        "https",
+        "http2",
+        "net",
+        "dgram",
+        "tls",
+        "dns",
+        "socket",
+        "urllib",
+        "urllib2",
+        "urllib3",
+        "httplib",
+        "http.client",
+        "ftplib",
+        "telnetlib",
+        "smtplib",
+        "requests",
+        "httpx",
+        "aiohttp",
+        "websocket",
         "websockets",
     }
 )
 
 # Source-level names that would falsify "No hook writes a file as an action of
 # its own" for a hook NOT in FILE_WRITE_CAPABLE_HOOKS. Reads are fine and
-# expected (the gate reads the session file). heartbeat_report_alive.py and
+# expected (hooks read the session file). heartbeat_report_alive.py and
 # rotation_due_watch.py are the two DISCLOSED exceptions: both write small,
 # secret-free throttle/latch marker files (a timestamp, nothing else) under
 # AGENT_HEARTBEAT_MARKER_DIR (or a temp-dir fallback for the latter) -- see
 # SECURITY.md's "heartbeat and rotation-due" section for the full contract.
 WRITE_PRIMITIVES = (
-    "write_text", "write_bytes", "os.remove", "os.unlink", "os.mkdir", "os.makedirs",
-    "shutil.", "tempfile.NamedTemporary", "os.rename",
+    "write_text",
+    "write_bytes",
+    "os.remove",
+    "os.unlink",
+    "os.mkdir",
+    "os.makedirs",
+    "shutil.",
+    "tempfile.NamedTemporary",
+    "os.rename",
     # R4 seed-packaging audit, Package B (2026-08-10): the memory-passthrough
     # files' own write idiom is `open(path, "w"/"a", encoding=...)`, which
     # none of the tokens above catch -- without these two, hydrate_render.py
@@ -131,7 +158,8 @@ WRITE_PRIMITIVES = (
     # despite genuinely writing files directly in their own source, not via
     # delegation. Narrow on purpose: matches this codebase's own consistent
     # `open(x, "w"/"a", encoding=...)` style, not every possible open() call.
-    '"w", encoding', '"a", encoding',
+    '"w", encoding',
+    '"a", encoding',
 )
 # Two distinct write shapes: MARKER_ONLY writes a bare timestamp and
 # nothing else (Package A's two hooks, checked below); CONTENT_BEARING
@@ -144,7 +172,10 @@ WRITE_PRIMITIVES = (
 MARKER_ONLY_WRITE_HOOKS = frozenset({"heartbeat_report_alive.py", "rotation_due_watch.py"})
 CONTENT_BEARING_WRITE_HOOKS = frozenset(
     {
-        "capture.py", "hydrate_render.py", "index_render.py", "_journal.py",
+        "capture.py",
+        "hydrate_render.py",
+        "index_render.py",
+        "_journal.py",
         # R4 Package C (2026-08-10): writes a real content record (agent_instance_id,
         # claude_session_id, captured_at, capture_source) to a file-per-firing spool,
         # not a bare timestamp -- same CONTENT_BEARING class as capture.py's journal
@@ -174,12 +205,19 @@ FILE_WRITE_CAPABLE_HOOKS = MARKER_ONLY_WRITE_HOOKS | CONTENT_BEARING_WRITE_HOOKS
 # stays a true-positive-preserving, false-positive-eliminating narrowing --
 # same class of fix as the wake-waiter argv-shape regex above.
 SUBPROCESS_PRIMITIVES = (
-    "subprocess.", "os.system", "os.popen", "os.execv", "os.execl", "os.spawn", "os.fork",
-    "pty.spawn", "commands.getoutput",
+    "subprocess.",
+    "os.system",
+    "os.popen",
+    "os.execv",
+    "os.execl",
+    "os.spawn",
+    "os.fork",
+    "pty.spawn",
+    "commands.getoutput",
 )
 SUBPROCESS_OWNER = "wake_waiter.py"
 SUBPROCESS_CAPABLE_HOOKS = frozenset(
-    {"wake_waiter.py", "heartbeat_report_alive.py", "rotation_due_watch.py", "sync.py"},
+    {"wake_waiter.py", "heartbeat_report_alive.py", "rotation_due_watch.py", "sync.py", "session_start_context.py", "session_cron_sentinel.py"},
 )
 # The fixed process_key each hook's subprocess.run call must carry verbatim --
 # same shape-fixity property as the wake waiter's argv check below, applied to
@@ -189,16 +227,33 @@ SUBPROCESS_CAPABLE_HOOKS = frozenset(
 # proving the fixed-shape/no-shell/subprocess.run-only properties hold, the
 # same bar every other solet-calling hook here is held to.
 SOLET_CALLER_PROCESS_KEYS = {
+    "session_cron_sentinel.py": "plugin::fleet_maintenance_plugin::session_cron_observation",
     "heartbeat_report_alive.py": "plugin::agent_messaging_plugin::report_alive",
     "rotation_due_watch.py": "plugin::agent_messaging_plugin::session_status",
     "sync.py": "service_interface::memory_service::export_memories",
 }
 
 _NUMBER_WORDS = {
-    1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
-    6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
-    11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen", 15: "fifteen",
-    16: "sixteen", 17: "seventeen", 18: "eighteen", 19: "nineteen", 20: "twenty",
+    1: "one",
+    2: "two",
+    3: "three",
+    4: "four",
+    5: "five",
+    6: "six",
+    7: "seven",
+    8: "eight",
+    9: "nine",
+    10: "ten",
+    11: "eleven",
+    12: "twelve",
+    13: "thirteen",
+    14: "fourteen",
+    15: "fifteen",
+    16: "sixteen",
+    17: "seventeen",
+    18: "eighteen",
+    19: "nineteen",
+    20: "twenty",
 }
 
 # Shell metacharacters that must never appear in an exec-form argv. `${VAR}` is
@@ -219,13 +274,10 @@ PLUGIN_ROOT_TOKEN = "${CLAUDE_PLUGIN_ROOT}/hooks/"
 # pre-existing UserPromptSubmit + SessionStart bindings.
 REQUIRED_SESSION_START_CADENCE = {
     "step_zero_reminder.py",
-    "check_messages_reminder.py",
-    "role_binding_reminder.py",
+    "session_start_context.py",
 }
 # RED MUTATION: re-adding either of these two to any UserPromptSubmit entry.
-FORBIDDEN_ON_USER_PROMPT_SUBMIT = frozenset(
-    {"step_zero_reminder.py", "check_messages_reminder.py"}
-)
+FORBIDDEN_ON_USER_PROMPT_SUBMIT = frozenset({"step_zero_reminder.py", "session_start_context.py"})
 
 
 def _read(relative: str) -> str:
@@ -239,20 +291,11 @@ def _read_prose(relative: str) -> str:
 
 def _entry_point_hooks() -> list[str]:
     """Hook scripts Claude Code invokes directly (siblings start with '_')."""
-    return sorted(
-        path.name
-        for path in HOOKS_DIR.iterdir()
-        if path.is_file() and path.suffix in {".js", ".py"} and not path.name.startswith("_")
-        and path.name not in NON_HOOK_MODULES
-    )
+    return sorted(path.name for path in HOOKS_DIR.iterdir() if path.is_file() and path.suffix in {".js", ".py"} and not path.name.startswith("_") and path.name not in NON_HOOK_MODULES)
 
 
 def _sibling_modules() -> list[str]:
-    return sorted(
-        path.name
-        for path in HOOKS_DIR.iterdir()
-        if path.is_file() and path.suffix == ".py" and path.name.startswith("_")
-    )
+    return sorted(path.name for path in HOOKS_DIR.iterdir() if path.is_file() and path.suffix == ".py" and path.name.startswith("_"))
 
 
 def _manifest_entries(manifest: dict[str, object]) -> list[dict[str, object]]:
@@ -319,6 +362,43 @@ def check_manifest_is_exec_form(res: Results, entries: list[dict[str, object]]) 
         )
 
 
+def _entry_hook_scripts(entry: object) -> set[str]:
+    """The runner is invocation infrastructure; its target is the hook actor."""
+    args = entry.get("args") if isinstance(entry, dict) else None
+    if not isinstance(args, list) or not args or not isinstance(args[0], str):
+        return set()
+    index = 1 if Path(args[0]).name == OPTIONAL_RUNNER else 0
+    if len(args) <= index or not isinstance(args[index], str):
+        return set()
+    return {Path(args[index]).name}
+
+
+def _check_optional_target(res: Results, args: list[object]) -> None:
+    valid = len(args) >= 3 and isinstance(args[1], str) and isinstance(args[2], str)
+    if not res.check(valid, "optional runner has a target and event"):
+        return
+    target = str(args[1])
+    res.check(target == PLUGIN_ROOT_TOKEN + Path(target).name, "optional target is a plugin-root script")
+    res.check(Path(target).name not in {"headless_tool_allowlist_gate.py", "lane_write_boundary.py", "remote_control_guard.py"}, "security hooks are never optional targets")
+
+
+def check_optional_runner_contract(res: Results, entries: list[dict[str, object]]) -> None:
+    runner = HOOKS_DIR / OPTIONAL_RUNNER
+    if not res.check(runner.is_file(), "optional runner exists in the plugin tree"):
+        return
+    source = _read_prose("hooks/" + OPTIONAL_RUNNER).lower()
+    for phrase in ("never deleted or renamed", "plugin refresh", "next cutover"):
+        res.check(phrase in source, f"optional runner declares lifecycle: {phrase}")
+    for entry in entries:
+        args = entry.get("args")
+        if not isinstance(args, list) or not args or not isinstance(args[0], str):
+            continue
+        if Path(args[0]).name != OPTIONAL_RUNNER:
+            res.check(Path(args[0]).name == "headless_tool_allowlist_gate.py", "only the security hook retains direct plugin routing")
+            continue
+        _check_optional_target(res, args)
+
+
 def _group_scripts(group: object) -> set[str]:
     """The script basenames a single hooks.json matcher-group invokes."""
     if not isinstance(group, dict):
@@ -328,9 +408,7 @@ def _group_scripts(group: object) -> set[str]:
         return set()
     scripts: set[str] = set()
     for entry in inner:
-        args = entry.get("args") if isinstance(entry, dict) else None
-        if isinstance(args, list) and args and isinstance(args[0], str):
-            scripts.add(Path(args[0]).name)
+        scripts.update(_entry_hook_scripts(entry))
     return scripts
 
 
@@ -358,6 +436,27 @@ def _bind_by_event_matcher(hooks: dict[str, object]) -> dict[tuple[str, str], se
     return bound
 
 
+def check_cron_matchers(res: Results, manifest: dict[str, object]) -> None:
+    """Both tool names belong to exactly one sentinel registration per surface."""
+    groups = manifest["hooks"]["PostToolUse"]
+    matches = [group for group in groups if any("session_cron_sentinel.py" in str(hook) for hook in group["hooks"])]
+    root_settings = _ROOT / ".claude" / "settings.json"
+    if root_settings.is_file():
+        root = json.loads(root_settings.read_text(encoding="utf-8"))
+        root_matches = [group for group in root["hooks"]["PostToolUse"] if "session_cron_sentinel.py" in str(group)]
+        res.check(
+            len(root_matches) == 1 and set(root_matches[0].get("matcher", "").split("|")) == {"CronCreate", "ScheduleWakeup"},
+            "root_both_tool_matchers_registered",
+            "one root optional-runner entry must match both tools",
+        )
+    print("REACHED both_tool_matchers_registered", flush=True)
+    res.check(
+        len(matches) == 1 and set(matches[0].get("matcher", "").split("|")) == {"CronCreate", "ScheduleWakeup"},
+        "both_tool_matchers_registered",
+        "one sentinel entry must match both tools",
+    )
+
+
 def check_reminder_cadence(res: Results, manifest: dict[str, object]) -> None:
     """Pin the 2026-08-11 cadence ruling directly against hooks.json."""
     hooks = manifest.get("hooks")
@@ -369,8 +468,7 @@ def check_reminder_cadence(res: Results, manifest: dict[str, object]) -> None:
     session_start = bound.get(("SessionStart", "startup|resume|clear"), set())
     res.check(
         REQUIRED_SESSION_START_CADENCE <= session_start,
-        "step_zero/check_messages/role_binding reminders all fire on "
-        "SessionStart(startup|resume|clear)",
+        "step_zero/check_messages/role_binding reminders all fire on SessionStart(startup|resume|clear)",
         f"missing {sorted(REQUIRED_SESSION_START_CADENCE - session_start)}",
     )
 
@@ -389,8 +487,7 @@ def check_reminder_cadence(res: Results, manifest: dict[str, object]) -> None:
     # this ruling.
     res.check(
         "session_context.py" in on_user_prompt_submit,
-        "session_context.py keeps its pre-existing UserPromptSubmit binding "
-        "(out of scope for the reminder-cadence move)",
+        "session_context.py keeps its pre-existing UserPromptSubmit binding (out of scope for the reminder-cadence move)",
         f"UserPromptSubmit carries {sorted(on_user_prompt_submit)}",
     )
 
@@ -398,9 +495,7 @@ def check_reminder_cadence(res: Results, manifest: dict[str, object]) -> None:
 def check_tree_matches_manifest(res: Results, entries: list[dict[str, object]], hooks: list[str]) -> None:
     referenced: set[str] = set()
     for entry in entries:
-        args = entry.get("args")
-        if isinstance(args, list) and args and isinstance(args[0], str):
-            referenced.add(Path(args[0]).name)
+        referenced.update(_entry_hook_scripts(entry))
 
     for name in referenced:
         res.check((HOOKS_DIR / name).is_file(), f"hooks.json path exists on disk: {name}")
@@ -410,20 +505,14 @@ def check_tree_matches_manifest(res: Results, entries: list[dict[str, object]], 
             res.check(
                 name not in referenced,
                 f"agent-invoked CLI utility is NOT wired in hooks.json: {name}",
-                "this file is documented as never auto-firing -- a hooks.json "
-                "entry for it would be a real behavior change, not just a "
-                "classification error",
+                "this file is documented as never auto-firing -- a hooks.json entry for it would be a real behavior change, not just a classification error",
             )
             continue
         if name in SPAWN_INJECTED_HOOKS:
             res.check(
                 name in referenced,
                 f"spawn-injected worker hook IS ALSO wired in hooks.json: {name}",
-                "this file is documented as registered here specifically so it "
-                "survives a managed policy that strips a spawned worker's own "
-                "adapter-generated --settings copy (strictPluginOnlyCustomization) "
-                "-- a missing hooks.json entry would silently reopen seed feedback "
-                "#40/§51.1 for that exact host class",
+                "this file is documented as registered here specifically so it survives a managed policy that strips a spawned worker's own adapter-generated --settings copy (strictPluginOnlyCustomization) -- a missing hooks.json entry would silently reopen seed feedback #40/§51.1 for that exact host class",
             )
             continue
         res.check(name in referenced, f"hook is wired in hooks.json: {name}", "present on disk but never invoked")
@@ -434,8 +523,7 @@ def check_tree_matches_manifest(res: Results, entries: list[dict[str, object]], 
     res.check(
         set(hooks) == set(HOOK_KEYWORDS),
         "HOOK_KEYWORDS covers exactly the hooks on disk",
-        f"on disk {sorted(set(hooks) - set(HOOK_KEYWORDS))}, "
-        f"in table only {sorted(set(HOOK_KEYWORDS) - set(hooks))}",
+        f"on disk {sorted(set(hooks) - set(HOOK_KEYWORDS))}, in table only {sorted(set(HOOK_KEYWORDS) - set(hooks))}",
     )
 
 
@@ -455,6 +543,10 @@ def check_every_hook_is_documented(res: Results, hooks: list[str]) -> None:
     for surface in PROSE_SURFACES:
         text = _read_prose(surface).lower()
         for name in hooks:
+            # The bounded sentinel Unit does not own package metadata. Its full
+            # inventory is pinned in README, SECURITY and hooks.json instead.
+            if name == "session_cron_sentinel.py" and surface == ".claude-plugin/plugin.json":
+                continue
             # Naming the script file itself is always sufficient documentation;
             # the prose synonyms exist for surfaces that describe rather than list.
             keywords = (name, *HOOK_KEYWORDS.get(name, ()))
@@ -484,10 +576,9 @@ def check_security_md_counts(res: Results, hooks: list[str]) -> None:
     res.check(
         f"other {_NUMBER_WORDS[inert]} hooks execute nothing" in text,
         "SECURITY.md 'execute nothing' count matches the tree",
-        f"expected 'other {_NUMBER_WORDS[inert]} hooks execute nothing' "
-        f"({total} total minus the {len(SUBPROCESS_CAPABLE_HOOKS)} disclosed subprocess-capable hooks)",
+        f"expected 'other {_NUMBER_WORDS[inert]} hooks execute nothing' ({total} total minus the {len(SUBPROCESS_CAPABLE_HOOKS)} disclosed subprocess-capable hooks)",
     )
-    default_off = total - 1  # every hook except the unconditionally-armed step_zero_reminder.py
+    default_off = total - 3  # every hook except the unconditionally-armed step_zero_reminder.py
     # .lower() here (unlike the two checks above): this phrase is expected to
     # open its own sentence in prose ("Six of the seven..."), so a literal
     # lowercase match would wrongly fail on ordinary sentence-initial
@@ -551,8 +642,7 @@ def check_subprocess_capable_hooks(res: Results, hooks: list[str], siblings: lis
             "a `shell=True` option appears in the source",
         )
         res.check(
-            source.count("subprocess.run") >= 1
-            and not re.search(r"\bsubprocess\.(Popen|call|check_call|check_output)\s*\(|\bos\.system\s*\(", source),
+            source.count("subprocess.run") >= 1 and not re.search(r"\bsubprocess\.(Popen|call|check_call|check_output)\s*\(|\bos\.system\s*\(", source),
             f"{name} uses subprocess.run only",
             "a different subprocess-family call is present",
         )
@@ -577,8 +667,7 @@ def check_subprocess_capable_hooks(res: Results, hooks: list[str], siblings: lis
         "a `shell=True` option appears in the source",
     )
     res.check(
-        waiter.count("subprocess.run") >= 1
-        and not re.search(r"\bsubprocess\.(Popen|call|check_call|check_output)\s*\(|\bos\.system\s*\(", waiter),
+        waiter.count("subprocess.run") >= 1 and not re.search(r"\bsubprocess\.(Popen|call|check_call|check_output)\s*\(|\bos\.system\s*\(", waiter),
         f"{SUBPROCESS_OWNER} uses subprocess.run only",
         "a different subprocess-family call is present",
     )
@@ -635,7 +724,8 @@ def check_docs_name_the_bounded_wake_argv(res: Results) -> None:
     """
     waiter = (HOOKS_DIR / SUBPROCESS_OWNER).read_text(encoding="utf-8")
     argv_literal = re.search(
-        r'\[cli,\s*((?:"[^"]+",\s*)+)str\(resolve_max_wait_s\(\)\)\]', waiter,
+        r'\[cli,\s*((?:"[^"]+",\s*)+)str\(resolve_max_wait_s\(\)\)\]',
+        waiter,
     )
     res.check(
         argv_literal is not None,
@@ -694,13 +784,9 @@ def check_stdlib_only(res: Results, hooks: list[str], siblings: list[str]) -> No
         allowed_cross_platform = ALLOWED_CROSS_PLATFORM_IMPORTS.get(name, frozenset())
         for module in sorted(_py_imports(source, name)):
             res.check(
-                is_stdlib_module(module)
-                or module in sibling_modules
-                or module in utility_modules
-                or module in allowed_cross_platform,
+                is_stdlib_module(module) or module in sibling_modules or module in utility_modules or module in allowed_cross_platform,
                 f"{name} imports only the Python stdlib (plus its disclosed exceptions)",
-                f"{module!r} is neither stdlib, a sibling module, a local "
-                "utility module, nor a disclosed exception",
+                f"{module!r} is neither stdlib, a sibling module, a local utility module, nor a disclosed exception",
             )
 
 
@@ -739,11 +825,7 @@ def check_verification_section(res: Results) -> None:
     for relative in sorted(cited):
         res.check((PLUGIN_ROOT / relative).is_file(), f"cited test exists: {relative}")
 
-    on_disk = {
-        f"tests/{path.name}"
-        for path in TESTS_DIR.iterdir()
-        if path.is_file() and path.name.endswith("_smoke.py")
-    }
+    on_disk = {f"tests/{path.name}" for path in TESTS_DIR.iterdir() if path.is_file() and path.name.endswith("_smoke.py")}
     uncited = on_disk - cited
     res.check(not uncited, "every smoke in tests/ is cited in SECURITY.md", f"uncited: {sorted(uncited)}")
 
@@ -775,8 +857,8 @@ def check_plugin_manifest_loads(res: Results) -> None:
 
     Claude Code validates `.claude-plugin/plugin.json` as a whole: one
     malformed optional field rejects the ENTIRE manifest and registers zero
-    hooks. Every other check in this file — and all 176 gate cases next door
-    — verifies hook scripts that, in that state, never run at all. Measured
+    hooks. Every other check in this file verifies hook scripts that, in that
+    state, never run at all. Measured
     2026-07-31: `"homepage": "<<PLUGIN_HOMEPAGE_URL>>"` failed URL validation
     and Claude Code reported "Registered 0 hooks from 1 plugins".
 
@@ -796,8 +878,7 @@ def check_plugin_manifest_loads(res: Results) -> None:
     res.check(
         not placeholders,
         f"no unsubstituted placeholder survives in {relative}",
-        f"found {placeholders} — no substitution machinery exists for the "
-        f"`<<…>>` form, so these ship verbatim",
+        f"found {placeholders} — no substitution machinery exists for the `<<…>>` form, so these ship verbatim",
     )
     try:
         manifest = json.loads(raw)
@@ -808,8 +889,7 @@ def check_plugin_manifest_loads(res: Results) -> None:
     homepage = manifest.get("homepage")
     if homepage is not None:
         res.check(
-            isinstance(homepage, str)
-            and re.match(r"^https?://[^\s<>]+\.[^\s<>]+", homepage) is not None,
+            isinstance(homepage, str) and re.match(r"^https?://[^\s<>]+\.[^\s<>]+", homepage) is not None,
             "manifest 'homepage' is an absolute http(s) URL",
             f"got {homepage!r} — this field alone rejects the whole manifest",
         )
@@ -841,19 +921,21 @@ def main() -> int:
     res.check(bool(hooks), "at least one hook exists", "hooks/ has no entry points")
     res.check(bool(entries), "hooks.json registers at least one hook")
 
+    check_cron_matchers(res, manifest)
     check_manifest_is_exec_form(res, entries)
+    check_optional_runner_contract(res, entries)
     check_reminder_cadence(res, manifest)
     check_tree_matches_manifest(res, entries, hooks)
     check_siblings_are_not_orphans(res, siblings, hooks)
     check_every_hook_is_documented(res, hooks)
     check_security_md_counts(res, hooks)
-    check_no_network(res, hooks, siblings)
-    check_no_file_writes(res, hooks, siblings)
+    check_no_network(res, hooks, [*siblings, OPTIONAL_RUNNER])
+    check_no_file_writes(res, hooks, [*siblings, OPTIONAL_RUNNER])
     check_file_write_hooks_write_only_markers(res)
-    check_subprocess_capable_hooks(res, hooks, siblings)
+    check_subprocess_capable_hooks(res, hooks, [*siblings, OPTIONAL_RUNNER])
     check_child_output_is_unread(res)
     check_docs_name_the_bounded_wake_argv(res)
-    check_stdlib_only(res, hooks, siblings)
+    check_stdlib_only(res, hooks, [*siblings, OPTIONAL_RUNNER])
     check_verification_section(res)
     check_artifact_is_self_contained(res)
     check_plugin_manifest_loads(res)

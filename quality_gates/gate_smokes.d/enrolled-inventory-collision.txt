@@ -1,0 +1,1 @@
+solet_cli/tests/enrolled_inventory_collision_smoke.py

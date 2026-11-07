@@ -333,9 +333,7 @@ def test_h_sibling_attempts_with_attempt_placement() -> None:
         len(events) == 3,
         "(h) sibling attempt yields 1 diff + 2 messages = 3 events",
     )
-    placements = [
-        evt.payload.get("_codex_cloud_attempt_placement") for evt in events
-    ]
+    placements = [evt.payload.get("_codex_cloud_attempt_placement") for evt in events]
     _check(
         all(p == 1 for p in placements),
         "(h) attempt_placement=1 stamped on every sibling event",
@@ -473,6 +471,17 @@ def test_l_event_at_matches_envelope() -> None:
 # ─── main ───────────────────────────────────────────────────────────────────
 
 
+def test_function_call_arguments_use_json_only() -> None:
+    for arguments in ("", "echo 雪\nnext", '{"cmd":"true"}'):
+        events = _parse(_envelope(task_details={"current_assistant_turn": {"id": "function-turn", "output_items": [{"type": "function_call", "name": "exec_command", "call_id": "real-call", "arguments": arguments}]}}))
+        _check(len(events) == 1, "function_call parsed exactly once")
+        normalized = codex_cloud.normalize_raw(events[0])
+        _check(normalized.event_type is EventType.TOOL_CALL and normalized.role is MessageRole.ASSISTANT, "function_call type and role retained")
+        _check(normalized.content_text is None, "function_call uses no content_text")
+        _check(normalized.content_json == {"subtype": "function_call", "name": "exec_command", "call_id": "real-call", "arguments_text": arguments}, "function_call JSON retains exact arguments/name/call_id")
+        _check((normalized.vendor_event_id, normalized.vendor_parent_event_id) == (events[0].vendor_event_id, events[0].vendor_parent_event_id), "function_call vendor identity retained")
+
+
 def main() -> int:
     print("=== codex_cloud_parse_smoke (12 cases a–l) ===")
     test_a_user_message_from_input_items()
@@ -487,9 +496,9 @@ def main() -> int:
     test_j_malformed_envelope_variants_raise()
     test_k_event_ordering_and_vendor_event_id_uniqueness()
     test_l_event_at_matches_envelope()
+    test_function_call_arguments_use_json_only()
     print(
-        f"\n{_passed} passed, {len(_failed)} failed"
-        + ("" if not _failed else "\n  failures:\n    " + "\n    ".join(_failed)),
+        f"\n{_passed} passed, {len(_failed)} failed" + ("" if not _failed else "\n  failures:\n    " + "\n    ".join(_failed)),
     )
     return 0 if not _failed else 1
 

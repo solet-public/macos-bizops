@@ -1,0 +1,3 @@
+# prb_f6964132 (unt_c0996a0e): an event-embedding sweep embeds only missing work after a corrupt checkpoint, corrects a
+# legacy unknown previous in place, skips events already holding the new cut, and drains new arrivals first. Offline.
+ananta/tests/llm/session_ledger/event_embed_sweep_missing_work_smoke.py

@@ -13,6 +13,7 @@ import logging
 from datetime import UTC, datetime
 
 from ananta.constants import FRAMEWORK_ACTION_EXECUTIONS_TABLE, FRAMEWORK_NAMESPACE
+from ananta.core.actions._measured_action_lane import run_blocking
 from ananta.core.domain.status import is_status_match
 from ananta.core.plugins.plugin_contracts import ActionStatus
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
@@ -39,6 +40,17 @@ class ActionStatsService:
         self.state_service = state_service
 
     async def track_action_execution_start(
+        self,
+        execution_id: str,
+        action_name: str,
+        action_parameters: dict[str, object],
+        start_time: datetime,
+        source_context: dict[str, object],
+    ) -> None:
+        """Persist the start envelope off the runtime loop."""
+        await run_blocking(self._track_action_execution_start, execution_id, action_name, action_parameters, start_time, source_context)
+
+    def _track_action_execution_start(
         self,
         execution_id: str,
         action_name: str,
@@ -91,6 +103,17 @@ class ActionStatsService:
         error_message: str | None,
         start_time: datetime,
     ) -> None:
+        """Persist the terminal envelope off the runtime loop."""
+        await run_blocking(self._track_action_execution_end, execution_id, status, result, error_message, start_time)
+
+    def _track_action_execution_end(
+        self,
+        execution_id: str,
+        status: ActionStatus,
+        result: dict[str, object],
+        error_message: str | None,
+        start_time: datetime,
+    ) -> None:
         """
         Track the end of action execution.
 
@@ -131,9 +154,7 @@ class ActionStatsService:
             )
 
             if not is_status_match(update_result.get("action_status"), ActionStatus.COMPLETED):
-                logger.error(
-                    f"Failed to update execution record for {execution_id}: {update_result}"
-                )
+                logger.error(f"Failed to update execution record for {execution_id}: {update_result}")
 
         except Exception as e:
             logger.error(f"Error tracking execution end for {execution_id}: {e}")
@@ -150,9 +171,11 @@ class ActionStatsService:
 
         return records if records else None
 
-    async def get_action_performance_stats(
-        self, action_name: str | None = None
-    ) -> dict[str, object]:
+    async def get_action_performance_stats(self, action_name: str | None = None) -> dict[str, object]:
+        """Read and aggregate action statistics off the runtime loop."""
+        return await run_blocking(self._get_action_performance_stats, action_name)
+
+    def _get_action_performance_stats(self, action_name: str | None = None) -> dict[str, object]:
         """Get performance statistics for actions."""
         try:
             if not self.state_service:
@@ -230,9 +253,7 @@ class ActionStatsService:
         if isinstance(val, int):
             breakdown[key] = val + 1
 
-    def _track_duration_value(
-        self, duration: object, durations: list[float], breakdown: dict[str, object]
-    ) -> None:
+    def _track_duration_value(self, duration: object, durations: list[float], breakdown: dict[str, object]) -> None:
         """Track duration in global list and breakdown."""
         if duration is None or not isinstance(duration, int | float | str):
             return
@@ -308,9 +329,7 @@ class ActionStatsService:
             "total_executions": total_executions,
             "successful_executions": successful_executions,
             "failed_executions": failed_executions,
-            "success_rate": round((successful_executions / total_executions) * 100, 2)
-            if total_executions > 0
-            else 0,
+            "success_rate": round((successful_executions / total_executions) * 100, 2) if total_executions > 0 else 0,
         }
 
         # Add timing statistics if available
@@ -322,9 +341,7 @@ class ActionStatsService:
                     float_durations.append(float(d))
 
             if float_durations:
-                stats["average_duration_seconds"] = round(
-                    sum(float_durations) / len(float_durations), 3
-                )
+                stats["average_duration_seconds"] = round(sum(float_durations) / len(float_durations), 3)
                 stats["min_duration_seconds"] = round(min(float_durations), 3)
                 stats["max_duration_seconds"] = round(max(float_durations), 3)
 
@@ -363,9 +380,7 @@ class ActionStatsService:
         stats["min_duration_seconds"] = round(min(float_durations), 3)
         stats["max_duration_seconds"] = round(max(float_durations), 3)
 
-    def _build_action_breakdown_stats(
-        self, action_breakdown: dict[str, object]
-    ) -> dict[str, dict[str, object]]:
+    def _build_action_breakdown_stats(self, action_breakdown: dict[str, object]) -> dict[str, dict[str, object]]:
         """Build per-action statistics from action breakdown data."""
         result: dict[str, dict[str, object]] = {}
 

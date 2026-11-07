@@ -1,0 +1,3 @@
+# Offline gate regressions. Optional-client setup has a tagged exclusion instead:
+# its self.target fixture is not yet recognized by the shipped dependency scan.
+quality_gates/tests/gate_hygiene_smoke.py

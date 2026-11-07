@@ -10,10 +10,7 @@ from discovered_decision_scenarios import run_journal_resume_round_trip_scenario
 
 def main() -> int:
     run_journal_resume_round_trip_scenario()
-    print(
-        "journal_resume_round_trip_smoke OK: "
-        f"{support._CHECKS} checks passed"
-    )
+    print(f"journal_resume_round_trip_smoke OK: {support._checks} checks passed")
     return 0
 
 

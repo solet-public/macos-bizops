@@ -215,6 +215,31 @@ LANE_CHARTER_ID_PREFIX = "lch"
 TABLE_HELD_AUTHORIZATION = "held_authorization"
 HELD_AUTHORIZATION_ID_PREFIX = "hau"
 
+# Accepted-but-unfired authorization obligations (wgr_d854aa6c,
+# iss_b764f521). A separate projection plus append-only history beside the R1
+# refusal queue, so a refusal row is never relabeled as accepted authority.
+# `state` accepted = waiting on an external precondition, not fired. An
+# obligation index only: no row performs the act or authorizes a landing.
+TABLE_ACCEPTED_AUTHORIZATION = "accepted_authorization"
+ACCEPTED_AUTHORIZATION_ID_PREFIX = "aau"
+TABLE_ACCEPTED_AUTHORIZATION_EVENT = "accepted_authorization_event"
+ACCEPTED_AUTHORIZATION_EVENT_ID_PREFIX = "aae"
+
+# ``accepted_authorization.state`` domain. Fired is terminal; withdrawn and
+# retired reopen only on a fresh authorizing message.
+AUTHORIZATION_ACCEPTED = "accepted"
+AUTHORIZATION_FIRED = "fired"
+AUTHORIZATION_WITHDRAWN = "withdrawn"
+AUTHORIZATION_RETIRED = "retired"
+AUTHORIZATION_STATES: frozenset[str] = frozenset(
+    {
+        AUTHORIZATION_ACCEPTED,
+        AUTHORIZATION_FIRED,
+        AUTHORIZATION_WITHDRAWN,
+        AUTHORIZATION_RETIRED,
+    }
+)
+
 # Model capability catalog (iss_48ea8171, 2026-09-19 operator directive):
 # the durable, refreshed model x effort -> {capability score, real USD
 # cost-per-task} table behind cost-aware dispatch. Three tables: raw
@@ -226,13 +251,21 @@ TABLE_MODEL_CAPABILITY_OBSERVATION = "model_capability_observation"
 MODEL_CAPABILITY_OBSERVATION_ID_PREFIX = "mco"
 TABLE_MODEL_CAPABILITY_CELL = "model_capability_cell"
 MODEL_CAPABILITY_CELL_ID_PREFIX = "mcc"
+TABLE_MODEL_CELL_POLICY = "model_cell_policy"
 TABLE_MODEL_CAPABILITY_REFRESH_RUN = "model_capability_refresh_run"
 MODEL_CAPABILITY_REFRESH_RUN_ID_PREFIX = "mcr"
 # iss_c6fbf9ae: operator-recorded allowance-pool readings, laid over the static
 # usage_economics profile so a flat-rate pool can have a current reading at
 # runtime. One row per (profile_id, pool_id); the reading is never inferred.
+TABLE_ALLOWANCE_POOL_READING_HISTORY = "allowance_pool_reading_history"
+ALLOWANCE_POOL_READING_HISTORY_ID_PREFIX = "aprh"
 TABLE_ALLOWANCE_POOL_READING = "allowance_pool_reading"
 ALLOWANCE_POOL_READING_ID_PREFIX = "apr"
+# iss_d9c955a2 (ruling arm-2305256f, transport part (a)): the authoritative
+# retired-role registry. Append-only; a send or claim naming a row here is
+# refused, and project-solet's content guard reads the same rows by version.
+TABLE_RETIRED_ROLE = "retired_role"
+RETIRED_ROLE_ID_PREFIX = "rtr"
 
 CELL_ACCEPTANCE_ACCEPTED = "accepted"
 CELL_ACCEPTANCE_PENDING_CROSSCHECK = "pending_crosscheck"
@@ -385,20 +418,11 @@ def get_peer_binding_schema() -> TableSchema:
             ),
             "parent_pid": ColumnDefinition(
                 type=ColumnType.INTEGER,
-                description=(
-                    "OS PID of the bridge subprocess host; used by the "
-                    "native-wake adapter to pair sibling bridges."
-                ),
+                description=("OS PID of the bridge subprocess host; used by the native-wake adapter to pair sibling bridges."),
             ),
             "agent_session_id": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "S1: STABLE per-logical-session key (survives reconnect / "
-                    "agent_instance_id rotation). Surfaced via current_identity; "
-                    "the reconnect state-table role self-refresh keys on it. "
-                    "DATA CAPTURE only (no lookup / routing / dedup here). "
-                    "Optional (empty for streamable / older clients)."
-                ),
+                description=("S1: STABLE per-logical-session key (survives reconnect / agent_instance_id rotation). Surfaced via current_identity; the reconnect state-table role self-refresh keys on it. DATA CAPTURE only (no lookup / routing / dedup here). Optional (empty for streamable / older clients)."),
             ),
             "last_model_activity_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
@@ -510,11 +534,7 @@ def get_agent_role_binding_schema() -> TableSchema:
     """
     return TableSchema(
         table_name=TABLE_AGENT_ROLE_BINDING,
-        description=(
-            "Single writable role-ownership authority — one row per role, "
-            "idempotent on external_id='role:{role}'. Backs resolve_role + "
-            "the single-row update_state CAS self-refresh (Control #2)."
-        ),
+        description=("Single writable role-ownership authority — one row per role, idempotent on external_id='role:{role}'. Backs resolve_role + the single-row update_state CAS self-refresh (Control #2)."),
         id_prefix=AGENT_ROLE_BINDING_ID_PREFIX,
         columns={
             COL_ROLE: ColumnDefinition(
@@ -535,10 +555,7 @@ def get_agent_role_binding_schema() -> TableSchema:
             COL_AGENT_SESSION_ID: ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "Stable logical-session id the single-row CAS self-refresh "
-                    "compares against (WHERE agent_session_id=expected)."
-                ),
+                description=("Stable logical-session id the single-row CAS self-refresh compares against (WHERE agent_session_id=expected)."),
             ),
             COL_SESSION_LABEL: ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -546,10 +563,7 @@ def get_agent_role_binding_schema() -> TableSchema:
             ),
             COL_CLAIMED_AT: ColumnDefinition(
                 type=ColumnType.DATETIME,
-                description=(
-                    "When the role was last claimed/refreshed. Distinct "
-                    "business column the CAS writes explicitly."
-                ),
+                description=("When the role was last claimed/refreshed. Distinct business column the CAS writes explicitly."),
             ),
         },
         indexes=[
@@ -589,11 +603,7 @@ def get_role_schema() -> TableSchema:
     """
     return TableSchema(
         table_name=TABLE_ROLE,
-        description=(
-            "First-class role entity — extensible (properties JSON) + "
-            "discoverable (memory-ingested); one row per role name, UNIQUE on "
-            "external_id='role:{role}'. Never on the resolve hot path."
-        ),
+        description=("First-class role entity — extensible (properties JSON) + discoverable (memory-ingested); one row per role name, UNIQUE on external_id='role:{role}'. Never on the resolve hot path."),
         id_prefix=ROLE_ID_PREFIX,
         columns={
             COL_ROLE: ColumnDefinition(
@@ -605,10 +615,7 @@ def get_role_schema() -> TableSchema:
                 type=ColumnType.TEXT,
                 not_null=True,
                 default=ROLE_ORIGIN_USER,
-                description=(
-                    "Provenance: 'user' (arbitrary operator name) | 'system' "
-                    "(reserved-namespace slot, §6). Set from the prefix check."
-                ),
+                description=("Provenance: 'user' (arbitrary operator name) | 'system' (reserved-namespace slot, §6). Set from the prefix check."),
             ),
             COL_DESCRIPTION: ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -621,21 +628,14 @@ def get_role_schema() -> TableSchema:
             ),
             COL_MEMORY_ID: ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "The memory_service row this entity is ingested as (§7); "
-                    "nullable — ingest is best-effort, never gates a claim."
-                ),
+                description=("The memory_service row this entity is ingested as (§7); nullable — ingest is best-effort, never gates a claim."),
             ),
             COL_ROLE_CLASS: ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
                 default=ROLE_CLASS_DEFAULT,
                 description=(
-                    "Fleet session-management Phase B (§2) taxonomy: primary | "
-                    "principal | project | ephemeral | chat. Existing rows backfill "
-                    "to 'project' (one-shot reconcile, role_class_backfill.py); "
-                    "validated against reserved names (<solet>-Main, sys:*) "
-                    "at claim time — class validation, not keyspace rejection."
+                    "Fleet session-management Phase B (§2) taxonomy: primary | principal | project | ephemeral | chat. Existing rows backfill to 'project' (one-shot reconcile, role_class_backfill.py); validated against reserved names (<solet>-Main, sys:*) at claim time — class validation, not keyspace rejection."
                 ),
             ),
         },
@@ -656,11 +656,7 @@ def get_role_binding_schema() -> TableSchema:
     """
     return TableSchema(
         table_name=TABLE_ROLE_BINDING,
-        description=(
-            "Discriminated role-ownership authority — one row per role, UNIQUE "
-            "on external_id='role:{role}'. holder_kind session|inference_provider; "
-            "predicated-CAS on claim_epoch; kind-appropriate holder_identity JSON."
-        ),
+        description=("Discriminated role-ownership authority — one row per role, UNIQUE on external_id='role:{role}'. holder_kind session|inference_provider; predicated-CAS on claim_epoch; kind-appropriate holder_identity JSON."),
         id_prefix=ROLE_BINDING_ID_PREFIX,
         columns={
             COL_ROLE: ColumnDefinition(
@@ -672,42 +668,26 @@ def get_role_binding_schema() -> TableSchema:
                 type=ColumnType.TEXT,
                 not_null=True,
                 default=HOLDER_KIND_SESSION,
-                description=(
-                    "Discriminator: 'session' | 'inference_provider' (extensible). "
-                    "Code semantics, NEVER a role name."
-                ),
+                description=("Discriminator: 'session' | 'inference_provider' (extensible). Code semantics, NEVER a role name."),
             ),
             COL_AGENT_INSTANCE_ID: ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "Session holder's per-bridge instance id — the reverse-lookup "
-                    "/ drain-fence filter (indexed). NULL for non-session holders."
-                ),
+                description=("Session holder's per-bridge instance id — the reverse-lookup / drain-fence filter (indexed). NULL for non-session holders."),
             ),
             COL_AGENT_SESSION_ID: ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "Session holder's stable logical-session id — the CAS "
-                    "self-refresh predicate. NULL for non-session holders."
-                ),
+                description=("Session holder's stable logical-session id — the CAS self-refresh predicate. NULL for non-session holders."),
             ),
             COL_HOLDER_IDENTITY: ColumnDefinition(
                 type=ColumnType.JSON,
                 default="{}",
-                description=(
-                    "Kind- & transport-appropriate identity, typed-parsed once on "
-                    "resolve (§4.6). session: {agent_id, session_label}; "
-                    "inference_provider: {provider_kind, provider_ref, display_name}."
-                ),
+                description=("Kind- & transport-appropriate identity, typed-parsed once on resolve (§4.6). session: {agent_id, session_label}; inference_provider: {provider_kind, provider_ref, display_name}."),
             ),
             COL_CLAIM_EPOCH: ColumnDefinition(
                 type=ColumnType.INTEGER,
                 not_null=True,
                 default=0,
-                description=(
-                    "Predicated-CAS token for claim/displace (§5.1); bumped each "
-                    "claim/displace, NOT by self-refresh. ABA-safe, kind-agnostic."
-                ),
+                description=("Predicated-CAS token for claim/displace (§5.1); bumped each claim/displace, NOT by self-refresh. ABA-safe, kind-agnostic."),
             ),
             COL_CLAIMED_AT: ColumnDefinition(
                 type=ColumnType.DATETIME,
@@ -757,21 +737,13 @@ def get_session_role_claim_schema() -> TableSchema:
     """
     return TableSchema(
         table_name=TABLE_SESSION_ROLE_CLAIM,
-        description=(
-            "One row per session — the AMEND-4b cardinality gate. UNIQUE on "
-            "external_id='session_role:{agent_session_id}'; held_role names the "
-            "single role this session currently holds."
-        ),
+        description=("One row per session — the AMEND-4b cardinality gate. UNIQUE on external_id='session_role:{agent_session_id}'; held_role names the single role this session currently holds."),
         id_prefix=SESSION_ROLE_CLAIM_ID_PREFIX,
         columns={
             COL_AGENT_SESSION_ID: ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "Server-built stable logical-session id (never caller-"
-                    "asserted, AMEND 4c) — the row's own identity, mirrored "
-                    "into external_id."
-                ),
+                description=("Server-built stable logical-session id (never caller-asserted, AMEND 4c) — the row's own identity, mirrored into external_id."),
             ),
             "held_role": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -796,12 +768,7 @@ def get_managed_session_schema() -> TableSchema:
     registration (so the fleet is ONE list, §4 ``list_sessions``)."""
     return TableSchema(
         table_name=TABLE_MANAGED_SESSION,
-        description=(
-            "Session lifecycle ledger — identity, lineage, dispatch config, "
-            "host, independent report contract, and the current-state "
-            "lifecycle_state projection (AMEND 2b; full history in "
-            "session_transition)."
-        ),
+        description=("Session lifecycle ledger — identity, lineage, dispatch config, host, independent report contract, and the current-state lifecycle_state projection (AMEND 2b; full history in session_transition)."),
         id_prefix=MANAGED_SESSION_ID_PREFIX,
         columns={
             COL_AGENT_INSTANCE_ID: ColumnDefinition(
@@ -847,26 +814,31 @@ def get_managed_session_schema() -> TableSchema:
                     "OWN machine — the headless driver's --name, the tmux label the "
                     "session name derives from. Defaulted by spawn_session to "
                     "role_name for a project-class role and lane_id otherwise. "
-                    "Persisted because it is the COLLISION KEY: the Git-Controller "
-                    "mutation guard resolves the caller by reading the local session "
-                    "file's 'name' field and comparing it EXACTLY "
-                    "(.claude/hooks/git_controller_gate.py find_session_name / "
-                    "session_name == controller), so two non-terminal rows sharing a "
-                    "local_name are two processes that both pass the same guard. No "
-                    "uniquifying suffix is available precisely because that compare "
-                    "is exact."
+                    "Persisted because it is the COLLISION KEY: two non-terminal rows "
+                    "sharing a local_name are two processes answering to the same "
+                    "name. No uniquifying suffix is used, so the name stays exactly "
+                    "the role or lane the spawn was requested under."
                 ),
             ),
             "brief_ref": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description="Workbench path or dispatch id backing the spawn (provenance).",
+                description="Read-only historical file provenance; never a launch input.",
+            ),
+            "assignment": ColumnDefinition(
+                type=ColumnType.JSON,
+                description="Immutable registered Unit/revision/body. NULL identifies historical rows.",
+            ),
+            "assignment_sha256": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="Digest of the immutable registered assignment.",
             ),
             "unit_id": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description="Optional project-solet work-unit identity resolvable by the spawned lane.",
+                description="Registered Unit identity; absent on historical or operator-inventory rows.",
             ),
             "model": ColumnDefinition(
-                type=ColumnType.TEXT, description="Dispatch model override.",
+                type=ColumnType.TEXT,
+                description="Dispatch model override.",
             ),
             "dispatch_kind": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -882,18 +854,11 @@ def get_managed_session_schema() -> TableSchema:
             ),
             "scope_tags": ColumnDefinition(
                 type=ColumnType.JSON,
-                description=(
-                    "Caller-declared work scope tags (e.g. [\"state_schema\"]) "
-                    "preserved as provenance; the state_schema model floor is retired (rul_0c6ec7c7)."
-                ),
+                description=('Caller-declared work scope tags (e.g. ["state_schema"]) preserved as provenance; the state_schema model floor is retired (rul_0c6ec7c7).'),
             ),
             "capability_floors": ColumnDefinition(
                 type=ColumnType.JSON,
-                description=(
-                    "Every capability floor spawn_session applied to this spawn's model: "
-                    "[{tag, source (declared | brief_marker), detail}]. The audit answer to "
-                    "'which floor governed this model', as a ledger read (iss_63d91ca9)."
-                ),
+                description=("Every capability floor spawn_session applied to this spawn's model: [{tag, source (declared | brief_marker), detail}]. The audit answer to 'which floor governed this model', as a ledger read (iss_63d91ca9)."),
             ),
             "difficulty_score": ColumnDefinition(
                 type=ColumnType.REAL,
@@ -904,7 +869,8 @@ def get_managed_session_schema() -> TableSchema:
                 description="Exact selector receipt proving the stored spawn tuple was the cheapest clearing answer.",
             ),
             "effort": ColumnDefinition(
-                type=ColumnType.TEXT, description="Dispatch effort override.",
+                type=ColumnType.TEXT,
+                description="Dispatch effort override.",
             ),
             "work_class": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -912,8 +878,7 @@ def get_managed_session_schema() -> TableSchema:
             ),
             "budget_line": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description="Foreign key the token-budget ledger (§3.5, deferred to L3) hangs "
-                "from.",
+                description="Foreign key the token-budget ledger (§3.5, deferred to L3) hangs from.",
             ),
             "visibility": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -928,26 +893,15 @@ def get_managed_session_schema() -> TableSchema:
             "agent_runtime": ColumnDefinition(
                 type=ColumnType.TEXT,
                 default="claude_code",
-                description=(
-                    "Exact peer-registry agent_id vocabulary for the worker runtime: "
-                    "claude_code | codex. Orthogonal to host topology; nullable for "
-                    "declarative migration of pre-runtime rows, whose read floor is "
-                    "claude_code."
-                ),
+                description=("Exact peer-registry agent_id vocabulary for the worker runtime: claude_code | codex. Orthogonal to host topology; nullable for declarative migration of pre-runtime rows, whose read floor is claude_code."),
             ),
             "hook_absence_checked_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
-                description=(
-                    "When the hook-absence sweep consumed this row. A NULL value is an "
-                    "unchecked candidate; the atomic first write is the bounded sweep cursor."
-                ),
+                description=("When the hook-absence sweep consumed this row. A NULL value is an unchecked candidate; the atomic first write is the bounded sweep cursor."),
             ),
             "hook_absence_warned_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
-                description=(
-                    "When the absence sweep emitted this session's one actionable "
-                    "HOOK ABSENCE warning; NULL means it was checked without warning."
-                ),
+                description=("When the absence sweep emitted this session's one actionable HOOK ABSENCE warning; NULL means it was checked without warning."),
             ),
             "host_ref": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -955,10 +909,7 @@ def get_managed_session_schema() -> TableSchema:
             ),
             "dispatch_id": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "The durable managed_dispatch work contract this host attempt "
-                    "belongs to. NULL/empty on historical and explicit host-only rows."
-                ),
+                description=("The durable managed_dispatch work contract this host attempt belongs to. NULL/empty on historical and explicit host-only rows."),
             ),
             "first_turn_source": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -1030,11 +981,7 @@ def get_managed_session_schema() -> TableSchema:
                 type=ColumnType.INTEGER,
                 default=0,
                 description=(
-                    "Spawn-time report-or-die WINDOW LENGTH (not the deadline — "
-                    "that's report_by), persisted so report_alive/drive_session can "
-                    "re-arm from the spawn's own requested window instead of a "
-                    "hardcoded default. 0 means the spawn didn't request a custom "
-                    "window; re-arm falls back to DEFAULT_REPORT_BY_SECONDS."
+                    "Spawn-time report-or-die WINDOW LENGTH (not the deadline — that's report_by), persisted so report_alive/drive_session can re-arm from the spawn's own requested window instead of a hardcoded default. 0 means the spawn didn't request a custom window; re-arm falls back to DEFAULT_REPORT_BY_SECONDS."
                 ),
             ),
             "expires_at": ColumnDefinition(
@@ -1045,12 +992,7 @@ def get_managed_session_schema() -> TableSchema:
                 type=ColumnType.TEXT,
                 not_null=True,
                 default=LIFECYCLE_SPAWNING,
-                description=(
-                    "Current-state projection (AMEND 2b): spawning | live | idle "
-                    "| overdue | parked | terminated | retired. Every write is a "
-                    "predicated update_state on the expected prior state — "
-                    "rows_affected==0 -> stable error token stale_lifecycle_state."
-                ),
+                description=("Current-state projection (AMEND 2b): spawning | live | idle | overdue | parked | terminated | retired. Every write is a predicated update_state on the expected prior state — rows_affected==0 -> stable error token stale_lifecycle_state."),
             ),
             "last_transition_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
@@ -1059,11 +1001,7 @@ def get_managed_session_schema() -> TableSchema:
             "worktree_disposition": ColumnDefinition(
                 type=ColumnType.TEXT,
                 description=(
-                    "Retirement teardown outcome: removed | retained_not_disposable | "
-                    "retained_error | not_provisioned. Empty until retirement. Recorded "
-                    "with the terminal ledger transition so session_status/list_sessions "
-                    "expose a retained worktree or an absent provisioning target instead "
-                    "of implying cleanup succeeded."
+                    "Retirement teardown outcome: removed | retained_not_disposable | retained_error | not_provisioned. Empty until retirement. Recorded with the terminal ledger transition so session_status/list_sessions expose a retained worktree or an absent provisioning target instead of implying cleanup succeeded."
                 ),
             ),
             "registration_overdue_at": ColumnDefinition(
@@ -1080,29 +1018,16 @@ def get_managed_session_schema() -> TableSchema:
             ),
             "registration_overdue_reason": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "W4A: the attribution that goes with registration_overdue_at — "
-                    "what the platform could actually observe at the seam, never an "
-                    "inference from any policy blob's shape."
-                ),
+                description=("W4A: the attribution that goes with registration_overdue_at — what the platform could actually observe at the seam, never an inference from any policy blob's shape."),
             ),
             "degraded_hooks_acknowledged": ColumnDefinition(
                 type=ColumnType.BOOLEAN,
                 default=0,
-                description=(
-                    "W4A item 3: this spawn EXPLICITLY opted to proceed on a host "
-                    "whose preflight found worker hooks unable to run. Default 0 — "
-                    "running degraded is a stated operator choice recorded at spawn, "
-                    "never something discovered later from the silence."
-                ),
+                description=("W4A item 3: this spawn EXPLICITLY opted to proceed on a host whose preflight found worker hooks unable to run. Default 0 — running degraded is a stated operator choice recorded at spawn, never something discovered later from the silence."),
             ),
             "directed_by": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "Server-built principal (CallContext, never caller-supplied) "
-                    "that made the most recent mutating transition; full audit "
-                    "trail is session_transition, this is the fast-read mirror."
-                ),
+                description=("Server-built principal (CallContext, never caller-supplied) that made the most recent mutating transition; full audit trail is session_transition, this is the fast-read mirror."),
             ),
             "provisioning_mode": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -1119,12 +1044,7 @@ def get_managed_session_schema() -> TableSchema:
             ),
             "lane_repo_root": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=(
-                    "Resolved Git checkout root used for this lane's worktree at spawn. "
-                    "Retirement reads this durable value so it never re-derives a foreign "
-                    "lane from the serving Solet's APP_HOME. Empty rows predate this field "
-                    "and retain the APP_HOME fallback."
-                ),
+                description=("Resolved Git checkout root used for this lane's worktree at spawn. Retirement reads this durable value so it never re-derives a foreign lane from the serving Solet's APP_HOME. Empty rows predate this field and retain the APP_HOME fallback."),
             ),
         },
         indexes=[
@@ -1149,18 +1069,18 @@ def get_managed_dispatch_schema() -> TableSchema:
         "role_class": "Role class required by the dispatch.",
         "work_class": "Work authority classification.",
         "budget_line": "Budget attribution key.",
-        "brief_ref": "Exact immutable brief path.",
+        "brief_ref": "Read-only historical file path; never a launch input.",
         "unit_id": "Register unit identity ensured before spawn.",
-        "repository_root": (
-            "Optional absolute Git checkout selected for the lane; retained in the immutable "
-            "dispatch contract for retries."
-        ),
-        # Nullable: rows that predate the register Unit mint (unt_57725090)
-        # carry NULL, which the mint code reads as empty.
-        "unit_mint_state": "How unit_id was ensured: minted, adopted, or verified; empty before.",
-        "unit_mint_key": "Register unit_key pinned at prepare (or the verified Unit's own key).",
+        "repository_root": ("Optional absolute Git checkout selected for the lane; retained in the immutable dispatch contract for retries."),
+        # Retained only for historical readback. No writer or launch consumes them.
+        "unit_mint_state": "Read-only historical mint classification; no active mint path.",
+        "unit_mint_key": "Read-only historical mint key; no active mint path.",
         "unit_repository_id": "Register repository resolved from the lane root, never cwd.",
-        "brief_sha256": "SHA-256 of the exact brief bytes.",
+        "brief_sha256": "Read-only historical file digest; never assignment identity.",
+        "assignment_sha256": "Digest of the immutable registered Unit/revision/body assignment.",
+        "request_sha256": "Digest of the original request for duplicate/conflict detection.",
+        "expected_revision_id": "Original optimistic revision premise; never follows plan edits.",
+        "repository_id": "Original caller repository expectation, checked before assignment.",
         "expected_path": "Exact expected completion artifact.",
         "completion_contract_sha256": "Digest of the structured completion contract.",
         "model": "Explicit worker model.",
@@ -1185,6 +1105,7 @@ def get_managed_dispatch_schema() -> TableSchema:
         "next_required_action": "Decision-oriented next action.",
         "responsible_role": "Role responsible for the next action.",
         "terminal_reason": "Explicit terminal classification.",
+        "cancelled_by_instance_id": "Caller instance that explicitly cancelled an assignment-less historical dispatch.",
         "first_turn_source": "charter | fallback transport source.",
         "first_turn_error": "Exact first-turn submission error.",
         "current_host": "Current attempt host topology.",
@@ -1206,8 +1127,6 @@ def get_managed_dispatch_schema() -> TableSchema:
                 "role_class",
                 "work_class",
                 "budget_line",
-                "brief_ref",
-                "brief_sha256",
                 "expected_path",
                 "completion_contract_sha256",
                 "model",
@@ -1249,17 +1168,14 @@ def get_managed_dispatch_schema() -> TableSchema:
             ),
             "scope_tags": ColumnDefinition(
                 type=ColumnType.JSON,
-                description=(
-                    "Declared work scope tags carried in the immutable contract so a "
-                    "retry cannot drop provenance, including state_schema (rul_0c6ec7c7)."
-                ),
+                description=("Declared work scope tags carried in the immutable contract so a retry cannot drop provenance, including state_schema (rul_0c6ec7c7)."),
             ),
             # Defaults on the three receipt columns exist for rows that predate
             # the receipt-enforcement mechanism (iss_1505248c): the deploy
             # schema preflight refuses a new NOT NULL column with no default as
             # rollback-unsafe. A legacy row reads exactly like a dispatch that
             # entered through a non-enforcing path — enforced=False is what
-            # makes ``_selection_fields_from_dispatch`` skip replay and the
+            # makes lifecycle selection skip replay and the
             # retry mismatch check, and 0.0 / {} are the same unset values
             # that path already persists. {} also fails
             # ``verify_selection_receipt`` closed (missing required keys), so
@@ -1268,42 +1184,39 @@ def get_managed_dispatch_schema() -> TableSchema:
                 type=ColumnType.REAL,
                 not_null=True,
                 default=0.0,
-                description=(
-                    "Immutable difficulty score that the spawn receipt must prove. 0.0 is "
-                    "the unset value for a non-enforced or pre-enforcement row; the score is "
-                    "only meaningful when selection_receipt_enforced is true."
-                ),
+                description=("Immutable difficulty score that the spawn receipt must prove. 0.0 is the unset value for a non-enforced or pre-enforcement row; the score is only meaningful when selection_receipt_enforced is true."),
+            ),
+            "assignment": ColumnDefinition(
+                type=ColumnType.JSON,
+                description="Immutable registered Unit/revision/body. NULL rows are read-only history.",
+            ),
+            "attempt_failure": ColumnDefinition(
+                type=ColumnType.JSON,
+                description="Exact current failed-attempt refusal replayed for duplicate requests.",
+            ),
+            "attempt_receipt": ColumnDefinition(
+                type=ColumnType.JSON,
+                description="Exact current attempt receipt returned by duplicate launch requests.",
             ),
             "unit_mint_receipt": ColumnDefinition(
                 type=ColumnType.JSON,
-                description="Verbatim psolet receipt for a minted Unit, or the adoption readback.",
+                description="Read-only historical mint/adoption receipt.",
             ),
             "unit_mint_request": ColumnDefinition(
                 type=ColumnType.JSON,
-                description=(
-                    "Immutable mint inputs pinned at prepare (expected repository_id, "
-                    "addresses, reference basis) so a retry mints exactly the same Unit."
-                ),
+                description=("Read-only historical mint inputs; cannot launch or retry."),
             ),
             "selection_receipt": ColumnDefinition(
                 type=ColumnType.JSON,
                 not_null=True,
                 default="{}",
-                description=(
-                    "Immutable selector receipt replayed before every dispatch attempt. {} "
-                    "for a non-enforced or pre-enforcement row; an empty receipt never "
-                    "passes verify_selection_receipt."
-                ),
+                description=("Immutable selector receipt replayed before every dispatch attempt. {} for a non-enforced or pre-enforcement row; an empty receipt never passes verify_selection_receipt."),
             ),
             "selection_receipt_enforced": ColumnDefinition(
                 type=ColumnType.BOOLEAN,
                 not_null=True,
                 default=False,
-                description=(
-                    "Whether this dispatch entered through a public receipt-enforcing path. "
-                    "False for rows that predate enforcement: the receipt is not applicable, "
-                    "not refused."
-                ),
+                description=("Whether this dispatch entered through a public receipt-enforcing path. False for rows that predate enforcement: the receipt is not applicable, not refused."),
             ),
             "allow_askuserquestion": ColumnDefinition(
                 type=ColumnType.BOOLEAN,
@@ -1322,10 +1235,7 @@ def get_managed_dispatch_schema() -> TableSchema:
             ),
             "ttl_seconds": ColumnDefinition(
                 type=ColumnType.INTEGER,
-                description=(
-                    "Retired attempt lifetime storage; retained nullable for legacy "
-                    "reconciliation. Current writers omit this value."
-                ),
+                description=("Retired attempt lifetime storage; retained nullable for legacy reconciliation. Current writers omit this value."),
             ),
             "attempt_number": ColumnDefinition(
                 type=ColumnType.INTEGER,
@@ -1381,8 +1291,7 @@ def get_managed_dispatch_schema() -> TableSchema:
         columns[name] = ColumnDefinition(
             type=ColumnType.DATETIME,
             not_null=name in {"uptake_due_at", "report_by", "watchdog_due_at"},
-            description=("Retired lifetime timestamp; legacy reconciliation only."
-                         if name == "expires_at" else f"Managed-dispatch timestamp: {name}."),
+            description=("Retired lifetime timestamp; legacy reconciliation only." if name == "expires_at" else f"Managed-dispatch timestamp: {name}."),
         )
     for name in (
         "uptake_due_at_window_seconds",
@@ -1393,16 +1302,11 @@ def get_managed_dispatch_schema() -> TableSchema:
         columns[name] = ColumnDefinition(
             type=ColumnType.INTEGER,
             not_null=name != "expires_at_window_seconds",
-            description=("Retired lifetime window; legacy reconciliation only."
-                         if name == "expires_at_window_seconds"
-                         else f"Immutable retry window derived at prepare: {name}."),
+            description=("Retired lifetime window; legacy reconciliation only." if name == "expires_at_window_seconds" else f"Immutable retry window derived at prepare: {name}."),
         )
     return TableSchema(
         table_name=TABLE_MANAGED_DISPATCH,
-        description=(
-            "Durable managed work contract with explicit uptake, blocker, liveness, "
-            "completion, and coordinator-acceptance truth."
-        ),
+        description=("Durable managed work contract with explicit uptake, blocker, liveness, completion, and coordinator-acceptance truth."),
         id_prefix=MANAGED_DISPATCH_ID_PREFIX,
         columns=columns,
         indexes=[
@@ -1422,10 +1326,7 @@ def get_managed_dispatch_event_schema() -> TableSchema:
     """Append-only accepted and rejected dispatch-event audit trail."""
     return TableSchema(
         table_name=TABLE_MANAGED_DISPATCH_EVENT,
-        description=(
-            "Append-only causal event trail for worker reports, coordinator decisions, "
-            "transport evidence, and deduplicated supervision notices."
-        ),
+        description=("Append-only causal event trail for worker reports, coordinator decisions, transport evidence, and deduplicated supervision notices."),
         id_prefix=MANAGED_DISPATCH_EVENT_ID_PREFIX,
         columns={
             "event_id": ColumnDefinition(
@@ -1499,11 +1400,7 @@ def get_session_transition_schema() -> TableSchema:
     in window T" are one-filter reads under the sanctioned grammar."""
     return TableSchema(
         table_name=TABLE_SESSION_TRANSITION,
-        description=(
-            "Append-only session lifecycle audit trail (AMEND 2a). Insert-only "
-            "— concurrent writers (sweep, steward, report_alive, terminate) "
-            "never contend, so no audit record can be lost to a row race."
-        ),
+        description=("Append-only session lifecycle audit trail (AMEND 2a). Insert-only — concurrent writers (sweep, steward, report_alive, terminate) never contend, so no audit record can be lost to a row race."),
         id_prefix=SESSION_TRANSITION_ID_PREFIX,
         columns={
             COL_AGENT_INSTANCE_ID: ColumnDefinition(
@@ -1537,10 +1434,7 @@ def get_session_dependency_schema() -> TableSchema:
     edge is state, the wake is a message; no new transport."""
     return TableSchema(
         table_name=TABLE_SESSION_DEPENDENCY,
-        description=(
-            "Armed wake edges ('when X lands, wake Y'). fired_at NULL = armed; "
-            "the platform sweep evaluates and delivers through normal messaging."
-        ),
+        description=("Armed wake edges ('when X lands, wake Y'). fired_at NULL = armed; the platform sweep evaluates and delivers through normal messaging."),
         id_prefix=SESSION_DEPENDENCY_ID_PREFIX,
         columns={
             "waiter_instance_id": ColumnDefinition(
@@ -1585,11 +1479,7 @@ def get_session_claude_mapping_schema() -> TableSchema:
     the SAME row rather than duplicating it."""
     return TableSchema(
         table_name=TABLE_SESSION_CLAUDE_MAPPING,
-        description=(
-            "agent_instance_id <-> claude_session_id mapping, ONE-TO-MANY "
-            "over a worker's lifetime (SessionStart hook capture + headless "
-            "init-event cross-check)."
-        ),
+        description=("agent_instance_id <-> claude_session_id mapping, ONE-TO-MANY over a worker's lifetime (SessionStart hook capture + headless init-event cross-check)."),
         id_prefix=SESSION_CLAUDE_MAPPING_ID_PREFIX,
         columns={
             COL_AGENT_INSTANCE_ID: ColumnDefinition(
@@ -1634,11 +1524,7 @@ def get_inbox_consumption_status_schema() -> TableSchema:
     return TableSchema(
         table_name=TABLE_INBOX_CONSUMPTION_STATUS,
         description=(
-            "Latest known inbox-consumption-check state per agent_instance_id "
-            "-- the cache session_inbox_consumption_status reads, fed by "
-            "report_inbox_consumption. Absence of a row is the honest, "
-            "expected shape for a session whose runtime has no consumer hook "
-            "(or has not ticked yet), never a synonym for 'consumed'."
+            "Latest known inbox-consumption-check state per agent_instance_id -- the cache session_inbox_consumption_status reads, fed by report_inbox_consumption. Absence of a row is the honest, expected shape for a session whose runtime has no consumer hook (or has not ticked yet), never a synonym for 'consumed'."
         ),
         id_prefix=INBOX_CONSUMPTION_STATUS_ID_PREFIX,
         columns={
@@ -1655,41 +1541,22 @@ def get_inbox_consumption_status_schema() -> TableSchema:
             "checked_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
                 not_null=True,
-                description=(
-                    "When the consumer hook last actually performed its "
-                    "existence check, REGARDLESS of what it found. This is "
-                    "the honesty signal itself: a recent checked_at proves "
-                    "the mechanism executed; row absence (never a stale or "
-                    "defaulted timestamp) proves it never has."
-                ),
+                description=("When the consumer hook last actually performed its existence check, REGARDLESS of what it found. This is the honesty signal itself: a recent checked_at proves the mechanism executed; row absence (never a stale or defaulted timestamp) proves it never has."),
             ),
             "pending_found_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
                 not_null=False,
-                description=(
-                    "The last time a check found a pending delivery and "
-                    "forced a Stop-hook block/continue. NULL means either "
-                    "'never found one' or 'no check has run yet' -- "
-                    "disambiguate using checked_at, not this column alone."
-                ),
+                description=("The last time a check found a pending delivery and forced a Stop-hook block/continue. NULL means either 'never found one' or 'no check has run yet' -- disambiguate using checked_at, not this column alone."),
             ),
             "pending_reason": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=False,
-                description=(
-                    "The fixed nudge text last delivered via decision:block, "
-                    "for diagnostics. NULL when pending_found_at is NULL."
-                ),
+                description=("The fixed nudge text last delivered via decision:block, for diagnostics. NULL when pending_found_at is NULL."),
             ),
             "reporter_surface": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=False,
-                description=(
-                    "checkout | plugin_cache | vendored | release | unknown "
-                    "-- which copy of the hook wrote this row, same closed "
-                    "vocabulary as session_context_status.reporter_surface. "
-                    "NULL means the reporter predates this column."
-                ),
+                description=("checkout | plugin_cache | vendored | release | unknown -- which copy of the hook wrote this row, same closed vocabulary as session_context_status.reporter_surface. NULL means the reporter predates this column."),
             ),
             "agent_session_id": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -1719,43 +1586,47 @@ def get_fleet_liveness_run_schema() -> TableSchema:
     """Append-only records of the Phase-A fleet liveness procedure."""
     return TableSchema(
         table_name=TABLE_FLEET_LIVENESS_RUN,
-        description=(
-            "One complete, deployment-native Phase-A fleet-liveness pass. Structured "
-            "JSON captures the checked population, findings, actions, inbox drain, "
-            "sleep check, and escalations without an unbounded markdown log."
-        ),
+        description=("One complete, deployment-native Phase-A fleet-liveness pass. Structured JSON captures the checked population, findings, actions, inbox drain, sleep check, and escalations without an unbounded markdown log."),
         id_prefix=FLEET_LIVENESS_RUN_ID_PREFIX,
         columns={
             "observed_at": ColumnDefinition(
-                type=ColumnType.DATETIME, not_null=True,
+                type=ColumnType.DATETIME,
+                not_null=True,
                 description="When this liveness pass completed its observation.",
             ),
             "checked": ColumnDefinition(
-                type=ColumnType.JSON, not_null=True,
+                type=ColumnType.JSON,
+                not_null=True,
                 description="Structured population and checks performed during the pass.",
             ),
             "stuck": ColumnDefinition(
-                type=ColumnType.JSON, not_null=True,
+                type=ColumnType.JSON,
+                not_null=True,
                 description="Structured unhealthy findings; [] is an explicit clear pass.",
             ),
             "actions": ColumnDefinition(
-                type=ColumnType.JSON, not_null=True,
+                type=ColumnType.JSON,
+                not_null=True,
                 description="Structured drive/restart/escalation actions taken; [] when none.",
             ),
             "outcome": ColumnDefinition(
-                type=ColumnType.TEXT, not_null=True,
+                type=ColumnType.TEXT,
+                not_null=True,
                 description="Short truthful result of the whole pass.",
             ),
             "role_inbox_drain": ColumnDefinition(
-                type=ColumnType.JSON, not_null=True,
+                type=ColumnType.JSON,
+                not_null=True,
                 description="Coordinator role-inbox drain result, including clear-path evidence.",
             ),
             "sleep_check": ColumnDefinition(
-                type=ColumnType.JSON, not_null=True,
+                type=ColumnType.JSON,
+                not_null=True,
                 description="Host-sleep check result and cursor evidence.",
             ),
             "escalations": ColumnDefinition(
-                type=ColumnType.JSON, not_null=True,
+                type=ColumnType.JSON,
+                not_null=True,
                 description="Operator or peer escalations raised by this pass; [] when none.",
             ),
         },
@@ -1769,50 +1640,57 @@ def get_fleet_progress_run_schema() -> TableSchema:
     """Append-only per-workstream records of the Phase-B progress review."""
     return TableSchema(
         table_name=TABLE_FLEET_PROGRESS_RUN,
-        description=(
-            "One Phase-B objective/delta assessment for one stable workstream. "
-            "The workstream index makes trend reads direct rather than prose search."
-        ),
+        description=("One Phase-B objective/delta assessment for one stable workstream. The workstream index makes trend reads direct rather than prose search."),
         id_prefix=FLEET_PROGRESS_RUN_ID_PREFIX,
         columns={
             "reviewed_at": ColumnDefinition(
-                type=ColumnType.DATETIME, not_null=True,
+                type=ColumnType.DATETIME,
+                not_null=True,
                 description="When this workstream assessment was completed.",
             ),
             "workstream_id": ColumnDefinition(
-                type=ColumnType.TEXT, not_null=True,
+                type=ColumnType.TEXT,
+                not_null=True,
                 description="Stable workstream key used for trend queries (for example WS1).",
             ),
             "objective_citation": ColumnDefinition(
-                type=ColumnType.TEXT, not_null=True,
+                type=ColumnType.TEXT,
+                not_null=True,
                 description="Current objective or ruling citation assessed by this row.",
             ),
             "metrics": ColumnDefinition(
-                type=ColumnType.JSON, not_null=True,
+                type=ColumnType.JSON,
+                not_null=True,
                 description="Raw current metrics, kept structured for the next delta.",
             ),
             "delta": ColumnDefinition(
-                type=ColumnType.JSON, not_null=True,
+                type=ColumnType.JSON,
+                not_null=True,
                 description="Measured change from the previous assessment for this stream.",
             ),
             "assessment": ColumnDefinition(
-                type=ColumnType.TEXT, not_null=True,
+                type=ColumnType.TEXT,
+                not_null=True,
                 description="Evidence-cited honest progress assessment.",
             ),
             "recommendation": ColumnDefinition(
-                type=ColumnType.TEXT, not_null=True,
+                type=ColumnType.TEXT,
+                not_null=True,
                 description="Recommended next action or explicit no-change result.",
             ),
             "independent_critique": ColumnDefinition(
-                type=ColumnType.JSON, not_null=True,
+                type=ColumnType.JSON,
+                not_null=True,
                 description="Critique due/pending/result state and reviewer reference.",
             ),
             "escalations": ColumnDefinition(
-                type=ColumnType.JSON, not_null=True,
+                type=ColumnType.JSON,
+                not_null=True,
                 description="Escalations caused by this assessment; [] when none.",
             ),
             "phase_a_run_id": ColumnDefinition(
-                type=ColumnType.TEXT, not_null=False,
+                type=ColumnType.TEXT,
+                not_null=False,
                 description="Optional cited fleet_liveness_run id consumed by this review.",
             ),
         },
@@ -1832,10 +1710,7 @@ def get_session_context_status_schema() -> TableSchema:
     it back as-is."""
     return TableSchema(
         table_name=TABLE_SESSION_CONTEXT_STATUS,
-        description=(
-            "Latest known context-window occupancy per agent_instance_id — "
-            "the cache session_context_status reads, fed by report_context_status."
-        ),
+        description=("Latest known context-window occupancy per agent_instance_id — the cache session_context_status reads, fed by report_context_status."),
         id_prefix=SESSION_CONTEXT_STATUS_ID_PREFIX,
         columns={
             COL_AGENT_INSTANCE_ID: ColumnDefinition(
@@ -1846,11 +1721,7 @@ def get_session_context_status_schema() -> TableSchema:
             "claude_session_id": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "The runtime's native session identity this snapshot was measured "
-                    "against. The physical column predates Codex coverage; the external "
-                    "contract names this runtime_session_id."
-                ),
+                description=("The runtime's native session identity this snapshot was measured against. The physical column predates Codex coverage; the external contract names this runtime_session_id."),
             ),
             "provider": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -1875,19 +1746,12 @@ def get_session_context_status_schema() -> TableSchema:
             "current_tokens": ColumnDefinition(
                 type=ColumnType.INTEGER,
                 not_null=True,
-                description=(
-                    "Model-visible input tokens for the most recent assistant call, "
-                    "using the runtime's native counter. Cache counters are stored "
-                    "separately and must not be added twice."
-                ),
+                description=("Model-visible input tokens for the most recent assistant call, using the runtime's native counter. Cache counters are stored separately and must not be added twice."),
             ),
             "ceiling": ColumnDefinition(
                 type=ColumnType.INTEGER,
                 not_null=True,
-                description=(
-                    "The active runtime's positive effective context capacity at "
-                    "measurement time, distinct from a provider API maximum."
-                ),
+                description=("The active runtime's positive effective context capacity at measurement time, distinct from a provider API maximum."),
             ),
             "measured_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
@@ -1943,19 +1807,12 @@ def get_session_context_status_schema() -> TableSchema:
             "cache_read_tokens": ColumnDefinition(
                 type=ColumnType.INTEGER,
                 not_null=False,
-                description=(
-                    "cache_read_input_tokens on the most recent assistant call. "
-                    "0 means that call read NOTHING from cache and paid full "
-                    "price; NULL means the reporting hook did not report it."
-                ),
+                description=("cache_read_input_tokens on the most recent assistant call. 0 means that call read NOTHING from cache and paid full price; NULL means the reporting hook did not report it."),
             ),
             "cache_write_tokens": ColumnDefinition(
                 type=ColumnType.INTEGER,
                 not_null=False,
-                description=(
-                    "Cache-write tokens on the same measured call. NULL means the "
-                    "runtime did not report the counter; it is never inferred from input."
-                ),
+                description=("Cache-write tokens on the same measured call. NULL means the runtime did not report the counter; it is never inferred from input."),
             ),
             "cache_cold": ColumnDefinition(
                 type=ColumnType.INTEGER,
@@ -2140,10 +1997,7 @@ def get_session_context_status_history_schema() -> TableSchema:
     """
     return TableSchema(
         table_name=TABLE_SESSION_CONTEXT_STATUS_HISTORY,
-        description=(
-            "Bounded append-only series of accepted session_context_status "
-            "writes — the history the upsert-only cache cannot keep."
-        ),
+        description=("Bounded append-only series of accepted session_context_status writes — the history the upsert-only cache cannot keep."),
         id_prefix=SESSION_CONTEXT_STATUS_HISTORY_ID_PREFIX,
         columns={
             COL_AGENT_INSTANCE_ID: ColumnDefinition(
@@ -2154,12 +2008,7 @@ def get_session_context_status_history_schema() -> TableSchema:
             "claude_session_id": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "The runtime-native session identity this reading was measured "
-                    "against. The physical column predates Codex coverage; the "
-                    "external contract names it runtime_session_id. A change here "
-                    "under one agent_instance_id is a rotation boundary."
-                ),
+                description=("The runtime-native session identity this reading was measured against. The physical column predates Codex coverage; the external contract names it runtime_session_id. A change here under one agent_instance_id is a rotation boundary."),
             ),
             "provider": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -2179,11 +2028,7 @@ def get_session_context_status_history_schema() -> TableSchema:
             "agent_session_id": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=False,
-                description=(
-                    "The session's stable agent_session_id as reported. NULL "
-                    "means NOT REPORTED (a reporter predating that column), "
-                    "never 'this session has no bridge'."
-                ),
+                description=("The session's stable agent_session_id as reported. NULL means NOT REPORTED (a reporter predating that column), never 'this session has no bridge'."),
             ),
             "model": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -2193,36 +2038,22 @@ def get_session_context_status_history_schema() -> TableSchema:
             "current_tokens": ColumnDefinition(
                 type=ColumnType.INTEGER,
                 not_null=True,
-                description=(
-                    "The model-visible input-token reading this tick saw, from the "
-                    "reporting runtime's native counter."
-                ),
+                description=("The model-visible input-token reading this tick saw, from the reporting runtime's native counter."),
             ),
             "ceiling": ColumnDefinition(
                 type=ColumnType.INTEGER,
                 not_null=True,
-                description=(
-                    "The active runtime's positive effective context capacity, "
-                    "distinct from a provider API maximum."
-                ),
+                description=("The active runtime's positive effective context capacity, distinct from a provider API maximum."),
             ),
             "measured_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
                 not_null=True,
-                description=(
-                    "The REPORTER's clock: when the hook computed this "
-                    "snapshot. The timestamp whose arrest is the whole "
-                    "signature of GAU-01."
-                ),
+                description=("The REPORTER's clock: when the hook computed this snapshot. The timestamp whose arrest is the whole signature of GAU-01."),
             ),
             "recorded_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
                 not_null=True,
-                description=(
-                    "The STATE LAYER's clock: when this row was appended. Kept "
-                    "beside measured_at so the difference between them is "
-                    "readable evidence rather than an assumption."
-                ),
+                description=("The STATE LAYER's clock: when this row was appended. Kept beside measured_at so the difference between them is readable evidence rather than an assumption."),
             ),
             "reading_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
@@ -2256,10 +2087,7 @@ def get_session_context_status_history_schema() -> TableSchema:
             "cache_cold": ColumnDefinition(
                 type=ColumnType.INTEGER,
                 not_null=False,
-                description=(
-                    "1/0 as reported; NULL = NOT REPORTED, which is a third "
-                    "state and never a synonym for 'cache is warm'."
-                ),
+                description=("1/0 as reported; NULL = NOT REPORTED, which is a third state and never a synonym for 'cache is warm'."),
             ),
             "cache_overage_signature": ColumnDefinition(
                 type=ColumnType.INTEGER,
@@ -2282,10 +2110,7 @@ def get_session_context_status_history_schema() -> TableSchema:
             "reporter_generation": ColumnDefinition(
                 type=ColumnType.INTEGER,
                 not_null=False,
-                description=(
-                    "The reporting hook copy's generation. NULL = "
-                    "pre-attribution reporter."
-                ),
+                description=("The reporting hook copy's generation. NULL = pre-attribution reporter."),
             ),
         },
         indexes=[
@@ -2345,103 +2170,58 @@ def get_gauge_notice_record_schema() -> TableSchema:
     """
     return TableSchema(
         table_name=TABLE_GAUGE_NOTICE_RECORD,
-        description=(
-            "Durable, attributable record that a gauge notice fired — the "
-            "trace the in-memory, drain-once bridge event queue cannot keep."
-        ),
+        description=("Durable, attributable record that a gauge notice fired — the trace the in-memory, drain-once bridge event queue cannot keep."),
         id_prefix=GAUGE_NOTICE_RECORD_ID_PREFIX,
         columns={
             "notice_type": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "Which detector fired: gauge_stale_notice or "
-                    "gauge_coverage_notice. The by-type read the bridge event "
-                    "queue has no surface for."
-                ),
+                description=("Which detector fired: gauge_stale_notice or gauge_coverage_notice. The by-type read the bridge event queue has no surface for."),
             ),
             COL_AGENT_INSTANCE_ID: ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "The SUBJECT session the notice is about — never the "
-                    "steward it was addressed to."
-                ),
+                description=("The SUBJECT session the notice is about — never the steward it was addressed to."),
             ),
             "emitted_at": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "When the sweep DECIDED to fire, on the sweep's own clock. "
-                    "Not when a steward read it: the read may never happen, "
-                    "which is the point of the table."
-                ),
+                description=("When the sweep DECIDED to fire, on the sweep's own clock. Not when a steward read it: the read may never happen, which is the point of the table."),
             ),
             "steward_instance_id": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=False,
-                description=(
-                    "Who the notice was addressed to. NULL means NO STEWARD "
-                    "WAS RESOLVED — a real and previously invisible outcome, "
-                    "never 'not recorded'."
-                ),
+                description=("Who the notice was addressed to. NULL means NO STEWARD WAS RESOLVED — a real and previously invisible outcome, never 'not recorded'."),
             ),
             "delivery_outcome": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "appended / no_steward_binding / append_failed. "
-                    "Deliberately not a boolean: an unbound steward and a "
-                    "failed append are different faults with different owners, "
-                    "and both look like silence from outside."
-                ),
+                description=("appended / no_steward_binding / append_failed. Deliberately not a boolean: an unbound steward and a failed append are different faults with different owners, and both look like silence from outside."),
             ),
             "release_id": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=False,
-                description=(
-                    "The release whose detector fired this, self-identified "
-                    "from the running module's own tree. NULL means the "
-                    "release could not be determined (a checkout run, say) — "
-                    "absent, never guessed, because a wrong release id "
-                    "silently re-dates the thresholds a reader applies."
-                ),
+                description=("The release whose detector fired this, self-identified from the running module's own tree. NULL means the release could not be determined (a checkout run, say) — absent, never guessed, because a wrong release id silently re-dates the thresholds a reader applies."),
             ),
             "threshold_s": ColumnDefinition(
                 type=ColumnType.REAL,
                 not_null=False,
-                description=(
-                    "The threshold IN FORCE at emit time, recorded rather than "
-                    "re-read at read time — the running release's value has "
-                    "already been measured to differ from master's."
-                ),
+                description=("The threshold IN FORCE at emit time, recorded rather than re-read at read time — the running release's value has already been measured to differ from master's."),
             ),
             "observed_s": ColumnDefinition(
                 type=ColumnType.REAL,
                 not_null=False,
-                description=(
-                    "What was actually measured against that threshold: the "
-                    "gauge lag for a staleness notice, the live-row age for a "
-                    "coverage notice."
-                ),
+                description=("What was actually measured against that threshold: the gauge lag for a staleness notice, the live-row age for a coverage notice."),
             ),
             "last_report_alive_at": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=False,
-                description=(
-                    "The lifecycle clock the staleness leg diverged FROM. NULL "
-                    "for a coverage notice, which does not read it."
-                ),
+                description=("The lifecycle clock the staleness leg diverged FROM. NULL for a coverage notice, which does not read it."),
             ),
             "gauge_measured_at": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=False,
-                description=(
-                    "The arrested gauge reading's own timestamp — the value "
-                    "the upsert-only cache would otherwise overwrite. NULL for "
-                    "a coverage notice, which fires precisely because there is "
-                    "no gauge row to read."
-                ),
+                description=("The arrested gauge reading's own timestamp — the value the upsert-only cache would otherwise overwrite. NULL for a coverage notice, which fires precisely because there is no gauge row to read."),
             ),
         },
         indexes=[
@@ -2478,29 +2258,19 @@ def get_gauge_canary_registry_schema() -> TableSchema:
     """
     return TableSchema(
         table_name=TABLE_GAUGE_CANARY_REGISTRY,
-        description=(
-            "Identities that are synthetic gauge canaries — the store-plane "
-            "provenance mark, deliberately not a column on the gauge row."
-        ),
+        description=("Identities that are synthetic gauge canaries — the store-plane provenance mark, deliberately not a column on the gauge row."),
         id_prefix=GAUGE_CANARY_REGISTRY_ID_PREFIX,
         columns={
             COL_AGENT_INSTANCE_ID: ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
                 unique=True,
-                description=(
-                    "The canary's own instance id, as the real reporting path "
-                    "writes it. Unique: one registration per identity."
-                ),
+                description=("The canary's own instance id, as the real reporting path writes it. Unique: one registration per identity."),
             ),
             "purpose": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "Why this canary exists, in words, for whoever finds a "
-                    "synthetic session in a listing and needs to know it is "
-                    "deliberate."
-                ),
+                description=("Why this canary exists, in words, for whoever finds a synthetic session in a listing and needs to know it is deliberate."),
             ),
             "registered_at": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -2510,20 +2280,12 @@ def get_gauge_canary_registry_schema() -> TableSchema:
             "registered_by": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "Who registered it, in the same directed_by form the "
-                    "tamper log uses — a synthetic identity in the fleet is an "
-                    "act someone took, never an ambient fact."
-                ),
+                description=("Who registered it, in the same directed_by form the tamper log uses — a synthetic identity in the fleet is an act someone took, never an ambient fact."),
             ),
             "retired_at": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=False,
-                description=(
-                    "When it was stood down; NULL means ACTIVE. Retired rather "
-                    "than deleted, because a stood-down canary still has to "
-                    "explain the alarms it produced while it ran."
-                ),
+                description=("When it was stood down; NULL means ACTIVE. Retired rather than deleted, because a stood-down canary still has to explain the alarms it produced while it ran."),
             ),
         },
     )
@@ -2551,11 +2313,7 @@ def get_gauge_canary_tamper_schema() -> TableSchema:
     """
     return TableSchema(
         table_name=TABLE_GAUGE_CANARY_TAMPER,
-        description=(
-            "Audited record of every canary arrest: who directed it, the "
-            "window, and the alarm it expected — what makes an alarm "
-            "attributable to a scheduled tamper rather than a real fault."
-        ),
+        description=("Audited record of every canary arrest: who directed it, the window, and the alarm it expected — what makes an alarm attributable to a scheduled tamper rather than a real fault."),
         id_prefix=GAUGE_CANARY_TAMPER_ID_PREFIX,
         columns={
             COL_AGENT_INSTANCE_ID: ColumnDefinition(
@@ -2566,11 +2324,7 @@ def get_gauge_canary_tamper_schema() -> TableSchema:
             "directed_by": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "Who ordered the tamper, in the platform's directed_by "
-                    "form. An unattributable tamper is the failure mode this "
-                    "column exists to make impossible."
-                ),
+                description=("Who ordered the tamper, in the platform's directed_by form. An unattributable tamper is the failure mode this column exists to make impossible."),
             ),
             "arrest_from": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -2580,21 +2334,12 @@ def get_gauge_canary_tamper_schema() -> TableSchema:
             "arrest_until": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "End of the requested arrest window, exclusive. ALWAYS "
-                    "bounded: an open-ended arrest is a canary that stays "
-                    "broken, and its alarms would then be attributable "
-                    "forever, which is the same as not being attributable."
-                ),
+                description=("End of the requested arrest window, exclusive. ALWAYS bounded: an open-ended arrest is a canary that stays broken, and its alarms would then be attributable forever, which is the same as not being attributable."),
             ),
             "expected_notice_type": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "Which alarm this arrest is expected to provoke, recorded "
-                    "BEFORE the outcome is known so the verifier cannot grade "
-                    "its own expectations after the fact."
-                ),
+                description=("Which alarm this arrest is expected to provoke, recorded BEFORE the outcome is known so the verifier cannot grade its own expectations after the fact."),
             ),
             "reason": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -2628,41 +2373,39 @@ def get_lane_charter_schema() -> TableSchema:
     path for it anywhere in this codebase."""
     return TableSchema(
         table_name=TABLE_LANE_CHARTER,
-        description=(
-            "Append-only operator-charter capture per lane_id. The latest "
-            "row's charter_text is driven byte-exact as a spawned worker's "
-            "literal first turn (spawn_session); a lane with no captured "
-            "charter resolves to a deterministic fallback turn instead."
-        ),
+        description=("Append-only operator-charter capture per lane_id. The latest row's charter_text is driven byte-exact as a spawned worker's literal first turn (spawn_session); a lane with no captured charter resolves to a deterministic fallback turn instead."),
         id_prefix=LANE_CHARTER_ID_PREFIX,
         columns={
             "lane_id": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description="The lane this charter founds; spawn_session resolves the "
-                "LATEST row for its lane_id.",
+                description="The lane this charter founds; spawn_session resolves the LATEST row for its lane_id.",
             ),
             "charter_text": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description="The operator's verbatim words, captured byte-exact — driven "
-                "unmodified as a spawned worker's first turn.",
+                description="The operator's verbatim words, captured byte-exact — driven unmodified as a spawned worker's first turn.",
             ),
             "brief_ref": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description="Workbench path or dispatch id the charter accompanies "
-                "(provenance).",
+                description="Read-only historical file provenance; never a launch input.",
+            ),
+            "unit_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="Registered Unit this charter accompanies; NULL means history.",
+            ),
+            "revision_id": ColumnDefinition(
+                type=ColumnType.TEXT,
+                description="Registered revision this immutable charter accompanies.",
             ),
             "captured_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
                 not_null=True,
-                description="When the operator spoke these words in the seat "
-                "conversation — NOT the row-write time.",
+                description="When the operator spoke these words in the seat conversation — NOT the row-write time.",
             ),
             "directed_by": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description="Server-built principal (CallContext) that captured this "
-                "charter.",
+                description="Server-built principal (CallContext) that captured this charter.",
             ),
         },
         indexes=[
@@ -2684,12 +2427,7 @@ def get_held_authorization_schema() -> TableSchema:
     ``session_dependency.fired_at``'s NULL-armed convention."""
     return TableSchema(
         table_name=TABLE_HELD_AUTHORIZATION,
-        description=(
-            "Held authorization-citation refusals Git-Controller cannot act "
-            "on without a first-party authorization. retired_at NULL = still "
-            "owed; list_held_authorizations is the 'what is blocked on <role>?' "
-            "answer for a session with no memory of a prior seat."
-        ),
+        description=("Held authorization-citation refusals Git-Controller cannot act on without a first-party authorization. retired_at NULL = still owed; list_held_authorizations is the 'what is blocked on <role>?' answer for a session with no memory of a prior seat."),
         id_prefix=HELD_AUTHORIZATION_ID_PREFIX,
         columns={
             "requesting_peer": ColumnDefinition(
@@ -2700,10 +2438,7 @@ def get_held_authorization_schema() -> TableSchema:
             "owed_by_role": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description=(
-                    "The seat/coordinator role expected to send the first-party "
-                    "authorization GC is waiting on. Not hardcoded to any one role."
-                ),
+                description=("The seat/coordinator role expected to send the first-party authorization GC is waiting on. Not hardcoded to any one role."),
             ),
             "branch_or_request_ref": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -2730,13 +2465,16 @@ def get_held_authorization_schema() -> TableSchema:
         },
         indexes=[
             IndexDefinition(
-                name="idx_held_authorization_owed_by_role", columns=["owed_by_role"],
+                name="idx_held_authorization_owed_by_role",
+                columns=["owed_by_role"],
             ),
             IndexDefinition(
-                name="idx_held_authorization_requesting_peer", columns=["requesting_peer"],
+                name="idx_held_authorization_requesting_peer",
+                columns=["requesting_peer"],
             ),
             IndexDefinition(
-                name="idx_held_authorization_open", columns=["retired_at"],
+                name="idx_held_authorization_open",
+                columns=["retired_at"],
             ),
         ],
     )
@@ -2756,10 +2494,7 @@ def _cell_identity_columns() -> dict[str, ColumnDefinition]:
         "provider": _text_column("Vendor: anthropic | openai."),
         "runtime": _text_column("Agent runtime as model_profiles/ names it: claude_code | codex."),
         "model": _text_column("Canonical model id as model_dispatch_policy.v1.json names it."),
-        "effort": _text_column(
-            "Effort tier: non_reasoning | none | low | medium | high | xhigh | max. "
-            "non_reasoning where the model has no dial."
-        ),
+        "effort": _text_column("Effort tier: non_reasoning | none | low | medium | high | xhigh | max. non_reasoning where the model has no dial."),
     }
 
 
@@ -2777,17 +2512,11 @@ def get_model_capability_observation_schema() -> TableSchema:
         id_prefix=MODEL_CAPABILITY_OBSERVATION_ID_PREFIX,
         columns={
             "refresh_run_id": _text_column("The model_capability_refresh_run this fetch belongs to."),
-            "source_id": _text_column(
-                "artificial_analysis_api | artificial_analysis_leaderboard_html | "
-                "openai_model_docs | anthropic_pricing_page | seed_table."
-            ),
+            "source_id": _text_column("artificial_analysis_leaderboard_html | artificial_analysis_model_detail_html | seed_table | manual_record | manual_lifecycle | harness_<runtime> (harness_claude_code, harness_codex)."),
             "fetch_method": _text_column("Verbatim recipe: URL, method, non-secret headers, parser id and version."),
             "fetched_at": _text_column("ISO-8601 UTC timestamp of the fetch."),
             **_cell_identity_columns(),
-            "metric": _text_column(
-                "intelligence_index | cost_per_task_usd | input_per_mtok | output_per_mtok | "
-                "cached_input_per_mtok | effort_supported | default_effort."
-            ),
+            "metric": _text_column("intelligence_index | cost_per_task_usd | acceptance_change (a withdraw or reinstate; value_text names the move and its cause) | harness_clock (the harness-absence clock started, restarted or cleared)."),
             "value_number": _real_column("The numeric reading, for numeric metrics."),
             "value_text": _text_column("The textual reading (effort lists, default effort).", not_null=False),
             "raw_excerpt": _text_column("At most 512 characters of source around the number.", not_null=False),
@@ -2803,9 +2532,14 @@ def get_model_capability_observation_schema() -> TableSchema:
 def get_model_capability_cell_schema() -> TableSchema:
     """`model_capability_cell` — the served, reconciled table (iss_48ea8171 §3.2).
 
-    Unique on (runtime, model, effort); updated in place by reconciliation
-    only, history lives in the observation table. `acceptance` and
-    `measured_at` together decide whether a consumer may read the cell.
+    Unique on (runtime, model, effort); history lives in the observation
+    table. A cell is created and renewed by the discovery refresh or recorded
+    by hand (`record_model_capability_cell`), and `acceptance` moves between
+    `accepted` and `withdrawn` by `withdraw_model_capability_cell`,
+    `reinstate_model_capability_cell` or the refresh's harness pass. A refresh
+    never changes the acceptance of a withdrawn cell except by reinstating one
+    the harness pass itself withdrew. `acceptance` and `measured_at` together
+    decide whether a consumer may read the cell.
     """
     return TableSchema(
         table_name=TABLE_MODEL_CAPABILITY_CELL,
@@ -2814,31 +2548,49 @@ def get_model_capability_cell_schema() -> TableSchema:
         columns={
             **_cell_identity_columns(),
             "capability_score": _real_column("Artificial Analysis Intelligence Index, 0-100."),
+            "enabled": ColumnDefinition(type=ColumnType.BOOLEAN, not_null=True, default=True, description="Operator eligibility, independent of measurement acceptance; standing policy governs new cells."),
             "cost_per_task_usd": _real_column("Artificial Analysis cost-per-task in USD at this effort."),
             "relative_cost_multiplier": _real_column("cost_per_task_usd over the cheapest accepted cell; derived at reconcile time."),
             "currency": _text_column("Always USD today; a column so it is never assumed."),
             "effort_supported": ColumnDefinition(
-                type=ColumnType.BOOLEAN, not_null=True,
+                type=ColumnType.BOOLEAN,
+                not_null=True,
                 description="Whether the vendor documentation lists this effort for this model.",
             ),
             "measured_at": _text_column("fetched_at of the newest agreeing observation; null until any.", not_null=False),
             "accepted_at": _text_column("When the current values passed cross-check; null until then.", not_null=False),
             "acceptance": _text_column("accepted | pending_crosscheck | crosscheck_conflict | withdrawn."),
             "agreeing_observation_ids": ColumnDefinition(
-                type=ColumnType.JSON, not_null=True,
+                type=ColumnType.JSON,
+                not_null=True,
                 description="The observation ids that agreed; [] while pending.",
             ),
             "disagreement_note": _text_column("Which sources said what, when in conflict.", not_null=False),
             "staleness_window_hours": ColumnDefinition(
-                type=ColumnType.INTEGER, not_null=True,
-                description="Window copied from the run config so a consumer refuses without re-reading config.",
+                type=ColumnType.INTEGER,
+                not_null=False,
+                description="Measured or configured policy window in hours; null means the policy window is unknown, not a measured zero window.",
             ),
             "last_refresh_run_id": _text_column("The run that last touched this cell."),
+            "harness_unverified_since": _text_column(
+                "UTC ISO-8601 time from which the harness list stopped confirming this model; null when the harness confirms it or it was never checked. Non-null on a withdrawn cell means the refresh withdrew it automatically; null on a withdrawn cell means a person did, and a refresh never reverses that.",
+                not_null=False,
+            ),
         },
         indexes=[
             IndexDefinition(name="idx_model_capability_cell_key", columns=["runtime", "model", "effort"], unique=True),
             IndexDefinition(name="idx_model_capability_cell_acceptance", columns=["acceptance"]),
         ],
+    )
+
+
+def get_model_cell_policy_schema() -> TableSchema:
+    """One current policy; immutable snapshots use existing policy_change runs."""
+    return TableSchema(
+        table_name=TABLE_MODEL_CELL_POLICY,
+        id_prefix="mcp",
+        description="Current ordered last-match-wins operator cell rules; empty means all enabled.",
+        columns={"rules": ColumnDefinition(type=ColumnType.JSON, not_null=True, description="Ordered {id, selector, enabled} rules; default true. Correct/retire by id, clear all to [].")},
     )
 
 
@@ -2851,13 +2603,13 @@ def get_model_capability_refresh_run_schema() -> TableSchema:
         columns={
             "started_at": _text_column("ISO-8601 UTC start."),
             "finished_at": _text_column("ISO-8601 UTC finish; null while running.", not_null=False),
-            "trigger": _text_column("cron | manual | policy_change | seed."),
+            "trigger": _text_column("cron | manual | policy_change | selector_stale | seed."),
             "status": _text_column("running | completed | failed."),
             "sources_ok": ColumnDefinition(type=ColumnType.JSON, not_null=True, description="Source ids that fetched cleanly."),
             "sources_failed": ColumnDefinition(type=ColumnType.JSON, not_null=True, description="Source ids that failed, with reason."),
-            "cells_accepted": ColumnDefinition(type=ColumnType.INTEGER, not_null=True, description="Cells accepted by this run."),
+            "cells_accepted": ColumnDefinition(type=ColumnType.INTEGER, not_null=True, description="Cells this run created or renewed as accepted."),
             "cells_conflicted": ColumnDefinition(type=ColumnType.INTEGER, not_null=True, description="Cells left in crosscheck_conflict."),
-            "cells_unchanged": ColumnDefinition(type=ColumnType.INTEGER, not_null=True, description="Cells whose values did not move."),
+            "cells_unchanged": ColumnDefinition(type=ColumnType.INTEGER, not_null=True, description="Cells that had a reading this run and were left as they were (an unconfirmed single source, a held manual value, a withdrawn cell)."),
             "note": _text_column("Free-text outcome, e.g. why a run failed.", not_null=False),
         },
         indexes=[
@@ -2896,6 +2648,152 @@ def get_allowance_pool_reading_schema() -> TableSchema:
     )
 
 
+def get_allowance_pool_reading_history_schema() -> TableSchema:
+    """Immutable record/correction/retraction snapshots; only append and read."""
+    columns = dict(get_allowance_pool_reading_schema().columns)
+    columns["operation"] = _text_column("record or retract; correction is another record.")
+    columns["reading_recorded_at"] = _text_column("Original snapshot write instant.")
+    return TableSchema(
+        table_name=TABLE_ALLOWANCE_POOL_READING_HISTORY,
+        description="Append-only allowance reading history, oldest recorded_at/id first.",
+        id_prefix=ALLOWANCE_POOL_READING_HISTORY_ID_PREFIX,
+        columns=columns,
+        indexes=[IndexDefinition(name="idx_allowance_history_order", columns=["recorded_at", "id"])],
+    )
+
+
+def get_retired_role_schema() -> TableSchema:
+    """`retired_role` — the authoritative retired-role registry (iss_d9c955a2).
+
+    Append-only, one row per retired role. ``external_id`` is
+    ``retired_role:<normalized name>`` (standard UNIQUE), and
+    ``registry_version`` is UNIQUE too, so the registry's version (its highest
+    row version) strictly increases on every retirement and two concurrent
+    retirements cannot share one. Written only by ``retired_role_registry``.
+    """
+    return TableSchema(
+        table_name=TABLE_RETIRED_ROLE,
+        description=("Authoritative retired-role registry: role-addressed sends and claims naming a row are refused; registry_version versions the whole set."),
+        id_prefix=RETIRED_ROLE_ID_PREFIX,
+        columns={
+            "role": _text_column("Role name exactly as it was retired (display spelling)."),
+            "role_key": _text_column("Matching key: NFKC, casefold, whitespace stripped."),
+            "retired_at": ColumnDefinition(
+                type=ColumnType.DATETIME,
+                not_null=True,
+                description="When the role was retired.",
+            ),
+            "retired_by": _text_column("Ruling, issue or seat that retired the role."),
+            "reason": _text_column("Why the role is retired; quoted in every refusal."),
+            "successor": _text_column(
+                "Role that took over the retired role's work; null when none.",
+                not_null=False,
+            ),
+            "registry_version": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=True,
+                unique=True,
+                description="Registry version this row was added at; max over rows is the registry version.",
+            ),
+        },
+    )
+
+
+def get_accepted_authorization_schema() -> TableSchema:
+    """Accepted-but-unfired authorization obligations (wgr_d854aa6c). One row
+    per accepted obligation; ``version`` is the compare-and-set token every
+    change names, and every change appends an ``accepted_authorization_event``
+    row in the same transaction. Not proof of authority: no row authorizes a
+    landing, and recording one performs no act."""
+    return TableSchema(
+        table_name=TABLE_ACCEPTED_AUTHORIZATION,
+        description=("Accepted authorization obligations waiting on an external precondition: who owes the act, the authorizing message, the act and its current predicate. state accepted = pending, never fired; list_held_authorizations reports them beside open refusals."),
+        id_prefix=ACCEPTED_AUTHORIZATION_ID_PREFIX,
+        columns={
+            "requesting_peer": _text_column("The role or instance the accepted authorization serves."),
+            "owed_by_role": _text_column("The seat responsible to act once the predicate holds."),
+            "branch_or_request_ref": _text_column("The proposed branch name or other stable request identifier."),
+            "authorizing_message_id": _text_column("The message that issued the current act and predicate."),
+            "act": _text_column("What the owed_by_role seat does once the predicate holds, e.g. seed-clone."),
+            "predicate": _text_column("The current exact precondition; a fire must name it verbatim."),
+            "state": _text_column("accepted | fired | withdrawn | retired."),
+            "version": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=True,
+                description="Compare-and-set version: 1 at record, +1 per change.",
+            ),
+            "notes": _text_column("Optional notes; set, corrected or cleared by a correction.", not_null=False),
+            "terminal_reason": _text_column("Why the entry left accepted; null while accepted.", not_null=False),
+            "terminal_actor": _text_column("Who recorded the fire, withdrawal or retirement.", not_null=False),
+            "terminal_evidence": _text_column("Action evidence of a fire, or optional withdrawal/retirement evidence.", not_null=False),
+        },
+        indexes=[
+            IndexDefinition(name="idx_accepted_authorization_owed_by_role", columns=["owed_by_role"]),
+            IndexDefinition(name="idx_accepted_authorization_requesting_peer", columns=["requesting_peer"]),
+            IndexDefinition(name="idx_accepted_authorization_state", columns=["state"]),
+            IndexDefinition(name="idx_accepted_authorization_message", columns=["authorizing_message_id"]),
+        ],
+    )
+
+
+def get_accepted_authorization_event_schema() -> TableSchema:
+    """Append-only history of ``accepted_authorization``: one row per record or
+    change, written in the projection's transaction and never updated or
+    deleted. ``external_id`` is ``accepted-authorization-event:<entry_id>:
+    <revision>``, so one revision can never gain a second event."""
+    return TableSchema(
+        table_name=TABLE_ACCEPTED_AUTHORIZATION_EVENT,
+        description=("Append-only accepted-authorization history: before/after snapshots, operation, reason, actor and the causal authorizing message per revision; get_authorization_history reads it by entry or by message id."),
+        id_prefix=ACCEPTED_AUTHORIZATION_EVENT_ID_PREFIX,
+        columns={
+            "entry_id": _text_column("The accepted_authorization row this event belongs to."),
+            "revision": ColumnDefinition(
+                type=ColumnType.INTEGER,
+                not_null=True,
+                description="The projection version this event produced; 1 for record.",
+            ),
+            "operation": _text_column("record | correct | fire | withdraw | retire | reopen."),
+            "authorizing_message_id": _text_column("The authorizing message in force after this event."),
+            "reason": _text_column("Why the caller made this change."),
+            "actor": _text_column("Who made this change, as the caller reported it."),
+            "changes": ColumnDefinition(
+                type=ColumnType.JSON,
+                not_null=True,
+                description="Changed field -> set | correct | clear.",
+            ),
+            "before_snapshot": ColumnDefinition(
+                type=ColumnType.JSON,
+                description="The projection before this event; null for record.",
+            ),
+            "after_snapshot": ColumnDefinition(
+                type=ColumnType.JSON,
+                not_null=True,
+                description="The projection after this event.",
+            ),
+        },
+        indexes=[
+            IndexDefinition(name="idx_accepted_authorization_event_entry", columns=["entry_id", "revision"]),
+            IndexDefinition(name="idx_accepted_authorization_event_message", columns=["authorizing_message_id"]),
+        ],
+    )
+
+
+def get_accepted_authorization_schema_definition() -> SchemaDefinition:
+    """Accepted authorization obligations and their history, declared piecewise
+    in this plugin's role/session namespace beside the session-lifecycle
+    definition that holds the R1 refusal queue (same pattern as
+    :func:`get_role_model_schema_definition`)."""
+    return SchemaDefinition(
+        namespace=AGENT_ROLE_BINDING_NAMESPACE,
+        version="1.0.0",
+        description=("Accepted-but-unfired authorization obligations: the accepted_authorization projection and its append-only accepted_authorization_event history."),
+        tables={
+            TABLE_ACCEPTED_AUTHORIZATION: get_accepted_authorization_schema(),
+            TABLE_ACCEPTED_AUTHORIZATION_EVENT: get_accepted_authorization_event_schema(),
+        },
+    )
+
+
 def get_session_lifecycle_schema_definition() -> SchemaDefinition:
     """Wrap the D1 L0 schema deltas (§3.2-3.4 + the AMEND-4b cardinality row)
     for ``get_schema_definitions``. Same namespace as the rest of this plugin's
@@ -2904,7 +2802,7 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
     D1 is land-able alone)."""
     return SchemaDefinition(
         namespace=AGENT_ROLE_BINDING_NAMESPACE,
-        version="1.13.0",
+        version="1.16.0",
         description=(
             "Fleet session-management Phase B, D1 — L0 schema deltas. "
             "+1.1.0: session_context_status (maintenance-verbs M1). "
@@ -2923,7 +2821,11 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
             "+1.12.0: nullable legacy managed-dispatch TTL storage for the F1 "
             "blue/green compatibility bridge; current writers remain unchanged. "
             "+1.13.0: allowance_pool_reading, an operator-recorded reading per "
-            "flat-rate allowance pool (iss_c6fbf9ae)."
+            "flat-rate allowance pool (iss_c6fbf9ae). "
+            "+1.14.0: retired_role, the authoritative retired-role registry "
+            "(iss_d9c955a2). +1.15.0: append-only allowance_pool_reading_history. "
+            "+1.16.0: model capability cells may preserve an unknown policy "
+            "staleness window as null."
         ),
         tables={
             TABLE_SESSION_ROLE_CLAIM: get_session_role_claim_schema(),
@@ -2935,9 +2837,7 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
             TABLE_SESSION_CLAUDE_MAPPING: get_session_claude_mapping_schema(),
             TABLE_LANE_CHARTER: get_lane_charter_schema(),
             TABLE_SESSION_CONTEXT_STATUS: get_session_context_status_schema(),
-            TABLE_SESSION_CONTEXT_STATUS_HISTORY: (
-                get_session_context_status_history_schema()
-            ),
+            TABLE_SESSION_CONTEXT_STATUS_HISTORY: (get_session_context_status_history_schema()),
             TABLE_HELD_AUTHORIZATION: get_held_authorization_schema(),
             TABLE_GAUGE_NOTICE_RECORD: get_gauge_notice_record_schema(),
             TABLE_GAUGE_CANARY_REGISTRY: get_gauge_canary_registry_schema(),
@@ -2947,15 +2847,26 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
             TABLE_FLEET_PROGRESS_RUN: get_fleet_progress_run_schema(),
             TABLE_MODEL_CAPABILITY_OBSERVATION: get_model_capability_observation_schema(),
             TABLE_MODEL_CAPABILITY_CELL: get_model_capability_cell_schema(),
+            TABLE_MODEL_CELL_POLICY: get_model_cell_policy_schema(),
             TABLE_MODEL_CAPABILITY_REFRESH_RUN: get_model_capability_refresh_run_schema(),
             TABLE_ALLOWANCE_POOL_READING: get_allowance_pool_reading_schema(),
+            TABLE_ALLOWANCE_POOL_READING_HISTORY: get_allowance_pool_reading_history_schema(),
+            TABLE_RETIRED_ROLE: get_retired_role_schema(),
         },
     )
 
 
 __all__ = [
+    "ACCEPTED_AUTHORIZATION_EVENT_ID_PREFIX",
+    "ACCEPTED_AUTHORIZATION_ID_PREFIX",
     "AGENT_ROLE_BINDING_ID_PREFIX",
     "ALLOWANCE_POOL_READING_ID_PREFIX",
+    "AUTHORIZATION_ACCEPTED",
+    "AUTHORIZATION_FIRED",
+    "AUTHORIZATION_RETIRED",
+    "AUTHORIZATION_STATES",
+    "AUTHORIZATION_WITHDRAWN",
+    "RETIRED_ROLE_ID_PREFIX",
     "CAPTURE_SOURCE_HOOK_CLEAR",
     "CAPTURE_SOURCE_HOOK_RESUME",
     "CAPTURE_SOURCE_HOOK_STARTUP",
@@ -3016,9 +2927,12 @@ __all__ = [
     "TABLE_FLEET_LIVENESS_RUN",
     "TABLE_FLEET_PROGRESS_RUN",
     "TABLE_ALLOWANCE_POOL_READING",
+    "TABLE_RETIRED_ROLE",
     "TABLE_MODEL_CAPABILITY_CELL",
     "TABLE_MODEL_CAPABILITY_OBSERVATION",
     "TABLE_MODEL_CAPABILITY_REFRESH_RUN",
+    "TABLE_ACCEPTED_AUTHORIZATION",
+    "TABLE_ACCEPTED_AUTHORIZATION_EVENT",
     "TABLE_HELD_AUTHORIZATION",
     "TABLE_INBOX_CONSUMPTION_STATUS",
     "TABLE_LANE_CHARTER",
@@ -3034,6 +2948,9 @@ __all__ = [
     "WORK_CLASS_ANALYSIS_DELIVERABLE",
     "WORK_CLASS_PRODUCTION_MUTATION",
     "WORK_CLASS_READ_ONLY",
+    "get_accepted_authorization_event_schema",
+    "get_accepted_authorization_schema",
+    "get_accepted_authorization_schema_definition",
     "get_agent_role_binding_schema",
     "get_agent_role_binding_schema_definition",
     "get_gauge_canary_registry_schema",
@@ -3042,6 +2959,7 @@ __all__ = [
     "get_fleet_liveness_run_schema",
     "get_fleet_progress_run_schema",
     "get_allowance_pool_reading_schema",
+    "get_retired_role_schema",
     "get_model_capability_cell_schema",
     "get_model_capability_observation_schema",
     "get_model_capability_refresh_run_schema",

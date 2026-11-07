@@ -123,7 +123,6 @@ settings, preserving the plugin-cache reporter there. This is an election of
 ONE writer, not a renamed pair of independent writers.
 """
 
-
 from __future__ import annotations
 
 # INTERPRETER FLOOR. These hooks are Python 3.13 source and use datetime.UTC
@@ -158,6 +157,7 @@ from typing import Any
 _OWNER_DIRECTORY = str(Path(__file__).resolve().parent)
 if _OWNER_DIRECTORY not in sys.path:
     sys.path.insert(0, _OWNER_DIRECTORY)
+import _session_identity as session_identity  # noqa: E402 -- sibling path follows runtime floor
 import coordination_owner  # noqa: E402 -- sibling path follows runtime floor
 
 _MARKER_DIR_ENV = "AGENT_HEARTBEAT_MARKER_DIR"
@@ -455,9 +455,16 @@ def sum_context_tokens(usage: dict[str, Any]) -> int:
 
 
 def build_notification_content(
-    *, agent_instance_id: str, session_label: str, model: str,
-    current_tokens: int, ceiling: int, band: str, band_actionable: bool,
-    threshold_fraction: float, fraction_crossed: bool,
+    *,
+    agent_instance_id: str,
+    session_label: str,
+    model: str,
+    current_tokens: int,
+    ceiling: int,
+    band: str,
+    band_actionable: bool,
+    threshold_fraction: float,
+    fraction_crossed: bool,
 ) -> str:
     """Return the sole durability notice text for a due session."""
     return f"context is {current_tokens:,} — make sure everything is durable."
@@ -546,7 +553,10 @@ def _solet_call(process_key: str, arguments: dict[str, Any]) -> dict[str, Any] |
     try:
         result = subprocess.run(
             ["solet-bridge", "call", process_key, json.dumps(arguments)],
-            capture_output=True, text=True, timeout=20, check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
             env=_solet_call_env(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -568,7 +578,8 @@ def _resolve_steward_role(agent_instance_id: str) -> str | None:
     steward -- callers fall back to local self-notification, they don't
     treat this as an error."""
     envelope = _solet_call(
-        _SESSION_STATUS_PROCESS_KEY, {"agent_instance_id": agent_instance_id},
+        _SESSION_STATUS_PROCESS_KEY,
+        {"agent_instance_id": agent_instance_id},
     )
     if envelope is None or envelope.get("status") != "completed":
         return None
@@ -647,7 +658,10 @@ def _ancestor_claude_pid() -> int | None:
         try:
             result = subprocess.run(
                 ["ps", "-o", "ppid=,comm=", "-p", str(pid)],
-                capture_output=True, text=True, timeout=5, check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             _warn(f"ancestor walk failed at pid {pid}: {exc}")
@@ -691,15 +705,12 @@ def _registry_row_is_fresh(row: dict[str, Any]) -> bool:
     age_seconds = (datetime.now(UTC) - stamp).total_seconds()
     if age_seconds < -_SEAT_REGISTRY_MAX_AGE_SECONDS:
         _warn(
-            f"registry row is {-age_seconds:.0f}s in the FUTURE -- clock or "
-            "timezone fault, not freshness; skipping rather than trusting it",
+            f"registry row is {-age_seconds:.0f}s in the FUTURE -- clock or timezone fault, not freshness; skipping rather than trusting it",
         )
         return False
     if age_seconds > _SEAT_REGISTRY_MAX_AGE_SECONDS:
         _warn(
-            f"registry row is {age_seconds:.0f}s old (bound "
-            f"{_SEAT_REGISTRY_MAX_AGE_SECONDS}s) -- a re-used pid may be "
-            "matching a dead session; skipping rather than reporting under it",
+            f"registry row is {age_seconds:.0f}s old (bound {_SEAT_REGISTRY_MAX_AGE_SECONDS}s) -- a re-used pid may be matching a dead session; skipping rather than reporting under it",
         )
         return False
     return True
@@ -712,15 +723,8 @@ def _registry_rows_for_pid(pid: int) -> list[dict[str, Any]] | None:
     envelope = _solet_call(_PEER_LIST_PROCESS_KEY, {})
     if envelope is None:
         return None
-    instances = (
-        (envelope.get("result") or {}).get("data", {}).get("instances") or {}
-    )
-    return [
-        row
-        for rows in instances.values()
-        for row in rows
-        if row.get("parent_pid") == pid
-    ]
+    instances = (envelope.get("result") or {}).get("data", {}).get("instances") or {}
+    return [row for rows in instances.values() for row in rows if row.get("parent_pid") == pid]
 
 
 def _resolve_seat_instance_id() -> str | None:
@@ -750,8 +754,7 @@ def _resolve_seat_instance_id() -> str | None:
     # and skipping IS the correct behaviour for it.
     if len(matches) != 1:
         _warn(
-            f"registry has {len(matches)} rows for ancestor pid {pid}, need "
-            "exactly 1 -- skipping",
+            f"registry has {len(matches)} rows for ancestor pid {pid}, need exactly 1 -- skipping",
         )
         return None
     if not _registry_row_is_fresh(matches[0]):
@@ -795,8 +798,7 @@ def _identity_without_env() -> str | None:
     if resolved:
         return resolved
     _warn(
-        f"{_INSTANCE_ID_ENV} not set and no registry row resolved -- not a "
-        "fleet-managed spawn, or identity is unavailable; skipping",
+        f"{_INSTANCE_ID_ENV} not set and no registry row resolved -- not a fleet-managed spawn, or identity is unavailable; skipping",
     )
     return None
 
@@ -821,7 +823,8 @@ def _resolve_firing_context(identity_dir: Path) -> tuple[Path, str, str, str] | 
 
 
 def _cache_arguments(
-    transcript_path: str, thresholds: Any,
+    transcript_path: str,
+    thresholds: Any,
 ) -> dict[str, Any]:
     """The three optional cache fields, or ``{}`` when they cannot be measured.
 
@@ -845,7 +848,9 @@ def _cache_arguments(
         _warn(f"could not parse transcript timestamps for cache state: {exc}")
         return {}
     state = thresholds.classify_cache_state(
-        parsed, datetime.now(UTC), cleared_at=None,
+        parsed,
+        datetime.now(UTC),
+        cleared_at=None,
     )
     return {
         "cache_read_tokens": parsed[-1].cache_read_tokens,
@@ -919,8 +924,7 @@ def _runtime_identity_arguments(claude_session_id: str) -> dict[str, str]:
         global _missing_effort_warned
         if not _missing_effort_warned:
             _warn(
-                "CLAUDE_EFFORT is unset; reporting effort='unknown' as a "
-                "degraded identity rather than withholding the gauge",
+                "CLAUDE_EFFORT is unset; reporting effort='unknown' as a degraded identity rather than withholding the gauge",
             )
             _missing_effort_warned = True
         effort = "unknown"
@@ -973,8 +977,13 @@ def _classify_surface(parts: tuple[str, ...]) -> str:
 
 
 def _report_context_status(
-    *, agent_instance_id: str, claude_session_id: str, model: str,
-    current_tokens: int, ceiling: int, cache_arguments: dict[str, Any],
+    *,
+    agent_instance_id: str,
+    claude_session_id: str,
+    model: str,
+    current_tokens: int,
+    ceiling: int,
+    cache_arguments: dict[str, Any],
     reading_at: str | None,
 ) -> bool:
     """Best-effort cache write for ``session_context_status`` (shape (a)) --
@@ -1043,9 +1052,16 @@ def _resolve_usage(transcript_path: str) -> tuple[str, int, str | None, Any] | N
 
 
 def _check_and_notify(
-    *, marker_dir: Path, agent_instance_id: str, claude_session_id: str,
-    latch_path: Path, model: str, current_tokens: int, cache_cold: Any,
-    rotation_thresholds: Any, solet_live: bool,
+    *,
+    marker_dir: Path,
+    agent_instance_id: str,
+    claude_session_id: str,
+    latch_path: Path,
+    model: str,
+    current_tokens: int,
+    cache_cold: Any,
+    rotation_thresholds: Any,
+    solet_live: bool,
 ) -> None:
     """The threshold-and-notify half of a firing (post throttle/latch
     gating) -- split out of :func:`main` to keep it a straight-line
@@ -1141,7 +1157,9 @@ def _check_and_notify(
     # fraction-only crossing is not, and this hook keeps it.
     if solet_live and verdict.band_actionable:
         deferred_path = _deferred_marker_path(
-            marker_dir, agent_instance_id, claude_session_id,
+            marker_dir,
+            agent_instance_id,
+            claude_session_id,
         )
         if not deferred_path.exists():
             _warn(
@@ -1167,8 +1185,10 @@ def _check_and_notify(
         fraction_crossed=verdict.fraction_crossed,
     )
     delivered = _deliver_notification(
-        agent_instance_id=agent_instance_id, claude_session_id=claude_session_id,
-        content=content, marker_dir=marker_dir,
+        agent_instance_id=agent_instance_id,
+        claude_session_id=claude_session_id,
+        content=content,
+        marker_dir=marker_dir,
     )
     if delivered:
         touch_marker(latch_path)
@@ -1187,6 +1207,10 @@ def _verified_identity_directory() -> Path | None:
 
 
 def main() -> int:
+    # Env-less session (desktop app / hand-started): overlay its persisted
+    # identity and clone receipt before ownership is verified. A no-op whenever
+    # a launcher exported an identity, so fleet spawns verify exactly as before.
+    session_identity.apply(__file__)
     identity_dir = _verified_identity_directory()
     if identity_dir is None:
         return 0
@@ -1217,8 +1241,10 @@ def main() -> int:
     # cost twice, they could disagree if a call landed between them.
     cache_arguments = _cache_arguments(transcript_path, rotation_thresholds)
     solet_live = _report_context_status(
-        agent_instance_id=agent_instance_id, claude_session_id=claude_session_id,
-        model=model, current_tokens=current_tokens,
+        agent_instance_id=agent_instance_id,
+        claude_session_id=claude_session_id,
+        model=model,
+        current_tokens=current_tokens,
         ceiling=rotation_thresholds.resolve_ceiling(model),
         cache_arguments=cache_arguments,
         reading_at=reading_at,
@@ -1234,9 +1260,12 @@ def main() -> int:
         return 0
 
     _check_and_notify(
-        marker_dir=marker_dir, agent_instance_id=agent_instance_id,
-        claude_session_id=claude_session_id, latch_path=latch_path,
-        model=model, current_tokens=current_tokens,
+        marker_dir=marker_dir,
+        agent_instance_id=agent_instance_id,
+        claude_session_id=claude_session_id,
+        latch_path=latch_path,
+        model=model,
+        current_tokens=current_tokens,
         # `.get` returns None when the cache state could not be measured at all
         # -- `_cache_arguments` returns {} in that case precisely so the absence
         # stays visible instead of arriving as a fabricated False.

@@ -35,8 +35,10 @@ import logging
 import socket
 import sys
 import tempfile
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import cast
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
@@ -134,12 +136,14 @@ async def _router_running(
     socket_path: Path,
     public_port: int,
     *,
+    runtime_dir: Path,
     streamable_public_port: int | None,
-):
+) -> AsyncGenerator[asyncio.Task[None]]:
     ready = asyncio.Event()
     task = asyncio.create_task(
         run_router(
             solet="smoke",
+            runtime_dir=runtime_dir,
             public_port=public_port,
             public_host="127.0.0.1",
             socket_path=socket_path,
@@ -168,6 +172,40 @@ async def _router_running(
 def _stamp(label: str, ok: bool, detail: str = "") -> bool:
     sym = "PASS" if ok else "FAIL"
     print(f"  [{sym}] {label}" + (f" — {detail}" if detail else ""))
+    return ok
+
+
+def _require_object_records(value: object, field_name: str) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        raise AssertionError(f"status {field_name} must be a list")
+    records: list[dict[str, object]] = []
+    for record in cast(list[object], value):
+        if not isinstance(record, dict) or not all(
+            isinstance(key, str) for key in cast(dict[object, object], record)
+        ):
+            raise AssertionError(f"each {field_name} record must be an object with string keys")
+        records.append(cast(dict[str, object], record))
+    return records
+
+
+def _case_runtime_isolation(
+    runtime_dir: Path,
+    public_port: int,
+) -> bool:
+    ok = True
+    for suffix in ("router", "bridge"):
+        port_file = runtime_dir / f"smoke.{suffix}.port"
+        exists = port_file.is_file()
+        is_in_temp_runtime = exists and port_file.resolve().parent == runtime_dir.resolve()
+        ok &= _stamp(
+            f"{port_file.name} written under resolved smoke runtime",
+            is_in_temp_runtime,
+        )
+        if exists:
+            ok &= _stamp(
+                f"{port_file.name} contains public port",
+                port_file.read_text(encoding="utf-8") == str(public_port),
+            )
     return ok
 
 
@@ -261,11 +299,9 @@ async def case_no_streamable_port_503s_but_main_still_works(
 async def case_status_exposes_streamable_port(mgmt: _Mgmt) -> bool:
     print("\n[case_status_exposes_streamable_port] status() carries streamable_port per color")
     status_resp = await mgmt.call("status")
-    colors = status_resp.get("colors")
-    ok_shape = isinstance(colors, list) and all(
-        isinstance(c, dict) and "streamable_port" in c for c in colors
-    )
-    _stamp("every status color entry carries a streamable_port key", ok_shape, repr(colors))
+    color_entries = _require_object_records(status_resp.get("colors"), "colors")
+    ok_shape = all("streamable_port" in color for color in color_entries)
+    _stamp("every status color entry carries a streamable_port key", ok_shape, repr(color_entries))
     return ok_shape
 
 
@@ -274,8 +310,15 @@ async def case_opt_out_starts_no_second_listener() -> bool:
     public_port = _pick_free_port()
     probe_port = _pick_free_port()  # never bound by the router; nothing should answer here
     tmpdir = Path(tempfile.mkdtemp(prefix="bg-router-smoke-optout-"))
-    socket_path = tmpdir / "router.sock"
-    async with _router_running(socket_path, public_port, streamable_public_port=None):
+    runtime_dir = tmpdir / "runtime"
+    runtime_dir.mkdir()
+    socket_path = runtime_dir / "router.sock"
+    async with _router_running(
+        socket_path,
+        public_port,
+        runtime_dir=runtime_dir,
+        streamable_public_port=None,
+    ):
         try:
             async with httpx.AsyncClient(timeout=1.0) as client:
                 await client.get(f"http://127.0.0.1:{probe_port}/probe")
@@ -284,7 +327,9 @@ async def case_opt_out_starts_no_second_listener() -> bool:
             connected = False
     ok = not connected
     _stamp("nothing listening on the never-configured streamable port", ok)
-    return ok
+    return _case_runtime_isolation(
+        runtime_dir, public_port,
+    ) and ok
 
 
 async def main_async() -> int:
@@ -295,7 +340,9 @@ async def main_async() -> int:
     green_main, green_streamable = _pick_free_port(), _pick_free_port()
     yellow_main = _pick_free_port()
     tmpdir = Path(tempfile.mkdtemp(prefix="bg-router-smoke-blg04-"))
-    socket_path = tmpdir / "router.sock"
+    runtime_dir = tmpdir / "runtime"
+    runtime_dir.mkdir()
+    socket_path = runtime_dir / "router.sock"
 
     listeners = [
         _MockListener("blue-main", blue_main),
@@ -312,7 +359,10 @@ async def main_async() -> int:
     )
     try:
         async with _router_running(
-            socket_path, public_port, streamable_public_port=streamable_public_port,
+            socket_path,
+            public_port,
+            runtime_dir=runtime_dir,
+            streamable_public_port=streamable_public_port,
         ):
             mgmt = _Mgmt(socket_path)
             results = [
@@ -337,6 +387,10 @@ async def main_async() -> int:
                 (
                     "status_exposes_streamable_port",
                     await case_status_exposes_streamable_port(mgmt),
+                ),
+                (
+                    "runtime_isolation",
+                    _case_runtime_isolation(runtime_dir, public_port),
                 ),
             ]
     finally:

@@ -56,8 +56,10 @@ from __future__ import annotations
 import re
 import subprocess
 from collections.abc import Callable
+from pathlib import Path
 
 from .doctor_advisory_result import advisory_unknown, advisory_verified, advisory_warn
+from .doctor_check_results import result as advisory_result
 from .models import InstanceRecord, JsonValue
 
 _STATE_SERVICE_SUFFIX = "postgres_state_management_plugin"
@@ -65,6 +67,10 @@ _LIVE_ACCOUNT = "db_password"
 _OFFLINE_ACCOUNT = "password"
 
 _COPY_CHECK_ID = "doctor::offline_credential_copy_current_v1"
+
+# The reader the raw account exists for. A target that does not ship it has no
+# offline consumer, so there is no copy for this check to grade.
+_OFFLINE_CONSUMER = Path("plugins/default_knowledge_plugin/tools/_pg_credentials.py")
 
 _QUOTED_FIELD = re.compile(r'"([^"]*)"')
 
@@ -149,6 +155,18 @@ def _offline_copy_advisory(record: InstanceRecord, reader: AttributeReader) -> d
     }
     source = f"security find-generic-password -s {service} (attributes only, no secret read)"
 
+    if not (Path(record.target) / _OFFLINE_CONSUMER).is_file():
+        return advisory_result(
+            _COPY_CHECK_ID,
+            "not_applicable",
+            "This target does not ship the offline knowledge reader, so no raw credential copy is read here.",
+            expected,
+            observed,
+            source,
+            "offline_consumer_not_shipped",
+            None,
+        )
+
     try:
         live = reader(service, _LIVE_ACCOUNT)
         offline = reader(service, _OFFLINE_ACCOUNT)
@@ -166,28 +184,23 @@ def _offline_copy_advisory(record: InstanceRecord, reader: AttributeReader) -> d
     if offline is None:
         return advisory_warn(
             _COPY_CHECK_ID,
-            "The raw Keychain account the offline knowledge tools read does not exist, so "
-            "the documented degraded fallback cannot authenticate at all.",
+            "The raw Keychain account the offline knowledge tools read does not exist, so the documented degraded fallback cannot authenticate at all.",
             expected,
             observed,
             source,
             "offline_credential_copy_absent",
-            "Recreate the raw account at this service with the CURRENT password (verbatim "
-            "keyring.set_password, not the RFC-2397 form); the offline tools read it "
-            "directly and fail loud without it.",
+            "Recreate the raw account at this service with the CURRENT password (verbatim keyring.set_password, not the RFC-2397 form); the offline tools read it directly and fail loud without it.",
         )
 
     if live is None:
         return advisory_unknown(
             _COPY_CHECK_ID,
-            "The live credential account is absent, so there is no rotation to compare the "
-            "offline copy against.",
+            "The live credential account is absent, so there is no rotation to compare the offline copy against.",
             expected,
             observed,
             source,
             "live_credential_copy_absent",
-            "The live db_password account does not exist; this check grades the offline "
-            "copy relative to it and cannot do so.",
+            "The live db_password account does not exist; this check grades the offline copy relative to it and cannot do so.",
         )
 
     return _grade_currency(live, offline, expected, observed, source)
@@ -217,8 +230,7 @@ def _grade_currency(
             observed,
             source,
             "keychain_dates_missing",
-            "Without both dates on both accounts the rotation cannot be ordered; an "
-            "ungradable pair is not a passing one.",
+            "Without both dates on both accounts the rotation cannot be ordered; an ungradable pair is not a passing one.",
         )
 
     live_was_rotated = live_modified > live_created
@@ -227,24 +239,18 @@ def _grade_currency(
     if live_was_rotated and rotated_after_offline:
         return advisory_warn(
             _COPY_CHECK_ID,
-            "The live credential was rotated after the offline copy was last written, so "
-            "the copy the offline knowledge tools read is stale.",
+            "The live credential was rotated after the offline copy was last written, so the copy the offline knowledge tools read is stale.",
             expected,
             observed,
             source,
             "offline_credential_copy_stale",
-            "Rewrite the raw account with the current password. credential_seed rotates the "
-            "live and pgvector copies and the role, and never this one, so the documented "
-            "offline fallback breaks silently -- and is discovered only when live retrieval "
-            "is already down and the fallback is what you reached for.",
+            "Rewrite the raw account with the current password. credential_seed rotates the live and pgvector copies and the role, and never this one, so the documented offline fallback breaks silently -- and is discovered only when live retrieval is already down and the fallback is what you reached for.",
         )
 
     if rotated_after_offline:
         return advisory_verified(
             _COPY_CHECK_ID,
-            "The live account is younger than the offline copy but has never been modified "
-            "since it was created, which is the expected additive-introduction state, not a "
-            "rotation that stranded the copy.",
+            "The live account is younger than the offline copy but has never been modified since it was created, which is the expected additive-introduction state, not a rotation that stranded the copy.",
             expected,
             observed,
             source,

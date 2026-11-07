@@ -57,14 +57,24 @@ from ..peer_dispatch import (
 )
 from ..peer_inbox_view import (
     InvalidInboxCursorError,
+    parse_since_continuation_cursor,
     parse_since_cursor,
     serialize_peer_inbox_page,
 )
 from ..peer_list_view import (
     serialize_peer_list as _serialize_peer_list,
 )
-from ..peer_registry import PeerAmbiguousError, PeerUnreachableError
+from ..peer_registry import (
+    PEER_REGISTRATION_LOCK,
+    PeerAmbiguousError,
+    PeerUnreachableError,
+)
 from ..platform_surface import BridgeError
+from ..retired_role_registry import (
+    RetiredRoleRegistryError,
+    RoleRetiredError,
+    refuse_if_retired,
+)
 from ..role_binding_store import (
     RoleBindingVacantError,
     list_roles_for_agent_instance,
@@ -649,7 +659,10 @@ def _tool_peer_register(
         session_label=label,
         parent_pid=None,
     )
-    context.peer_registry.register(binding)
+    # iss_59a7f833: the same lock the HTTP peer/register check-then-act holds,
+    # so this relabel cannot interleave with it on another worker thread.
+    with PEER_REGISTRATION_LOCK:
+        context.peer_registry.register(binding)
     session.agent_id = new_agent_id
     session.session_label = label
     session.binding = binding
@@ -723,6 +736,18 @@ def _tool_peer_send(
     return outcome.to_payload()
 
 
+def _refuse_retired_role(state_service: Any, role_name: str) -> None:
+    """Refuse a retired name before resolve and persist (iss_d9c955a2)."""
+    try:
+        refuse_if_retired(state_service, role_name)
+    except RoleRetiredError as exc:
+        raise JsonRpcError(_PEER_UNREACHABLE, str(exc), data=exc.to_public()) from exc
+    except RetiredRoleRegistryError as exc:
+        raise JsonRpcError(
+            _TOOL_CALL_FAILED, exc.message, data={"code": exc.code},
+        ) from exc
+
+
 def _tool_peer_send_by_name(
     arguments: dict[str, Any],
     *,
@@ -747,6 +772,7 @@ def _tool_peer_send_by_name(
             "state_service is not bound; cannot resolve role bindings.",
             data={"code": "bridge.state_service_unavailable"},
         )
+    _refuse_retired_role(state_service, role_name)
     try:
         role = resolve_role_binding(state_service, role_name)
     except RoleBindingVacantError as exc:
@@ -813,6 +839,14 @@ def _peer_inbox_since(raw: object) -> datetime | None:
         raise JsonRpcError(_INVALID_PARAMS, f"peer_inbox.{exc}") from exc
 
 
+def _peer_inbox_since_cursor(raw: object) -> str | None:
+    """Validate the opaque direct-section continuation token."""
+    try:
+        return parse_since_continuation_cursor(raw)
+    except InvalidInboxCursorError as exc:
+        raise JsonRpcError(_INVALID_PARAMS, f"peer_inbox.{exc}") from exc
+
+
 def _tool_peer_inbox(
     arguments: dict[str, Any],
     *,
@@ -830,6 +864,7 @@ def _tool_peer_inbox(
                 f"peer_inbox.after is not a valid ISO-8601 datetime: {exc}",
             ) from exc
     since_dt = _peer_inbox_since(arguments.get("since"))
+    since_cursor = _peer_inbox_since_cursor(arguments.get("since_cursor"))
     limit_raw = arguments.get("limit", 50)
     if not isinstance(limit_raw, int) or limit_raw <= 0:
         raise JsonRpcError(
@@ -850,6 +885,7 @@ def _tool_peer_inbox(
             recipient_agent_session_id=session.agent_session_id,
             after_created_at=after_dt,
             since_created_at=since_dt,
+            since_cursor=since_cursor,
             limit=max(1, min(limit_raw, 100)),
             # A4 (2026-08-04): include_important retired from the tool schema
             # -- the catch-up view is the only meaningful one now that

@@ -14,6 +14,7 @@ from types import TracebackType
 from typing import Any
 
 import agent_messaging_plugin.session_lifecycle_verbs as lifecycle_verbs
+from agent_messaging_plugin.lane_worktree_evidence import RetirementCustodyContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +33,7 @@ class RecordedLaneWorktreeFixture:
         self.root = temp_root.resolve() / "recorded-lane-worktrees"
         self.provisioning_calls: list[RecordedProvision] = []
         self.retirement_calls: list[dict[str, object]] = []
+        self.custody_calls: list[RetirementCustodyContext | None] = []
         self.cleanup_calls: list[lifecycle_verbs.LaneWorktree] = []
         self._original_provision: Any = None
         self._original_adjudicate: Any = None
@@ -72,13 +74,7 @@ class RecordedLaneWorktreeFixture:
 
     def has_recorded_provisioning(self) -> bool:
         """Validate the complete role/branch/root record for every spawn."""
-        return bool(self.provisioning_calls) and all(
-            self.contains(call.worktree.repo_root)
-            and self.contains(call.worktree.root)
-            and self.contains(call.worktree.path)
-            and call.worktree.branch == f"fixture/{call.role_name}/{call.agent_instance_id}"
-            for call in self.provisioning_calls
-        )
+        return bool(self.provisioning_calls) and all(self.contains(call.worktree.repo_root) and self.contains(call.worktree.root) and self.contains(call.worktree.path) and call.worktree.branch == f"fixture/{call.role_name}/{call.agent_instance_id}" for call in self.provisioning_calls)
 
     def _provision(
         self,
@@ -105,11 +101,13 @@ class RecordedLaneWorktreeFixture:
         self.provisioning_calls.append(RecordedProvision(role_name, agent_instance_id, worktree))
         return worktree
 
-    def _adjudicate(self, row: Mapping[str, object]) -> None:
+    def _adjudicate(self, row: Mapping[str, object], custody: RetirementCustodyContext | None = None) -> None:
         del row
+        self.custody_calls.append(custody)
 
-    def _retire(self, row: Mapping[str, object]) -> str:
+    def _retire(self, row: Mapping[str, object], custody: RetirementCustodyContext | None = None) -> str:
         self.retirement_calls.append(dict(row))
+        self.custody_calls.append(custody)
         return "removed"
 
     def _cleanup(self, worktree: lifecycle_verbs.LaneWorktree) -> None:

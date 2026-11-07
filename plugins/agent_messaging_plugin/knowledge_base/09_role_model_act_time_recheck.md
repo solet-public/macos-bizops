@@ -122,10 +122,19 @@ exists to begin with.
 `peer_claim_role`'s arguments do not carry `agent_session_id`. The claim MUST source
 it from the CLAIMANT's own live `peer_binding` row (by `agent_instance_id`), never
 from claim args — an empty `agent_session_id` on the binding makes the reconnect
-self-refresh (`refresh_role_binding_cas`, keyed on the stable session id alone) match
-nothing, so a claimed role's reroute can never heal until the holder re-claims
-explicitly. A populated session id is what lets one predicated compare-and-set
-re-point every role a reconnecting session holds.
+self-refresh (`refresh_role_binding_cas`) match nothing, so a claimed role's
+reroute can never heal until the holder re-claims explicitly. A populated
+session id is required for reconnect refresh. The stable session id is the
+logical-session predicate; when an independently observed predecessor instance
+is available, its id is also an atomic predicate. Losing that expected-predecessor
+compare-and-set updates zero rows and is not retried against a new holder.
+Known contradictory parent evidence refuses rotation only. If predecessor
+attribution is missing, the original session-key rotation remains available and
+an ERROR advisory records the missing attribution. Reconnect refresh changes
+the instance pointer and claim time while preserving claim epoch and holder
+identity. This is distinct from an explicit self-re-claim by the live holder:
+that remains the idempotent refresh described above, with no epoch bump or
+handover notification.
 
 ## Status and slice-D migration flag
 

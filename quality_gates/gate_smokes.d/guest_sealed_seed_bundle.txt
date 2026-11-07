@@ -1,0 +1,4 @@
+# prb_4967522c / iss_3c84d7c3 (unt_219d94ab): the fresh-guest ladder fetches a release's provisional seed tag
+# from a bundle of the run's sealed scratch repo, through a guest-validation-only manager seam that is off by
+# default and leaves the fetch hardening untouched. Both run offline on temporary local repos (no Tart, no network).
+solet_cli/tests/sealed_seed_bundle_smoke.py

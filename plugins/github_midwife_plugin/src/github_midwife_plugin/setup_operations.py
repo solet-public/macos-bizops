@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections.abc import Callable
@@ -39,6 +40,7 @@ from .steps import GENESIS_STEP_RUNNERS
 type OperationHandler = Callable[[AdapterRequest, Runtime], JsonObject]
 
 _TEMPLATES = Path(__file__).resolve().parents[2] / "knowledge_base" / "hydration_templates"
+_LOGGER = logging.getLogger(__name__)
 _CLAUDE_HOOKS = Path(CLAUDE_HOOK_MANIFEST)
 _CODEX_HOOKS = Path(CODEX_HOOK_MANIFEST)
 _MODEL_CONFIGS = {
@@ -57,12 +59,7 @@ _SETTINGS_URLS = {
     "macos::settings.background_items": "x-apple.systempreferences:com.apple.LoginItems-Settings.extension",
     "macos::settings.files_and_folders": "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
 }
-_TMUX_RETURN_KEY_BLOCK = (
-    "# BEGIN SOLET TERMINAL RETURN KEYS\n"
-    "set -s extended-keys on\n"
-    'set -as terminal-features "xterm*:extkeys"\n'
-    "# END SOLET TERMINAL RETURN KEYS\n"
-)
+_TMUX_RETURN_KEY_BLOCK = '# BEGIN SOLET TERMINAL RETURN KEYS\nset -s extended-keys on\nset -as terminal-features "xterm*:extkeys"\n# END SOLET TERMINAL RETURN KEYS\n'
 _ITERM_RETURN_KEY_PROFILE = {
     "Profiles": [
         {
@@ -72,9 +69,7 @@ _ITERM_RETURN_KEY_PROFILE = {
         }
     ]
 }
-_ITERM_RETURN_KEY_PROFILE_RELATIVE = Path(
-    "Library/Application Support/iTerm2/DynamicProfiles/solet-claude-return-keys.json"
-)
+_ITERM_RETURN_KEY_PROFILE_RELATIVE = Path("Library/Application Support/iTerm2/DynamicProfiles/solet-claude-return-keys.json")
 _RUNTIME_MANIFEST = Path("profile/config/manifest.yaml")
 _COREAI_PLUGIN = "coreai_embeddings_plugin"
 _GENESIS_COMPLETED_STEPS = tuple(step_name for step_name, _runner in GENESIS_STEP_RUNNERS)
@@ -90,19 +85,26 @@ _SOLET_RESULT_ENVELOPE_KEYS = frozenset(
     }
 )
 _FAILURE_STDERR_DIAGNOSTIC_LIMIT = 1024
-_CREDENTIAL_KEY_NAME = (
-    r"[a-z0-9_-]*(?:password|passwd|secret|token|key|bearer|credential)[a-z0-9_-]*"
-)
+_CREDENTIAL_KEY_NAME = r"[a-z0-9_-]*(?:password|passwd|secret|token|key|bearer|credential)[a-z0-9_-]*"
 _CREDENTIAL_VALUE = re.compile(
     r"""(?ix)
-    (?P<label>\b""" + _CREDENTIAL_KEY_NAME + r"""\b)
+    (?P<label>\b"""
+    + _CREDENTIAL_KEY_NAME
+    + r"""\b)
     (?P<separator>\s*(?:=|:)\s*)
     (?P<value>"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)
     """
 )
-_AUTHORIZATION_BEARER_VALUE = re.compile(
-    r"(?i)(?P<label>\bauthorization\b)(?P<separator>\s*:\s*bearer\s+)(?P<value>\S+)"
-)
+_AUTHORIZATION_BEARER_VALUE = re.compile(r"(?i)(?P<label>\bauthorization\b)(?P<separator>\s*:\s*bearer\s+)(?P<value>\S+)")
+
+
+def selected_coding_agents(request: AdapterRequest) -> tuple[str, ...]:
+    """Use the projected selection; direct callers without one get the reviewed default."""
+    selected = request.public_inputs.get("selected_coding_agents")
+    if isinstance(selected, list) and selected:
+        return tuple(agent for agent in ("claude_code", "codex") if agent in selected)
+    _LOGGER.warning("Coding-agent selection is absent; using the Claude Code-only default.")
+    return ("claude_code",)
 
 
 def operation_handlers() -> dict[str, OperationHandler]:
@@ -474,9 +476,7 @@ def _genesis(request: AdapterRequest, runtime: Runtime) -> JsonObject:
     if deferral is not None and request.operation_ref == "genesis::autostart.install":
         return _coreai_asset_pending(request, deferral)
     if request.phase == "probe":
-        return _genesis_probe(
-            request, runtime, autostart=autostart, artifacts_valid=artifacts_valid, deferral=deferral
-        )
+        return _genesis_probe(request, runtime, autostart=autostart, artifacts_valid=artifacts_valid, deferral=deferral)
     return _genesis_apply(request, runtime, autostart)
 
 
@@ -490,11 +490,7 @@ def _genesis_probe(
 ) -> JsonObject:
     marker = request.target / ".solet" / "genesis.json"
     plist = runtime.home / "Library" / "LaunchAgents" / f"local.solet.{request.name}.plist"
-    satisfied = artifacts_valid and (
-        not autostart
-        or deferral is not None
-        or (_launchagent_running(request, runtime) and plist.is_file())
-    )
+    satisfied = artifacts_valid and (not autostart or deferral is not None or (_launchagent_running(request, runtime) and plist.is_file()))
     if satisfied and deferral is not None:
         return _deferred_launchagent(request, marker, deferral)
     if satisfied:
@@ -516,11 +512,7 @@ def _genesis_apply(request: AdapterRequest, runtime: Runtime, autostart: bool) -
         )
     # The roster follows the implementation decisions the Manager projects (iss_3a2a74ea); an
     # absent decision keeps the profile template's own roster for that service.
-    implementations = {
-        decision: value
-        for decision in IMPLEMENTATION_DECISIONS
-        if request.operation_ref == "genesis::solet.run" and (value := public_string(request, decision)) is not None
-    }
+    implementations = {decision: value for decision in IMPLEMENTATION_DECISIONS if request.operation_ref == "genesis::solet.run" and (value := public_string(request, decision)) is not None}
     outcome = runtime.run(
         (str(python), "-m", "github_midwife_plugin.genesis"),
         timeout_seconds=request.timeout_seconds,
@@ -531,15 +523,14 @@ def _genesis_apply(request: AdapterRequest, runtime: Runtime, autostart: bool) -
             "SOLET_PROFILE": setup_profile,
             "SOLET_AUTOSTART": "enabled" if autostart else "disabled",
             "SOLET_OPERATION_REF": request.operation_ref,
+            "SOLET_CODING_AGENTS": ",".join(selected_coding_agents(request)),
             **{f"SOLET_{decision.upper()}": str(value) for decision, value in implementations.items()},
         },
     )
     return _apply_outcome(request, outcome, "genesis_failed")
 
 
-def _launchagent_deferral(
-    request: AdapterRequest, *, autostart: bool, artifacts_valid: bool
-) -> str | None:
+def _launchagent_deferral(request: AdapterRequest, *, autostart: bool, artifacts_valid: bool) -> str | None:
     """Name the pending Core AI asset or llama.cpp entry that holds the LaunchAgent, if any.
 
     The scoped LaunchAgent install always reads the materialized roster. A
@@ -557,8 +548,7 @@ def _coreai_asset_pending(request: AdapterRequest, deferral: str) -> JsonObject:
     return _blocked(
         request,
         "coreai_asset_unavailable",
-        f"{deferral}. The LaunchAgent stays deferred because the roster loads Core AI; "
-        "resume setup so acquire_coreai_asset downloads and verifies the pinned asset, then retry.",
+        f"{deferral}. The LaunchAgent stays deferred because the roster loads Core AI; resume setup so acquire_coreai_asset downloads and verifies the pinned asset, then retry.",
     )
 
 
@@ -666,6 +656,8 @@ def _genesis_actions(
             ("install_launchagent", "LaunchAgent", "launchagent_install", plist),
             *targets[5:],
         )
+    if "codex" not in selected_coding_agents(request):
+        targets = tuple(target for target in targets if target[0] != "configure_codex_mcp_server")
     return [_genesis_action(action_id, title, mutation_kind, target) for action_id, title, mutation_kind, target in targets]
 
 
@@ -896,17 +888,9 @@ def _solet_success_payload(outcome: CommandOutcome) -> JsonObject | None:
     """
 
     result_payload = _solet_result(outcome)
-    if (
-        result_payload is None
-        or result_payload.get("success") is not True
-        or result_payload.get("error") is not None
-    ):
+    if result_payload is None or result_payload.get("success") is not True or result_payload.get("error") is not None:
         return None
-    business_fields = {
-        key: value
-        for key, value in result_payload.items()
-        if key not in _SOLET_RESULT_ENVELOPE_KEYS
-    }
+    business_fields = {key: value for key, value in result_payload.items() if key not in _SOLET_RESULT_ENVELOPE_KEYS}
     if "data" not in result_payload:
         return business_fields if business_fields else None
     data = result_payload["data"]

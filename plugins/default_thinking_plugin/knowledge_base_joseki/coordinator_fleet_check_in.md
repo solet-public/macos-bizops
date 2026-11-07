@@ -13,7 +13,7 @@ EMBEDDING_DESCRIPTION: Run a coordinator's scheduled check-in over the sessions 
 
 ## Input Contract
 
-- The coordinator's own durable record of every session it dispatched: `dispatch_id`s from managed-dispatch composites, or `agent_instance_id`s from direct `spawn_session` calls it made itself. This is the scope. Never rediscovered from a role-name guess or a register `actor` column, which names the minting/coordinating seat, not the session that actually did the work.
+- The coordinator's own durable record of every session it dispatched: the canonical launch `job_id`s it retained, plus `dispatch_id`s or `agent_instance_id`s from their terminal `job.result.data` payloads. This is the scope. Never rediscovered from a role-name guess or a register `actor` column, which names the minting/coordinating seat, not the session that actually did the work.
 - Read access to this solet's managed_session ledger (`session_status`, `list_sessions`) for every session in scope.
 - Read/write access to whichever register(s) this coordinator's sessions can affect. In this checkout the register is a project-solet-backed database reached via the `psolet` CLI — it has no `service_interface` process binding inside this solet, so this card's register-reconciliation steps are plain CLI instructions, not bound process calls.
 - The coordinator's own existing repo-boundary and register-write authority. This card grants no new authority; it exercises exactly what the coordinator already holds.
@@ -29,7 +29,8 @@ EMBEDDING_DESCRIPTION: Run a coordinator's scheduled check-in over the sessions 
 
 [ ] 1. Enumerate this coordinator's own dispatched sessions
     a) Read the coordinator's own dispatch log — the `dispatch_id`s and `agent_instance_id`s it holds from its own spawn/dispatch calls, current session and any durable record it kept across sessions. This defines scope.
-    b) Cross-check scope against current live registration (service key below) to see which sessions still appear registered at all — this is scoping only, never the state read itself, since a session can be off the live roster while still holding unretired register rows, or on the roster while already dead.
+    b) For launch jobs without a terminal result yet, schedule exact-id `service_interface::job_service::get_job` reads. Keep their launch status pending and do not infer an instance or re-submit a launch. Add identities to scope only from their final payloads.
+    c) Cross-check scope against current live registration (service key below) to see which sessions still appear registered at all — this is scoping only, never the state read itself, since a session can be off the live roster while still holding unretired register rows, or on the roster while already dead.
         RESULT_PROCESSOR_KIND: deterministic_continuation
         Call: plugin::agent_messaging_plugin::list_sessions
         Arguments:

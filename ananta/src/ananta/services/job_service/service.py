@@ -34,9 +34,7 @@ _TERMINAL_STATUSES: tuple[str, ...] = ("completed", "error", "cancelled")
 _MAX_UNREACHED_LIMIT = 100
 """Page cap for the unreached-completions read, mirroring query_ordered's."""
 
-_TERMINAL_TOKEN_STATES: frozenset[str] = frozenset(
-    {"completed", "failed", "cancelled", "aborted"}
-)
+_TERMINAL_TOKEN_STATES: frozenset[str] = frozenset({"completed", "failed", "cancelled", "aborted"})
 """FRG ``TokenState`` values that count as resolved (flow_runtime_graph)."""
 
 _SWEEPABLE_STATUS = "processing"
@@ -249,15 +247,9 @@ class JobService(JobServiceAPI):
         wearing the same name as a measurement.
         """
         if limit < 1 or limit > _MAX_UNREACHED_LIMIT:
-            raise ValueError(
-                f"limit must be between 1 and {_MAX_UNREACHED_LIMIT}; got {limit}"
-            )
+            raise ValueError(f"limit must be between 1 and {_MAX_UNREACHED_LIMIT}; got {limit}")
         rows = self._read_jobs({"status": list(_TERMINAL_STATUSES)})
-        unreached = [
-            r for r in rows
-            if (_decode_json_object(r.get("metadata")) or {}).get(COMPLETION_REACH_KEY)
-            == REACH_BRIDGE_DISPATCH_NO_RETURN_PATH
-        ]
+        unreached = [r for r in rows if (_decode_json_object(r.get("metadata")) or {}).get(COMPLETION_REACH_KEY) == REACH_BRIDGE_DISPATCH_NO_RETURN_PATH]
         unreached.sort(key=lambda r: (to_naive_utc(r["created_at"]), str(r["id"])), reverse=True)
         return [self._attach_payloads(r) for r in unreached[:limit]]
 
@@ -315,16 +307,9 @@ class JobService(JobServiceAPI):
         evidence of a defect, and the defect is what wants fixing.
         """
         if limit < 1 or limit > _MAX_UNREACHED_LIMIT:
-            raise ValueError(
-                f"limit must be between 1 and {_MAX_UNREACHED_LIMIT}; got {limit}"
-            )
-        rows = [
-            r for r in self._read_jobs({"status": list(_TERMINAL_STATUSES)})
-            if isinstance(r.get("flow_token_id"), str) and r["flow_token_id"]
-        ]
-        unresolved = [
-            r for r in rows if self._token_is_unresolved(str(r["flow_token_id"]))
-        ]
+            raise ValueError(f"limit must be between 1 and {_MAX_UNREACHED_LIMIT}; got {limit}")
+        rows = [r for r in self._read_jobs({"status": list(_TERMINAL_STATUSES)}) if isinstance(r.get("flow_token_id"), str) and r["flow_token_id"]]
+        unresolved = [r for r in rows if self._token_is_unresolved(str(r["flow_token_id"]))]
         unresolved.sort(key=lambda r: (to_naive_utc(r["created_at"]), str(r["id"])), reverse=True)
         return unresolved[:limit]
 
@@ -337,9 +322,7 @@ class JobService(JobServiceAPI):
         wrong defect. Only a token that is present and demonstrably unresolved
         earns a place in the detector's output.
         """
-        result = self.state_service.query_state(
-            self.namespace, {"table": "flow_tokens", "filters": {"id": token_id}}
-        )
+        result = self.state_service.query_state(self.namespace, {"table": "flow_tokens", "filters": {"id": token_id}})
         if result.get(KEY_ACTION_STATUS) != STATUS_COMPLETED:
             raise RuntimeError(f"token query did not complete: {result.get('error')!r}")
         data_obj = result.get(KEY_DATA)
@@ -410,9 +393,7 @@ class JobService(JobServiceAPI):
                 "actions": [],
             }
 
-    def _sweep_stale(
-        self, max_age_minutes: int, plugin_name: str | None, limit: int
-    ) -> list[dict[str, Any]]:
+    def _sweep_stale(self, max_age_minutes: int, plugin_name: str | None, limit: int) -> list[dict[str, Any]]:
         """Terminate stale ``processing`` rows through the manager's own path.
 
         Staleness is measured on ``updated_at``, which is the honest signal: a
@@ -428,17 +409,11 @@ class JobService(JobServiceAPI):
         low by default rather than unbounded.
         """
         if self.async_job_manager is None:
-            raise RuntimeError(
-                "sweep_stale_jobs requires an AsyncJobManager; refusing to write a "
-                "terminal status directly, which would skip completion routing and "
-                "leave the flow token unresolved"
-            )
+            raise RuntimeError("sweep_stale_jobs requires an AsyncJobManager; refusing to write a terminal status directly, which would skip completion routing and leave the flow token unresolved")
         if max_age_minutes < 1:
             raise ValueError(f"max_age_minutes must be at least 1; got {max_age_minutes}")
         if limit < 1 or limit > _MAX_UNREACHED_LIMIT:
-            raise ValueError(
-                f"limit must be between 1 and {_MAX_UNREACHED_LIMIT}; got {limit}"
-            )
+            raise ValueError(f"limit must be between 1 and {_MAX_UNREACHED_LIMIT}; got {limit}")
 
         cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=max_age_minutes)
         filters: dict[str, object] = {
@@ -454,14 +429,8 @@ class JobService(JobServiceAPI):
         swept: list[dict[str, Any]] = []
         for row in rows[:limit]:
             job_id = str(row["id"])
-            reason = (
-                f"{_SWEPT_STATUS_REASON_PREFIX}: no progress reported for over "
-                f"{max_age_minutes} minute(s); last update {row.get('updated_at')!s}. "
-                "Terminated by the staleness sweep, NOT reported by the worker."
-            )
-            result = self.async_job_manager.update_job(
-                job_id, {"status": "error", "status_reason": reason}
-            )
+            reason = f"{_SWEPT_STATUS_REASON_PREFIX}: no progress reported for over {max_age_minutes} minute(s); last update {row.get('updated_at')!s}. Terminated by the staleness sweep, NOT reported by the worker."
+            result = self.async_job_manager.update_job(job_id, {"status": "error", "status_reason": reason})
             swept.append(
                 {
                     "job_id": job_id,
@@ -548,34 +517,41 @@ class JobService(JobServiceAPI):
         action_name: str | None,
         status: str | None,
     ) -> dict[str, Any] | None:
-        """Most-recently-created job matching the filters, via read-then-route.
-
-        The exact ``provider_name`` and ``status`` filters are equality and go to
-        ``query_state``; the ``provider_name LIKE 'plugin.%'`` prefix-match is NOT
-        expressible in the equality/``=ANY``/``is_null`` grammar, so it is applied
-        in Python after the read. ``ORDER BY created_at DESC LIMIT 1`` becomes a
-        Python max by ``(created_at, id)`` — ``created_at`` coerced to a VALUE
-        (never compared as an ISO spelling), with ``id`` as a deterministic
-        tie-break (the raw query had no secondary sort, so equal-``created_at``
-        ties were nondeterministic). No ``is_deleted`` filter — the raw query had
-        none, so the behavior is preserved.
-        """
+        """Return the newest matching job using bounded, tie-safe pages."""
         filters, provider_prefix = self._build_job_filters(plugin_name, action_name, status)
-        rows = self._read_jobs(filters)
-        if provider_prefix is not None:
-            rows = [
-                r for r in rows
-                if str(r.get("provider_name", "")).startswith(provider_prefix)
-            ]
-        if not rows:
-            return None
-        rows.sort(key=lambda r: (to_naive_utc(r["created_at"]), str(r["id"])), reverse=True)
-        return self._attach_payloads(rows[0])
+        order_by = [["created_at", "desc"], ["id", "desc"]]
+        page_limit = 1 if provider_prefix is None else 100
+        after: list[object] | None = None
+        page_count = 1 if provider_prefix is None else 100
+        for _ in range(page_count):
+            query: dict[str, object] = {
+                "table": "job",
+                "filters": filters,
+                "order_by": order_by,
+                "limit": page_limit,
+                "include_deleted": True,
+            }
+            query["after"] = after
+            result = self.state_service.query_ordered(self.namespace, query)
+            if result.get(KEY_ACTION_STATUS) != STATUS_COMPLETED:
+                raise RuntimeError(f"ordered job query did not complete: {result.get('error')!r}")
+            data_obj = cast(dict[str, Any], result.get(KEY_DATA))
+            records = data_obj.get("records")
+            if not isinstance(records, list):
+                raise RuntimeError(f"ordered job query returned malformed records: {records!r}")
+            rows = list(map(self._validated_job_row, records))
+            prefix = "" if provider_prefix is None else provider_prefix
+            match = next(filter(lambda row: row["provider_name"].startswith(prefix), rows), None)
+            if match is not None:
+                return self._attach_payloads(match)
+            if len(rows) < page_limit:
+                return None
+            last = rows[-1]
+            after = [last["created_at"], last["id"]]
+        raise RuntimeError("plugin prefix scan reached the 100-page ceiling without a match")
 
     @staticmethod
-    def _build_job_filters(
-        plugin_name: str | None, action_name: str | None, status: str | None
-    ) -> tuple[dict[str, object], str | None]:
+    def _build_job_filters(plugin_name: str | None, action_name: str | None, status: str | None) -> tuple[dict[str, object], str | None]:
         """Split the request into equality filters + an optional Python prefix.
 
         Returns ``(filters, provider_prefix)``: ``filters`` are grammar-expressible
@@ -600,9 +576,7 @@ class JobService(JobServiceAPI):
         DB error can never masquerade as a valid "no job found". An empty list is
         returned ONLY for a valid completed result with zero matching rows.
         """
-        result = self.state_service.query_state(
-            self.namespace, {"table": "job", "filters": filters}
-        )
+        result = self.state_service.query_state(self.namespace, {"table": "job", "filters": filters})
         if result.get(KEY_ACTION_STATUS) != STATUS_COMPLETED:
             raise RuntimeError(f"job query did not complete: {result.get('error')!r}")
         data_obj = result.get(KEY_DATA)

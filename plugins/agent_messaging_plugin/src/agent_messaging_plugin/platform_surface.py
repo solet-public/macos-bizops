@@ -20,7 +20,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import TYPE_CHECKING, Any, Final
 
 from ananta.core.actions.action_factory import UNKNOWN_ARGUMENTS_ERROR_CODE
@@ -36,7 +39,7 @@ from .process_exposure import (
 from .role_binding_store import list_roles_for_agent_instance
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
 
     from .bridge_sessions import BridgeSessionManager
     from .models import BridgeSessionState
@@ -61,20 +64,18 @@ ERR_DEPENDENCIES_NOT_READY: Final[str] = "bridge.dependencies_not_ready"
 ERR_ATTACHMENT_MISSING: Final[str] = "bridge.attachment_missing"
 
 # Stable caller-input failures retain their public code across submission.
-_ARGUMENT_ERROR_PASSTHROUGH_CODES: Final[frozenset[str]] = frozenset({
-    UNKNOWN_ARGUMENTS_ERROR_CODE,
-    "retired_session_ttl_argument",
-})
+_ARGUMENT_ERROR_PASSTHROUGH_CODES: Final[frozenset[str]] = frozenset(
+    {
+        UNKNOWN_ARGUMENTS_ERROR_CODE,
+        "retired_session_ttl_argument",
+    }
+)
 
 # Process keys for the bridge-delivery EDGE_SINK pair.  Kept here (not in
 # constants.py) because the dispatcher contract (process_call's async
 # completion path) is local to the bridge surface.
-_DELIVER_RESULT_PROCESS_KEY: Final[str] = (
-    f"plugin::{PLUGIN_NAME}::deliver_result"
-)
-_DELIVER_ERROR_PROCESS_KEY: Final[str] = (
-    f"plugin::{PLUGIN_NAME}::deliver_error"
-)
+_DELIVER_RESULT_PROCESS_KEY: Final[str] = f"plugin::{PLUGIN_NAME}::deliver_result"
+_DELIVER_ERROR_PROCESS_KEY: Final[str] = f"plugin::{PLUGIN_NAME}::deliver_error"
 
 _PROCESS_SEARCH_DEFAULT_RESULTS: Final[int] = 10
 _PROCESS_SEARCH_MAX_RESULTS: Final[int] = 50
@@ -103,7 +104,10 @@ role was actually resolved, so completion delivery reads presence as permission.
 
 
 def _role_for_instance(
-    state_service: Any, agent_instance_id: str, *, purpose: str,
+    state_service: Any,
+    agent_instance_id: str,
+    *,
+    purpose: str,
 ) -> str:
     """The durable role held by ``agent_instance_id``, or "" — degrade-silent.
 
@@ -124,8 +128,7 @@ def _role_for_instance(
         roles = list_roles_for_agent_instance(state_service, agent_instance_id)
     except Exception:  # noqa: BLE001 — degrade to roleless; never break dispatch
         logger.warning(
-            "role lookup for %s failed (agent_instance_id=%s); degrading to "
-            "roleless tag — process_call dispatch proceeds",
+            "role lookup for %s failed (agent_instance_id=%s); degrading to roleless tag — process_call dispatch proceeds",
             purpose,
             agent_instance_id,
             exc_info=True,
@@ -146,6 +149,97 @@ class BridgeError(Exception):
         super().__init__(message)
         self.code: str = code
         self.message: str = message
+
+
+_MCP_FAILURE_CONTEXT: ContextVar[tuple[str, str]] = ContextVar(
+    "mcp_failure_context",
+    default=("unknown", "unknown"),
+)
+_DIAGNOSTIC_BRIDGE_CODES: Final[frozenset[str]] = frozenset(
+    {
+        ERR_BRIDGE_DISABLED,
+        ERR_INVALID_PROCESS_KEY,
+        ERR_PROCESS_NOT_ALLOWED,
+        ERR_NO_BRIDGE,
+        ERR_DISCOVERY_UNAVAILABLE,
+        ERR_STATE_UNAVAILABLE,
+        ERR_BLOB_UNAVAILABLE,
+        ERR_BLOB_NOT_FOUND,
+        ERR_PROCESS_CALL_FAILED,
+        ERR_ACTION_RESULT_NOT_FOUND,
+        ERR_DEPENDENCIES_NOT_READY,
+        ERR_ATTACHMENT_MISSING,
+        *_ARGUMENT_ERROR_PASSTHROUGH_CODES,
+    }
+)
+
+
+@contextmanager
+def mcp_failure_scope(transport: str, request_id: object = None) -> Generator[None]:
+    """Carry local transport provenance; never infer it across HTTP hops."""
+    digest = "unknown"
+    if type(request_id) is str or (type(request_id) is int and request_id.bit_length() <= 1024):
+        value = str(request_id)
+        if len(value) <= 4096:
+            digest = sha256(value.encode("utf-8", errors="replace")).hexdigest()
+    token = _MCP_FAILURE_CONTEXT.set((transport, digest))
+    try:
+        yield
+    finally:
+        _MCP_FAILURE_CONTEXT.reset(token)
+
+
+def _diagnostic_process_key(arguments: object) -> str:
+    key = arguments.get("process_key") if type(arguments) is dict else None
+    if type(key) is str and len(key) <= 256 and key == key.strip() and is_valid_process_key_shape(key):
+        return key
+    return "unknown"
+
+
+def _diagnostic_error_codes(error: Exception) -> tuple[str | int, str]:
+    code = getattr(error, "code", None)
+    safe_code = code if type(code) is int or (type(code) is str and code in _DIAGNOSTIC_BRIDGE_CODES) else "unknown"
+    cause = error.__cause__
+    bridge_code = cause.code if isinstance(cause, BridgeError) else safe_code
+    safe_bridge = bridge_code if type(bridge_code) is str and bridge_code in _DIAGNOSTIC_BRIDGE_CODES else "unknown"
+    return safe_code, str(safe_bridge)
+
+
+def log_mcp_failure(
+    target: logging.Logger,
+    *,
+    tool: object,
+    arguments: object,
+    recognized_tools: tuple[str, ...],
+    stage: str,
+    error: Exception,
+    bridge_id: object = None,
+) -> None:
+    """Failure-only, allowlisted observations; logging cannot replace a failure.
+
+    Inputs are deliberately objects: malformed wire data must never acquire a
+    new indexing/coercion failure in this diagnostic path. No exception text,
+    traceback, raw request id or arguments enter the structured fields.
+    """
+    try:
+        safe_tool = tool if type(tool) is str and tool in recognized_tools else "unknown"
+        safe_key = _diagnostic_process_key(arguments)
+        safe_code, bridge_code = _diagnostic_error_codes(error)
+        transport, request_digest = _MCP_FAILURE_CONTEXT.get()
+        fields = {
+            "tool": safe_tool,
+            "process_key": safe_key,
+            "transport": transport,
+            "stage": stage,
+            "exception_type": type(error).__name__,
+            "code": safe_code,
+            "bridge_code": bridge_code,
+            "bridge_id": bridge_id if type(bridge_id) is str and re.fullmatch(r"agc-[A-Za-z0-9_-]{1,128}", bridge_id) else "unknown",
+            "request_id_digest": request_digest,
+        }
+        target.warning("MCP failure attribution: %s", fields, extra={"mcp_failure": fields})
+    except Exception:  # noqa: BLE001 — observations never replace the original error
+        return
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,7 +365,8 @@ class PlatformSurface:
             if bridge.client_id:
                 search_limit = _PROCESS_SEARCH_MAX_RESULTS
         payload = discovery.query_process_registry(
-            query=query, max_results=search_limit,
+            query=query,
+            max_results=search_limit,
         )
         if not isinstance(payload, dict):
             raise BridgeError(
@@ -317,30 +412,42 @@ class PlatformSurface:
         if bridge_id is not None:
             bridge = self._resolve_bridge(bridge_id)
             self._validate_process_against_session_policy(process_key, bridge)
-        discovery = self._discovery_service
-        if discovery is None:
-            raise BridgeError(
-                ERR_DISCOVERY_UNAVAILABLE,
-                "Discovery service is not available",
+        try:
+            discovery = self._discovery_service
+            if discovery is None:
+                raise BridgeError(
+                    ERR_DISCOVERY_UNAVAILABLE,
+                    "Discovery service is not available",
+                )
+            wrapped = discovery.get_process_schema(process_key)
+            if not isinstance(wrapped, dict):
+                raise BridgeError(
+                    ERR_DISCOVERY_UNAVAILABLE,
+                    "Discovery service returned an unexpected payload",
+                )
+            if wrapped.get("action_status") != ActionStatus.COMPLETED.value:
+                raise BridgeError(
+                    ERR_INVALID_PROCESS_KEY,
+                    str(wrapped.get("error") or "Unknown discovery error"),
+                )
+            data = wrapped.get("data")
+            if not isinstance(data, dict):
+                raise BridgeError(
+                    ERR_DISCOVERY_UNAVAILABLE,
+                    "Discovery schema response missing data",
+                )
+            return data
+        except Exception as exc:
+            log_mcp_failure(
+                logger,
+                tool="process_schema",
+                arguments={"process_key": process_key},
+                recognized_tools=("process_schema",),
+                stage="schema_discovery",
+                error=exc,
+                bridge_id=bridge_id,
             )
-        wrapped = discovery.get_process_schema(process_key)
-        if not isinstance(wrapped, dict):
-            raise BridgeError(
-                ERR_DISCOVERY_UNAVAILABLE,
-                "Discovery service returned an unexpected payload",
-            )
-        if wrapped.get("action_status") != ActionStatus.COMPLETED.value:
-            raise BridgeError(
-                ERR_INVALID_PROCESS_KEY,
-                str(wrapped.get("error") or "Unknown discovery error"),
-            )
-        data = wrapped.get("data")
-        if not isinstance(data, dict):
-            raise BridgeError(
-                ERR_DISCOVERY_UNAVAILABLE,
-                "Discovery schema response missing data",
-            )
-        return data
+            raise
 
     # ------------------------------------------------------------------
     # process_call / process_result — direct, inference-free invocation
@@ -382,18 +489,26 @@ class PlatformSurface:
         self._validate_process_against_session_policy(process_key, bridge)
 
         reason_raw = ctx.get("reason")
-        reason = (
-            str(reason_raw)
-            if isinstance(reason_raw, str) and reason_raw.strip()
-            else f"Direct process call: {process_key}"
-        )
-        return self._submit_process_call(
-            bridge=bridge,
-            process_key=process_key,
-            arguments=arguments,
-            reason=reason,
-            deliver_to_bridge=deliver_to_bridge,
-        )
+        reason = str(reason_raw) if isinstance(reason_raw, str) and reason_raw.strip() else f"Direct process call: {process_key}"
+        try:
+            return self._submit_process_call(
+                bridge=bridge,
+                process_key=process_key,
+                arguments=arguments,
+                reason=reason,
+                deliver_to_bridge=deliver_to_bridge,
+            )
+        except Exception as exc:
+            log_mcp_failure(
+                logger,
+                tool="process_call",
+                arguments={"process_key": process_key},
+                recognized_tools=("process_call",),
+                stage="call_submission",
+                error=exc,
+                bridge_id=bridge.bridge_id,
+            )
+            raise
 
     def process_result(self, action_id: str) -> dict[str, Any]:
         """Return the latest stored result for ``action_id``."""
@@ -459,9 +574,13 @@ class PlatformSurface:
                 "Blob storage is not available",
             )
         result = blob_svc.retrieve_blob(blob_id)
-        if not isinstance(result, dict) or result.get(
-            "action_status",
-        ) != ActionStatus.COMPLETED.value:
+        if (
+            not isinstance(result, dict)
+            or result.get(
+                "action_status",
+            )
+            != ActionStatus.COMPLETED.value
+        ):
             raise BridgeError(
                 ERR_BLOB_NOT_FOUND,
                 f"Blob not found: {blob_id}",
@@ -539,7 +658,9 @@ class PlatformSurface:
     # ------------------------------------------------------------------
 
     def _validate_process_call_inputs(
-        self, process_key: object, arguments: object,
+        self,
+        process_key: object,
+        arguments: object,
     ) -> None:
         if not isinstance(process_key, str) or not is_valid_process_key_shape(
             process_key,
@@ -560,7 +681,9 @@ class PlatformSurface:
             )
 
     def _validate_process_against_session_policy(
-        self, process_key: str, bridge: BridgeSessionState,
+        self,
+        process_key: str,
+        bridge: BridgeSessionState,
     ) -> None:
         """M5 §14.5: enforce per-session allowlist after bridge resolution.
 
@@ -588,10 +711,7 @@ class PlatformSurface:
         if not bridge_allows_process(bridge, process_key):
             raise BridgeError(
                 ERR_PROCESS_NOT_ALLOWED,
-                (
-                    f"Process {process_key} is not in the bridge session's "
-                    "per-session allowlist"
-                ),
+                (f"Process {process_key} is not in the bridge session's per-session allowlist"),
             )
 
     def _submit_process_call(
@@ -644,10 +764,12 @@ class PlatformSurface:
             )
         try:
             compilation_context = self._compilation_context_builder.build_context(
-                session_id=bridge.session_id, flow_id=flow_id,
+                session_id=bridge.session_id,
+                flow_id=flow_id,
             )
             action_id = self._action_factory.submit_action_definition(
-                action_definition=action_def, context=compilation_context,
+                action_definition=action_def,
+                context=compilation_context,
             )
         except Exception as exc:
             self._flow_manager.update_flow_status(flow_id, "failed")
@@ -693,7 +815,8 @@ class PlatformSurface:
         )
 
     def _resolve_caller_attribution(
-        self, bridge: BridgeSessionState,
+        self,
+        bridge: BridgeSessionState,
     ) -> CallerAttribution:
         """§34.6: derive sender provenance for an UNREGISTERED caller, or empty.
 
@@ -727,8 +850,7 @@ class PlatformSurface:
             )
         except Exception:  # noqa: BLE001 — degrade to unattributed; never break dispatch
             logger.warning(
-                "caller attribution lookup failed (agent_session_id=%s); "
-                "degrading to the system sentinel — dispatch proceeds",
+                "caller attribution lookup failed (agent_session_id=%s); degrading to the system sentinel — dispatch proceeds",
                 bridge.caller_agent_session_id,
                 exc_info=True,
             )
@@ -747,7 +869,8 @@ class PlatformSurface:
         )
 
     def set_operator_equivalent_check(
-        self, callback: Callable[[str], bool],
+        self,
+        callback: Callable[[str], bool],
     ) -> None:
         """Wire the vault ``is_operator_equivalent`` lookup (post-readiness).
 
@@ -776,8 +899,7 @@ class PlatformSurface:
             return bool(self._operator_equivalent_check(bridge.client_id))
         except Exception:  # noqa: BLE001 — degrade to non-operator; never break dispatch
             logger.warning(
-                "operator_equivalent check threw for client_id=%s; "
-                "degrading to non-operator (dispatch proceeds)",
+                "operator_equivalent check threw for client_id=%s; degrading to non-operator (dispatch proceeds)",
                 bridge.client_id,
                 exc_info=True,
             )
@@ -864,7 +986,9 @@ class PlatformSurface:
     # ------------------------------------------------------------------
 
     def _read_action_event(
-        self, state_service: Any, action_id: str,
+        self,
+        state_service: Any,
+        action_id: str,
     ) -> dict[str, object] | None:
         result = state_service.read_state(
             namespace="core",
@@ -873,7 +997,9 @@ class PlatformSurface:
         return self._extract_first_record(result)
 
     def _read_latest_action_result(
-        self, state_service: Any, action_id: str,
+        self,
+        state_service: Any,
+        action_id: str,
     ) -> dict[str, object] | None:
         result = state_service.read_state(
             namespace="core",
@@ -948,30 +1074,28 @@ class PlatformSurface:
         first = records[0]
         return first if isinstance(first, dict) else None
 
+
 def _decode_blob_content(content: object) -> bytes:
     return bytes.fromhex(content) if isinstance(content, str) else b""
 
 
 def _resolve_blob_filename(data: dict[str, object], blob_id: str) -> str:
     metadata_raw = data.get("metadata")
-    metadata: dict[str, object] = (
-        metadata_raw if isinstance(metadata_raw, dict) else {}
-    )
+    metadata: dict[str, object] = metadata_raw if isinstance(metadata_raw, dict) else {}
     filename = metadata.get("filename") or data.get("filename")
     return filename if isinstance(filename, str) else f"{blob_id}.bin"
 
 
 def _resolve_blob_mime(data: dict[str, object]) -> str:
     metadata_raw = data.get("metadata")
-    metadata: dict[str, object] = (
-        metadata_raw if isinstance(metadata_raw, dict) else {}
-    )
+    metadata: dict[str, object] = metadata_raw if isinstance(metadata_raw, dict) else {}
     mime = metadata.get("mime_type")
     return mime if isinstance(mime, str) else "application/octet-stream"
 
 
 def _filter_payload_against_session_policy(
-    payload: dict[str, Any], bridge: BridgeSessionState,
+    payload: dict[str, Any],
+    bridge: BridgeSessionState,
 ) -> dict[str, Any]:
     """M5 §14.5: drop discovery results outside the bridge's allowlist.
 
@@ -1008,10 +1132,7 @@ def _filter_payload_against_session_policy(
             if isinstance(key, str) and key in allowlist:
                 kept.append(entry)
     filtered["processes"] = kept
-    filtered["process_keys"] = [
-        entry["process_key"] for entry in kept
-        if isinstance(entry.get("process_key"), str)
-    ]
+    filtered["process_keys"] = [entry["process_key"] for entry in kept if isinstance(entry.get("process_key"), str)]
     filtered["process_count"] = len(kept)
     return filtered
 
@@ -1065,10 +1186,7 @@ def _augment_discovery_payload(
 ) -> dict[str, Any]:
     augmented = dict(payload)
     augmented["processes"] = [*raw_processes, *additions]
-    augmented["process_keys"] = [
-        entry["process_key"] for entry in augmented["processes"]
-        if isinstance(entry.get("process_key"), str)
-    ]
+    augmented["process_keys"] = [entry["process_key"] for entry in augmented["processes"] if isinstance(entry.get("process_key"), str)]
     augmented["process_count"] = len(augmented["processes"])
     return augmented
 
@@ -1090,12 +1208,11 @@ def _lookup_discovery_entry(discovery: Any, process_key: str) -> dict[str, Any] 
 
 
 def _schema_data_to_discovery_entry(
-    process_key: str, data: dict[str, Any],
+    process_key: str,
+    data: dict[str, Any],
 ) -> dict[str, Any]:
     parts = process_key.split("::", 2)
-    provider_type, provider, function_name = (
-        parts if len(parts) == 3 else ("", "", "")
-    )
+    provider_type, provider, function_name = parts if len(parts) == 3 else ("", "", "")
     return {
         "process_key": str(data.get("process_key") or process_key),
         "provider_type": provider_type,
@@ -1112,10 +1229,7 @@ def _entry_matches_query(entry: dict[str, Any], query: str) -> bool:
     tokens = _query_tokens(query)
     if not tokens:
         return False
-    haystack = " ".join(
-        str(entry.get(field) or "")
-        for field in ("process_key", "description", "provider", "function_name")
-    )
+    haystack = " ".join(str(entry.get(field) or "") for field in ("process_key", "description", "provider", "function_name"))
     haystack_tokens = set(_query_tokens(haystack))
     return all(token in haystack_tokens for token in tokens)
 
@@ -1125,7 +1239,8 @@ def _query_tokens(text: str) -> tuple[str, ...]:
 
 
 def _limit_discovery_payload(
-    payload: dict[str, Any], max_results: int,
+    payload: dict[str, Any],
+    max_results: int,
 ) -> dict[str, Any]:
     """Clamp a discovery payload after policy filtering.
 
@@ -1137,15 +1252,9 @@ def _limit_discovery_payload(
     raw_processes = payload.get("processes", [])
     if not isinstance(raw_processes, list):
         return limited
-    kept = [
-        entry for entry in raw_processes[:max_results]
-        if isinstance(entry, dict)
-    ]
+    kept = [entry for entry in raw_processes[:max_results] if isinstance(entry, dict)]
     limited["processes"] = kept
-    limited["process_keys"] = [
-        entry["process_key"] for entry in kept
-        if isinstance(entry.get("process_key"), str)
-    ]
+    limited["process_keys"] = [entry["process_key"] for entry in kept if isinstance(entry.get("process_key"), str)]
     limited["process_count"] = len(kept)
     return limited
 

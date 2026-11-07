@@ -3,8 +3,8 @@
 
 WHAT THIS CLOSES. ``shipped_smoke_contract._checkout_only_violations`` (V1)
 checks that every checkout-only smoke declaration agrees across three
-surfaces — a ``# not shipped:`` marker in ``quality_gates/gate_smokes.txt``,
-a ``checkout_only`` entry in ``shipped_smoke_contract.yaml``, and a
+surfaces — a ``# not shipped:`` marker in the gate-smoke register, a
+``checkout_only`` entry in the shipped-smoke contract, and a
 ``seed_manifest.yaml`` ``exclude_paths`` line — but it previously ran ONLY
 inside ``assemble()``. ``unt_85473403`` landed a smoke with only the marker;
 the full pre-landing battery (840/845) and two reviews passed it, because
@@ -12,6 +12,17 @@ nothing at landing time read the contract at all, and the gap surfaced one
 publish lap later when r50's assembly failed closed (``rrun_78ae868f``).
 This gate runs the same V1 predicate at REPO scope, before a commit exists,
 so that exact class goes red here instead of at a later assembly.
+
+EACH SURFACE IS AN EFFECTIVE UNION (prb_ae6d81ea). Every one of the three is
+its main file plus the per-candidate fragments beside it —
+``gate_smokes.d/*.txt``, ``shipped_smoke_contract.d/*.yaml`` and
+``seed_manifest.d/*.yaml`` — so a candidate declaring a checkout-only smoke
+writes three files of its own and collides with no other candidate. The
+agreement is exactly as strong as before: this gate compares the UNIONS, so a
+declaration present in one surface and missing from another is still a finding
+wherever each part lives, and the marker-only state that broke r50 still goes
+red. Fragments that could not be read or parsed are printed as ``ADVISORY``
+lines and do not block (rul_becb4bed); what could be read is in effect.
 
 PER-PROFILE ROWS (wgr_42e3a251). The V1 predicate above is bundle-free: it
 calls ``checkout_only_consistency_violations``, which passes an EMPTY retained
@@ -83,13 +94,9 @@ _DEFAULT_ALLOWLIST_RELPATH: Final[str] = "quality_gates/smoke_contract_lint_gate
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Repo-level shipped-smoke source contract gate."
-    )
-    parser.add_argument("--repo-root", type=Path, default=Path.cwd(),
-                        help="checkout root to measure (default: cwd)")
-    parser.add_argument("--allowlist", type=Path, default=None,
-                        help=f"tracked-debt register (default: <repo-root>/{_DEFAULT_ALLOWLIST_RELPATH})")
+    parser = argparse.ArgumentParser(description="Repo-level shipped-smoke source contract gate.")
+    parser.add_argument("--repo-root", type=Path, default=Path.cwd(), help="checkout root to measure (default: cwd)")
+    parser.add_argument("--allowlist", type=Path, default=None, help=f"tracked-debt register (default: <repo-root>/{_DEFAULT_ALLOWLIST_RELPATH})")
     return parser.parse_args(list(argv))
 
 
@@ -97,9 +104,7 @@ def run(argv: Sequence[str]) -> int:
     args = _parse_args(argv)
     repo_root: Path = args.repo_root.resolve()
     contract_path = repo_root / _CONTRACT_RELPATH
-    allowlist_path: Path = (
-        args.allowlist if args.allowlist is not None else repo_root / _DEFAULT_ALLOWLIST_RELPATH
-    )
+    allowlist_path: Path = args.allowlist if args.allowlist is not None else repo_root / _DEFAULT_ALLOWLIST_RELPATH
 
     if not contract_path.is_file():
         print(f"❌ usage: shipped-smoke contract not found: {contract_path}")
@@ -117,12 +122,10 @@ def run(argv: Sequence[str]) -> int:
             ShippedSmokeContractError,
             check_source_tree_contract,
             checkout_only_consistency_violations,
+            contract_surface_advisories,
         )
     except ImportError as exc:
-        print(
-            "🛑 GATE CRASH: smoke_contract_lint_gate cannot import "
-            f"seed_factory_plugin from {plugin_src}: {exc}"
-        )
+        print(f"🛑 GATE CRASH: smoke_contract_lint_gate cannot import seed_factory_plugin from {plugin_src}: {exc}")
         return EXIT_GATE_CRASH
 
     try:
@@ -134,11 +137,14 @@ def run(argv: Sequence[str]) -> int:
             contract_path=contract_path,
         )
         violations.extend(profile_row_findings((r.profile, r.rows) for r in reports))
+        advisories = contract_surface_advisories(contract_path)
         allowlist = load_allowlist(allowlist_path)
     except (ShippedSmokeContractError, OSError) as exc:
         print(f"🛑 GATE CRASH: smoke_contract_lint_gate produced NO VERDICT — {type(exc).__name__}: {exc}")
         return EXIT_GATE_CRASH
 
+    for advisory in advisories:
+        print(advisory)
     return _verdict(violations, allowlist)
 
 
@@ -161,10 +167,7 @@ def _verdict(violations: Sequence[str], allowlist: frozenset[str]) -> int:
         for violation in blocking:
             print(f"    {violation}")
         return EXIT_BLOCKING
-    print(
-        "✅ smoke_contract_lint_gate: shipped-smoke contract holds for every profile "
-        f"({len(violations)} tolerated)"
-    )
+    print(f"✅ smoke_contract_lint_gate: shipped-smoke contract holds for every profile ({len(violations)} tolerated)")
     return EXIT_OK
 
 

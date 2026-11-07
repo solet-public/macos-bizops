@@ -1,0 +1,3 @@
+# Named bounded per-loop worker admission and real route/action responsiveness.
+ananta/tests/core/runtime/loop_executors_smoke.py
+plugins/agent_messaging_plugin/tests/loop_executor_routes_smoke.py

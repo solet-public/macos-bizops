@@ -34,8 +34,7 @@ def _solet_or_fail() -> str:
     name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "marketo_plugin.constants: SOLET_NAME env var is "
-            "required to resolve the scoped client_secret vault key.",
+            "marketo_plugin.constants: SOLET_NAME env var is required to resolve the scoped client_secret vault key.",
         )
     return name
 
@@ -58,19 +57,14 @@ PLUGIN_VERSION: Final[str] = "1.1.0"
 # vault namespace enforcement requires the key's ``<plugin>`` segment to equal
 # the retrieving caller. Therefore NOT declared in get_required_vault_keys /
 # get_declared_vault_keys (both return []).
-VAULT_KEY_CLIENT_SECRET: Final[str] = (
-    f"{_SOLET}.default_address_book_plugin.marketo_client_secret"
-)
+VAULT_KEY_CLIENT_SECRET: Final[str] = f"{_SOLET}.default_address_book_plugin.marketo_client_secret"
 
 # ---------------------------------------------------------------------------
 # Address book entry — Marketo instance identity + credentials
 # ---------------------------------------------------------------------------
 ADDRESS_BOOK_ENTRY_NAME: Final[str] = "marketo_instance"
 ADDRESS_BOOK_ENTRY_TYPE: Final[str] = "api"
-ADDRESS_BOOK_ENTRY_DESCRIPTION: Final[str] = (
-    "Marketo Engage instance identity + credentials (base_url REST endpoint, "
-    "client_id, client_secret vault-ref) for marketo_plugin."
-)
+ADDRESS_BOOK_ENTRY_DESCRIPTION: Final[str] = "Marketo Engage instance identity + credentials (base_url REST endpoint, client_id, client_secret vault-ref) for marketo_plugin."
 ADDRESS_BOOK_FIELD_BASE_URL: Final[str] = "base_url"
 ADDRESS_BOOK_FIELD_CLIENT_ID: Final[str] = "client_id"
 ADDRESS_BOOK_FIELD_CLIENT_SECRET: Final[str] = "client_secret"
@@ -166,9 +160,7 @@ ACTIVITIES_PATH: Final[str] = "/rest/v1/activities.json"
 ACTIVITY_TYPES_PATH: Final[str] = "/rest/v1/activities/types.json"
 API_USAGE_PATH: Final[str] = "/rest/v1/stats/usage.json"
 
-LEAD_ACTIONS: Final[frozenset[str]] = frozenset(
-    {"createOrUpdate", "createOnly", "updateOnly", "createDuplicate"}
-)
+LEAD_ACTIONS: Final[frozenset[str]] = frozenset({"createOrUpdate", "createOnly", "updateOnly", "createDuplicate"})
 DEFAULT_LEAD_ACTION: Final[str] = "createOrUpdate"
 # Adobe's Sync Leads contract defaults an omitted lookupField to email and
 # describes id as the system-managed unique key. Both are identifiers rather
@@ -179,9 +171,7 @@ LEAD_ID_FIELD: Final[str] = "id"
 # caller omits ``fields``. Evidence class: documented, not measured. Membership
 # here does not claim that Marketo marks any field REST read-only; the live
 # describe response remains the authority for that separate property.
-GET_LEADS_DEFAULT_FIELDS: Final[frozenset[str]] = frozenset(
-    {"id", "email", "updatedAt", "createdAt", "firstName", "lastName"}
-)
+GET_LEADS_DEFAULT_FIELDS: Final[frozenset[str]] = frozenset({"id", "email", "updatedAt", "createdAt", "firstName", "lastName"})
 LEADS_DESCRIBE_PATH: Final[str] = "/rest/v1/leads/describe.json"
 
 # ---------------------------------------------------------------------------
@@ -294,6 +284,27 @@ CHECK_SETUP_UNVERIFIED_WRITE_VERBS: Final[tuple[str, ...]] = (
     "add_leads_to_list",
     "remove_leads_from_list",
     "trigger_campaign",
+    "sync_companies",
+    "delete_companies",
+    "sync_opportunities",
+    "delete_opportunities",
+    "sync_opportunity_roles",
+    "delete_opportunity_roles",
+    "sync_sales_persons",
+    "delete_sales_persons",
+    "sync_named_accounts",
+    "delete_named_accounts",
+    "sync_named_account_lists",
+    "delete_named_account_lists",
+    "add_named_account_list_members",
+    "remove_named_account_list_members",
+    "sync_custom_objects",
+    "delete_custom_objects",
+    "create_asset_folder",
+    "update_asset_folder",
+    "delete_asset_folder",
+    "set_asset_token",
+    "delete_asset_token",
 )
 
 # ---------------------------------------------------------------------------
@@ -323,7 +334,13 @@ RESULT_TYPE_CHECK_MARKETO_JOB_STATUS: Final[str] = "marketo_check_job_status_res
 # list_campaigns, list_static_lists). See marketing_actions.py's module
 # docstring for the prepare/execute split this enables.
 # ---------------------------------------------------------------------------
-MARKETO_ASYNC_ACTION_NAMES: Final[frozenset[str]] = frozenset(
-    {"get_leads", "get_activities", "list_campaigns", "list_static_lists"}
-)
+MARKETO_ASYNC_ACTION_NAMES: Final[frozenset[str]] = frozenset({"get_leads", "get_activities", "list_campaigns", "list_static_lists"})
 PARAM_JOB_ID: Final[str] = "job_id"
+
+# Generic authenticated request. No method allowlist: vendor RBAC decides.
+RESULT_TYPE_REQUEST: Final[str] = "marketo_request_result"
+REQUEST_REDACTION: Final[str] = "[REDACTED]"
+REQUEST_SECRET_KEYS: Final[frozenset[str]] = frozenset(
+    {"access_token", "refresh_token", "client_secret", "authorization", "password"},
+)
+REQUEST_VERB_LABEL: Final[str] = "authenticated request (may change vendor state)"

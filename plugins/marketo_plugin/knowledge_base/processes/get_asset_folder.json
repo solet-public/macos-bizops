@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::get_asset_folder",
+  "display_name": "Marketo: Get Asset Folder",
+  "description": "Read a Marketo Folder or Program by its numeric folder_id and folder_type. Returns the current folder metadata, including parent, path and archive state, in a workspace TSV. Vendor RBAC and workspace permissions apply; poll check_marketo_job_status for the finished export.",
+  "embedding_description": "Read a Marketo Folder or Program by its numeric folder_id and folder_type. Returns the current folder metadata, including parent, path and archive state, in a workspace TSV. Vendor RBAC and workspace permissions apply; poll check_marketo_job_status for the finished export.",
+  "result_processor_customizations": {
+    "action_label": "Marketo: Get Asset Folder job dispatched",
+    "result_type": "marketo_get_asset_folder_result",
+    "result_description": "Queued job_id and status. Poll check_marketo_job_status for a TSV handle, row_count, columns, truncated, per-page envelope metadata and next_offset when truncated.",
+    "presentation_guidance": "Poll the job before reporting success. Report path and row_count. Truncated reads can continue from next_offset with identical filters."
+  },
+  "error_processor_customizations": {
+    "action_context": "Read a Marketo Folder or Program by its numeric folder_id and folder_type. Returns the current folder metadata, including parent, path and archive state, in a workspace TSV. Vendor RBAC and workspace permissions apply; poll check_marketo_job_status for the finished export.",
+    "error_interpretation": "marketo.invalid_params: correct vendor-shaped inputs. marketo.permission_denied: vendor RBAC or workspace access refused. marketo.auth_failed: credential rejected. marketo.validation_failed: vendor rejected the operation. A transport failure may follow a mutation.",
+    "recovery_guidance": "Use the registered credential and vendor Read-Only Assets / Read-Write Assets permissions. Reads do not prove write access. Read back state before retrying an uncertain mutation; these endpoints offer no CAS/ETag."
+  }
+}

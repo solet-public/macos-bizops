@@ -11,7 +11,7 @@ import sys
 from collections.abc import Iterable
 from pathlib import Path
 
-from .mcp_ingress import ingress_port_file_path, read_router_port
+from .mcp_ingress import ROUTER_IO, ingress_port_file_path, read_router_port
 from .service_install import validate_solet_name
 
 logger = logging.getLogger("local_blue_green.tunnel_supervisor")
@@ -84,7 +84,7 @@ class TunnelSupervisor:
     async def _wait_for_ingress_port(self) -> int:
         while not self._stop.is_set():
             try:
-                return read_router_port(self.ingress_port_file)
+                return await ROUTER_IO.run(read_router_port, self.ingress_port_file)
             except RuntimeError as exc:
                 logger.info("waiting for ingress port file: %s", exc)
                 try:
@@ -160,9 +160,7 @@ async def _amain(args: argparse.Namespace) -> int:
         tunnel_client_path=args.tunnel_client_path,
         tunnel_id=args.tunnel_id,
         control_plane_api_key=args.control_plane_api_key,
-        ingress_port_file=(
-            args.ingress_port_file or ingress_port_file_path(args.solet)
-        ),
+        ingress_port_file=(args.ingress_port_file or ingress_port_file_path(args.solet)),
         health_url_file=args.health_url_file,
         mcp_path=args.mcp_path,
         poll_interval_seconds=args.poll_interval_seconds,
@@ -175,10 +173,7 @@ async def _amain(args: argparse.Namespace) -> int:
 def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="tunnel_supervisor",
-        description=(
-            "Run tunnel-client against the current per-solet MCP ingress "
-            "port and restart it when that local ingress port changes."
-        ),
+        description=("Run tunnel-client against the current per-solet MCP ingress port and restart it when that local ingress port changes."),
     )
     parser.add_argument("--solet", required=True, help="Solet name.")
     parser.add_argument(

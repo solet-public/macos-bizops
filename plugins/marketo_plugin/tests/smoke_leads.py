@@ -226,8 +226,7 @@ def test_get_leads_filter_forwarding() -> None:
     _assert("get_leads has no more_result field — hidden by design", "more_result" not in result)
     _assert(
         "instance-specific filter_type forwarded",
-        client.get_json.call_args.kwargs["params"]["filterType"]
-        == "externalDedupeKey",
+        client.get_json.call_args.kwargs["params"]["filterType"] == "externalDedupeKey",
         str(client.get_json.call_args),
     )
 
@@ -272,7 +271,7 @@ def test_create_or_update_leads_partial_batch_is_not_an_error() -> None:
                     "reasons": [{"code": "1006", "message": "Field 'emali' not found"}],
                 },
             ],
-        }
+        },
     )
     result = marketing_actions.create_or_update_leads(
         client,
@@ -291,8 +290,7 @@ def test_create_or_update_leads_partial_batch_is_not_an_error() -> None:
     )
     _assert(
         "unknown-field reasons survive vendor-verbatim",
-        result["results"][1]["reasons"]
-        == [{"code": "1006", "message": "Field 'emali' not found"}],
+        result["results"][1]["reasons"] == [{"code": "1006", "message": "Field 'emali' not found"}],
         str(result),
     )
     _assert("result row_count preserved", result["row_count"] == 2)
@@ -471,8 +469,7 @@ def test_create_or_update_leads_read_only_preflight() -> None:
     )
     _assert(
         "heterogeneous refusal identifies carrying records",
-        "readOnlyAlpha (records 1)" in heterogeneous_refusal
-        and "readOnlyBeta (records 2)" in heterogeneous_refusal,
+        "readOnlyAlpha (records 1)" in heterogeneous_refusal and "readOnlyBeta (records 2)" in heterogeneous_refusal,
         heterogeneous_refusal,
     )
     _assert("heterogeneous refusal prevents the write", heterogeneous_client.post_json.call_count == 0)
@@ -581,9 +578,11 @@ def test_check_setup_all_pass() -> None:
     _assert("check_setup all-pass reads_verified", result["reads_verified"] is True)
     _assert("check_setup ran all 6 read probes", len(result["checks"]) == 6, str(result["checks"]))
     _assert(
-        "check_setup names the 6 unverified write verbs",
+        "check_setup names the 27 unverified write verbs",
         set(result["writes_unverified"])
-        == {"create_or_update_leads", "delete_leads", "merge_leads", "add_leads_to_list", "remove_leads_from_list", "trigger_campaign"},
+        == {"create_or_update_leads", "delete_leads", "merge_leads", "add_leads_to_list", "remove_leads_from_list", "trigger_campaign", "add_named_account_list_members", "remove_named_account_list_members"}
+        | {f"{operation}_{family}" for operation in ("sync", "delete") for family in ("companies", "opportunities", "opportunity_roles", "sales_persons", "named_accounts", "named_account_lists", "custom_objects")}
+        | {"create_asset_folder", "update_asset_folder", "delete_asset_folder", "set_asset_token", "delete_asset_token"},
         str(result["writes_unverified"]),
     )
 
@@ -915,9 +914,7 @@ def test_list_paging_fields_surfaced() -> None:
 
     # Without a usable token, the collection is terminal even when the raw
     # vendor flag claims otherwise — a single call, not truncated.
-    bare = _fake_client(
-        get_json={"success": True, "result": [{"id": 1}], "moreResult": True}
-    )
+    bare = _fake_client(get_json={"success": True, "result": [{"id": 1}], "moreResult": True})
     result = marketing_actions.list_campaigns(bare, {"output_tsv_path": _tmp_tsv_path()}, _passthrough_gate)
     _assert("absent token ends the collection in one call", bare.get_json.call_count == 1)
     _assert("absent collection token overrides true vendor moreResult — not truncated", result["truncated"] is False)
@@ -954,7 +951,7 @@ def test_edge_parity() -> None:
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 16 verbs discovered", len(actions) == 16, str(len(actions)))
+    _assert("all 58 verbs discovered", len(actions) == 58, str(len(actions)))
     _assert("get_activities registered as a verb", "get_activities" in {a.name for a in actions})
     _assert(
         "list_activity_types registered as a verb",

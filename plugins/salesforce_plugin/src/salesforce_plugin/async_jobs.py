@@ -39,6 +39,7 @@ dispatched.
 
 from __future__ import annotations
 
+import functools
 import logging
 import threading
 import time
@@ -47,9 +48,10 @@ from typing import TYPE_CHECKING, Any
 
 from ananta.constants import CONTEXT_KEY_FLOW_ID, CONTEXT_KEY_SESSION_ID
 
-from . import bulk_actions, completion_templates, record_actions, soql_actions
+from . import bulk_actions, completion_templates, record_actions, soql_actions, typed_families
 from .client import SalesforceCliExecutor
 from .constants import ERROR_API_ERROR, PLUGIN_NAME
+from .request_actions import authenticated_request
 
 if TYPE_CHECKING:
     from .plugin import SalesforcePlugin
@@ -60,9 +62,7 @@ POLL_INTERVAL_SECONDS = 2.0
 _JOB_LIST_LIMIT = 10
 
 
-def _test_connection_action(
-    executor: SalesforceCliExecutor, _params: dict[str, Any]
-) -> dict[str, Any]:
+def _test_connection_action(executor: SalesforceCliExecutor, _params: dict[str, Any]) -> dict[str, Any]:
     """Verify the org binding — same body as the pre-migration inline closure."""
     org_id = soql_actions.fetch_org_id(executor)
     return {
@@ -80,6 +80,7 @@ def _test_connection_action(
 GateFactory = Callable[["SalesforcePlugin"], Any]
 ActionHandler = tuple[Callable[..., dict[str, Any]], GateFactory | None]
 ACTION_HANDLERS: dict[str, ActionHandler] = {
+    "authenticated_request": (authenticated_request, None),
     "soql_query": (soql_actions.soql_query, lambda plugin: plugin._export_path_gate),  # noqa: SLF001
     "export_soql": (soql_actions.export_soql, lambda plugin: plugin._export_path_gate),  # noqa: SLF001
     "get_record": (record_actions.get_record, None),
@@ -93,6 +94,15 @@ ACTION_HANDLERS: dict[str, ActionHandler] = {
     "bulk_job_status": (bulk_actions.bulk_job_status, None),
     "bulk_job_results": (bulk_actions.bulk_job_results, lambda plugin: plugin._csv_export_path_gate),  # noqa: SLF001
     "bulk_job_abort": (bulk_actions.bulk_job_abort, None),
+    # Typed families (typed_families.py). bulk_jobs writes query results as CSV
+    # under the same export gate as bulk_job_results.
+    "composite": (functools.partial(typed_families.run_family, "composite"), None),
+    "tooling": (functools.partial(typed_families.run_family, "tooling"), None),
+    "bulk_jobs": (functools.partial(typed_families.run_family, "bulk_jobs"), lambda plugin: plugin._csv_export_path_gate),  # noqa: SLF001
+    "reports": (functools.partial(typed_families.run_family, "reports"), None),
+    "dashboards": (functools.partial(typed_families.run_family, "dashboards"), None),
+    "rest_resources": (functools.partial(typed_families.run_family, "rest_resources"), None),
+    "actions": (functools.partial(typed_families.run_family, "actions"), None),
 }
 
 
@@ -126,7 +136,10 @@ def ensure_worker_started(plugin: SalesforcePlugin) -> None:
         if plugin._worker_thread is not None and plugin._worker_thread.is_alive():
             return
         thread = threading.Thread(
-            target=_worker_loop, args=(plugin,), name=f"{PLUGIN_NAME}-async-worker", daemon=True,
+            target=_worker_loop,
+            args=(plugin,),
+            name=f"{PLUGIN_NAME}-async-worker",
+            daemon=True,
         )
         plugin._worker_thread = thread
         thread.start()
@@ -189,7 +202,10 @@ def _drain_queued_jobs(plugin: SalesforcePlugin) -> None:
 
 
 def _process_job(
-    plugin: SalesforcePlugin, async_job_manager: Any, job_id: str, action_name: str,
+    plugin: SalesforcePlugin,
+    async_job_manager: Any,
+    job_id: str,
+    action_name: str,
 ) -> None:
     """Run one job's real `sf` CLI I/O and complete it. Runs on the ONE worker thread only."""
     async_job_manager.update_job(job_id, {"status": "processing"})

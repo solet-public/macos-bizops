@@ -17,10 +17,11 @@ Recognized ``type`` values (from a real 2025-10-15 rollout):
                         function_call_output, custom_tool_call,
                         custom_tool_call_output}`` → produces one
                         :class:`RawSessionEvent`.
-* ``event_msg``       — UI / runtime metrics (token counts, agent_message
-                        duplicates, turn_aborted). Known-skip; never yields,
-                        never raises.
-* ``turn_context``    — workspace state echoed each turn. Known-skip.
+* ``event_msg``       — token_count with dict info yields a usage SYSTEM event;
+                        other runtime messages are skipped.
+* ``turn_context``    — supplies the preceding model; yields no event.
+* ``world_state`` / ``token_usage_record`` — non-conversation records, skipped;
+                        token_count remains the only rollout usage meter.
 
 Any other top-level ``type`` raises :class:`ValueError` (per spec §17.2
 acceptance: unrecognized payload type marks the batch
@@ -36,6 +37,7 @@ canonical :class:`NormalizedSessionEvent`.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -56,13 +58,14 @@ from ananta.llm.session_ledger.types import (
 ROLLOUT_FILENAME_GLOB = "rollout-*.jsonl"
 DEFAULT_ROOT_DIR = "~/.codex/sessions"
 ARCHIVED_SUBDIR = "archived_sessions"
+logger = logging.getLogger(__name__)
 
 
 def iter_session_files(root_dir: Path) -> Iterator[Path]:
     """Yield rollout-JSONL paths under ``root_dir`` in alphabetical order.
 
     Codex names files ``rollout-<ISO timestamp>-<uuid>.jsonl``; lexical sort
-    is therefore time-monotonic, which is what the discovery cursor relies on.
+    gives a stable walk, without excluding older files that can still grow.
     Walks both the dated ``YYYY/MM/DD/`` tree AND a sibling
     ``archived_sessions/`` directory if it exists; archived files are
     yielded after live ones (alphabetically merged).
@@ -105,12 +108,8 @@ def external_session_id_for(path: Path) -> str:
 # ``compacted`` line to raise ValueError, the per-session try/except in
 # :class:`SessionLedgerImporter` silently skipped the session, and the
 # discovery cursor advanced regardless → 4.5 months of orphaned sessions.
-_RECOGNIZED_LINE_TYPES: frozenset[str] = frozenset(
-    {"session_meta", "response_item", "event_msg", "turn_context", "compacted"}
-)
-_SKIPPED_LINE_TYPES: frozenset[str] = frozenset(
-    {"event_msg", "turn_context", "compacted"}
-)
+_RECOGNIZED_LINE_TYPES: frozenset[str] = frozenset({"session_meta", "response_item", "event_msg", "turn_context", "compacted", "world_state", "token_usage_record"})
+_SKIPPED_LINE_TYPES: frozenset[str] = frozenset({"event_msg", "turn_context", "compacted", "world_state", "token_usage_record"})
 
 # `response_item.payload.type` we recognize. Anything else → ValueError.
 #
@@ -155,9 +154,7 @@ def read_session_meta(path: Path) -> CodexSessionMeta:
         raise ValueError(f"empty rollout file: {path}")
     obj = _load_line(first, path=path, line_no=1)
     if obj.get("type") != "session_meta":
-        raise ValueError(
-            f"{path}: expected first line type='session_meta', got {obj.get('type')!r}"
-        )
+        raise ValueError(f"{path}: expected first line type='session_meta', got {obj.get('type')!r}")
     payload = _require_dict(obj, "payload", path, 1)
     uuid = payload.get("id")
     if not isinstance(uuid, str) or not uuid:
@@ -179,26 +176,32 @@ def iter_events_from_path(
 
     ``start_line`` is 0-based; the first emitted line will have
     ``line_offset >= start_line``. ``session_meta`` lines are skipped.
-    ``event_msg`` / ``turn_context`` lines are skipped (known-noise).
+    ``turn_context`` supplies model context; token_count runtime messages
+    yield usage events. Other runtime messages are skipped.
     Unrecognized top-level or item types raise ``ValueError``.
     """
     external_session_id = external_session_id_for(path)
-    with path.open("r", encoding="utf-8") as fh:
-        for line_no, raw_line in enumerate(fh):
-            if line_no < start_line:
-                continue
-            if not raw_line.strip():
-                continue
-            obj = _load_line(raw_line, path=path, line_no=line_no + 1)
-            event = _line_to_raw_event(
-                obj=obj,
-                external_session_id=external_session_id,
-                source=str(path),
-                line_no=line_no + 1,
-            )
-            if event is None:
-                continue
-            yield line_no, event
+    context = _ParseContext()
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line_no, raw_line in enumerate(fh):
+                if line_no < start_line:
+                    _read_prefix_context(raw_line, context)
+                    continue
+                if not raw_line.strip():
+                    continue
+                obj = _load_line(raw_line, path=path, line_no=line_no + 1)
+                event = _parse_with_context(
+                    obj=obj,
+                    external_session_id=external_session_id,
+                    source=str(path),
+                    line_no=line_no + 1,
+                    context=context,
+                )
+                if event is not None:
+                    yield line_no, event
+    finally:
+        context.report()
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -230,24 +233,30 @@ def parse_chunk(chunk_text: str) -> Iterator[RawSessionEvent]:
         raise ValueError("codex pushed chunk must be a JSON object")
     external_session_id = envelope.get("external_session_id")
     if not isinstance(external_session_id, str) or not external_session_id:
-        raise ValueError(
-            "codex pushed chunk requires non-empty 'external_session_id' field"
-        )
+        raise ValueError("codex pushed chunk requires non-empty 'external_session_id' field")
     events = envelope.get("events")
     if not isinstance(events, list):
         raise ValueError("codex pushed chunk requires 'events' list")
-    for idx, item in enumerate(events):
-        if not isinstance(item, dict):
-            raise ValueError(f"codex pushed events[{idx}] is not a dict")
-        event = _line_to_raw_event(
-            obj=item,
-            external_session_id=external_session_id,
-            source=f"pushed_chunk[{idx}]",
-            line_no=idx + 1,
-        )
-        if event is None:
-            continue
-        yield event
+    yield from _parse_chunk_events(events, external_session_id)
+
+
+def _parse_chunk_events(events: list[object], external_session_id: str) -> Iterator[RawSessionEvent]:
+    context = _ParseContext()
+    try:
+        for idx, item in enumerate(events):
+            if not isinstance(item, dict):
+                raise ValueError(f"codex pushed events[{idx}] is not a dict")
+            event = _parse_with_context(
+                obj=item,
+                external_session_id=external_session_id,
+                source=f"pushed_chunk[{idx}]",
+                line_no=idx + 1,
+                context=context,
+            )
+            if event is not None:
+                yield event
+    finally:
+        context.report()
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -261,6 +270,8 @@ def normalize_raw(raw: RawSessionEvent) -> NormalizedSessionEvent:
     Dispatches on ``raw.payload['_codex_item_type']`` (set by the parser).
     """
     item_type = raw.payload.get("_codex_item_type")
+    if item_type == "token_count":
+        return _normalize_token_count(raw)
     if item_type == "message":
         return _normalize_message(raw)
     if item_type == "reasoning":
@@ -271,14 +282,112 @@ def normalize_raw(raw: RawSessionEvent) -> NormalizedSessionEvent:
         return _normalize_tool_result(raw)
     if item_type == "web_search_call":
         return _normalize_web_search_call(raw)
-    raise ValueError(
-        f"normalize_raw: unrecognized _codex_item_type {item_type!r} in payload"
-    )
+    raise ValueError(f"normalize_raw: unrecognized _codex_item_type {item_type!r} in payload")
 
 
 # ───────────────────────────────────────────────────────────────────────────
 # Internals
 # ───────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(slots=True)
+class _ParseContext:
+    model: str | None = None
+    null_info: int = 0
+    model_missing: int = 0
+
+    def report(self) -> None:
+        """One aggregate diagnostic per consumed parse call, including zero counts."""
+        logger.debug("codex token_count: null-info skipped %d, model-missing %d", self.null_info, self.model_missing)
+
+
+def _update_model(obj: dict[str, Any], context: _ParseContext) -> None:
+    if obj.get("type") == "turn_context":
+        payload = obj.get("payload")
+        context.model = _optional_str(payload.get("model")) if isinstance(payload, dict) else None
+
+
+def _read_prefix_context(raw_line: str, context: _ParseContext) -> None:
+    """Scan prefix text without parsing unrelated or malformed historical lines."""
+    if "turn_context" not in raw_line:
+        return
+    try:
+        obj = json.loads(raw_line)
+    except json.JSONDecodeError:
+        return
+    if isinstance(obj, dict):
+        _update_model(obj, context)
+
+
+def _parse_with_context(
+    *,
+    obj: dict[str, Any],
+    external_session_id: str,
+    source: str,
+    line_no: int,
+    context: _ParseContext,
+) -> RawSessionEvent | None:
+    _update_model(obj, context)
+    payload = obj.get("payload")
+    if obj.get("type") == "event_msg" and isinstance(payload, dict) and payload.get("type") == "token_count":
+        return _token_count_event(obj, payload, external_session_id, line_no, context)
+    return _line_to_raw_event(obj=obj, external_session_id=external_session_id, source=source, line_no=line_no)
+
+
+def _token_count_event(
+    obj: dict[str, Any],
+    payload: dict[str, Any],
+    external_session_id: str,
+    line_no: int,
+    context: _ParseContext,
+) -> RawSessionEvent | None:
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        context.null_info += 1
+        return None
+    if context.model is None:
+        context.model_missing += 1
+    timestamp_raw = obj.get("timestamp")
+    if not isinstance(timestamp_raw, str):
+        raise ValueError("codex token_count line lacks string 'timestamp'")
+    vendor_event_id, parent = _resolve_vendor_ids(
+        item_type="token_count",
+        call_id=None,
+        timestamp_raw=timestamp_raw,
+        line_no=line_no,
+    )
+    return RawSessionEvent(
+        external_session_id=external_session_id,
+        payload={
+            "_codex_item_type": "token_count",
+            "usage": {
+                "total": info.get("total_token_usage"),
+                "last": info.get("last_token_usage"),
+                "model_context_window": info.get("model_context_window"),
+                "model": context.model,
+            },
+        },
+        event_at=_parse_iso(timestamp_raw),
+        vendor_event_id=vendor_event_id,
+        vendor_parent_event_id=parent,
+    )
+
+
+def _normalize_token_count(raw: RawSessionEvent) -> NormalizedSessionEvent:
+    return NormalizedSessionEvent(
+        external_session_id=raw.external_session_id,
+        event_type=EventType.SYSTEM,
+        role=MessageRole.SYSTEM,
+        content_text=None,
+        content_json={"subtype": "codex_token_count"},
+        event_at=raw.event_at,
+        vendor_event_id=raw.vendor_event_id,
+        vendor_parent_event_id=raw.vendor_parent_event_id,
+        attachment_blob_upload=None,
+        attachment_mime_type=None,
+        attachment_filename=None,
+        usage_json=raw.payload["usage"],
+    )
 
 
 def _line_to_raw_event(
@@ -299,9 +408,7 @@ def _line_to_raw_event(
     if not isinstance(top_type, str):
         raise ValueError(f"{source}:{line_no} line lacks string 'type'")
     if top_type not in _RECOGNIZED_LINE_TYPES:
-        raise ValueError(
-            f"{source}:{line_no} unrecognized codex line type {top_type!r}"
-        )
+        raise ValueError(f"{source}:{line_no} unrecognized codex line type {top_type!r}")
     if top_type == "session_meta":
         return None
     if top_type in _SKIPPED_LINE_TYPES:
@@ -310,14 +417,9 @@ def _line_to_raw_event(
     payload = _require_dict(obj, "payload", source, line_no)
     item_type = payload.get("type")
     if not isinstance(item_type, str):
-        raise ValueError(
-            f"{source}:{line_no} response_item.payload lacks string 'type'"
-        )
+        raise ValueError(f"{source}:{line_no} response_item.payload lacks string 'type'")
     if item_type not in _RECOGNIZED_ITEM_TYPES:
-        raise ValueError(
-            f"{source}:{line_no} unrecognized response_item.payload.type "
-            f"{item_type!r}"
-        )
+        raise ValueError(f"{source}:{line_no} unrecognized response_item.payload.type {item_type!r}")
     timestamp_raw = obj.get("timestamp")
     if not isinstance(timestamp_raw, str):
         raise ValueError(f"{source}:{line_no} line lacks string 'timestamp'")
@@ -371,6 +473,8 @@ def _resolve_vendor_ids(
         return result_id, call_id
     if item_type == "web_search_call":
         return f"web_search:{timestamp_raw}:{line_no}", None
+    if item_type == "token_count":
+        return f"token_count:{timestamp_raw}:{line_no}", None
     return call_id, None
 
 
@@ -386,10 +490,12 @@ def _normalize_message(raw: RawSessionEvent) -> NormalizedSessionEvent:
     text = _extract_text_parts(content_parts)
     return NormalizedSessionEvent(
         external_session_id=raw.external_session_id,
-        event_type=EventType.MESSAGE,
+        event_type=EventType.TOOL_RESULT if role is MessageRole.TOOL else EventType.MESSAGE,
         role=role,
         content_text=text or None,
-        content_json=None if text else {"raw_content": content_parts},
+        # Tool messages can carry correlation and non-text vendor fields.
+        # Retain them verbatim; a message id is not evidence of a tool-use id.
+        content_json=dict(payload) if role is MessageRole.TOOL else (None if text else {"raw_content": content_parts}),
         event_at=raw.event_at,
         vendor_event_id=raw.vendor_event_id,
         vendor_parent_event_id=raw.vendor_parent_event_id,
@@ -472,9 +578,7 @@ def _normalize_tool_result(raw: RawSessionEvent) -> NormalizedSessionEvent:
     payload = raw.payload
     call_id = payload.get("call_id")
     if not isinstance(call_id, str) or not call_id:
-        raise ValueError(
-            "codex function_call_output payload missing non-empty 'call_id'"
-        )
+        raise ValueError("codex function_call_output payload missing non-empty 'call_id'")
     output_raw = payload.get("output")
     output: Any = output_raw
     if isinstance(output_raw, str):
@@ -610,9 +714,7 @@ def _load_line(line: str, *, path: Path | str, line_no: int) -> dict[str, Any]:
     return obj
 
 
-def _require_dict(
-    obj: dict[str, Any], field: str, source: Path | str, line_no: int
-) -> dict[str, Any]:
+def _require_dict(obj: dict[str, Any], field: str, source: Path | str, line_no: int) -> dict[str, Any]:
     value = obj.get(field)
     if not isinstance(value, dict):
         raise ValueError(f"{source}:{line_no} missing dict field {field!r}")

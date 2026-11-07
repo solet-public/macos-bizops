@@ -6,11 +6,12 @@ provider ActionResult envelopes).
 Proves the properties the R1 design depends on: a fresh record is open
 (``retired_at`` unset) and round-trips through ``list``; the open-only
 default filters correctly; ``owed_by_role``/``requesting_peer`` filters
-compose; and retirement is predicated on ``retired_at IS NULL`` so a
+compose; retirement is predicated on ``retired_at IS NULL`` so a
 double-retire is a no-op (``False``, zero rows affected) rather than a
 silent overwrite of an earlier retirement's provenance — the exact class of
 bug the ``{"op": "is_null"}`` filter grammar exists to prevent (a bare
-``None`` filter would match zero rows, silently, forever).
+``None`` filter would match zero rows, silently, forever); and the list is
+an ordered, bounded page whose cursor continues it, never a capped prefix.
 
 Run:
     .venv/bin/python3 \
@@ -20,11 +21,13 @@ Run:
 from __future__ import annotations
 
 import sys
+from itertools import count
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
-sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
+_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_ROOT / "ananta" / "src"))
+sys.path.insert(0, str(_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _real_state_fake import RealShapeState  # noqa: E402
@@ -71,9 +74,7 @@ def test_record_round_trips_as_open_entry() -> None:
     )
     _check(
         rows and bool(rows[0].get("created_at")),
-        "created_at is present and non-empty — the platform's protected "
-        "auto-timestamp populated it on insert, since this store never "
-        "writes the field itself",
+        "created_at is present and non-empty — the platform's protected auto-timestamp populated it on insert, since this store never writes the field itself",
     )
 
 
@@ -96,8 +97,7 @@ def test_open_only_default_excludes_retired() -> None:
     open_rows = list_held_authorizations(state, owed_by_role="Coordinator")
     _check(
         len(open_rows) == 0,
-        "a retired entry is excluded from the open-only default list — "
-        "retired_at IS NULL filtering works, not a bare None comparison",
+        "a retired entry is excluded from the open-only default list — retired_at IS NULL filtering works, not a bare None comparison",
     )
     all_rows = list_held_authorizations(state, owed_by_role="Coordinator", include_retired=True)
     _check(
@@ -136,8 +136,7 @@ def test_double_retire_is_a_no_op_not_an_overwrite() -> None:
     rows = list_held_authorizations(state, owed_by_role="Git-Controller", include_retired=True)
     _check(
         rows and rows[0].get("retired_reason") == "authorized",
-        "the SECOND call's retired_reason never overwrote the first — "
-        "provenance of the actual retirement survives",
+        "the SECOND call's retired_reason never overwrote the first — provenance of the actual retirement survives",
     )
 
 
@@ -156,23 +155,74 @@ def test_retire_unknown_entry_is_a_no_op() -> None:
 def test_filters_compose_with_and() -> None:
     state = RealShapeState()
     record_held_authorization(
-        state, requesting_peer="lane-a", owed_by_role="Coordinator",
-        branch_or_request_ref="feature/a", reason="test",
+        state,
+        requesting_peer="lane-a",
+        owed_by_role="Coordinator",
+        branch_or_request_ref="feature/a",
+        reason="test",
     )
     record_held_authorization(
-        state, requesting_peer="lane-b", owed_by_role="Coordinator",
-        branch_or_request_ref="feature/b", reason="test",
+        state,
+        requesting_peer="lane-b",
+        owed_by_role="Coordinator",
+        branch_or_request_ref="feature/b",
+        reason="test",
     )
     record_held_authorization(
-        state, requesting_peer="lane-a", owed_by_role="Git-Controller",
-        branch_or_request_ref="feature/c", reason="test",
+        state,
+        requesting_peer="lane-a",
+        owed_by_role="Git-Controller",
+        branch_or_request_ref="feature/c",
+        reason="test",
     )
     rows = list_held_authorizations(state, owed_by_role="Coordinator", requesting_peer="lane-a")
     _check(
         len(rows) == 1 and rows[0]["requesting_peer"] == "lane-a",
-        "owed_by_role and requesting_peer filters compose with AND, "
-        "never returning a sibling lane's entry",
+        "owed_by_role and requesting_peer filters compose with AND, never returning a sibling lane's entry",
     )
+
+
+def _refusal_pages(state: RealShapeState, limit: int) -> list[list[str]]:
+    """Every page of Git-Controller's refusals as ids, each after the last row."""
+    pages: list[list[str]] = []
+    after_id: str | None = None
+    while len(pages) <= 20:
+        page = list_held_authorizations(state, owed_by_role="Git-Controller", limit=limit, after_id=after_id)
+        pages.append([str(row["id"]) for row in page])
+        if len(page) < limit:
+            break
+        after_id = str(page[-1]["id"])
+    return pages
+
+
+def _missing_cursor_refused(state: RealShapeState) -> bool:
+    try:
+        list_held_authorizations(state, after_id="hau_does_not_exist")
+    except LookupError:
+        return True
+    return False
+
+
+def test_pages_continue_after_cursor() -> None:
+    state = RealShapeState()
+    clock = count(1)
+    state.now_iso = lambda: f"2026-10-18T12:00:{next(clock):06d}"
+    recorded = [
+        record_held_authorization(
+            state,
+            requesting_peer=f"lane-{index}",
+            owed_by_role="Git-Controller",
+            branch_or_request_ref=f"feature/{index}",
+            reason="test",
+        )
+        for index in range(5)
+    ]
+    pages = _refusal_pages(state, 2)
+    _check(
+        ([len(page) for page in pages], sum(pages, [])) == ([2, 2, 1], recorded),
+        "refusal pages are oldest-first, bounded and continue exactly after the cursor row",
+    )
+    _check(_missing_cursor_refused(state), "a cursor naming no row is refused, never a silent restart from page one")
 
 
 def main() -> int:
@@ -181,6 +231,7 @@ def main() -> int:
     test_double_retire_is_a_no_op_not_an_overwrite()
     test_retire_unknown_entry_is_a_no_op()
     test_filters_compose_with_and()
+    test_pages_continue_after_cursor()
 
     print()
     print(f"PASSED: {_passed}")

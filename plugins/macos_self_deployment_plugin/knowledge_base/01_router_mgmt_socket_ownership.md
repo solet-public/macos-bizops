@@ -116,6 +116,53 @@ asyncio does. Any explicit unlink that remains should be ownership-checked and
 logged, and understood as a statement of intent rather than as the mechanism
 that does the work.
 
+## Owned-deploy admission — one deploy, rollback or stop at a time
+
+The router socket is not the only thing an overlapping operation can damage.
+A manifest commit, a blue-green restart, a durable code rollback and
+`stop_self` each rewrite what the solet runs, and two of them interleaving
+can leave a manifest on disk that no running colour was built from, or a
+drain sentinel and a delayed SIGTERM landing on a swap that is still
+building. All four therefore admit through one per-solet lock before their
+first side effect (`ananta.core.actions.owned_deploy_admission`).
+
+- **Busy admission.** The lock is a nonblocking exclusive `flock` on
+  `~/.ananta/runtime/<name>.owned_deploy.lock`. The file is created once and
+  never unlinked; do not delete it, because a fresh file is a different inode
+  and would let a second owner in beside the first. A contender is refused at
+  once, never queued: `apply_manifest` returns its rejected envelope with
+  `owned_deploy_in_progress` in `rejection_reasons` and writes nothing,
+  `restart_with_manifest` and `rollback_release` return `failed` with reason
+  code `owned_deploy_in_progress` before any build or spawn, and `stop_self`
+  returns `failed` with neither a sentinel nor a watchdog. If the lock cannot
+  be established at all (unwritable runtime root, `flock` error, replaced
+  inode), the same surfaces report `owned_deploy_exclusion_unavailable`, again
+  before any side effect.
+- **Nested release.** `apply_manifest` holds the lock across its delegate,
+  and the macOS restart it calls admits again on the same thread. That inner
+  admission joins the outer attempt rather than re-locking, and only the
+  outermost scope releases. Another thread of the same process is never
+  treated as the same owner.
+- **Watchdog custody.** `stop_self` hands the held lock descriptor to its
+  detached watchdog through `pass_fds`, and the solet closes its own copy
+  without unlocking. The watchdog holds the lock through its delayed SIGTERM
+  and bounded SIGKILL escalation and releases it by exiting. Before each
+  signal it re-reads the target's start-time token and sends nothing if the
+  pid now belongs to another process.
+- **Orphan cleanup.** Ownership is the live descriptor and nothing else, so a
+  crashed, `exec`ed or exited holder frees the lock through the kernel, with
+  no timer or reaper. The holder's advisory record,
+  `<name>.owned_deploy.active.json` (operation, attempt id, owner pid, phase),
+  is left behind in that case; the next successful admission retires it as
+  `orphaned` in `<name>.owned_deploy.history.jsonl` before starting its own
+  attempt. A leftover or corrupt record never blocks anything. A live but hung
+  holder stays busy and is never expired by age. Find it from the record's
+  `owner_pid` and resolve that process rather than editing the files.
+- **External limit.** Only participants that admit through this module are
+  fenced. A manager or operator that stops, restarts or signals the solet
+  directly (for example `launchctl kickstart -k`) bypasses the lock, and
+  coordinating those paths is the manager's responsibility, outside the solet.
+
 ## Recovery
 
 If a solet is crash-looping on a missing router socket:

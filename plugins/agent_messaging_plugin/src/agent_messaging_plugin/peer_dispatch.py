@@ -5,7 +5,9 @@ and the Streamable HTTP MCP transport's ``tools/call peer_send``
 funnel through the **same** dispatch logic:
 
 * resolve the recipient ``BridgeBinding`` via ``PeerRegistry.resolve``
-  (raises :class:`PeerAmbiguousError` / :class:`PeerUnreachableError`),
+  (raises :class:`PeerAmbiguousError` / :class:`PeerUnreachableError`; a raw
+  target that names a bound role raises ``PeerUnreachableError`` with a
+  ``peer_role_target:`` pointer to ``peer_send_by_name``),
 * persist the message via ``agent_messaging_service.peer_send``,
 * touch the sender bridge + both bindings so ``updated_at`` reflects
   the dispatch,
@@ -16,6 +18,9 @@ funnel through the **same** dispatch logic:
   extra nudge through the recipient's ``managed_session`` driver channel
   when one is live and eligible — see
   :func:`agent_messaging_plugin.session_lifecycle_verbs.drive_on_delivery`.
+  Since iss_ab680764 the nudge is scheduled on the bounded delivery-drive
+  executor (:mod:`agent_messaging_plugin.delivery_drive`) rather than run
+  inline, so a send never waits for a tmux drive.
 
 Wake is a TRANSPORT property, not a sender-declared one (A4, 2026-08-04):
 every send takes this path, unconditionally — the IMPORTANT marker is
@@ -49,8 +54,10 @@ from ananta.llm.agent_messaging.schema import (
     ROLE_THREAD_PREFIX,
 )
 from ananta.llm.agent_messaging.service import role_message_external_id
+from ananta.llm.agent_messaging.state_results import StateOperationError
 
 from .bridge_sessions import BridgeNotFoundError, BridgeQueueFullError
+from .delivery_drive import CodexPickupStore, schedule_drive_on_delivery
 from .peer_registry import PeerAmbiguousError, PeerUnreachableError
 from .sender_provenance import (
     SENDER_PRINCIPAL_KIND_STDIO_AGENT,
@@ -60,7 +67,6 @@ from .sender_provenance import (
 from .session_lifecycle_verbs import (
     DRIVE_DRIVER_UNAVAILABLE,
     DriveOnDeliveryOutcome,
-    drive_on_delivery,
 )
 
 if TYPE_CHECKING:
@@ -91,7 +97,8 @@ EVENT_POST_MESSAGE: Final[str] = "post_message"
 # permanent cosmetic strip so literal "IMPORTANT:" text from old-habit
 # senders never leaks into delivered prose. Stripped, never branched on.
 IMPORTANT_MARKER_RE: Final[re.Pattern[str]] = re.compile(
-    r"^\s*IMPORTANT[:\s]\s*", re.MULTILINE,
+    r"^\s*IMPORTANT[:\s]\s*",
+    re.MULTILINE,
 )
 
 
@@ -144,6 +151,45 @@ DELIVERY_QUEUED_WATCHER: Final[str] = "queued_watcher"
 # durable and Control #5's repair loop re-delivers on the holder's next attach.
 DELIVERY_QUEUED_FOR_REPLAY: Final[str] = "queued_for_replay"
 
+# A stored message cannot start a turn through a watcher or replay-only
+# delivery unless the managed-session drive was actually handed to the
+# executor (or already completed). The send result stays ``completed`` (the
+# message IS stored and durable); it only gains ``send_status`` and
+# ``sender_notice`` so a sender can tell it will not be woken and must not
+# resend it.
+_NO_DRIVE_OUTCOMES: Final[frozenset[str]] = frozenset(
+    {
+        "not_managed",
+        "ineligible_state",
+        "driver_unavailable",
+        "driver_queue_full",
+        "driver_error",
+    }
+)
+_NO_WAKE_DELIVERIES: Final[frozenset[str]] = frozenset(
+    {
+        DELIVERY_QUEUED_WATCHER,
+        DELIVERY_QUEUED_FOR_REPLAY,
+    }
+)
+
+
+def _add_stored_no_wake_notice(
+    payload: dict[str, Any],
+    *,
+    delivery: str,
+    drive_on_delivery: DriveOnDeliveryOutcome,
+) -> dict[str, Any]:
+    """Annotate durable watcher/replay sends that have no successful drive."""
+    if drive_on_delivery == "driver_scheduled":
+        payload["send_status"] = "stored_wake_pending"
+        payload["sender_notice"] = f"The message is already stored as {payload['message_id']}; the driver is merely scheduled, wake confirmation is pending and turn start is unconfirmed. Do NOT resend it."
+    elif delivery in _NO_WAKE_DELIVERIES and drive_on_delivery in _NO_DRIVE_OUTCOMES:
+        payload["send_status"] = "stored_no_wake"
+        payload["sender_notice"] = f"The message is already stored as {payload['message_id']}; no turn was scheduled, so the recipient will not be woken. Do NOT resend it; nudge the recipient's pane or tell the operator if it matters."
+    return payload
+
+
 @dataclass(frozen=True, slots=True)
 class PeerSendOutcome:
     """Typed result of a peer_send dispatch.
@@ -167,19 +213,23 @@ class PeerSendOutcome:
 
     def to_payload(self) -> dict[str, Any]:
         """Return the response shape both transports serialise."""
-        return {
-            "thread_id": self.thread_id,
-            "message_id": self.message_id,
-            "cursor": self.cursor,
-            "delivered_to_agent_id": self.delivered_to_agent_id,
-            "delivered_to_agent_instance_id": self.delivered_to_agent_instance_id,
-            "from_agent_id": self.from_agent_id,
-            "from_agent_instance_id": self.from_agent_instance_id,
-            "delivery": self.delivery,
-            "drive_on_delivery": self.drive_on_delivery,
-            "drive_on_delivery_detail": self.drive_on_delivery_detail,
-            "delivered_to_bridge_id": self.delivered_to_bridge_id,
-        }
+        return _add_stored_no_wake_notice(
+            {
+                "thread_id": self.thread_id,
+                "message_id": self.message_id,
+                "cursor": self.cursor,
+                "delivered_to_agent_id": self.delivered_to_agent_id,
+                "delivered_to_agent_instance_id": self.delivered_to_agent_instance_id,
+                "from_agent_id": self.from_agent_id,
+                "from_agent_instance_id": self.from_agent_instance_id,
+                "delivery": self.delivery,
+                "drive_on_delivery": self.drive_on_delivery,
+                "drive_on_delivery_detail": self.drive_on_delivery_detail,
+                "delivered_to_bridge_id": self.delivered_to_bridge_id,
+            },
+            delivery=self.delivery,
+            drive_on_delivery=self.drive_on_delivery,
+        )
 
 
 class NativeWakeError(Exception):
@@ -227,7 +277,9 @@ def dispatch_peer_send(
         :class:`PeerAmbiguousError`: multiple instances of ``peer_id``
             registered and no ``peer_agent_instance_id`` hint given.
         :class:`PeerUnreachableError`: no binding matches the
-            requested recipient.
+            requested recipient. When the requested id names a bound role,
+            the message starts ``peer_role_target:`` and names
+            ``peer_send_by_name``; nothing is persisted either way.
         :class:`BridgeNotFoundError`: the recipient's bridge has been
             torn down between resolve and append.
         :class:`BridgeQueueFullError`: the recipient's event queue
@@ -235,12 +287,21 @@ def dispatch_peer_send(
         :class:`NativeWakeError`: a registered native wake adapter
             raised during IMPORTANT delivery.
     """
-    recipient = _resolve_peer_recipient(
-        peer_registry=peer_registry,
-        peer_id=peer_id,
-        peer_agent_instance_id=peer_agent_instance_id,
-        peer_agent_session_id=peer_agent_session_id,
-    )
+    try:
+        recipient = _resolve_peer_recipient(
+            peer_registry=peer_registry,
+            peer_id=peer_id,
+            peer_agent_instance_id=peer_agent_instance_id,
+            peer_agent_session_id=peer_agent_session_id,
+        )
+    except PeerUnreachableError as original_error:
+        _raise_role_target_pointer(
+            state_service,
+            peer_id,
+            peer_agent_instance_id,
+            original_error,
+        )
+        raise
     # A2: the SENDER's stable session key, resolved SERVER-SIDE from the sender's
     # own registered binding — never accepted from the caller, so it is a routing
     # key the registry vouches for rather than an identity claim. "" when the
@@ -254,7 +315,7 @@ def dispatch_peer_send(
     # A4: the marker is stripped as input hygiene, never branched on for
     # anything else — every send takes this path (ruled NONE on a wake
     # toggle; see the module docstring).
-    delivered_prose = prose[marker_match.end():] if marker_match else prose
+    delivered_prose = prose[marker_match.end() :] if marker_match else prose
     result = agent_messaging_service.peer_send(
         PeerSendRequest(
             sender_bridge_id=sender_bridge_id,
@@ -326,11 +387,7 @@ def dispatch_peer_send(
             ) from exc
         # A watcher-held recipient is a pull consumer — the same queued event,
         # but no turn starts. Label truthfully.
-        delivery_kind = (
-            DELIVERY_QUEUED_WATCHER
-            if recipient.is_watcher
-            else DELIVERY_QUEUED_WAKE
-        )
+        delivery_kind = DELIVERY_QUEUED_WATCHER if recipient.is_watcher else DELIVERY_QUEUED_WAKE
         delivered_bridge = str(delivered_to_bridge_id)
     else:
         meta = build_peer_message_meta(
@@ -352,11 +409,7 @@ def dispatch_peer_send(
             delivered_prose,
             meta,
         )
-        delivery_kind = (
-            DELIVERY_QUEUED_WATCHER
-            if recipient.is_watcher
-            else DELIVERY_QUEUED_NOTIFICATION
-        )
+        delivery_kind = DELIVERY_QUEUED_WATCHER if recipient.is_watcher else DELIVERY_QUEUED_NOTIFICATION
         delivered_bridge = recipient.bridge_id
     # A4 (2026-08-04): the REL-05 direct-wake insurance outbox retired here —
     # sweep_overdue_sessions + _notify_steward_of_overdue is its successor,
@@ -387,13 +440,17 @@ def dispatch_peer_send(
     # fires on every managed watcher-held worker, so a notice routed through
     # this default looks perfectly well behaved when hand-tested on a seat and
     # injects a turn on exactly the population it was meant to protect.
-    drive_details: list[str] = []
-    drive_outcome = drive_on_delivery(
+    #
+    # iss_ab680764: the send returns once the message is durable. Only the
+    # managed-row lookup runs here; the tmux drive itself runs on the bounded
+    # delivery-drive executor and this result reads ``driver_scheduled``.
+    drive_outcome = schedule_drive_on_delivery(
         state_service,
         recipient_agent_instance_id=recipient.agent_instance_id,
         recipient_agent_session_id=recipient.agent_session_id,
         sender_label=sender_session_label,
-        detail_sink=drive_details.append,
+        message_id=str(result.message_id),
+        recipient_agent_id=recipient.agent_id,
     )
     return PeerSendOutcome(
         thread_id=str(result.thread_id),
@@ -406,7 +463,6 @@ def dispatch_peer_send(
         delivery=delivery_kind,
         drive_on_delivery=drive_outcome,
         delivered_to_bridge_id=delivered_bridge,
-        drive_on_delivery_detail=drive_details[0] if drive_details else None,
     )
 
 
@@ -440,6 +496,43 @@ def _resolve_peer_recipient(
         return recipient
 
 
+def _raise_role_target_pointer(
+    state_service: StateManagementInterface | None,
+    peer_id: str,
+    instance_id: str | None,
+    original_error: PeerUnreachableError,
+) -> None:
+    """Raise the role-addressed pointer when a failed raw target is a bound role.
+
+    Returns without raising when no target names a bound role, so the caller
+    re-raises ``original_error`` unchanged. A failed role lookup is advisory: it
+    is logged and the original error stands.
+    """
+    if state_service is None or type(original_error) is not PeerUnreachableError:
+        return
+    # Local import: role_binding_store depends on the messaging stack, which
+    # imports this module, so a module-level import would cycle.
+    from .role_binding_store import (
+        RoleBindingMalformedError,
+        RoleBindingVacantError,
+        resolve_role_binding,
+    )
+
+    for target in (peer_id, instance_id):
+        if not target:
+            continue
+        try:
+            resolve_role_binding(state_service, target)
+        except RoleBindingVacantError:
+            continue
+        except (RoleBindingMalformedError, StateOperationError) as exc:
+            logger.warning("peer_role_target lookup skipped for %r: %s", target, exc)
+            continue
+        raise PeerUnreachableError(
+            f"peer_role_target: {target!r} is a bound role, not a raw recipient; use peer_send_by_name(name={target!r})",
+        ) from original_error
+
+
 @dataclass(frozen=True, slots=True)
 class RoleSendOutcome:
     """Typed result of a role-addressed (``peer_send_by_name``) dispatch.
@@ -465,17 +558,21 @@ class RoleSendOutcome:
     drive_on_delivery_detail: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        return {
-            "thread_id": self.thread_id,
-            "message_id": self.message_id,
-            "delivery": self.delivery,
-            "drive_on_delivery": self.drive_on_delivery,
-            "drive_on_delivery_detail": self.drive_on_delivery_detail,
-            "delivered_to_bridge_id": self.delivered_to_bridge_id,
-            "resolved_agent_id": self.role.agent_id,
-            "resolved_agent_instance_id": self.role.agent_instance_id,
-            "resolved_session_label": self.role.session_label,
-        }
+        return _add_stored_no_wake_notice(
+            {
+                "thread_id": self.thread_id,
+                "message_id": self.message_id,
+                "delivery": self.delivery,
+                "drive_on_delivery": self.drive_on_delivery,
+                "drive_on_delivery_detail": self.drive_on_delivery_detail,
+                "delivered_to_bridge_id": self.delivered_to_bridge_id,
+                "resolved_agent_id": self.role.agent_id,
+                "resolved_agent_instance_id": self.role.agent_instance_id,
+                "resolved_session_label": self.role.session_label,
+            },
+            delivery=self.delivery,
+            drive_on_delivery=self.drive_on_delivery,
+        )
 
 
 def binding_is_live(
@@ -504,9 +601,7 @@ def binding_is_live(
         last_seen = datetime.fromisoformat(bridge.last_seen_at)
     except (TypeError, ValueError):
         return False
-    return (
-        (now or datetime.now(UTC)) - last_seen
-    ).total_seconds() <= window_seconds
+    return ((now or datetime.now(UTC)) - last_seen).total_seconds() <= window_seconds
 
 
 def _deliver_important_to_binding(
@@ -563,9 +658,7 @@ def _deliver_important_to_binding(
         window_seconds=bridge_manager.binding_liveness_window_s,
     ):
         raise PeerUnreachableError(
-            f"binding {recipient.agent_instance_id} resolves to bridge "
-            f"{recipient.bridge_id}, which has not polled within "
-            f"{bridge_manager.binding_liveness_window_s}s — treating as unreachable",
+            f"binding {recipient.agent_instance_id} resolves to bridge {recipient.bridge_id}, which has not polled within {bridge_manager.binding_liveness_window_s}s — treating as unreachable",
         )
     adapter = peer_registry.wake_adapter_for(recipient.agent_id)
     if adapter is not None:
@@ -635,7 +728,10 @@ def _deliver_important_to_binding(
         message_id=message_id,
     )
     bridge_manager.append_event(
-        recipient.bridge_id, EVENT_PEER_MESSAGE, hinted_prose, meta,
+        recipient.bridge_id,
+        EVENT_PEER_MESSAGE,
+        hinted_prose,
+        meta,
     )
     if recipient.is_watcher:
         return DELIVERY_QUEUED_WATCHER, recipient.bridge_id
@@ -690,7 +786,7 @@ def dispatch_role_send(
     """
     prose = "\n".join(part.text for part in content)
     marker_match = IMPORTANT_MARKER_RE.match(prose)
-    delivered_prose = prose[marker_match.end():] if marker_match else prose
+    delivered_prose = prose[marker_match.end() :] if marker_match else prose
     transport_principal, identity_trust = _resolve_transport_provenance(
         sender_principal_kind=sender_principal_kind,
         sender_bridge_id=sender_bridge_id,
@@ -712,7 +808,9 @@ def dispatch_role_send(
     )
     thread_id = f"{ROLE_THREAD_PREFIX}{role_name}"
     delivery_external_id = role_message_external_id(
-        RECIPIENT_KIND_ROLE, role_name, message_id,
+        RECIPIENT_KIND_ROLE,
+        role_name,
+        message_id,
     )
     try:
         # A parked Codex lane replaces its managed binding with an
@@ -759,6 +857,16 @@ def dispatch_role_send(
         NativeWakeError,
     ):
         # Holder unreachable — the envelope is durable; replay on next attach.
+        if state_service is not None and role.agent_id in {"codex", "claude_code"}:
+            try:
+                CodexPickupStore(state_service).remember(
+                    message_id,
+                    role.agent_instance_id,
+                    role.agent_session_id,
+                    role_name,
+                )
+            except Exception:  # noqa: BLE001 -- durable role mail remains intact
+                logger.exception("Codex replay pickup evidence could not be recorded")
         return RoleSendOutcome(
             thread_id=thread_id,
             message_id=message_id,
@@ -780,13 +888,15 @@ def dispatch_role_send(
     # suppression — the flip is always whoever currently holds + drains.
     # Drive-on-delivery (2026-08-04): ALONGSIDE the notify above, never
     # instead of it — best-effort, cannot raise, cannot change delivery_kind.
-    drive_details: list[str] = []
-    drive_outcome = drive_on_delivery(
+    # iss_ab680764: scheduled off the request path, as in dispatch_peer_send.
+    drive_outcome = schedule_drive_on_delivery(
         state_service,
         recipient_agent_instance_id=recipient.agent_instance_id,
         recipient_agent_session_id=recipient.agent_session_id,
         sender_label=sender_session_label,
-        detail_sink=drive_details.append,
+        message_id=message_id,
+        recipient_agent_id=recipient.agent_id,
+        recipient_role_name=role_name,
     )
     return RoleSendOutcome(
         thread_id=thread_id,
@@ -795,7 +905,6 @@ def dispatch_role_send(
         delivery=delivery_kind,
         drive_on_delivery=drive_outcome,
         delivered_to_bridge_id=delivered_to_bridge_id,
-        drive_on_delivery_detail=drive_details[0] if drive_details else None,
     )
 
 
@@ -821,27 +930,14 @@ def build_wake_reply_hint(
     opaque, operator-defined string (never enumerated / special-cased).
     """
     if reply_to_role:
-        return (
-            f"(reply via peer_send_by_name with name={reply_to_role}; "
-            f'prefix prose with "IMPORTANT: " only if you need a response. '
-            f"thread_id={thread_id}, message_id={message_id}.)"
-        )
+        return f'(reply via peer_send_by_name with name={reply_to_role}; prefix prose with "IMPORTANT: " only if you need a response. thread_id={thread_id}, message_id={message_id}.)'
     # WS-2c V4 / A2: the sender's STABLE session key rides ALONGSIDE the instance
     # id, never replacing it — old receivers keep reading the field they already
     # know, and a receiver whose stored instance id has rotated has a second key
     # that survives. Omitted entirely when the sender has no registered binding,
     # so an unresolvable hint is never fabricated.
-    session_hint = (
-        f", peer_agent_session_id={sender_agent_session_id}"
-        if sender_agent_session_id
-        else ""
-    )
-    return (
-        f"(reply via peer_send with peer_id={sender_agent_id}, "
-        f"peer_agent_instance_id={sender_agent_instance_id}{session_hint}; "
-        f'prefix prose with "IMPORTANT: " only if you need a response. '
-        f"thread_id={thread_id}, message_id={message_id}.)"
-    )
+    session_hint = f", peer_agent_session_id={sender_agent_session_id}" if sender_agent_session_id else ""
+    return f'(reply via peer_send with peer_id={sender_agent_id}, peer_agent_instance_id={sender_agent_instance_id}{session_hint}; prefix prose with "IMPORTANT: " only if you need a response. thread_id={thread_id}, message_id={message_id}.)'
 
 
 def build_peer_message_meta(

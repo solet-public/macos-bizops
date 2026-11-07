@@ -29,7 +29,7 @@ from typing import cast
 from .errors import HostRequirementError, SourceTransitionIncompleteError, UpdateFailedError
 from .existing_install_inspection import ExistingInstallFacts
 from .host_software import claude_search_directories, host_section
-from .local_state import LocalStateDelta, ObservedLocalState, allowed_service_write, compare, observe_entry, observe_local_state, snapshot_from_journal
+from .local_state import LocalStateDelta, ObservedLocalState, allowed_service_write, commitment, compare, observe_entry, observe_local_state, snapshot_from_journal
 from .models import JsonValue
 from .target_git import run_target_git
 from .update_journal import DOCTOR_STATUSES
@@ -204,13 +204,19 @@ def _restore_repair(target: Path, path: str) -> str:
     return f"{path}: move your copy aside, then `git -C {shlex.quote(str(target))} restore -- {shlex.quote(path)}` takes HEAD's bytes."
 
 
-def rebaseline_revision(journal: dict[str, JsonValue], observed: ObservedLocalState, last_observed: ObservedLocalState | None, operation_id: str, declared: frozenset[str], name: str, target: Path) -> tuple[tuple[dict[str, JsonValue], ...], dict[str, JsonValue]] | None:
+def rebaseline_revision(journal: dict[str, JsonValue], observed: ObservedLocalState, last_observed: ObservedLocalState | None, operation_id: str, declared: frozenset[str], name: str, target: Path) -> tuple[tuple[dict[str, JsonValue], dict[str, JsonValue]], ...] | None:
     """Section 6.6, the per-operation carve-out: a hard-tier change outside the operation's declared targets is a
     ``preservation_violated`` failure; declared changes re-baseline ``current`` with a journaled revision; a
     preserved-surface change is disclosed.  Under ``runtime_reconciling`` the solet is running, so an undeclared
     committed-tier path that is exactly a B7 creation (:func:`allowed_service_write`) is the solet's own write and
     is disclosed as a ``service_writes`` revision instead of being blamed on the operation.  Returns
-    ``(revisions, current)`` or ``None`` when nothing moved."""
+    ``((revision, current_after_it), ...)`` in journal-write order, or ``None`` when nothing moved.
+
+    One journal write admits one revision, and a crash between two writes must lose neither.  When both a
+    ``service_writes`` and an operation revision arise, the operation's goes first with a ``current`` that
+    leaves the solet's own creations out; a crash after it re-derives the service writes at re-entry
+    (:func:`verify_local_state` admits them), where the reverse order would leave ``current`` already holding the
+    operation's change and the next re-baseline would find no delta to record (iss_0cde2ca4)."""
     current = _current(journal)
     delta = compare(current, observed, last_observed)
     undeclared = sorted(set(delta.hard) - declared - paths_ignored_by_declared_exclude(target, declared, delta.hard, current, last_observed))
@@ -218,8 +224,23 @@ def rebaseline_revision(journal: dict[str, JsonValue], observed: ObservedLocalSt
     admitted = _service_write_paths(service)
     _refuse_undeclared(tuple(path for path in undeclared if path not in admitted), operation_id, name)
     operation = _operation_revision(current, observed, last_observed, delta, tuple(path for path in delta.hard if path not in admitted), operation_id)
-    revisions = tuple(item for item in (service, operation) if item is not None)
-    return (revisions, observed.snapshot()) if revisions else None
+    return _journal_writes(service, operation, observed, admitted)
+
+
+def _journal_writes(service: dict[str, JsonValue] | None, operation: dict[str, JsonValue] | None, observed: ObservedLocalState, admitted: frozenset[str]) -> tuple[tuple[dict[str, JsonValue], dict[str, JsonValue]], ...] | None:
+    """Each revision with the ``current`` its own journal write carries; the last write carries the full observation."""
+    final = observed.snapshot()
+    if service is not None and operation is not None:
+        return ((operation, _without_paths(observed, admitted)), (service, final))
+    revision = operation if service is None else service
+    return None if revision is None else ((revision, final),)
+
+
+def _without_paths(observed: ObservedLocalState, omitted: frozenset[str]) -> dict[str, JsonValue]:
+    """``observed``'s snapshot with the committed entries at ``omitted`` left out, the commitment recomputed over the rest."""
+    kept = tuple(entry for entry in observed.committed if entry.path not in omitted)
+    state = observed.state
+    return LocalState(state.preserved_tracked_paths, tuple(entry.inventory() for entry in kept), commitment(kept), state.preserved_surface).snapshot()
 
 
 def _refuse_undeclared(violations: tuple[str, ...], operation_id: str, name: str) -> None:

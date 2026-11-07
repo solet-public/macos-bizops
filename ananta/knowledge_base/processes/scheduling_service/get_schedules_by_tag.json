@@ -1,18 +1,18 @@
 {
   "process_key": "service_interface::scheduling_service::get_schedules_by_tag",
   "display_name": "Get Schedules By Tag",
-  "description": "List schedules that match a specific tag.\n\nUse this when you need to verify that a heartbeat/check-in schedule exists (or diagnose duplicates), without having to query raw tables directly. This is especially useful for global liveness (e.g., tag=heartbeat:global) and for cleaning up per-job/per-session monitoring schedules.\n\nUnlike clear_scheduled_actions_by_tag, this does not modify state. It is an observability / introspection tool.\n\nReturned schedule entries include both timing metadata (cron_expression/run_at) and execution context (session_id/flow_id). This helps you verify whether a schedule is global or session-affined.",
-  "embedding_description": "List schedules matching a tag. Use to verify a global heartbeat exists (heartbeat:global), detect duplicate schedules, and inspect check-in/timeout schedules before cleanup. Read-only introspection; prefer over raw state_service SQL for routine schedule checks.",
+  "description": "Read the same complete owner projection as list_schedules, filtered by tag after enumeration. Each row includes action_definitions, targets, revision, error_message and runtime job presence/revision. count is the number returned after filtering; complete describes source enumeration. Unknown or unavailable liveness never removes a schedule.",
+  "embedding_description": "Read the same complete owner projection as list_schedules, filtered by tag after enumeration. Each row includes action_definitions, targets, revision, error_message and runtime job presence/revision. count is the number returned after filtering; complete describes source enumeration. Unknown or unavailable liveness never removes a schedule.",
   "result_processor_customizations": {
-    "action_label": "Schedules Listed",
-    "result_type": "schedule_list",
-    "result_description": "List of schedules that match the given tag (schedule_id, type, status, cron/run_at, label, tags, and execution context like session_id/flow_id)",
-    "presentation_guidance": "",
-    "output_action_guidance": "Schedules matching the tag were retrieved. If none exist and you need a heartbeat/check-in, create one. If multiple exist unintentionally, you can clear by tag and recreate a single schedule."
+    "action_label": "Get Schedules By Tag",
+    "result_type": "schedule_observation",
+    "result_description": "Read the same complete owner projection as list_schedules, filtered by tag after enumeration. Each row includes action_definitions, targets, revision, error_message and runtime job presence/revision. count is the number returned after filtering; complete describes source enumeration. Unknown or unavailable liveness never removes a schedule.",
+    "presentation_guidance": "Show completeness, holder observation, revision and activation advisories explicitly. A registered route is an observation, not a delivery guarantee.",
+    "output_action_guidance": "Read current revision before a mutation. Recovery is a separate explicit action. Pre-boundary queued work is unchanged."
   },
   "error_processor_customizations": {
-    "action_context": "Listing schedules by tag for heartbeat/check-in introspection",
-    "error_interpretation": "ValidationError with 'tag': tag is missing or invalid. SchedulerError: scheduling service unavailable or failed to query schedules.",
-    "recovery_guidance": "For tag errors: provide a non-empty tag string. For scheduler errors: verify the scheduling service is running; as a fallback, use state_service::read_state/execute_sql to inspect schedules directly if permitted."
+    "action_context": "get schedules by tag",
+    "error_interpretation": "A stale revision or invalid lifecycle transition is a data-integrity refusal; unavailable observations are advisories.",
+    "recovery_guidance": "Read the current owner projection and history, then make an explicit correction with its current revision. Do not recreate a schedule to bypass a stale revision."
   }
 }

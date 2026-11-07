@@ -64,9 +64,14 @@ class _FakeScheduler:
 _DB_ROWS: dict[str, Any] = {
     "scheduled_actions": {
         "1000": {
-            "type": "recurring", "status": "scheduled", "label": "normal cron",
-            "cron_expression": "*/5 * * * *", "run_at": None,
-            "tags": ["t"], "session_id": None, "flow_id": "flow-1000",
+            "type": "recurring",
+            "status": "scheduled",
+            "label": "normal cron",
+            "cron_expression": "*/5 * * * *",
+            "run_at": None,
+            "tags": ["t"],
+            "session_id": None,
+            "flow_id": "flow-1000",
         },
     },
 }
@@ -81,7 +86,7 @@ def _build_plugin(live_job_ids: set[str]) -> tuple[SchedulingPlugin, _FakeSchedu
     # DB delete succeeds only for rows present in _DB_ROWS (the real
     # _delete_schedule needs a repository/_memory_schedules; stub the boundary).
     plugin._delete_schedule = (  # type: ignore[method-assign]
-        lambda sid: sid in _DB_ROWS["scheduled_actions"]
+        lambda sid, **_kwargs: sid in _DB_ROWS["scheduled_actions"]
     )
     return plugin, sched
 

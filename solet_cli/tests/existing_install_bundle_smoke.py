@@ -11,6 +11,7 @@ Legs:
   ``profile/data``, a session-history path, ``AGENTS.md``/``CLAUDE.md``), a
   missing postcondition probe, and any extra key;
 - Manager and seed ``existing::`` enumerations (seed-side subset) are byte-equal;
+- fixture Git children ignore inherited repository selectors and leave a victim repository unchanged;
 - static reachable-call analysis from the Step-5 Manager modules finds no edge
   to ``AdapterRegistry``, ``genesis::``, ``bootstrap::postgres``, credential or
   vault seeding, ``router_install``, ``StateManagementInterface``, ``psycopg``,
@@ -29,7 +30,9 @@ import ast
 import copy
 import hashlib
 import json
+import os
 import re
+import subprocess
 import sys
 import uuid
 from dataclasses import asdict
@@ -269,7 +272,9 @@ def _check_shipped_bundle() -> None:
     from_bytes = transition_bundle_digest(files)
     _check(from_bytes == _directory_digest(files), "bytes-keyed digest equals the directory digest")
     _check(from_bytes != contract_digest(_KB), "transition digest is distinct from the create digest")
-    _check(contract_digest_from_bytes({name: (_KB / name).read_bytes() for name in ("macos_setup_flow.json", "setup_flow.schema.json", "setup_answers.schema.json", "setup_journal.schema.json", "setup_adapter_envelope.schema.json")}) == contract_digest(_KB), "contract_digest is a thin wrapper over the bytes-keyed digest")
+    _check(
+        contract_digest_from_bytes({name: (_KB / name).read_bytes() for name in ("macos_setup_flow.json", "setup_flow.schema.json", "setup_answers.schema.json", "setup_journal.schema.json", "setup_adapter_envelope.schema.json")}) == contract_digest(_KB), "contract_digest is a thin wrapper over the bytes-keyed digest"
+    )
     _check(_stager_transition_digest() == from_bytes, "stage_release.py computes the same transition digest from the committed blobs")
     try:
         transition_bundle_digest({**files, "macos_setup_flow.json": b"{}"})
@@ -339,6 +344,21 @@ def _check_parser_refusals() -> None:
         "{PROFILE_HOME}/config/x.json",
     ):
         _expect_contract_error(mutate(lambda d, destination=destination: d["managed_artifacts"][1].__setitem__("logical_destination", destination)), f"preserved-never destination refused: {destination}")
+    noncanonical = (
+        "{TARGET}/./.git/config",
+        "{TARGET}//.git/config",
+        "{TARGET}/.GIT/config",
+        "{HOME}/.Claude/Projects/x.jsonl",
+        "{TARGET}/safe/..",
+    )
+    accepted: list[str] = []
+    for destination in noncanonical:
+        try:
+            parse_transition_bundle(json.dumps(mutate(lambda d, destination=destination: d["managed_artifacts"][1].__setitem__("logical_destination", destination))).encode())
+        except ContractError:
+            continue
+        accepted.append(destination)
+    _check(not accepted, f"noncanonical preserved-never spellings refused: {', '.join(accepted)}")
     _expect_contract_error(mutate(lambda d: d["managed_artifacts"][1].__setitem__("marker", {"begin": "# BEGIN SOLET {NAME}", "end": "# END SOLET {NAME}"})), "unversioned marker refused")
     _expect_contract_error(mutate(lambda d: d["managed_artifacts"][0].__setitem__("stamp", None)), "whole-file artifact without a stamp refused")
     _expect_contract_error(mutate(lambda d: d["supported_predecessors"].clear()), "no predecessors refused")
@@ -353,9 +373,28 @@ def _check_section_and_exclude_refusals() -> None:
         edit(next(row for row in document["managed_artifacts"] if row["artifact_id"] == artifact_id))
         return document
 
+    exact_exclude = mutate("clone_exclude_block", lambda row: row.__setitem__("logical_destination", "{TARGET}/.git/info/exclude"))
+    try:
+        exact_bundle = parse_transition_bundle(json.dumps(exact_exclude).encode())
+    except ContractError:
+        exact_bundle = None
+    _check(exact_bundle is not None and any(artifact.artifact_id == "clone_exclude_block" and artifact.logical_destination == "{TARGET}/.git/info/exclude" for artifact in exact_bundle.managed_artifacts), "the exact clone ignore destination is accepted as a managed_block")
     parse_transition_bundle(json.dumps(shipped).encode())
-    for destination in ("{TARGET}/.git/config", "{TARGET}/.git/hooks/pre-commit", "{TARGET}/.git/info/attributes"):
+    for destination in (
+        "{TARGET}/.git/config",
+        "{TARGET}/.git/hooks/pre-commit",
+        "{TARGET}/.git/info/attributes",
+    ):
         _expect_contract_error(mutate("clone_exclude_block", lambda row, destination=destination: row.__setitem__("logical_destination", destination)), f"a path inside .git other than the ignore file is refused: {destination}")
+    exclude_variants = ("{TARGET}/.GIT/info/exclude", "{TARGET}/.git/./info/exclude")
+    accepted: list[str] = []
+    for destination in exclude_variants:
+        try:
+            parse_transition_bundle(json.dumps(mutate("clone_exclude_block", lambda row, destination=destination: row.__setitem__("logical_destination", destination))).encode())
+        except ContractError:
+            continue
+        accepted.append(destination)
+    _check(not accepted, f"case and dot variants of clone ignore destination refused: {', '.join(accepted)}")
     _expect_contract_error(mutate("fleet_launcher", lambda row: row.__setitem__("logical_destination", "{TARGET}/.git/info/exclude")), "the ignore file may only carry a managed block")
     _expect_contract_error(mutate("clone_exclude_block", lambda row: row.__setitem__("section_end", "# x")), "section_end on a managed block refused")
     _expect_contract_error(mutate("fleet_launcher", lambda row: row.__setitem__("preservation_class", "manager_generated_whole")), "a section-bounded artifact is operator-owned")
@@ -380,7 +419,11 @@ def _check_enumerations() -> None:
     _check(set(seed_ops.EXISTING_ALLOWED_PUBLIC_INPUTS) == set(seed_ops.operation_handlers()), "every seed handler declares its allowed public inputs")
     _check(bootstrap_dependency.EXISTING_DEPENDENCIES_REF == "existing::dependencies.reconcile", "bootstrap route name")
     _check(len({item.operation_ref for item in EXISTING_OPERATIONS}) == len(EXISTING_OPERATIONS) == 13, "thirteen unique closed members")
-    _check(set(DECLARABLE_OPERATION_REFS) == {"existing::dependencies.reconcile", "existing::migration.solet_rename", "existing::migration.export_root_containment", "existing::migration.plugin_transition", "existing::hydration.reconcile", "existing::autostart.reconcile", "existing::runtime.platform_migration", "existing::runtime.plugin_cache_refresh"}, "declarable subset")
+    _check(
+        set(DECLARABLE_OPERATION_REFS)
+        == {"existing::dependencies.reconcile", "existing::migration.solet_rename", "existing::migration.export_root_containment", "existing::migration.plugin_transition", "existing::hydration.reconcile", "existing::autostart.reconcile", "existing::runtime.platform_migration", "existing::runtime.plugin_cache_refresh"},
+        "declarable subset",
+    )
     _check(REQUIRED_DISTRIBUTIONS == bootstrap_dependency.REQUIRED_DISTRIBUTIONS, "Manager REQUIRED_DISTRIBUTIONS equals the bootstrap adapter's")
     _check(len(STEP5_NON_TOUCH_SURFACES) == 13 and len(STEP5_MANAGED_SUB_SURFACES) == 11 and len(STEP5_CAPABILITIES) == 11, "closed Step-5 surface constants")
     _check("dependencies_and_venv" in STEP5_MANAGED_SUB_SURFACES and "dependencies_and_venv" not in set[str](STEP5_NON_TOUCH_SURFACES), "the venv moved from non-touch to managed")
@@ -478,7 +521,16 @@ def _seed_request(flow_id: str, ref: str) -> dict[str, object]:
 
 
 def _check_three_validators() -> None:
-    pairs = (("macos.repository_setup", "setup::tmux.install", True), ("macos.repository_setup", "existing::hydration.reconcile", False), ("existing-install", "existing::hydration.reconcile", True), ("existing-install", "setup::tmux.install", False), ("existing-install", "genesis::solet.run", False), ("existing-install", "hydration::shell.install", False), ("macos.target_reconciliation", "existing::hydration.reconcile", False), ("other-flow", "existing::hydration.reconcile", False))
+    pairs = (
+        ("macos.repository_setup", "setup::tmux.install", True),
+        ("macos.repository_setup", "existing::hydration.reconcile", False),
+        ("existing-install", "existing::hydration.reconcile", True),
+        ("existing-install", "setup::tmux.install", False),
+        ("existing-install", "genesis::solet.run", False),
+        ("existing-install", "hydration::shell.install", False),
+        ("macos.target_reconciliation", "existing::hydration.reconcile", False),
+        ("other-flow", "existing::hydration.reconcile", False),
+    )
     for flow_id, ref, accepted in pairs:
         manager_ok = True
         try:
@@ -510,10 +562,55 @@ def _check_three_validators() -> None:
         raise AssertionError("invented probe purpose accepted")
 
 
+def _check_git_environment_isolation() -> None:
+    with TemporaryDirectory() as temporary:
+        root = Path(temporary).resolve()
+        victim = root / "victim"
+        fixture = root / "fixture"
+        child_cwd = root
+        for path in (victim, fixture, child_cwd):
+            assert path.resolve().is_relative_to(root)
+
+        victim.mkdir()
+        fixture.mkdir()
+        setup_environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        setup_environment.update({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+        for repository in (victim, fixture):
+            subprocess.run(
+                ["git", "-C", str(repository), "init", "--quiet"],
+                env=setup_environment,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        victim_config = victim / ".git" / "config"
+        victim_config_before = victim_config.read_bytes()
+        child_environment = dict(setup_environment)
+        child_environment.update({"GIT_DIR": str(victim / ".git"), "GIT_WORK_TREE": str(victim), "PYTHONPATH": str(Path(__file__).resolve().parent)})
+        print(f"git environment isolation temp paths: victim={victim} fixture={fixture}", flush=True)
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; from pathlib import Path; from _step5_support import git; git(Path(sys.argv[1]), 'config', 'user.name', 'Fixture')",
+                str(fixture),
+            ],
+            cwd=child_cwd,
+            env=child_environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        _check(victim_config.read_bytes() == victim_config_before, "victim config bytes are unchanged after fixture git config")
+        _check(b"name = Fixture" in (fixture / ".git" / "config").read_bytes(), "fixture git config contains Fixture")
+        assert child.returncode == 0, f"fixture git child failed: {child.stderr.strip()}"
+
+
 def main() -> int:
+    _check_git_environment_isolation()
+    _check_section_and_exclude_refusals()
     _check_shipped_bundle()
     _check_parser_refusals()
-    _check_section_and_exclude_refusals()
     _check_exclude_coverage_rule()
     _check_enumerations()
     _check_static_reachability()

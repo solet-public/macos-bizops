@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
+from _register_unit_double import FIXTURE_UNIT_ID, fixture_assignment  # noqa: E402
 from ananta.core.config.config_provider import ConfigProvider  # noqa: E402
 
 from agent_messaging_plugin.plugin import (  # noqa: E402
@@ -54,7 +55,7 @@ def _check(condition: object, label: str) -> None:
 
 def _req(*, work_class: str, model: str = "", effort: str = "") -> SpawnSessionRequest:
     return SpawnSessionRequest(
-        role_class="ephemeral", lane_id="lane-1", brief_ref="brief-1",
+        role_class="ephemeral", lane_id="lane-1", unit_id=FIXTURE_UNIT_ID, assignment=fixture_assignment(),
         work_class=work_class, budget_line="budget-1", model=model, effort=effort,
     )
 
@@ -219,7 +220,7 @@ def test_as_work_class_tool_allowlists_non_dict_input_returns_empty() -> None:
 
 def _spawn_req(*, work_class: str, allowed_tools: tuple[str, ...] = ()) -> SpawnSessionRequest:
     return SpawnSessionRequest(
-        role_class="ephemeral", lane_id="lane-1", brief_ref="brief-1",
+        role_class="ephemeral", lane_id="lane-1", unit_id=FIXTURE_UNIT_ID, assignment=fixture_assignment(),
         work_class=work_class, budget_line="budget-1", allowed_tools=allowed_tools,
     )
 
@@ -359,7 +360,7 @@ def test_resolve_permission_mode_fills_omitted_from_policy() -> None:
 
 def test_resolve_permission_mode_never_overrides_explicit_value() -> None:
     req = SpawnSessionRequest(
-        role_class="ephemeral", lane_id="lane-1", brief_ref="brief-1",
+        role_class="ephemeral", lane_id="lane-1", unit_id=FIXTURE_UNIT_ID, assignment=fixture_assignment(),
         work_class="read_only", budget_line="budget-1", permission_mode="manual",
     )
     resolved = _resolve_permission_mode(req, "acceptEdits")
@@ -405,7 +406,7 @@ def test_resolve_transport_fills_omitted_from_policy() -> None:
 
 def test_resolve_transport_never_overrides_explicit_value() -> None:
     req = SpawnSessionRequest(
-        role_class="ephemeral", lane_id="lane-1", brief_ref="brief-1",
+        role_class="ephemeral", lane_id="lane-1", unit_id=FIXTURE_UNIT_ID, assignment=fixture_assignment(),
         work_class="read_only", budget_line="budget-1", transport="mcp",
     )
     resolved = _resolve_transport(req, "watch")

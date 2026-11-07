@@ -1,10 +1,14 @@
+import asyncio
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ananta.core.contexts.normalization import normalize_flow_id, normalize_session_id
 from ananta.core.domain.error_codes import ErrorCode
@@ -101,10 +105,7 @@ _LM_STUDIO_RETRY_MAX_SECONDS = 60.0
 # prompt normally emits a very small schema-valid response, but a reasoning
 # capable model can spend its output budget before producing that response.
 _GRAMMAR_PREWARM_MAX_TOKENS = 2048
-_GRAMMAR_PREWARM_PROMPT = (
-    "Return the shortest valid response permitted by the response schema. "
-    "Use empty strings, empty arrays, and empty objects wherever the schema permits them."
-)
+_GRAMMAR_PREWARM_PROMPT = "Return the shortest valid response permitted by the response schema. Use empty strings, empty arrays, and empty objects wherever the schema permits them."
 
 
 if TYPE_CHECKING:
@@ -116,6 +117,86 @@ if TYPE_CHECKING:
     from ananta.services.context_management.service import ContextManagementService
     from ananta.services.inference_service.interfaces.provider import InferenceDefaults
     from ananta.services.memory_service import MemoryService
+
+
+# A single running operation and FIFO async turn reservations preserve ordering.
+# Waiting callers never occupy an executor worker or its submission queue.
+# The process owns this pool across plugin stop/restart; Python retires it at exit.
+_F5_WORKERS = 1
+_F5_PENDING_BOUND = 1
+_F5_EXECUTOR = ThreadPoolExecutor(max_workers=_F5_WORKERS, thread_name_prefix="default_inference-f5")
+_F5_SUBMISSION_LOCK = threading.RLock()
+_f5_in_flight: Future[object] | None = None
+_f5_turn: Future[None] | None = None
+_f5_waiters: deque[Future[None]] = deque()
+logging.getLogger(__name__).info("F5 executor default_inference-f5: workers=%s pending=%s", _F5_WORKERS, _F5_PENDING_BOUND)
+
+
+def _release_f5_turn(turn: Future[None]) -> None:
+    global _f5_turn
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is not turn:
+            return
+        if _f5_waiters:
+            next_turn = _f5_waiters.popleft()
+            _f5_turn = next_turn
+            next_turn.set_result(None)
+        else:
+            _f5_turn = None
+
+
+def _cancel_f5_waiter(turn: Future[None]) -> None:
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is turn:
+            _release_f5_turn(turn)
+        elif turn in _f5_waiters:
+            _f5_waiters.remove(turn)
+            turn.cancel()
+
+
+def _complete_f5_operation(turn: Future[None], done: Future[object]) -> None:
+    global _f5_in_flight
+    with _F5_SUBMISSION_LOCK:
+        if _f5_in_flight is done:
+            _f5_in_flight = None
+        _release_f5_turn(turn)
+
+
+def _report_f5_late_failure(done: Future[object]) -> None:
+    error = done.exception()
+    if error is not None:
+        logging.getLogger(__name__).error("F5 operation failed after its waiter cancelled: %s", error)
+
+
+async def _run_f5_blocking[T](operation: Callable[[], T]) -> T:
+    """Reserve FIFO order before waiting; cancellation retains active ownership."""
+    global _f5_in_flight, _f5_turn
+    turn = Future[None]()
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is None:
+            _f5_turn = turn
+            turn.set_result(None)
+        else:
+            _f5_waiters.append(turn)
+    try:
+        await asyncio.shield(asyncio.gather(asyncio.wrap_future(turn), return_exceptions=True))
+    except asyncio.CancelledError:
+        _cancel_f5_waiter(turn)
+        raise
+    try:
+        with _F5_SUBMISSION_LOCK:
+            future = _F5_EXECUTOR.submit(copy_context().run, operation)
+            _f5_in_flight = cast(Future[object], future)
+    except BaseException:
+        _release_f5_turn(turn)
+        raise
+    future.add_done_callback(lambda done: _complete_f5_operation(turn, cast(Future[object], done)))
+    try:
+        await asyncio.shield(asyncio.gather(asyncio.wrap_future(future), return_exceptions=True))
+    except asyncio.CancelledError:
+        future.add_done_callback(lambda done: _report_f5_late_failure(cast(Future[object], done)))
+        raise
+    return future.result()
 
 
 class Plugin(
@@ -204,23 +285,16 @@ class Plugin(
 
         self._app_home = getattr(self.orchestrator_ref, "APP_HOME", None)
         if not self._app_home:
-            raise RuntimeError(
-                f"{self.name}: Application directory not configured - plugin cannot initialize"
-            )
+            raise RuntimeError(f"{self.name}: Application directory not configured - plugin cannot initialize")
 
         # Initialize config provider from config file - REQUIRED (no fallback)
         config_manager = getattr(self.orchestrator_ref, "config_manager", None)
         if config_manager is None:
-            raise RuntimeError(
-                f"{self.name}: config_manager not available - plugin requires configuration"
-            )
+            raise RuntimeError(f"{self.name}: config_manager not available - plugin requires configuration")
 
         config = config_manager.get_plugin_config_provider(self.name)
         if not config:
-            raise RuntimeError(
-                f"{self.name}: Plugin configuration not found - "
-                f"ensure config file exists at profile/config/plugins/{self.name}.json"
-            )
+            raise RuntimeError(f"{self.name}: Plugin configuration not found - ensure config file exists at profile/config/plugins/{self.name}.json")
 
         self.config_provider = config
         self.logger = configure_plugin_logging(self._app_home, self.name, self.config_provider)
@@ -236,16 +310,10 @@ class Plugin(
         self._default_temperature = self.config_provider.get_float("temperature")
         self._default_max_tokens = self.config_provider.get_int("max_tokens")
 
-        self.logger.debug(
-            f"Config loaded: base_url={lm_studio_url}, model={lm_studio_model}, "
-            f"timeout={timeout}, temperature={self._default_temperature}, "
-            f"max_tokens={self._default_max_tokens}"
-        )
+        self.logger.debug(f"Config loaded: base_url={lm_studio_url}, model={lm_studio_model}, timeout={timeout}, temperature={self._default_temperature}, max_tokens={self._default_max_tokens}")
 
         self.provider = LMStudioProvider(lm_studio_url, lm_studio_model, timeout)
-        self.logger.debug(
-            f"LM Studio provider initialized: {lm_studio_url}, model={lm_studio_model}"
-        )
+        self.logger.debug(f"LM Studio provider initialized: {lm_studio_url}, model={lm_studio_model}")
 
         # The inference server is deliberately not contacted before router
         # registration.  Cold guests load both models asynchronously and an
@@ -271,10 +339,7 @@ class Plugin(
     def _start_availability_retry(self) -> None:
         """Start one daemon worker that waits for LM Studio without restart storms."""
         with self._availability_retry_lock:
-            if (
-                self._availability_retry_thread is not None
-                and self._availability_retry_thread.is_alive()
-            ):
+            if self._availability_retry_thread is not None and self._availability_retry_thread.is_alive():
                 return
             retry_thread = threading.Thread(
                 target=self._retry_availability_until_ready,
@@ -325,9 +390,7 @@ class Plugin(
                     self.logger.warning("%s — retrying", error_message)
                 else:
                     self.set_ready()
-                    self.logger.info(
-                        "LM Studio is serving the configured model; inference plugin is ready"
-                    )
+                    self.logger.info("LM Studio is serving the configured model; inference plugin is ready")
                     return
             retry_seconds = min(retry_seconds * 2, _LM_STUDIO_RETRY_MAX_SECONDS)
 
@@ -461,9 +524,7 @@ class Plugin(
                 self._content_storage = self._context_management_service.content_storage
                 self.logger.debug("Using shared content_storage from ContextManagementService")
             else:
-                self.logger.debug(
-                    "ContextManagementService not available - platform context disabled"
-                )
+                self.logger.debug("ContextManagementService not available - platform context disabled")
 
         # Initialize PromptPipeline for observable prompt assembly
         # Uses pass-through mode for TemplateStage since templates are resolved upstream
@@ -472,17 +533,10 @@ class Plugin(
 
         prompts_dir = Path(self._app_home) / "config" / "prompts"
         if not prompts_dir.exists():
-            raise RuntimeError(
-                f"{self.name}: prompts_dir not found at {prompts_dir} - cannot initialize pipeline"
-            )
+            raise RuntimeError(f"{self.name}: prompts_dir not found at {prompts_dir} - cannot initialize pipeline")
 
         # Resolve step guidance articles directory (direct file read for plan step guidance)
-        self._guidance_articles_dir = (
-            Path(self._app_home).parent
-            / "knowledge_bases"
-            / _GUIDANCE_KB_NAME
-            / _GUIDANCE_EXAMPLES_SUBDIR
-        )
+        self._guidance_articles_dir = Path(self._app_home).parent / "knowledge_bases" / _GUIDANCE_KB_NAME / _GUIDANCE_EXAMPLES_SUBDIR
 
         # Get context config for ContextStage (uses config-driven attachment_scan_limit)
         context_config = self.get_context_management_config()
@@ -563,10 +617,7 @@ class Plugin(
                 raise ValueError(msg)
             content = result.get("content", "")
             if not isinstance(content, str) or not content:
-                msg = (
-                    f"Playbook section empty or missing: "
-                    f"playbook_id={playbook_id}, section_id={section_id}"
-                )
+                msg = f"Playbook section empty or missing: playbook_id={playbook_id}, section_id={section_id}"
                 raise ValueError(msg)
             return content
 
@@ -596,11 +647,15 @@ class Plugin(
     def _has_focused_plan(self, *, session_id: str) -> bool:
         """Delegate to platform advancement module (session-scoped, JOS-02)."""
         return _has_focused_plan_check(
-            self._memory_service, session_id=session_id,
+            self._memory_service,
+            session_id=session_id,
         )
 
     def _maybe_advance_plan(
-        self, *, is_continuation: bool = False, session_id: str,
+        self,
+        *,
+        is_continuation: bool = False,
+        session_id: str,
     ) -> None:
         """Delegate to platform advancement module (session-scoped, JOS-02)."""
         maybe_advance_plan(
@@ -697,9 +752,7 @@ class Plugin(
             return ""
         for mem in ctx.focused_memories:
             content = mem.get("content", "")
-            if isinstance(content, str) and content.strip().startswith(
-                "# Work Breakdown Structure"
-            ):
+            if isinstance(content, str) and content.strip().startswith("# Work Breakdown Structure"):
                 return content
         return ""
 
@@ -848,11 +901,7 @@ class Plugin(
                 enforce_bound_argument_values,
             )
 
-            register = (
-                self._load_work_product_register(ctx)
-                if self._has_composed_references(ctx)
-                else None
-            )
+            register = self._load_work_product_register(ctx) if self._has_composed_references(ctx) else None
             enforce_bound_argument_values(ctx.plan_state, actions, register)
 
         # Inject platform-computed deterministic filenames for owned slots
@@ -862,7 +911,9 @@ class Plugin(
             )
 
             inject_work_product_values(
-                ctx.plan_state, actions, self._state_service,
+                ctx.plan_state,
+                actions,
+                self._state_service,
                 self._build_process_arg_lookup(),
             )
 
@@ -890,11 +941,7 @@ class Plugin(
             raise RuntimeError("WORK_PRODUCTS: No state service — cannot load register")
         store = WorkProductStoreAdapter(self.state_service)
         register_data = store.load_register(wbs_id)
-        return (
-            WorkProductRegister.deserialize(register_data)
-            if register_data
-            else WorkProductRegister()
-        )
+        return WorkProductRegister.deserialize(register_data) if register_data else WorkProductRegister()
 
     def _resolve_active_wbs_id(self, ctx: PromptContext) -> str | None:
         """Resolve the active WBS ID from the focused plan."""
@@ -1045,13 +1092,13 @@ class Plugin(
 
         class _Adapter:
             def advance_current_plan_step(
-                self, *, session_id: str,
+                self,
+                *,
+                session_id: str,
             ) -> dict[str, Any] | None:
                 thinking_svc = plugin._resolve_thinking_service()
                 if thinking_svc is None:
-                    raise RuntimeError(
-                        "PlanAdvancer: thinking service unavailable — cannot advance plan step"
-                    )
+                    raise RuntimeError("PlanAdvancer: thinking service unavailable — cannot advance plan step")
                 result: dict[str, Any] | None = thinking_svc.advance_current_plan_step(
                     session_id=session_id,
                 )
@@ -1243,9 +1290,7 @@ class Plugin(
             min_summary_tokens=config.get_int("context.min_summary_tokens"),
             discovery_intent_max_tokens=config.get_int("context.discovery_intent_max_tokens"),
             discovery_intent_temperature=config.get_float("context.discovery_intent_temperature"),
-            discovery_min_similarity_threshold=config.get_float(
-                "context.discovery_min_similarity_threshold"
-            ),
+            discovery_min_similarity_threshold=config.get_float("context.discovery_min_similarity_threshold"),
             attachment_scan_limit=config.get_int("context.attachment_scan_limit"),
             model_context_tokens=config.get_int("context.model_context_tokens"),
         )
@@ -1275,10 +1320,7 @@ class Plugin(
         ]
         missing_keys = [key for key in required_keys if self.config_provider.get(key) is None]
         if missing_keys:
-            raise RuntimeError(
-                f"{self.name}: Missing required config keys: {', '.join(missing_keys)}. "
-                f"These must be set in profile/config/plugins/{self.name}.json"
-            )
+            raise RuntimeError(f"{self.name}: Missing required config keys: {', '.join(missing_keys)}. These must be set in profile/config/plugins/{self.name}.json")
 
     def _validate_required_context_config_keys(self, config: Any) -> None:
         """Validate all required context config keys are present."""
@@ -1368,15 +1410,13 @@ class Plugin(
 
         if soft_max_char >= max_char:
             raise PluginError(
-                message=f"soft_max_char_count ({soft_max_char}) must be < "
-                f"max_char_count ({max_char})",
+                message=f"soft_max_char_count ({soft_max_char}) must be < max_char_count ({max_char})",
                 error_code=ErrorCode.PLUGIN_CONFIG_ERROR,
                 plugin_name=self.name,
             )
         if target_char >= soft_max_char:
             raise PluginError(
-                message=f"target_char_count ({target_char}) must be < "
-                f"soft_max_char_count ({soft_max_char})",
+                message=f"target_char_count ({target_char}) must be < soft_max_char_count ({soft_max_char})",
                 error_code=ErrorCode.PLUGIN_CONFIG_ERROR,
                 plugin_name=self.name,
             )
@@ -1447,10 +1487,7 @@ class Plugin(
         if config:
             configured_model = config.get("model")
             if configured_model and requested_name != configured_model:
-                return False, (
-                    f"Model name mismatch: requested '{requested_name}' "
-                    f"but plugin is configured for '{configured_model}'"
-                )
+                return False, (f"Model name mismatch: requested '{requested_name}' but plugin is configured for '{configured_model}'")
 
         return True, None
 
@@ -1531,9 +1568,7 @@ class Plugin(
                 unresolved_vars = ", ".join(f"__{var}__" for var in matches)
                 return (
                     False,
-                    f"PLUGIN_VALIDATION_FAILED: Found unresolved template "
-                    f"variables: {unresolved_vars}. Framework should resolve "
-                    f"all templates before plugins receive data.",
+                    f"PLUGIN_VALIDATION_FAILED: Found unresolved template variables: {unresolved_vars}. Framework should resolve all templates before plugins receive data.",
                 )
 
             return True, None
@@ -1650,9 +1685,7 @@ class Plugin(
         action_name: str,
         state: dict[str, Any],
         context_config: ContextManagementConfig,
-    ) -> tuple[
-        InferenceRequest, dict[str, Any], str | None, str | None, dict[str, Any], PromptContext
-    ]:
+    ) -> tuple[InferenceRequest, dict[str, Any], str | None, str | None, dict[str, Any], PromptContext]:
         """Prepare and validate inference request via assembly contract.
 
         Routes through assemble_prompt() with INFERENCE_PROFILE for
@@ -1780,9 +1813,7 @@ class Plugin(
 
         store_system_messages_if_first_request()
 
-    def _execute_inference_and_extract_completion(
-        self, request: InferenceRequest
-    ) -> tuple[dict[str, Any], str]:
+    def _execute_inference_and_extract_completion(self, request: InferenceRequest) -> tuple[dict[str, Any], str]:
         """Execute inference and extract completion text from result."""
         # Delegate to provider
         result = self.generate_completion(request)
@@ -1845,7 +1876,8 @@ class Plugin(
         acting_session = str(state.get("session_id") or "")
         has_observation = "observation" in action_params.get("prompt", {})
         self._maybe_advance_plan(
-            is_continuation=has_observation, session_id=acting_session,
+            is_continuation=has_observation,
+            session_id=acting_session,
         )
 
         # Guard: plan just completed and this is a result-processing vertex.
@@ -1853,8 +1885,7 @@ class Plugin(
             session_id=acting_session,
         ):
             self.logger.info(
-                "FLOW_COMPLETE: No focused plan for session %s after advancement "
-                "on a process_results vertex — flow is done, skipping inference",
+                "FLOW_COMPLETE: No focused plan for session %s after advancement on a process_results vertex — flow is done, skipping inference",
                 acting_session or "<none>",
             )
             return ActionResult(
@@ -1870,7 +1901,10 @@ class Plugin(
         except (PluginError, AnantaError, Exception) as e:
             io_process_key = self._resolve_active_io_process_key(state)
             return create_inference_error_response(
-                e, action_name, state, io_process_key,
+                e,
+                action_name,
+                state,
+                io_process_key,
             )
 
     def _infer_and_process(
@@ -1926,18 +1960,32 @@ class Plugin(
 
         if is_platform_mode and context_id:
             self._store_post_inference_events(
-                context_id, state, resolved_action_params, completion_text, prompt_ctx,
+                context_id,
+                state,
+                resolved_action_params,
+                completion_text,
+                prompt_ctx,
             )
 
         log_response_to_state(
-            state, action_name, model_info, completion_text, result_data,
+            state,
+            action_name,
+            model_info,
+            completion_text,
+            result_data,
             state_service=self.state_service,
         )
 
         return self._parse_and_normalize_actions(
-            params, state, action_params,
-            model_info, resolved_user_input, context_id,
-            prompt_ctx, completion_text, result_data,
+            params,
+            state,
+            action_params,
+            model_info,
+            resolved_user_input,
+            context_id,
+            prompt_ctx,
+            completion_text,
+            result_data,
         )
 
     def _parse_and_normalize_actions(
@@ -1969,7 +2017,9 @@ class Plugin(
         )
 
         placeholder_context = build_placeholder_context(
-            state, model_info, resolved_user_input,
+            state,
+            model_info,
+            resolved_user_input,
         )
         actions_to_execute = normalize_action_definitions(
             actions_to_execute,
@@ -1984,7 +2034,9 @@ class Plugin(
         validate_planning_extension_content(prompt_ctx, actions_to_execute)
 
         job_id_context = extract_job_id_from_context(
-            state, action_params, raw_params=params,
+            state,
+            action_params,
+            raw_params=params,
         )
         inject_job_context(actions_to_execute, job_id_context)
 
@@ -2048,7 +2100,7 @@ class Plugin(
         params: dict[str, Any],
         state: dict[str, Any],
     ) -> ActionResult:
-        return self._process_inference_request(params, state)
+        return await _run_f5_blocking(lambda: self._process_inference_request(params, state))
 
     # ========================================
     # InferenceServiceInterface Implementation
@@ -2231,9 +2283,7 @@ class Plugin(
         """
         if result.get("action_status") != ActionStatus.COMPLETED.value:
             error_detail = result.get("error")
-            error_msg = (
-                error_detail.get("message", "Unknown error") if error_detail else "Unknown error"
-            )
+            error_msg = error_detail.get("message", "Unknown error") if error_detail else "Unknown error"
             raise PluginError(
                 message=f"Completion failed: {error_msg}",
                 error_code=ErrorCode.PLUGIN_EXECUTION_ERROR,
@@ -2301,9 +2351,7 @@ class Plugin(
                 plugin_name=self.name,
             )
 
-        raw_messages = self._build_text_completion_messages(
-            prompt, context_user_message, load_context
-        )
+        raw_messages = self._build_text_completion_messages(prompt, context_user_message, load_context)
 
         # Route through assembly contract for consistent serialization
         from ananta.core.prompts.profiles import TEXT_COMPLETION_PROFILE
@@ -2320,7 +2368,9 @@ class Plugin(
             pre_built_messages=tuple(raw_messages),
         )
         assembly_result = _assemble(
-            assembly_request, TEXT_COMPLETION_PROFILE, self._pipeline_factory,
+            assembly_request,
+            TEXT_COMPLETION_PROFILE,
+            self._pipeline_factory,
         )
 
         req = InferenceRequest(
@@ -2347,16 +2397,11 @@ class Plugin(
             PluginError: If summary generation fails.
         """
         # Build prompt for summary generation
-        messages_text = "\n".join(
-            f"[{msg.get('role', 'unknown')}]: {msg.get('content', '')}"
-            for msg in request.messages_to_summarize
-        )
+        messages_text = "\n".join(f"[{msg.get('role', 'unknown')}]: {msg.get('content', '')}" for msg in request.messages_to_summarize)
 
         existing_summary_text = ""
         if request.existing_summary:
-            existing_summary_text = (
-                f"\nExisting summary to incorporate:\n{request.existing_summary}\n"
-            )
+            existing_summary_text = f"\nExisting summary to incorporate:\n{request.existing_summary}\n"
 
         prompt = f"""Generate a concise summary of the following conversation.
 {existing_summary_text}
@@ -2403,9 +2448,7 @@ Summary:"""
             )
 
         # Build prompt from messages for cache warming
-        messages_text = "\n".join(
-            f"[{msg.get('role', 'unknown')}]: {msg.get('content', '')}" for msg in request.messages
-        )
+        messages_text = "\n".join(f"[{msg.get('role', 'unknown')}]: {msg.get('content', '')}" for msg in request.messages)
 
         prompt = f"""[Context Restoration]
 The following is the conversation history being restored to cache:
@@ -2426,9 +2469,7 @@ Acknowledge receipt with a brief confirmation."""
         # Check for actual errors (network, timeout), but NOT empty completion
         if result.get("action_status") != ActionStatus.COMPLETED.value:
             error_detail = result.get("error")
-            error_msg = (
-                error_detail.get("message", "Unknown error") if error_detail else "Unknown error"
-            )
+            error_msg = error_detail.get("message", "Unknown error") if error_detail else "Unknown error"
             raise PluginError(
                 message=f"Cache warming failed: {error_msg}",
                 error_code=ErrorCode.PLUGIN_EXECUTION_ERROR,
@@ -2455,9 +2496,7 @@ Acknowledge receipt with a brief confirmation."""
         return {
             "$schema": "http://json-schema.org/draft-07/schema#",
             "title": "Default Inference Plugin",
-            "description": (
-                "Configuration for LLM inference service (LM Studio, Ollama, or OpenAI-compatible)"
-            ),
+            "description": ("Configuration for LLM inference service (LM Studio, Ollama, or OpenAI-compatible)"),
             "type": "object",
             "required": ["base_url", "model"],
             "properties": {
@@ -2494,10 +2533,7 @@ Acknowledge receipt with a brief confirmation."""
                 "api_key": {
                     "type": "string",
                     "title": "API Key",
-                    "description": (
-                        "API key for authentication (required for "
-                        "OpenAI/Anthropic, optional for local providers)"
-                    ),
+                    "description": ("API key for authentication (required for OpenAI/Anthropic, optional for local providers)"),
                     "x-secret": True,
                     "x-group": "security",
                     "x-order": 1,
@@ -2505,9 +2541,7 @@ Acknowledge receipt with a brief confirmation."""
                 "timeout_seconds": {
                     "type": "integer",
                     "title": "Timeout",
-                    "description": (
-                        "Request timeout in seconds (inference can take longer than embeddings)"
-                    ),
+                    "description": ("Request timeout in seconds (inference can take longer than embeddings)"),
                     "default": 120,
                     "minimum": 10,
                     "maximum": 600,

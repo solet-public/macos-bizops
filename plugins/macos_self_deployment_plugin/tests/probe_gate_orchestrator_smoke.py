@@ -24,8 +24,10 @@ Run:
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 _PLUGIN_SRC = Path(__file__).resolve().parents[1] / "src"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -33,6 +35,9 @@ for _p in (str(_PLUGIN_SRC), str(_REPO_ROOT / "ananta" / "src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from macos_self_deployment_plugin import swap_orchestrator as orchestrator_module  # noqa: E402
+from macos_self_deployment_plugin import swap_orchestrator_preflight as preflight_module  # noqa: E402
+from macos_self_deployment_plugin import swap_orchestrator_types as types_module  # noqa: E402
 from macos_self_deployment_plugin.constants import (  # noqa: E402
     COLOR_BLUE,
     RestartReasonCode,
@@ -55,6 +60,11 @@ from macos_self_deployment_plugin.swap_orchestrator import (  # noqa: E402
     PRE_BUILD_PROBE_RELEASE_ID,
     SwapOrchestrator,
 )
+from macos_self_deployment_plugin.swap_orchestrator_admission import OwnedDeployGate  # noqa: E402
+
+# Private runtime root for the orchestrator's owned-deploy lock and pending-finisher
+# record, so this smoke never touches a live solet's runtime directory.
+_RUNTIME = tempfile.TemporaryDirectory(prefix="probe_gate_orchestrator_runtime_")
 
 _passed = 0
 _failed: list[str] = []
@@ -95,7 +105,9 @@ class _RecordingReleaseManager:
         return GcResult(deleted=(), retained=())
 
     def build_candidate(
-        self, *, manifest_etag: str = "",
+        self,
+        *,
+        manifest_etag: str = "",
         manifest_plugins: tuple[str, ...] | None = None,
         schema_snapshot_fn: object = None,
     ) -> CandidatePaths:
@@ -137,7 +149,8 @@ class _RecordingReleaseManager:
 
 
 def _additive_preflight(
-    candidate: CandidatePaths, *,
+    candidate: CandidatePaths,
+    *,
     current_snapshot: dict[str, object] | None,
     current_release_exists: bool,
 ) -> PreflightVerdict:
@@ -146,7 +159,8 @@ def _additive_preflight(
 
 
 def _non_additive_preflight(
-    candidate: CandidatePaths, *,
+    candidate: CandidatePaths,
+    *,
     current_snapshot: dict[str, object] | None,
     current_release_exists: bool,
 ) -> PreflightVerdict:
@@ -155,8 +169,11 @@ def _non_additive_preflight(
         is_additive=False,
         breaking_changes=(
             SchemaChange(
-                kind="column_removed", namespace="plugin", table="thing",
-                column="gone", detail="column dropped",
+                kind="column_removed",
+                namespace="plugin",
+                table="thing",
+                column="gone",
+                detail="column dropped",
             ),
         ),
     )
@@ -176,8 +193,11 @@ class _Harness:
         self._probe = probe
 
         def _spawn(
-            app_home: Path, next_color: str, next_instance_id: str,
-            solet_name: str, candidate: CandidatePaths,
+            app_home: Path,
+            next_color: str,
+            next_instance_id: str,
+            solet_name: str,
+            candidate: CandidatePaths,
         ) -> int:
             del app_home, next_color, solet_name, candidate
             self.spawn_calls.append(next_instance_id)
@@ -215,6 +235,7 @@ class _Harness:
             spawn_fn=_spawn,
             ready_timeout_seconds=2,
             ready_poll_interval_seconds=0.01,
+            runtime_dir=Path(_RUNTIME.name),
         )
 
     def restart(self) -> Any:
@@ -230,20 +251,27 @@ class _Harness:
 
 
 def _red_probe(candidate: CandidatePaths) -> ProbeOutcome:
-    return ProbeOutcome(ok=False, payload={
-        "failing_step": "L1.1_import",
-        "error_class": "RuntimeError",
-        "detail": "planted probe rejection",
-        "failures": [{"check": "L1.1_import", "plugin": "p", "message": "m",
-                      "error_class": "RuntimeError"}],
-        "release_id": candidate.release_id,
-    })
+    return ProbeOutcome(
+        ok=False,
+        payload={
+            "failing_step": "L1.1_import",
+            "error_class": "RuntimeError",
+            "detail": "planted probe rejection",
+            "failures": [{"check": "L1.1_import", "plugin": "p", "message": "m", "error_class": "RuntimeError"}],
+            "release_id": candidate.release_id,
+        },
+    )
 
 
 def _green_probe(candidate: CandidatePaths) -> ProbeOutcome:
-    return ProbeOutcome(ok=True, payload={
-        "ok": True, "duration_ms": 1, "release_id": candidate.release_id,
-    })
+    return ProbeOutcome(
+        ok=True,
+        payload={
+            "ok": True,
+            "duration_ms": 1,
+            "release_id": candidate.release_id,
+        },
+    )
 
 
 def _raising_probe(candidate: CandidatePaths) -> ProbeOutcome:
@@ -256,22 +284,16 @@ def _case_red_probe_blocks() -> None:
     harness = _Harness(schema_preflight=_additive_preflight, probe=_red_probe)
     result = harness.restart()
     _check(
-        result.status.value == "probe_failed"
-        and result.reason_code == RestartReasonCode.PROBE_REJECTED,
-        f"[1] RED probe ⇒ PROBE_FAILED/probe_rejected "
-        f"({result.status}, {result.reason_code!r})",
+        result.status.value == "probe_failed" and result.reason_code == RestartReasonCode.PROBE_REJECTED,
+        f"[1] RED probe ⇒ PROBE_FAILED/probe_rejected ({result.status}, {result.reason_code!r})",
     )
     _check(
-        result.probe is not None
-        and result.probe.get("error_class") == "RuntimeError"
-        and result.probe.get("failures"),
+        result.probe is not None and result.probe.get("error_class") == "RuntimeError" and result.probe.get("failures"),
         f"[2] rejection payload rides RestartResult.probe ({result.probe})",
     )
     _check(
-        harness.spawn_calls == [] and harness.release_mgr.cutover_count == 0
-        and harness.probe_calls == ["rel-probe-gate"],
-        f"[3] NO spawn, NO cutover; probe consulted once against the built "
-        f"candidate (spawn={harness.spawn_calls}, probe={harness.probe_calls})",
+        harness.spawn_calls == [] and harness.release_mgr.cutover_count == 0 and harness.probe_calls == ["rel-probe-gate"],
+        f"[3] NO spawn, NO cutover; probe consulted once against the built candidate (spawn={harness.spawn_calls}, probe={harness.probe_calls})",
     )
 
 
@@ -285,12 +307,8 @@ def _case_raising_seam_contained() -> None:
         escaped = True
         result = None
     _check(
-        not escaped and result is not None
-        and result.status.value == "probe_failed"
-        and result.probe is not None
-        and result.probe.get("error_class") == PROBE_ERROR_HARNESS,
-        f"[4] raising probe seam contained ⇒ PROBE_FAILED/ProbeHarnessError, "
-        f"nothing escaped (escaped={escaped})",
+        not escaped and result is not None and result.status.value == "probe_failed" and result.probe is not None and result.probe.get("error_class") == PROBE_ERROR_HARNESS,
+        f"[4] raising probe seam contained ⇒ PROBE_FAILED/ProbeHarnessError, nothing escaped (escaped={escaped})",
     )
     _check(
         harness.spawn_calls == [],
@@ -303,15 +321,12 @@ def _case_schema_refuses_first() -> None:
     harness = _Harness(schema_preflight=_non_additive_preflight, probe=_green_probe)
     result = harness.restart()
     _check(
-        result.status.value == "failed"
-        and result.reason_code == RestartReasonCode.SCHEMA_PREFLIGHT_REFUSED,
-        f"[6] non-additive schema still refuses first "
-        f"({result.status}, {result.reason_code!r})",
+        result.status.value == "failed" and result.reason_code == RestartReasonCode.SCHEMA_PREFLIGHT_REFUSED,
+        f"[6] non-additive schema still refuses first ({result.status}, {result.reason_code!r})",
     )
     _check(
         harness.probe_calls == [],
-        f"[7] probe NOT consulted when the cheaper gate already refused "
-        f"({harness.probe_calls})",
+        f"[7] probe NOT consulted when the cheaper gate already refused ({harness.probe_calls})",
     )
 
 
@@ -320,20 +335,65 @@ def _case_green_passes_through() -> None:
     harness = _Harness(schema_preflight=_additive_preflight, probe=_green_probe)
     result = harness.restart()
     _check(
-        result.status.value == "failed"
-        and result.reason_code == RestartReasonCode.SPAWN_FAILED,
-        f"[8] GREEN probe ⇒ flow proceeds past the gate to spawn "
-        f"(stopped by the deliberate spawn failure: {result.reason_code!r})",
+        result.status.value == "failed" and result.reason_code == RestartReasonCode.SPAWN_FAILED,
+        f"[8] GREEN probe ⇒ flow proceeds past the gate to spawn (stopped by the deliberate spawn failure: {result.reason_code!r})",
     )
     _check(
         harness.probe_calls == ["rel-probe-gate"] and len(harness.spawn_calls) == 1,
-        f"[9] probe ran exactly once, spawn WAS attempted "
-        f"(probe={harness.probe_calls}, spawn={harness.spawn_calls})",
+        f"[9] probe ran exactly once, spawn WAS attempted (probe={harness.probe_calls}, spawn={harness.spawn_calls})",
+    )
+
+
+def _case_extracted_api_exports() -> None:
+    """The original imports and private entry still reach real preparation."""
+    _check(
+        orchestrator_module.OwnedDeployGate is OwnedDeployGate
+        and orchestrator_module.ReleaseManagerProtocol is types_module.ReleaseManagerProtocol
+        and orchestrator_module.SchemaPreflightFn is types_module.SchemaPreflightFn
+        and orchestrator_module.PreflightProbeFn is types_module.PreflightProbeFn
+        and orchestrator_module._SwapPlan is types_module._SwapPlan
+        and orchestrator_module._resolve_current_snapshot is preflight_module._resolve_current_snapshot,
+        "original module exports the extracted contracts and helper without wrappers",
+    )
+
+
+def _case_extracted_preparation() -> None:
+    """Keep the private prepare entry and evidence handoff intact."""
+    harness = _Harness(schema_preflight=_additive_preflight, probe=_green_probe)
+    with patch.object(orchestrator_module, "prepare_swap", wraps=preflight_module.prepare_swap) as prepare:
+        plan = harness.orch._prepare_swap(
+            reason="extracted-preparation",
+            expected_etag="etag-api",
+            app_home=Path("/nonexistent/profile"),
+            self_color=COLOR_BLUE,
+            self_instance_id="blue-id",
+        )
+    _check(
+        isinstance(plan, types_module._SwapPlan) and plan.next_color == "green" and plan.candidate.release_id == "rel-probe-gate" and plan.probe_evidence == {"ok": True, "duration_ms": 1, "release_id": "rel-probe-gate"} and harness.spawn_calls == [] and harness.release_mgr.gc_count == 1,
+        "preparation returns the immutable real candidate and probe proof before spawn",
+    )
+    _check(
+        prepare.call_count == 1 and prepare.call_args.kwargs["release_manager"] is harness.release_mgr and prepare.call_args.kwargs["failure"] == harness.orch._failure,
+        "private entry delegates once with its existing manager and bound failure builder",
+    )
+
+
+def _case_extracted_failure_callback() -> None:
+    """Refusals use the existing overridable failure method."""
+    refused = _Harness(schema_preflight=_non_additive_preflight, probe=_green_probe)
+    with patch.object(refused.orch, "_failure", wraps=refused.orch._failure) as failure:
+        result = refused.restart()
+    _check(
+        failure.call_count == 1 and failure.call_args.kwargs["reason_code"] == RestartReasonCode.SCHEMA_PREFLIGHT_REFUSED and result.reason_code == RestartReasonCode.SCHEMA_PREFLIGHT_REFUSED and refused.spawn_calls == [] and refused.probe_calls == [],
+        "extracted refusal preserves the orchestrator failure seam and stops before probe/spawn",
     )
 
 
 def run_smoke() -> int:
     print("=== probe_gate_orchestrator_smoke (S4: probe gate in _prepare_swap) ===")
+    _case_extracted_api_exports()
+    _case_extracted_preparation()
+    _case_extracted_failure_callback()
     _case_red_probe_blocks()
     _case_raising_seam_contained()
     _case_schema_refuses_first()

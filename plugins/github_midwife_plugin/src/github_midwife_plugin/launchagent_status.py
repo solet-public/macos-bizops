@@ -14,13 +14,41 @@ def launchagent_health(outcome: CommandOutcome) -> tuple[bool, str, str | None]:
         return False, "launchctl_print_failed", "launchagent_unavailable"
     state = _launchctl_field(outcome.stdout, "state")
     last_exit = _launchctl_field(outcome.stdout, "last exit (?:code|status)")
+    last_signal = _launchctl_field(outcome.stdout, "last terminating signal")
     runs = _launchctl_field(outcome.stdout, "(?:runs|run count)")
-    if state != "running" or last_exit is None or runs is None:
+    if state != "running" or runs is None:
         return False, "launchctl_status_unreadable", "launchagent_status_unreadable"
+    run_count = _run_count(runs)
+    if run_count is None:
+        return False, "launchctl_status_unreadable", "launchagent_status_unreadable"
+    if last_exit is None:
+        return _signal_history_health(state, last_signal, run_count)
+    return _exit_history_health(state, last_exit, run_count)
+
+
+def _run_count(value: str) -> int | None:
     try:
-        run_count = int(runs)
+        return int(value)
     except ValueError:
+        return None
+
+
+def _signal_history_health(
+    state: str,
+    signal: str | None,
+    run_count: int,
+) -> tuple[bool, str, str | None]:
+    if signal is None or re.fullmatch(r"Killed:\s*9", signal) is None:
         return False, "launchctl_status_unreadable", "launchagent_status_unreadable"
+    observed = f"state={state},last_terminating_signal={signal},runs={run_count}"
+    return True, observed, None
+
+
+def _exit_history_health(
+    state: str,
+    last_exit: str,
+    run_count: int,
+) -> tuple[bool, str, str | None]:
     if last_exit == "(never exited)":
         observed = f"state={state},last_exit={last_exit},runs={run_count}"
         return True, observed, None

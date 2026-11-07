@@ -5,9 +5,11 @@ Each function takes an already-built :class:`http_client.ZuoraClient` and a
 ``ValueError`` (mapped to ``zuora.invalid_params``); non-2xx responses raise
 ``ZuoraResponseError`` (carrying the response for the plugin's classifier).
 
-No delete verb exists (v1 scope, matching the 2026-06-20 design + the
-umbrella wave's read/write posture register): billing records are
-voided/cancelled through Zuora's own workflow, not deleted through this tool.
+These are the original object and billing verbs. Vendor RBAC is the only
+operation boundary: deletes and lifecycle actions go through the typed
+Workflow / Data Query / Files verbs (``typed_operations``) or the generic
+``request`` verb. A billing record Zuora voids or cancels rather than deletes
+keeps that vendor-defined terminal state; void is not described as delete.
 
 Business-data limits + data-export migration (2026-08-02 —
 workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md).
@@ -72,6 +74,7 @@ from typing import Any, Final
 
 import httpx
 
+from .commerce_fields import V1_HEADERS, subscription_read_options
 from .constants import (
     BULK_EXPORT_ROW_CAP,
     DATA_QUERY_MAX_ROWS_CAP,
@@ -82,6 +85,7 @@ from .constants import (
     SUPPORTED_OBJECT_TYPES,
     ZUORA_LIST_PAGE_SIZE_MAX,
 )
+from .typed_operations import collect
 
 # path_gate(output_tsv_path) -> realpath-resolved path to write, or raises
 # ExportPathRefusedError. Injected by the plugin, which binds the operator's
@@ -112,7 +116,10 @@ def data_query(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict
     bulk_export (same override mechanism, higher hard cap).
     """
     effective_limit = _resolve_effective_limit(
-        params, default=DEFAULT_ROW_LIMIT, hard_cap=DATA_QUERY_MAX_ROWS_CAP, verb="data_query",
+        params,
+        default=DEFAULT_ROW_LIMIT,
+        hard_cap=DATA_QUERY_MAX_ROWS_CAP,
+        verb="data_query",
     )
     zoql = _require_str(params, "zoql")
     output_tsv_path = _require_str(params, "output_tsv_path")
@@ -129,7 +136,10 @@ def bulk_export(client: Any, params: dict[str, Any], path_gate: PathGate) -> dic
     50,000 cap is now genuinely reachable.
     """
     effective_limit = _resolve_effective_limit(
-        params, default=DEFAULT_ROW_LIMIT, hard_cap=BULK_EXPORT_ROW_CAP, verb="bulk_export",
+        params,
+        default=DEFAULT_ROW_LIMIT,
+        hard_cap=BULK_EXPORT_ROW_CAP,
+        verb="bulk_export",
     )
     zoql = _require_str(params, "zoql")
     output_tsv_path = _require_str(params, "output_tsv_path")
@@ -179,24 +189,44 @@ def list_subscriptions(client: Any, params: dict[str, Any], path_gate: PathGate)
     Pages internally (page/pageSize, ZUORA_LIST_PAGE_SIZE_MAX per call) up to
     the effective row limit — the previous implementation passed no
     pagination parameters and silently returned at most 20 (Zuora's own
-    pageSize default).
+    pageSize default). The vendor's documented read options (charge_detail,
+    as_of_date, exclude_rate_plans_with_no_charges, get_detailed_metrics,
+    as_of_day) and the four documented request headers (Zuora-Version,
+    Zuora-Entity-Ids, Zuora-Org-Ids, Zuora-Track-Id) are forwarded on every
+    page.
     """
     effective_limit = _resolve_effective_limit(
-        params, default=DEFAULT_ROW_LIMIT, hard_cap=LIST_ROW_LIMIT_CAP, verb="list_subscriptions",
+        params,
+        default=DEFAULT_ROW_LIMIT,
+        hard_cap=LIST_ROW_LIMIT_CAP,
+        verb="list_subscriptions",
     )
+    read_options = subscription_read_options(params)
+    headers = v1_headers(params)
     account_id = _require_str(params, "account_id")
     output_tsv_path = _require_str(params, "output_tsv_path")
     resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
     subscriptions, truncated = _paginate_account_list(
-        client, f"/v1/subscriptions/accounts/{account_id}", "subscriptions", effective_limit,
+        client,
+        f"/v1/subscriptions/accounts/{account_id}",
+        "subscriptions",
+        effective_limit,
+        read_options,
+        headers,
     )
     return _write_records_tsv(subscriptions, resolved_path, truncated=truncated)
 
 
+def v1_headers(params: dict[str, Any]) -> dict[str, str] | None:
+    """The documented Zuora-Version, Zuora-Entity-Ids, Zuora-Org-Ids and Zuora-Track-Id headers a caller set, validated."""
+    return collect(V1_HEADERS, params) or None
+
+
 def get_invoice(client: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Fetch one invoice by id."""
+    """Fetch one invoice by id or number, with the four documented request headers when given."""
+    headers = v1_headers(params)
     invoice_id = _require_str(params, "id")
-    response = client.get(f"/v1/invoices/{invoice_id}")
+    response = client.get(f"/v1/invoices/{invoice_id}", headers=headers)
     _raise_for_status(response, is_query=False)
     return {"invoice": response.json()}
 
@@ -211,7 +241,10 @@ def list_invoices(client: Any, params: dict[str, Any], path_gate: PathGate) -> d
     pre-fetch vendor-side ceiling.
     """
     effective_limit = _resolve_effective_limit(
-        params, default=DEFAULT_ROW_LIMIT, hard_cap=LIST_ROW_LIMIT_CAP, verb="list_invoices",
+        params,
+        default=DEFAULT_ROW_LIMIT,
+        hard_cap=LIST_ROW_LIMIT_CAP,
+        verb="list_invoices",
     )
     account_id = _require_str(params, "account_id")
     output_tsv_path = _require_str(params, "output_tsv_path")
@@ -232,7 +265,11 @@ def list_invoices(client: Any, params: dict[str, Any], path_gate: PathGate) -> d
 
 
 def _write_zoql_result_tsv(
-    client: Any, zoql: str, cap: int, path_gate: PathGate, output_tsv_path: str,
+    client: Any,
+    zoql: str,
+    cap: int,
+    path_gate: PathGate,
+    output_tsv_path: str,
 ) -> dict[str, Any]:
     resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
     records, total_size, truncated = _run_zoql_query(client, zoql, cap)
@@ -248,12 +285,16 @@ def _run_zoql_query(client: Any, zoql: str, cap: int) -> tuple[list[dict[str, An
     from the final page, truncated).
     """
     records, total_size, done, query_locator = _query_page(
-        client, "/v1/action/query", {"queryString": zoql},
+        client,
+        "/v1/action/query",
+        {"queryString": zoql},
     )
     calls = 0
     while not done and len(records) < cap and query_locator is not None and calls < _MAX_QUERY_MORE_CALLS:
         page_records, total_size, done, query_locator = _query_page(
-            client, "/v1/action/queryMore", {"queryLocator": query_locator},
+            client,
+            "/v1/action/queryMore",
+            {"queryLocator": query_locator},
         )
         if not page_records and not done:
             # Vendor stalled without signaling completion — stop rather than
@@ -266,7 +307,9 @@ def _run_zoql_query(client: Any, zoql: str, cap: int) -> tuple[list[dict[str, An
 
 
 def _query_page(
-    client: Any, path: str, body: dict[str, Any],
+    client: Any,
+    path: str,
+    body: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], int, bool, str | None]:
     response = client.post(path, json=body)
     _raise_for_status(response, is_query=True)
@@ -284,12 +327,17 @@ def _query_page(
 
 
 def _paginate_account_list(
-    client: Any, path: str, list_key: str, cap: int,
+    client: Any,
+    path: str,
+    list_key: str,
+    cap: int,
+    read_options: dict[str, Any],
+    headers: dict[str, str] | None,
 ) -> tuple[list[dict[str, Any]], bool]:
     records: list[dict[str, Any]] = []
     page = 1
     while len(records) < cap:
-        response = client.get(path, params={"page": page, "pageSize": ZUORA_LIST_PAGE_SIZE_MAX})
+        response = client.get(path, params={**read_options, "page": page, "pageSize": ZUORA_LIST_PAGE_SIZE_MAX}, headers=headers)
         _raise_for_status(response, is_query=False)
         payload = response.json()
         page_items = _as_record_list(payload.get(list_key))
@@ -313,15 +361,15 @@ def _gate_and_check_parent(path_gate: PathGate, output_tsv_path: str) -> str:
     resolved_path = path_gate(output_tsv_path)
     parent_dir = os.path.dirname(resolved_path)
     if not os.path.isdir(parent_dir):
-        raise ValueError(
-            f"the parent directory of output_tsv_path does not exist ({parent_dir}); "
-            "create it first — this verb writes one file, it does not create directories"
-        )
+        raise ValueError(f"the parent directory of output_tsv_path does not exist ({parent_dir}); create it first — this verb writes one file, it does not create directories")
     return resolved_path
 
 
 def _write_records_tsv(
-    records: list[dict[str, Any]], resolved_path: str, *, truncated: bool,
+    records: list[dict[str, Any]],
+    resolved_path: str,
+    *,
+    truncated: bool,
 ) -> dict[str, Any]:
     columns = _ordered_columns(records)
     row_lists = [[_cell_value(record.get(column)) for column in columns] for record in records]
@@ -336,7 +384,11 @@ def _write_records_tsv(
 
 
 def _resolve_effective_limit(
-    params: dict[str, Any], *, default: int, hard_cap: int, verb: str,
+    params: dict[str, Any],
+    *,
+    default: int,
+    hard_cap: int,
+    verb: str,
 ) -> int:
     """Resolve the effective fetch ceiling from the §5 override pair.
 
@@ -351,20 +403,13 @@ def _resolve_effective_limit(
     override_present = override is True
     row_limit_present = row_limit is not None
     if override_present != row_limit_present:
-        raise ValueError(
-            f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be "
-            f"given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, "
-            f"{PARAM_ROW_LIMIT}={row_limit!r}"
-        )
+        raise ValueError(f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, {PARAM_ROW_LIMIT}={row_limit!r}")
     if not override_present:
         return default
     if not isinstance(row_limit, int) or isinstance(row_limit, bool) or row_limit < 1:
         raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}' must be a positive integer")
     if row_limit > hard_cap:
-        raise ValueError(
-            f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of "
-            f"{hard_cap}; refusing rather than silently clamping"
-        )
+        raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of {hard_cap}; refusing rather than silently clamping")
     return row_limit
 
 
@@ -422,9 +467,7 @@ def _raise_for_status(response: httpx.Response, *, is_query: bool) -> None:
 def _require_object_type(params: dict[str, Any]) -> str:
     object_type = _require_str(params, "type")
     if object_type not in SUPPORTED_OBJECT_TYPES:
-        raise ValueError(
-            f"'type' must be one of {sorted(SUPPORTED_OBJECT_TYPES)}, got {object_type!r}"
-        )
+        raise ValueError(f"'type' must be one of {sorted(SUPPORTED_OBJECT_TYPES)}, got {object_type!r}")
     return object_type
 
 

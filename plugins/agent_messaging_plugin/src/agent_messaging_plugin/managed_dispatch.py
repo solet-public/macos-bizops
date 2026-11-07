@@ -13,7 +13,7 @@ import json
 import logging
 import secrets
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,10 +26,10 @@ from ananta.llm.agent_messaging.state_results import (
     require_updated,
 )
 
+from ._managed_dispatch_authority import SUCCESSION_PAYLOAD_KEY, coordinator_succession_proof
 from .managed_dispatch_bridge import (
     MANAGED_DISPATCH_PAGE_DEFAULT,
     MANAGED_DISPATCH_PAGE_MAX,
-    all_managed_dispatch_events,
     legacy_cancel_updates,
     legacy_completion_updates,
     managed_dispatch_events,
@@ -37,30 +37,41 @@ from .managed_dispatch_bridge import (
 )
 from .managed_dispatch_errors import DispatchError
 from .managed_dispatch_unit import (
-    EVENT_ENSURE_UNIT,
     EVENT_REGISTER_ANNOTATION_FAILED,
-    NEXT_ENSURE_UNIT,
     NEXT_SPAWN_CURRENT_ATTEMPT,
-    UNIT_MINT_ADOPTED,
-    UNIT_MINT_MINTED,
-    UNIT_MINT_VERIFIED,
-    annotate_unit,
-    ensure_unit_updates,
+    capture_annotation_source,
     fail_start_updates,
-    retire_unit,
-    unit_mint_columns,
+    first_turn_already_recorded,
+    require_assignment,
+    require_resolution_assignment,
+    resolution_actor_role,
+    resolve_assignment,
+    retained_annotation_source,
+    verify_retry_assignment,
+)
+from .managed_dispatch_unit import (
+    annotate_causal_transition as _annotate_causal_transition,
+)
+from .managed_dispatch_unit import (
+    annotate_transition_unit as _annotate_unit,
+)
+from .managed_dispatch_unit import (
+    fail_start as _fail_start,
+)
+from .managed_dispatch_unit import (
+    failed_attempt_error as _failed_attempt_error,
 )
 from .register_unit_client import (
     RegisterActor,
     RegisterUnitClient,
-    RegisterUnitError,
+    VerbError,
+    owner_transfer_pending,
 )
-from .role_binding_store import holds_role
+from .role_binding_store import RoleBindingVacantError, holds_role, resolve_role_binding
 from .schema import (
     TABLE_MANAGED_DISPATCH,
     TABLE_MANAGED_DISPATCH_EVENT,
 )
-from .spawn_capability_floors import contract_scope_tags
 
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
@@ -136,8 +147,7 @@ class DispatchSpec:
     role_class: str
     work_class: str
     budget_line: str
-    brief_ref: str
-    brief_sha256: str
+    unit_id: str
     expected_path: str
     completion_contract: Mapping[str, Any]
     model: str
@@ -159,7 +169,6 @@ class DispatchSpec:
     uptake_due_at: str
     report_by: str
     watchdog_due_at: str
-    unit_id: str = ""
     repository_root: str = ""
     dispatch_kind: str = ""
     reviewed_report_vendor: str = ""
@@ -170,18 +179,14 @@ class DispatchSpec:
     difficulty_score: float = 0.0
     selection_receipt: Mapping[str, Any] = dataclass_field(default_factory=dict)
     selection_receipt_enforced: bool = False
-    # Register Unit mint inputs (design unt_57725090 s4.1), persisted as the
-    # immutable ``unit_mint_request`` so a retry mints exactly the same Unit.
-    # ``repository_id`` is an expectation checked against resolution, never a
-    # substitute for it; an empty ``unit_key`` pins ``<lane_id>-<dispatch_id>``.
+    # Optional optimistic premise, never a second launch address.
+    expected_revision_id: str = ""
     repository_id: str = ""
-    unit_key: str = ""
-    addresses: tuple[str, ...] = ()
-    reference_basis: str = ""
-    reference_basis_reason: str = ""
-    # Declared document root for a brief outside the lane root (psolet
-    # ``--brief-repo``); empty means the brief must sit inside the lane root.
-    brief_repository_root: str = ""
+
+
+# Host/lifecycle wiring consumes the already verified persisted row and
+# returns the exact attempt receipt; no file input exists.
+AttemptLauncher = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 
 
 def _canonical_sha256(value: Mapping[str, Any]) -> str:
@@ -252,10 +257,7 @@ def _decode_persisted_dispatch_times(row: Mapping[str, Any]) -> dict[str, Any]:
     receipts serializable while retaining the original stored bytes untouched.
     """
     # Raw legacy inventory remains available through managed_dispatch_inventory.
-    decoded = {
-        key: value for key, value in row.items()
-        if key not in {"ttl_seconds", "expires_at", "expires_at_window_seconds"}
-    }
+    decoded = {key: value for key, value in row.items() if key not in {"ttl_seconds", "expires_at", "expires_at_window_seconds"}}
     for field in _PERSISTED_UTC_FIELDS:
         value = decoded.get(field)
         if value in (None, ""):
@@ -289,40 +291,54 @@ def _validate_completion_evidence(
         prefix=prefix,
     )
 
+
 def _deadline_windows(deadlines: Mapping[str, datetime], now: datetime) -> dict[str, int]:
-    return {
-        f"{name}_window_seconds": max(1, int((value - now).total_seconds()))
-        for name, value in deadlines.items()
-    }
+    return {f"{name}_window_seconds": max(1, int((value - now).total_seconds())) for name, value in deadlines.items()}
 
 
-def _validate_spec(spec: DispatchSpec, now: datetime) -> tuple[Path, str]:
+def _validate_spec(spec: DispatchSpec, now: datetime) -> None:
     from .session_lifecycle_store import validate_dispatch_spec  # noqa: PLC0415
 
     return validate_dispatch_spec(spec, now)
+
 
 def prepare_managed_dispatch(
     state: StateManagementInterface,
     spec: DispatchSpec,
     *,
+    register: RegisterUnitClient,
+    actor: DispatchActor,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Validate and insert one ``preparing`` dispatch before host spawn."""
+    """Freeze an existing Unit revision before any dispatch or session write.
+
+    Repeated identical requests return the existing attempt, even after plan
+    edits. A changed request under the same id is a conflict, not correction.
+    """
     clock = (now or datetime.now(UTC)).astimezone(UTC)
-    _validate_spec(spec, clock)
+    record = asdict(spec)
+    _require_coordinator_authority(state, record, actor)
+    request_sha256 = _canonical_sha256(record)
     existing = _find_dispatch(state, spec.dispatch_id)
     if existing is not None:
-        raise DispatchError(
-            "dispatch_id_conflict", f"dispatch_id already exists: {spec.dispatch_id}"
-        )
-    record = asdict(spec)
-    mint_columns = unit_mint_columns(record)
+        require_assignment(existing)
+        if existing.get("request_sha256") != request_sha256:
+            raise DispatchError("dispatch_id_conflict", "dispatch_id already names a different request.")
+        return read_managed_dispatch(state, spec.dispatch_id)
+    _validate_spec(spec, clock)
+    assignment = resolve_assignment(state, record, register)
     record["allowed_tools"] = list(spec.allowed_tools)
     record["scope_tags"] = list(spec.scope_tags)
     record["selection_receipt"] = dict(spec.selection_receipt)
     record.update(
         {
             "external_id": f"managed-dispatch:{spec.dispatch_id}",
+            "assignment": assignment.to_record(),
+            "assignment_sha256": assignment.sha256,
+            "request_sha256": request_sha256,
+            "attempt_receipt": {},
+            "attempt_failure": {},
+            "unit_repository_id": assignment.repository_id,
             "completion_contract": dict(spec.completion_contract),
             "completion_contract_sha256": _canonical_sha256(spec.completion_contract),
             "state": DISPATCH_PREPARING,
@@ -330,204 +346,98 @@ def prepare_managed_dispatch(
             "current_agent_instance_id": "",
             "version": 0,
             "created_at": clock.isoformat(),
-            "next_required_action": NEXT_ENSURE_UNIT,
+            "next_required_action": NEXT_SPAWN_CURRENT_ATTEMPT,
             "responsible_role": spec.spawned_by_role,
-            **mint_columns,
-            **_deadline_windows(
-                {
-                    field: _parse_aware_utc(str(getattr(spec, field)), field)
-                    for field in (
-                        "uptake_due_at",
-                        "report_by",
-                        "watchdog_due_at",
-                    )
-                },
-                clock,
-            ),
-        },
+            **_deadline_windows({field: _parse_aware_utc(str(getattr(spec, field)), field) for field in ("uptake_due_at", "report_by", "watchdog_due_at")}, clock),
+        }
     )
     require_completed(
-        state.write_state(
+        state.upsert_state(
             AGENT_ROLE_BINDING_NAMESPACE,
-            {"table": TABLE_MANAGED_DISPATCH, "record": record},
+            {
+                "table": TABLE_MANAGED_DISPATCH,
+                "record": record,
+                "conflict_columns": ["dispatch_id"],
+                "on_conflict": "do_nothing",
+            },
         ),
         "insert managed_dispatch",
     )
-    return read_managed_dispatch(state, spec.dispatch_id)
+    winner = read_managed_dispatch(state, spec.dispatch_id)
+    require_assignment(winner)
+    if winner.get("request_sha256") != request_sha256:
+        raise DispatchError("dispatch_id_conflict", "dispatch_id already names a different request.")
+    return winner
 
 
 def mint_dispatch_id() -> str:
-    """Mint the server-issued identity raw spawn requires."""
+    """Mint a dispatch identity, never a register Unit."""
     return f"mdp-{secrets.token_hex(16)}"
 
 
 def dispatch_managed_work(
     state: StateManagementInterface,
     spec: DispatchSpec,
-    spawn_request: object,
     *,
     register: RegisterUnitClient,
+    actor: DispatchActor,
+    spawn_attempt: AttemptLauncher,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Atomically prepare supervision truth, ensure its Unit, then spawn.
-
-    The register Unit is minted (or a supplied one verified) between the
-    durable ``preparing`` row and the spawn, with no bypass: a refusal leaves a
-    ``failed_start`` row and no session, worktree, or host process.  The import
-    is deliberately local: the lifecycle layer validates the prepared row by
-    calling this module, so a module-level mutual import would make
-    initialization order authoritative.  The call-time graph is acyclic.
-    """
-    from .session_lifecycle_verbs import (  # noqa: PLC0415
-        SpawnSessionRequest,
-        VerbError,
-        spawn_session,
-    )
-
-    if not isinstance(spawn_request, SpawnSessionRequest):
-        raise DispatchError("spawn_request_invalid", "A SpawnSessionRequest is required.")
-    prepared = prepare_managed_dispatch(state, spec, now=now)
-    actor = RegisterActor(
-        agent_instance_id=spec.spawned_by_instance_id,
-        agent_session_id="",
-        role_name=spec.spawned_by_role,
-        lane_id=spec.lane_id,
-    )
-    try:
-        ensured = _ensure_register_unit(state, prepared, register, actor, reconcile_first=False)
-    except DispatchError as exc:
-        raise _fail_start(state, prepared, exc) from exc
-    request = replace(spawn_request, dispatch_id=spec.dispatch_id, unit_id=str(ensured["unit_id"]))
-    try:
-        attempt = spawn_session(state, request)
-    except VerbError as exc:
-        current = read_managed_dispatch(state, spec.dispatch_id)
-        _annotate_unit(state, current, register, actor, "failed_start", {"code": exc.code})
-        raise _fail_start(state, current, DispatchError(exc.code, exc.message)) from exc
-    dispatch = read_managed_dispatch(state, spec.dispatch_id)
-    _annotate_unit(state, dispatch, register, actor, "spawned")
-    return {"dispatch": dispatch, "attempt": attempt}
+    """Resolve/freeze, then invoke the host attempt launcher exactly once."""
+    row = prepare_managed_dispatch(state, spec, register=register, actor=actor, now=now)
+    if owner_transfer_pending(row):
+        row = _update_dispatch(
+            state,
+            row,
+            {
+                "state": DISPATCH_PREPARING,
+                "next_required_action": NEXT_SPAWN_CURRENT_ATTEMPT,
+                "attempt_failure": {},
+                "terminal_reason": "",
+            },
+        )
+    failure = row.get("attempt_failure")
+    if row["state"] == DISPATCH_FAILED_START and isinstance(failure, Mapping) and failure:
+        raise _failed_attempt_error(row, str(failure["code"]), str(failure["message"]))
+    receipt = row.get("attempt_receipt")
+    if isinstance(receipt, Mapping) and receipt.get("agent_instance_id") and receipt.get("agent_instance_id") == row.get("current_agent_instance_id"):
+        return {"dispatch": row, "attempt": dict(receipt)}
+    register_actor = RegisterActor(actor.agent_instance_id, actor.agent_session_id, spec.spawned_by_role, spec.lane_id)
+    launched = _launch_attempt(state, row, spawn_attempt, register, register_actor)
+    return {"dispatch": launched, "attempt": dict(launched["attempt_receipt"])}
 
 
-def _fail_start(
+def _launch_attempt(
     state: StateManagementInterface,
     row: Mapping[str, Any],
-    error: DispatchError,
-) -> DispatchError:
-    """Persist ``failed_start`` and return the caller-facing error."""
-    failed = _update_dispatch(state, row, fail_start_updates(row, error))
-    return DispatchError(
-        error.code,
-        error.message,
-        data={
-            "dispatch_id": str(row["dispatch_id"]),
-            "state": DISPATCH_FAILED_START,
-            "version": int(failed["version"]),
-            "next_required_action": str(failed["next_required_action"]),
-            "unit_id": str(failed.get("unit_id") or ""),
-        },
-    )
-
-
-def _ensure_register_unit(
-    state: StateManagementInterface,
-    row: Mapping[str, Any],
+    launcher: AttemptLauncher,
     register: RegisterUnitClient,
     actor: RegisterActor,
-    *,
-    reconcile_first: bool,
 ) -> dict[str, Any]:
-    """Record the row's minted or verified Unit before any spawn (s4.2).
-
-    Every refusal is audited as a rejected ``ensure_unit`` event and re-raised.
-    """
+    require_assignment(row)
+    if row["state"] != DISPATCH_PREPARING or row.get("next_required_action") != NEXT_SPAWN_CURRENT_ATTEMPT:
+        raise DispatchError("dispatch_attempt_in_progress", "This attempt is already launched or awaiting an explicit retry.")
+    # Reserve before the external effect. A concurrent duplicate cannot create
+    # another host; an uncertain crash needs an explicit retry decision.
+    retained = dict(row.get("attempt_receipt") or {})
+    if "annotation_source" not in retained:
+        retained["annotation_source"] = capture_annotation_source(row, actor)
+    reserved = _update_dispatch(state, row, {"next_required_action": "spawn_in_progress", "attempt_receipt": retained})
     try:
-        updates = ensure_unit_updates(state, row, register, actor, reconcile_first=reconcile_first)
-    except DispatchError as exc:
-        _write_ensure_event(state, row, actor, {"unit_id": str(row.get("unit_id") or "")}, rejection=exc)
-        raise
-    ensured = _update_dispatch(state, row, updates)
-    receipt = ensured.get("unit_mint_receipt")
-    _write_ensure_event(
-        state,
-        row,
-        actor,
-        {
-            "unit_id": str(ensured["unit_id"]),
-            "unit_mint_state": str(ensured["unit_mint_state"]),
-            "unit_mint_key": str(ensured["unit_mint_key"]),
-            "unit_repository_id": str(ensured["unit_repository_id"]),
-            "receipt_sha256": _canonical_sha256(receipt if isinstance(receipt, Mapping) else {}),
-        },
-    )
-    if ensured["unit_mint_state"] == UNIT_MINT_VERIFIED:
-        _annotate_unit(state, ensured, register, actor, "tier_recorded")
-    return ensured
-
-
-def _write_ensure_event(
-    state: StateManagementInterface,
-    row: Mapping[str, Any],
-    actor: RegisterActor,
-    payload: Mapping[str, Any],
-    *,
-    rejection: DispatchError | None = None,
-) -> None:
-    _write_event(
-        state,
-        dispatch_id=str(row["dispatch_id"]),
-        event_id=f"{EVENT_ENSURE_UNIT}:attempt-{int(row['attempt_number'])}:v{int(row['version'])}",
-        event_kind=EVENT_ENSURE_UNIT,
-        attempt_agent_instance_id="",
-        actor_role=str(row["spawned_by_role"]),
-        actor_instance_id=actor.agent_instance_id,
-        prior_version=int(row["version"]),
-        observed_at=datetime.now(UTC),
-        payload=payload,
-        accepted=rejection is None,
-        rejection_code="" if rejection is None else rejection.code,
-    )
-
-
-def _annotate_unit(
-    state: StateManagementInterface,
-    row: Mapping[str, Any],
-    register: RegisterUnitClient | None,
-    actor: RegisterActor,
-    event: str,
-    extra: Mapping[str, Any] | None = None,
-) -> None:
-    """Append a best-effort register link event; a failure is recorded, never raised."""
-    if not str(row.get("unit_id") or ""):
-        return
-    failure = annotate_unit(register, row, actor, event, extra)
-    if failure is not None:
-        _record_annotation_failure(state, row, actor, event, failure)
-
-
-def _record_annotation_failure(
-    state: StateManagementInterface,
-    row: Mapping[str, Any],
-    actor: RegisterActor,
-    event: str,
-    error: RegisterUnitError,
-) -> None:
-    logger.warning(
-        "managed dispatch %s register annotation %s failed: %s", row["dispatch_id"], event, error
-    )
-    _write_event(
-        state,
-        dispatch_id=str(row["dispatch_id"]),
-        event_id=f"{EVENT_REGISTER_ANNOTATION_FAILED}:{event}:{secrets.token_hex(8)}",
-        event_kind=EVENT_REGISTER_ANNOTATION_FAILED,
-        attempt_agent_instance_id=str(row.get("current_agent_instance_id") or ""),
-        actor_role=str(row["spawned_by_role"]),
-        actor_instance_id=actor.agent_instance_id,
-        prior_version=int(row["version"]),
-        observed_at=datetime.now(UTC),
-        payload={"unit_id": str(row.get("unit_id") or ""), "event": event, "code": error.code, "detail": error.detail},
-        accepted=True,
-    )
+        receipt = {**dict(launcher(reserved)), "annotation_source": retained["annotation_source"]}
+        instance = _require_text(receipt.get("agent_instance_id"), "agent_instance_id")
+    except (DispatchError, VerbError) as exc:
+        current = read_managed_dispatch(state, str(row["dispatch_id"]))
+        _annotate_unit(state, current, register, actor, "failed_start", {"code": exc.code, "annotation_source": retained["annotation_source"]})
+        raise _fail_start(state, current, DispatchError(exc.code, exc.message)) from exc
+    current = read_managed_dispatch(state, str(row["dispatch_id"]))
+    updates: dict[str, Any] = {"current_agent_instance_id": instance, "attempt_receipt": receipt}
+    if current["state"] == DISPATCH_PREPARING:
+        updates.update({"state": DISPATCH_UPTAKE_PENDING, "next_required_action": "await_worker_ack"})
+    launched = _update_dispatch(state, current, updates)
+    _annotate_unit(state, launched, register, actor, "spawned", {"annotation_source": retained["annotation_source"]})
+    return launched
 
 
 def _find_dispatch(
@@ -651,10 +561,10 @@ def _replay_event(event: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _require_unreserved_event_payload(payload: Mapping[str, Any]) -> None:
-    if _ACCEPTED_OUTCOME_PAYLOAD_KEY in payload:
+    if {_ACCEPTED_OUTCOME_PAYLOAD_KEY, SUCCESSION_PAYLOAD_KEY}.intersection(payload):
         raise DispatchError(
             "event_payload_reserved",
-            f"Payload field {_ACCEPTED_OUTCOME_PAYLOAD_KEY!r} is platform-owned.",
+            "Accepted outcome and coordinator succession evidence are platform-owned.",
         )
 
 
@@ -663,6 +573,19 @@ def _update_dispatch(
     row: Mapping[str, Any],
     updates: Mapping[str, Any],
 ) -> dict[str, Any]:
+    require_assignment(row)
+    for field in ("assignment", "assignment_sha256", "unit_id", "request_sha256"):
+        if field in updates and updates[field] != row.get(field):
+            raise DispatchError("unit_assignment_immutable", "Cancel this dispatch and create a new assignment to correct it.")
+    return _compare_and_update_dispatch(state, row, updates)
+
+
+def _compare_and_update_dispatch(
+    state: StateManagementInterface,
+    row: Mapping[str, Any],
+    updates: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist a validated native transition or explicit historical cancellation."""
     dispatch_id = str(row["dispatch_id"])
     prior_version = int(row["version"])
     mutation = dict(updates)
@@ -698,34 +621,30 @@ def record_first_turn_evidence(
     host_ref: str,
     agent_runtime: str,
     observed_at: datetime,
+    register: RegisterUnitClient | None,
+    actor: RegisterActor | None,
 ) -> dict[str, Any]:
     """Link an attempt and durably record submission evidence without ACK."""
     row = read_managed_dispatch(state, dispatch_id)
-    current = str(row.get("current_agent_instance_id") or "")
-    if current == agent_instance_id and row.get("first_turn_at"):
+    require_assignment(row)
+    if first_turn_already_recorded(row, agent_instance_id):
         return row
-    if current and current != agent_instance_id:
-        raise DispatchError("attempt_conflict", "A different current attempt already exists.")
-    if str(row["state"]) != DISPATCH_PREPARING:
-        raise DispatchError("dispatch_not_preparing", "First-turn evidence requires preparing.")
     next_state = DISPATCH_UPTAKE_PENDING if delivered else DISPATCH_UPTAKE_UNCERTAIN
-    result = _update_dispatch(
-        state,
-        row,
-        {
-            "state": next_state,
-            "current_agent_instance_id": agent_instance_id,
-            "first_turn_source": source,
-            "first_turn_delivered": delivered,
-            "first_turn_error": error,
-            "first_turn_at": observed_at.astimezone(UTC).isoformat(),
-            "current_host": host,
-            "current_host_ref": host_ref,
-            "current_agent_runtime": agent_runtime,
-            "next_required_action": "await_worker_ack" if delivered else "decide_start_recovery",
-            "responsible_role": str(row["spawned_by_role"]),
-        },
-    )
+    updates = {
+        "state": next_state,
+        "current_agent_instance_id": agent_instance_id,
+        "first_turn_source": source,
+        "first_turn_delivered": delivered,
+        "first_turn_error": error,
+        "first_turn_at": observed_at.astimezone(UTC).isoformat(),
+        "current_host": host,
+        "current_host_ref": host_ref,
+        "current_agent_runtime": agent_runtime,
+        "next_required_action": "await_worker_ack" if delivered else "decide_start_recovery",
+        "responsible_role": str(row["spawned_by_role"]),
+    }
+    result = _update_dispatch(state, row, updates)
+    causal = {**row, **updates, "version": int(row["version"]) + 1}
     _write_event(
         state,
         dispatch_id=dispatch_id,
@@ -743,9 +662,24 @@ def record_first_turn_evidence(
             "host": host,
             "host_ref": host_ref,
             "agent_runtime": agent_runtime,
+            "annotation_source": retained_annotation_source(row),
         },
         accepted=True,
     )
+    if not delivered:
+        _annotate_causal_transition(
+            state,
+            causal,
+            register,
+            "uptake_uncertain",
+            {
+                "prior_version": int(row["version"]),
+                "transition_version": int(row["version"]) + 1,
+                "causal_event_id": f"first-turn:{int(row['attempt_number'])}",
+                "trigger_detail": error,
+            },
+            actor,
+        )
     return result
 
 
@@ -787,15 +721,21 @@ def _require_worker_authority(
 ) -> None:
     current = str(row.get("current_agent_instance_id") or "")
     role = str(row["role_name"])
-    if (
-        not actor.agent_instance_id
-        or actor.agent_instance_id != current
-        or not holds_role(state, role, actor.agent_session_id)
-    ):
+    if not actor.agent_instance_id or actor.agent_instance_id != current or not holds_role(state, role, actor.agent_session_id):
         raise DispatchError(
             "worker_authority_denied",
             "Caller is not the current attempt holding the dispatch worker role.",
         )
+
+
+def _caller_holds_binding(state: StateManagementInterface, role: str, actor: DispatchActor) -> bool:
+    if not actor.agent_instance_id or not actor.agent_session_id:
+        return False
+    try:
+        binding = resolve_role_binding(state, role)
+    except RoleBindingVacantError:
+        return False
+    return binding.agent_instance_id == actor.agent_instance_id and binding.agent_session_id == actor.agent_session_id
 
 
 def _require_coordinator_authority(
@@ -803,26 +743,20 @@ def _require_coordinator_authority(
     row: Mapping[str, Any],
     actor: DispatchActor,
 ) -> None:
-    role = str(row["spawned_by_role"])
-    if (
-        not actor.agent_instance_id
-        or actor.agent_instance_id != str(row["spawned_by_instance_id"])
-        or not holds_role(state, role, actor.agent_session_id)
-    ):
-        raise DispatchError(
-            "coordinator_authority_denied",
-            "Caller is not the immutable spawning coordinator holding its durable role.",
-        )
+    coordinator_succession_proof(state, row, actor)
 
 
-def _ack_updates(
-    row: Mapping[str, Any], payload: Mapping[str, Any], at: datetime
-) -> dict[str, Any]:
-    required = ("brief_sha256", "role_binding", "scope_readback_sha256", "plan_sha256")
+def _require_assignment_identity(row: Mapping[str, Any], payload: Mapping[str, Any]) -> None:
+    assignment = require_assignment(row)
+    if payload.get("assignment_sha256") != assignment.sha256 or payload.get("revision_id") != assignment.revision.revision_id:
+        raise DispatchError("assignment_identity_mismatch", "Event identity does not match the immutable assignment.")
+
+
+def _ack_updates(row: Mapping[str, Any], payload: Mapping[str, Any], at: datetime) -> dict[str, Any]:
+    required = ("assignment_sha256", "revision_id", "role_binding", "scope_readback_sha256", "plan_sha256")
     for field in required:
         _require_text(payload.get(field), field)
-    if str(payload["brief_sha256"]) != str(row["brief_sha256"]):
-        raise DispatchError("ack_brief_mismatch", "ACK brief digest does not match dispatch.")
+    _require_assignment_identity(row, payload)
     if str(payload["role_binding"]) != str(row["role_name"]):
         raise DispatchError("ack_role_mismatch", "ACK role binding does not match dispatch.")
     return {
@@ -838,9 +772,7 @@ def _validate_common_blocker_payload(payload: Mapping[str, Any]) -> tuple[str, s
     question = _require_text(payload.get("question"), "question")
     safe_options = payload.get("safe_options")
     evidence = payload.get("evidence")
-    if not isinstance(safe_options, list) or not safe_options or not all(
-        isinstance(value, str) and value.strip() for value in safe_options
-    ):
+    if not isinstance(safe_options, list) or not safe_options or not all(isinstance(value, str) and value.strip() for value in safe_options):
         raise DispatchError("safe_options_invalid", "Blocker safe_options must be non-empty.")
     if not isinstance(evidence, Mapping) or not evidence:
         raise DispatchError("blocker_evidence_required", "Blocker evidence is required.")
@@ -879,9 +811,7 @@ def _validate_operator_blocker(payload: Mapping[str, Any], *, owner: str) -> Non
     _require_text(payload.get("authority_gap"), "authority_gap")
 
 
-def _blocked_updates(
-    row: Mapping[str, Any], payload: Mapping[str, Any], at: datetime
-) -> dict[str, Any]:
+def _blocked_updates(row: Mapping[str, Any], payload: Mapping[str, Any], at: datetime) -> dict[str, Any]:
     blocker_class = _require_text(payload.get("blocker_class"), "blocker_class")
     if blocker_class not in {"internal", "operator"}:
         raise DispatchError("blocker_class_invalid", "blocker_class must be internal or operator.")
@@ -904,9 +834,7 @@ def _blocked_updates(
         "blocker_owner": owner,
         "blocker_question": question,
         "blocker_evidence": dict(payload),
-        "next_required_action": "resolve_internal_blocker"
-        if blocker_class == "internal"
-        else "await_operator_ruling",
+        "next_required_action": "resolve_internal_blocker" if blocker_class == "internal" else "await_operator_ruling",
         "responsible_role": owner,
     }
 
@@ -916,6 +844,7 @@ def _completion_updates(
     payload: Mapping[str, Any],
     at: datetime,
 ) -> dict[str, Any]:
+    _require_assignment_identity(row, payload)
     artifact = Path(_require_text(payload.get("artifact_path"), "artifact_path"))
     artifact_sha256 = _require_text(payload.get("artifact_sha256"), "artifact_sha256")
     contract_sha256 = _require_text(
@@ -950,9 +879,7 @@ def _completion_updates(
     }
 
 
-def _milestone_updates(
-    row: Mapping[str, Any], payload: Mapping[str, Any], at: datetime
-) -> dict[str, Any]:
+def _milestone_updates(row: Mapping[str, Any], payload: Mapping[str, Any], at: datetime) -> dict[str, Any]:
     if not payload.get("completed_work"):
         raise DispatchError("completed_work_required", "Milestone completed_work is required.")
     evidence = payload.get("current_evidence")
@@ -1022,6 +949,7 @@ def report_managed_dispatch(
     """Append a worker event and apply its one legal projection transition."""
     _require_text(event_id, "event_id")
     row = read_managed_dispatch(state, dispatch_id)
+    require_assignment(row)
     existing = _find_event(state, dispatch_id, event_id)
     if existing is not None:
         _require_worker_authority(state, row, actor)
@@ -1095,10 +1023,13 @@ def _accept_completion_updates(
     if not isinstance(worker_evidence, Mapping):
         raise DispatchError("reported_evidence_invalid", "Worker evidence projection is invalid.")
     worker_digest = _canonical_sha256(worker_evidence)
-    if _require_text(
-        acceptance.get("worker_evidence_sha256"),
-        "worker_evidence_sha256",
-    ) != worker_digest:
+    if (
+        _require_text(
+            acceptance.get("worker_evidence_sha256"),
+            "worker_evidence_sha256",
+        )
+        != worker_digest
+    ):
         raise DispatchError(
             "acceptance_worker_evidence_mismatch",
             "Acceptance did not bind the exact worker evidence projection.",
@@ -1117,9 +1048,7 @@ def _accept_completion_updates(
     }
 
 
-def _require_resolution_state(
-    row: Mapping[str, Any], allowed: frozenset[str], code: str, action: str
-) -> None:
+def _require_resolution_state(row: Mapping[str, Any], allowed: frozenset[str], code: str, action: str) -> None:
     state_name = str(row["state"])
     if state_name not in allowed:
         raise DispatchError(code, f"{action} is not legal from {state_name}.")
@@ -1163,7 +1092,7 @@ def _retry_updates(
         deadline_updates[field] = (clock + timedelta(seconds=seconds)).isoformat()
     return {
         "state": DISPATCH_PREPARING,
-        "attempt_number": int(row["attempt_number"]) + 1,
+        "attempt_number": int(row["attempt_number"]) + (0 if owner_transfer_pending(row) else 1),
         "current_agent_instance_id": "",
         "first_turn_source": "",
         "first_turn_delivered": False,
@@ -1194,11 +1123,9 @@ def _retry_updates(
         "liveness_escalation_due_at": None,
         "watchdog_fired_at": None,
         "terminal_reason": "",
-        # A retry never changes Unit identity; a row whose mint failed re-runs
-        # the reconcile-then-mint step before its replacement attempt.
-        "next_required_action": (
-            NEXT_SPAWN_CURRENT_ATTEMPT if str(row.get("unit_id") or "") else NEXT_ENSURE_UNIT
-        ),
+        "attempt_receipt": dict(row.get("attempt_receipt") or {}) if owner_transfer_pending(row) else {},
+        "attempt_failure": {},
+        "next_required_action": NEXT_SPAWN_CURRENT_ATTEMPT,
         "responsible_role": actor_role,
         **deadline_updates,
     }
@@ -1268,10 +1195,11 @@ def _cancel_updates(
     _actor_role: str,
 ) -> dict[str, Any]:
     state_name = str(row["state"])
-    if state_name in DISPATCH_TERMINAL_STATES:
-        raise DispatchError(
-            "cancel_not_allowed", f"Dispatch is already terminal: {state_name}."
-        )
+    if state_name not in DISPATCH_NONTERMINAL_STATES | {
+        DISPATCH_FAILED_START,
+        DISPATCH_WORKER_LOST,
+    }:
+        raise DispatchError("cancel_not_allowed", f"Dispatch is already terminal: {state_name}.")
     return {
         "state": DISPATCH_CANCELLED,
         "terminal_reason": _require_text(payload.get("reason"), "reason"),
@@ -1309,6 +1237,66 @@ def _resolution_updates(
     return builder(row, payload, observed_at, actor_role)
 
 
+def validate_resolution_admission(
+    state: StateManagementInterface,
+    *,
+    dispatch_id: str,
+    event_id: str,
+    action: str,
+    actor: DispatchActor,
+    historical_cancel_role: str = "",
+) -> None:
+    """Bounded shape/authority guard; version and retry effects stay in the operation."""
+    _require_text(event_id, "event_id")
+    if action not in _RESOLUTION_RULES:
+        raise DispatchError("resolve_action_invalid", f"Unknown resolve action {action!r}.")
+    row = read_managed_dispatch(state, dispatch_id)
+    _require_resolution_caller(state, row, action, actor, historical_cancel_role)
+
+
+def _require_resolution_caller(
+    state: StateManagementInterface,
+    row: Mapping[str, Any],
+    action: str,
+    actor: DispatchActor,
+    historical_cancel_role: str = "",
+) -> dict[str, str] | None:
+    require_resolution_assignment(row, action)
+    if row.get("assignment") is not None:
+        _require_coordinator_authority(state, row, actor)
+        return coordinator_succession_proof(state, row, actor)
+    if not _caller_holds_binding(state, resolution_actor_role(row, historical_cancel_role), actor):
+        raise DispatchError("historical_cancel_caller_mismatch", "The caller does not hold the configured historical_cancel_role binding.")
+    return None
+
+
+def _update_resolution(
+    state: StateManagementInterface,
+    row: Mapping[str, Any],
+    *,
+    action: str,
+    payload: Mapping[str, Any],
+    observed_at: datetime,
+    actor_role: str,
+    actor: DispatchActor,
+) -> dict[str, Any]:
+    require_resolution_assignment(row, action)
+    updates = _resolution_updates(
+        row,
+        action=action,
+        payload=payload,
+        observed_at=observed_at,
+        actor_role=actor_role,
+    )
+    if row.get("assignment") is None:
+        # Only _cancel_updates can reach this path. Preserve every old contract
+        # field; the CAS and append-only decision event are the normal ones.
+        _require_resolution_state(row, DISPATCH_NONTERMINAL_STATES, "cancel_not_allowed", "Historical cancellation")
+        updates["cancelled_by_instance_id"] = actor.agent_instance_id
+        return _compare_and_update_dispatch(state, row, updates)
+    return _update_dispatch(state, row, updates)
+
+
 def resolve_managed_dispatch(
     state: StateManagementInterface,
     *,
@@ -1320,16 +1308,20 @@ def resolve_managed_dispatch(
     payload: Mapping[str, Any],
     observed_at: datetime,
     register: RegisterUnitClient | None = None,
+    spawn_attempt: AttemptLauncher | None = None,
+    historical_cancel_role: str = "",
 ) -> dict[str, Any]:
     """Apply one coordinator decision; retries are idempotent by event id.
 
-    ``register`` is required by the two actions that touch the Unit: a retry
-    whose mint failed refuses ``unit_register_unavailable`` without it, and a
-    cancel records ``register_annotation_failed`` instead of compensating.
+    Retry requires a register client and attempt launcher. Cancellation only
+    records an observation; an existing Unit is never implicitly retired.
+    Assignment-less historical rows support cancellation only, without register
+    annotation or conversion to a native assignment.
     """
     _require_text(event_id, "event_id")
     row = read_managed_dispatch(state, dispatch_id)
-    actor_role = str(row["spawned_by_role"])
+    require_resolution_assignment(row, action)
+    actor_role = resolution_actor_role(row, historical_cancel_role)
     register_actor = RegisterActor(
         agent_instance_id=actor.agent_instance_id,
         agent_session_id=actor.agent_session_id,
@@ -1338,25 +1330,26 @@ def resolve_managed_dispatch(
     )
     existing = _find_event(state, dispatch_id, event_id)
     if existing is not None:
-        _require_coordinator_authority(state, row, actor)
+        _require_resolution_caller(state, row, action, actor, historical_cancel_role)
         return _replay_event(existing)
     try:
-        _require_coordinator_authority(state, row, actor)
+        proof = _require_resolution_caller(state, row, action, actor, historical_cancel_role)
         _require_unreserved_event_payload(payload)
         if prior_version != int(row["version"]):
             raise DispatchError("stale_dispatch_version", "Event causal version is stale.")
-        updates = _resolution_updates(
+        result = _update_resolution(
+            state,
             row,
             action=action,
             payload=payload,
             observed_at=observed_at,
             actor_role=actor_role,
+            actor=actor,
         )
-        result = _update_dispatch(state, row, updates)
         if action == "request_retry":
-            result = _retry_attempt(state, result, register, register_actor)
-        elif action == "cancel":
-            result = _compensate_cancelled_unit(state, result, register, register_actor, payload)
+            result = _retry_attempt(state, result, register, register_actor, spawn_attempt)
+        elif action == "cancel" and row.get("assignment") is not None:
+            _annotate_unit(state, result, register, register_actor, "cancelled", payload)
     except DispatchError as exc:
         _audit_rejected_event(
             state,
@@ -1381,44 +1374,11 @@ def resolve_managed_dispatch(
         actor_instance_id=actor.agent_instance_id,
         prior_version=prior_version,
         observed_at=observed_at,
-        payload=payload,
+        payload={**payload, **({SUCCESSION_PAYLOAD_KEY: proof} if proof is not None else {})},
         accepted=True,
         accepted_outcome=result,
     )
     return result
-
-
-def _compensate_cancelled_unit(
-    state: StateManagementInterface,
-    row: dict[str, Any],
-    register: RegisterUnitClient | None,
-    actor: RegisterActor,
-    payload: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Retire only a self-minted Unit no attempt ever took up (s4.7).
-
-    A verified or adopted Unit, or one whose attempt reached a worker, belongs
-    to the coordinator's explicit ``psolet db unit retire``; the platform only annotates.
-    """
-    reason = str(payload.get("reason") or "")
-    if not str(row.get("unit_id") or ""):
-        return {**row, "unit_retired": False}
-    if row.get("unit_mint_state") != UNIT_MINT_MINTED or _dispatch_had_uptake(state, str(row["dispatch_id"])):
-        _annotate_unit(state, row, register, actor, "cancelled", {"reason": reason})
-        return {**row, "unit_retired": False}
-    failure = retire_unit(register, row, actor, reason)
-    if failure is not None:
-        _record_annotation_failure(state, row, actor, "cancelled", failure)
-    return {**row, "unit_retired": failure is None}
-
-
-def _dispatch_had_uptake(state: StateManagementInterface, dispatch_id: str) -> bool:
-    """Any accepted first turn or worker event on any attempt is uptake."""
-    return any(
-        bool(event.get("accepted"))
-        and (event.get("event_kind") == "first_turn" or event.get("event_kind") in _WORKER_EVENT_RULES)
-        for event in all_managed_dispatch_events(state, dispatch_id)
-    )
 
 
 def _retry_attempt(
@@ -1426,88 +1386,21 @@ def _retry_attempt(
     row: dict[str, Any],
     register: RegisterUnitClient | None,
     actor: RegisterActor,
+    spawn_attempt: AttemptLauncher | None,
 ) -> dict[str, Any]:
-    """Re-run the reconcile-then-mint step when the row has no Unit, then spawn."""
-    if row.get("next_required_action") == NEXT_ENSURE_UNIT:
-        try:
-            if register is None:
-                raise DispatchError("unit_register_unavailable", "no register client is bound to this retry")
-            row = _ensure_register_unit(state, row, register, actor, reconcile_first=True)
-        except DispatchError as exc:
-            return _update_dispatch(state, row, fail_start_updates(row, exc))
-    return _spawn_retry_attempt(state, row, register, actor)
-
-
-def _spawn_retry_attempt(
-    state: StateManagementInterface,
-    row: Mapping[str, Any],
-    register: RegisterUnitClient | None,
-    actor: RegisterActor,
-) -> dict[str, Any]:
-    """Create the explicit replacement attempt from the immutable contract."""
-    from .session_lifecycle_verbs import (  # noqa: PLC0415
-        SpawnSessionRequest,
-        VerbError,
-        spawn_session,
-    )
-
-    raw_tools = row.get("allowed_tools")
-    if not isinstance(raw_tools, (list, tuple)):
-        raise DispatchError("dispatch_contract_invalid", "allowed_tools is not a list.")
-    difficulty_score, selection_receipt, enforce_selection_receipt = _selection_fields_from_dispatch(row)
-    request = SpawnSessionRequest(
-        role_class=str(row["role_class"]),
-        lane_id=str(row["lane_id"]),
-        brief_ref=str(row["brief_ref"]),
-        work_class=str(row["work_class"]),
-        budget_line=str(row["budget_line"]),
-        unit_id=str(row.get("unit_id") or ""),
-        repository_root=str(row.get("repository_root") or ""),
-        dispatch_id=str(row["dispatch_id"]),
-        agent_runtime=str(row["agent_runtime"]),
-        role_name=str(row["role_name"]),
-        host=str(row["host"]),
-        visibility=str(row["visibility"]),
-        model=str(row["model"]),
-        effort=str(row["effort"]),
-        report_by_seconds=int(row["report_by_seconds"]),
-        spawned_by_instance_id=str(row["spawned_by_instance_id"]),
-        spawned_by_role=str(row["spawned_by_role"]),
-        directed_by=str(row["directed_by"]),
-        allowed_tools=tuple(str(value) for value in raw_tools),
-        permission_mode=str(row["permission_mode"]),
-        transport=str(row["transport"]),
-        allow_askuserquestion=bool(row["allow_askuserquestion"]),
-        local_name=str(row["local_name"]),
-        degraded_hooks_acknowledged=bool(row["degraded_hooks_acknowledged"]),
-        dispatch_kind=str(row.get("dispatch_kind") or ""),
-        reviewed_report_vendor=str(row.get("reviewed_report_vendor") or ""),
-        pair_id=str(row.get("pair_id") or ""),
-        scope_tags=contract_scope_tags(row),
-        difficulty_score=difficulty_score,
-        selection_receipt=selection_receipt,
-        enforce_selection_receipt=enforce_selection_receipt,
-    )
+    """Check current eligibility and exact old revision; never rebind or mint."""
     try:
-        spawn_session(state, request)
-    except VerbError as exc:
+        if register is None:
+            raise DispatchError("unit_register_unavailable", "A register client is required for retry.")
+        if spawn_attempt is None:
+            raise DispatchError("unit_launcher_unavailable", "An attempt launcher is required for retry.")
+        verify_retry_assignment(row, register)
+        return _launch_attempt(state, row, spawn_attempt, register, actor)
+    except DispatchError as exc:
         current = read_managed_dispatch(state, str(row["dispatch_id"]))
-        _annotate_unit(state, current, register, actor, "failed_start", {"code": exc.code})
-        return _update_dispatch(state, current, fail_start_updates(current, DispatchError(exc.code, exc.message)))
-    spawned = read_managed_dispatch(state, str(row["dispatch_id"]))
-    _annotate_unit(state, spawned, register, actor, "spawned")
-    return spawned
-
-
-def _selection_fields_from_dispatch(
-    row: Mapping[str, Any],
-) -> tuple[float, Mapping[str, Any] | None, bool]:
-    receipt = row.get("selection_receipt")
-    return (
-        float(row.get("difficulty_score") or 0.0),
-        receipt if isinstance(receipt, dict) else None,
-        bool(row.get("selection_receipt_enforced")),
-    )
+        if current["state"] == DISPATCH_FAILED_START:
+            return current
+        return _update_dispatch(state, current, fail_start_updates(current, exc))
 
 
 def mark_dispatch_worker_lost(
@@ -1517,26 +1410,26 @@ def mark_dispatch_worker_lost(
     agent_instance_id: str,
     observed_at: datetime,
     detail: str,
+    register: RegisterUnitClient | None,
 ) -> dict[str, Any]:
     """Converge a confirmed-dead current attempt without respawning it."""
     row = read_managed_dispatch(state, dispatch_id)
+    require_assignment(row)
     if str(row.get("current_agent_instance_id") or "") != agent_instance_id:
         raise DispatchError("stale_attempt", "Dead-host evidence is not for current attempt.")
     if str(row["state"]) in DISPATCH_TERMINAL_STATES:
         return row
-    result = _update_dispatch(
-        state,
-        row,
-        {
-            "state": DISPATCH_WORKER_LOST,
-            "terminal_reason": "confirmed_host_dead",
-            "host_liveness": "dead",
-            "host_liveness_observed_at": observed_at.isoformat(),
-            "host_liveness_detail": detail,
-            "next_required_action": "decide_retry_or_cancel",
-            "responsible_role": str(row["spawned_by_role"]),
-        },
-    )
+    updates = {
+        "state": DISPATCH_WORKER_LOST,
+        "terminal_reason": "confirmed_host_dead",
+        "host_liveness": "dead",
+        "host_liveness_observed_at": observed_at.isoformat(),
+        "host_liveness_detail": detail,
+        "next_required_action": "decide_retry_or_cancel",
+        "responsible_role": str(row["spawned_by_role"]),
+    }
+    result = _update_dispatch(state, row, updates)
+    causal = {**row, **updates, "version": int(row["version"]) + 1}
     _write_event(
         state,
         dispatch_id=dispatch_id,
@@ -1549,6 +1442,18 @@ def mark_dispatch_worker_lost(
         observed_at=observed_at,
         payload={"detail": detail},
         accepted=True,
+    )
+    _annotate_causal_transition(
+        state,
+        causal,
+        register,
+        "worker_lost",
+        {
+            "prior_version": int(row["version"]),
+            "transition_version": int(row["version"]) + 1,
+            "causal_event_id": f"host-dead:{int(row['version'])}",
+            "trigger_detail": detail,
+        },
     )
     return result
 
@@ -1565,6 +1470,7 @@ def record_dispatch_liveness(
     if liveness not in {"alive", "dead", "unknown"}:
         raise DispatchError("host_liveness_invalid", f"Unknown liveness {liveness!r}.")
     row = read_managed_dispatch(state, dispatch_id)
+    require_assignment(row)
     updates: dict[str, Any] = {
         "host_liveness": liveness,
         "host_liveness_observed_at": observed_at.isoformat(),
@@ -1577,15 +1483,8 @@ def record_dispatch_liveness(
         updates.update(
             {
                 "liveness_unknown_count": unknown_count,
-                "next_liveness_probe_at": (
-                    observed_at.astimezone(UTC)
-                    + timedelta(seconds=UNKNOWN_LIVENESS_REPROBE_SECONDS)
-                ).isoformat(),
-                "liveness_escalation_due_at": existing_escalation
-                or (
-                    observed_at.astimezone(UTC)
-                    + timedelta(seconds=UNKNOWN_LIVENESS_ESCALATION_SECONDS)
-                ).isoformat(),
+                "next_liveness_probe_at": (observed_at.astimezone(UTC) + timedelta(seconds=UNKNOWN_LIVENESS_REPROBE_SECONDS)).isoformat(),
+                "liveness_escalation_due_at": existing_escalation or (observed_at.astimezone(UTC) + timedelta(seconds=UNKNOWN_LIVENESS_ESCALATION_SECONDS)).isoformat(),
             },
         )
     else:
@@ -1609,14 +1508,6 @@ def record_dispatch_liveness(
     return read_managed_dispatch(state, dispatch_id)
 
 
-def _condition_for(
-    row: Mapping[str, Any], now: datetime
-) -> tuple[str, str, str] | None:
-    from .session_lifecycle_store import managed_dispatch_condition  # noqa: PLC0415
-
-    return managed_dispatch_condition(row, now)
-
-
 def supervise_managed_dispatches(
     state: StateManagementInterface,
     *,
@@ -1632,6 +1523,7 @@ def supervise_managed_dispatches(
 def sweep_managed_dispatches(
     state: StateManagementInterface,
     *,
+    register: RegisterUnitClient | None,
     peer_registry: PeerRegistry | None = None,
     bridge_manager: BridgeSessionManager | None = None,
     now: datetime | None = None,
@@ -1642,53 +1534,38 @@ def sweep_managed_dispatches(
 
     return sweep(
         state,
+        register=register,
         peer_registry=peer_registry,
         bridge_manager=bridge_manager,
         now=now,
     )
+
+
 def managed_dispatch_status(
     state: StateManagementInterface,
     dispatch_id: str,
     *,
     now: datetime | None = None,
+    milestone_claim: Any = None,
 ) -> dict[str, Any]:
     """Return one decision-oriented aggregate, with receipts subordinate."""
-    from .session_lifecycle_verbs import dispatch_event_age_seconds
-
     clock = (now or datetime.now(UTC)).astimezone(UTC)
+    from .session_lifecycle_store import verify_milestone_claim  # noqa: PLC0415
+
     row = read_managed_dispatch(state, dispatch_id)
-    events = all_managed_dispatch_events(state, dispatch_id)
-    condition = _condition_for(row, clock)
-    aggregate = dict(row)
-    deadline_overdue = {
-        name: clock >= _parse_persisted_utc(row[name], name)
-        for name in ("uptake_due_at", "report_by", "watchdog_due_at")
-    }
-    aggregate.update(
-        {
-            "state": str(row["state"]),
-            "ledger_state": str(row["state"]),
-            "state_consistent": str(row.get("host_liveness") or "unknown") != "dead"
-            or str(row["state"]) in DISPATCH_TERMINAL_STATES,
-            "rejected_event_count": sum(not bool(event.get("accepted")) for event in events),
-            "event_count": len(events),
-            "raw_receipts": [event for event in events if event.get("event_kind") == "first_turn"],
-            "deadline_overdue": deadline_overdue,
-            "last_ack_age_seconds": dispatch_event_age_seconds(row.get("last_ack_at"), clock),
-            "last_milestone_age_seconds": dispatch_event_age_seconds(
-                row.get("last_milestone_at"), clock
-            ),
-            "plan_projection_warning": (
-                "human coordinator plans are unverified projections; durable dispatch state "
-                "and append-only events remain authoritative"
-            ),
-        },
-    )
-    if condition is not None:
-        aggregate["overdue_condition"] = condition[0]
-        aggregate["next_required_action"] = condition[1]
-        aggregate["responsible_role"] = condition[2]
-    return aggregate
+    if row.get("assignment") is None:
+        historical = {
+            **row,
+            "assignment_status": "historical",
+            "allowed_actions": ["cancel"] if row["state"] in DISPATCH_NONTERMINAL_STATES else [],
+        }
+        if milestone_claim is not None:
+            historical["milestone_claim_verification"] = verify_milestone_claim(row, [], milestone_claim)
+        return historical
+    require_assignment(row)
+    from .session_lifecycle_store import native_managed_dispatch_status  # noqa: PLC0415
+
+    return native_managed_dispatch_status(state, row, clock, milestone_claim=milestone_claim)
 
 
 __all__ = [
@@ -1707,19 +1584,15 @@ __all__ = [
     "DISPATCH_UPTAKE_PENDING",
     "DISPATCH_UPTAKE_UNCERTAIN",
     "DISPATCH_WORKER_LOST",
+    "AttemptLauncher",
     "DispatchActor",
     "DispatchError",
     "DispatchSpec",
-    "EVENT_ENSURE_UNIT",
     "EVENT_MANAGED_DISPATCH_NOTICE",
     "EVENT_REGISTER_ANNOTATION_FAILED",
     "MANAGED_DISPATCH_PAGE_DEFAULT",
     "MANAGED_DISPATCH_PAGE_MAX",
-    "NEXT_ENSURE_UNIT",
     "NEXT_SPAWN_CURRENT_ATTEMPT",
-    "UNIT_MINT_ADOPTED",
-    "UNIT_MINT_MINTED",
-    "UNIT_MINT_VERIFIED",
     "managed_dispatch_events",
     "managed_dispatch_inventory",
     "managed_dispatch_status",

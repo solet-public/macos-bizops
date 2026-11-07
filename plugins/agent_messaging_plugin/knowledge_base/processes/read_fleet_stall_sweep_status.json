@@ -1,0 +1,19 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::read_fleet_stall_sweep_status",
+  "display_name": "Read the fleet stall sweep's own last completed run",
+  "description": "iss_c4fbe548. A pure read of the fleet stall sweep's OWN liveness: the last completed run it published, how long ago that was, and an explicit 'silent' flag once that age passes three scheduled intervals (2700 seconds at the default 15-minute cron). One missed fire is a restart or a slow tick; three consecutive misses is the sweep not running. This verb exists because the fleet's predecessor stall net was found dead for about 25 days with nobody able to notice, since nothing published its last run; a net nobody can tell is dead is a defect this fleet has already paid for once. The record is the whole run envelope, so a reader sees the last verdict, window, counts and advisories as well as the timestamp. A null last_completed_run means no run has ever been recorded, which is itself reported as an advisory rather than as health. Records nothing and acts on nothing.",
+  "embedding_description": "Checking whether the fleet stall sweep itself is still running: reading the last sweep run it published, how old that run is, and whether the sweep has gone silent past three missed scheduled fires, so a dead watcher is visible instead of looking like a quiet fleet.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Fleet stall sweep status",
+    "result_type": "fleet_stall_sweep_status_result",
+    "result_description": "last_completed_run (the whole published run envelope, or null when none has ever been recorded), seconds_since_last_completed_run, silent, silence_threshold_seconds, and advisories.",
+    "presentation_guidance": "Lead with whether the sweep is still running: silent=true means it is not, and that is the headline, not the stale verdict it last recorded. State the age in plain units against the threshold. When last_completed_run is null, say the sweep may never have run rather than reporting it as healthy or as absent of stalls. A stale verdict inside the record describes the fleet at the time of that run and nothing later; do not restate it as current.",
+    "output_action_guidance": "If silent=true, ensure_fleet_stall_sweep_schedule shows whether the cron exists at all, and sweep_fleet_stall runs the sweep once by hand. This verb only reports; nothing here restarts the sweep."
+  },
+  "error_processor_customizations": {
+    "action_context": "One key_value_store read of the sweep's published last-run record through StateManagementInterface. No register call, no session contact, no write.",
+    "error_interpretation": "state_service_unavailable: the deployment has no bound state service, so the published run record is unreachable. An unreadable or malformed stored stamp is not an error: it is returned as a named advisory with a null age.",
+    "recovery_guidance": "Retry is always safe; this is a pure read. A state fault means the state service is unbound or down, not that the sweep is silent: do not read a failed status read as evidence either way about the sweep or the fleet."
+  }
+}

@@ -93,7 +93,7 @@ class _BridgeBackedState:
             )
         return {
             "action_status": "completed",
-            "data": {"records": records[:data["limit"]]},
+            "data": {"records": records[: data["limit"]]},
             "actions": [],
             "error": None,
         }
@@ -118,7 +118,8 @@ def _cleanup() -> None:
 def main() -> int:
     if os.environ.get("GAUGE_NOTICE_RECORD_LIVE_SMOKE") != "1":
         print("SKIP  set GAUGE_NOTICE_RECORD_LIVE_SMOKE=1; requires a live bridge session")
-        return 0
+        print('BORN_CLONE_SKIP_WITNESS={"reason":"opt_in_toggle_not_enabled","toggle":"GAUGE_NOTICE_RECORD_LIVE_SMOKE"}')
+        return 77
 
     state = _BridgeBackedState()
     now = datetime.now(UTC)
@@ -136,11 +137,7 @@ def main() -> int:
                 agent_instance_id=_PROBE_SUBJECT,
                 emitted_at=(now + timedelta(seconds=index)).isoformat(),
                 delivery_outcome=delivery_outcome,
-                steward_instance_id=(
-                    "agi-gauge-notice-live-steward"
-                    if delivery_outcome == NOTICE_DELIVERY_APPENDED
-                    else None
-                ),
+                steward_instance_id=("agi-gauge-notice-live-steward" if delivery_outcome == NOTICE_DELIVERY_APPENDED else None),
                 release_id="gauge-notice-live-smoke",
                 threshold_s=3600.0,
                 observed_s=5400.0,

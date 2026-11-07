@@ -61,6 +61,14 @@ class SchedulingPluginProtocol(Protocol):
         state: dict[str, Any],
     ) -> ActionResult: ...
 
+    def list_schedules(self, params: dict[str, Any], state: dict[str, Any]) -> ActionResult: ...
+
+    def rebind_scheduled_action(self, params: dict[str, Any], state: dict[str, Any]) -> ActionResult: ...
+
+    def get_schedule_binding_history(self, params: dict[str, Any], state: dict[str, Any]) -> ActionResult: ...
+
+    def recover_scheduled_action(self, params: dict[str, Any], state: dict[str, Any]) -> ActionResult: ...
+
 
 class SchedulingService(BootstrappableServiceInterface):
     """Service wrapper that exposes scheduling operations via service interface."""
@@ -79,11 +87,7 @@ class SchedulingService(BootstrappableServiceInterface):
         self._plugin_manager: PluginManager = plugin_manager
         self.plugin_manager = plugin_manager
         self.app_home = app_home
-        self._plugin_name = (
-            scheduling_plugin_name
-            or os.environ.get("ANANTA_SCHEDULING_PLUGIN")
-            or DEFAULT_SCHEDULING_PLUGIN
-        )
+        self._plugin_name = scheduling_plugin_name or os.environ.get("ANANTA_SCHEDULING_PLUGIN") or DEFAULT_SCHEDULING_PLUGIN
         self._plugin: SchedulingPluginProtocol | None = None
 
         super().__init__(plugin_manager)
@@ -107,9 +111,7 @@ class SchedulingService(BootstrappableServiceInterface):
         if self._plugin is None:
             plugin_obj = self._plugin_manager.get_plugin(self._plugin_name)
             if not isinstance(plugin_obj, SchedulingPluginProtocol):
-                raise FrameworkError(
-                    f"Scheduling plugin '{self._plugin_name}' does not implement the required protocol"
-                )
+                raise FrameworkError(f"Scheduling plugin '{self._plugin_name}' does not implement the required protocol")
 
             provider_hook = getattr(plugin_obj, "set_as_active_provider", None)
             if callable(provider_hook):
@@ -138,9 +140,7 @@ class SchedulingService(BootstrappableServiceInterface):
         return normalized
 
     @staticmethod
-    def _merge_memory_tag_into_tags(
-        memory_tag: str, tags: list[str] | str | None
-    ) -> list[str] | str:
+    def _merge_memory_tag_into_tags(memory_tag: str, tags: list[str] | str | None) -> list[str] | str:
         if tags is None:
             return [memory_tag]
         if isinstance(tags, list):
@@ -263,3 +263,15 @@ class SchedulingService(BootstrappableServiceInterface):
             params=params,
             state=self._normalize_state(state),
         )
+
+    def list_schedules(self, status: str | None = None, state: dict[str, Any] | None = None) -> ActionResult:
+        return self._ensure_ready().list_schedules(params={"status": status}, state=self._normalize_state(state))
+
+    def rebind_scheduled_action(self, schedule_id: str, action_index: int, target_kind: str, target_value: str, expected_revision: int, reason: str, state: dict[str, Any] | None = None) -> ActionResult:
+        return self._ensure_ready().rebind_scheduled_action(params={"schedule_id": schedule_id, "action_index": action_index, "target_kind": target_kind, "target_value": target_value, "expected_revision": expected_revision, "reason": reason}, state=self._normalize_state(state))
+
+    def get_schedule_binding_history(self, schedule_id: str, limit: int = 100, after: list[object] | None = None, state: dict[str, Any] | None = None) -> ActionResult:
+        return self._ensure_ready().get_schedule_binding_history(params={"schedule_id": schedule_id, "limit": limit, "after": after}, state=self._normalize_state(state))
+
+    def recover_scheduled_action(self, schedule_id: str, expected_revision: int, reason: str, state: dict[str, Any] | None = None) -> ActionResult:
+        return self._ensure_ready().recover_scheduled_action(params={"schedule_id": schedule_id, "expected_revision": expected_revision, "reason": reason}, state=self._normalize_state(state))

@@ -22,6 +22,7 @@ from ananta.core.config.environment_config import EnvironmentConfig
 from ananta.core.event_orchestrator import EventOrchestrator
 from ananta.core.plugins.plugin_contracts import ActionStatus, ErrorCode, ErrorSeverity
 from ananta.core.root_manifest.diagnostic import emit_startup_diagnostic
+from ananta.core.runtime.loop_lag import install_loop_lag_monitor
 from ananta.core.runtime.stack_dump import install_stack_dump_handler
 from ananta.error_handling import (
     AnantaError,
@@ -249,9 +250,7 @@ def _create_bootstrap_plugin_manager(logger: logging.Logger) -> "PluginManager":
         raise
 
 
-def _execute_service_transitions(
-    orchestrator: EventOrchestrator, plugin_manager: "PluginManager"
-) -> None:
+def _execute_service_transitions(orchestrator: EventOrchestrator, plugin_manager: "PluginManager") -> None:
     """Execute full service transition from bootstrap to plugin mode."""
     from ananta.core.services.service_transition_coordinator import (
         HasServicesCollection,
@@ -259,9 +258,7 @@ def _execute_service_transitions(
     )
 
     orchestrator_protocol = cast(HasServicesCollection, orchestrator)
-    coordinator = ServiceTransitionCoordinator(
-        orchestrator_protocol, plugin_manager, config_manager=orchestrator.config
-    )
+    coordinator = ServiceTransitionCoordinator(orchestrator_protocol, plugin_manager, config_manager=orchestrator.config)
     coordinator.execute_full_transition_sync()
 
 
@@ -315,21 +312,16 @@ def _execute_infrastructure_setup(
     try:
         _execute_service_transitions(orchestrator, plugin_manager)
         orchestrator.initialize_database_after_schema_creation()
-        _reinitialize_logging_after_transition(
-            orchestrator, app_home, log_level, log_outputs, logger
-        )
+        _reinitialize_logging_after_transition(orchestrator, app_home, log_level, log_outputs, logger)
     except Exception as setup_error:
         logger.error(f"Infrastructure setup failed: {setup_error}")
         raise
 
 
-def initialize_components_sync(
-    app_home: Path, args: argparse.Namespace
-) -> tuple[logging.Logger, EventOrchestrator]:
+def initialize_components_sync(app_home: Path, args: argparse.Namespace) -> tuple[logging.Logger, EventOrchestrator]:
     """Initialize all components synchronously."""
-    logger = _initialize_logging_sync(
-        app_home=app_home, log_level=args.log_level, log_outputs=args.log_outputs
-    )
+    logger = _initialize_logging_sync(app_home=app_home, log_level=args.log_level, log_outputs=args.log_outputs)
+    install_loop_lag_monitor()
     logger.debug(f"Starting Ananta with app directory: {app_home}")
     if args.actions:
         logger.debug(f"Starting prompt: {args.actions}")
@@ -349,16 +341,12 @@ def initialize_components_sync(
     )
 
     plugin_manager = _create_bootstrap_plugin_manager(logger)
-    _execute_infrastructure_setup(
-        orchestrator, plugin_manager, app_home, args.log_level, args.log_outputs, logger
-    )
+    _execute_infrastructure_setup(orchestrator, plugin_manager, app_home, args.log_level, args.log_outputs, logger)
 
     return logger, orchestrator
 
 
-def _initialize_logging_sync(
-    *, app_home: Path, log_level: str, log_outputs: str | None = None
-) -> logging.Logger:
+def _initialize_logging_sync(*, app_home: Path, log_level: str, log_outputs: str | None = None) -> logging.Logger:
     log_level_map = {
         "debug": logging.DEBUG,
         "info": logging.INFO,
@@ -390,10 +378,7 @@ def _initialize_logging_sync(
         )
         files_deleted, bytes_freed = purge_old_logs(str(Path(app_home) / "data" / "logs"))
         if files_deleted:
-            logger.info(
-                f"Log retention sweep: deleted {files_deleted} file(s) "
-                f"older than {DEFAULT_LOG_RETENTION_DAYS} days ({bytes_freed / 1024 / 1024:.1f} MB freed)"
-            )
+            logger.info(f"Log retention sweep: deleted {files_deleted} file(s) older than {DEFAULT_LOG_RETENTION_DAYS} days ({bytes_freed / 1024 / 1024:.1f} MB freed)")
         return logger
     except Exception as e:
         raise SystemError(

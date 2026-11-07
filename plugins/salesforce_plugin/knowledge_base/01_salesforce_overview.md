@@ -6,7 +6,7 @@ Article Role: plugin_reference
 
 Article Tags: planning-stage:execution, evidence-category:capability-reference, domain:salesforce, domain:local-solet, domain:cloud-solet
 
-Embedding Description: Salesforce plugin reference — the one-time operator setup for connecting a Salesforce org via the operator's sf CLI login (standalone CLI bundle install, one browser login via sf org login web, two-field salesforce_org address-book registration with a pinned instance host), the thirteen verbs with argument shapes (SOQL query, record get/describe/list/create/update/delete, test_connection, and Bulk API v2 ingest submit/status/results/abort), typed sf.* errors with recovery when the CLI has no live session, and the full-CRUD-including-delete posture under full CLI delegation.
+Embedding Description: Salesforce plugin reference — the one-time operator setup for connecting a Salesforce org via the operator's sf CLI login (standalone CLI bundle install, one browser login via sf org login web, two-field salesforce_org address-book registration with a pinned instance host), the verbs with argument shapes (SOQL query and queryAll, record get/describe/list/create/update/delete, test_connection, Bulk API v2 ingest submit/status/results/abort including hardDelete, the composite, tooling, bulk_jobs, reports, dashboards, rest_resources and actions families, and the generic authenticated request), typed sf.* errors with recovery when the CLI has no live session, and the full-CRUD-including-delete posture under full CLI delegation.
 
 A full read/write connector over the operator's Salesforce org. Executor:
 full CLI delegation — every verb shells out to the operator's `sf` CLI
@@ -27,12 +27,27 @@ The operator's dividing line: *"document/ticket deletion is an acceptable
 loss class, database destruction is not."* Salesforce is a SaaS workflow
 tool, not the developer database connectors are — so, unlike
 `snowflake_plugin`/`external_postgres_plugin`, this connector ships **full
-CRUD including `delete_record`**, and — as of 2026-08-24 — **Bulk API v2
-ingest** (`bulk_ingest_submit`/`bulk_job_status`/`bulk_job_results`/
-`bulk_job_abort`; insert/update/upsert/delete, never `hardDelete` — see
-"Bulk API v2 ingest" below). `run_apex`, bulk **query**, and ContentVersion
-file-upload verbs remain **out of v1 for build-effort reasons only** (not a
-risk exclusion) — pullable into v1 on operator request.
+CRUD including `delete_record`**, **Bulk API v2 ingest**
+(`bulk_ingest_submit`/`bulk_job_status`/`bulk_job_results`/`bulk_job_abort`;
+insert/update/upsert/delete/hardDelete — see "Bulk API v2 ingest" below), and
+the typed families from build 3 (2026-11-07): `composite` (composite, graph,
+batch, tree and sObject Collections, deletes included), `tooling` (Tooling
+API queries, Tooling record writes and deletes, anonymous Apex and Apex test
+runs) and `bulk_jobs` (the Bulk API 2.0 query job lifecycle plus ingest job
+list and delete), and from build 4: `reports` (run, clone, save and delete
+reports, asynchronous runs, report types), `dashboards` (results, refresh,
+clone, save and delete), `rest_resources` (limits, recent items, object info
+and describe, updated/deleted ids, records by external id including upsert
+and delete, relationship traversal, paged query and queryAll, explain, SOSL
+and parameterized search) and `actions` (invocable action discovery and
+invocation: Apex, flows, quick actions, email alerts and standard actions).
+`authenticated_request` reaches every other endpoint. Salesforce's own
+permissions on the registered user are the only boundary (USER ruling
+`rul_4c99a30d`): the plugin adds no read-only mode, role request or
+confirmation prompt. The remaining typed gaps (Metadata API, Partner SOAP
+operations, Platform Event subscription, ContentVersion files) are listed in
+`plugins/salesforce_plugin/knowledge_base/vendor_api_coverage.md` and
+reachable now through `authenticated_request`.
 
 ## Executor model — full CLI delegation, no token ever enters this process
 
@@ -159,13 +174,13 @@ that user's permissions, and its audit trail shows that user.
   org-side revocation turns the connector off until the next login — the
   fully-supported dormant state, not a breakage.
 
-## Verbs (built — 13 total)
+## Verbs (built — 23 total)
 
 | Verb | Args | Returns |
 |---|---|---|
 | `test_connection` | — | `{ok, org_id, username, api_version}` |
-| `soql_query` | `query`, `output_tsv_path`, `acknowledge_default_limit_override=false`, `row_limit?` | `{path, columns, row_count, total_size, truncated}` — written as ONE `.tsv` file at the caller's ABSOLUTE path, never records inline; defaults to 500 records, up to 1000 with an acknowledged override |
-| `export_soql` | `query`, `output_tsv_path`, `acknowledge_default_limit_override=false`, `row_limit?` | `{path, columns, row_count, total_size, truncated}` — the N>>500 route: same shape as soql_query, defaults to 500 records, up to 50000 with an acknowledged override |
+| `soql_query` | `query`, `output_tsv_path`, `acknowledge_default_limit_override=false`, `row_limit?`, `include_deleted=false` | `{path, columns, row_count, total_size, truncated}` — written as ONE `.tsv` file at the caller's ABSOLUTE path, never records inline; defaults to 500 records, up to 1000 with an acknowledged override |
+| `export_soql` | `query`, `output_tsv_path`, `acknowledge_default_limit_override=false`, `row_limit?`, `include_deleted=false` | `{path, columns, row_count, total_size, truncated}` — the N>>500 route: same shape as soql_query, defaults to 500 records, up to 50000 with an acknowledged override |
 | `get_record` | `sobject`, `id`, `fields?` | `{record}` |
 | `describe_sobject` | `sobject` | `{fields:[{name, type, label, nillable, updateable}]}` |
 | `list_sobjects` | — | `{sobjects:[{name, label}]}` |
@@ -176,6 +191,15 @@ that user's permissions, and its audit trail shows that user.
 | `bulk_job_status` | `job_id` | `{job_id, state, processed_records, failed_records, error_message}` — the poll target for a submitted job |
 | `bulk_job_results` | `job_id`, `successful_results_path`, `failed_results_path`, `unprocessed_results_path` | `{successful_results_path, failed_results_path, unprocessed_results_path}` — three CSVs written under `export_allowed_roots` |
 | `bulk_job_abort` | `job_id` | `{job_id, state, processed_records, failed_records, error_message}` |
+| `composite` | `operation`, `body?`, `query?`, `headers?`, `sobject?`, `external_id_field?` | `{family, operation, method, status, headers, body, correlation_id, error_code?, failures?}` — composite, graph, batch, tree, collections_create/retrieve/retrieve_many/update/upsert/delete |
+| `tooling` | `operation`, `query?`, `body?`, `headers?`, `sobject?`, `id?`, `next_records_url?` | same shape plus `pagination.next_records_url` — query, query_more, search, execute_anonymous, run_tests_async/sync, completions, list_sobjects, sobject_info, describe, create/get/update/delete |
+| `bulk_jobs` | `operation`, `job_id?`, `query?`, `body?`, `headers?`, `output_csv_path?` | same shape; `query_results` writes one CSV page under `export_allowed_roots` and returns `output_csv_path`, `bytes_written`, `pagination.next_locator` — query_create/get/list/results/abort/delete, ingest_list/delete |
+| `reports` | `operation`, `report_id?`, `instance_id?`, `report_type?`, `query?`, `body?`, `headers?` | same shape plus `pagination.report_all_data` (false when a run returned only the vendor's first detail rows) — list, create, clone, describe, run, run_filtered, run_async, instances, instance_results, query, update, delete, report_types, describe_report_type |
+| `dashboards` | `operation`, `dashboard_id?`, `query?`, `body?`, `headers?` | same shape — list, clone, describe, results, refresh, status, update, delete |
+| `rest_resources` | `operation`, `sobject?`, `external_id_field?`, `external_id?`, `id?`, `relationship?`, `next_records_url?`, `query?`, `body?`, `headers?` | same shape plus `pagination.next_records_url` — resources, limits, recent, describe_global, sobject_info, describe, updated, deleted, get/upsert/delete_by_external_id, relationship, query, query_all, query_more, explain, search, parameterized_search |
+| `actions` | `operation`, `action_type?`, `action?`, `body?`, `headers?` | same shape; `failures` counts invocation results whose `isSuccess` is false — list, list_standard, list_custom, list_custom_type, describe_standard, describe_custom, invoke_standard, invoke_custom |
+| `authenticated_request` | `method`, `path`, `query?`, `headers?`, `body?` | `{status, headers, body, correlation_id, nextRecordsUrl?}` — any other relative endpoint on the registered org |
+| `probe_cli` / `provision_cli` | — / `acknowledge_system_change` | local `sf` CLI diagnostic and consent-gated install |
 
 Both `soql_query` and `export_soql` ALWAYS write their result to the
 caller's `output_tsv_path` — never records inline, at any size
@@ -191,13 +215,15 @@ their cells. Each defaults to 500 records absent an acknowledged override;
 N>>500 route). `acknowledge_default_limit_override=true` together with an
 explicit `row_limit` requests more than the default — both are required
 together, and a `row_limit` above the verb's hard cap is refused, never
-silently clamped. Neither verb has a vendor-imposed ceiling to defer to:
-this plugin never executes Apex, so the 50,000-record Apex governor limit
-does not apply; the actual Salesforce fact for this call path is a
+silently clamped. `include_deleted=true` runs the query through the vendor
+`queryAll` resource (`sf data query --all-rows`), which also returns deleted
+records still in the recycle bin and archived records. Neither verb has a
+vendor-imposed ceiling to defer to: these verbs never run SOQL inside Apex,
+so the 50,000-record Apex governor limit does not apply; the actual Salesforce fact for this call path is a
 2,000-record REST query batch size with no vendor total ceiling, and
 jsforce's `autoFetch` already pages past that internally.
 
-## Bulk API v2 ingest (2026-08-24 — wave 1: ingest only, bulk query is wave 2)
+## Bulk API v2 ingest and query jobs
 
 Four verbs cover the write side of Bulk API v2 — submitting large insert/
 update/upsert/delete jobs from a CSV file, polling them, fetching their
@@ -211,10 +237,11 @@ completes — two independent async layers, never conflate the two ids.
   returns the instant Salesforce ACKNOWLEDGES the job (state `Open` or
   similar) — never `--wait`, because a Bulk v2 job can run minutes, well past
   this connector's 30s per-call subprocess bound (`SF_CLI_TIMEOUT_SECONDS`).
-  `operation` is one of `insert`/`update`/`upsert`/`delete`. **`hardDelete` is
-  explicitly excluded** — it bypasses the recycle bin and needs a separate org
-  permission, and is not obviously inside the standing delete ratification
-  (RATIFY-2); add it later only on explicit operator say-so. `external_id_field`
+  `operation` is one of `insert`/`update`/`upsert`/`delete`/`hardDelete`.
+  `hardDelete` runs `sf data delete bulk --hard-delete`: the records bypass the
+  recycle bin, and Salesforce itself refuses the job unless the user holds the
+  "Bulk API Hard Delete" system permission — the vendor's permission is the
+  boundary, the plugin adds none of its own. `external_id_field`
   is required if, and only if, `operation` is `upsert` — supplying it for any
   other operation is refused, not silently ignored. `csv_path` must be an
   ABSOLUTE path already on disk, contained under an operator-configured
@@ -235,12 +262,22 @@ completes — two independent async layers, never conflate the two ids.
 - **`bulk_job_abort`** does `PATCH /jobs/ingest/{id}` with `state: Aborted` —
   the recovery lever for a job submitted in error. Records already processed
   before the abort are NOT rolled back.
+- **`bulk_jobs`** covers the rest of Bulk API 2.0 over the same transport as
+  `authenticated_request`: `query_create` (`POST /jobs/query` with operation
+  `query` or `queryAll`), `query_get`, `query_list` and `ingest_list` (job
+  lists, paged by `queryLocator`), `query_results` (`GET
+  /jobs/query/{id}/results` with `locator` and `maxRecords`; each page is
+  written as a CSV under `export_allowed_roots`, never inline, and the
+  `Sforce-Locator` header comes back as `pagination.next_locator`),
+  `query_abort`, `query_delete` and `ingest_delete`.
 
 Errors are typed with the `sf.*` prefix: `sf.not_configured`,
 `sf.invalid_params`, `sf.auth_failed`, `sf.session_expired`,
 `sf.permission_denied`, `sf.not_found`, `sf.malformed_query`,
 `sf.rate_limited`, `sf.api_error`, `sf.export_path_refused`,
-`sf.import_path_refused`.
+`sf.import_path_refused`. The typed families report vendor HTTP failures as
+completion data with an `error_code`, adding `sf.bad_request` (400),
+`sf.conflict` (409) and `sf.precondition_failed` (412) to the classes above.
 
 ## Security posture (mirrors the Jira/Snowflake/external-Postgres wave)
 
@@ -294,4 +331,6 @@ false positive the gate cannot resolve statically. One whole-file
 | `src/salesforce_plugin/record_actions.py` | `get_record`/`describe_sobject`/`delete_record` via stable ID-based commands; `create_record`/`update_record`/`list_sobjects` via `run_rest` (the `--values` mini-language's `stringToDictionary` parser has a proven correctness bug — see the executor model section above). |
 | `plugins/salesforce_plugin/src/salesforce_plugin/bulk_actions.py` | Bulk API v2 ingest — `bulk_ingest_submit` (`data <op> bulk --async`), `bulk_job_status`/`bulk_job_abort` (`run_rest` against `/jobs/ingest/{id}`), `bulk_job_results` (raw-text `run_rest` → three contained CSV writes). |
 | `plugins/salesforce_plugin/src/salesforce_plugin/import_containment.py` | Read-side mirror of `export_containment.py` for `bulk_ingest_submit`'s `csv_path` — `import_allowed_roots`, refuse-all default, plus an existence check (an ingest source must already be a real file). |
+| `plugins/salesforce_plugin/src/salesforce_plugin/request_actions.py` | `authenticated_request`: one forwarded call with redaction of credential echoes in raw, JSON-escaped, percent-encoded and base64 forms, plus the typed-only media proof for the CLI's header/body boundary. |
+| `plugins/salesforce_plugin/src/salesforce_plugin/typed_families.py` | The `composite`, `tooling`, `bulk_jobs`, `reports`, `dashboards`, `rest_resources` and `actions` operation tables (vendor method and path per operation), input checks, error-code mapping, failure counts and pagination hints. |
 | `src/salesforce_plugin/plugin.py` | The `SalesforcePlugin` EDGE provider — error mapping, EDGE registration. No retry wrapper: a CLI invocation either succeeds or fails classified, never a stale-session mid-flight fault to retry. |

@@ -30,17 +30,13 @@ Coverage:
 * ``updated_at`` advances via the BEFORE-UPDATE trigger after acquire + reset.
 
 Writes only sentinel rows (one source + its children) and hard-deletes them in
-a ``finally``. Env-gated behind ``LEDGER_POLLING_LIVE_SMOKE=1``.
-
-Run::
-
-    LEDGER_POLLING_LIVE_SMOKE=1 \\
-      .venv/bin/python3 ananta/tests/llm/session_ledger/polling_driver_migration_live_smoke.py
+a ``finally``. Private fixture: run under quality_gates/provision_test_pg.py using the
+explicit the private manifest variable contract. Without it, exit 77; legacy enable flags
+never select a live profile. See quality_gates/private_postgres.md.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from contextlib import contextmanager
@@ -48,13 +44,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, LiteralString, cast
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+_ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(_ROOT))
+REPO_ROOT = _ROOT
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(
-    0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
+    0,
+    str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 
-from ananta.constants import SOLET_NAME_ENV_VAR  # noqa: E402
+from ananta.core.domain.types import ActionResult  # noqa: E402
 from ananta.llm.session_ledger.repository import (  # noqa: E402
     PollingLeaseHandle,
     SessionLedgerRepository,
@@ -64,6 +63,7 @@ from ananta.llm.session_ledger.types import (  # noqa: E402
     ImportBatchStatus,
     IngestSourceKind,
 )
+from ananta.services.state_service import StateService  # noqa: E402
 from postgres_state_management_plugin.plugin import (  # noqa: E402
     _PostgresStateTransaction,
 )
@@ -73,6 +73,8 @@ from postgres_state_management_plugin.postgres_backend.config import (  # noqa: 
 from postgres_state_management_plugin.postgres_backend.provider import (  # noqa: E402
     PostgresProvider,
 )
+
+from quality_gates.private_test_pg import MANIFEST_ENV, PG_SCHEMA, ledger_fixture, load_fixture, skip_fixture  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
@@ -88,27 +90,28 @@ def _check(condition: object, label: str) -> None:
         print(f"  FAIL  {label}")
 
 
-_PROFILE_PG_CONFIG = (
-    REPO_ROOT / "profile" / "config" / "plugins"
-    / "postgres_state_management_plugin.json"
-)
-
-
 def _load_pg_config() -> PostgresConfig:
-    return PostgresConfig(**json.loads(_PROFILE_PG_CONFIG.read_text(encoding="utf-8")))
+    return PostgresConfig(**load_fixture("ledger_polling").connection_config(PG_SCHEMA))
 
 
-def _envelope(data: dict[str, Any]) -> dict[str, Any]:
+def _envelope(data: dict[str, object]) -> ActionResult:
     return {"action_status": "completed", "data": data, "actions": [], "error": None}
 
 
-class _LiveStateAdapter:
+class _LiveStateAdapter(StateService):
     """Full StateManagementInterface stand-in over a real provider."""
 
     def __init__(self, provider: PostgresProvider) -> None:
+        super().__init__()
         self._provider = provider
 
-    def write_state(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:
+    def write_state(
+        self,
+        namespace: str,
+        data: dict[str, object],
+        calling_service: str | None = None,
+        calling_namespace: str | None = None,
+    ) -> ActionResult:
         row_id = self._provider.insert(
             namespace=namespace,
             table=str(data["table"]),
@@ -116,9 +119,7 @@ class _LiveStateAdapter:
         )
         return _envelope({"result": {"generated_id": row_id, "inserted": 1}})
 
-    def update_state(
-        self, namespace: str, query: dict[str, Any], updates: dict[str, Any]
-    ) -> dict[str, Any]:
+    def update_state(self, namespace: str, query: dict[str, object], updates: dict[str, object]) -> ActionResult:
         filters = query.get("filters") or {}
         affected = self._provider.update(
             namespace=namespace,
@@ -128,16 +129,17 @@ class _LiveStateAdapter:
         )
         return _envelope({"result": {"updated": affected}})
 
-    def query_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
-        filters = query.get("filters") or {}
+    def query_state(self, namespace: str, filters: dict[str, object]) -> ActionResult:
+        query = filters
+        where_filters = query.get("filters") or {}
         rows = self._provider.select(
             namespace=namespace,
             table=str(query["table"]),
-            conditions=cast("dict[str, Any]", filters) if isinstance(filters, dict) else None,
+            conditions=cast("dict[str, Any]", where_filters) if isinstance(where_filters, dict) else None,
         )
         return _envelope({"records": rows, "count": len(rows)})
 
-    def query_ordered(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:
+    def query_ordered(self, namespace: str, data: dict[str, object]) -> ActionResult:
         filters = data.get("filters") or {}
         order_by = cast("list[list[str]]", data.get("order_by") or [])
         rows = self._provider.select_ordered(
@@ -150,7 +152,7 @@ class _LiveStateAdapter:
         )
         return _envelope({"records": rows, "count": len(rows)})
 
-    def delete_records(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
+    def delete_records(self, namespace: str, query: dict[str, object]) -> ActionResult:
         filters = query.get("filters") or {}
         soft = bool(query.get("soft_delete", True))
         deleted = self._provider.delete(
@@ -161,7 +163,7 @@ class _LiveStateAdapter:
         )
         return _envelope({"result": {"deleted": deleted, "soft_delete": soft}})
 
-    def acquire_lease(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:
+    def acquire_lease(self, namespace: str, data: dict[str, object]) -> ActionResult:
         acquired = self._provider.acquire_lease(
             namespace=namespace,
             table=str(data["table"]),
@@ -179,7 +181,7 @@ class _LiveStateAdapter:
 
 
 _MARK = "__polling_driver_migration_live_smoke__"
-_SCHEMA = os.environ[SOLET_NAME_ENV_VAR]
+_SCHEMA = PG_SCHEMA
 _NOW = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
 
 
@@ -240,7 +242,8 @@ def test_polling_driver_lifecycle(  # noqa: PLR0915 — one linear lifecycle
 
         # ── try_acquire: expired (until<now) → re-acquired, fresh token ──
         provider.update(
-            namespace="session_ledger", table="source",
+            namespace="session_ledger",
+            table="source",
             conditions={"id": source_id},
             updates={"polling_lease_until": _naive(_NOW - timedelta(seconds=60))},
         )
@@ -260,12 +263,12 @@ def test_polling_driver_lifecycle(  # noqa: PLR0915 — one linear lifecycle
         refreshed = repo.refresh_polling_lease(h3, ttl_seconds=1200)
         _check(refreshed is not None, "owner-token refresh succeeds")
         _check(
-            _as_dt(_row(provider, "source", source_id)["polling_lease_until"])
-            == _naive(_NOW + timedelta(seconds=1200)),
+            _as_dt(_row(provider, "source", source_id)["polling_lease_until"]) == _naive(_NOW + timedelta(seconds=1200)),
             "refresh extended polling_lease_until to now + new ttl",
         )
         wrong = PollingLeaseHandle(
-            source_id=source_id, lease_token="not-the-owner",
+            source_id=source_id,
+            lease_token="not-the-owner",
             lease_until=_NOW,
         )
         _check(
@@ -294,9 +297,11 @@ def test_polling_driver_lifecycle(  # noqa: PLR0915 — one linear lifecycle
         )
         _check(
             repo.finish_batch(
-                batch_id, polling_lease_token="tok-WRONG",
+                batch_id,
+                polling_lease_token="tok-WRONG",
                 status=ImportBatchStatus.COMPLETED,
-            ) is False,
+            )
+            is False,
             "wrong-token finish is dropped (no clobber)",
         )
         _check(
@@ -305,9 +310,11 @@ def test_polling_driver_lifecycle(  # noqa: PLR0915 — one linear lifecycle
         )
         _check(
             repo.finish_batch(
-                batch_id, polling_lease_token="tok-A",
+                batch_id,
+                polling_lease_token="tok-A",
                 status=ImportBatchStatus.COMPLETED,
-            ) is True,
+            )
+            is True,
             "matching-token finish lands terminal",
         )
         _check(
@@ -316,9 +323,11 @@ def test_polling_driver_lifecycle(  # noqa: PLR0915 — one linear lifecycle
         )
         _check(
             repo.finish_batch(
-                batch_id, polling_lease_token="tok-A",
+                batch_id,
+                polling_lease_token="tok-A",
                 status=ImportBatchStatus.FAILED,
-            ) is False,
+            )
+            is False,
             "double-finish is dropped (status already terminal)",
         )
 
@@ -334,9 +343,16 @@ def test_polling_driver_lifecycle(  # noqa: PLR0915 — one linear lifecycle
         )
         _check(
             status is not None
-            and set(status.keys()) == {
-                "id", "source_id", "started_at", "finished_at",
-                "status", "event_count", "error_message", "error_kind",
+            and set(status.keys())
+            == {
+                "id",
+                "source_id",
+                "started_at",
+                "finished_at",
+                "status",
+                "event_count",
+                "error_message",
+                "error_kind",
             },
             "get_import_status projects to exactly the curated public columns",
         )
@@ -356,7 +372,9 @@ def test_polling_driver_lifecycle(  # noqa: PLR0915 — one linear lifecycle
 
         # ── adopt: in-window claim ──
         adopted = repo.adopt_route_batch_for_source(
-            source_id, polling_lease_token="tok-importer", recency_window_minutes=10,
+            source_id,
+            polling_lease_token="tok-importer",
+            recency_window_minutes=10,
         )
         _check(adopted == route_a, "in-window route batch is adopted (claimed)")
         _check(
@@ -367,28 +385,36 @@ def test_polling_driver_lifecycle(  # noqa: PLR0915 — one linear lifecycle
         # ── adopt: non-adoptable (token now held) → None ──
         _check(
             repo.adopt_route_batch_for_source(
-                source_id, polling_lease_token="tok-other", recency_window_minutes=10,
-            ) is None,
+                source_id,
+                polling_lease_token="tok-other",
+                recency_window_minutes=10,
+            )
+            is None,
             "no adoptable (token-NULL) batch → adopt returns None",
         )
 
         # ── adopt: out-of-window (old started_at) → None ──
         old_route = repo.ensure_open_route_batch_for_source(source_id)
         provider.update(
-            namespace="session_ledger", table="import_batch",
+            namespace="session_ledger",
+            table="import_batch",
             conditions={"id": old_route},
             updates={"started_at": _naive(_NOW - timedelta(minutes=60))},
         )
         _check(
             repo.adopt_route_batch_for_source(
-                source_id, polling_lease_token="tok-late", recency_window_minutes=10,
-            ) is None,
+                source_id,
+                polling_lease_token="tok-late",
+                recency_window_minutes=10,
+            )
+            is None,
             "most-recent adoptable older than the recency window → adopt returns None",
         )
 
         # ── write_cursor / read_cursor: discovery insert→read, re-write→revive ──
         repo.write_cursor(
-            source_id=source_id, scope=CursorScope.DISCOVERY,
+            source_id=source_id,
+            scope=CursorScope.DISCOVERY,
             cursor_payload={"high_water_iso": "2026-05-01T00:00:00+00:00"},
         )
         disc = repo.read_cursor(source_id=source_id, scope=CursorScope.DISCOVERY)
@@ -397,7 +423,8 @@ def test_polling_driver_lifecycle(  # noqa: PLR0915 — one linear lifecycle
             "discovery cursor round-trips through JSONB",
         )
         repo.write_cursor(
-            source_id=source_id, scope=CursorScope.DISCOVERY,
+            source_id=source_id,
+            scope=CursorScope.DISCOVERY,
             cursor_payload={"high_water_iso": "2026-06-01T00:00:00+00:00"},
         )
         disc2 = repo.read_cursor(source_id=source_id, scope=CursorScope.DISCOVERY)
@@ -406,16 +433,19 @@ def test_polling_driver_lifecycle(  # noqa: PLR0915 — one linear lifecycle
             "re-write updates the existing discovery cursor (revive/update branch)",
         )
         repo.write_cursor(
-            source_id=source_id, scope=CursorScope.EVENT_READ,
-            cursor_payload={"cursor_high_water": 5}, scope_key="ext-1",
+            source_id=source_id,
+            scope=CursorScope.EVENT_READ,
+            cursor_payload={"cursor_high_water": 5},
+            scope_key="ext-1",
         )
         ev = repo.read_cursor(
-            source_id=source_id, scope=CursorScope.EVENT_READ, scope_key="ext-1",
+            source_id=source_id,
+            scope=CursorScope.EVENT_READ,
+            scope_key="ext-1",
         )
         _check(ev == {"cursor_high_water": 5}, "event_read cursor round-trips by scope_key")
         _check(
-            repo.read_cursor(source_id=source_id, scope=CursorScope.EVENT_READ, scope_key="ext-NONE")
-            is None,
+            repo.read_cursor(source_id=source_id, scope=CursorScope.EVENT_READ, scope_key="ext-NONE") is None,
             "read_cursor returns None for an unwritten scope_key",
         )
 
@@ -434,7 +464,8 @@ def test_polling_driver_lifecycle(  # noqa: PLR0915 — one linear lifecycle
         # gone, not left as is_deleted=1 ghosts. provider.select does NOT auto-
         # filter is_deleted, so an empty result discriminates HARD from soft.
         remaining = provider.select(
-            namespace="session_ledger", table="source_cursor",
+            namespace="session_ledger",
+            table="source_cursor",
             conditions={"source_id": source_id},
         )
         _check(
@@ -446,18 +477,19 @@ def test_polling_driver_lifecycle(  # noqa: PLR0915 — one linear lifecycle
         # ── record_lease_ping: insert then update ──
         repo.record_lease_ping(session_id=session_id, source_id=source_id, ttl_seconds=120)
         leases = provider.select(
-            namespace="session_ledger", table="active_lease",
+            namespace="session_ledger",
+            table="active_lease",
             conditions={"session_id": session_id},
         )
         _check(len(leases) == 1, "record_lease_ping inserts a lease row for a new session")
         _check(
-            (_as_dt(leases[0]["expires_at"]) - _as_dt(leases[0]["last_seen_at"])).total_seconds()
-            == 120,
+            (_as_dt(leases[0]["expires_at"]) - _as_dt(leases[0]["last_seen_at"])).total_seconds() == 120,
             "expires_at = last_seen_at + ttl on the insert branch",
         )
         repo.record_lease_ping(session_id=session_id, source_id=source_id, ttl_seconds=300)
         leases2 = provider.select(
-            namespace="session_ledger", table="active_lease",
+            namespace="session_ledger",
+            table="active_lease",
             conditions={"session_id": session_id},
         )
         _check(len(leases2) == 1, "record_lease_ping UPDATES (no duplicate row) for the same session")
@@ -471,33 +503,36 @@ def test_polling_driver_lifecycle(  # noqa: PLR0915 — one linear lifecycle
             _hard_delete_where(provider, "source_cursor", "source_id", source_id)
             _hard_delete_where(provider, "source", "id", source_id)
         _hard_delete_where(provider, "active_lease", "session_id", session_id)
-        leftover = provider.select(
-            namespace="session_ledger", table="source", conditions={"id": source_id},
-        ) if source_id else []
+        leftover = (
+            provider.select(
+                namespace="session_ledger",
+                table="source",
+                conditions={"id": source_id},
+            )
+            if source_id
+            else []
+        )
         _check(not leftover, "all sentinel rows hard-deleted (cleanup)")
 
 
 def main() -> int:
-    if os.environ.get("LEDGER_POLLING_LIVE_SMOKE") != "1":
-        print("=== polling_driver_migration_live_smoke ===")
-        print(
-            "  SKIP  set LEDGER_POLLING_LIVE_SMOKE=1 to run; "
-            "needs the live solet DB."
-        )
-        return 0
+    if not os.environ.get(MANIFEST_ENV):
+        return skip_fixture()
     print("=== polling_driver_migration_live_smoke ===")
-    provider = PostgresProvider(_load_pg_config())
-    provider.initialize()
-    repo = SessionLedgerRepository(
-        state_service=cast("Any", _LiveStateAdapter(provider)),
-        clock=lambda: _NOW,
-    )
-    test_polling_driver_lifecycle(repo, provider)
+    with ledger_fixture("ledger_polling"):
+        provider = PostgresProvider(_load_pg_config())
+        provider.initialize()
+        repo = SessionLedgerRepository(
+            state_service=cast("Any", _LiveStateAdapter(provider)),
+            clock=lambda: _NOW,
+        )
+        test_polling_driver_lifecycle(repo, provider)
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:
             print(f"  FAILED: {label}")
         return 1
+    print("PRIVATE_PG_BODY ledger_polling")
     return 0
 
 

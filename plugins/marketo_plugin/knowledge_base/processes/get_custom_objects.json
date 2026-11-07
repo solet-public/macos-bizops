@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::get_custom_objects",
+  "display_name": "Marketo: Get Custom Objects",
+  "description": "Dispatch an async query of Marketo custom object records (GET /rest/v1/customobjects/{api_name}.json) by filter_type and up to 300 filter_values or by compound_keys (POST ?_method=GET). Pages internally at the vendor's 300-per-call ceiling up to 500 rows by default (5000 with acknowledge_default_limit_override plus row_limit). The finished job writes the records to output_tsv_path and reports truncated.",
+  "embedding_description": "Query Marketo custom object records of one type (api_name) by a searchable field and up to 300 values, or by compound dedupe keys sent as POST ?_method=GET. Async job pages through nextPageToken and writes matching records to a workspace TSV with a truncated flag. Distinct from describe_custom_objects, which returns the schema.",
+  "result_processor_customizations": {
+    "action_label": "Marketo custom objects query job dispatched",
+    "result_type": "marketo_get_custom_objects_result",
+    "result_description": "Dict with job_id and status 'queued'. The completed job result (via check_marketo_job_status) is a TSV handle: path, columns, row_count, and truncated (true when more records may exist beyond the row limit).",
+    "presentation_guidance": "Confirm the job was dispatched and give the job_id; the records are not available until check_marketo_job_status reports completed. Then state the TSV path and row_count and say plainly when truncated is true."
+  },
+  "error_processor_customizations": {
+    "action_context": "Read Marketo custom object records from the configured instance.",
+    "error_interpretation": "marketo.invalid_params: refused at dispatch before any vendor call (missing or malformed parameters, more than 300 entries, an action/dedupe_by/delete_by value Marketo does not define, an api_name that is empty or a relative path segment, compound_keys combined with filter_values, or an output_tsv_path outside export_allowed_roots). On the finished job: marketo.permission_denied (vendor 603 or HTTP 403) means the API user's Role lacks the Access API permission; marketo.auth_failed (601/602 after one re-mint, or HTTP 401) means the credential was rejected; marketo.validation_failed and other vendor codes carry Marketo's own message.",
+    "recovery_guidance": "marketo.permission_denied: grant the Role's read permission for custom objects under Admin > Users & Roles > Roles > the API role > Access API (Adobe's Custom Objects page names no checkbox; look for Read-Only Custom Object or Read-Write Custom Object and confirm the label on that screen), then retry. Custom objects also require a subscription that includes them."
+  }
+}

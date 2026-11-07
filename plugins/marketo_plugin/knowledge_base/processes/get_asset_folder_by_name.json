@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::get_asset_folder_by_name",
+  "display_name": "Marketo: Get Asset Folder By Name",
+  "description": "Find Marketo folders by exact name, optionally scoped to a root reference, folder_type and workspace. The result can contain several matching folders. Async read writes the metadata to output_tsv_path; poll check_marketo_job_status. All vendor parameters are forwarded.",
+  "embedding_description": "Find Marketo folders by exact name, optionally scoped to a root reference, folder_type and workspace. The result can contain several matching folders. Async read writes the metadata to output_tsv_path; poll check_marketo_job_status. All vendor parameters are forwarded.",
+  "result_processor_customizations": {
+    "action_label": "Marketo: Get Asset Folder By Name job dispatched",
+    "result_type": "marketo_get_asset_folder_by_name_result",
+    "result_description": "Queued job_id and status. Poll check_marketo_job_status for a TSV handle, row_count, columns, truncated, per-page envelope metadata and next_offset when truncated.",
+    "presentation_guidance": "Poll the job before reporting success. Report path and row_count. Truncated reads can continue from next_offset with identical filters."
+  },
+  "error_processor_customizations": {
+    "action_context": "Find Marketo folders by exact name, optionally scoped to a root reference, folder_type and workspace. The result can contain several matching folders. Async read writes the metadata to output_tsv_path; poll check_marketo_job_status. All vendor parameters are forwarded.",
+    "error_interpretation": "marketo.invalid_params: correct vendor-shaped inputs. marketo.permission_denied: vendor RBAC or workspace access refused. marketo.auth_failed: credential rejected. marketo.validation_failed: vendor rejected the operation. A transport failure may follow a mutation.",
+    "recovery_guidance": "Use the registered credential and vendor Read-Only Assets / Read-Write Assets permissions. Reads do not prove write access. Read back state before retrying an uncertain mutation; these endpoints offer no CAS/ETag."
+  }
+}

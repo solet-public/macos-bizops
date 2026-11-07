@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -80,8 +81,135 @@ libomp
 ggml
 """
 
+_R72_POSTGRES_PLAN = """==> Would install 1 formula:
+postgresql@17 17.11_1
+==> Would install 3 dependencies for postgresql@17:
+icu4c@79
+openssl@4
+krb5
+==> Would upgrade 3 dependencies for postgresql@17:
+ca-certificates
+lz4
+libunistring
+"""
+_R72_DEPENDENCIES = "icu4c@79\nopenssl@4\nkrb5\nca-certificates\nlz4\nlibunistring\n"
+
+
+class DerivedDependencyTests(unittest.TestCase):
+    """Bind every dependency mutation to fresh, complete recursive metadata."""
+
+    def exercise(
+        self,
+        plan: str,
+        *,
+        dependencies: str = _R72_DEPENDENCIES,
+        dependency_exit: int = 0,
+        dependency_error: Exception | None = None,
+        kind: str = "formula",
+    ) -> tuple[list[list[str]], list[dict[str, str]], tuple[str, ...]]:
+        commands: list[list[str]] = []
+        environments: list[dict[str, str]] = []
+
+        def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            commands.append(command)
+            environments.append(dict(kwargs["env"]))  # type: ignore[arg-type]
+            if command[1:3] == ["deps", "--formula"]:
+                if dependency_error is not None:
+                    raise dependency_error
+                return subprocess.CompletedProcess(command, dependency_exit, dependencies, "metadata unavailable" if dependency_exit else "")
+            if "--dry-run" in command:
+                return subprocess.CompletedProcess(command, 0, plan, "")
+            if "list" in command:
+                return subprocess.CompletedProcess(command, 1, "", "")
+            self.assertEqual(command[1:], ["install", "postgresql@17"])
+            return subprocess.CompletedProcess(command, 0, "installed", "")
+
+        runtime = AdapterRuntime(
+            run=run,
+            which=lambda _name: "/fixture/brew",
+            now=lambda: datetime(2026, 11, 7, tzinfo=UTC),
+            name="fixture",
+            target=Path("/fixture"),
+        )
+        try:
+            outcome = run_homebrew_install_required(runtime, "/fixture/brew", "postgresql@17", "PostgreSQL", kind=kind)
+        except HomebrewInstallError:
+            self.assertNotIn(["/fixture/brew", "install", "postgresql@17"], commands)
+            raise
+        return commands, environments, outcome.upgraded_dependencies
+
+    def test_r72_install_proceeds_with_derived_closure(self) -> None:
+        commands, environments, upgraded = self.exercise(_R72_POSTGRES_PLAN)
+        self.assertEqual(
+            commands,
+            [
+                ["/fixture/brew", "install", "--dry-run", "postgresql@17"],
+                ["/fixture/brew", "deps", "--formula", "postgresql@17"],
+                ["/fixture/brew", "install", "postgresql@17"],
+            ],
+        )
+        self.assertEqual(environments[0], environments[1])
+        self.assertEqual(environments[2], {**environments[0], "HOMEBREW_NO_INSTALL_CLEANUP": "1"})
+        self.assertEqual(upgraded, ("ca-certificates", "lz4", "libunistring"))
+
+    def test_clean_environment_pins_cleanup_for_every_command(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            _commands, environments, _upgraded = self.exercise(_R72_POSTGRES_PLAN)
+        self.assertEqual(len(environments), 3)
+        for environment in environments:
+            self.assertEqual(environment.get("HOMEBREW_NO_INSTALL_CLEANUP"), "1")
+
+    def test_cleanup_proposal_remains_refused(self) -> None:
+        cleanup = "==> Would run `brew cleanup` which has not been run in the last 30 days"
+        plan = _R72_POSTGRES_PLAN + cleanup + "\nDisable this behaviour by setting `HOMEBREW_NO_INSTALL_CLEANUP=1`.\n"
+        with patch.dict("os.environ", {}, clear=True), self.assertRaises(HomebrewInstallError) as caught:
+            self.exercise(plan)
+        self.assertEqual(caught.exception.unrecognized_line, cleanup)
+
+    def test_outside_closure_and_malformed_plans_refuse(self) -> None:
+        for plan in (
+            _R72_POSTGRES_PLAN.replace("icu4c@79\n", "unrelated\n"),
+            _R72_POSTGRES_PLAN.replace("lz4\n", "unrelated\n"),
+            _R72_POSTGRES_PLAN.replace("install 3 dependencies", "install 4 dependencies"),
+            _R72_POSTGRES_PLAN + "==> Would unlink 1 formula:\nunrelated\n",
+        ):
+            with self.subTest(plan=plan), self.assertRaises(HomebrewInstallError):
+                self.exercise(plan)
+
+    def test_dependency_lookup_failures_keep_reason_and_refuse(self) -> None:
+        cases = (
+            ({"dependency_exit": 1}, "brew deps failed (exit 1)"),
+            ({"dependencies": "x" * 16_385}, "output was incomplete"),
+            ({"dependencies": "Would install unrelated\n"}, "malformed dependency name"),
+            ({"dependency_error": OSError("missing brew")}, "brew deps failed (exit None)"),
+            ({"dependency_error": subprocess.TimeoutExpired("brew deps", 300)}, "brew deps timed out"),
+        )
+        for kwargs, reason in cases:
+            with self.subTest(reason=reason), self.assertRaisesRegex(HomebrewInstallError, "unapproved package mutation") as caught:
+                self.exercise(_R72_POSTGRES_PLAN, **kwargs)  # type: ignore[arg-type]
+            self.assertIn(reason, str(caught.exception))
+
+    def test_closure_changes_are_fresh_and_casks_stay_closed(self) -> None:
+        self.exercise(_R72_POSTGRES_PLAN)
+        with self.assertRaises(HomebrewInstallError):
+            self.exercise(_R72_POSTGRES_PLAN, dependencies="krb5\nreadline\n")
+        with self.assertRaises(HomebrewInstallError):
+            self.exercise(_R72_POSTGRES_PLAN, kind="cask")
+
+
+_FIXTURE_DEPENDENCIES = {
+    "postgresql@17": frozenset({"krb5", "readline", "xz"}),
+    "llama.cpp": frozenset({"libomp", "ggml"}),
+}
+
+
 def _homebrew_plan_is_exact(output: str, *, kind: str, package: str) -> bool:
-    return _inspect_homebrew_plan(output, kind=kind, package=package).exact
+    return _inspect_homebrew_plan(
+        output,
+        kind=kind,
+        package=package,
+        reviewed_dependencies=_FIXTURE_DEPENDENCIES.get(package, frozenset()),
+    ).exact
 
 
 def _check(condition: object, label: str) -> None:
@@ -174,6 +302,8 @@ def _check_r44_postgres_dependency_upgrade_proceeds() -> None:
     commands: list[list[str]] = []
 
     def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[1:3] == ["deps", "--formula"]:
+            return subprocess.CompletedProcess(command, 0, "krb5\nreadline\nxz\n", "")
         commands.append(command)
         if command[1:] == ["install", "--dry-run", "postgresql@17"]:
             return subprocess.CompletedProcess(command, 0, _R44_POSTGRES_UPGRADE_PLAN, "")
@@ -273,12 +403,14 @@ def _check_dependency_upgrade_grammar_stays_closed() -> None:
             not _homebrew_plan_is_exact(plan, kind="formula", package="postgresql@17"),
             f"{name} dependency upgrade block stays refused",
         )
-    inspected = _inspect_homebrew_plan(accepted["plural"], kind="formula", package="postgresql@17")
+    inspected = _inspect_homebrew_plan(accepted["plural"], kind="formula", package="postgresql@17", reviewed_dependencies=_FIXTURE_DEPENDENCIES["postgresql@17"])
     _check(inspected.upgraded_dependencies == ("readline", "xz"), "accepted upgrades are reported in plan order")
 
     commands: list[list[str]] = []
 
     def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[1:3] == ["deps", "--formula"]:
+            return subprocess.CompletedProcess(command, 0, "krb5\nreadline\nxz\n", "")
         commands.append(command)
         if "--dry-run" in command:
             return subprocess.CompletedProcess(command, 0, refused["declares_two_lists_one"], "")
@@ -298,7 +430,8 @@ def _check_dependency_upgrade_grammar_stays_closed() -> None:
     else:
         raise AssertionError("a count-mismatched upgrade block was accepted")
     _check(
-        commands == [
+        commands
+        == [
             ["/fixture/brew", "install", "--dry-run", "postgresql@17"],
             ["/fixture/brew", "list", "--versions", "postgresql@17"],
         ],
@@ -321,9 +454,7 @@ def _check_incomplete_and_decorated_plans_refuse_before_mutation() -> None:
         "paragraph_separator": "postgresql@17\u2029",
         "stderr_vertical_tab": "metadata\x0b",
     }
-    blank_only_cases = frozenset(
-        {"blank_stdout_spaces", "blank_stderr_spaces", "blank_stdout_newline", "blank_stderr_newline"}
-    )
+    blank_only_cases = frozenset({"blank_stdout_spaces", "blank_stderr_spaces", "blank_stdout_newline", "blank_stderr_newline"})
     cases = {
         "vertical_tab": (head[:-1] + "\x0b\n", ""),
         "form_feed": (head[:-1] + "\x0c\n", ""),
@@ -350,9 +481,7 @@ def _check_incomplete_and_decorated_plans_refuse_before_mutation() -> None:
         "unknown_bare_dependency": (head + dependency_head + "glorp\n", ""),
         "unknown_plan_line": (head + "Other pending operation\n", ""),
         "ansi": (
-            head
-            + "\x1b[32m==> Would upgrade 1 dependency for postgresql@17:\x1b[0m\n"
-            + "\x1b[32mreadline\x1b[0m\n",
+            head + "\x1b[32m==> Would upgrade 1 dependency for postgresql@17:\x1b[0m\n" + "\x1b[32mreadline\x1b[0m\n",
             "",
         ),
         "unrecognized": (head + "==> Would replace 1 dependency for postgresql@17:\nreadline\n", ""),
@@ -380,6 +509,8 @@ def _check_incomplete_and_decorated_plans_refuse_before_mutation() -> None:
         ]
 
         def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if command[1:3] == ["deps", "--formula"]:
+                return subprocess.CompletedProcess(command, 0, "krb5\nreadline\nxz\n", "")
             calls.append(command)
             if "--dry-run" in command:
                 return subprocess.CompletedProcess(command, 0, stdout, stderr)
@@ -406,14 +537,11 @@ def _check_incomplete_and_decorated_plans_refuse_before_mutation() -> None:
         except HomebrewInstallError as exc:
             reported_line = exc.unrecognized_line
             _check(
-                exc.outcome.stdout == stdout[:16_384]
-                and exc.outcome.stderr == stderr[:16_384]
-                and exc.outcome.output_complete == output_complete,
+                exc.outcome.stdout == stdout[:16_384] and exc.outcome.stderr == stderr[:16_384] and exc.outcome.output_complete == output_complete,
                 f"{name}/{state} keeps bounded diagnostics",
             )
             _check(
-                (reported_line is not None and "unrecognized dry-run line" in str(exc))
-                if output_complete and name not in blank_only_cases else reported_line is None,
+                (reported_line is not None and "unrecognized dry-run line" in str(exc)) if output_complete and name not in blank_only_cases else reported_line is None,
                 f"{name}/{state} reports a complete unrecognized line only with complete evidence",
             )
         else:
@@ -433,14 +561,12 @@ def _check_incomplete_and_decorated_plans_refuse_before_mutation() -> None:
         with patch("bootstrap_adapter.routes.postgres_observation", return_value=observation):
             failed = _postgres_install_route(_request("install_postgresql"), runtime)
         _check(
-            failed["checkpoint_status"] == "failed"
-            and failed["error_kind"] == "postgres_install_failed",
+            failed["checkpoint_status"] == "failed" and failed["error_kind"] == "postgres_install_failed",
             f"{name}/{state} route refuses with the generic failure kind",
         )
         repair = str(failed["repair"])
         _check(
-            ("Unrecognized Homebrew dry-run line" in repair and repr(reported_line[:160]) in repair)
-            if reported_line is not None else "Unrecognized Homebrew dry-run line" not in repair,
+            ("Unrecognized Homebrew dry-run line" in repair and repr(reported_line[:160]) in repair) if reported_line is not None else "Unrecognized Homebrew dry-run line" not in repair,
             f"{name}/{state} route reports the unrecognized line without guessing an upgrade",
         )
         _check(
@@ -467,6 +593,8 @@ def _check_fresh_postgres_plans_pgvector_before_apply() -> None:
     commands: list[list[str]] = []
 
     def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[1:3] == ["deps", "--formula"]:
+            return subprocess.CompletedProcess(command, 0, "krb5\nreadline\nxz\n", "")
         commands.append(command)
         if "--dry-run" in command:
             package = command[-1]
@@ -692,6 +820,8 @@ def _check_postgres_configuration_failure_keeps_psql_diagnostics() -> None:
 
 
 def main() -> int:
+    result = unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(DerivedDependencyTests))
+    _check(result.wasSuccessful(), "derived dependency closure regressions pass")
     _check(
         _homebrew_plan_is_exact(_RECEIPT_049_CODEX, kind="cask", package="codex"),
         "receipt-049 arrow-prefixed Codex cask plan is accepted",
@@ -706,8 +836,7 @@ def main() -> int:
     )
     _check(
         _homebrew_plan_is_exact(
-            "==> Would install 1 formula:\npostgresql@17\n"
-            "==> Would install 1 dependency for postgresql@17:\nreadline 8.3\n",
+            "==> Would install 1 formula:\npostgresql@17\n==> Would install 1 dependency for postgresql@17:\nreadline 8.3\n",
             kind="formula",
             package="postgresql@17",
         ),
@@ -763,8 +892,7 @@ def main() -> int:
     )
     _check(
         not _homebrew_plan_is_exact(
-            "==> Would install 1 formula:\nllama.cpp\n"
-            "==> Would install 3 dependencies for llama.cpp:\nlibomp\nggml\nopenssl@3\n",
+            "==> Would install 1 formula:\nllama.cpp\n==> Would install 3 dependencies for llama.cpp:\nlibomp\nggml\nopenssl@3\n",
             kind="formula",
             package="llama.cpp",
         ),

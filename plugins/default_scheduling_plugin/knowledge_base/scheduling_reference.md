@@ -348,3 +348,83 @@ Step 3: clear_scheduled_actions_by_tag(tag="followup:timeout:<id>")  // Cancel i
 - Recurring schedules (`create_cron_schedule`) continue until explicitly cancelled
 - **Always tag your schedules** so they can be bulk-cancelled with `clear_scheduled_actions_by_tag`
 - Schedules persist across service restarts
+
+
+## Action targets, completeness and destination recovery
+
+Use `service_interface::scheduling_service::list_schedules` without a filter to
+observe the complete owner registry. `get_schedules_by_tag` uses the same
+projection. `count` describes returned rows after filtering. `complete=true`
+means valid paging was exhausted at unchanged persistent and memory epochs; the
+owner retries a concurrent change once. Failures retain known rows with
+`complete=false`, precise advisories, `checked_epochs` and an observation token.
+Neither list verb changes the registry. Restoration preserves registered jobs
+when its source is incomplete and discloses deferred rows.
+
+Each row retains the existing schedule metadata and adds the exact copied
+`action_definitions`, per-action `targets` with zero-based ordinals and actual
+process keys, the owner revision, error, and runtime job presence/revision.
+Messaging observations distinguish `retired`, `vacant`, `not_found`,
+`disconnected`, `live` and `unavailable`. They come from the messaging owner,
+not foreign table reads. A registered delivery route does not prove eventual
+delivery. Context session/flow IDs are separate from action destinations.
+Unsupported or ambiguous action destinations remain visible.
+
+For `send_peer_message`, `peer_agent_session_id` is a fallback hint, not an
+independent destination. Transport resolves `peer_id` and its optional instance
+first; a sole registered peer can win over a different session hint. With only
+the hint, the target is `kind=unknown`, `supported=false`, with advisory
+`session_hint_is_fallback`. The original `peer_id` and hint remain readable in
+`action_definitions`. A destination-only rebind of that hint is refused without
+changing the schedule or history (`session_hint_rebind_matches_dispatch` tests
+the real resolver against an in-memory registry). A raw peer action with both
+instance and fallback remains ambiguous for destination-only rebinding. Role
+targets and explicit instance targets without a fallback are supported.
+
+`rebind_scheduled_action(schedule_id, action_index, target_kind, target_value,
+expected_revision, reason)` corrects exactly one supported destination. Its
+pass condition is an existing nonterminal action at the revision returned by
+owner list; shipped create/list make that attainable and
+`rebind_current_revision_passes` exercises it. Original text (including
+whitespace, Unicode and newlines), nested non-destination values, result
+processors, ID, cadence, context, label, tags and status remain unchanged.
+Required destinations cannot be independently cleared into invalid actions:
+rebind to correct/reverse, or use the existing clear verbs to terminate.
+Unknown holder liveness is advisory and never blocks a rebind.
+
+Rebinding an errored schedule leaves it errored. Explicit
+`recover_scheduled_action(schedule_id, expected_revision, reason)` is the
+error-to-scheduled transition for recurring schedules. Its attainable pass
+condition is a recurring error row at the current revision, produced by the
+owner creation/fire-failure paths and exercised by
+`recover_error_current_revision_passes` and `recovered_error_restores`. Recovery
+clears the error and reconciles one cron job without immediate firing or
+duplicate jobs. `activation_status=pending` is not effective recovery; startup
+restoration and explicit idempotent retries reconcile it. A retry at a current
+scheduled revision does not append another event. One-time completion/clear
+is terminal; creating a new schedule is a new identity, never a reopen.
+
+Creation, rebind correction/reversal, recovery, status error/completion and
+clear share owner transactions: conditional current-row writes, immutable
+history, and epoch advance commit or roll back together. Existing revision-0
+rows acquire an explicitly observed baseline on first mutation, without an
+invented creator. Server CallContext supplies actor provenance; unavailable
+attribution is recorded as such, and internal events name the scheduler.
+The trusted local mutation authority is the existing create/clear authority;
+no additional durable-role gate is introduced.
+
+`get_schedule_binding_history(schedule_id, limit=100, after=None)` reads retained
+events even after clear. Follow its `[created_at,id]` cursor; limits are 1..100.
+History has no edit/delete operation. Revision and registry epoch
+are initialized and advanced by their owner; namespace uninstall retires those
+metadata and history. There is no reset-in-place operation.
+
+Dispatch locks the current schedule through synchronous submission of its
+ordered action set. A callback saved before rebind reads the new target when
+invoked afterward. Work already submitted before the returned
+`effective_revision` boundary is unchanged and may execute later. Clear and
+completion serialize with rebind; an orphan callback is a disclosed no-op.
+A no-op dispatch lock does not consume semantic revision, history or epoch.
+Queue submission is not exactly-once external delivery, and queue persistence
+and scheduling history are not one atomic transaction. Partial submission is
+disclosed with the observed revision.

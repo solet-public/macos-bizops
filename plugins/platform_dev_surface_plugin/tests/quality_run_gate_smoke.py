@@ -19,8 +19,10 @@ Run from repo root:
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 # app_home anchor for locate_repo_root: <worktree>/profile (its parent is the
@@ -36,6 +38,8 @@ from platform_dev_surface_plugin.quality.operations import (  # noqa: E402
     QualityOperations,
 )
 from platform_dev_surface_plugin.repo_root import locate_repo_root  # noqa: E402
+
+_DEFAULT_NO_DEADLINE_OUTPUT_CAP = 1000
 
 _passed = 0
 _failed: list[str] = []
@@ -83,11 +87,7 @@ def _test_argv_is_server_fixed() -> None:
     # No caller-controllable free-form tokens: every entry is a known flag,
     # the interpreter, the script, or an in-repo allowlist path.
     allowed_flags = {"--allowlist", "--warn-only"}
-    stray = [
-        tok
-        for tok in argv[2:]
-        if tok not in allowed_flags and not tok.startswith(str(repo_root))
-    ]
+    stray = [tok for tok in argv[2:] if tok not in allowed_flags and not tok.startswith(str(repo_root))]
     _check(not stray, f"no stray/free-form argv tokens (found {stray})")
 
 
@@ -128,10 +128,43 @@ def _test_bounded_output() -> None:
     _check(fail.exit_code == 3, "non-zero exit code propagates verbatim")
 
 
+def _test_explicit_no_deadline() -> None:
+    """Real children; FIXTURE_NO_DEADLINE_SMOKE_OUTPUT_CAP sets fixture cap (default 1000)."""
+    root = locate_repo_root(_APP_HOME)
+    cap = int(os.environ.get("FIXTURE_NO_DEADLINE_SMOKE_OUTPUT_CAP", str(_DEFAULT_NO_DEADLINE_OUTPUT_CAP)))
+    assert cap > 0
+    _check(Path(sys.modules[run_bounded.__module__].__file__).resolve() == root / "plugins/platform_dev_surface_plugin/src/platform_dev_surface_plugin/bounded_subprocess.py", "helper import originates in this checkout")
+    with patch("platform_dev_surface_plugin.bounded_subprocess.subprocess.run", wraps=subprocess.run) as physical:
+        result = run_bounded(
+            [sys.executable, "-c", "import os,sys; print('B' * int(os.environ['OUTPUT_CAP'])); print('tail', file=sys.stderr)"],
+            cwd=root,
+            timeout=None,
+            extra_env={"OUTPUT_CAP": str(cap)},
+            max_output_chars=cap,
+        )
+        _check(physical.call_args.kwargs["timeout"] is None, "real subprocess receives actual None")
+    _check(result.exit_code == 0 and not result.timed_out, "no-deadline child completes successfully")
+    _check(result.output_chars_total == cap + len("\ntail\n"), "no-deadline stdout and stderr totals remain exact")
+    _check(result.truncated and len(result.output) == cap and result.output.endswith("tail\n"), "no-deadline capture keeps bounded tail and truncation")
+    failed = run_bounded([sys.executable, "-c", "import sys; print('failure'); sys.exit(3)"], cwd=root, timeout=None)
+    _check(failed.exit_code == 3 and not failed.timed_out and failed.output == "failure\n", "no-deadline nonzero child remains a genuine failure")
+    # This is explicitly a finite nonbattery harness probe, never a battery verdict.
+    finite = run_bounded([sys.executable, "-c", "pass"], cwd=root, timeout=0)
+    _check(finite.exit_code == 124 and finite.timed_out and finite.output == "TIMEOUT after 0s", "finite nonbattery timeout preserves harness failure representation")
+
+
 def _test_real_gate_runs() -> None:
     """Integration: run a real, fast gate end-to-end through run_gate."""
     ops = QualityOperations(locate_repo_root(_APP_HOME), os.environ["SOLET_NAME"])
-    result = ops.run_gate("service_interface_ast")
+    with patch(
+        "platform_dev_surface_plugin.bounded_subprocess.subprocess.run",
+        wraps=subprocess.run,
+    ) as physical:
+        result = ops.run_gate("service_interface_ast")
+        _check(
+            physical.call_count > 0 and physical.call_args_list[0].kwargs["timeout"] is None,
+            "run_gate launches its real child with no execution deadline",
+        )
     expected_keys = {
         "gate",
         "passed",
@@ -162,6 +195,7 @@ def main() -> int:
     _test_argv_is_server_fixed()
     _test_run_gate_rejects_unknown()
     _test_bounded_output()
+    _test_explicit_no_deadline()
     _test_real_gate_runs()
 
     print(f"\n{_passed} passed, {len(_failed)} failed")

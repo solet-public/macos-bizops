@@ -268,7 +268,7 @@ class ServiceInterfaceScanner:
             "provider": metadata.provider,
             "function_name": metadata.function_name,
             "process_key": process_key,
-            "is_async": False,
+            "is_async": metadata.is_async,
             "estimated_duration": "< 1s",
             "version": metadata.version,
             "parameters": parameters_dict,

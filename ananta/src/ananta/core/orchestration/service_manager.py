@@ -53,14 +53,14 @@ class PlatformServicesManagerProtocol(Protocol):
     def is_initialized(self) -> bool: ...
     @property
     def unified_metadata_registry(self) -> object | None: ...
+    @property
+    def initialization_error(self) -> Exception | None: ...
 
 
 class SystemPlatformManagerProtocol(Protocol):
     """Protocol for system platform manager."""
 
-    def initialize_plugin_system(
-        self, config: object, plugin_operational_config: dict[str, object], orchestrator_ref: object
-    ) -> PluginManager: ...
+    def initialize_plugin_system(self, config: object, plugin_operational_config: dict[str, object], orchestrator_ref: object) -> PluginManager: ...
     def get_plugin_lifecycle_manager(self) -> object: ...
 
 
@@ -111,9 +111,7 @@ class ServiceManager:
         # Services collection for legacy compatibility
         self.services_collection: dict[str, object] = {}
 
-    def initialize_all_services(
-        self, orchestrator_ref: OrchestratorProtocol, event_bus: EventBusProtocol
-    ) -> None:
+    def initialize_all_services(self, orchestrator_ref: OrchestratorProtocol, event_bus: EventBusProtocol) -> None:
         """Initialize all services in the correct dependency order."""
         logger.debug("ServiceManager: Starting service initialization")
 
@@ -160,14 +158,8 @@ class ServiceManager:
         """
 
         # Use the PluginManager that was already created by startup_sequence._init_plugin_manager()
-        if (
-            not hasattr(orchestrator_ref, "plugin_manager")
-            or orchestrator_ref.plugin_manager is None
-        ):
-            raise RuntimeError(
-                "PluginManager not found on orchestrator. "
-                "Ensure startup_sequence._init_plugin_manager() runs before ServiceManager initialization."
-            )
+        if not hasattr(orchestrator_ref, "plugin_manager") or orchestrator_ref.plugin_manager is None:
+            raise RuntimeError("PluginManager not found on orchestrator. Ensure startup_sequence._init_plugin_manager() runs before ServiceManager initialization.")
 
         self.plugin_manager = orchestrator_ref.plugin_manager
 
@@ -192,13 +184,8 @@ class ServiceManager:
 
         if unready_plugins:
             logger.error(f"ServiceManager: Not all non-service plugins ready: {unready_plugins}")
-            raise RuntimeError(
-                f"Not all non-service plugins are ready for operation: {unready_plugins}. "
-                f"Readiness results: {readiness_results}"
-            )
-        logger.debug(
-            "ServiceManager: All non-service plugins ready (service plugins will be started during runtime)"
-        )
+            raise RuntimeError(f"Not all non-service plugins are ready for operation: {unready_plugins}. Readiness results: {readiness_results}")
+        logger.debug("ServiceManager: All non-service plugins ready (service plugins will be started during runtime)")
 
         if self.default_inference_provider:
             self._validate_inference_provider()
@@ -221,16 +208,11 @@ class ServiceManager:
             # It already has SchemaManager wired up from _initialize_schemas step
             existing_state_service = self._orchestrator_ref.get_service("state_service")
             if existing_state_service is None:
-                raise ValueError(
-                    "StateService not found on orchestrator. "
-                    "Ensure startup_sequence._create_state_service_wrapper() runs before ServiceManager."
-                )
+                raise ValueError("StateService not found on orchestrator. Ensure startup_sequence._create_state_service_wrapper() runs before ServiceManager.")
 
             # Type-safe assignment - get_service returns object, we need StateService
             if not isinstance(existing_state_service, StateService):
-                raise TypeError(
-                    f"Expected StateService, got {type(existing_state_service).__name__}"
-                )
+                raise TypeError(f"Expected StateService, got {type(existing_state_service).__name__}")
 
             self.state_service = existing_state_service
 
@@ -258,17 +240,13 @@ class ServiceManager:
                 def write_state(self, namespace: str, data: dict[str, object]) -> ActionResult:
                     return self._state_service.write_state(namespace, data)
 
-                def update_state(
-                    self, namespace: str, query: dict[str, object], updates: dict[str, object]
-                ) -> ActionResult:
+                def update_state(self, namespace: str, query: dict[str, object], updates: dict[str, object]) -> ActionResult:
                     return self._state_service.update_state(namespace, query, updates)
 
                 def upsert_state(self, namespace: str, data: dict[str, object]) -> ActionResult:
                     return self._state_service.upsert_state(namespace, data)
 
-                def acquire_lease(
-                    self, namespace: str, data: dict[str, object]
-                ) -> ActionResult:
+                def acquire_lease(self, namespace: str, data: dict[str, object]) -> ActionResult:
                     return self._state_service.acquire_lease(namespace, data)
 
                 def count(self, namespace: str, data: dict[str, object]) -> ActionResult:
@@ -286,9 +264,7 @@ class ServiceManager:
                 def query_state(self, namespace: str, filters: dict[str, object]) -> ActionResult:
                     return self._state_service.query_state(namespace, filters)
 
-                def query_ordered(
-                    self, namespace: str, data: dict[str, object]
-                ) -> ActionResult:
+                def query_ordered(self, namespace: str, data: dict[str, object]) -> ActionResult:
                     return self._state_service.query_ordered(namespace, data)
 
                 def set_key_value(
@@ -318,19 +294,13 @@ class ServiceManager:
                     else:
                         raise ValueError(f"Unsupported value type: {type(value)}")
 
-                def get_key_value(
-                    self, namespace: str, key: str, scope: str = "GLOBAL"
-                ) -> ActionResult:
+                def get_key_value(self, namespace: str, key: str, scope: str = "GLOBAL") -> ActionResult:
                     return self._state_service.get_key_value(namespace, key, scope)
 
-                def delete_key_value(
-                    self, namespace: str, key: str, scope: str = "GLOBAL"
-                ) -> ActionResult:
+                def delete_key_value(self, namespace: str, key: str, scope: str = "GLOBAL") -> ActionResult:
                     return self._state_service.delete_key_value(namespace, key, scope)
 
-                def clear_key_values(
-                    self, namespace: str | None = None, scope: str | None = None
-                ) -> ActionResult:
+                def clear_key_values(self, namespace: str | None = None, scope: str | None = None) -> ActionResult:
                     return self._state_service.clear_key_values(namespace, scope)
 
                 def list_key_values(
@@ -341,9 +311,7 @@ class ServiceManager:
                 ) -> ActionResult:
                     return self._state_service.list_key_values(namespace, scope, pattern)
 
-                def execute_sql(
-                    self, sql_query: str, sql_params: list[object] | None = None
-                ) -> ActionResult:
+                def execute_sql(self, sql_query: str, sql_params: list[object] | None = None) -> ActionResult:
                     return self._state_service.execute_sql(sql_query, sql_params)
 
                 def transactional(self) -> Any:
@@ -365,9 +333,7 @@ class ServiceManager:
                 def mark_as_read(self, namespace: str, query: dict[str, object]) -> ActionResult:
                     return self._state_service.mark_as_read(namespace, query)
 
-                def initialize_database(
-                    self, config: dict[str, object] | None = None
-                ) -> ActionResult:
+                def initialize_database(self, config: dict[str, object] | None = None) -> ActionResult:
                     return self._state_service.initialize_database(config)
 
                 def is_ready(self) -> bool:
@@ -410,9 +376,7 @@ class ServiceManager:
                 raise ValueError("Plugin manager must be initialized before blob storage service")
             from ananta.core.orchestration.service_bindings import ServiceName as _ServiceName
 
-            blob_plugin_name = self._orchestrator_ref.service_bindings.get_plugin_name(
-                _ServiceName.BLOB_STORAGE_SERVICE
-            )
+            blob_plugin_name = self._orchestrator_ref.service_bindings.get_plugin_name(_ServiceName.BLOB_STORAGE_SERVICE)
             self.blob_storage_service = BlobStorageService(
                 plugin_manager=self.plugin_manager,
                 blob_storage_plugin_name=blob_plugin_name,
@@ -427,9 +391,7 @@ class ServiceManager:
             self.job_service = JobService(self.state_service, self.async_job_manager)
 
             # Initialize lifecycle management service
-            self.lifecycle_management_service = LifecycleManagementService(
-                orchestrator_ref=self._orchestrator_ref
-            )
+            self.lifecycle_management_service = LifecycleManagementService(orchestrator_ref=self._orchestrator_ref)
             logger.debug("ServiceManager: LifecycleManagementService initialized")
 
             # Initialize inference service (wraps default_inference_plugin)
@@ -446,9 +408,7 @@ class ServiceManager:
                 state_service=self.state_service,
                 orchestrator=self._orchestrator_ref,
             )
-            logger.debug(
-                f"ServiceManager: InferenceService initialized (plugin: {inference_plugin_name})"
-            )
+            logger.debug(f"ServiceManager: InferenceService initialized (plugin: {inference_plugin_name})")
 
             # PromptAssemblyService is the same InferenceService instance —
             # it implements PromptAssemblyServiceInterface via assemble_prompt().
@@ -472,12 +432,8 @@ class ServiceManager:
 
             # Initialize embedding service (wraps local_embeddings_plugin)
             embedding_plugin_name = service_bindings.get_plugin_name(ServiceName.EMBEDDING_SERVICE)
-            self.embedding_service = EmbeddingService(
-                plugin_manager=self.plugin_manager, embedding_plugin_name=embedding_plugin_name
-            )
-            logger.debug(
-                f"ServiceManager: EmbeddingService initialized (plugin: {embedding_plugin_name})"
-            )
+            self.embedding_service = EmbeddingService(plugin_manager=self.plugin_manager, embedding_plugin_name=embedding_plugin_name)
+            logger.debug(f"ServiceManager: EmbeddingService initialized (plugin: {embedding_plugin_name})")
 
             # Initialize vector service (wraps pgvector_service_plugin, requires state_service)
             vector_plugin_name = service_bindings.get_plugin_name(ServiceName.VECTOR_SERVICE)
@@ -530,9 +486,7 @@ class ServiceManager:
             # Convert hours to minutes for backward compatibility with existing config
             # Default is 1 hour (60 minutes) but can be overridden
             timeout_minutes = self._session_timeout_hours * 60
-            self.session_manager = SessionManager(
-                self.state_service, session_timeout_minutes=timeout_minutes
-            )
+            self.session_manager = SessionManager(self.state_service, session_timeout_minutes=timeout_minutes)
             self.flow_manager = FlowManager(self.state_service)
 
             # Initialize FlowRuntimeGraph for FRG token management
@@ -544,9 +498,7 @@ class ServiceManager:
                 self.async_job_manager._flow_runtime_graph = self.flow_runtime_graph
 
             # ActionEventRecorder now requires FlowRuntimeGraph for token creation
-            self.action_recorder = ActionEventRecorder(
-                self.state_service, self.flow_manager, self.flow_runtime_graph
-            )
+            self.action_recorder = ActionEventRecorder(self.state_service, self.flow_manager, self.flow_runtime_graph)
 
             # Initialize flow service (requires FlowManager)
             if self.flow_manager:
@@ -601,6 +553,10 @@ class ServiceManager:
                 def unified_metadata_registry(self) -> object | None:
                     return self._manager.unified_metadata_registry
 
+                @property
+                def initialization_error(self) -> Exception | None:
+                    return self._manager.initialization_error
+
             # Create adapter and initialize platform services
             adapter = PlatformServicesAdapter(platform_manager_instance)
             self.platform_services_manager = adapter
@@ -608,12 +564,10 @@ class ServiceManager:
             platform_init_success = self.platform_services_manager.initialize()
 
             if platform_init_success and self.platform_services_manager.is_initialized():
-                self.unified_metadata_registry = (
-                    self.platform_services_manager.unified_metadata_registry
-                )
+                self.unified_metadata_registry = self.platform_services_manager.unified_metadata_registry
                 logger.debug("ServiceManager: Platform services initialized with metadata registry")
-            else:
-                logger.error("ServiceManager: Platform services initialization failed")
+            # Failed initialization is logged once at its origin. init_actions
+            # propagates the sanitized cause rather than a feature-flag guess.
         except Exception as e:
             logger.error(f"ServiceManager: Failed to initialize platform services: {e}")
             raise

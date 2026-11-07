@@ -34,6 +34,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
+from _register_unit_double import fixture_assignment_record  # noqa: E402
+
 from agent_messaging_plugin.plugin import (  # noqa: E402
     AgentMessagingPlugin,
     _apply_spawn_session_policy,
@@ -62,8 +64,7 @@ def _plugin() -> AgentMessagingPlugin:
 def _old_row(**overrides: str) -> dict[str, str]:
     row = {
         "host": "tmux",
-        "brief_ref": "workbench/some-brief.md",
-        "unit_id": "unt-restart-01234567",
+        **fixture_assignment_record("unt-restart-01234567"),
         "work_class": "read_only",
         "budget_line": "some-budget-line",
         "visibility": "visible",

@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::get_named_account_list_members",
+  "display_name": "Marketo: Get Named Account List Members",
+  "description": "Dispatch an async read of the named accounts in one Marketo named account list (GET /rest/v1/namedAccountList/{list_id}/namedAccounts.json). Pages internally at 300 per call up to 500 rows by default (5000 with the override pair); writes the members to output_tsv_path and reports truncated.",
+  "embedding_description": "Read which named accounts belong to one Marketo named account list (ABM account list membership), by the list's marketoGUID. Async job pages 300 at a time through nextPageToken, writes the member accounts' marketoGUID, name and requested fields to a workspace TSV, and reports truncated. Distinct from get_named_account_lists.",
+  "result_processor_customizations": {
+    "action_label": "Marketo named account list members query job dispatched",
+    "result_type": "marketo_get_named_account_list_members_result",
+    "result_description": "Dict with job_id and status 'queued'. The completed job result (via check_marketo_job_status) is a TSV handle: path, columns, row_count, and truncated (true when more records may exist beyond the row limit).",
+    "presentation_guidance": "Confirm the job was dispatched and give the job_id; the records are not available until check_marketo_job_status reports completed. Then state the TSV path and row_count and say plainly when truncated is true."
+  },
+  "error_processor_customizations": {
+    "action_context": "Read the members of a Marketo named account list on the configured instance.",
+    "error_interpretation": "marketo.invalid_params: refused at dispatch before any vendor call (missing or malformed parameters, more than 300 entries, an action/dedupe_by/delete_by value Marketo does not define, a list_id that is empty or a relative path segment, or an output_tsv_path outside export_allowed_roots). On the finished job: marketo.permission_denied (vendor 603 or HTTP 403) means the API user's Role lacks the Access API permission; marketo.auth_failed (601/602 after one re-mint, or HTTP 401) means the credential was rejected; marketo.validation_failed and other vendor codes carry Marketo's own message.",
+    "recovery_guidance": "marketo.permission_denied: grant Read-Only Named Account (or Read-Write Named Account) under Admin > Users & Roles > Roles > the API role > Access API, then retry."
+  }
+}

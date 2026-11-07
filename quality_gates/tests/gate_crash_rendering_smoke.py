@@ -36,6 +36,7 @@ from collections.abc import Generator
 from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import patch
 
 _GATE_DIR = Path(__file__).resolve().parent.parent
 if str(_GATE_DIR) not in sys.path:
@@ -73,9 +74,11 @@ def check(name: str, condition: bool) -> None:
         _FAILURES.append(name)
 
 
-def _fake(returncode: int, output: str) -> subprocess.CompletedProcess[str]:
+def _fake(
+    returncode: int, output: str, argv: list[str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(
-        args=["gate"], returncode=returncode, stdout=output, stderr="",
+        args=argv or ["gate"], returncode=returncode, stdout=output, stderr="",
     )
 
 
@@ -129,14 +132,18 @@ def _scratch_repo() -> Generator[Path]:
         yield root
 
 
-def _render(returncode: int, output: str) -> tuple[cqc._CheckResults, str]:
+def _render(
+    returncode: int, output: str, argv: list[str] | None = None,
+    blocking_code: int = cqc._WRAPPER_BLOCKING,
+) -> tuple[cqc._CheckResults, str]:
     """Drive one gate result through classification + summary; capture stdout."""
     results = cqc._CheckResults()
     buf = io.StringIO()
     with redirect_stdout(buf):
         blocking = cqc._interpret_tree_gate_result(
-            cqc._W_INT_GATE, _fake(returncode, output),
+            cqc._W_INT_GATE, _fake(returncode, output, argv),
             Path("py"), Path("script"), Path("allowlist"), results,
+            blocking_code=blocking_code,
         )
         if blocking:
             results.failed_blocking_gates.append(cqc._W_INT_GATE.name)
@@ -145,6 +152,40 @@ def _render(returncode: int, output: str) -> tuple[cqc._CheckResults, str]:
 
 
 # ---------------------------------------------------------------------------
+
+
+def test_blocking_whole_tree_hint_replays_gate_argv() -> None:
+    print("whole-tree blocking hint reproduces the gate argv")
+    argv = [
+        "py", "quality_gates/shipped_doc_gate.py", "--repo-root", ".",
+        "--allowlist", "quality_gates/cited_path_gate_allowlist.txt",
+    ]
+    _, out = _render(
+        cqc._W_INT_WRAPPER_BLOCKING, _FINDINGS, argv,
+        blocking_code=cqc._W_INT_WRAPPER_BLOCKING,
+    )
+    hint = next(line for line in out.splitlines() if "Re-run:" in line)
+    check("hint contains the argv the whole-tree gate ran",
+          hint == "💡 Re-run: " + " ".join(argv))
+    check("whole-tree hint omits <paths>", "<paths>" not in hint)
+
+
+def test_path_scoped_hint_keeps_paths_placeholder() -> None:
+    print("path-scoped blocking hint keeps the <paths> placeholder")
+    result = _fake(
+        cqc._WRAPPER_BLOCKING, _FINDINGS,
+        ["py", "script", "one.py", "two.py", "--allowlist", "allowlist"],
+    )
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        cqc._interpret_gate_result(
+            "radon_cc_check", result, Path("py"), Path("script"),
+            Path("allowlist"), cqc._CheckResults(),
+        )
+    hint = next(line for line in buf.getvalue().splitlines() if "Re-run:" in line)
+    check("path-scoped hint retains <paths>", "<paths>" in hint)
+    check("path-scoped hint omits the full file list",
+          "one.py" not in hint and "two.py" not in hint)
 
 
 def test_crash_is_not_rendered_as_a_violation() -> None:
@@ -311,12 +352,146 @@ def test_wrappers_expose_the_crash_contract() -> None:
               issubclass(mod.GateCrashError, Exception))
 
 
+def test_pyright_no_verdict_is_not_reported_as_passed() -> None:
+    print("pyright timeout and launch failure are reported as unmeasured")
+    for output in (
+        "Command timed out after 120 seconds",
+        "OSError: Bad CPU type in executable",
+    ):
+        results = cqc._CheckResults()
+        buf = io.StringIO()
+        with patch.object(cqc, "run_command", return_value=(False, output)):
+            with redirect_stdout(buf):
+                exit_code = cqc._run_pyright_checked(
+                    Path("."), Path(".venv/bin/python"), results,
+                )
+                if exit_code is None:
+                    exit_code = cqc._print_summary(results)
+        rendered = buf.getvalue()
+        check(f"{output}: does not report all checks passed",
+              "All code quality checks passed!" not in rendered)
+        check(f"{output}: names pyright as unmeasured",
+              "pyright" in rendered.lower() and "unmeasured" in rendered.lower())
+        check(f"{output}: exit code stays 0", exit_code == 0)
+
+
+def test_pyright_success_error_and_unavailable_paths() -> None:
+    print("pyright success, parsed errors, and module-unavailable paths")
+    with patch.object(cqc, "run_command", return_value=(True, "")):
+        success_results = cqc._CheckResults()
+        success_output = io.StringIO()
+        with redirect_stdout(success_output):
+            code = cqc._run_pyright_checked(
+                Path("."), Path(".venv/bin/python"), success_results,
+            )
+            if code is None:
+                code = cqc._print_summary(success_results)
+    check("success is not recorded as no verdict",
+          not success_results.pyright_unmeasured)
+    check("success still prints the all-passed summary",
+          code == 0 and "All code quality checks passed!" in success_output.getvalue())
+    errors = "file.py:1:1 - error: expected error\n"
+    with patch.object(cqc, "run_command", return_value=(False, errors)):
+        error_results = cqc._CheckResults()
+        with redirect_stdout(io.StringIO()):
+            code = cqc._run_pyright_checked(
+                Path("."), Path(".venv/bin/python"), error_results,
+            )
+            if code is None:
+                code = cqc._print_summary(error_results)
+    check("parsed errors remain blocking", error_results.has_type_errors)
+    check("parsed errors retain exit code 1", code == 1)
+    with patch.object(
+        cqc, "run_command", return_value=(False, "No module named pyright"),
+    ):
+        try:
+            cqc._check_pyright(Path("."), Path(".venv/bin/python"))
+        except cqc.ToolUnavailableError:
+            unavailable = True
+        else:
+            unavailable = False
+    check("missing module still raises ToolUnavailableError", unavailable)
+
+
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_paths_are_measured_or_loudly_skipped() -> None:
+    print("explicit paths are reported without narrowing whole-tree scope")
+    with _scratch_repo() as root, tempfile.TemporaryDirectory(
+        prefix="explicit_path_outside_",
+    ) as outside_dir:
+        tracked = root / "quality_gates" / "tracked_module.py"
+        untracked = root / "quality_gates" / "untracked_module.py"
+        untracked.write_text("def u() -> None:\n    pass\n", encoding="utf-8")
+        missing = root / "quality_gates" / "missing_module.py"
+        non_python = root / "quality_gates" / "notes.txt"
+        non_python.write_text("notes\n", encoding="utf-8")
+        outside = Path(outside_dir) / "outside_module.py"
+        outside.write_text("def x() -> None:\n    pass\n", encoding="utf-8")
+        arguments = [
+            str(outside), str(missing.relative_to(root)),
+            str(non_python.relative_to(root)), str(tracked.relative_to(root)),
+            str(untracked.relative_to(root)),
+        ]
+        expected_scope = tuple(cqc._per_file_gate_paths(root))
+        captured_scopes: list[tuple[Path, ...]] = []
+
+        def capture_scope(
+            _venv_python: Path, _gate: cqc._GateSpec, _project_root: Path,
+            scope_paths: list[Path], _results: cqc._CheckResults,
+        ) -> cqc._GateOutcome:
+            captured_scopes.append(tuple(scope_paths))
+            return cqc._GateOutcome.OK
+
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["code_quality_check.py", *arguments]):
+            with patch.object(cqc, "_run_coherence_gate", side_effect=capture_scope):
+                with redirect_stdout(output):
+                    cqc._check_coherence_gates(
+                        root, Path("python"), cqc._CheckResults(),
+                    )
+        captured_output = output.getvalue()
+        check(
+            "explicit outside-root path is loudly skipped with a reason",
+            f"ADVISORY explicit path skipped: {arguments[0]} "
+            "(outside quality-surface roots)" in captured_output,
+        )
+        check(
+            "missing and non-Python paths have specific advisories",
+            f"ADVISORY explicit path skipped: {arguments[1]} (path does not exist)"
+            in captured_output
+            and f"ADVISORY explicit path skipped: {arguments[2]} (not a .py file)"
+            in captured_output,
+        )
+        check(
+            "explicit paths leave the complete whole-tree scope unchanged",
+            len(captured_scopes) == len(cqc._COHERENCE_GATES)
+            and all(scope == expected_scope for scope in captured_scopes)
+            and tracked.resolve() in expected_scope
+            and untracked.resolve() in expected_scope,
+        )
+        check(
+            "tracked in-scope path is reported as included",
+            f"INFO explicit path included in whole-tree per-file checks: {arguments[3]}"
+            in captured_output,
+        )
+        check(
+            "untracked in-scope path is reported as included",
+            f"INFO explicit path included in whole-tree per-file checks: {arguments[4]}"
+            in captured_output,
+        )
+
+
 # ---------------------------------------------------------------------------
 
 
 def main() -> int:
     print("Gate-crash rendering + tracked-scope smoke\n")
     for test in (
+        test_explicit_paths_are_measured_or_loudly_skipped,
+        test_blocking_whole_tree_hint_replays_gate_argv,
+        test_path_scoped_hint_keeps_paths_placeholder,
         test_crash_is_not_rendered_as_a_violation,
         test_dedicated_crash_exit_code,
         test_negative_control_real_violation_still_reads_as_one,
@@ -328,6 +503,8 @@ def main() -> int:
         test_repo_files_prunes_bundled_venv_by_name_like_its_sibling,
         test_wrappers_expand_directories_to_in_repo_files,
         test_wrappers_expose_the_crash_contract,
+        test_pyright_no_verdict_is_not_reported_as_passed,
+        test_pyright_success_error_and_unavailable_paths,
     ):
         test()
     print()

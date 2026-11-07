@@ -99,7 +99,7 @@ result = unittest.TextTestRunner(verbosity=2).run(test)
 assert result.wasSuccessful()
 """
             verify = subprocess.run(
-                [sys.executable, "-I", "-c", probe, str(installed)],
+                [sys.executable, "-I", "-S", "-c", probe, str(installed)],
                 cwd=root,
                 capture_output=True,
                 text=True,

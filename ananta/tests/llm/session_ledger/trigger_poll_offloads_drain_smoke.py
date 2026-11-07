@@ -42,11 +42,14 @@ import logging
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
+sys.path.insert(0, str(REPO_ROOT / "ananta" / "tests" / "llm" / "session_ledger"))
 
 # The slot-release-on-exception case deliberately raises inside the drain; the
 # single-slot executor logs that at its top-level background boundary. Silence it
@@ -55,7 +58,7 @@ logging.getLogger(
     "ananta.services.session_ledger_service.summary_executor",
 ).setLevel(logging.CRITICAL)
 
-from ananta.llm.session_ledger.types import ImporterReport  # noqa: E402
+from ananta.llm.session_ledger.types import ExternalSessionRef, ImporterReport, IngestSourceKind, RawSessionEvent  # noqa: E402
 from ananta.services.session_ledger_service import (  # noqa: E402
     poll_drain as poll_drain_mod,
 )
@@ -96,6 +99,9 @@ class _BlockingImporter:
         self.calls = 0
         self._raises = raises
 
+    def poll_one_oversized(self) -> None:
+        """Legacy sources have no opted-in oversized work."""
+
     def poll_once(self) -> ImporterReport:
         self.calls += 1
         self.poll_threads.append(threading.get_ident())
@@ -104,7 +110,10 @@ class _BlockingImporter:
         if self._raises:
             raise RuntimeError("simulated importer poll failure")
         return ImporterReport(
-            sources_polled=1, sessions_seen=0, events_persisted=0, batches_failed=0,
+            sources_polled=1,
+            sessions_seen=0,
+            events_persisted=0,
+            batches_failed=0,
         )
 
 
@@ -117,6 +126,7 @@ def _make_service(*, importer: Any, poll_executor: Any) -> SessionLedgerService:
     instance = SessionLedgerService.__new__(SessionLedgerService)
     instance._importer = importer  # type: ignore[assignment]
     instance._poll_executor = poll_executor  # type: ignore[assignment]
+    instance._oversized_executor = BoundedSummaryExecutor(name="ledger-oversized-test")
     return instance
 
 
@@ -166,7 +176,9 @@ def test_static_trigger_poll_offloads_without_inline_poll() -> None:
     for src in (svc_src, drain_src):
         for node in ast.walk(ast.parse(src)):
             if isinstance(node, ast.FunctionDef) and node.name in (
-                "trigger_poll", "start_importer_poll_drain", "run_importer_poll_drain",
+                "trigger_poll",
+                "start_importer_poll_drain",
+                "run_importer_poll_drain",
             ):
                 bodies[node.name] = ast.get_source_segment(src, node) or ""
 
@@ -199,14 +211,14 @@ def test_trigger_poll_returns_fast_and_reports_started() -> None:
     ``{"poller": "started"}`` and the pass runs on a NON-caller daemon thread."""
     importer = _BlockingImporter()
     service = _make_service(
-        importer=importer, poll_executor=BoundedSummaryExecutor(name="ledger-poll-test"),
+        importer=importer,
+        poll_executor=BoundedSummaryExecutor(name="ledger-poll-test"),
     )
     holder, returned = _fire_async(service)
     try:
         _check(
             returned.wait(timeout=1.0),
-            "trigger_poll returns fast while poll_once is still blocked "
-            "(off the dispatch path)",
+            "trigger_poll returns fast while poll_once is still blocked (off the dispatch path)",
         )
         _check(
             holder.get("result") == {"poller": "started"},
@@ -218,10 +230,8 @@ def test_trigger_poll_returns_fast_and_reports_started() -> None:
         )
         caller_ident = holder.get("caller_ident")
         _check(
-            importer.poll_threads
-            and all(t != caller_ident for t in importer.poll_threads),
-            "poll_once ran on a background daemon thread, never the calling "
-            "(action-queue) thread",
+            importer.poll_threads and all(t != caller_ident for t in importer.poll_threads),
+            "poll_once ran on a background daemon thread, never the calling (action-queue) thread",
         )
     finally:
         importer.release.set()
@@ -241,7 +251,8 @@ def test_second_fire_is_already_running_singleton() -> None:
         f"first fire started the drainer (got {h1.get('result')!r})",
     )
     _check(
-        importer.entered.wait(timeout=2.0), "drainer thread entered poll_once (holds slot)",
+        importer.entered.wait(timeout=2.0),
+        "drainer thread entered poll_once (holds slot)",
     )
     h2, r2 = _fire_async(service)
     _check(
@@ -277,8 +288,101 @@ def test_slot_releases_after_poll_raises() -> None:
     importer.release.set()
 
 
+from ananta.llm.session_ledger.registry import SessionSourceRegistry  # noqa: E402
+from ananta.llm.session_ledger.repository import SourceRow  # noqa: E402
+from importer_smoke import _ContractSource, _TimedSource, runtime_importer  # noqa: E402
+
+
+class _BlockedContractSource(_ContractSource):
+    def __init__(self) -> None:
+        super().__init__()
+        self.empty = True  # empty regular set reaches caught_up despite deferred candidate
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.finished = threading.Event()
+        self.large_calls = 0
+
+    def read_events(self, root_uri: str, session: ExternalSessionRef, cursor_payload: dict[str, object] | None) -> Iterator[RawSessionEvent]:
+        self.large_calls += 1
+        self.entered.set()
+        try:
+            assert self.release.wait(4), "test must release oversized session"
+            yield from super().read_events(root_uri, session, cursor_payload)
+        finally:
+            self.finished.set()
+
+
+def _real_custody_fixture() -> tuple[SessionLedgerService, _BlockedContractSource, Any, Any]:
+    plugin = _BlockedContractSource()
+    importer, repo, state = runtime_importer(plugin, "synthetic")
+    plugin.repo = repo
+    other = _TimedSource()
+    repo.sources.append(SourceRow("other-source", IngestSourceKind.AGENT_MESSAGING, "synthetic", None, True, {}))
+    importer._registry = SessionSourceRegistry({"large": plugin, "other": other})
+    service = _make_service(importer=importer, poll_executor=BoundedSummaryExecutor(name="regular-custody-test"))
+    return service, plugin, repo, state
+
+
+def _other_event_count(state: Any) -> int:
+    return sum(w.table == "event" and w.record["source_kind"] == "agent_messaging" for w in state.upserts)
+
+
+def _prove_two_regular_passes(service: SessionLedgerService, state: Any) -> None:
+    baseline = _other_event_count(state)
+    for expected in (baseline + 4, baseline + 8):
+        assert _await_slot_free(service), "TWO normal passes require a free regular slot while oversized blocks"
+        deadline = time.monotonic() + 1
+        while _other_event_count(state) < expected and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert _other_event_count(state) >= expected, "TWO normal other-source passes complete during oversized lease"
+
+
+def _finish_and_resubmit(service: SessionLedgerService, plugin: _BlockedContractSource, repo: Any) -> None:
+    assert plugin.finished.wait(1), "oversized body releases after whole-session completion"
+    deadline = time.monotonic() + 1
+    while plugin.large_calls < 2 and time.monotonic() < deadline:
+        _await_slot_free(service)
+        time.sleep(0.005)
+    assert plugin.large_calls >= 2, "later heartbeat resubmits after oversized slot releases"
+    deadline = time.monotonic() + 1
+    while "runtime-source" in repo.held_sources and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert "runtime-source" not in repo.held_sources, "oversized session finally releases lease"
+    from ananta.llm.session_ledger.types import CursorScope
+
+    assert repo.cursors["runtime-source", CursorScope.EVENT_READ, "contract"]["_poll_completed_version"] == {"version": 1}, "real importer checkpoints oversized EOF/fingerprint"
+
+
+def test_oversized_does_not_occupy_regular_slot() -> None:
+    service, plugin, repo, state = _real_custody_fixture()
+    try:
+        assert service.trigger_poll() == {"poller": "started"}
+        assert plugin.entered.wait(1), "oversized producer must run after normal completion"
+        _prove_two_regular_passes(service, state)
+        assert plugin.large_calls == 1, "occupied oversized slot does not enqueue duplicate work"
+        assert "runtime-source" in repo.held_sources, "blocked whole session retains its source lease"
+    finally:
+        plugin.release.set()
+    _finish_and_resubmit(service, plugin, repo)
+
+    _check(True, "separate oversized custody permits TWO normal passes and later resubmission")
+
+
+def test_oversized_admission_failure_releases_slot() -> None:
+    """An OS thread-start refusal leaves eligibility for the next heartbeat."""
+    executor = BoundedSummaryExecutor(name="oversized-admission-fixture")
+    ran = threading.Event()
+    with patch.object(threading.Thread, "start", side_effect=RuntimeError("fixture thread limit")):
+        assert not executor.submit(ran.set), "thread admission failure is advisory, no occupied slot remains"
+    assert executor.submit(ran.set), "later heartbeat can submit after thread admission failure"
+    assert ran.wait(1), "the admitted retry executes"
+    _check(True, "oversized admission failure frees slot for a later heartbeat")
+
+
 def main() -> int:
     print("=== trigger_poll_offloads_drain_smoke (dispatch offload, 2026-07-10) ===")
+    test_oversized_admission_failure_releases_slot()
+    test_oversized_does_not_occupy_regular_slot()
     test_static_trigger_poll_offloads_without_inline_poll()
     test_trigger_poll_returns_fast_and_reports_started()
     test_second_fire_is_already_running_singleton()

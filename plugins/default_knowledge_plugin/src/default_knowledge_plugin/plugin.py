@@ -23,9 +23,10 @@ Implementation is decomposed across sibling modules:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from ananta.core.domain.enums import ActionStatus, ErrorSeverity
 from ananta.core.domain.types import ActionResult, ErrorDetail
@@ -41,12 +42,19 @@ from ._maintenance_plugin_mixin import KnowledgeMaintenancePluginMixin
 from ._refresh_plugin_mixin import KnowledgeRefreshPluginMixin
 from ._search_plugin_mixin import KnowledgeSearchPluginMixin
 from .constants import PLUGIN_NAME
+from .kb_install_control import paced_install_control
 from .kb_lifecycle import (
     auto_install_knowledge_bases as _run_auto_install,
 )
 from .schema import get_knowledge_schema
 
 logger = logging.getLogger(__name__)
+
+
+class _ShutdownEvent(Protocol):
+    """The orchestrator's shutdown event; only its flag is read, from the install thread."""
+
+    def is_set(self) -> bool: ...
 
 
 def _lifecycle_completed() -> ActionResult:
@@ -120,9 +128,7 @@ class DefaultKnowledgePlugin(
     """
 
     service_interfaces: tuple[type, ...] = (KnowledgeServiceInterface,)
-    supported_interface_versions: dict[type, str] = {
-        KnowledgeServiceInterface: KnowledgeServiceInterface.INTERFACE_VERSION
-    }
+    supported_interface_versions: dict[type, str] = {KnowledgeServiceInterface: KnowledgeServiceInterface.INTERFACE_VERSION}
 
     def __init__(self) -> None:
         super().__init__()
@@ -168,10 +174,7 @@ class DefaultKnowledgePlugin(
             raise RuntimeError(f"{PLUGIN_NAME}: config_manager not available")
         config = config_manager.get_plugin_config_provider(self.name)
         if not config:
-            raise RuntimeError(
-                f"{PLUGIN_NAME}: Plugin configuration not found - "
-                f"ensure config file exists at profile/config/plugins/{self.name}.json"
-            )
+            raise RuntimeError(f"{PLUGIN_NAME}: Plugin configuration not found - ensure config file exists at profile/config/plugins/{self.name}.json")
         self.config_provider = config
 
         kb_root_str = str(config.get("knowledge_base_root", ""))
@@ -191,7 +194,8 @@ class DefaultKnowledgePlugin(
         return _lifecycle_completed()
 
     def auto_install_knowledge_bases(
-        self, manifest_plugin_set: set[str] | None = None,
+        self,
+        manifest_plugin_set: set[str] | None = None,
     ) -> None:
         """Public entry point for startup-sequence to trigger KB auto-install.
 
@@ -207,15 +211,33 @@ class DefaultKnowledgePlugin(
         the spawn-path purge brings cutover cost back to O(plugin count);
         the spawn-path purge accumulated 271,605 archived rows by
         2026-06-13 and blew the 600s router-registration timeout.
+
+        With no install records, the startup pass defaults to full speed and
+        smallest-first order so a small KB becomes searchable before larger
+        corpora complete. Later passes use alphabetical order and duty 0.05.
+        An explicit ``SOLET_KB_INSTALL_DUTY`` overrides either duty. The pass
+        stops between chunks once the orchestrator's shutdown event is set;
+        an interrupted install resumes at the next start (prb_2e7713d4).
         """
         if self._kb_root is None:
             return
         _run_auto_install(
-            self._kb_root, self._state_service,
-            self._memory_service, self._address_book_service,
+            self._kb_root,
+            self._state_service,
+            self._memory_service,
+            self._address_book_service,
             manifest_plugin_set=manifest_plugin_set,
             budget=self._embedding_budget(),
+            control_factory=lambda first_install: paced_install_control(self._shutdown_check(), first_install=first_install),
         )
+
+    def _shutdown_check(self) -> Callable[[], bool]:
+        """True once the orchestrator's shutdown event is set; an orchestrator without one is reported, never refused."""
+        event: _ShutdownEvent | None = getattr(self.orchestrator_ref, "shutdown_event", None)
+        if event is None:
+            logger.warning("%s: the orchestrator has no shutdown_event; the knowledge-base auto-install cannot stop early at shutdown", PLUGIN_NAME)
+            return lambda: False
+        return event.is_set
 
     def _embedding_budget(self) -> TokenBudget | None:
         """The bound embedding provider's per-input budget; every index path splits to it (iss_9166af93)."""

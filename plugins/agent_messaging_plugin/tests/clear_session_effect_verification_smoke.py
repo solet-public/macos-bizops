@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
+from _register_unit_double import fixture_assignment  # noqa: E402
 
 from agent_messaging_plugin import session_hosts  # noqa: E402
 from agent_messaging_plugin import tmux_adapter as tmux_module  # noqa: E402
@@ -162,7 +163,7 @@ def _live_session(state: StateManagementInterface, agent_instance_id: str, host:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id=agent_instance_id, lane_id="lane-gau09", brief_ref="",
+            agent_instance_id=agent_instance_id, lane_id="lane-gau09", assignment=fixture_assignment(),
             work_class="read_only", budget_line="gau_fixes_2026-08-18", host=host,
         ),
     )

@@ -30,7 +30,7 @@ A hook is chosen over an inverse `--disallowedTools` enumeration because an
 enumeration is allow-by-default for any tool added in a future Claude Code
 version — the wrong direction for a fail-closed design.
 
-Opt-in + nameable, mirroring `git_controller_gate.py`'s contract: the gate
+Opt-in + nameable: the gate
 enforces ONLY when `FLEET_HEADLESS_TOOL_ALLOWLIST` is SET (even to an empty
 string — an explicit blank means "this IS a gated headless worker, with
 NOTHING extra allowed," distinct from unset, "not a gated session at all,"
@@ -42,8 +42,7 @@ never injected into, is unaffected).
 Hook contract: invoked by Claude Code as a PreToolUse handler. `exit(2)`
 BLOCKS the tool; any OTHER exit is non-blocking per Anthropic docs.
 
-UNLIKE `git_controller_gate.py` (disclosed mistake-prevention scope,
-allow-on-error): this IS the actual safety boundary for an UNATTENDED
+This IS the actual safety boundary for an UNATTENDED
 worker with no human to catch a hook bug, so this gate is FAIL-CLOSED —
 any parse/exception path also returns 2, never 0.
 
@@ -118,8 +117,7 @@ def _decide(env: dict[str, str], payload: dict[str, object]) -> tuple[bool, str]
 def main() -> int:
     """Entry point. Returns ``2`` to BLOCK, ``0`` to ALLOW.
 
-    FAIL-CLOSED: unlike the git-controller gate's mistake-prevention scope,
-    this hook is the actual safety boundary for an unattended worker with
+    FAIL-CLOSED: this hook is the actual safety boundary for an unattended worker with
     no human to notice a hook bug — any parse/exception path blocks."""
     try:
         payload = json.loads(sys.stdin.read())

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Query-verb + classification smoke tests for snowflake_plugin.
+"""Query-verb and statement-forwarding smoke tests for snowflake_plugin.
 
 Hermetic — a faked Snowflake connection/cursor, no live warehouse (there is no
 LIVE write-capability smoke here — see this module's own run_statement tests'
@@ -10,14 +10,14 @@ Exercises:
   1. run_query — writes a TSV handle (path/columns/row_count/truncated), never
      rows/records inline (override-friction default/override behavior is
      smoke_data_export.py's job, not duplicated here)
-  2. run_query — refuses a write-leader statement (guard)
+  2. run_query — forwards a write-leader statement to the existing runner
   3. run_statement — no-result-set statement disables autocommit, commits, and
      returns rowcount inline; a result-producing statement (e.g. RETURNING)
      routes through the same always-TSV path as run_query and commits; a
      result-producing statement WITHOUT output_tsv_path rolls back (never
-     silently discards the returned rows while committing); the read-leader
-     ACCESS-CONTROL guard never runs on this path (a DELETE is not refused) —
-     see query_actions.run_statement's own docstring. No single-statement
+     silently discards the returned rows while committing); statement input
+     is forwarded under the registered vendor role — see
+     query_actions.run_statement's own docstring. No single-statement
      SHAPE guard test exists here (unlike external_postgres_plugin's
      run_statement): Snowflake enforces single-statement natively at the
      driver, not via a plugin-side parser, so there is nothing to exercise
@@ -97,7 +97,6 @@ def _fake_conn(columns: list[str] | None, rows: list[tuple[Any, ...]]) -> tuple[
     return conn, cur
 
 
-
 class _FakeDriverError(Exception):
     def __init__(self, errno: int, message: str, sqlstate: str | None = None) -> None:
         super().__init__(message)
@@ -116,7 +115,9 @@ def test_run_query_writes_tsv() -> None:
     with tempfile.TemporaryDirectory(prefix="snw_shape_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
         result = query_actions.run_query(
-            conn, {"sql": "SELECT id, name FROM t", "output_tsv_path": out_path}, _passthrough_gate,
+            conn,
+            {"sql": "SELECT id, name FROM t", "output_tsv_path": out_path},
+            _passthrough_gate,
         )
         _assert("handle columns carried", result["columns"] == ["id", "name"])
         _assert("handle row_count", result["row_count"] == 2)
@@ -127,25 +128,25 @@ def test_run_query_writes_tsv() -> None:
         _assert("tsv data rows", "1\talice" in lines and "2\tbob" in lines)
 
 
-def test_run_query_guard() -> None:
-    conn, _ = _fake_conn(["id"], [(1,)])
+def test_run_query_forwards_write_statement() -> None:
+    conn, cur = _fake_conn(None, [])
     with tempfile.TemporaryDirectory(prefix="snw_guard_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
-        write = False
-        try:
-            query_actions.run_query(
-                conn, {"sql": "DELETE FROM t", "output_tsv_path": out_path}, _passthrough_gate,
-            )
-        except StatementGuardError:
-            write = True
-        _assert("write-leader run_query refused", write)
+        query_actions.run_query(
+            conn,
+            {"sql": "DELETE FROM t", "output_tsv_path": out_path},
+            _passthrough_gate,
+        )
+        _assert("write-leader run_query forwarded", cur.execute.call_args.args[0] == "DELETE FROM t")
 
 
 def test_run_statement_no_result_set_commits_inline() -> None:
     conn, cur = _fake_conn(None, [])
     cur.rowcount = 3
     result = query_actions.run_statement(
-        conn, {"sql": "UPDATE t SET x = 1"}, _passthrough_gate,
+        conn,
+        {"sql": "UPDATE t SET x = 1"},
+        _passthrough_gate,
     )
     _assert("no-result-set has_result_set False", result["has_result_set"] is False)
     _assert("no-result-set carries rowcount", result.get("rowcount") == 3)
@@ -177,7 +178,9 @@ def test_run_statement_result_set_without_path_rolls_back() -> None:
     raised = False
     try:
         query_actions.run_statement(
-            conn, {"sql": "INSERT INTO t (v) VALUES (1) RETURNING id"}, _passthrough_gate,
+            conn,
+            {"sql": "INSERT INTO t (v) VALUES (1) RETURNING id"},
+            _passthrough_gate,
         )
     except ValueError:
         raised = True
@@ -186,16 +189,16 @@ def test_run_statement_result_set_without_path_rolls_back() -> None:
     _assert("never commits when rows would be discarded", not conn.commit.called)
 
 
-def test_run_statement_no_read_leader_classification() -> None:
-    # The read/write ACCESS-CONTROL guard (assert_read_statement) must NEVER
-    # run on this path -- a DELETE is not refused here, unlike run_query.
+def test_run_statement_no_statement_classification() -> None:
+    # Input validation must NEVER classify the statement on this path; a
+    # DELETE is forwarded to Snowflake under the registered vendor role.
     conn, _ = _fake_conn(None, [])
     refused = False
     try:
         query_actions.run_statement(conn, {"sql": "DELETE FROM t"}, _passthrough_gate)
     except StatementGuardError:
         refused = True
-    _assert("run_statement never applies the read-leader access-control guard", not refused)
+    _assert("run_statement never applies statement classification", not refused)
 
 
 def test_list_databases() -> None:
@@ -230,12 +233,12 @@ def test_describe_table() -> None:
 def test_test_connection() -> None:
     conn, _ = _fake_conn(
         ["account", "user", "role", "warehouse", "version"],
-        [("myorg-acct", "OPERATOR_USER", "EXAMPLE_READONLY", "WH_XS", "8.1.0")],
+        [("myorg-acct", "OPERATOR_USER", "EXAMPLE_ROLE", "WH_XS", "8.1.0")],
     )
     result = query_actions.test_connection(conn, {})
     _assert("ok True", result["ok"] is True)
     _assert("account carried", result["account"] == "myorg-acct")
-    _assert("role carried", result["role"] == "EXAMPLE_READONLY")
+    _assert("role carried", result["role"] == "EXAMPLE_ROLE")
 
 
 def test_classify_topology_leak() -> None:
@@ -270,24 +273,22 @@ def test_edge_parity() -> None:
     actions = discover_actions(plugin)
     raised = None
     try:
-        PluginRegistrationValidator().validate_edge_process_provider(
-            "snowflake_plugin", plugin, actions
-        )
+        PluginRegistrationValidator().validate_edge_process_provider("snowflake_plugin", plugin, actions)
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 8 verbs discovered", len(actions) == 8)
+    _assert("all 21 verbs discovered", len(actions) == 21)
 
 
 def main() -> int:
     print("\nsnowflake_plugin query-verb smoke tests")
     print("=" * 47)
     test_run_query_writes_tsv()
-    test_run_query_guard()
+    test_run_query_forwards_write_statement()
     test_run_statement_no_result_set_commits_inline()
     test_run_statement_with_result_set_writes_tsv()
     test_run_statement_result_set_without_path_rolls_back()
-    test_run_statement_no_read_leader_classification()
+    test_run_statement_no_statement_classification()
     test_list_databases()
     test_list_schemas()
     test_list_tables()

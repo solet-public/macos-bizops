@@ -125,7 +125,7 @@ def _active_work_actors(
 
 def _legacy_candidate(row: dict[str, Any]) -> bool:
     """Recognize only the dispatch-less, unscoped registration-era shape."""
-    fields = ("dispatch_id", "lane_id", "role_name", "brief_ref")
+    fields = ("dispatch_id", "lane_id", "role_name", "unit_id", "assignment", "assignment_sha256")
     return not any(str(row.get(field) or "") for field in fields)
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -328,7 +329,7 @@ def _download_one(url: str, partial: Path, pin: FilePin, opener: UrlOpener) -> N
         with opener(request, _SOCKET_TIMEOUT_SECONDS) as response:
             mode, offset = _response_mode(response, offset, pin)
             total = _stream_to_partial(response, partial, mode, offset, pin)
-    except (URLError, TimeoutError, OSError) as exc:
+    except (http.client.HTTPException, URLError, TimeoutError, OSError) as exc:
         raise AssetDownloadError(f"download interrupted for {pin.relative_path}: {exc}") from exc
     if total != pin.size_bytes:
         raise AssetDownloadError(f"download incomplete for {pin.relative_path}: {total}/{pin.size_bytes}")

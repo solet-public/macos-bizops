@@ -66,7 +66,13 @@ class ThinkingServiceAPI(ABC):
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
-    def upsert_plan(self, content: str, *, session_id: str) -> dict[str, Any]: ...
+    def upsert_plan(
+        self,
+        content: str,
+        *,
+        session_id: str = "",
+        state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
 
     @service_interface_process(
         name="create_extended_plan",
@@ -2138,7 +2144,37 @@ class ThinkingServiceAPI(ABC):
         *,
         request_id: str,
         state: dict[str, Any] | None = None,
-    ) -> ActionResult: ...
+    ) -> ActionResult:
+        """Resume planning with a completion served through INF-02.
+
+        The platform submits this continuation after
+        ``submit_autonomic_completion`` wins the durable request's
+        pending-to-served transition. ``request_id`` is the required id of
+        that completion request; its served row supplies both the completion
+        text and planning correlation. The row must belong to the planning
+        consumer and contain the fields needed to resume.
+
+        Args:
+            request_id: Required id of a served completion request.
+            state: Optional execution state for the originating flow. Its
+                ``session_id`` preserves the planning session when the
+                completion continues that flow.
+
+        The method appends the served text as an OUTPUT context event, then
+        continues the planning loop with parsed actions or finalizes the
+        playbook and plan when the completion has no actions. It returns the
+        same actions-or-artifacts shape as ``process_planning_results``. This
+        is a platform continuation, not an operator entry point.
+
+        Returns:
+            The planning continuation's actions-or-artifacts result.
+
+        Raises:
+            FrameworkError: If the request id is missing, unknown, not a
+                served planning request, or lacks the required completion or
+                planning correlation.
+        """
+        ...
 
     # ------------------------------------------------------------------
     # Joseki run driver (Track A, spec 2026-07-05 v3.1) — the four verbs

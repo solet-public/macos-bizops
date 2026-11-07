@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::database",
+  "display_name": "Snowflake: Databases",
+  "description": "Manage Snowflake databases under /api/v2/databases. Operations: list (like, startsWith, showLimit 1-10000, fromName, history), create (body Database with name; createMode, kind), create_from_share (body with name; createMode, share), clone (name, body DatabaseClone with name and optional point_of_time; createMode, kind), get, create_or_alter (PUT, full Database body), delete (ifExists, restrict), undrop, enable_replication (body accounts; ignore_edition_check), disable_replication (optional body accounts), refresh_replication, enable_failover (body accounts), disable_failover (optional body accounts), primary_failover, set_tags and unset_tags (tags; ifExists), get_tags (withLineage) and fetch_result (result_handler, page). The deprecated databases/{name}:from_share path stays on request. Vendor RBAC alone decides. Returns job_id/status queued.",
+  "embedding_description": "Create, clone, alter, drop, undrop and replicate Snowflake databases through the Database REST API: create from a share, enable or refresh replication and failover, promote a primary, and set or read database tags. Use for database lifecycle; list_databases is the SQL listing. Vendor role grants decide every operation.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake database operation queued",
+    "result_type": "snowflake_database_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: family, operation, method, status (HTTP), headers, body (Database objects, the vendor's status message or a SuccessAcceptedResponse), body_encoding, correlation_id, error_code for 4xx/5xx, and pagination: next_from_name when a list filled showLimit, Link relations, location and result_handler for 202 responses.",
+    "presentation_guidance": "This operation may have changed vendor state. Queued means the job was accepted, not that Snowflake completed the operation. Report the HTTP status, error_code and body faithfully. To page a list, repeat it with query.fromName set to pagination.next_from_name. Replication and failover changes may answer 202: report them as accepted until fetch_result returns. Report deletes from the vendor status, never from job completion alone."
+  },
+  "error_processor_customizations": {
+    "action_context": "Manage Snowflake databases with the registered role's grants.",
+    "error_interpretation": "snowflake.invalid_params is raised before any vendor call when the operation, identifiers, query parameter names, types or ranges (showLimit 1-10000, boolean ifExists, restrict, history and ignore_edition_check), createMode or required body members do not match the documented vendor shape. Vendor HTTP errors are completion data with status, body and error_code: auth_failed (401), permission_denied (403), object_not_found (404), timeout (408), conflict (409), rate_limited (429), api_error otherwise. snowflake.api_error without a status is a transport or configuration failure.",
+    "recovery_guidance": "Read the vendor status and body before retrying. A 403 means the registered role lacks the grant: grant it in Snowflake, the plugin adds no gate of its own. Double-quote identifiers that contain other characters. For a 202, call the same verb with operation fetch_result and the pagination.result_handler. Never silently retry a mutation after a transport error: read the object first."
+  }
+}

@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
+from _register_unit_double import FIXTURE_UNIT_ID  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
     AGENT_ROLE_BINDING_NAMESPACE,
     COL_ROLE_CLASS,
@@ -130,10 +131,7 @@ def test_legislate_creates_primary_row() -> None:
     action = legislate_role_class(
         state, name="Coordinator-Main", role_class=ROLE_CLASS_PRIMARY,
         directed_by="operator_equivalent:Coordinator-Dawn",
-        brief_ref=(
-            "workbench/2026-08-03_phase_c_brief_and_d4_sitting_agenda_coordinator_dawn.md "
-            "Part B item 1"
-        ),
+        unit_id=FIXTURE_UNIT_ID, revision_id="drv_fixture-revision",
     )
     _check(
         action == "legislated",
@@ -147,7 +145,7 @@ def test_legislate_creates_primary_row() -> None:
 
     action_again = legislate_role_class(
         state, name="Coordinator-Main", role_class=ROLE_CLASS_PRIMARY,
-        directed_by="operator_equivalent:Coordinator-Dawn", brief_ref="re-run",
+        directed_by="operator_equivalent:Coordinator-Dawn", unit_id=FIXTURE_UNIT_ID, revision_id="drv_fixture-revision",
     )
     _check(
         action_again == "already_legislated",
@@ -158,7 +156,7 @@ def test_legislate_creates_primary_row() -> None:
     try:
         legislate_role_class(
             state, name="Coordinator-Main", role_class=ROLE_CLASS_PRINCIPAL,
-            directed_by="operator_equivalent:Coordinator-Dawn", brief_ref="conflicting re-run",
+            directed_by="operator_equivalent:Coordinator-Dawn", unit_id=FIXTURE_UNIT_ID, revision_id="drv_fixture-revision",
         )
     except RoleClassConflictError:
         conflict_raised = True
@@ -189,34 +187,34 @@ def test_verb_layer_validation() -> None:
 
     _expect_verb_error(
         LegislateRoleRequest(
-            name="Some-Project-Role", role_class=ROLE_CLASS_PROJECT, brief_ref="x",
+            name="Some-Project-Role", role_class=ROLE_CLASS_PROJECT, unit_id=FIXTURE_UNIT_ID, revision_id="drv_fixture-revision",
         ),
         "role_class_not_legislatable",
         "project/ephemeral/chat role_class is refused, never minted through this verb",
     )
     _expect_verb_error(
         LegislateRoleRequest(
-            name="Not-Reserved-Shape", role_class=ROLE_CLASS_PRIMARY, brief_ref="x",
+            name="Not-Reserved-Shape", role_class=ROLE_CLASS_PRIMARY, unit_id=FIXTURE_UNIT_ID, revision_id="drv_fixture-revision",
         ),
         "reserved_primary_name_required",
         "role_class='primary' on a non-<solet>-Main-shaped name is refused",
     )
     _expect_verb_error(
-        LegislateRoleRequest(name="", role_class=ROLE_CLASS_PRIMARY, brief_ref="x"),
+        LegislateRoleRequest(name="", role_class=ROLE_CLASS_PRIMARY, unit_id=FIXTURE_UNIT_ID, revision_id="drv_fixture-revision"),
         "missing_argument",
         "an empty name is refused",
     )
     _expect_verb_error(
-        LegislateRoleRequest(name="Coordinator-Main", role_class=ROLE_CLASS_PRIMARY, brief_ref=""),
+        LegislateRoleRequest(name="Coordinator-Main", role_class=ROLE_CLASS_PRIMARY, unit_id="", revision_id="drv_fixture-revision"),
         "missing_argument",
-        "an empty brief_ref is refused",
+        "an empty Unit identity is refused",
     )
 
     result = verb_legislate_role(
         state,
         LegislateRoleRequest(
             name="Coordinator-Main", role_class=ROLE_CLASS_PRIMARY,
-            brief_ref="D4 Part B item 1", directed_by="operator_equivalent:Coordinator-Dawn",
+            unit_id=FIXTURE_UNIT_ID, revision_id="drv_fixture-revision", directed_by="operator_equivalent:Coordinator-Dawn",
         ),
     )
     _check(
@@ -255,7 +253,7 @@ def test_reserved_mint_refusal_still_intact() -> None:
     # enforce-by-class, never class-assignment — the guard only blocks MINTING).
     legislate_role_class(
         state, name="Coordinator-Main", role_class=ROLE_CLASS_PRIMARY,
-        directed_by="operator_equivalent:Coordinator-Dawn", brief_ref="D4 Part B item 1",
+        directed_by="operator_equivalent:Coordinator-Dawn", unit_id=FIXTURE_UNIT_ID, revision_id="drv_fixture-revision",
     )
     legislated_claim = _claim(
         state, name="Coordinator-Main",
@@ -280,7 +278,7 @@ def test_claim_time_enforcement_against_legislated_row() -> None:
     state = _state()
     legislate_role_class(
         state, name="Coordinator-Main", role_class=ROLE_CLASS_PRIMARY,
-        directed_by="operator_equivalent:Coordinator-Dawn", brief_ref="D4 Part B item 1",
+        directed_by="operator_equivalent:Coordinator-Dawn", unit_id=FIXTURE_UNIT_ID, revision_id="drv_fixture-revision",
     )
 
     first = _claim(

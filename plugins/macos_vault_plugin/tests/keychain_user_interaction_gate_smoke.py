@@ -172,7 +172,7 @@ def _check(name: str, fn: Callable[[], None], failures: list[str]) -> None:
 def main() -> int:
     if sys.platform != "darwin":
         print("SKIP: macOS-only vault substrate.")
-        return 0
+        return 77
 
     entry_state = keychain_interaction.user_interaction_allowed()
     recorder = _install_recorder()

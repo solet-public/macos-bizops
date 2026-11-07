@@ -95,6 +95,7 @@ from typing import Any
 
 from ananta.llm.session_ledger.types import (
     EventType,
+    MessageRole,
     NormalizedSessionEvent,
     RawSessionEvent,
 )
@@ -157,10 +158,7 @@ def iter_goal_rows(
         sql = f"SELECT {select_columns} FROM thread_goals ORDER BY updated_at_ms"
         params: tuple[Any, ...] = ()
     else:
-        sql = (
-            f"SELECT {select_columns} FROM thread_goals "
-            f"WHERE updated_at_ms > ? ORDER BY updated_at_ms"
-        )
+        sql = f"SELECT {select_columns} FROM thread_goals WHERE updated_at_ms > ? ORDER BY updated_at_ms"
         params = (after_updated_at,)
     for row in con.execute(sql, params):
         thread_id = str(row[0])
@@ -205,7 +203,7 @@ def normalize_raw(raw: RawSessionEvent) -> NormalizedSessionEvent:
     return NormalizedSessionEvent(
         external_session_id=raw.external_session_id,
         event_type=EventType.SYSTEM,
-        role=None,
+        role=MessageRole.SYSTEM,
         content_text=None,
         content_json=dict(raw.payload),
         event_at=raw.event_at,

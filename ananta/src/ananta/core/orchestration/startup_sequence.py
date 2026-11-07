@@ -155,7 +155,8 @@ class StartupSequenceRunner:
                 logger.error(f"❌ {step.name}: {e}", exc_info=True)
                 if step.critical:
                     raise StartupError(
-                        f"{step.name} failed: {e}", step_name=step.name,
+                        f"{step.name} failed: {e}",
+                        step_name=step.name,
                     ) from e
                 else:
                     logger.debug(f"Non-critical step {step.name} failed, continuing...")
@@ -197,25 +198,17 @@ def _init_plugin_manager(orch: Any) -> None:
 
     allowed_plugins = load_manifest_plugin_set(orch.APP_HOME)
     if allowed_plugins is not None:
-        logger.info(
-            f"Profile manifest gates discovery to {len(allowed_plugins)} plugins"
-        )
+        logger.info(f"Profile manifest gates discovery to {len(allowed_plugins)} plugins")
 
     orch.plugin_manager = PluginManager()
-    orch.plugin_manager.discover_plugins(
-        orch.config_manager, allowed_plugins=allowed_plugins
-    )
+    orch.plugin_manager.discover_plugins(orch.config_manager, allowed_plugins=allowed_plugins)
     _report_plugin_discovery_completeness(orch.plugin_manager, allowed_plugins)
     orch.plugin_manager.set_orchestrator_ref(orch)
     orch.plugin_manager.set_event_bus_ref(orch.event_bus)
-    logger.debug(
-        f"Plugin manager initialized, discovered {len(orch.plugin_manager.plugins)} plugins"
-    )
+    logger.debug(f"Plugin manager initialized, discovered {len(orch.plugin_manager.plugins)} plugins")
 
 
-def _report_plugin_discovery_completeness(
-    plugin_manager: Any, allowed_plugins: set[str] | None
-) -> None:
+def _report_plugin_discovery_completeness(plugin_manager: Any, allowed_plugins: set[str] | None) -> None:
     """Log an incomplete manifest-governed roster without changing boot outcome."""
     if allowed_plugins is None:
         return
@@ -223,8 +216,7 @@ def _report_plugin_discovery_completeness(
     if not missing:
         return
     logger.error(
-        "Plugin discovery incomplete: manifest plugins were not loaded: %s; "
-        "continuing boot per ruling rul_a4b34267",
+        "Plugin discovery incomplete: manifest plugins were not loaded: %s; continuing boot per ruling rul_a4b34267",
         missing,
     )
 
@@ -281,12 +273,7 @@ def _load_service_bindings(orch: Any) -> None:
     for service_name, binding in bindings.items():
         plugin_name = binding.plugin_name
         if plugin_name not in orch.plugin_manager.plugins:
-            raise StartupError(
-                f"Service '{service_name.value}' is bound to plugin '{plugin_name}', "
-                f"but that plugin was not loaded during discovery. "
-                f"Check that the plugin package is installed and its entry point is registered. "
-                f"Loaded plugins: {sorted(orch.plugin_manager.plugins.keys())}"
-            )
+            raise StartupError(f"Service '{service_name.value}' is bound to plugin '{plugin_name}', but that plugin was not loaded during discovery. Check that the plugin package is installed and its entry point is registered. Loaded plugins: {sorted(orch.plugin_manager.plugins.keys())}")
 
 
 def _inject_state_vault_service(orch: Any) -> None:
@@ -344,10 +331,7 @@ def _inject_state_vault_service(orch: Any) -> None:
 
     raw_vault = orch.get_service("vault_service")
     if raw_vault is None:
-        logger.debug(
-            "No vault_service bound; skipping state-plugin vault proxy injection "
-            "(state plugin fails loud at _initialize if it requires the vault)"
-        )
+        logger.debug("No vault_service bound; skipping state-plugin vault proxy injection (state plugin fails loud at _initialize if it requires the vault)")
         return
 
     setter = getattr(state_plugin, "set_vault_service", None)
@@ -358,9 +342,7 @@ def _inject_state_vault_service(orch: Any) -> None:
         )
         return
 
-    proxy = VaultServiceProxy(
-        cast(VaultServiceInterface, raw_vault), caller_plugin=state_plugin_name
-    )
+    proxy = VaultServiceProxy(cast(VaultServiceInterface, raw_vault), caller_plugin=state_plugin_name)
     setter(proxy)
     logger.debug("Injected VaultServiceProxy into state plugin %s", state_plugin_name)
 
@@ -376,11 +358,7 @@ def _start_state_plugin(orch: Any) -> None:
     state_plugin_name = orch.service_bindings.get_plugin_name(ServiceName.STATE_SERVICE)
 
     if state_plugin_name is None:
-        raise StartupError(
-            "No plugin bound to state_service. "
-            "Set ANANTA_STATE_SERVICE or ANANTA_STATE_PLUGIN environment variable, "
-            "or configure in config/service_bindings.json"
-        )
+        raise StartupError("No plugin bound to state_service. Set ANANTA_STATE_SERVICE or ANANTA_STATE_PLUGIN environment variable, or configure in config/service_bindings.json")
 
     # Store the state plugin name for later use
     orch._state_plugin_name = state_plugin_name
@@ -390,10 +368,7 @@ def _start_state_plugin(orch: Any) -> None:
     # Same pattern used in _validate_service_interfaces.
     state_plugin = orch.plugin_manager.plugins.get(state_plugin_name)
     if state_plugin is None:
-        raise StartupError(
-            f"State plugin '{state_plugin_name}' not found in loaded plugins. "
-            f"Available: {list(orch.plugin_manager.plugins.keys())}"
-        )
+        raise StartupError(f"State plugin '{state_plugin_name}' not found in loaded plugins. Available: {list(orch.plugin_manager.plugins.keys())}")
 
     # Load config for state plugin
     config_path = Path(orch.APP_HOME) / "config" / "plugins" / f"{state_plugin_name}.json"
@@ -408,6 +383,7 @@ def _start_state_plugin(orch: Any) -> None:
     # Installed BEFORE state plugin's prepare_for_readiness (which opens the
     # first authorized connection) and BEFORE any consumer plugin runs.
     from .postgres_authorization_guard import install_postgres_authorization_guard
+
     install_postgres_authorization_guard()
 
     # Initialize state plugin
@@ -435,9 +411,7 @@ def _create_state_service_wrapper(orch: Any) -> None:
     from ananta.services.state_service import StateService
 
     state_plugin_name = getattr(orch, "_state_plugin_name", None)
-    orch.state_service = StateService(
-        orch.plugin_manager, orch.APP_HOME, state_plugin_name=state_plugin_name
-    )
+    orch.state_service = StateService(orch.plugin_manager, orch.APP_HOME, state_plugin_name=state_plugin_name)
 
 
 def _inject_dependencies(orch: Any) -> None:
@@ -462,9 +436,7 @@ def _inject_at_command_processor(orch: Any) -> None:
                 plugin.set_at_command_processor(orch.at_command_processor)
                 injected_count += 1
             else:
-                logger.error(
-                    f"Plugin {name} requires at_command_processor but it's not available yet"
-                )
+                logger.error(f"Plugin {name} requires at_command_processor but it's not available yet")
 
 
 def _inject_flow_manager(orch: Any) -> None:
@@ -508,14 +480,10 @@ def _inject_context_management_service(orch: Any) -> None:
     # Get context_management_service from service_manager
     context_management_service = None
     if hasattr(orch, "service_manager") and orch.service_manager is not None:
-        context_management_service = getattr(
-            orch.service_manager, "context_management_service", None
-        )
+        context_management_service = getattr(orch.service_manager, "context_management_service", None)
 
     if context_management_service is None:
-        logger.error(
-            "context_management_service not available - IO plugins will fail on action submission"
-        )
+        logger.error("context_management_service not available - IO plugins will fail on action submission")
         return
 
     injected_count = 0
@@ -530,10 +498,7 @@ def _inject_context_management_service(orch: Any) -> None:
 def _inject_memory_service(orch: Any) -> None:
     """Inject memory service into plugins that need it. Fails fast - memory is required."""
     if not hasattr(orch, "memory_service") or orch.memory_service is None:
-        raise StartupError(
-            "Cannot inject memory service: orch.memory_service is not set. "
-            "Memory service is a required platform service."
-        )
+        raise StartupError("Cannot inject memory service: orch.memory_service is not set. Memory service is a required platform service.")
 
     for plugin_name, plugin in orch.plugin_manager.plugins.items():
         setter = getattr(plugin, "set_memory_service", None)
@@ -638,20 +603,14 @@ def _resolve_embedding_dimensions(orch: Any) -> int:
 
     embedding_plugin_name = orch.service_bindings.get_plugin_name(ServiceName.EMBEDDING_SERVICE)
     if embedding_plugin_name is None:
-        raise RuntimeError(
-            "embedding_service has no binding; cannot resolve discovery vector dimension. "
-            "Add an embedding_service entry to the profile's service_bindings."
-        )
+        raise RuntimeError("embedding_service has no binding; cannot resolve discovery vector dimension. Add an embedding_service entry to the profile's service_bindings.")
     embedding_service = EmbeddingService(
         plugin_manager=orch.plugin_manager,
         embedding_plugin_name=embedding_plugin_name,
     )
     dim = embedding_service.get_default_dimensions()
     if dim <= 0:
-        raise RuntimeError(
-            f"embedding plugin '{embedding_plugin_name}'.get_default_dimensions() "
-            f"returned {dim!r} (expected positive int)."
-        )
+        raise RuntimeError(f"embedding plugin '{embedding_plugin_name}'.get_default_dimensions() returned {dim!r} (expected positive int).")
     logger.info(
         "Resolved embedding dimension %d from %s for discovery schema init",
         dim,
@@ -700,9 +659,7 @@ def _initialize_schemas(orch: Any) -> None:
         # match the deployed model, exactly like the discovery table above.
         # Owned here (not in get_all_core_schemas) because the dimension is
         # only knowable once the embedding binding is resolved.
-        all_schemas.append(
-            build_session_ledger_event_embeddings_schema(embedding_dimensions)
-        )
+        all_schemas.append(build_session_ledger_event_embeddings_schema(embedding_dimensions))
     except Exception as e:
         logger.error(f"Failed to get discovery schemas: {e}", exc_info=True)
         raise  # Discovery schemas are also critical
@@ -715,8 +672,7 @@ def _initialize_schemas(orch: Any) -> None:
         plugin_schema_service = orch.get_service("plugin_schema_service")
         if plugin_schema_service is None:
             raise StartupError(
-                "plugin_schema_service binding unresolved at schema init; the "
-                "state plugin must provide it (no legacy fallback path exists)",
+                "plugin_schema_service binding unresolved at schema init; the state plugin must provide it (no legacy fallback path exists)",
                 step_name="initialize_schemas",
             )
 
@@ -741,12 +697,11 @@ def _validate_scoped_key_shape(name: str, key: str) -> None:
     from ananta.interfaces.vault_keys_provider import (  # noqa: PLC0415
         MalformedVaultKeyDeclarationError,
     )
+
     parts = key.split(".", 2)
     if len(parts) < 3 or parts[1] != name:
         raise MalformedVaultKeyDeclarationError(
-            f"plugin {name!r} declared key {key!r} which is not in "
-            f"<solet>.{name}.<credential> form (plugin segment "
-            f"must match the plugin's own name)",
+            f"plugin {name!r} declared key {key!r} which is not in <solet>.{name}.<credential> form (plugin segment must match the plugin's own name)",
         )
 
 
@@ -755,12 +710,12 @@ def _check_single_key_exists(name: str, key: str, proxy: Any) -> bool:
     from ananta.interfaces.vault_keys_provider import (  # noqa: PLC0415
         VaultServiceUnavailableError,
     )
+
     try:
         result = proxy.exists(key)
     except Exception as e:  # noqa: BLE001 — vault-substrate failures arrive as any exception
         raise VaultServiceUnavailableError(
-            f"plugin {name!r} launch-key gate: vault_service.exists({key!r}) "
-            f"raised {type(e).__name__}: {e}",
+            f"plugin {name!r} launch-key gate: vault_service.exists({key!r}) raised {type(e).__name__}: {e}",
         ) from e
     data = result.get("data") if isinstance(result, dict) else None
     return bool(data and data.get("exists"))
@@ -771,16 +726,14 @@ def _report_missing_keys(name: str, missing: list[str]) -> None:
     from ananta.interfaces.vault_keys_provider import (  # noqa: PLC0415
         MissingVaultKeyError,
     )
+
     if VAULT_KEYS_GATE_MODE == "fail":
         raise MissingVaultKeyError(name, missing)
     for key in missing:
         logger.warning(
-            "Plugin %r declared required vault key %r but vault has no "
-            "matching entry. Launch-key gate is in WARN mode (sub-1 "
-            "landing); plugin will load but the next runtime call that "
-            "consumes this key will surface a not_found error. Flip to "
-            "FAIL at sub-2 landing per W-VAULT-CALLER-ENFORCE.",
-            name, key,
+            "Plugin %r declared required vault key %r but vault has no matching entry. Launch-key gate is in WARN mode (sub-1 landing); plugin will load but the next runtime call that consumes this key will surface a not_found error. Flip to FAIL at sub-2 landing per W-VAULT-CALLER-ENFORCE.",
+            name,
+            key,
         )
 
 
@@ -825,8 +778,7 @@ def _check_vault_keys_for_plugin(name: str, plugin: Any) -> None:
     proxy = getattr(plugin, "_vault_service", None)
     if proxy is None:
         logger.debug(
-            "Plugin %r declared required vault keys but has no "
-            "_vault_service proxy injected; skipping launch-key gate.",
+            "Plugin %r declared required vault keys but has no _vault_service proxy injected; skipping launch-key gate.",
             name,
         )
         return
@@ -998,11 +950,7 @@ def _validate_service_interfaces(orch: Any) -> None:
             continue
         plugin = orch.plugin_manager.plugins.get(plugin_name)
         if plugin is None:
-            raise RuntimeError(
-                f"Service binding error: service '{service_name.value}' is bound to plugin "
-                f"'{plugin_name}', but that plugin is not loaded. "
-                f"Either install the plugin or remove the binding from service_bindings.json."
-            )
+            raise RuntimeError(f"Service binding error: service '{service_name.value}' is bound to plugin '{plugin_name}', but that plugin is not loaded. Either install the plugin or remove the binding from service_bindings.json.")
         orch.service_bindings.validate_plugin_interface(service_name, plugin)
 
     logger.debug("All service plugin interfaces validated")
@@ -1025,15 +973,11 @@ def _create_service_wrappers(orch: Any) -> None:
 
     # VectorService - use service binding
     vector_plugin_name = orch.service_bindings.get_plugin_name(ServiceName.VECTOR_SERVICE)
-    orch.vector_service = VectorService(
-        orch.plugin_manager, vector_plugin_name=vector_plugin_name, state_service=orch.state_service
-    )
+    orch.vector_service = VectorService(orch.plugin_manager, vector_plugin_name=vector_plugin_name, state_service=orch.state_service)
 
     # EmbeddingService - use service binding
     embedding_plugin_name = orch.service_bindings.get_plugin_name(ServiceName.EMBEDDING_SERVICE)
-    orch.embedding_service = EmbeddingService(
-        orch.plugin_manager, embedding_plugin_name=embedding_plugin_name
-    )
+    orch.embedding_service = EmbeddingService(orch.plugin_manager, embedding_plugin_name=embedding_plugin_name)
 
     # InferenceService - use service binding
     inference_plugin_name = orch.service_bindings.get_plugin_name(ServiceName.INFERENCE_SERVICE)
@@ -1076,25 +1020,19 @@ def _create_service_wrappers(orch: Any) -> None:
 
     # MemoryService wrapper - required service (fails if not bound)
     memory_plugin_name = orch.service_bindings.get_plugin_name(ServiceName.MEMORY_SERVICE)
-    orch.memory_service = MemoryService(
-        orch.plugin_manager, memory_plugin_name=memory_plugin_name
-    )
+    orch.memory_service = MemoryService(orch.plugin_manager, memory_plugin_name=memory_plugin_name)
 
     # KnowledgeService wrapper - optional (None if not bound)
     knowledge_plugin_name = orch.service_bindings.get_plugin_name(ServiceName.KNOWLEDGE_SERVICE)
     if knowledge_plugin_name:
-        orch.knowledge_service = KnowledgeService(
-            orch.plugin_manager, knowledge_plugin_name=knowledge_plugin_name
-        )
+        orch.knowledge_service = KnowledgeService(orch.plugin_manager, knowledge_plugin_name=knowledge_plugin_name)
     else:
         orch.knowledge_service = None
 
     # ThinkingService wrapper - optional (None if not bound)
     thinking_plugin_name = orch.service_bindings.get_plugin_name(ServiceName.THINKING_SERVICE)
     if thinking_plugin_name:
-        orch.thinking_service = ThinkingService(
-            orch.plugin_manager, thinking_plugin_name=thinking_plugin_name
-        )
+        orch.thinking_service = ThinkingService(orch.plugin_manager, thinking_plugin_name=thinking_plugin_name)
     else:
         orch.thinking_service = None
 
@@ -1183,8 +1121,7 @@ def _probe_exit_if_in_probe_mode(orch: Any) -> None:
         encoding="utf-8",
     )
     logger.info(
-        "L2 probe reached init_actions threshold cleanly; "
-        "writing %s and exiting before action processing begins.",
+        "L2 probe reached init_actions threshold cleanly; writing %s and exiting before action processing begins.",
         marker,
     )
     os._exit(0)
@@ -1193,6 +1130,12 @@ def _probe_exit_if_in_probe_mode(orch: Any) -> None:
 def _init_actions(orch: Any) -> None:
     """Initialize action coordination system with full dependency injection."""
     from ananta.core.orchestration.action_coordinator import ActionCoordinator
+    from ananta.platform.platform_services_manager import metadata_registry_startup_detail
+
+    platform_manager = orch.service_manager.platform_services_manager
+    if platform_manager is not None and platform_manager.initialization_error is not None:
+        cause = platform_manager.initialization_error
+        raise StartupError(metadata_registry_startup_detail(cause), step_name="init_actions") from cause
 
     orch.action_coordinator = ActionCoordinator()
 
@@ -1221,9 +1164,7 @@ def _init_actions(orch: Any) -> None:
     }
 
     # Fully initialize ActionCoordinator including action_factory injection into plugins
-    orch.action_coordinator.initialize_action_components(
-        orchestrator_ref=orch, services_dict=services_dict
-    )
+    orch.action_coordinator.initialize_action_components(orchestrator_ref=orch, services_dict=services_dict)
 
     # Delegate action attributes for compatibility
     orch.action_factory = orch.action_coordinator.action_factory
@@ -1317,11 +1258,7 @@ def _seed_identity_memories(orch: Any) -> None:
     seeded_count = _seed_identity_items(orch.memory_service, identity_items, IDENTITY_TAG)
 
     if seeded_count == 0:
-        raise StartupError(
-            f"Seeded 0 identity memories from {identity_config_path}.\n"
-            f"Items in config: {len(identity_items)}\n"
-            "This should not happen - validation should have caught invalid items."
-        )
+        raise StartupError(f"Seeded 0 identity memories from {identity_config_path}.\nItems in config: {len(identity_items)}\nThis should not happen - validation should have caught invalid items.")
 
     _verify_identity_seeding(orch.memory_service, IDENTITY_TAG, seeded_count)
     logger.info(f"✅ Seeded {seeded_count} identity memories")
@@ -1340,25 +1277,17 @@ def _load_identity_config(config_path: Path) -> list[Any]:
         StartupError: If config missing or empty
     """
     if not config_path.exists():
-        raise StartupError(
-            f"Identity config not found: {config_path}. "
-            "Create profile/config/identity.json with identity strings."
-        )
+        raise StartupError(f"Identity config not found: {config_path}. Create profile/config/identity.json with identity strings.")
 
     with open(config_path) as f:
         config = json.load(f)
 
     identity_items = config.get("identity", [])
     if not identity_items:
-        raise StartupError(
-            f"Identity config is empty: {config_path}. "
-            "Add identity strings to the 'identity' array."
-        )
+        raise StartupError(f"Identity config is empty: {config_path}. Add identity strings to the 'identity' array.")
 
     if not isinstance(identity_items, list):
-        raise StartupError(
-            f"Identity config 'identity' must be a list: {config_path}"
-        )
+        raise StartupError(f"Identity config 'identity' must be a list: {config_path}")
 
     return identity_items
 
@@ -1393,9 +1322,7 @@ def _clear_identity_memories(memory_service: Any, identity_tag: str) -> int:
     return cleared_count
 
 
-def _seed_identity_items(
-    memory_service: Any, items: list[Any], identity_tag: str
-) -> int:
+def _seed_identity_items(memory_service: Any, items: list[Any], identity_tag: str) -> int:
     """Seed identity items into memory service.
 
     Args:
@@ -1413,24 +1340,16 @@ def _seed_identity_items(
     for i, item in enumerate(items):
         # Validate item is a non-empty string - fail fast with precise error
         if not isinstance(item, str):
-            raise StartupError(
-                f"identity.json item[{i}] must be a string, got {type(item).__name__}: {item!r}"
-            )
+            raise StartupError(f"identity.json item[{i}] must be a string, got {type(item).__name__}: {item!r}")
         if not item.strip():
-            raise StartupError(
-                f"identity.json item[{i}] is empty or whitespace-only: {item!r}"
-            )
+            raise StartupError(f"identity.json item[{i}] is empty or whitespace-only: {item!r}")
 
         result = memory_service.remember(
             content=item,
             tags=[identity_tag],
         )
         if "error" in result:
-            raise StartupError(
-                f"Failed to store identity.json item[{i}] in memory service.\n"
-                f"Content: {item!r}\n"
-                f"Error: {result['error']}"
-            )
+            raise StartupError(f"Failed to store identity.json item[{i}] in memory service.\nContent: {item!r}\nError: {result['error']}")
         if "memory_id" in result:
             seeded_count += 1
             logger.debug(f"Seeded identity: {item[:50]}...")
@@ -1438,9 +1357,7 @@ def _seed_identity_items(
     return seeded_count
 
 
-def _verify_identity_seeding(
-    memory_service: Any, identity_tag: str, seeded_count: int
-) -> None:
+def _verify_identity_seeding(memory_service: Any, identity_tag: str, seeded_count: int) -> None:
     """Verify that identity seeding succeeded using direct tag lookup.
 
     Uses get_memories_by_tag for deterministic verification instead of
@@ -1458,22 +1375,11 @@ def _verify_identity_seeding(
 
     # Check for error
     if "error" in verify:
-        raise StartupError(
-            f"Identity verification failed.\n"
-            f"Tag: '{identity_tag}'\n"
-            f"Error: {verify['error']}"
-        )
+        raise StartupError(f"Identity verification failed.\nTag: '{identity_tag}'\nError: {verify['error']}")
 
     memories = verify.get("memories", [])
     if not memories:
-        raise StartupError(
-            f"Identity verification failed: no memories found with tag '{identity_tag}'.\n"
-            f"Seeded: {seeded_count} items\n"
-            f"Result: {verify}\n"
-            "\n"
-            "This means memories were stored but not retrievable.\n"
-            "Check database connectivity and state service configuration."
-        )
+        raise StartupError(f"Identity verification failed: no memories found with tag '{identity_tag}'.\nSeeded: {seeded_count} items\nResult: {verify}\n\nThis means memories were stored but not retrievable.\nCheck database connectivity and state service configuration.")
 
 
 def _reindex_orphaned_memories(orch: Any) -> None:
@@ -1487,6 +1393,9 @@ def _reindex_orphaned_memories(orch: Any) -> None:
 
     if result.get("action_status") == ActionStatus.COMPLETED.value:
         data = result.get("data", {})
+        failures = data.get("failed_records", [])
+        if failures:
+            raise StartupError(f"Reindex completed with failed records: {failures}")
         reindexed = data.get("reindex_count", 0)
         message = data.get("message")
 
@@ -1549,16 +1458,13 @@ def _auto_install_knowledge_bases(orch: Any) -> None:
     """
     if os.environ.get(_PROBE_MODE_ENV_VAR) == "1":
         logger.info(
-            "auto_install_knowledge_bases skipped: SOLET_PROBE_MODE=1 "
-            "(probe shares live Postgres; install records already present)",
+            "auto_install_knowledge_bases skipped: SOLET_PROBE_MODE=1 (probe shares live Postgres; install records already present)",
         )
         return
 
     from ananta.core.orchestration.service_bindings import ServiceName
 
-    knowledge_plugin_name = orch.service_bindings.get_plugin_name(
-        ServiceName.KNOWLEDGE_SERVICE
-    )
+    knowledge_plugin_name = orch.service_bindings.get_plugin_name(ServiceName.KNOWLEDGE_SERVICE)
     if not knowledge_plugin_name:
         return
 
@@ -1574,6 +1480,7 @@ def _auto_install_knowledge_bases(orch: Any) -> None:
         # installed" default and disables the auto-uninstall pass
         # symmetrically (no manifest → no filter).
         from ananta.core.plugins.profile_manifest import load_manifest_plugin_set
+
         manifest_plugin_set = load_manifest_plugin_set(orch.APP_HOME)
         hydration_thread = threading.Thread(
             target=_run_auto_install_knowledge_bases,
@@ -1605,8 +1512,7 @@ def _run_auto_install_knowledge_bases(
                     "error": str(exc),
                 }
                 logger.exception(
-                    "Knowledge-base auto-install failed after %d attempts; "
-                    "startup readiness remains available",
+                    "Knowledge-base auto-install failed after %d attempts; startup readiness remains available",
                     attempt,
                 )
                 return
@@ -1686,32 +1592,80 @@ def _start_selected_inference_work(orch: Any) -> dict[str, Any]:
     return {"state": "started", "provider": plugin_name}
 
 
-def _run_post_registration_work(orch: Any) -> None:
-    """Sequence local-model work after activation without delaying router health."""
+def _qualify_post_registration_embeddings(orch: Any) -> None:
+    """Finish the embedding prerequisite before memory-producing startup work."""
+    embeddings = orch.plugin_manager.plugins.get("openai_embeddings_plugin")
+    if embeddings is None:
+        return
+    start = getattr(embeddings, "start_post_registration_qualification", None)
+    wait = getattr(embeddings, "wait_for_post_registration_qualification", None)
+    if not callable(start) or not callable(wait):
+        raise RuntimeError("embedding plugin lacks post-registration qualification hooks")
+    start()
+    wait()
+
+
+def _populate_post_registration_discovery(orch: Any) -> None:
+    """Discovery refresh has no memory-reindex prerequisite."""
+    coordinator = getattr(orch, "action_coordinator", None)
+    if coordinator is not None:
+        coordinator.populate_discovery_after_registration()
+
+
+def _run_post_registration_step(
+    orch: Any,
+    name: str,
+    run: Callable[[Any], Any],
+) -> tuple[Any, dict[str, str] | None]:
+    """Capture a named step failure without hiding its traceback."""
     try:
-        plugins = orch.plugin_manager.plugins
-        embeddings = plugins.get("openai_embeddings_plugin")
-        if embeddings is not None:
-            start_qualification = getattr(embeddings, "start_post_registration_qualification", None)
-            wait_qualification = getattr(embeddings, "wait_for_post_registration_qualification", None)
-            if not callable(start_qualification) or not callable(wait_qualification):
-                raise RuntimeError("embedding plugin lacks post-registration qualification hooks")
-            start_qualification()
-            wait_qualification()
-
-        action_coordinator = getattr(orch, "action_coordinator", None)
-        if action_coordinator is not None:
-            action_coordinator.populate_discovery_after_registration()
-        _seed_identity_memories(orch)
-        _reindex_orphaned_memories(orch)
-        _auto_install_knowledge_bases(orch)
-
-        status = _start_selected_inference_work(orch)
+        result = run(orch)
+        if name == "inference_start" and not isinstance(result, dict):
+            raise RuntimeError("inference startup must return an explicit status dictionary")
     except Exception as exc:
-        orch.post_registration_work_status = {"state": "failed", "error": str(exc)}
-        logger.exception("Post-registration startup work failed")
+        logger.exception("Post-registration step %s failed", name)
+        return None, {"step": name, "error": str(exc)}
+    return result, None
+
+
+def _run_post_registration_work(orch: Any) -> None:
+    """Isolate post-activation work; retain every failed/skipped dependency."""
+    steps: tuple[tuple[str, tuple[str, ...], Callable[[Any], Any]], ...] = (
+        ("embeddings_qualification", (), _qualify_post_registration_embeddings),
+        ("discovery", (), _populate_post_registration_discovery),
+        ("identity_seed", ("embeddings_qualification",), _seed_identity_memories),
+        ("memory_reindex", ("embeddings_qualification",), _reindex_orphaned_memories),
+        ("knowledge_auto_install", ("embeddings_qualification",), _auto_install_knowledge_bases),
+        ("inference_start", (), _start_selected_inference_work),
+    )
+    succeeded: set[str] = set()
+    failed: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
+    inference_status: dict[str, Any] = {}
+    for name, prerequisites, run in steps:
+        unmet = [dependency for dependency in prerequisites if dependency not in succeeded]
+        if unmet:
+            reason = "prerequisite did not complete: " + ", ".join(unmet)
+            skipped.append({"step": name, "reason": reason})
+            logger.error("Post-registration step %s skipped: %s", name, reason)
+            continue
+        result, failure = _run_post_registration_step(orch, name, run)
+        if failure is not None:
+            failed.append(failure)
+            continue
+        succeeded.add(name)
+        if name == "inference_start":
+            inference_status = cast(dict[str, Any], result)
+    if failed or skipped:
+        orch.post_registration_work_status = {
+            "state": "degraded",
+            "failed_steps": failed,
+            "skipped_steps": skipped,
+            "inference": inference_status,
+        }
     else:
-        orch.post_registration_work_status = status
+        # Preserve the selected provider's existing success/vacancy/pending shape.
+        orch.post_registration_work_status = inference_status
 
 
 def _auto_register_declared_pulling_sources(service: Any) -> None:
@@ -1726,14 +1680,27 @@ def _auto_register_declared_pulling_sources(service: Any) -> None:
     ``ledger_allowed_roots`` during hydration. A hard raise here would crash-loop
     the newborn's whole boot. The origin solet is unaffected — its sources are already
     registered (the existing-kind skip below).
+
+    The trusted seam itself does not check containment, so the skip is enforced
+    here: a FILESYSTEM default root outside ``ledger_allowed_roots`` is logged and
+    skipped. This keeps an opt-in source such as ``codex_local`` unindexed until
+    setup writes its approved root and restarts (prb_8c652bf3).
     """
     from ananta.interfaces.llm_session_source_interface import PullingSourceMixin
     from ananta.llm.session_ledger.types import IngestMode
+    from ananta.services.session_ledger_service.enforcement import (
+        filesystem_root_uri_is_allowed,
+        is_filesystem_root_uri,
+    )
+
     # Defensive double-guard vs register_source's own idempotency (Coordinator Q1
     # ruling 2026-05-31): skip a source_kind whose row already exists.
-    existing_kinds = {row.source_kind for row in service._repository.list_sources(  # noqa: SLF001
-        enabled_only=False,
-    )}
+    existing_kinds = {
+        row.source_kind
+        for row in service._repository.list_sources(  # noqa: SLF001
+            enabled_only=False,
+        )
+    }
     for descriptor in service.registry.list_sources():
         if IngestMode.PULLING not in descriptor.supported_modes:
             continue
@@ -1743,6 +1710,17 @@ def _auto_register_declared_pulling_sources(service: Any) -> None:
             continue
         plugin = service.registry.get_by_kind(descriptor.source_kind)
         if plugin is None or not isinstance(plugin, PullingSourceMixin):
+            continue
+        root_uri = descriptor.default_pulling_root_uri
+        if is_filesystem_root_uri(root_uri) and not filesystem_root_uri_is_allowed(
+            root_uri,
+            service._ledger_allowed_roots,  # noqa: SLF001
+        ):
+            logger.info(
+                "ledger source kind=%s not auto-registered: default root_uri=%s is not in ledger_allowed_roots (opt-in; setup writes the approved root, then restarts)",
+                descriptor.source_kind.value,
+                root_uri,
+            )
             continue
         result = service._register_source_internal(  # noqa: SLF001
             source_kind=descriptor.source_kind.value,
@@ -1793,11 +1771,7 @@ def _init_session_ledger_service(orch: Any) -> None:
     # internal seam and are unaffected).
     ledger_config = orch.config_manager.get_plugin_config("session_ledger_service")
     raw_allowed_roots = ledger_config.get("ledger_allowed_roots", [])
-    ledger_allowed_roots = (
-        [str(root) for root in raw_allowed_roots]
-        if isinstance(raw_allowed_roots, list)
-        else []
-    )
+    ledger_allowed_roots = [str(root) for root in raw_allowed_roots] if isinstance(raw_allowed_roots, list) else []
     service = SessionLedgerService(
         state_service=orch.state_service,
         blob_storage_service=orch.blob_storage_service,
@@ -1841,9 +1815,7 @@ def _init_io_interface_service(orch: Any) -> None:
         async_job_manager=getattr(orch, "async_job_manager", None),
     )
 
-    logger.debug(
-        f"✅ IO Interface Service initialized with {len(registry.get_namespaces())} plugins"
-    )
+    logger.debug(f"✅ IO Interface Service initialized with {len(registry.get_namespaces())} plugins")
 
 
 # ==============================================================================
@@ -1871,9 +1843,7 @@ STARTUP_SEQUENCE = [
         _start_state_plugin,
         ["load_service_bindings", "inject_state_vault_service"],
     ),
-    StartupStep(
-        "create_state_service_wrapper", _create_state_service_wrapper, ["start_state_plugin"]
-    ),
+    StartupStep("create_state_service_wrapper", _create_state_service_wrapper, ["start_state_plugin"]),
     StartupStep("inject_dependencies", _inject_dependencies, ["create_state_service_wrapper"]),
     StartupStep("initialize_schemas", _initialize_schemas, ["inject_dependencies"]),
     # W-VAULT-INTERFACE-EXTEND Phase D-1: inject caller-bound VaultServiceProxy
@@ -1900,9 +1870,7 @@ STARTUP_SEQUENCE = [
         _defer_inference_dependent_startup_work,
         ["handle_clean_restart"],
     ),
-    StartupStep(
-        "inject_at_command_processor", _inject_at_command_processor, ["create_service_wrappers"]
-    ),
+    StartupStep("inject_at_command_processor", _inject_at_command_processor, ["create_service_wrappers"]),
     StartupStep(
         "inject_compilation_context_builder",
         _inject_compilation_context_builder,
@@ -1918,9 +1886,7 @@ STARTUP_SEQUENCE = [
         _inject_context_management_service,
         ["init_service_manager"],
     ),
-    StartupStep(
-        "init_io_interface_service", _init_io_interface_service, ["create_service_wrappers"]
-    ),
+    StartupStep("init_io_interface_service", _init_io_interface_service, ["create_service_wrappers"]),
     StartupStep(
         "init_session_ledger_service",
         _init_session_ledger_service,

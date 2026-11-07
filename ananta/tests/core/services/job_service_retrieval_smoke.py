@@ -38,6 +38,9 @@ Cases, each naming the mutation that reds it:
      -> PASS to FAIL.)
   7. An out-of-range limit is refused, not silently clamped. (Mutation:
      replace the range check with a clamp -> PASS to FAIL.)
+  8. Latest-job reads page in newest-first order, preserve tie-breaking and
+     refuse a fully exhausted prefix scan. (Mutation: reverse sort directions
+     -> the named newest-row assertion fails.)
 
 Rail: the fake tracks StateServiceProtocol's real signatures, so protocol
 drift reds this smoke instead of quietly vacating it.
@@ -55,7 +58,7 @@ import inspect
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
@@ -124,7 +127,25 @@ class _FakeStateService:
         return _ok(self._rows_for(dict(query)))
 
     def query_state(self, namespace: str, filters: dict[str, object]) -> dict[str, object]:
-        return _ok(self._rows_for(dict(filters)))
+        rows = self._rows_for(dict(filters))
+        if len(rows) > 100:
+            return {"action_status": "error", "error": "query.unbounded_read_over_cap"}
+        return _ok(rows)
+
+    def query_ordered(self, namespace: str, data: dict[str, object]) -> dict[str, object]:
+        order_by = cast(list[list[str]], data.get("order_by", []))
+        limit = cast(int, data.get("limit", 1))
+        if len(order_by) < 2 or len({pair[1] for pair in order_by}) != 1 or (limit > 100 and not data.get("unbounded", False)):
+            return {"action_status": "error", "error": "query_ordered grammar refused"}
+        rows = self._rows_for(dict(data))
+        for pair in reversed(order_by):
+            column, direction = pair
+            rows.sort(key=lambda row: str(row[column]), reverse=direction == "desc")
+        after = data.get("after")
+        if isinstance(after, list):
+            cursor = tuple(map(str, after))
+            rows = [row for row in rows if (str(row[order_by[0][0]]), str(row[order_by[1][0]])) < cursor]
+        return _ok(rows[:limit])
 
     def write_state(
         self,
@@ -135,9 +156,7 @@ class _FakeStateService:
     ) -> dict[str, object]:
         return {"action_status": "completed"}
 
-    def update_state(
-        self, namespace: str, query: dict[str, object], updates: dict[str, object]
-    ) -> dict[str, object]:
+    def update_state(self, namespace: str, query: dict[str, object], updates: dict[str, object]) -> dict[str, object]:
         return {"action_status": "completed"}
 
 
@@ -146,6 +165,7 @@ def _job(
     *,
     created_at: str = "2026-08-14T00:00:00",
     status: str = "completed",
+    provider_name: str = "g_suite_plugin.sheets_create_from_files",
     reach: str | None = None,
 ) -> dict[str, Any]:
     metadata: dict[str, object] = {"flow_id": "flow-1", "session_id": "ses-1"}
@@ -153,7 +173,7 @@ def _job(
         metadata[COMPLETION_REACH_KEY] = reach
     return {
         "id": job_id,
-        "provider_name": "g_suite_plugin.sheets_create_from_files",
+        "provider_name": provider_name,
         "status": status,
         "created_at": created_at,
         "metadata": json.dumps(metadata),
@@ -173,9 +193,7 @@ def _payload(job_id: str, payload_type: str, data: dict[str, Any], sequence: int
 _SHEET_RESULT = {"spreadsheet_url": "https://example.invalid/s/1", "row_count": 42}
 
 
-def _service(
-    jobs: list[dict[str, Any]], payloads: list[dict[str, Any]] | None = None
-) -> JobService:
+def _service(jobs: list[dict[str, Any]], payloads: list[dict[str, Any]] | None = None) -> JobService:
     state = _FakeStateService(jobs=jobs, payloads=payloads)
     return JobService(state_service=state)  # type: ignore[arg-type]
 
@@ -261,12 +279,10 @@ def test_unreached_lists_only_stamped_jobs() -> None:
     """Case 6: only measured-unreached jobs are listed."""
     svc = _service(
         [
-            _job("job-bridge", created_at="2026-08-14T00:00:03",
-                 reach=REACH_BRIDGE_DISPATCH_NO_RETURN_PATH),
+            _job("job-bridge", created_at="2026-08-14T00:00:03", reach=REACH_BRIDGE_DISPATCH_NO_RETURN_PATH),
             _job("job-channel", created_at="2026-08-14T00:00:02", reach=REACH_CHANNEL_FLOW),
             _job("job-unstamped", created_at="2026-08-14T00:00:01"),
-            _job("job-running", created_at="2026-08-14T00:00:04", status="processing",
-                 reach=REACH_BRIDGE_DISPATCH_NO_RETURN_PATH),
+            _job("job-running", created_at="2026-08-14T00:00:04", status="processing", reach=REACH_BRIDGE_DISPATCH_NO_RETURN_PATH),
         ],
         [_payload("job-bridge", "result", _SHEET_RESULT, 0)],
     )
@@ -280,9 +296,7 @@ def test_unreached_lists_only_stamped_jobs() -> None:
     _check(ids == ["job-bridge"], f"only the stamped terminal job is listed (got {ids})")
     _check(result.get("count") == 1, "count matches the returned page")
     _check(
-        isinstance(jobs, list)
-        and bool(jobs)
-        and jobs[0].get("result") == _SHEET_RESULT,
+        isinstance(jobs, list) and bool(jobs) and jobs[0].get("result") == _SHEET_RESULT,
         "each listed job carries the payload nobody received",
     )
 
@@ -298,17 +312,54 @@ def test_out_of_range_limit_is_refused() -> None:
         )
 
 
+def test_latest_job_uses_bounded_pages() -> None:
+    """Latest retrieval pages newest-first and refuses exhausted prefix scans."""
+    jobs = [
+        _job(
+            f"job-{i:03}",
+            status="processing",
+            provider_name=("agent_messaging_plugin.action" if i <= 104 else "g_suite_plugin.sheets_create_from_files"),
+        )
+        for i in range(205)
+    ]
+    job = _returned_job(_service(jobs).get_latest_job())
+    _check(job is not None and job["id"] == "job-204", "unfiltered latest job returns the newest row beyond 100 jobs")
+
+    job = _returned_job(_service(jobs).get_latest_job(plugin_name="agent_messaging_plugin"))
+    _check(job is not None and job["id"] == "job-104", "prefix match beyond the first page is found")
+    job = _returned_job(_service(jobs).get_latest_job(plugin_name="agent_messaging_plugin", action_name="action"))
+    _check(job is not None and job["id"] == "job-104", "exact plugin.action query is bounded")
+    job = _returned_job(_service(jobs).get_latest_job(status="processing"))
+    _check(job is not None and job["id"] == "job-204", "status query returns newest match")
+
+    ties = [_job("tie-a", created_at="2026-08-14T00:00:00"), _job("tie-z", created_at="2026-08-14T00:00:00")]
+    job = _returned_job(_service(ties).get_latest_job())
+    _check(job is not None and job["id"] == "tie-z", "equal timestamps choose the larger id")
+
+    no_match = [_job(f"n-{i:05}") for i in range(10000)]
+    envelope = _service(no_match).get_latest_job(plugin_name="absent_plugin")
+    error = envelope["data"]["result"]["error"]
+    _check("100-page ceiling" in str(error), "full prefix exhaustion names the 100-page ceiling")
+
+    refused = _FakeStateService().query_ordered(
+        "core",
+        {
+            "table": "job",
+            "order_by": [["created_at", "desc"], ["id", "asc"]],
+            "limit": 1,
+        },
+    )
+    _check(refused.get("action_status") == "error", "fake refuses mixed ordered-query directions")
+
+
 def test_fake_tracks_real_signatures() -> None:
     """Rail: protocol drift must red this smoke, not silently vacate it."""
-    for method_name in ("read_state", "write_state", "update_state", "query_state"):
-        real_params = list(
-            inspect.signature(getattr(StateServiceProtocol, method_name)).parameters
-        )
+    for method_name in ("read_state", "write_state", "update_state", "query_state", "query_ordered"):
+        real_params = list(inspect.signature(getattr(StateServiceProtocol, method_name)).parameters)
         fake_params = list(inspect.signature(getattr(_FakeStateService, method_name)).parameters)
         _check(
             real_params == fake_params,
-            f"_FakeStateService.{method_name} params {fake_params} match "
-            f"StateServiceProtocol's {real_params}",
+            f"_FakeStateService.{method_name} params {fake_params} match StateServiceProtocol's {real_params}",
         )
 
 
@@ -328,6 +379,8 @@ def main() -> int:
     test_unreached_lists_only_stamped_jobs()
     print("\nCase 7: an out-of-range limit is refused")
     test_out_of_range_limit_is_refused()
+    print("\nCase 8: latest-job reads are bounded and tie-safe")
+    test_latest_job_uses_bounded_pages()
     print("\nRail: the fake tracks the real protocol signatures")
     test_fake_tracks_real_signatures()
 

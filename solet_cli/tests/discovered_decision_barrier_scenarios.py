@@ -30,6 +30,28 @@ from solet_manager.transaction import Transaction, canonical_sha256, write_trans
 
 type JsonObject = dict[str, object]
 
+__all__ = [
+    "JsonObject",
+    "PersistentArtifactAdapter",
+    "_GOLDEN_APPLY_TRACE",
+    "_GOLDEN_PLANNED_ORDER",
+    "_PERSISTENT_KEYS",
+    "_advance_to_models",
+    "_artifact_census",
+    "_canonical_request",
+    "_check",
+    "_closure_matrix",
+    "_decision_error_ids",
+    "_expected_planned_actions",
+    "_has_prohibited_effect",
+    "_initialize_fixture_state",
+    "_persistent_slice",
+    "_refused_arm",
+    "_set_invoke_adapter",
+    "_stable_result",
+    "run_barrier_scenario",
+]
+
 _PROTECTED_NAMES = (
     "fixture-alpha",
     "fixture-beta",
@@ -93,10 +115,11 @@ _GOLDEN_APPLY_TRACE: tuple[tuple[str, str, JsonObject], ...] = (
             "embeddings_implementation": "lm_studio",
             "inference_implementation": "lm_studio",
             "setup_profile": "macos-" + "biz" + "ops",
+            "selected_coding_agents": ["codex", "claude_code"],
             "solet_name": "barrier-terminal",
         },
     ),
-    ("install_shell_integration", "hydration::shell.install", {}),
+    ("install_shell_integration", "hydration::shell.install", {"selected_coding_agents": ["codex", "claude_code"]}),
     (
         "configure_lm_studio_embeddings",
         "setup::models.configure_lm_studio_embeddings",
@@ -192,13 +215,7 @@ def _initialize_fixture_state(root: Path) -> None:
 
 
 def _protected_census(root: Path) -> JsonObject:
-    return {
-        name: {
-            field: _file_identity(root / "protected" / name / field)
-            for field in ("labels", "plists", "processes", "target", "evidence")
-        }
-        for name in _PROTECTED_NAMES
-    }
+    return {name: {field: _file_identity(root / "protected" / name / field) for field in ("labels", "plists", "processes", "target", "evidence")} for name in _PROTECTED_NAMES}
 
 
 def _artifact_census(
@@ -206,20 +223,12 @@ def _artifact_census(
     paths: ManagerPaths,
     name: str,
 ) -> JsonObject:
-    artifacts = {
-        key: _file_identity(root / relative)
-        for key, relative in sorted(_ARTIFACT_PATHS.items())
-    }
-    shell_text = "".join(
-        (root / _ARTIFACT_PATHS[key]).read_text(encoding="utf-8")
-        for key in ("shell_zsh", "shell_bash")
-    )
+    artifacts = {key: _file_identity(root / relative) for key, relative in sorted(_ARTIFACT_PATHS.items())}
+    shell_text = "".join((root / _ARTIFACT_PATHS[key]).read_text(encoding="utf-8") for key in ("shell_zsh", "shell_bash"))
     return {
         "artifacts": artifacts,
         "shell_managed_block_count": shell_text.count(_MANAGED_BLOCK),
-        "registry_instances": LifecycleManager(paths).list_instances().data[
-            "instances"
-        ],
+        "registry_instances": LifecycleManager(paths).list_instances().data["instances"],
         "transaction": _file_identity(paths.transaction_path(name)),
         "protected": _protected_census(root),
     }
@@ -271,10 +280,7 @@ class PersistentArtifactAdapter(FakeAdapter):
                 "operation_id": request.operation_id,
             }
         )
-        if (
-            request.probe_purpose == "decision_discovery"
-            and request.public_inputs.get("decision_id") == self.empty_decision
-        ):
+        if request.probe_purpose == "decision_discovery" and request.public_inputs.get("decision_id") == self.empty_decision:
             self.event_trace.append(
                 {
                     "event": "decision_closure_nonterminal",
@@ -282,9 +288,7 @@ class PersistentArtifactAdapter(FakeAdapter):
                 }
             )
         if request.phase == "apply":
-            self.event_trace.append(
-                {"event": "apply_dispatch", "operation_id": request.operation_id}
-            )
+            self.event_trace.append({"event": "apply_dispatch", "operation_id": request.operation_id})
             self._record_nested_effects(request.operation_id)
         return result
 
@@ -337,11 +341,7 @@ def _decision_error_ids(result: CommandResult) -> set[str]:
     raw = result.data.get("decision_errors")
     if not isinstance(raw, list):
         return set()
-    return {
-        str(item["id"])
-        for item in raw
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
+    return {str(item["id"]) for item in raw if isinstance(item, dict) and isinstance(item.get("id"), str)}
 
 
 def _has_prohibited_effect(trace: list[JsonObject]) -> bool:
@@ -356,21 +356,19 @@ def _advance_to_models(
     dependencies, dependencies_result = _apply_current_frontier(
         manager,
         config,
-        decision_selections=selections,
+        decision_selections={**selections},
     )
     _check(
-        dependencies.data["frontier"] == ["system_dependencies"]
-        and dependencies_result.error_kind == "next_stage_preview_required",
+        dependencies.data["frontier"] == ["system_dependencies"] and dependencies_result.error_kind == "next_stage_preview_required",
         "model barrier advances through the dependency frontier",
     )
     genesis, genesis_result = _apply_current_frontier(
         manager,
         config,
-        decision_selections=selections,
+        decision_selections={**selections},
     )
     _check(
-        genesis.data["frontier"] == ["genesis"]
-        and genesis_result.error_kind == "next_stage_preview_required",
+        genesis.data["frontier"] == ["genesis"] and genesis_result.error_kind == "next_stage_preview_required",
         "model barrier advances through the genesis frontier",
     )
 
@@ -406,21 +404,15 @@ def _model_matrix_case(
     _advance_to_models(manager, config, selections)
     before = _artifact_census(fixture_root, paths, config.name)
     trace_start = len(trace)
-    preview = manager.preview(config, decision_selections=selections)
+    preview = manager.preview(config, decision_selections={**selections})
     after = _artifact_census(fixture_root, paths, config.name)
     return {
         "frontier": preview.data.get("frontier"),
         "status": preview.status,
         "error_kind": preview.error_kind,
         "decision_ids": sorted(_decision_error_ids(preview)),
-        "zero_effect_after_models": (
-            not _has_prohibited_effect(trace[trace_start:])
-            and _persistent_slice(before) == _persistent_slice(after)
-        ),
-        "inference_probed": any(
-            request.public_inputs.get("decision_id") == "inference_model"
-            for request in adapter.requests
-        ),
+        "zero_effect_after_models": (not _has_prohibited_effect(trace[trace_start:]) and _persistent_slice(before) == _persistent_slice(after)),
+        "inference_probed": any(request.public_inputs.get("decision_id") == "inference_model" for request in adapter.requests),
     }
 
 
@@ -440,14 +432,23 @@ def _inactive_inference_case(root: Path) -> JsonObject:
     bundle = ContractBundle.load(source_revision=seed.commit, directory=contracts)
     config = CreateConfig(name=name, target=target, autostart=True)
     plan = build_setup_plan(
-        bundle=bundle, config=config, seed=seed, journal_path=paths.transaction_path(name),
+        bundle=bundle,
+        config=config,
+        seed=seed,
+        journal_path=paths.transaction_path(name),
         decision_selections={"coding_agents": ["codex", "claude_code"], "session_sources": []},
     )
     transaction = Transaction.create(
-        name=name, target=target, input_fingerprint=canonical_sha256(config.to_identity_dict()),
-        answers=plan.answers, seed=seed, flow_id=bundle.flow_id,
-        flow_source_revision=bundle.source_revision, flow_contract_digest=bundle.contract_digest,
-        stage_ids=tuple(bundle.stages), completion_probe_ids=bundle.completion_probe_ids,
+        name=name,
+        target=target,
+        input_fingerprint=canonical_sha256(config.to_identity_dict()),
+        answers=plan.answers,
+        seed=seed,
+        flow_id=bundle.flow_id,
+        flow_source_revision=bundle.source_revision,
+        flow_contract_digest=bundle.contract_digest,
+        stage_ids=tuple(bundle.stages),
+        completion_probe_ids=bundle.completion_probe_ids,
         stage_probe_statuses=initial_stage_probe_statuses(bundle, plan.answers),
     )
     write_transaction(paths.transaction_path(name), transaction)
@@ -471,21 +472,19 @@ def _inactive_inference_case(root: Path) -> JsonObject:
     adapter = PersistentArtifactAdapter(fixture_root, event_trace=trace)
     _set_invoke_adapter(adapter)
     selections = {"embedding_model": "embedding_model.recommended"}
-    dependencies, result = _apply_current_frontier(manager, config, decision_selections=selections)
+    dependencies, result = _apply_current_frontier(manager, config, decision_selections={**selections})
     _check(
-        dependencies.data["frontier"] == ["system_dependencies"]
-        and result.error_kind == "next_stage_preview_required",
+        dependencies.data["frontier"] == ["system_dependencies"] and result.error_kind == "next_stage_preview_required",
         "free profile advances the dependency frontier",
     )
-    genesis, result = _apply_current_frontier(manager, config, decision_selections=selections)
+    genesis, result = _apply_current_frontier(manager, config, decision_selections={**selections})
     _check(
-        genesis.data["frontier"] == ["genesis"]
-        and result.error_kind == "next_stage_preview_required",
+        genesis.data["frontier"] == ["genesis"] and result.error_kind == "next_stage_preview_required",
         "free profile advances genesis before the model barrier",
     )
     before = _artifact_census(fixture_root, paths, name)
     trace_start = len(trace)
-    preview = manager.preview(config, decision_selections=selections)
+    preview = manager.preview(config, decision_selections={**selections})
     after = _artifact_census(fixture_root, paths, name)
     _check(preview.data.get("frontier") == ["models"], "free inverse reaches the actual model barrier")
     return {
@@ -493,16 +492,8 @@ def _inactive_inference_case(root: Path) -> JsonObject:
         "status": preview.status,
         "error_kind": preview.error_kind,
         "decision_ids": sorted(_decision_error_ids(preview)),
-        "zero_effect_after_models": (
-            not _has_prohibited_effect(trace[trace_start:])
-            and _persistent_slice(before) == _persistent_slice(after)
-        ),
-        "inference_probed": any(
-            request.public_inputs.get("decision_id") == "inference_model"
-            or "inference" in request.operation_ref
-            or request.operation_ref == "setup::models.qualify_structured_actions"
-            for request in adapter.requests
-        ),
+        "zero_effect_after_models": (not _has_prohibited_effect(trace[trace_start:]) and _persistent_slice(before) == _persistent_slice(after)),
+        "inference_probed": any(request.public_inputs.get("decision_id") == "inference_model" or "inference" in request.operation_ref or request.operation_ref == "setup::models.qualify_structured_actions" for request in adapter.requests),
     }
 
 
@@ -521,26 +512,22 @@ def _refused_arm(root: Path, selections: dict[str, str]) -> JsonObject:
     before = _artifact_census(fixture_root, paths, config.name)
     trace_start = len(trace)
     journal_before = paths.transaction_path(config.name).read_bytes()
-    preview = manager.preview(config, decision_selections=selections)
+    preview = manager.preview(config, decision_selections={**selections})
     argv_fingerprint = str(preview.data.get("approval_fingerprint", "not-approved"))
     first = manager.create(
         config,
         approved_fingerprint=argv_fingerprint,
-        decision_selections=selections,
+        decision_selections={**selections},
     )
     middle = _artifact_census(fixture_root, paths, config.name)
     second = manager.create(
         config,
         approved_fingerprint=argv_fingerprint,
-        decision_selections=selections,
+        decision_selections={**selections},
     )
     after = _artifact_census(fixture_root, paths, config.name)
     journal_after = paths.transaction_path(config.name).read_bytes()
-    prohibited = [
-        item
-        for item in trace[trace_start:]
-        if item.get("event") == "persistent_mutator"
-    ]
+    prohibited = [item for item in trace[trace_start:] if item.get("event") == "persistent_mutator"]
     return {
         "fixture": "barrier-blocked",
         "argv": [
@@ -557,25 +544,14 @@ def _refused_arm(root: Path, selections: dict[str, str]) -> JsonObject:
         "same_refusal": _stable_result(first) == _stable_result(second),
         "decision_named": _decision_error_ids(first) == {"embedding_model"},
         "journal_byte_identical": journal_before == journal_after,
-        "model_activation_not_started": (
-            before["transaction"] == after["transaction"]
-            and after["registry_instances"] == before["registry_instances"]
-        ),
+        "model_activation_not_started": (before["transaction"] == after["transaction"] and after["registry_instances"] == before["registry_instances"]),
         "before": before,
         "after_first": middle,
         "after_second": after,
         "trace": trace,
         "prohibited_effects": prohibited,
-        "compensation_or_cleanup": [
-            item
-            for item in trace
-            if item.get("event") in {"compensation", "cleanup", "adopt", "repair"}
-        ],
-        "zero_prohibited_effects_after_models": (
-            not prohibited
-            and _persistent_slice(before) == _persistent_slice(middle)
-            and _persistent_slice(before) == _persistent_slice(after)
-        ),
+        "compensation_or_cleanup": [item for item in trace if item.get("event") in {"compensation", "cleanup", "adopt", "repair"}],
+        "zero_prohibited_effects_after_models": (not prohibited and _persistent_slice(before) == _persistent_slice(middle) and _persistent_slice(before) == _persistent_slice(after)),
     }
 
 

@@ -1,0 +1,19 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::read_model_cell_policy",
+  "display_name": "Read model cell policy",
+  "description": "Read the current ordered last-match-wins Operator enablement policy, rule identifiers, updated_at optimistic correction premise, catalog flags with provenance, and bounded immutable policy_change history. Default history_limit is 20; valid range 1..100. No current policy means explicit all-on and an advisory; initial create uses expected_updated_at=null. Disabled, withdrawn and unscored cells remain visible. Reading changes no state and requires no Operator role.",
+  "embedding_description": "Read the current ordered last-match-wins Operator enablement policy, rule identifiers, updated_at optimistic correction premise, catalog flags with provenance, and bounded immutable policy_change history.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Read model cell policy",
+    "result_type": "read_model_cell_policy_result",
+    "result_description": "rules, updated_at, cells with enabled and enabled_provenance, history (latest immutable existing policy_change refresh runs), and advisory warnings when uninitialized.",
+    "presentation_guidance": "Show the current policy decisions and provenance clearly. Preserve full immutable history in evidence; explain advisories without blocking progress.",
+    "output_action_guidance": "Use the current updated_at premise for subsequent Operator corrections; never bypass disabled cells with a pin."
+  },
+  "error_processor_customizations": {
+    "action_context": "Typed StateManagementInterface catalog policy lifecycle; no network, deployment, drain or session actions.",
+    "error_interpretation": "parameter_invalid: supply integer history_limit in 1..100. policy_invalid: malformed stored policy is an integrity fault; inspect it rather than silently resetting. state_service_unavailable: restore the state service binding. For mutation use set_model_cells_enabled as the current Operator, passing updated_at from this read.",
+    "recovery_guidance": "parameter_invalid: supply integer history_limit in 1..100. policy_invalid: malformed stored policy is an integrity fault; inspect it rather than silently resetting. state_service_unavailable: restore the state service binding. For mutation use set_model_cells_enabled as the current Operator, passing updated_at from this read."
+  }
+}

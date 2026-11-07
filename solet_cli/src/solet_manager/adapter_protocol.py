@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import re
+import signal
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Self, cast
 
 from .adapter_validation import (
+    FAILURE_STDERR_DIAGNOSTIC_LIMIT,
     FINGERPRINT_PATTERN,
     NAME_PATTERN,
     OPERATION_REF_PATTERN,
+    STREAM_LIMIT_BYTES,
     boolean,
     bounded_integer,
+    bounded_redacted,
     identifier,
     nonnegative_integer,
     optional_identifier,
@@ -356,6 +360,82 @@ class OperationResult:
     evidence: tuple[dict[str, JsonValue], ...]
     repair: str | None
     reason: dict[str, JsonValue] | None = None
+
+    @classmethod
+    def from_process_exit(
+        cls,
+        request: OperationRequest,
+        *,
+        returncode: int,
+        error_kind: str,
+        retry_safe: bool,
+        duration_ms: int,
+        stdout: str,
+        stderr: str,
+        repair: str,
+    ) -> Self:
+        """Build a bounded envelope from a subprocess return code."""
+        if returncode < 0:
+            signal_number = -returncode
+            signal_name = signal.Signals(signal_number).name
+            exit_code = 128 + signal_number
+            diagnosis = f"Adapter process terminated by signal {signal_number} ({signal_name})."
+            public_stderr = bounded_redacted(f"{diagnosis}\n{stderr}")
+            diagnostic_bytes = public_stderr.encode("utf-8")
+            stdout_bytes = len(stdout.encode("utf-8", errors="replace"))
+            stderr_bytes = len(stderr.encode("utf-8", errors="replace"))
+            diagnostic = diagnostic_bytes[:FAILURE_STDERR_DIAGNOSTIC_LIMIT].decode(
+                "utf-8", errors="ignore"
+            )
+            return cls(
+                request.request_id,
+                request.operation_id,
+                request.phase,
+                request.probe_purpose,
+                CheckpointStatus.BLOCKED,
+                error_kind,
+                retry_safe,
+                exit_code,
+                False,
+                max(0, duration_ms),
+                bounded_redacted(stdout),
+                public_stderr,
+                (),
+                (),
+                (),
+                repair,
+                {
+                    "outcome_class": "nonzero_exit",
+                    "exit_code": exit_code,
+                    "duration_ms": max(0, duration_ms),
+                    "timed_out": False,
+                    "stdout_bytes": stdout_bytes,
+                    "stderr_bytes": stderr_bytes,
+                    "stdout_truncated": stdout_bytes > STREAM_LIMIT_BYTES,
+                    "stderr_truncated": stderr_bytes > STREAM_LIMIT_BYTES,
+                    "stderr_diagnostic": diagnostic,
+                    "stderr_diagnostic_truncated": len(diagnostic_bytes)
+                    > FAILURE_STDERR_DIAGNOSTIC_LIMIT,
+                },
+            )
+        return cls(
+            request.request_id,
+            request.operation_id,
+            request.phase,
+            request.probe_purpose,
+            CheckpointStatus.FAILED,
+            error_kind,
+            retry_safe,
+            returncode,
+            False,
+            max(0, duration_ms),
+            bounded_redacted(stdout),
+            bounded_redacted(stderr),
+            (),
+            (),
+            (),
+            repair,
+        )
 
     @classmethod
     def blocked(

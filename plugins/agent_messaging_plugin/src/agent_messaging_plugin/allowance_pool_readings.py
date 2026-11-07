@@ -19,7 +19,7 @@ from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE
 from ananta.llm.agent_messaging.state_results import require_completed, require_deleted, require_records
 
 from .model_capability_store import CatalogError
-from .schema import TABLE_ALLOWANCE_POOL_READING
+from .schema import TABLE_ALLOWANCE_POOL_READING, TABLE_ALLOWANCE_POOL_READING_HISTORY
 from .usage_economics_profiles import (
     AllowancePool,
     FlatRateQuotaProfile,
@@ -168,7 +168,11 @@ def _expiry_fields(params: dict[str, Any], *, as_of: datetime, now: datetime) ->
 
 
 def record_allowance_pool_reading(
-    state: StateManagementInterface, params: dict[str, Any], *, profile_path: Path, now: datetime,
+    state: StateManagementInterface,
+    params: dict[str, Any],
+    *,
+    profile_path: Path,
+    now: datetime,
 ) -> dict[str, Any]:
     """Write one explicit reading, replacing any earlier one for the same pool."""
     profile_id = _text(params.get("profile_id"), "profile_id")
@@ -180,16 +184,29 @@ def record_allowance_pool_reading(
         raise CatalogError("parameter_invalid", f"as_of {as_of.isoformat()} is in the future.")
     next_reset_at, expires_at = _expiry_fields(params, as_of=as_of, now=now)
     reading = PoolReading(
-        profile_id=profile_id, pool_id=pool_id, consumed=consumed, remaining=remaining, as_of=as_of,
-        next_reset_at=next_reset_at, expires_at=expires_at, source=_text(params.get("source"), "source"),
-        recorded_by=_text(params.get("recorded_by"), "recorded_by"), recorded_at=now,
+        profile_id=profile_id,
+        pool_id=pool_id,
+        consumed=consumed,
+        remaining=remaining,
+        as_of=as_of,
+        next_reset_at=next_reset_at,
+        expires_at=expires_at,
+        source=_text(params.get("source"), "source"),
+        recorded_by=_text(params.get("recorded_by"), "recorded_by"),
+        recorded_at=now,
     )
     record = {
-        "profile_id": profile_id, "pool_id": pool_id, "native_unit": pool.native_unit,
-        "consumed": consumed, "remaining": remaining, "as_of": as_of.isoformat(),
+        "profile_id": profile_id,
+        "pool_id": pool_id,
+        "native_unit": pool.native_unit,
+        "consumed": consumed,
+        "remaining": remaining,
+        "as_of": as_of.isoformat(),
         "next_reset_at": None if next_reset_at is None else next_reset_at.isoformat(),
         "expires_at": None if expires_at is None else expires_at.isoformat(),
-        "source": reading.source, "recorded_by": reading.recorded_by, "recorded_at": now.isoformat(),
+        "source": reading.source,
+        "recorded_by": reading.recorded_by,
+        "recorded_at": now.isoformat(),
     }
     require_completed(
         state.upsert_state(
@@ -198,18 +215,84 @@ def record_allowance_pool_reading(
         ),
         "record allowance pool reading",
     )
-    return reading.to_payload(now)
+    return {**reading.to_payload(now), **_append_history(state, record, operation="record", now=now)}
+
+
+def _append_history(
+    state: StateManagementInterface,
+    snapshot: dict[str, Any],
+    *,
+    operation: str,
+    now: datetime,
+) -> dict[str, Any]:
+    row = {
+        key: value
+        for key, value in snapshot.items()
+        if key
+        in {
+            "profile_id",
+            "pool_id",
+            "native_unit",
+            "consumed",
+            "remaining",
+            "as_of",
+            "next_reset_at",
+            "expires_at",
+            "source",
+            "recorded_by",
+            "recorded_at",
+        }
+    }
+    row.update(operation=operation, reading_recorded_at=row["recorded_at"], recorded_at=now.isoformat())
+    try:
+        require_completed(state.write_state(AGENT_ROLE_BINDING_NAMESPACE, {"table": TABLE_ALLOWANCE_POOL_READING_HISTORY, "record": row}), "append allowance reading history")
+    except Exception as exc:
+        # The current write already stood: audit failure must never undo or hide it.
+        return {"history_appended": False, "history_error": str(exc)}
+    return {"history_appended": True}
+
+
+def _history_limit(params: dict[str, Any]) -> int:
+    limit = params.get("limit", 50)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+        raise CatalogError("parameter_invalid", "limit must be an integer from 1 through 200.")
+    return limit
+
+
+def _read_history(state: StateManagementInterface, params: dict[str, Any], profile_id: str | None) -> dict[str, Any]:
+    limit = _history_limit(params)
+    filters = {} if profile_id is None else {"profile_id": profile_id}
+    query: dict[str, Any] = {"table": TABLE_ALLOWANCE_POOL_READING_HISTORY, "filters": filters, "order_by": [["recorded_at", "asc"], ["id", "asc"]]}
+    after_id = params.get("after_id")
+    if after_id is not None:
+        cursor = require_records(state.query_ordered(AGENT_ROLE_BINDING_NAMESPACE, {**query, "filters": {**filters, "id": _text(after_id, "after_id")}, "limit": 1}))
+        if not cursor:
+            raise CatalogError("parameter_invalid", "after_id must name a history row in this profile.")
+        query["after"] = [cursor[0]["recorded_at"], cursor[0]["id"]]
+    rows: list[dict[str, Any]] = []
+    while len(rows) < limit:
+        size = min(100, limit - len(rows))
+        page = require_records(state.query_ordered(AGENT_ROLE_BINDING_NAMESPACE, {**query, "limit": size}))
+        rows.extend(dict(row) for row in page)
+        if len(page) < size:
+            return {"history": rows, "next_cursor": None}
+        query["after"] = [page[-1]["recorded_at"], page[-1]["id"]]
+    more = require_records(state.query_ordered(AGENT_ROLE_BINDING_NAMESPACE, {**query, "limit": 1}))
+    return {"history": rows, "next_cursor": rows[-1]["id"] if more else None}
 
 
 def _row_reading(row: dict[str, Any]) -> PoolReading:
     try:
         return PoolReading(
-            profile_id=str(row["profile_id"]), pool_id=str(row["pool_id"]),
-            consumed=float(row["consumed"]), remaining=float(row["remaining"]),
+            profile_id=str(row["profile_id"]),
+            pool_id=str(row["pool_id"]),
+            consumed=float(row["consumed"]),
+            remaining=float(row["remaining"]),
             as_of=_stamp(row["as_of"], "as_of"),
             next_reset_at=_optional_stamp(row.get("next_reset_at"), "next_reset_at"),
             expires_at=_optional_stamp(row.get("expires_at"), "expires_at"),
-            source=str(row["source"]), recorded_by=str(row["recorded_by"]),
+            source=str(row["source"]),
+            recorded_by=str(row["recorded_by"]),
             recorded_at=_stamp(row["recorded_at"], "recorded_at"),
         )
     except (KeyError, TypeError, ValueError, CatalogError) as exc:
@@ -238,6 +321,8 @@ def read_allowance_pool_readings(state: StateManagementInterface, params: dict[s
     """Stored readings with each marked current or expired against ``now``."""
     raw = params.get("profile_id")
     profile_id = None if raw is None or raw == "" else _text(raw, "profile_id")
+    if params.get("history") is True:
+        return _read_history(state, params, profile_id)
     readings = read_pool_readings(state, profile_id=profile_id)
     return {
         "readings": [reading.to_payload(now) for reading in readings],
@@ -250,6 +335,7 @@ def retract_allowance_pool_reading(state: StateManagementInterface, params: dict
     """Delete the reading for one pool, so the pool reads unknown again."""
     profile_id = _text(params.get("profile_id"), "profile_id")
     pool_id = _text(params.get("pool_id"), "pool_id")
+    snapshot = require_records(state.query_ordered(AGENT_ROLE_BINDING_NAMESPACE, {"table": TABLE_ALLOWANCE_POOL_READING, "filters": {"profile_id": profile_id, "pool_id": pool_id}, "order_by": [["profile_id", "asc"], ["id", "asc"]], "limit": 1}))
     deleted = require_deleted(
         state.delete_records(
             AGENT_ROLE_BINDING_NAMESPACE,
@@ -262,11 +348,14 @@ def retract_allowance_pool_reading(state: StateManagementInterface, params: dict
     )
     if deleted == 0:
         raise CatalogError("reading_not_found", f"no recorded reading for {profile_id}/{pool_id}.")
-    return {"profile_id": profile_id, "pool_id": pool_id, "retracted": deleted}
+    return {"profile_id": profile_id, "pool_id": pool_id, "retracted": deleted, **_append_history(state, dict(snapshot[0]), operation="retract", now=datetime.now(UTC))}
 
 
 def apply_pool_readings(
-    economics: UsageEconomicsProfileCatalog, readings: tuple[PoolReading, ...], *, now: datetime,
+    economics: UsageEconomicsProfileCatalog,
+    readings: tuple[PoolReading, ...],
+    *,
+    now: datetime,
 ) -> tuple[UsageEconomicsProfileCatalog, tuple[str, ...]]:
     """The profile with each unexpired reading laid over its pool, plus a note per expired one.
 
@@ -287,7 +376,11 @@ def apply_pool_readings(
 
 
 def _overlay_pool(
-    profile_id: str, pool: AllowancePool, by_key: dict[tuple[str, str], PoolReading], now: datetime, expired: list[str],
+    profile_id: str,
+    pool: AllowancePool,
+    by_key: dict[tuple[str, str], PoolReading],
+    now: datetime,
+    expired: list[str],
 ) -> AllowancePool:
     reading = by_key.get((profile_id, pool.pool_id))
     if reading is None:
@@ -296,7 +389,10 @@ def _overlay_pool(
         expired.append(f"{profile_id}/{pool.pool_id} reading expired {reading.effective_expiry.isoformat()}")
         return pool
     return replace(
-        pool, reading_status="current", consumed=reading.consumed, remaining=reading.remaining,
+        pool,
+        reading_status="current",
+        consumed=reading.consumed,
+        remaining=reading.remaining,
         next_reset_at=reading.next_reset_at,
     )
 

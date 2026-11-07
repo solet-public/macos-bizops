@@ -49,7 +49,6 @@ still carries; the origin checkout's own
 must stay behaviorally byte-identical to it.
 """
 
-
 from __future__ import annotations
 
 # INTERPRETER FLOOR. These hooks are Python 3.13 source and use datetime.UTC
@@ -76,6 +75,11 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+
+_HOOK_DIRECTORY = str(Path(__file__).resolve().parent)
+if _HOOK_DIRECTORY not in sys.path:
+    sys.path.insert(0, _HOOK_DIRECTORY)
+import _session_identity as session_identity  # noqa: E402 -- sibling helper beside this hook
 
 _SPOOL_DIR_ENV = "ANANTA_SESSION_MAPPING_SPOOL_DIR"
 _INSTANCE_ID_ENV = "AGENT_INSTANCE_ID"
@@ -125,24 +129,24 @@ def _write_spool_file(spool_dir: str, record: dict[str, str]) -> None:
     decides how to report it (non-fatal by design)."""
     spool_path = Path(spool_dir)
     spool_path.mkdir(parents=True, exist_ok=True)
-    file_name = (
-        f"{record['captured_at']}__{record['agent_instance_id']}"
-        f"__{record['claude_session_id']}.json"
-    )
+    file_name = f"{record['captured_at']}__{record['agent_instance_id']}__{record['claude_session_id']}.json"
     (spool_path / file_name).write_text(json.dumps(record))
 
 
 def main() -> int:
+    payload = _read_stdin_payload()
+    # Env-less session (desktop app / hand-started): overlay its persisted
+    # identity and the clone's spool dir. A no-op whenever a launcher exported
+    # an identity, so a fleet spawn reaches the check below exactly as before.
+    session_identity.apply(__file__, payload_session_id=str((payload or {}).get("session_id") or ""))
     spool_dir = os.environ.get(_SPOOL_DIR_ENV, "").strip()
     agent_instance_id = os.environ.get(_INSTANCE_ID_ENV, "").strip()
     if not spool_dir or not agent_instance_id:
         _warn(
-            f"{_SPOOL_DIR_ENV} or {_INSTANCE_ID_ENV} not set -- not a "
-            "fleet-managed spawn, or the adapter didn't wire it; skipping capture",
+            f"{_SPOOL_DIR_ENV} or {_INSTANCE_ID_ENV} not set -- not a fleet-managed spawn, or the adapter didn't wire it; skipping capture",
         )
         return 0
 
-    payload = _read_stdin_payload()
     if payload is None:
         return 0
 

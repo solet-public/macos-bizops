@@ -13,12 +13,18 @@ is made at build time.
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 
 from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+from googleapiclient.discovery import build, build_from_document
 
+from ..constants import ACCOUNT_TIER_CONSUMER, ACCOUNT_TIER_UNKNOWN, ACCOUNT_TIER_WORKSPACE_USER, CONSUMER_GMAIL_DOMAINS
+from ..workspace_registry import discovery_document
 from .token_store import TokenStore
+
+_logger = logging.getLogger(__name__)
 
 
 class GoogleServiceFactory:
@@ -39,6 +45,12 @@ class GoogleServiceFactory:
             static_discovery=True,
         )
 
+    def credential_facts(self) -> dict[str, Any]:
+        return self._tokens.credential_facts()
+
+    def workspace_api(self, product: str) -> Any:
+        return build_from_document(json.dumps(discovery_document(product)), credentials=self._credentials())
+
     def gmail(self) -> Any:
         return self._build("gmail", "v1")
 
@@ -53,3 +65,44 @@ class GoogleServiceFactory:
 
     def slides(self) -> Any:
         return self._build("slides", "v1")
+
+
+def account_tier(email: str) -> str:
+    """consumer for gmail.com / googlemail.com, else workspace_user.
+
+    Every Gmail mailbox address is either a consumer Gmail address or an
+    address on a Workspace domain, so the Gmail profile address alone tells the
+    tier with no extra OAuth scope. Workspace-admin detection needs the Admin
+    SDK scope and arrives with an admin build; until then admins read as
+    workspace_user.
+    """
+    domain = email.rpartition("@")[2].lower()
+    if not domain:
+        return ACCOUNT_TIER_UNKNOWN
+    return ACCOUNT_TIER_CONSUMER if domain in CONSUMER_GMAIL_DOMAINS else ACCOUNT_TIER_WORKSPACE_USER
+
+
+def probe_account(access_token: str) -> tuple[str, str]:
+    """Read (lower-cased email, tier) for a fresh token.
+
+    Gmail users.getProfile first; its address also gives the tier. When that
+    fails (for example Gmail unticked on granular consent) the Drive about.get
+    user email identifies the account and the tier is recorded 'unknown', so a
+    failed Gmail probe never refuses a connect or a legacy migration that
+    another granted product can identify.
+    """
+    credentials = Credentials(token=access_token)
+    try:
+        gmail = build("gmail", "v1", credentials=credentials, cache_discovery=False, static_discovery=True)
+        email = str(gmail.users().getProfile(userId="me").execute().get("emailAddress") or "").lower()
+    except Exception as exc:  # noqa: BLE001 — the Drive fallback below identifies the account; the cause is logged
+        _logger.warning("Gmail profile probe failed (%s); identifying the account through Drive, tier unknown", type(exc).__name__)
+        email = ""
+    if email:
+        return email, account_tier(email)
+    drive = build("drive", "v3", credentials=credentials, cache_discovery=False, static_discovery=True)
+    about = drive.about().get(fields="user(emailAddress)").execute()
+    email = str((about.get("user") or {}).get("emailAddress") or "").lower()
+    if not email:
+        raise ValueError("Neither the Gmail profile nor the Drive account reported an email address")
+    return email, ACCOUNT_TIER_UNKNOWN

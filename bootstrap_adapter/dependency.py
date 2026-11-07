@@ -8,11 +8,12 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from .homebrew import homebrew_guard_environment
+from .homebrew import CommandExecutionError, CommandOutcome, homebrew_guard_environment
 from .models import (
     FORMULA_KEG_MARKER,
     INSTALL_TIMEOUT_SECONDS,
@@ -21,7 +22,15 @@ from .models import (
     AdapterRuntime,
     Runner,
 )
-from .protocol import EMPTY_ACTION_PURPOSES, Request, evidence, planned_action, result, run_public
+from .protocol import (
+    EMPTY_ACTION_PURPOSES,
+    Request,
+    command_failure_result,
+    evidence,
+    planned_action,
+    result,
+    run_public,
+)
 
 REQUIRED_DISTRIBUTIONS: tuple[tuple[str, str], ...] = (
     ("solet-setup-contracts", "solet_setup_contracts"),
@@ -230,12 +239,7 @@ def _missing_seed_distributions(payload: dict[str, object] | None, target: Path,
     packages = payload.get("packages")
     if not isinstance(packages, dict):
         return tuple(relative for _distribution, relative in closure)
-    return tuple(
-        relative
-        for distribution, relative in closure
-        if not isinstance(packages.get(distribution), dict)
-        or not _editable_root_matches(packages[distribution].get("direct_url"), target / relative)
-    )
+    return tuple(relative for distribution, relative in closure if not isinstance(packages.get(distribution), dict) or not _editable_root_matches(packages[distribution].get("direct_url"), target / relative))
 
 
 def _private_cli_works(runner: Runner, private_solet: Path) -> bool:
@@ -305,7 +309,24 @@ def _resolve_long_lived_python(runtime: AdapterRuntime) -> str:
     raise AdapterError("no long-lived Python 3.13 outside the Solet formula keg is available")
 
 
+_COMMAND_OUTPUT_LIMIT = 16_384
+
+
+def _bounded_output(stream: str | bytes | None) -> str:
+    """Bounded text of one captured stream; a timed-out child may leave bytes or nothing."""
+
+    if stream is None:
+        return ""
+    text = stream.decode(errors="replace") if isinstance(stream, bytes) else stream
+    return text[:_COMMAND_OUTPUT_LIMIT]
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, int((time.monotonic() - started) * 1000))
+
+
 def _run_required(runtime: AdapterRuntime, command: list[str], label: str) -> None:
+    started = time.monotonic()
     try:
         completed = runtime.run(
             command,
@@ -313,12 +334,24 @@ def _run_required(runtime: AdapterRuntime, command: list[str], label: str) -> No
             text=True,
             timeout=INSTALL_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AdapterError(f"{label} could not execute") from exc
+    except subprocess.TimeoutExpired as exc:
+        outcome = CommandOutcome(None, True, _elapsed_ms(started), _bounded_output(exc.stdout), _bounded_output(exc.stderr))
+        raise CommandExecutionError(f"{label} could not execute", outcome=outcome) from exc
+    except OSError as exc:
+        outcome = CommandOutcome(None, False, _elapsed_ms(started), "", "")
+        raise CommandExecutionError(f"{label} could not execute", outcome=outcome) from exc
+    outcome = CommandOutcome(
+        completed.returncode,
+        False,
+        _elapsed_ms(started),
+        _bounded_output(completed.stdout),
+        _bounded_output(completed.stderr),
+    )
     if completed.returncode != 0:
         stderr_tail = completed.stderr[-1024:].strip()
-        raise AdapterError(
-            f"{label} failed (exit {completed.returncode}; stderr tail: {stderr_tail!r})"
+        raise CommandExecutionError(
+            f"{label} failed (exit {completed.returncode}; stderr tail: {stderr_tail!r})",
+            outcome=outcome,
         )
 
 
@@ -392,10 +425,7 @@ def _python_request_evidence(runtime: AdapterRuntime, state: PythonRequestState)
         evidence_id="environment.python_installed_on_request",
         kind="dependency_closure",
         status="pending" if state is PythonRequestState.DEPENDENCY_ONLY else "verified",
-        summary=(
-            f"Whether Homebrew keeps {PYTHON_FORMULA} on request, so `brew autoremove` cannot remove the "
-            "interpreter this instance's venv links, was read from the keg's install receipt."
-        ),
+        summary=(f"Whether Homebrew keeps {PYTHON_FORMULA} on request, so `brew autoremove` cannot remove the interpreter this instance's venv links, was read from the keg's install receipt."),
         observed=state.value,
         expected=f"{PythonRequestState.ON_REQUEST.value} or {PythonRequestState.NOT_HOMEBREW.value}",
         source=f"Cellar/{PYTHON_FORMULA}/<version>/INSTALL_RECEIPT.json",
@@ -428,8 +458,7 @@ def mark_python_installed_on_request(runtime: AdapterRuntime, closure: Closure =
     if not _brew_works(runtime, brew):
         raise PythonRequestMarkError(
             "python_on_request_brew_missing",
-            f"{brew}, the Homebrew that owns this python@3.13, is not available, so it could not be marked installed on request. "
-            f"Run `{brew} {' '.join(_PYTHON_TAB_ARGS)}` once it is available",
+            f"{brew}, the Homebrew that owns this python@3.13, is not available, so it could not be marked installed on request. Run `{brew} {' '.join(_PYTHON_TAB_ARGS)}` once it is available",
         )
     try:
         environment = homebrew_guard_environment()
@@ -458,9 +487,7 @@ def _brew_works(runtime: AdapterRuntime, brew: Path) -> bool:
     return completed is not None and completed.returncode == 0
 
 
-def _repair_venv_if_needed(
-    runtime: AdapterRuntime, state: ClosureState, facts: dict[str, bool], venv_dir: Path, closure: Closure = REQUIRED_DISTRIBUTIONS
-) -> tuple[ClosureState, dict[str, bool]]:
+def _repair_venv_if_needed(runtime: AdapterRuntime, state: ClosureState, facts: dict[str, bool], venv_dir: Path, closure: Closure = REQUIRED_DISTRIBUTIONS) -> tuple[ClosureState, dict[str, bool]]:
     if not venv_rebuild_needed(state, facts):
         return state, facts
     interpreter = _resolve_long_lived_python(runtime)
@@ -481,9 +508,7 @@ def _repair_build_backend_if_needed(runtime: AdapterRuntime, facts: dict[str, bo
     )
 
 
-def _repair_seed_packages_if_needed(
-    runtime: AdapterRuntime, facts: dict[str, bool], venv_python: Path, closure: Closure = REQUIRED_DISTRIBUTIONS
-) -> None:
+def _repair_seed_packages_if_needed(runtime: AdapterRuntime, facts: dict[str, bool], venv_python: Path, closure: Closure = REQUIRED_DISTRIBUTIONS) -> None:
     missing = _missing_seed_distributions(_closure_payload(runtime.run, venv_python, closure), runtime.target, closure)
     if not facts["private_solet"] and not missing:
         missing = tuple(relative for _distribution, relative in closure)
@@ -597,14 +622,21 @@ def _apply_route_result(request: Request, runtime: AdapterRuntime, closure: Clos
     try:
         apply_dependency_closure(runtime, closure)
     except AdapterError as exc:
+        repair = f"{exc}. Repair the target package or interpreter condition and resume."
+        if isinstance(exc, CommandExecutionError):
+            return command_failure_result(
+                request,
+                error_kind="dependency_closure_apply_failed",
+                evidence_items=[],
+                repair=repair,
+                outcome=exc.outcome,
+            )
         return result(
             request,
             status="failed",
             error_kind="dependency_closure_apply_failed",
             retry_safe=True,
-            repair=(
-                f"{exc}. Repair the target package or interpreter condition and resume."
-            ),
+            repair=repair,
         )
     try:
         mark_python_installed_on_request(runtime, closure)
@@ -670,8 +702,7 @@ def _flag_only_gap_result(request: Request, request_state: PythonRequestState, e
         status="blocked",
         error_kind=_closure_error_kind(ClosureState.PRESENT_CLOSED),
         evidence_items=evidence_items,
-        repair=f"The mark step reported success but the receipt still says {PYTHON_FORMULA} was not installed on request. "
-        f"Run `{' '.join(('brew', *_PYTHON_TAB_ARGS))}` with the Homebrew that owns the keg, then resume.",
+        repair=f"The mark step reported success but the receipt still says {PYTHON_FORMULA} was not installed on request. Run `{' '.join(('brew', *_PYTHON_TAB_ARGS))}` with the Homebrew that owns the keg, then resume.",
     )
 
 

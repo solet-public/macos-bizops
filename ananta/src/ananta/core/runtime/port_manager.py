@@ -46,12 +46,126 @@ and neither writes. Callers must never use this function when a router
 is present.
 """
 
+import asyncio
+import logging
 import os
 import socket
+import threading
+from collections import deque
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from ananta.core.config.environment_config import EnvironmentConfig
+
+DEFAULT_CLIENT_IO_WORKERS: Final[int] = 2
+DEFAULT_CLIENT_IO_PENDING: Final[int] = 32
+
+
+@dataclass(eq=False)
+class _ClientIOWaiter:
+    loop: asyncio.AbstractEventLoop
+    future: asyncio.Future[None]
+    granted: bool = False
+
+
+class ClientIOExecutor:
+    """A helper-owned pool with a bounded submitted queue and async FIFO admission.
+
+    This is not a shared runtime pool. Standalone clients construct their own
+    named instance. Configuration is immutable; ``close`` drains accepted work
+    and retires the instance. Cancellation retains a slot until the physical
+    operation finishes, including when its original caller's loop has exited.
+
+    ``SOLET_CLIENT_IO_WORKERS`` (default 2) and ``SOLET_CLIENT_IO_PENDING``
+    (default 32) configure helper-local instances at construction. Explicit
+    constructor settings take precedence, including a zero pending queue.
+    """
+
+    def __init__(self, name: str, *, workers: int | None = None, pending: int | None = None) -> None:
+        workers = int(os.environ.get("SOLET_CLIENT_IO_WORKERS", str(DEFAULT_CLIENT_IO_WORKERS))) if workers is None else workers
+        pending = int(os.environ.get("SOLET_CLIENT_IO_PENDING", str(DEFAULT_CLIENT_IO_PENDING))) if pending is None else pending
+        if workers < 1 or pending < 0:
+            raise ValueError("workers must be positive and pending must be nonnegative")
+        self._name = name
+        self._workers = workers
+        self._capacity = workers + pending
+        self._available = self._capacity
+        self._pool: ThreadPoolExecutor | None = None
+        self._lock = threading.Lock()
+        self._waiters: deque[_ClientIOWaiter] = deque()
+        self._closed = False
+
+    async def _admit(self) -> ThreadPoolExecutor:
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            if self._closed:
+                raise RuntimeError(f"{self._name} is closed")
+            if self._pool is None:
+                self._pool = ThreadPoolExecutor(max_workers=self._workers, thread_name_prefix=self._name)
+                logging.getLogger(__name__).info("created %s executor: workers=%d pending=%d", self._name, self._workers, self._capacity - self._workers)
+            pool = self._pool
+            if self._available:
+                self._available -= 1
+                return pool
+            waiter = _ClientIOWaiter(loop, loop.create_future())
+            self._waiters.append(waiter)
+        try:
+            await waiter.future
+        except BaseException:
+            with self._lock:
+                if not waiter.granted:
+                    self._waiters.remove(waiter)
+            if waiter.granted:
+                self._release()
+            raise
+        return pool
+
+    @staticmethod
+    def _wake(future: asyncio.Future[None]) -> None:
+        if not future.done():
+            future.set_result(None)
+
+    def _release(self) -> None:
+        with self._lock:
+            if not self._waiters:
+                self._available += 1
+                self._close_if_drained()
+                return
+            waiter = self._waiters.popleft()
+            waiter.granted = True
+        try:
+            waiter.loop.call_soon_threadsafe(self._wake, waiter.future)
+        except RuntimeError:
+            # A closed caller loop cannot receive its reserved slot.
+            self._release()
+
+    async def run[T](self, function: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+        pool = await self._admit()
+        try:
+            job = pool.submit(function, *args, **kwargs)
+        except BaseException:
+            self._release()
+            raise
+        job.add_done_callback(lambda _job: self._release())
+        future = asyncio.wrap_future(job)
+        # A cancelled caller must neither free a running slot nor cancel a
+        # queued work item before the worker has physically dequeued it.
+        future.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        return await asyncio.shield(future)
+
+    def _close_if_drained(self) -> None:
+        if self._closed and self._available == self._capacity and self._pool is not None:
+            self._pool.shutdown(wait=False)
+
+    def close(self) -> None:
+        """Retire without joining a worker on the calling event loop."""
+        with self._lock:
+            self._closed = True
+            self._close_if_drained()
+
 
 # Filename suffix for the router-port discovery file written by
 # install_router.py. The router's own management port (NOT the public
@@ -134,9 +248,7 @@ def _is_port_available(port: int, host: str = "0.0.0.0") -> bool:
         return False
 
 
-def _port_file_path(
-    runtime_dir: Path, solet_name: str, service_name: str
-) -> Path:
+def _port_file_path(runtime_dir: Path, solet_name: str, service_name: str) -> Path:
     """Resolve the on-disk port file path for a non-bridge service.
 
     Returns ``<runtime_dir>/<solet_name>.<service_name>.port``.
@@ -150,9 +262,7 @@ def _port_file_path(
     return runtime_dir / filename
 
 
-def write_port_file(
-    port: int, service_name: str = "rest", solet_name: str | None = None
-) -> Path:
+def write_port_file(port: int, service_name: str = "rest", solet_name: str | None = None) -> Path:
     """Write a port number to a runtime file for service discovery.
 
     Creates a file at: ``{runtime_dir}/{solet_name}.{service_name}.port``.
@@ -310,12 +420,7 @@ def remove_port_file(service_name: str = "rest", solet_name: str | None = None) 
         ValueError: If ``service_name == 'bridge'`` — fail-fast guard.
     """
     if service_name in _FORBIDDEN_PORT_FILE_SERVICE_NAMES:
-        msg = (
-            f"remove_port_file(service_name={service_name!r}, ...) is forbidden: "
-            f"<name>.bridge.port is never removed by its writer — R3 of the D11 "
-            f"ruling keeps a stale file diagnosable (connection-refused) rather "
-            f"than racing a restart for zero benefit."
-        )
+        msg = f"remove_port_file(service_name={service_name!r}, ...) is forbidden: <name>.bridge.port is never removed by its writer — R3 of the D11 ruling keeps a stale file diagnosable (connection-refused) rather than racing a restart for zero benefit."
         raise ValueError(msg)
     if solet_name is None:
         solet_name = EnvironmentConfig.solet_name()

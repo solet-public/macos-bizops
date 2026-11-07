@@ -16,23 +16,14 @@ _HOMEBREW_GUARD_ENV = {
     "HOMEBREW_NO_COLOR": "1",
     "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK": "1",
     "HOMEBREW_NO_INSTALL_UPGRADE": "1",
-}
-_HOMEBREW_INSTALL_MUTATION_ENV = {
     "HOMEBREW_NO_INSTALL_CLEANUP": "1",
 }
 _OUTPUT_LIMIT = 16_384
 _VERSIONED_PACKAGE_ITEM = re.compile(r"^(?P<name>[a-z0-9][a-z0-9@._+/-]*)(?:\s+[0-9][A-Za-z0-9@._+/-]*)?$")
 _PACKAGE_HEADER = re.compile(r"^Would install (?P<count>[1-9][0-9]*) (?P<kind>cask|casks|formula|formulas|formulae):$")
 _DEPENDENCY_HEADER = re.compile(r"^Would install (?P<count>[1-9][0-9]*) dependenc(?:y|ies) for (?P<parent>.+):$")
-_UPGRADE_DEPENDENCY_HEADER = re.compile(
-    r"^Would upgrade (?P<count>[1-9][0-9]*) dependenc(?:y|ies) for (?P<parent>.+):$"
-)
-# New dependency names require review; a package-looking action line is not proof.
-_REVIEWED_INSTALL_DEPENDENCIES: dict[tuple[str, str], frozenset[str]] = {
-    ("formula", "postgresql@17"): frozenset({"krb5", "readline"}),
-    # r53 macOS 26 guest receipt (iss_6130e3f2): llama.cpp 0.4.0 bottles depend on these.
-    ("formula", "llama.cpp"): frozenset({"libomp", "ggml"}),
-}
+_UPGRADE_DEPENDENCY_HEADER = re.compile(r"^Would upgrade (?P<count>[1-9][0-9]*) dependenc(?:y|ies) for (?P<parent>.+):$")
+_DEPENDENCY_NAME = re.compile(r"^[a-z0-9][a-z0-9@._+/-]*$")
 _KNOWN_PLAN_INFORMATION = frozenset(
     {
         "Warning: `$HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK` is set: not checking for outdated",
@@ -112,7 +103,6 @@ class _PlanAccumulator:
     block_counts: list[tuple[list[str], int]] = field(default_factory=list)
     current_items: list[str] | None = None
     current_parent: str | None = None
-    current_is_upgrade: bool = False
 
     def begin_upgrade(self, line: str, *, package: str, reviewed: frozenset[str]) -> None:
         """Open a ``Would upgrade N dependencies for <parent>:`` block for this plan."""
@@ -123,7 +113,6 @@ class _PlanAccumulator:
         items: list[str] = []
         self.current_items = items
         self.current_parent = header["parent"]
-        self.current_is_upgrade = True
         self.block_counts.append((items, int(header["count"])))
         self.upgrade_blocks.append(items)
 
@@ -135,7 +124,6 @@ class _PlanAccumulator:
         if parent is not None and parent not in {package, *reviewed}:
             raise _UnrecognizedPlanLineError(line)
         self.current_items = items
-        self.current_is_upgrade = False
         self.current_parent = parent
         self.block_counts.append((items, declared_count))
         if parent is None:
@@ -148,7 +136,7 @@ class _PlanAccumulator:
             raise _UnrecognizedPlanLineError(line)
         name = _plan_item_name(line)
         allowed = {package} if self.current_parent is None else reviewed
-        if name is None or (not self.current_is_upgrade and name not in allowed):
+        if name is None or name not in allowed:
             raise _UnrecognizedPlanLineError(line)
         self.current_items.append(name)
 
@@ -167,9 +155,7 @@ def _outcome(
         duration_ms=max(0, int((time.monotonic() - started) * 1000)),
         stdout="" if completed is None else completed.stdout[:_OUTPUT_LIMIT],
         stderr="" if completed is None else completed.stderr[:_OUTPUT_LIMIT],
-        output_complete=completed is not None
-        and len(completed.stdout) <= _OUTPUT_LIMIT
-        and len(completed.stderr) <= _OUTPUT_LIMIT,
+        output_complete=completed is not None and len(completed.stdout) <= _OUTPUT_LIMIT and len(completed.stderr) <= _OUTPUT_LIMIT,
     )
 
 
@@ -253,9 +239,7 @@ def _plan_block_header(line: str, *, kind: str) -> tuple[list[str], int, str | N
 def _known_plan_information(line: str) -> bool:
     """Allow blanks and informational lines observed in reviewed dry-run receipts."""
 
-    return not line or line in _KNOWN_PLAN_INFORMATION or any(
-        pattern.fullmatch(line) is not None for pattern in _KNOWN_PLAN_INFORMATION_PATTERNS
-    )
+    return not line or line in _KNOWN_PLAN_INFORMATION or any(pattern.fullmatch(line) is not None for pattern in _KNOWN_PLAN_INFORMATION_PATTERNS)
 
 
 def _plan_item_name(line: str) -> str | None:
@@ -265,11 +249,10 @@ def _plan_item_name(line: str) -> str | None:
     return None if package_item is None else package_item["name"]
 
 
-def _homebrew_install_items(lines: list[str], *, kind: str, package: str) -> _PlanAccumulator | None:
+def _homebrew_install_items(lines: list[str], *, kind: str, package: str, reviewed_dependencies: frozenset[str]) -> _PlanAccumulator | None:
     """Accept only requested or reviewed items; expose every unknown line."""
 
     state = _PlanAccumulator()
-    reviewed_dependencies = _REVIEWED_INSTALL_DEPENDENCIES.get((kind, package), frozenset())
     for line in lines:
         if line.startswith("Would install"):
             state.begin(line, kind=kind, package=package, reviewed=reviewed_dependencies)
@@ -301,14 +284,19 @@ def _dependency_closure_is_exact(package: str, dependency_blocks: list[tuple[str
     return True
 
 
-def _inspect_homebrew_plan(output: str, *, kind: str, package: str) -> _PlanInspection:
+def _inspect_homebrew_plan(output: str, *, kind: str, package: str, reviewed_dependencies: frozenset[str] = frozenset()) -> _PlanInspection:
     if kind not in {"cask", "formula"}:
         return _PlanInspection(False)
     unsafe_line = _unsafe_plan_line(output)
     if unsafe_line is not None:
         return _PlanInspection(False, unsafe_line)
     try:
-        parsed = _homebrew_install_items(_normalized_plan_lines(output), kind=kind, package=package)
+        parsed = _homebrew_install_items(
+            _normalized_plan_lines(output),
+            kind=kind,
+            package=package,
+            reviewed_dependencies=reviewed_dependencies if kind == "formula" else frozenset(),
+        )
     except _UnrecognizedPlanLineError as exc:
         return _PlanInspection(False, exc.line)
     if parsed is None:
@@ -331,12 +319,7 @@ def _inspect_parsed_plan(parsed: _PlanAccumulator, *, package: str) -> _PlanInsp
 def _has_plan_control_characters(output: str) -> bool:
     """Reject controls and line separators before parsing can erase them."""
 
-    return any(
-        (ord(char) < 32 and char != "\n")
-        or 127 <= ord(char) <= 159
-        or char in "\u2028\u2029"
-        for char in output
-    )
+    return any((ord(char) < 32 and char != "\n") or 127 <= ord(char) <= 159 or char in "\u2028\u2029" for char in output)
 
 
 def _unsafe_plan_line(output: str) -> str | None:
@@ -381,21 +364,56 @@ def _homebrew_package_is_installed(
 def _dry_run_is_verified_noop(outcome: CommandOutcome, *, installed: bool) -> bool:
     """Accept truly empty successful streams only with fresh package-state proof."""
 
-    return (
-        outcome.returncode == 0
-        and outcome.output_complete
-        and outcome.stdout == ""
-        and outcome.stderr == ""
-        and installed
-    )
+    return outcome.returncode == 0 and outcome.output_complete and outcome.stdout == "" and outcome.stderr == "" and installed
 
 
-def _inspect_dry_run(outcome: CommandOutcome, output: str, *, kind: str, package: str) -> _PlanInspection:
+def _inspect_dry_run(
+    outcome: CommandOutcome,
+    output: str,
+    *,
+    kind: str,
+    package: str,
+    reviewed_dependencies: frozenset[str],
+) -> _PlanInspection:
     """Only a successful complete receipt can authorize a package mutation."""
 
     if outcome.returncode != 0 or not outcome.output_complete:
         return _PlanInspection(False)
-    return _inspect_homebrew_plan(output, kind=kind, package=package)
+    return _inspect_homebrew_plan(output, kind=kind, package=package, reviewed_dependencies=reviewed_dependencies)
+
+
+def _formula_dependency_closure(
+    runtime: AdapterRuntime,
+    brew: str,
+    package: str,
+    label: str,
+    environment: dict[str, str],
+) -> frozenset[str]:
+    """Derive recursive formula dependencies from the same bounded Homebrew runtime."""
+
+    outcome = _run_homebrew_command(runtime, [brew, "deps", "--formula", package], environment=environment)
+    reason: str | None = None
+    if outcome.timed_out:
+        reason = "brew deps timed out"
+    elif outcome.returncode != 0:
+        reason = f"brew deps failed (exit {outcome.returncode}): {outcome.stderr[:160]}"
+    elif not outcome.output_complete:
+        reason = "brew deps output was incomplete"
+    names = outcome.stdout.splitlines()
+    if reason is None and (_has_plan_control_characters(outcome.stdout) or any(_DEPENDENCY_NAME.fullmatch(name) is None for name in names)):
+        reason = "brew deps returned a malformed dependency name"
+    if reason is not None:
+        raise HomebrewInstallError(
+            f"{label} dry-run proposed an unapproved package mutation; dependency closure unavailable: {reason}",
+            outcome=outcome,
+        )
+    return frozenset(names)
+
+
+def _plan_requires_dependency_closure(outcome: CommandOutcome, output: str, *, kind: str) -> bool:
+    """Only dependency-bearing formula previews need dependency authorization."""
+
+    return kind == "formula" and outcome.returncode == 0 and outcome.output_complete and any(_DEPENDENCY_HEADER.fullmatch(line) or _UPGRADE_DEPENDENCY_HEADER.fullmatch(line) for line in _normalized_plan_lines(output))
 
 
 def run_homebrew_install_required(
@@ -423,7 +441,18 @@ def run_homebrew_install_required(
     )
     _require_homebrew_command_outcome(dry_run_outcome, label=label, phase="dry-run")
     plan_output = f"{dry_run_outcome.stdout}\n{dry_run_outcome.stderr}"
-    inspection = _inspect_dry_run(dry_run_outcome, plan_output, kind=kind, package=package)
+    # A leaf-only plan authorizes only the requested package. Dependency blocks
+    # require fresh recursive metadata, never a hand-maintained transitive pin.
+    reviewed_dependencies = frozenset[str]()
+    if _plan_requires_dependency_closure(dry_run_outcome, plan_output, kind=kind):
+        reviewed_dependencies = _formula_dependency_closure(runtime, brew, package, label, environment)
+    inspection = _inspect_dry_run(
+        dry_run_outcome,
+        plan_output,
+        kind=kind,
+        package=package,
+        reviewed_dependencies=reviewed_dependencies,
+    )
     if not inspection.exact:
         installed = _homebrew_package_is_installed(
             runtime,
@@ -439,11 +468,10 @@ def run_homebrew_install_required(
             outcome=dry_run_outcome,
             unrecognized_line=inspection.unrecognized_line,
         )
-    mutation_environment = {**environment, **_HOMEBREW_INSTALL_MUTATION_ENV}
     outcome = _run_homebrew_command(
         runtime,
         [brew, "install", *package_args],
-        environment=mutation_environment,
+        environment=environment,
     )
     _require_homebrew_command_outcome(outcome, label=label, phase="install")
     outcome = replace(outcome, upgraded_dependencies=inspection.upgraded_dependencies)

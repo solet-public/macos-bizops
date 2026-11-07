@@ -25,6 +25,7 @@ from .target_git import run_target_git
 
 _GIT_TIMEOUT_SECONDS = 30
 _FORMAT = "seed-tree-baseline-v1"
+_READ_ONLY_QUERY_SUBCOMMANDS = frozenset({"ls-tree"})
 
 
 @dataclass(frozen=True)
@@ -142,7 +143,10 @@ def verify_seed_tree(
 
 
 def query_target_git(target: Path, *arguments: str, runner: GitQueryRunner | None = None) -> GitQueryResult | str:
-    """One bounded, read-only Git query against ``target``; a failure is returned as its explained string."""
+    """One bounded Git query from the closed read-only subcommand set; failures return an explained string."""
+
+    if not arguments or arguments[0] not in _READ_ONLY_QUERY_SUBCOMMANDS:
+        raise ValueError(f"target Git query must use a read-only subcommand, got {arguments[:1]!r}")
 
     return _run_query(_subprocess_git_query if runner is None else runner, _git_command(target, *arguments))
 

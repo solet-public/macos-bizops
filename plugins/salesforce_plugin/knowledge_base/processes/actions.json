@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::salesforce_plugin::actions",
+  "display_name": "Salesforce: Invocable Actions",
+  "description": "Discover and invoke Salesforce invocable actions under /services/data/v{version}/actions on the registered org. Operations: list (GET /actions), list_standard (GET /actions/standard), list_custom (GET /actions/custom; the custom action types), list_custom_type (GET /actions/custom/{action_type}; for example apex, flow, quickAction or emailAlert), describe_standard (GET /actions/standard/{action}), describe_custom (GET /actions/custom/{action_type}/{action}), invoke_standard (POST /actions/standard/{action}; body inputs, a list of input objects) and invoke_custom (POST /actions/custom/{action_type}/{action}; body inputs). Invocable Apex methods, autolaunched flows, quick actions and email alerts are reached this way. Salesforce permissions alone decide each invocation. Returns job_id/status queued.",
+  "embedding_description": "Discover and run Salesforce invocable actions: list standard actions such as chatterPost or sendEmail and the org's custom action types, list invocable Apex methods, autolaunched flows, quick actions and email alerts, describe an action's inputs and outputs, and invoke it with a list of inputs. Use to run org automation; org permissions decide.",
+  "result_processor_customizations": {
+    "action_label": "Salesforce invocable action operation queued",
+    "result_type": "salesforce_actions_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: family, operation, method, status (HTTP), selected headers, body (action lists with name, label, type and url; a describe with inputs and outputs, each with name, type and required; an invocation's per-input results with actionName, isSuccess, outputValues and errors), correlation_id, error_code for a 4xx/5xx or unknown status, and failures counting results whose isSuccess is false.",
+    "presentation_guidance": "An invocation answers one result per input; a 200 with failures above zero means some inputs failed, so relay each failed result's errors. Invoking an action can change org data or send messages; queued means only that the job was accepted, and an invocation is not repeated automatically."
+  },
+  "error_processor_customizations": {
+    "action_context": "Discover or invoke Salesforce invocable actions with the registered user's permissions.",
+    "error_interpretation": "sf.invalid_params is raised before any vendor call when the operation, action_type (an API name), action (an action name such as chatterPost, a flow API name or Account.NewCase) or the required body member inputs does not match the vendor shape. Vendor HTTP errors are completion data with error_code: sf.bad_request (400, for example a missing required input), sf.session_expired or sf.auth_failed (401), sf.permission_denied (403), sf.not_found (404, an unknown action), sf.api_error otherwise.",
+    "recovery_guidance": "Describe the action first and supply every required input by name. A permission error means the registered user cannot run the flow, Apex class or quick action in Salesforce. Check an invocation's effect before invoking it again after a transport error."
+  }
+}

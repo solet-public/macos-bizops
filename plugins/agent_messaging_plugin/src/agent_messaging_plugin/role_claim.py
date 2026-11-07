@@ -49,14 +49,17 @@ from typing import TYPE_CHECKING, Any
 from ananta.llm.agent_messaging.models import TextPart
 from ananta.llm.agent_messaging.role_binding import (
     AGENT_ROLE_BINDING_NAMESPACE,
+    COL_ROLE,
     HOLDER_KIND_INFERENCE_PROVIDER,
     HOLDER_KIND_SESSION,
     TABLE_ROLE,
+    TABLE_ROLE_BINDING,
     is_reserved_primary_name,
     is_system_role,
     role_binding_external_id,
 )
 from ananta.llm.agent_messaging.state_results import require_records
+from ananta.services.state_service.bounded_read import iter_table_rows
 
 from .bridge_sessions import BridgeNotFoundError, BridgeQueueFullError
 from .constants import (
@@ -73,6 +76,12 @@ from .peer_registry import (
     PeerAmbiguousError,
     PeerSessionAmbiguousError,
     PeerUnreachableError,
+)
+from .retired_role_registry import (
+    RetiredRoleRegistryError,
+    RoleRetiredError,
+    normalize_role_name,
+    refuse_if_retired,
 )
 from .role_binding_store import (
     HolderClaim,
@@ -559,6 +568,78 @@ def _live_holder_refusal(
     )
 
 
+# Same ceiling and reason as the role_class backfill's walk of this table: one
+# row per role ever bound (133 measured 2026-08-15), growing with the fleet's
+# role vocabulary rather than its traffic.
+_BINDING_WALK_CEILING = 10_000
+_BINDING_WALK_REASON = (
+    "one row per role ever bound (133 measured 2026-08-15); grows with the "
+    "fleet's role vocabulary, not its traffic."
+)
+
+
+def live_holder_of(
+    *,
+    state_service: Any,
+    bridge_manager: BridgeSessionManager,
+    peer_registry: PeerRegistry,
+    name: str,
+) -> ResolvedRole | None:
+    """A live (or ambiguous) holder of any binding whose NORMALIZED name equals ``name``'s.
+
+    Bindings are keyed case-sensitively, but the retired-role registry matches
+    the normalized name (NFKC, casefold, strip). Comparing raw names here would
+    let ``git-controller`` be retired while ``Git-Controller`` is held live, and
+    every send to the live role would be refused from then on. So every binding
+    row is compared on the registry's own key, then checked with the claim
+    gate's liveness predicate.
+
+    STRICT, unlike :func:`_current_holder`: a matching row that fails the typed
+    parse raises :class:`RoleBindingMalformedError` rather than reading as "no
+    holder". Retirement is irreversible, so a row this check cannot read must
+    refuse it. Only ``retire_role`` calls this; claim and send keep the lenient
+    reader.
+    """
+    target = normalize_role_name(name)
+    rows = iter_table_rows(
+        state_service,
+        namespace=AGENT_ROLE_BINDING_NAMESPACE,
+        table=TABLE_ROLE_BINDING,
+        filters={},
+        ceiling=_BINDING_WALK_CEILING,
+        reason=_BINDING_WALK_REASON,
+    )
+    for row in rows:
+        role = row.get(COL_ROLE)
+        if not isinstance(role, str) or normalize_role_name(role) != target:
+            continue
+        try:
+            holder = resolve_role_binding_v4(state_service, role)
+        except RoleBindingVacantError:
+            continue
+        if not holder.agent_session_id:
+            continue
+        is_live, _ambiguous = _holder_is_live(
+            bridge_manager=bridge_manager,
+            peer_registry=peer_registry,
+            holder_session_id=holder.agent_session_id,
+        )
+        if is_live:
+            return holder
+    return None
+
+
+def _retired_claim_refusal(state_service: Any, name: str) -> RoleClaimFailure | None:
+    """Refuse a claim of a retired name (iss_d9c955a2); an unreadable registry refuses too."""
+    try:
+        refuse_if_retired(state_service, name)
+    except RoleRetiredError as exc:
+        return RoleClaimFailure(code=exc.code, message=str(exc))
+    except RetiredRoleRegistryError as exc:
+        return RoleClaimFailure(code=exc.code, message=exc.message)
+    return None
+
+
 def _claim_preflight_refusal(
     *,
     name: str,
@@ -773,6 +854,9 @@ def claim_role_for_session(
             code="state_service_unavailable",
             message="state_service is not bound on this solet.",
         )
+    retired = _retired_claim_refusal(state_service, name)
+    if retired is not None:
+        return retired
     # REL-07(1): source the claimant's stable session id from its OWN live
     # peer_binding row when the claim args omit it (they always do). An empty
     # agent_session_id makes the reconnect CAS (keyed on it alone) unable to
@@ -868,6 +952,7 @@ __all__ = [
     "displaced_prose",
     "displaced_target",
     "is_genuine_displacement",
+    "live_holder_of",
     "new_holder_prose",
     "notify_role_handover",
     "send_handover_notice",

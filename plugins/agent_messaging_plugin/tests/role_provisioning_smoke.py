@@ -10,7 +10,6 @@ the intended ``role_not_legislated`` refusal.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import sys
 import tempfile
@@ -25,7 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _real_state_fake import RealShapeState  # noqa: E402
 from _recorded_lane_worktree_fixture import RecordedLaneWorktreeFixture  # noqa: E402
-from _register_unit_double import RegisterUnitDouble  # noqa: E402
+from _register_unit_double import (  # noqa: E402
+    FIXTURE_UNIT_ID,
+    RegisterUnitDouble,  # noqa: E402
+    fixture_assignment,
+)
 from ananta.core.services.call_context import CallContext  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
     AGENT_ROLE_BINDING_NAMESPACE,
@@ -45,6 +48,7 @@ from agent_messaging_plugin.model_capability_store import load_seed_table, seed_
 from agent_messaging_plugin.model_capability_verbs import select_dispatch_tier  # noqa: E402
 from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
+from agent_messaging_plugin.register_unit_client import RegisterActor  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
     CELL_ACCEPTANCE_ACCEPTED,
     TABLE_MODEL_CAPABILITY_CELL,
@@ -171,8 +175,6 @@ def _state() -> Any:
 
 
 def _raw(tmp: Path, state: Any) -> dict[str, object]:
-    brief = tmp / "brief.md"
-    brief.write_text("role provisioning fixture\n", encoding="utf-8")
     now = datetime.now(UTC)
     selected = select_dispatch_tier(
         state,
@@ -183,8 +185,8 @@ def _raw(tmp: Path, state: Any) -> dict[str, object]:
     return {
         "role_name": "Git-Controller",
         "lane_id": "role-provisioning-fixture",
-        "brief_ref": str(brief),
-        "brief_sha256": hashlib.sha256(brief.read_bytes()).hexdigest(),
+        "unit_id": FIXTURE_UNIT_ID,
+        "dispatch_id": "mdp-role-provisioning",
         "expected_path": str(tmp / "report.md"),
         "completion_contract": {
             "evidence_obligations": [{"id": "focused", "allowed_statuses": ["pass"]}],
@@ -260,6 +262,13 @@ def _assert_existing_controller_is_reused(
     driver: _Driver,
 ) -> None:
     _bind_existing_controller(state)
+    from agent_messaging_plugin.session_launch_adapters import _provision_preflight
+    before = len(state.rows(AGENT_ROLE_BINDING_NAMESPACE, "managed_dispatch"))
+    raw = _raw(tmp, state)
+    raw["dispatch_id"] = "mdp-existing-holder-no-launch"
+    _provision_preflight(plugin, raw, _authenticated_state())
+    _check(len(state.rows(AGENT_ROLE_BINDING_NAMESPACE, "managed_dispatch")) == before,
+           "existing-holder admission does not create an unused dispatch")
     existing_result = plugin.provision_role_session(
         {"parameters": _raw(tmp, state)}, _authenticated_state(),
     )
@@ -298,6 +307,7 @@ def test_provisioning_and_red_mutation() -> None:
             plugin.orchestrator_ref = cast(Any, _Orchestrator(state))
             plugin._peer_registry = cast(Any, _Registry())  # noqa: SLF001
             register = RegisterUnitDouble()
+            register.add_unit()
             plugin._register_unit_client = lambda: register  # type: ignore[method-assign]  # noqa: SLF001
             with RecordedLaneWorktreeFixture(tmp) as fixture:
                 result = plugin.provision_role_session(
@@ -326,12 +336,6 @@ def test_provisioning_and_red_mutation() -> None:
                     and "Git-Controller" in driver.channel.sent[0],
                     "the first turn directs the worker itself to claim; the spawner never claims it",
                 )
-                gate = cast(dict[str, Any], data.get("git_controller_gate", {}))
-                _check(
-                    gate.get("status") == "not_armed" and len(gate.get("launchers", [])) == 2,
-                    "the result reports an unarmed launcher gate without modifying launchers",
-                )
-
                 _assert_existing_controller_is_reused(
                     plugin=plugin,
                     state=state,
@@ -347,14 +351,14 @@ def test_provisioning_and_red_mutation() -> None:
                     SpawnSessionRequest(
                         role_class="principal",
                         lane_id="red-principal-git-controller",
-                        brief_ref="red-mutation",
+                        unit_id=FIXTURE_UNIT_ID, assignment=fixture_assignment(),
                         work_class="production_mutation",
                         budget_line="red-mutation",
                         role_name="Git-Controller-Red",
                         host=_HOST,
                         dispatch_kind="infrastructure",
                     ),
-                )
+                 register=register, actor=RegisterActor("agi-coordinator", "ases-agi-coordinator", "Coordinator-Main", "fixture-lane"))
             except VerbError as exc:
                 red_code = exc.code
             _check(

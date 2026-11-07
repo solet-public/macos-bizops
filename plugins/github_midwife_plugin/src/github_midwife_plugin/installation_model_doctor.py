@@ -18,6 +18,7 @@ from ananta.services.embedding_service import EmbeddingService
 from .installation_doctor import _boolean_probe, _command_probe, _evidence, blocked
 from .setup_adapter_contract import AdapterRequest, JsonObject, JsonValue, public_string, public_text, result
 from .setup_adapter_runtime import Runtime, read_json_object
+from .setup_operations import selected_coding_agents
 
 __all__ = ("_platform_embedding_dimension",)
 
@@ -25,7 +26,11 @@ _INFERENCE_QUALIFICATION_TIMEOUT_SECONDS = 180
 
 
 def shell_path(request: AdapterRequest, runtime: Runtime) -> JsonObject:
-    script = 'command -v "$1" && command -v "claude-$1" && command -v "codex-$1"'
+    selected = selected_coding_agents(request)
+    script = 'command -v "$1"'
+    for agent, prefix in (("claude_code", "claude"), ("codex", "codex")):
+        if agent in selected:
+            script += f' && command -v "{prefix}-$1"'
     outcome = runtime.run(
         ("/bin/zsh", "-lic", script, "solet-path-probe", request.name),
         timeout_seconds=min(request.timeout_seconds, 15),
@@ -58,9 +63,7 @@ def model_discovery(request: AdapterRequest, runtime: Runtime) -> JsonObject:
         return blocked(request, "operation_input_missing", "decision_id is required for discovery.")
     base_url = _model_base_url(request)
     if base_url is None:
-        return blocked(
-            request, "operation_input_missing", "The pinned LM Studio base URL is unavailable."
-        )
+        return blocked(request, "operation_input_missing", "The pinned LM Studio base URL is unavailable.")
     try:
         status, payload = runtime.http_json(f"{base_url.rstrip('/')}/models", timeout_seconds=10)
     except urllib.error.URLError:
@@ -88,17 +91,12 @@ def model_discovery(request: AdapterRequest, runtime: Runtime) -> JsonObject:
             "model_discovery_invalid_response",
             "Repair the selected model service response, then resume.",
         )
-    candidates = [
-        _candidate(decision_id, model_id, index)
-        for index, model_id in enumerate(models)
-    ]
+    candidates = [_candidate(decision_id, model_id, index) for index, model_id in enumerate(models)]
     return result(
         request,
         status="verified",
         candidates=candidates,
-        evidence_items=[
-            _evidence("model_candidates", True, f"{base_url}/models", len(models), 0)
-        ],
+        evidence_items=[_evidence("model_candidates", True, f"{base_url}/models", len(models), 0)],
     )
 
 
@@ -115,9 +113,7 @@ def _model_base_url(request: AdapterRequest) -> str | None:
     explicit = public_string(request, "lm_studio_base_url")
     if explicit is not None:
         return explicit
-    flow_path = (
-        request.target / "plugins/github_midwife_plugin/knowledge_base/macos_setup_flow.json"
-    )
+    flow_path = request.target / "plugins/github_midwife_plugin/knowledge_base/macos_setup_flow.json"
     flow = read_json_object(flow_path)
     if flow is None:
         return None
@@ -134,9 +130,7 @@ def _model_base_url(request: AdapterRequest) -> str | None:
 def _materialized_inference_model(request: AdapterRequest) -> str | None:
     """Read the model written by the inference operation's apply phase."""
 
-    config_path = (
-        request.target / "profile/config/plugins/default_inference_plugin.json"
-    )
+    config_path = request.target / "profile/config/plugins/default_inference_plugin.json"
     config = read_json_object(config_path)
     if config is None:
         return None
@@ -175,11 +169,7 @@ def _platform_embedding_dimension(target: Path) -> int | None:
         )
     except (AnantaError, ImportError, OSError, RuntimeError, TypeError, ValueError):
         return None
-    return (
-        dimension
-        if isinstance(dimension, int) and not isinstance(dimension, bool) and dimension > 0
-        else None
-    )
+    return dimension if isinstance(dimension, int) and not isinstance(dimension, bool) and dimension > 0 else None
 
 
 def _candidate(
@@ -215,9 +205,7 @@ def embedding_qualification(request: AdapterRequest, runtime: Runtime) -> JsonOb
     candidate = public_string(request, "candidate_id")
     base_url = _model_base_url(request)
     if candidate is None or base_url is None:
-        return blocked(
-            request, "operation_input_missing", "candidate_id and base URL are required."
-        )
+        return blocked(request, "operation_input_missing", "candidate_id and base URL are required.")
     status, payload = runtime.http_json(
         f"{base_url.rstrip('/')}/embeddings",
         timeout_seconds=15,
@@ -226,13 +214,7 @@ def embedding_qualification(request: AdapterRequest, runtime: Runtime) -> JsonOb
     repeatable, observed_dimension = _embedding_observation(payload)
     returned_candidate = _response_model_identity(payload)
     expected_dimension = _platform_embedding_dimension(request.target)
-    valid = (
-        status == 200
-        and repeatable
-        and returned_candidate == candidate
-        and expected_dimension is not None
-        and observed_dimension == expected_dimension
-    )
+    valid = status == 200 and repeatable and returned_candidate == candidate and expected_dimension is not None and observed_dimension == expected_dimension
     repair = _embedding_repair(
         requested_candidate=candidate,
         returned_candidate=returned_candidate,
@@ -259,28 +241,12 @@ def _embedding_repair(
     observed = str(observed_dimension) if observed_dimension is not None else "unavailable"
     returned = returned_candidate if returned_candidate is not None else "unavailable"
     if returned_candidate != requested_candidate:
-        return (
-            "Embedding response model mismatch: "
-            f"requested public model ID {requested_candidate!r}; "
-            f"returned public model ID {returned!r}. Load the requested embedding "
-            "model in the local server and retry setup."
-        )
+        return f"Embedding response model mismatch: requested public model ID {requested_candidate!r}; returned public model ID {returned!r}. Load the requested embedding model in the local server and retry setup."
     if expected_dimension is None:
-        return (
-            "Platform expected dimension is unavailable; "
-            f"observed {observed}. Repair the bound embedding provider's "
-            "get_default_dimensions() declaration, then retry setup."
-        )
+        return f"Platform expected dimension is unavailable; observed {observed}. Repair the bound embedding provider's get_default_dimensions() declaration, then retry setup."
     if observed_dimension != expected_dimension:
-        return (
-            f"Embedding dimension mismatch: expected {expected_dimension}; "
-            f"observed {observed}. Load or configure a model matching the bound "
-            "provider's get_default_dimensions() declaration, then retry setup."
-        )
-    return (
-        f"Expected two finite, repeatable {expected_dimension}-dimensional vectors; "
-        f"observed {observed}. Repair the model response, then retry setup."
-    )
+        return f"Embedding dimension mismatch: expected {expected_dimension}; observed {observed}. Load or configure a model matching the bound provider's get_default_dimensions() declaration, then retry setup."
+    return f"Expected two finite, repeatable {expected_dimension}-dimensional vectors; observed {observed}. Repair the model response, then retry setup."
 
 
 def _response_model_identity(payload: JsonValue) -> str | None:
@@ -314,14 +280,10 @@ def _finite_number(value: JsonValue) -> bool:
 
 
 def inference_qualification(request: AdapterRequest, runtime: Runtime) -> JsonObject:
-    candidate = public_string(request, "candidate_id") or _materialized_inference_model(
-        request
-    )
+    candidate = public_string(request, "candidate_id") or _materialized_inference_model(request)
     base_url = _model_base_url(request)
     if candidate is None or base_url is None:
-        return blocked(
-            request, "operation_input_missing", "candidate_id is required."
-        )
+        return blocked(request, "operation_input_missing", "candidate_id is required.")
     payload: JsonObject = {
         "model": candidate,
         "messages": [
@@ -370,11 +332,7 @@ def inference_qualification(request: AdapterRequest, runtime: Runtime) -> JsonOb
         ),
         duration_ms=duration_ms,
         extra_evidence=_inference_timing_evidence(duration_ms, _reasoning_tokens(body)),
-        error_kind=(
-            "inference_model_identity_mismatch"
-            if status == 200 and returned_candidate != candidate
-            else None
-        ),
+        error_kind=("inference_model_identity_mismatch" if status == 200 and returned_candidate != candidate else None),
     )
 
 
@@ -387,25 +345,14 @@ def _inference_repair(
     """Describe an inference qualification failure without accepting substitution."""
 
     if timed_out:
-        return (
-            "Inference qualification timed out before the response could be validated. Keep the "
-            "requested inference model loaded and retry; a slow reasoning model may need the "
-            "full qualification budget."
-        )
+        return "Inference qualification timed out before the response could be validated. Keep the requested inference model loaded and retry; a slow reasoning model may need the full qualification budget."
     if returned_candidate != requested_candidate:
         returned = returned_candidate if returned_candidate is not None else "unavailable"
-        return (
-            "Inference response model mismatch: "
-            f"requested public model ID {requested_candidate!r}; "
-            f"returned public model ID {returned!r}. Load the requested inference "
-            "model in the local server and retry setup."
-        )
+        return f"Inference response model mismatch: requested public model ID {requested_candidate!r}; returned public model ID {returned!r}. Load the requested inference model in the local server and retry setup."
     return "Inference qualification request did not return HTTP 200; retry the local model service."
 
 
-def _inference_timing_evidence(
-    duration_ms: int, reasoning_tokens: int | None
-) -> list[JsonObject]:
+def _inference_timing_evidence(duration_ms: int, reasoning_tokens: int | None) -> list[JsonObject]:
     evidence_items = [
         _evidence(
             "inference_qualification_elapsed_seconds",

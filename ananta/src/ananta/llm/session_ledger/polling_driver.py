@@ -20,8 +20,9 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
+from ananta.interfaces.state_service_protocol import StateServiceProtocol
 from ananta.llm.session_ledger.base import (
     LedgerRepositoryError,
     SessionLedgerRepositoryBase,
@@ -161,16 +162,20 @@ class SessionLedgerPollingDriverMixin(SessionLedgerRepositoryBase):
                     NAMESPACE,
                     {
                         "table": TABLE_SOURCE_CURSOR,
-                        "record": {
-                            "id": _new_id(ID_PREFIX_SOURCE_CURSOR),
-                            "namespace": NAMESPACE,
-                            "source_id": source_id,
-                            "cursor_scope": scope.value,
-                            "cursor_payload": cursor_payload,
-                            "scope_key": scope_key,
-                            "created_at": now,
-                            "updated_at": now,
-                        },
+                        "record": cast(StateServiceProtocol, self._state).prepare_record(
+                            NAMESPACE,
+                            TABLE_SOURCE_CURSOR,
+                            {
+                                "id": _new_id(ID_PREFIX_SOURCE_CURSOR),
+                                "namespace": NAMESPACE,
+                                "source_id": source_id,
+                                "cursor_scope": scope.value,
+                                "cursor_payload": cursor_payload,
+                                "scope_key": scope_key,
+                                "created_at": now,
+                                "updated_at": now,
+                            },
+                        ),
                     },
                 )
             else:
@@ -454,17 +459,21 @@ class SessionLedgerPollingDriverMixin(SessionLedgerRepositoryBase):
                     NAMESPACE,
                     {
                         "table": TABLE_ACTIVE_LEASE,
-                        "record": {
-                            "id": _new_id(ID_PREFIX_ACTIVE_LEASE),
-                            "namespace": NAMESPACE,
-                            "session_id": session_id,
-                            "source_id": source_id,
-                            "last_seen_at": now,
-                            "expires_at": expires_at,
-                            "lease_ttl_seconds": ttl_seconds,
-                            "created_at": now,
-                            "updated_at": now,
-                        },
+                        "record": cast(StateServiceProtocol, self._state).prepare_record(
+                            NAMESPACE,
+                            TABLE_ACTIVE_LEASE,
+                            {
+                                "id": _new_id(ID_PREFIX_ACTIVE_LEASE),
+                                "namespace": NAMESPACE,
+                                "session_id": session_id,
+                                "source_id": source_id,
+                                "last_seen_at": now,
+                                "expires_at": expires_at,
+                                "lease_ttl_seconds": ttl_seconds,
+                                "created_at": now,
+                                "updated_at": now,
+                            },
+                        ),
                     },
                 )
             else:
@@ -503,9 +512,7 @@ class SessionLedgerPollingDriverMixin(SessionLedgerRepositoryBase):
         ghosts. Safe: the re-creation path (:meth:`write_cursor`) inserts a fresh
         row when none exists, so it no longer needs a soft-deleted row to revive.
         """
-        before = len(
-            self._query(TABLE_SOURCE_CURSOR, {"source_id": source_id, "is_deleted": 0})
-        )
+        before = len(self._query(TABLE_SOURCE_CURSOR, {"source_id": source_id, "is_deleted": 0}))
         if before == 0:
             return 0
         self._delete(

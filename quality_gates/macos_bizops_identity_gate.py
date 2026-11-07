@@ -104,10 +104,7 @@ _RETIRED = (
     "macos-bizops" + "-solet",
     "macos" + "_bizops",
 )
-_TOKEN_PATTERN = re.compile(
-    "|".join(re.escape(value) for value in _RETIRED)
-    + r"|(?<![A-Za-z0-9_])bizops(?![A-Za-z0-9_])"
-)
+_TOKEN_PATTERN = re.compile("|".join(re.escape(value) for value in _RETIRED) + r"|(?<![A-Za-z0-9_])bizops(?![A-Za-z0-9_])")
 _DATED_REPOSITORY = re.compile(r"\d{4}-\d{2}-\d{2}_[a-z0-9_]+_bizops_[0-9a-f]{8}")
 _INSTANCE_MARKERS = re.compile(
     r"solet (?:create|stop) bizops|name[\"']?\s*[:=]\s*[\"']?bizops[\"']?|"
@@ -135,9 +132,7 @@ _EXACT_BARE_BIZOPS = (
     rf"(?:{_PYTHON_STRING_PREFIX}(?P<identity_quote>[\"'])bizops"
     r"(?P=identity_quote)|bizops)"
 )
-_WRAPPED_BARE_BIZOPS = (
-    rf"(?:[\[(][ \t]*)*{_EXACT_BARE_BIZOPS}(?:[ \t]*[\])])*"
-)
+_WRAPPED_BARE_BIZOPS = rf"(?:[\[(][ \t]*)*{_EXACT_BARE_BIZOPS}(?:[ \t]*[\])])*"
 _VALUE_BOUNDARY = r"(?=$|[ \t,;:#}])"
 _KEYED_IDENTITY_ASSIGNMENT = re.compile(
     rf"(?<![A-Za-z0-9_]){_IDENTITY_KEY}[ \t]*{_ASSIGNMENT_OPERATOR}"
@@ -150,13 +145,8 @@ _CLI_IDENTITY_ASSIGNMENT = re.compile(
     rf"{_WRAPPED_BARE_BIZOPS}{_VALUE_BOUNDARY}",
     re.IGNORECASE,
 )
-_DECLARED_IDENTITY_NAMES = frozenset(
-    {"profile", "profile_name", "profile_template", "bundle", "bundle_name"}
-    | {"seed_profile", "setup_profile", "solet_profile"}
-)
-_DECLARED_IDENTITY_PATHS = frozenset(
-    {"bundle.name", "provenance.bundle.name", "seed.profile", "seed_lock.profile"}
-)
+_DECLARED_IDENTITY_NAMES = frozenset({"profile", "profile_name", "profile_template", "bundle", "bundle_name"} | {"seed_profile", "setup_profile", "solet_profile"})
+_DECLARED_IDENTITY_PATHS = frozenset({"bundle.name", "provenance.bundle.name", "seed.profile", "seed_lock.profile"})
 _STRUCTURED_DATA_SUFFIXES = frozenset({".json", ".yaml", ".yml"})
 _TEXT_EXACT_BARE_BIZOPS = re.compile(
     rf"(?<![A-Za-z0-9_-])(?:{_PYTHON_STRING_PREFIX}([\"']){_BARE_BIZOPS}\1|"
@@ -232,16 +222,20 @@ f8721c9a94ab0e80a1e3eef2895eaf94225638b9ccbc1cabd798b56b957635ac
 # same reason too: the census reads the stage-zero Git INDEX and these files
 # were still untracked in a lane worktree; verified with the candidate tree
 # per that same note.
+# 2026-10-03: the runner's exact timeout-budget entry for the same excluded
+# smoke is another non-carrier path reference; pin it with the same negative
+# fixture classification as the register's path entry.
 _NEGATIVE_LINE_ANCHORS: frozenset[str] = frozenset(
     """\
-04d9c55118bf4d05f56fea80e342b4a38ec7577f04fbdb962d1e120c63206fbf 0970d75540f30fb0c3465e6e81a4b523ee7246c78e8e5d881b3ed245f923aea4 0d7ffbf20386408b821d12f3500a410f2b74e47d58f2ac2637edd68e663c0116 12c4cf0ee3a19e4e0f07adeb35718a853cca46d18f0cf9d59dcf6ad1d9f9b353 1643a53c710f1d677beae38d81c6faec9353aaf46d53f03d7670de97608edcd3 17ca293d9799c97355e079e72d93d0716cdefba78fb159e54771e2b56de5ed5f 2a1ec7939dae525abcb41a3d0f742167dabbf3ae98f491f7b17e4a1bacbe0647 52a648d067f50c05fde91107280118bf24339e33c707a56c60a951cef37e4444 79dc587e25081639ab6545f53fa0e3d9e8c7d4555d610ecbf32eebefe440da8d 8269b5cc69592a373210d50aeb40e8225dd9450af36d84ee3ee90b1f232f41d0
-86593bf779142bcfa03ec6f2d503301df719f77ed9061eaa083621e3978396e0 86ccfa0a3ac29b5c40d1bc8d0445eb60213c588eb4f8986611253f5527c3831f 90f0bf26be29012f388d1be2a17296b59c48a48bc398cfab2acc97269c3c108f ab4ca3064ead1f576885c5d4d522515c692d9cf06fea38f4f6cdda271cfbb23c 22be7f7479f94f8b84242a19f880d28ac4b2b089de997c8deae2bd4deebcf841 bdae51f427601a8cf43e81c43cff548c1e5b2cfade4bedbdb284f2ab55088b2d 28d82afbe2aeeea73a82b6ccab49358108a67b513c8e63654ea0fc42d75de90e 8025e9bb49b6bc47850ea9ebca5acc563f02c78459da58a8b81f2a9a78bae160
+04d9c55118bf4d05f56fea80e342b4a38ec7577f04fbdb962d1e120c63206fbf 0970d75540f30fb0c3465e6e81a4b523ee7246c78e8e5d881b3ed245f923aea4 0d7ffbf20386408b821d12f3500a410f2b74e47d58f2ac2637edd68e663c0116 12c4cf0ee3a19e4e0f07adeb35718a853cca46d18f0cf9d59dcf6ad1d9f9b353 1643a53c710f1d677beae38d81c6faec9353aaf46d53f03d7670de97608edcd3 4524e0d0669a672c1b06c45e1df4810599d7cfb212078741658ac33f53c9b58e 2a1ec7939dae525abcb41a3d0f742167dabbf3ae98f491f7b17e4a1bacbe0647 52a648d067f50c05fde91107280118bf24339e33c707a56c60a951cef37e4444 79dc587e25081639ab6545f53fa0e3d9e8c7d4555d610ecbf32eebefe440da8d 8269b5cc69592a373210d50aeb40e8225dd9450af36d84ee3ee90b1f232f41d0
+86593bf779142bcfa03ec6f2d503301df719f77ed9061eaa083621e3978396e0 6f35b835fb90518eeb995cdb97b0899775aecef41f174b98e3ff69f9417802f0 90f0bf26be29012f388d1be2a17296b59c48a48bc398cfab2acc97269c3c108f ab4ca3064ead1f576885c5d4d522515c692d9cf06fea38f4f6cdda271cfbb23c 22be7f7479f94f8b84242a19f880d28ac4b2b089de997c8deae2bd4deebcf841 bdae51f427601a8cf43e81c43cff548c1e5b2cfade4bedbdb284f2ab55088b2d 28d82afbe2aeeea73a82b6ccab49358108a67b513c8e63654ea0fc42d75de90e 8025e9bb49b6bc47850ea9ebca5acc563f02c78459da58a8b81f2a9a78bae160
 cc20d5c4de436973665467c3b529443a46cb96a794c9961578f7788a5ca41a67 e8e9f62f9cf3767ded863ddd8a1ca6c57f0808bf5cb7356dd4b1c0eb35b7abfa ea7004af20f9db0817b40f714aa1043174d3a042b831a8e7d724a64e03a3bc24 fd0e7aa4cc780b8613f365b41775171e7c2580183249766dd98ea5d5166c63a1 0cd95c9d8ae9a3ec2d770301e493d99ddaeb0773e001582f419cc75b8dc5cb8c 3e5151a4a13e812b90d1be7ed22b865f4840c39fe6b52a1eb72ed0c28b1dc34a 7442792113dd17a3abc59b8fcb5de91de8948f43118b6454ab47ccc2db879107 4e6ad84441964fa3f1b70a7155b3d5f8fb661b72d9d3cd20c7aae370ea44adc0 61e5a17a285062f14cbbc45aa05e96633b146622e1828725bf086687b8519083
-903d6aa30acbddd685739aa03ef45f6afef9a1c0f964992833570c36352b19ca 9e20ff0656d72222916456cab08302c2ff020df03938f523a52c7d3ba687ac96 b268d148968998a891bbf120c756451680d57d3fc070d55a65544d80dfbc6ffd b0c3536edef73c8cf12d5a7946268240db31d6ac3d831f99c10791cb145c5ea6 d1f3d3f9eb073a52d4f20e13e66e69b2f75fe4236c37fbb8370373f6f12a6f99 2d1c0fd911701ec9c8de397ed1e76a4651ce263c0e4b0ac03fc479870572563b 9abe2b4ea7719701096c329aa7bc9eceed407765b0771b95fc3a3d76e6cf91c4 e05ebb66e6136aba414bf69122a332ea68253e4d2152cdbaf8360c680800ab41
+903d6aa30acbddd685739aa03ef45f6afef9a1c0f964992833570c36352b19ca 9e20ff0656d72222916456cab08302c2ff020df03938f523a52c7d3ba687ac96 b268d148968998a891bbf120c756451680d57d3fc070d55a65544d80dfbc6ffd 990a7bd4042b30ea61de9e851308100aae4923804b12de9259a1007cdd3cde8b d1f3d3f9eb073a52d4f20e13e66e69b2f75fe4236c37fbb8370373f6f12a6f99 2d1c0fd911701ec9c8de397ed1e76a4651ce263c0e4b0ac03fc479870572563b 9abe2b4ea7719701096c329aa7bc9eceed407765b0771b95fc3a3d76e6cf91c4 e05ebb66e6136aba414bf69122a332ea68253e4d2152cdbaf8360c680800ab41
 631e6703d283972fbc82879e9e6f8624781ca7c09d425429f543edf572899909 7c63f7758db563e7b5b1c5a39f350a7381502338ee9617ae57b17033471485e8
 0d36d0a0038a227558630e25113288b034adbbc327f41a20c8581169e271165e efc64c2fe6621e54f7d47d744c58ef025ae3d1a86b6f3553a0c74151f61d4e71 d440090e167e6a4ddae7699d54097e4d530c61fd720113122992e312b2fa5358
 f82bf6a8d635f75b5991903365cca0f4a79de666d581ccacc44084558709a6b1 5df86ce9def78a7fe06563c59edd21e03f146376661c8598aee776e2d3d10bb4
-def12426a178a7ebcdc242c422cf7c743b0ada9c8734ee8895224a02bb4c59ad 0448986b0f75d672cd8f9fb6c5af85206afbdfc94f82fd7c3052916bcc811816
+fa10851b4c9399c29a083bbe1bb77dfca5f3879bfaf08184a18190d1bc6eec17 0448986b0f75d672cd8f9fb6c5af85206afbdfc94f82fd7c3052916bcc811816
+4f4076ac69e90b11acc3e9aa419a3ddc94cc6f1cdea1b746ba37d3f29a683156
 """.split()
 ) - frozenset(
     {
@@ -262,6 +256,7 @@ _DETECTOR_DEFINITION_LINE_ANCHORS: frozenset[str] = frozenset(
 051ac5b94c894b578fd7e9c0ed780fc15ae77fa150730ecf8bc53a76dd28164b
 0f965818baf201a613ca1b72b1f37000e3168d27f4497d2af5042cf0819cfdb8
 129a23303aa32ee904947594fa256c3aeeed8f45af8cf7b62ba9616b53867d0c
+1e498d08cad308eef179ba06587c2fe90bbc14e045cbe741707fc930cbcfe14d
 28d82afbe2aeeea73a82b6ccab49358108a67b513c8e63654ea0fc42d75de90e
 2946d6cb94cf584b11df434c5c88c07194ef69f3f3e8eaf380d24f0aafd7fb8c
 2d2475ddf16d4d34a6557fffd6878915fb54b9d8a88c41e9674f3a6d2fdc9e14
@@ -280,6 +275,7 @@ fac38d845394d0789117836d36a5cdbb86a915ae917b3f9863f0b9cea591067d
 """.split()
 )
 
+
 @dataclass(frozen=True)
 class Occurrence:
     path: str
@@ -291,10 +287,7 @@ class Occurrence:
     def render(self) -> str:
         label = self.classification or "UNCLASSIFIED"
         anchor = _line_anchor(self.path, self.line)
-        return (
-            f"{self.path}:{self.line_number}:{self.token}:{label}:"
-            f"anchor={anchor}: {self.line.strip()}"
-        )
+        return f"{self.path}:{self.line_number}:{self.token}:{label}:anchor={anchor}: {self.line.strip()}"
 
 
 @dataclass(frozen=True)
@@ -350,9 +343,7 @@ def _in_census_scope(path: str) -> bool:
     return not path.startswith("workbench/")
 
 
-def _bind_logical_context(
-    contexts: list[_LogicalContext], lines: list[str], start: int, end: int
-) -> None:
+def _bind_logical_context(contexts: list[_LogicalContext], lines: list[str], start: int, end: int) -> None:
     source = "\n".join(lines[start - 1 : end])
     context = _LogicalContext(source=source, start_line=start)
     for line_number in range(start, end + 1):
@@ -360,15 +351,17 @@ def _bind_logical_context(
 
 
 def _python_logical_contexts(lines: list[str]) -> tuple[_LogicalContext, ...]:
-    contexts = [
-        _LogicalContext(source=line, start_line=index)
-        for index, line in enumerate(lines, start=1)
-    ]
+    contexts = [_LogicalContext(source=line, start_line=index) for index, line in enumerate(lines, start=1)]
     source = "\n".join((*lines, ""))
     statement_start: int | None = None
     ignored_starts = {
-        tokenize.COMMENT, tokenize.DEDENT, tokenize.ENDMARKER, tokenize.ENCODING,
-        tokenize.INDENT, tokenize.NEWLINE, tokenize.NL,
+        tokenize.COMMENT,
+        tokenize.DEDENT,
+        tokenize.ENDMARKER,
+        tokenize.ENCODING,
+        tokenize.INDENT,
+        tokenize.NEWLINE,
+        tokenize.NL,
     }
     try:
         tokens = tokenize.generate_tokens(io.StringIO(source).readline)
@@ -392,10 +385,7 @@ def _logical_contexts(path: str, lines: list[str]) -> tuple[_LogicalContext, ...
     if Path(path).suffix.casefold() in _STRUCTURED_DATA_SUFFIXES:
         context = _LogicalContext(source="\n".join(lines), start_line=1)
         return tuple(context for _line in lines)
-    return tuple(
-        _LogicalContext(source=line, start_line=index)
-        for index, line in enumerate(lines, start=1)
-    )
+    return tuple(_LogicalContext(source=line, start_line=index) for index, line in enumerate(lines, start=1))
 
 
 def _dotted_name(node: ast.expr) -> str | None:
@@ -436,12 +426,7 @@ def _target_name(node: ast.expr) -> str | None:
 
 
 def _is_declared_identity_carrier(name: str) -> bool:
-    return (
-        name in _DECLARED_IDENTITY_NAMES
-        or name in _DECLARED_IDENTITY_PATHS
-        or name.rsplit(".", maxsplit=1)[-1] in _DECLARED_IDENTITY_NAMES
-        or any(name.endswith(f".{path}") for path in _DECLARED_IDENTITY_PATHS)
-    )
+    return name in _DECLARED_IDENTITY_NAMES or name in _DECLARED_IDENTITY_PATHS or name.rsplit(".", maxsplit=1)[-1] in _DECLARED_IDENTITY_NAMES or any(name.endswith(f".{path}") for path in _DECLARED_IDENTITY_PATHS)
 
 
 def _declared_target_path(node: ast.expr) -> tuple[str, ...] | None:
@@ -467,24 +452,14 @@ def _literal_mapping_items(node: ast.Dict) -> tuple[tuple[str, ast.expr], ...]:
     return tuple(items)
 
 
-def _carrier_literals(
-    node: ast.expr, path: tuple[str, ...]
-) -> tuple[ast.expr, ...]:
+def _carrier_literals(node: ast.expr, path: tuple[str, ...]) -> tuple[ast.expr, ...]:
     if _is_exact_literal(node):
         return (node,) if _is_declared_identity_carrier(".".join(path)) else ()
     if isinstance(node, (ast.List, ast.Set, ast.Tuple)):
-        return tuple(
-            literal
-            for element in node.elts
-            for literal in _carrier_literals(element, path)
-        )
+        return tuple(literal for element in node.elts for literal in _carrier_literals(element, path))
     if not isinstance(node, ast.Dict):
         return ()
-    return tuple(
-        literal
-        for key_name, value in _literal_mapping_items(node)
-        for literal in _carrier_literals(value, (*path, key_name))
-    )
+    return tuple(literal for key_name, value in _literal_mapping_items(node) for literal in _carrier_literals(value, (*path, key_name)))
 
 
 def _sequence_elements(node: ast.expr) -> tuple[ast.expr, ...] | None:
@@ -493,17 +468,13 @@ def _sequence_elements(node: ast.expr) -> tuple[ast.expr, ...] | None:
     return None
 
 
-def _starred_pairs(
-    targets: tuple[ast.expr, ...], values: tuple[ast.expr, ...], star_index: int
-) -> tuple[tuple[ast.expr, ast.expr], ...]:
+def _starred_pairs(targets: tuple[ast.expr, ...], values: tuple[ast.expr, ...], star_index: int) -> tuple[tuple[ast.expr, ast.expr], ...]:
     required = len(targets) - 1
     if len(values) < required:
         return ()
     suffix_count = len(targets) - star_index - 1
     prefix = tuple(zip(targets[:star_index], values[:star_index], strict=True))
-    suffix = tuple(
-        zip(targets[star_index + 1 :], values[len(values) - suffix_count :], strict=True)
-    )
+    suffix = tuple(zip(targets[star_index + 1 :], values[len(values) - suffix_count :], strict=True))
     middle_end = len(values) - suffix_count if suffix_count else len(values)
     middle = ast.List(elts=list(values[star_index:middle_end]), ctx=ast.Load())
     starred = targets[star_index]
@@ -511,9 +482,7 @@ def _starred_pairs(
     return (*prefix, (starred.value, middle), *suffix)
 
 
-def _target_value_pairs(
-    target: ast.expr, value: ast.expr
-) -> tuple[tuple[ast.expr, ast.expr], ...]:
+def _target_value_pairs(target: ast.expr, value: ast.expr) -> tuple[tuple[ast.expr, ast.expr], ...]:
     targets = _sequence_elements(target)
     values = _sequence_elements(value)
     if targets is None:
@@ -540,11 +509,7 @@ def _assigned_literals(target: ast.expr, value: ast.expr) -> tuple[ast.expr, ...
 
 def _assignment_literals(node: ast.AST) -> tuple[ast.expr, ...]:
     if isinstance(node, ast.Assign):
-        return tuple(
-            literal
-            for target in node.targets
-            for literal in _assigned_literals(target, node.value)
-        )
+        return tuple(literal for target in node.targets for literal in _assigned_literals(target, node.value))
     if isinstance(node, ast.AnnAssign):
         value = node.annotation if node.value is None else node.value
         return _assigned_literals(node.target, value)
@@ -554,39 +519,18 @@ def _assignment_literals(node: ast.AST) -> tuple[ast.expr, ...]:
 
 
 def _keyword_literals(node: ast.Call) -> tuple[ast.expr, ...]:
-    return tuple(
-        literal
-        for keyword in node.keywords
-        if keyword.arg is not None
-        and keyword.arg.casefold() in _DECLARED_IDENTITY_NAMES
-        for literal in _carrier_literals(keyword.value, (keyword.arg.casefold(),))
-    )
+    return tuple(literal for keyword in node.keywords if keyword.arg is not None and keyword.arg.casefold() in _DECLARED_IDENTITY_NAMES for literal in _carrier_literals(keyword.value, (keyword.arg.casefold(),)))
 
 
 def _identity_literal_nodes(tree: ast.AST) -> tuple[ast.expr, ...]:
-    return tuple(
-        literal
-        for node in ast.walk(tree)
-        for literal in (
-            _assignment_literals(node)
-            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr))
-            else _keyword_literals(node)
-            if isinstance(node, ast.Call)
-            else _carrier_literals(node, ())
-            if isinstance(node, ast.Dict)
-            else ()
-        )
-    )
+    return tuple(literal for node in ast.walk(tree) for literal in (_assignment_literals(node) if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) else _keyword_literals(node) if isinstance(node, ast.Call) else _carrier_literals(node, ()) if isinstance(node, ast.Dict) else ()))
 
 
 def _dedent_source(source: str) -> tuple[str, tuple[int, ...]]:
     original_lines = source.splitlines()
     dedented = textwrap.dedent(source)
     dedented_lines = dedented.splitlines()
-    removed = tuple(
-        len(original) - len(rendered)
-        for original, rendered in zip(original_lines, dedented_lines, strict=True)
-    )
+    removed = tuple(len(original) - len(rendered) for original, rendered in zip(original_lines, dedented_lines, strict=True))
     return dedented, removed
 
 
@@ -607,16 +551,10 @@ def _structured_transparent_literals(node: Node) -> tuple[ScalarNode, ...]:
         return (node,) if node.value.casefold() == _BARE_BIZOPS else ()
     if not isinstance(node, SequenceNode):
         return ()
-    return tuple(
-        literal
-        for element in node.value
-        for literal in _structured_transparent_literals(element)
-    )
+    return tuple(literal for element in node.value for literal in _structured_transparent_literals(element))
 
 
-def _structured_identity_literals(
-    node: Node, path: tuple[str, ...] = ()
-) -> tuple[ScalarNode, ...]:
+def _structured_identity_literals(node: Node, path: tuple[str, ...] = ()) -> tuple[ScalarNode, ...]:
     """Collect exact values owned by complete structured carrier paths.
 
     Mapping descent extends ownership one key at a time. Sequence descent keeps
@@ -639,9 +577,7 @@ def _structured_identity_literals(
     return tuple(literals)
 
 
-def _structured_node_contains(
-    node: ScalarNode, line_number: int, column: int | None
-) -> bool:
+def _structured_node_contains(node: ScalarNode, line_number: int, column: int | None) -> bool:
     """Match a source occurrence against PyYAML's character-based span."""
 
     start_line = node.start_mark.line + 1
@@ -655,9 +591,7 @@ def _structured_node_contains(
     return line_number != end_line or column < node.end_mark.column
 
 
-def _structured_identity_assignment(
-    source: str, line_number: int, column: int | None
-) -> bool | None:
+def _structured_identity_assignment(source: str, line_number: int, column: int | None) -> bool | None:
     """Return structural ownership, or ``None`` when parsing is unavailable."""
 
     try:
@@ -666,15 +600,10 @@ def _structured_identity_assignment(
         return None
     if tree is None:
         return False
-    return any(
-        _structured_node_contains(node, line_number, column)
-        for node in _structured_identity_literals(tree)
-    )
+    return any(_structured_node_contains(node, line_number, column) for node in _structured_identity_literals(tree))
 
 
-def _python_identity_assignment(
-    statement: str, line_number: int, column: int | None
-) -> bool | None:
+def _python_identity_assignment(statement: str, line_number: int, column: int | None) -> bool | None:
     source, removed = _dedent_source(statement)
     try:
         tree = ast.parse(source)
@@ -682,10 +611,7 @@ def _python_identity_assignment(
         return None
     literals = _identity_literal_nodes(tree)
     if column is None:
-        return any(
-            node.lineno <= line_number <= (node.end_lineno or node.lineno)
-            for node in literals
-        )
+        return any(node.lineno <= line_number <= (node.end_lineno or node.lineno) for node in literals)
     source_line = statement.splitlines()[line_number - 1]
     byte_column = len(source_line[removed[line_number - 1] : column].encode())
     return any(_node_contains(node, line_number, byte_column) for node in literals)
@@ -693,10 +619,7 @@ def _python_identity_assignment(
 
 def _text_identity_assignment(statement: str) -> bool:
     collapsed = " ".join(statement.splitlines())
-    return bool(_CLI_IDENTITY_ASSIGNMENT.search(collapsed)) or any(
-        _TEXT_EXACT_BARE_BIZOPS.search(match.group("assigned"))
-        for match in _TEXT_IDENTITY_ASSIGNMENT.finditer(collapsed)
-    )
+    return bool(_CLI_IDENTITY_ASSIGNMENT.search(collapsed)) or any(_TEXT_EXACT_BARE_BIZOPS.search(match.group("assigned")) for match in _TEXT_IDENTITY_ASSIGNMENT.finditer(collapsed))
 
 
 def _context_line_number(line: str, context: str) -> int:
@@ -721,16 +644,10 @@ def _is_identity_assignment(
         if structural is not None:
             return structural
     elif suffix in _STRUCTURED_DATA_SUFFIXES:
-        structural = _structured_identity_assignment(
-            logical_context, line_number, column
-        )
+        structural = _structured_identity_assignment(logical_context, line_number, column)
         if structural is not None:
             return structural
-    return bool(
-        _KEYED_IDENTITY_ASSIGNMENT.search(line)
-        or _CLI_IDENTITY_ASSIGNMENT.search(line)
-        or _text_identity_assignment(logical_context)
-    )
+    return bool(_KEYED_IDENTITY_ASSIGNMENT.search(line) or _CLI_IDENTITY_ASSIGNMENT.search(line) or _text_identity_assignment(logical_context))
 
 
 def _line_anchor(path: str, line: str) -> str:
@@ -757,11 +674,7 @@ def _anchor_registers() -> tuple[tuple[str, frozenset[str], str], ...]:
 def _anchored_classification(anchor: str, *, folded: bool) -> str | None:
     registers = _anchor_registers() if folded else _anchor_registers()[1:]
     return next(
-        (
-            classification
-            for classification, anchors, _stale_label in registers
-            if anchor in anchors
-        ),
+        (classification for classification, anchors, _stale_label in registers if anchor in anchors),
         None,
     )
 
@@ -784,10 +697,7 @@ def _bare_bizops_classification(
     ):
         return None
     semantic_source = line if resolved_value is None else f"{line}\n{resolved_value}"
-    if (
-        CANONICAL_REPOSITORY in semantic_source
-        or "github.com/solet-public/macos-bizops" in semantic_source
-    ):
+    if CANONICAL_REPOSITORY in semantic_source or "github.com/solet-public/macos-bizops" in semantic_source:
         return "canonical_url"
     if "branch_bizops" in semantic_source or _DATED_REPOSITORY.search(semantic_source):
         return "dated_artifact"
@@ -813,9 +723,7 @@ def classify_occurrence(
     """Return one closed classification, or ``None`` for a blocking hit."""
 
     anchor = _line_anchor(path, line)
-    classification = _anchored_classification(
-        anchor, folded=resolved_value is not None
-    )
+    classification = _anchored_classification(anchor, folded=resolved_value is not None)
     if classification is not None:
         return classification
     if token in _RETIRED:
@@ -868,9 +776,7 @@ def scan_paths(repo_root: Path, paths: tuple[str, ...]) -> tuple[Occurrence, ...
     for relpath in paths:
         path = repo_root / relpath
         if path.is_symlink() or not path.is_file():
-            raise RuntimeError(
-                f"census manifest path is absent or non-regular: {relpath}"
-            )
+            raise RuntimeError(f"census manifest path is absent or non-regular: {relpath}")
         try:
             source = path.read_text(encoding="utf-8")
             lines = source.splitlines()
@@ -899,9 +805,7 @@ def scan_paths(repo_root: Path, paths: tuple[str, ...]) -> tuple[Occurrence, ...
                         ),
                     )
                 )
-        occurrences.extend(
-            _folded_occurrences(relpath, source, lines, logical_contexts)
-        )
+        occurrences.extend(_folded_occurrences(relpath, source, lines, logical_contexts))
     return tuple(occurrences)
 
 
@@ -916,14 +820,7 @@ def _valid_bundle_definition(definition: object) -> bool:
     if not isinstance(definition, dict):
         return False
     plugins = definition.get("plugins")
-    return (
-        definition.get("profile_template") == CANONICAL
-        and isinstance(plugins, list)
-        and len(plugins) == 34
-        and len({str(item) for item in plugins}) == 34
-        and "github_midwife_plugin" in plugins
-        and "seed_factory_plugin" not in plugins
-    )
+    return definition.get("profile_template") == CANONICAL and isinstance(plugins, list) and len(plugins) == 35 and len({str(item) for item in plugins}) == 35 and "github_midwife_plugin" in plugins and "seed_factory_plugin" not in plugins
 
 
 def _bundle_contract_violations(factory_kb: Path) -> list[str]:
@@ -932,12 +829,8 @@ def _bundle_contract_violations(factory_kb: Path) -> list[str]:
     if not isinstance(bundles, dict):
         return ["capability_bundles.yaml has no bundles mapping"]
     if not _valid_bundle_definition(bundles.get(CANONICAL)):
-        violations.append("canonical bundle/template/34-plugin lockstep is invalid")
-    violations.extend(
-        f"retired bundle alias remains live: {retired}"
-        for retired in _RETIRED
-        if retired in bundles
-    )
+        violations.append("canonical bundle/template/35-plugin lockstep is invalid")
+    violations.extend(f"retired bundle alias remains live: {retired}" for retired in _RETIRED if retired in bundles)
     return violations
 
 
@@ -961,23 +854,14 @@ def _flow_contract_violations(midwife_kb: Path) -> list[str]:
     run_genesis = flow["operations"]["run_genesis"]
     if CANONICAL not in setup_options or any(retired in setup_options for retired in _RETIRED):
         violations.append("setup_profile options do not carry only the canonical product identity")
-    if run_genesis.get("parameters", {}).get("setup_profile") != {
-        "decision_ref": "setup_profile"
-    }:
+    if run_genesis.get("parameters", {}).get("setup_profile") != {"decision_ref": "setup_profile"}:
         violations.append("run_genesis does not project setup_profile")
     return violations
 
 
 def _metadata_contract_violations(repo_root: Path) -> list[str]:
-    metadata = json.loads(
-        (repo_root / "solet_cli/homebrew/release_metadata.example.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    if (
-        metadata.get("seed_repository") != CANONICAL_REPOSITORY
-        or metadata.get("seed_profile") != CANONICAL
-    ):
+    metadata = json.loads((repo_root / "solet_cli/homebrew/release_metadata.example.json").read_text(encoding="utf-8"))
+    if metadata.get("seed_repository") != CANONICAL_REPOSITORY or metadata.get("seed_profile") != CANONICAL:
         return ["Homebrew metadata does not carry the canonical repository/profile pair"]
     return []
 
@@ -1009,24 +893,19 @@ def evaluate_repository(
     *,
     candidate_manifest: Path | None = None,
 ) -> tuple[tuple[Occurrence, ...], tuple[str, ...]]:
-    paths = tuple(filter(
-        _in_census_scope,
-        (
-            _tracked_paths(repo_root)
-        if candidate_manifest is None
-        else censusable_manifest_paths(repo_root, candidate_manifest)
-        ),
-    ))
+    paths = tuple(
+        filter(
+            _in_census_scope,
+            (_tracked_paths(repo_root) if candidate_manifest is None else censusable_manifest_paths(repo_root, candidate_manifest)),
+        )
+    )
     seed_clone = _is_seed_clone(repo_root)
     occurrences = scan_paths(repo_root, paths)
     violations = _live_contract_violations(repo_root, seed_clone=seed_clone)
     if not seed_clone:
         observed_anchors = {_line_anchor(item.path, item.line) for item in occurrences}
         for _classification, anchors, stale_label in _anchor_registers():
-            violations.extend(
-                f"stale {stale_label} anchor: {stale}"
-                for stale in sorted(anchors - observed_anchors)
-            )
+            violations.extend(f"stale {stale_label} anchor: {stale}" for stale in sorted(anchors - observed_anchors))
     violations.extend(item.render() for item in occurrences if item.classification is None)
     return occurrences, tuple(violations)
 
@@ -1050,11 +929,7 @@ def main(argv: list[str] | None = None) -> int:
         assert_running_from_source_root(Path(__file__), repo_root)
         occurrences, violations = evaluate_repository(
             repo_root,
-            candidate_manifest=(
-                args.candidate_manifest.resolve()
-                if args.candidate_manifest is not None
-                else None
-            ),
+            candidate_manifest=(args.candidate_manifest.resolve() if args.candidate_manifest is not None else None),
         )
     except (
         OSError,
@@ -1071,11 +946,7 @@ def main(argv: list[str] | None = None) -> int:
     for item in retained:
         print(item.render())
     counts = Counter(item.classification or "unclassified" for item in occurrences)
-    print(
-        "macos_bizops_identity_gate census: "
-        f"occurrences={len(occurrences)} retained_former={len(retained)} "
-        f"unclassified={len(violations)} classifications={dict(sorted(counts.items()))}"
-    )
+    print(f"macos_bizops_identity_gate census: occurrences={len(occurrences)} retained_former={len(retained)} unclassified={len(violations)} classifications={dict(sorted(counts.items()))}")
     if violations:
         for violation in violations:
             print(f"BLOCKING: {violation}", file=sys.stderr)

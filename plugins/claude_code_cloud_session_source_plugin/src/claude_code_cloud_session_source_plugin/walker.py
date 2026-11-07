@@ -68,6 +68,7 @@ class WalkerConfig:
     walker_concurrency: int
     fetch_timeout_seconds: int
     rate_limit_backoff_seconds: tuple[int, ...]
+    should_stop: Callable[[], bool] = lambda: False
 
 
 @dataclass(slots=True)
@@ -96,8 +97,7 @@ def load_credentials(
     if security_bin is None:
         raise ClaudeCodeCloudWalkerError(
             "auth_missing",
-            "macOS 'security' binary not found on PATH; this plugin only "
-            "supports macOS Keychain credentials today.",
+            "macOS 'security' binary not found on PATH; this plugin only supports macOS Keychain credentials today.",
         )
     try:
         result = subprocess.run(  # noqa: S603 — fixed argv, no shell
@@ -115,8 +115,7 @@ def load_credentials(
     if result.returncode != 0:
         raise ClaudeCodeCloudWalkerError(
             "auth_missing",
-            f"Keychain entry {keychain_service!r} not found; "
-            "run `claude auth login` first.",
+            f"Keychain entry {keychain_service!r} not found; run `claude auth login` first.",
         )
     raw = result.stdout.strip()
     if not raw:
@@ -135,8 +134,7 @@ def load_credentials(
     if not isinstance(token, str) or not token:
         raise ClaudeCodeCloudWalkerError(
             "auth_malformed",
-            f"Keychain envelope missing string at path {envelope_path!r}; "
-            "re-run `claude auth login`.",
+            f"Keychain envelope missing string at path {envelope_path!r}; re-run `claude auth login`.",
         )
     return ClaudeCodeCloudCredentials(access_token=token)
 
@@ -168,6 +166,7 @@ async def list_all_session_summaries(
     headers = _request_headers(creds, config)
     seen_cursors: set[str] = set()
     while True:
+        _check_stopping(config)
         payload = await _fetch_one_list_page(
             client=client,
             url=url,
@@ -175,6 +174,7 @@ async def list_all_session_summaries(
             limit=config.list_page_limit,
             cursor=cursor,
         )
+        _check_stopping(config)
         summaries.extend(_extract_summaries_from_page(payload))
         candidate = _next_cursor(payload)
         if candidate is None or candidate in seen_cursors:
@@ -200,8 +200,7 @@ async def _fetch_one_list_page(
     if response.status_code != 200:
         raise ClaudeCodeCloudWalkerError(
             "list_failed",
-            f"GET /v1/code/sessions returned HTTP {response.status_code}: "
-            f"{response.text[:200]}",
+            f"GET /v1/code/sessions returned HTTP {response.status_code}: {response.text[:200]}",
         )
     payload = response.json()
     if not isinstance(payload, dict):
@@ -247,12 +246,13 @@ async def fetch_session_envelope(
     via the importer's ``dispatch_pushed`` seam.
     """
     session_id = _summary_string(summary, "id")
-    events_url = (
-        f"{config.api_base_url.rstrip('/')}/v1/code/sessions/{session_id}/events"
-    )
+    events_url = f"{config.api_base_url.rstrip('/')}/v1/code/sessions/{session_id}/events"
     headers = _request_headers(creds, config)
     events = await _walk_events_pagination(
-        client=client, url=events_url, headers=headers, config=config,
+        client=client,
+        url=events_url,
+        headers=headers,
+        config=config,
         session_id=session_id,
     )
     return _build_envelope(summary=summary, events=events)
@@ -270,9 +270,14 @@ async def _walk_events_pagination(
     cursor: str | None = None
     seen_cursors: set[str] = set()
     while True:
+        _check_stopping(config)
         payload = await _fetch_one_events_page(
-            client=client, url=url, headers=headers, config=config,
-            session_id=session_id, cursor=cursor,
+            client=client,
+            url=url,
+            headers=headers,
+            config=config,
+            session_id=session_id,
+            cursor=cursor,
         )
         page = payload.get("data")
         if isinstance(page, list):
@@ -298,7 +303,9 @@ async def _fetch_one_events_page(
     if cursor is not None:
         params["cursor"] = cursor
     for attempt, delay in enumerate(config.rate_limit_backoff_seconds):
+        _check_stopping(config)
         response = await client.get(url, headers=headers, params=params)
+        _check_stopping(config)
         if response.status_code == 200:
             payload = response.json()
             if not isinstance(payload, dict):
@@ -311,26 +318,26 @@ async def _fetch_one_events_page(
         if response.status_code == 429:
             logger.info(
                 "claude_code_cloud: rate-limited on events %s (attempt %d); sleeping %ds",
-                session_id, attempt + 1, delay,
+                session_id,
+                attempt + 1,
+                delay,
             )
             await asyncio.sleep(delay)
             continue
         raise ClaudeCodeCloudWalkerError(
             "fetch_failed",
-            f"GET /v1/code/sessions/{session_id}/events returned "
-            f"HTTP {response.status_code}: {response.text[:200]}",
+            f"GET /v1/code/sessions/{session_id}/events returned HTTP {response.status_code}: {response.text[:200]}",
         )
     raise ClaudeCodeCloudWalkerError(
         "rate_limited",
-        (
-            f"GET /v1/code/sessions/{session_id}/events sustained HTTP 429 "
-            f"across {len(config.rate_limit_backoff_seconds)} retries"
-        ),
+        (f"GET /v1/code/sessions/{session_id}/events sustained HTTP 429 across {len(config.rate_limit_backoff_seconds)} retries"),
     )
 
 
 def _build_envelope(
-    *, summary: dict[str, Any], events: list[dict[str, Any]],
+    *,
+    summary: dict[str, Any],
+    events: list[dict[str, Any]],
 ) -> str:
     envelope = {
         "external_session_id": _summary_string(summary, "id"),
@@ -364,10 +371,14 @@ async def fetch_and_dispatch_concurrent(
         async with semaphore:
             if auth_expired.is_set():
                 return
+            _check_stopping(config)
             session_id = _summary_string(summary, "id")
             try:
                 envelope = await fetch_session_envelope(
-                    client=client, config=config, creds=creds, summary=summary,
+                    client=client,
+                    config=config,
+                    creds=creds,
+                    summary=summary,
                 )
             except ClaudeCodeCloudWalkerError as exc:
                 if exc.code == "auth_expired":
@@ -385,6 +396,7 @@ async def fetch_and_dispatch_concurrent(
                     f"{session_id}: network_error: {type(exc).__name__}: {exc}",
                 )
                 return
+            _check_stopping(config)
             try:
                 dispatch_callable(envelope)
             except ValueError as exc:
@@ -398,10 +410,11 @@ async def fetch_and_dispatch_concurrent(
         return
     try:
         await asyncio.gather(*tasks)
-    except ClaudeCodeCloudWalkerError:
+    except BaseException:
         for task in tasks:
             if not task.done():
                 task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         raise
 
 
@@ -411,7 +424,8 @@ async def fetch_and_dispatch_concurrent(
 
 
 def _request_headers(
-    creds: ClaudeCodeCloudCredentials, config: WalkerConfig,
+    creds: ClaudeCodeCloudCredentials,
+    config: WalkerConfig,
 ) -> dict[str, str]:
     return {
         _HEADER_AUTHORIZATION: f"Bearer {creds.access_token}",
@@ -449,3 +463,8 @@ __all__ = [
     "list_all_session_summaries",
     "load_credentials",
 ]
+
+
+def _check_stopping(config: WalkerConfig) -> None:
+    if config.should_stop():
+        raise ClaudeCodeCloudWalkerError("worker_interrupted", "Service stopping between bounded cloud requests; retry with a fresh force=True request.")

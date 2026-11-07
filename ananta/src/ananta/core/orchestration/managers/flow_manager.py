@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 from typing import cast
 
 from ananta.error_handling import ActionNameCollisionError, FrameworkError
@@ -17,6 +18,7 @@ class FlowManager(IFlowManager):
         # CRITICAL FIX: Cache sequence numbers to avoid circular dependency with StateService
         # Key = flow_id, Value = next_sequence_number
         self._sequence_cache: dict[str, int] = {}
+        self._sequence_lock = threading.Lock()
 
     def create_flow(
         self, session_id: str, trigger_type: str, trigger_data: dict[str, object], priority: int = 5
@@ -71,7 +73,8 @@ class FlowManager(IFlowManager):
         flow_id: str = flow_id_value
         self.current_flow_id = flow_id
         # Initialize sequence cache for new flow
-        self._sequence_cache[flow_id] = 1
+        with self._sequence_lock:
+            self._sequence_cache[flow_id] = 1
         return flow_id
 
     def get_flow_trigger_data(self, flow_id: str) -> dict[str, object]:
@@ -106,15 +109,10 @@ class FlowManager(IFlowManager):
         # CRITICAL FIX: Use cached sequence to avoid StateService circular dependency
         # This prevents the architectural violation where StateService is busy processing
         # the console input action that triggered action creation
-        if flow_id in self._sequence_cache:
-            next_sequence = self._sequence_cache[flow_id]
-            # Increment cache for next action
+        with self._sequence_lock:
+            next_sequence = self._sequence_cache.get(flow_id, 1)
             self._sequence_cache[flow_id] = next_sequence + 1
             return next_sequence
-
-        # If flow not in cache, initialize it (this should only happen for existing flows on startup)
-        self._sequence_cache[flow_id] = 2  # Next action will be sequence 2
-        return 1
 
     def validate_action_name_uniqueness(self, action: dict[str, object]) -> None:
         action_name_value = action.get("name")

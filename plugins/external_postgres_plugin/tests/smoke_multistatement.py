@@ -1,41 +1,18 @@
 #!/usr/bin/env python3
-"""LIVE single-statement + defense-in-depth smoke (§8.6) for external_postgres_plugin.
+"""Private live PostgreSQL multistatement behavioral proof.
 
-The single-statement parser (``sqlparse``) is the BELT — it bounds multi-result
-/ SET-injection. The read-only CONNECTION is the boundary. This smoke proves
-BOTH, and that the belt is not load-bearing for safety:
-
-  1. the parser refuses a two-statement string BEFORE execute (belt)
-  2. the parser admits exactly one statement
-  3. DEFENSE-IN-DEPTH (LIVE): if the parser were bypassed and a two-statement
-     string whose SECOND statement is a write is sent straight to psycopg, the
-     read-only connection STILL refuses the write with SQLSTATE 25006 — the
-     parser correctness gap never reaches the destruction boundary (rev-F reframe)
-  4. two READS bypassing the parser both run (proving the parser is hygiene, not
-     safety)
-
-Same local ``epg_smoke_scratch`` fixture as smoke_readonly.py, and the same
-VISIBLE-SKIP-ON-UNREACHABLE contract (Coordinator-Day Q2, GTE-09; UPDATED
-2026-08-08 — undeclared-dependency audit): a fixture unreachable at SETUP
-time exits the dedicated SKIP code (77 — automake/Meson/CTest convention),
-which ``run_smokes.py`` now reports distinctly from pass/fail (it used to
-only surface a smoke's output on FAIL, which is why the original ruling
-made this fail loud instead — that gap is closed, so the workaround is
-too). A failure once checks are already RUNNING stays a genuine FAIL.
-
-Run:
-    SOLET_NAME=<name> .venv/bin/python3 \
-        plugins/external_postgres_plugin/tests/smoke_multistatement.py
-
-Exits 0 when the live proof ran and passed; 77 when the fixture was
-unreachable at setup (disclosed skip); 1 on a real failure (belt, or a
-break once the live proof was already running).
+Run under quality_gates/provision_test_pg.py; the private manifest variable
+selects this smoke's independent database on the owned loopback cluster.
+No fixture returns 77; provisioned setup or body failures return nonzero.
+The original SQL behavior, read/write probes and dynamic OS-user assertions
+remain exercised. See quality_gates/private_postgres.md.
 """
 
 from __future__ import annotations
 
 import getpass
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -43,7 +20,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_ROOT))
+REPO_ROOT = _ROOT
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "external_postgres_plugin" / "src"))
 
 from external_postgres_plugin.app_config import ExternalDsn  # noqa: E402
@@ -53,9 +32,18 @@ from external_postgres_plugin.statement_guard import (  # noqa: E402
     assert_single_statement,
 )
 
-_SCRATCH_DB = "epg_smoke_scratch"
-_HOST = "localhost"
-_PORT = 5432
+from quality_gates.private_test_pg import (  # noqa: E402
+    MANIFEST_ENV,
+    FixtureIntegrityError,
+    load_fixture,
+    pg_binary,
+    skip_fixture,
+    without_libpq,
+)
+
+_SCRATCH_DB = ""
+_HOST = "127.0.0.1"
+_PORT = 0
 _USER = getpass.getuser()
 _PROBE = "epg_probe"
 _READ_ONLY_SQLSTATE = "25006"
@@ -82,27 +70,40 @@ def _single_ok(sql: str) -> bool:
         return False
 
 
+def _configure_fixture() -> None:
+    global _HOST, _PORT, _SCRATCH_DB
+    config = load_fixture("external_multistatement")
+    if config.user != _USER:
+        raise FixtureIntegrityError("fixture user differs from the current OS user")
+    _HOST, _PORT, _SCRATCH_DB = config.host, config.port, config.database
+
+
 def _dsn() -> ExternalDsn:
     return ExternalDsn(
-        name="scratch", host=_HOST, port=_PORT, dbname=_SCRATCH_DB,
-        user=_USER, password="", sslmode="disable",
+        name="scratch",
+        host=_HOST,
+        port=_PORT,
+        dbname=_SCRATCH_DB,
+        user=_USER,
+        password="",
+        sslmode="disable",
     )
 
 
 def _psql(sql: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["psql", "-U", _USER, "-d", _SCRATCH_DB, "-v", "ON_ERROR_STOP=1", "-c", sql],
-        capture_output=True, text=True, timeout=20,
+        [str(pg_binary("psql")), "-X", *load_fixture("external_multistatement").endpoint_args(), "-d", _SCRATCH_DB, "-v", "ON_ERROR_STOP=1", "-c", sql],
+        env=without_libpq(os.environ),
+        capture_output=True,
+        text=True,
+        timeout=20,
     )
 
 
 def _setup() -> bool:
     try:
-        subprocess.run(["createdb", "-U", _USER, _SCRATCH_DB], capture_output=True, text=True, timeout=20)
-        return _psql(
-            f"DROP TABLE IF EXISTS {_PROBE}; CREATE TABLE {_PROBE}(id int); "
-            f"INSERT INTO {_PROBE} VALUES (1), (2);"
-        ).returncode == 0
+        subprocess.run([str(pg_binary("createdb")), *load_fixture("external_multistatement").endpoint_args(), "--maintenance-db=postgres", _SCRATCH_DB], env=without_libpq(os.environ), capture_output=True, text=True, timeout=20)
+        return _psql(f"DROP TABLE IF EXISTS {_PROBE}; CREATE TABLE {_PROBE}(id int); INSERT INTO {_PROBE} VALUES (1), (2);").returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
@@ -143,24 +144,6 @@ def _run_live_checks() -> None:
         _assert("two reads bypassing the parser both run (no error)", two_reads_ok)
     finally:
         conn.close()
-
-
-_SKIP_EXIT_CODE = 77
-
-
-def _unreachable_skip(detail: str) -> int:
-    # See the module docstring's VISIBLE-SKIP-ON-UNREACHABLE note. Setup-time
-    # unreachability only -- a mid-run break stays a genuine FAIL via
-    # _mid_run_fail below, since that could be a real bug, not just an
-    # absent dependency.
-    print("=" * 70)
-    print("SKIPPED-LIVE-DB-UNREACHABLE")
-    print('BORN_CLONE_SKIP_WITNESS={"reason":"local_postgres_fixture_unreachable"}')
-    print(f"  {detail}")
-    print("  The LIVE parser-bypass 25006 defense-in-depth proof DID NOT RUN.")
-    print("  Bring up local Postgres (the local trust-auth user @ localhost:5432 + createdb/psql) and re-run.")
-    print("=" * 70)
-    return _SKIP_EXIT_CODE
 
 
 def _mid_run_fail(detail: str) -> int:
@@ -245,8 +228,11 @@ def main() -> int:
     if _failed:
         print("FAILED (belt):", _failed)
         return 1
+    if not os.environ.get(MANIFEST_ENV):
+        return skip_fixture()
+    _configure_fixture()
     if not _setup():
-        return _unreachable_skip("scratch Postgres fixture unreachable.")
+        return _mid_run_fail("provisioned private fixture setup failed")
     try:
         _run_live_checks()
     except Exception as exc:
@@ -259,6 +245,7 @@ def main() -> int:
         print("FAILED:", _failed)
         return 1
     print("All single-statement / defense-in-depth checks passed.")
+    print("PRIVATE_PG_BODY external_multistatement")
     return 0
 
 

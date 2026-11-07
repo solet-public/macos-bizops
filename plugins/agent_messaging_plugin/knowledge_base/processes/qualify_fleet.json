@@ -1,8 +1,12 @@
 {
   "process_key": "plugin::agent_messaging_plugin::qualify_fleet",
   "display_name": "Qualify fleet lifecycle plumbing",
-  "description": "Runs a bounded real no-worktree qualification worker through the qualification host. It proves fleet plumbing, not an LLM runtime.",
-  "embedding_description": "Run an internal, bounded fleet lifecycle qualification that creates a synthetic no-worktree worker through the declared qualification host, waits for its real watch bridge registration, claims its durable role using the registered identity, verifies role-addressed watcher delivery to that same instance, releases the role, and retires the worker without leaving a branch or worktree.",
+  "description": "The registered process returns an accepted job receipt in data.job_id and data.status=queued. Retain that exact canonical id and read service_interface::job_service::get_job until terminal. The stored job.result is the original operation envelope, including data and structured error; job.error is also retained on failure. A receipt does not establish a session, dispatch row, or successful first turn. launch_busy names the current operation/job and starts no work. Runs a bounded real no-worktree qualification worker through the qualification host. It proves fleet plumbing, not an LLM runtime.",
+  "embedding_description": "Submit a bounded session-launch job; retrieve its result by exact job id. Qualify fleet plumbing with a synthetic worker through the declared qualification host: await real watch-bridge registration, claim its durable role with the registered identity, verify role-addressed delivery to that instance, release the role, and retire the worker without a branch or worktree.",
   "processor_policy_category": "edge",
-  "result_processor_customizations": {"result_type": "fleet_qualification"}
+  "result_processor_customizations": {
+    "result_type": "fleet_qualification",
+    "result_description": "Accepted submission only: data.job_id and data.status=queued. After terminal retrieval, job.result.data carries the original operation fields; job.result.error preserves its error. Continue dependent actions only after this retrieval.",
+    "presentation_guidance": "Report acceptance with job_id. Retrieve the terminal job before reporting an instance, dispatch state, first-turn outcome, or qualification verdict. Keep uptake_pending and uptake_uncertain distinct from worker ACK."
+  }
 }

@@ -22,7 +22,7 @@ Cases:
  14. End-to-end: live gate against real tree with shipped allowlist returns
      exit 0 and reports 0 non-allowlisted findings (proves wiring + allowlist
      remain coherent against the current inventory).
- 15. End-to-end: live gate without allowlist reports non-zero blocking count
+ 15. End-to-end: live gate with an explicit empty register reports a non-zero blocking count
      (proves the gate actually flags the current bypass sites).
  16. Allowlist parse: malformed lines emit WARN and are skipped.
 
@@ -39,9 +39,9 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO_ROOT / "quality_gates"))
+sys.path.insert(0, str(REPO_ROOT))
 
-from wint2_driver_import_check import (  # noqa: E402
+from quality_gates.wint2_driver_import_check import (  # noqa: E402
     CHECK_ID,
     Allowlist,
     AllowlistEntry,
@@ -86,43 +86,43 @@ def _case_inside_function_import_psycopg_pool() -> None:
     print("\nCase 3: inside-function `import psycopg_pool` (drift hiding)")
     src = "def f():\n    import psycopg_pool\n    return psycopg_pool\n"
     hits = _scan_module_for_drivers(_parse(src))
-    _check(hits == [(2, "psycopg_pool")],
-           "nested import detected at line 2 (gate refuses lazy-import free pass)")
+    _check(hits == [(2, "psycopg_pool")], "nested import detected at line 2 (gate refuses lazy-import free pass)")
 
 
 def _case_all_five_driver_roots() -> None:
     print("\nCase 4: all five driver roots detected")
-    src = (
-        "import psycopg\n"
-        "import psycopg_pool\n"
-        "import asyncpg\n"
-        "import pg8000\n"
-        "import sqlalchemy\n"
-    )
+    src = "import psycopg\nimport psycopg_pool\nimport asyncpg\nimport pg8000\nimport sqlalchemy\n"
     hits = _scan_module_for_drivers(_parse(src))
     _check(len(hits) == 5, "5 hits for 5 driver roots")
-    _check({root for _, root in hits} == {
-        "psycopg", "psycopg_pool", "asyncpg", "pg8000", "sqlalchemy",
-    }, "all five roots reported")
+    _check(
+        {root for _, root in hits}
+        == {
+            "psycopg",
+            "psycopg_pool",
+            "asyncpg",
+            "pg8000",
+            "sqlalchemy",
+        },
+        "all five roots reported",
+    )
 
 
 def _case_non_driver_imports_ignored() -> None:
     print("\nCase 5: non-driver imports ignored")
-    src = (
-        "import os\n"
-        "import json\n"
-        "from pathlib import Path\n"
-        "from typing import Any\n"
-    )
+    src = "import os\nimport json\nfrom pathlib import Path\nfrom typing import Any\n"
     hits = _scan_module_for_drivers(_parse(src))
     _check(hits == [], "no hits for stdlib imports")
 
 
 def _case_allowlist_wildcard_covers() -> None:
     print("\nCase 6: allowlist `*` wildcard covers any specifier")
-    allowlist = Allowlist(frozenset({
-        AllowlistEntry(CHECK_ID, "some/file.py", "*"),
-    }))
+    allowlist = Allowlist(
+        frozenset(
+            {
+                AllowlistEntry(CHECK_ID, "some/file.py", "*"),
+            }
+        )
+    )
     finding = Finding(
         check_id=CHECK_ID,
         scope_qualifier="some/file.py",
@@ -136,33 +136,32 @@ def _case_allowlist_wildcard_covers() -> None:
 
 def _case_allowlist_exact_match() -> None:
     print("\nCase 7: allowlist exact-match")
-    allowlist = Allowlist(frozenset({
-        AllowlistEntry(CHECK_ID, "some/file.py", "42::psycopg"),
-    }))
-    covered = Finding(check_id=CHECK_ID, scope_qualifier="some/file.py",
-                      specifier="42::psycopg", message="…")
-    not_covered = Finding(check_id=CHECK_ID, scope_qualifier="some/file.py",
-                          specifier="43::psycopg", message="…")
+    allowlist = Allowlist(
+        frozenset(
+            {
+                AllowlistEntry(CHECK_ID, "some/file.py", "42::psycopg"),
+            }
+        )
+    )
+    covered = Finding(check_id=CHECK_ID, scope_qualifier="some/file.py", specifier="42::psycopg", message="…")
+    not_covered = Finding(check_id=CHECK_ID, scope_qualifier="some/file.py", specifier="43::psycopg", message="…")
     _check(allowlist.covers(covered), "exact specifier matches")
     _check(not allowlist.covers(not_covered), "different specifier does NOT match")
 
 
 def _case_scope_ananta_src() -> None:
     print("\nCase 8: ananta/src is in scope")
-    _check(_is_in_scope(REPO_ROOT / "ananta" / "src" / "ananta" / "platform" / "foo.py"),
-           "ananta/src/ananta/.../foo.py is in scope")
+    _check(_is_in_scope(REPO_ROOT / "ananta" / "src" / "ananta" / "platform" / "foo.py"), "ananta/src/ananta/.../foo.py is in scope")
 
 
 def _case_scope_plugin_src() -> None:
     print("\nCase 9: plugins/<X>/src is in scope")
-    _check(_is_in_scope(REPO_ROOT / "plugins" / "x_plugin" / "src" / "x_plugin" / "p.py"),
-           "plugins/x_plugin/src/x_plugin/p.py is in scope")
+    _check(_is_in_scope(REPO_ROOT / "plugins" / "x_plugin" / "src" / "x_plugin" / "p.py"), "plugins/x_plugin/src/x_plugin/p.py is in scope")
 
 
 def _case_scope_plugin_tests() -> None:
     print("\nCase 10: plugins/<X>/tests is in scope")
-    _check(_is_in_scope(REPO_ROOT / "plugins" / "x_plugin" / "tests" / "smoke.py"),
-           "plugins/x_plugin/tests/smoke.py is in scope")
+    _check(_is_in_scope(REPO_ROOT / "plugins" / "x_plugin" / "tests" / "smoke.py"), "plugins/x_plugin/tests/smoke.py is in scope")
 
 
 def _case_scope_operator_tooling_out() -> None:
@@ -175,8 +174,7 @@ def _case_scope_operator_tooling_out() -> None:
 def _case_scope_knowledge_base_out() -> None:
     print("\nCase 12: plugins/<X>/knowledge_base OUT")
     path = REPO_ROOT / "plugins" / "x_plugin" / "knowledge_base" / "processes" / "x.py"
-    _check(not _is_in_scope(path),
-           "plugins/x_plugin/knowledge_base/.../x.py is OUT")
+    _check(not _is_in_scope(path), "plugins/x_plugin/knowledge_base/.../x.py is OUT")
 
 
 def _case_scope_venv_and_cache_out() -> None:
@@ -196,64 +194,63 @@ def _case_findings_from_module_message_shape() -> None:
     if findings:
         f = findings[0]
         _check(f.check_id == CHECK_ID, "check_id is D1.1")
-        _check(f.scope_qualifier
-               == "plugins/fake_plugin/src/fake_plugin/p.py",
-               "scope_qualifier is repo-relative POSIX path")
-        _check(f.specifier == "1::psycopg",
-               "specifier is `<lineno>::<module-root>`")
-        _check("master plan" in f.message,
-               "message references the master plan")
+        _check(f.scope_qualifier == "plugins/fake_plugin/src/fake_plugin/p.py", "scope_qualifier is repo-relative POSIX path")
+        _check(f.specifier == "1::psycopg", "specifier is `<lineno>::<module-root>`")
+        _check("master plan" in f.message, "message references the master plan")
 
 
 def _case_end_to_end_against_real_tree() -> None:
     print("\nCase 15: live gate against real tree with shipped allowlist returns 0")
     result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "quality_gates" / "wint2_driver_import_check.py"),
-         "--allowlist", str(REPO_ROOT / "quality_gates"
-                            / "wint2_driver_import_allowlist.txt"),
-         "--json"],
-        capture_output=True, text=True, timeout=120,
+        [sys.executable, str(REPO_ROOT / "quality_gates" / "wint2_driver_import_check.py"), "--allowlist", str(REPO_ROOT / "quality_gates" / "wint2_driver_import_allowlist.txt"), "--json"],
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
-    _check(result.returncode == 0,
-           f"gate exits 0 with shipped allowlist (got {result.returncode})")
+    _check(result.returncode == 0, f"gate exits 0 with shipped allowlist (got {result.returncode})")
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         payload = None
         _check(False, f"gate JSON output parses ({exc})")
     if payload is not None:
-        _check(payload["blocking"] == 0,
-               f"0 non-allowlisted findings (got {payload['blocking']})")
-        _check(payload["allowlisted"] > 0,
-               f"some findings are allowlisted (got {payload['allowlisted']})")
+        _check(payload["blocking"] == 0, f"0 non-allowlisted findings (got {payload['blocking']})")
+        _check(payload["allowlisted"] > 0, f"some findings are allowlisted (got {payload['allowlisted']})")
 
 
-def _case_end_to_end_without_allowlist() -> None:
-    print("\nCase 16: live gate without allowlist reports current bypass sites")
-    result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "quality_gates" / "wint2_driver_import_check.py"),
-         "--json"],
-        capture_output=True, text=True, timeout=120,
-    )
-    _check(result.returncode == 1,
-           f"gate exits 1 without allowlist (got {result.returncode})")
+def _case_end_to_end_with_empty_allowlist() -> None:
+    print("\nCase 16: live gate with an explicit empty allowlist reports current bypass sites")
+    with tempfile.TemporaryDirectory() as temporary:
+        allowlist = Path(temporary) / "empty.txt"
+        allowlist.write_text("# Explicit empty tracked-debt register.\n", encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "quality_gates" / "wint2_driver_import_check.py"), "--allowlist", str(allowlist), "--json"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    _check(result.returncode == 1, f"gate exits 1 with an empty allowlist (got {result.returncode})")
     try:
         payload = json.loads(result.stdout)
-        _check(payload["blocking"] > 0,
-               f"non-zero blocking count (got {payload['blocking']})")
+        _check(payload["blocking"] > 0, f"non-zero blocking count (got {payload['blocking']})")
     except json.JSONDecodeError as exc:
         _check(False, f"gate JSON output parses ({exc})")
 
 
 def _case_warn_only_always_exits_zero() -> None:
     print("\nCase 17: --warn-only forces exit 0 even with non-allowlisted findings")
-    result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "quality_gates" / "wint2_driver_import_check.py"),
-         "--warn-only", "--json"],
-        capture_output=True, text=True, timeout=120,
-    )
-    _check(result.returncode == 0,
-           f"--warn-only exits 0 even with findings (got {result.returncode})")
+    with tempfile.TemporaryDirectory() as temporary:
+        allowlist = Path(temporary) / "empty.txt"
+        allowlist.write_text("# Explicit empty tracked-debt register.\n", encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "quality_gates" / "wint2_driver_import_check.py"), "--allowlist", str(allowlist), "--warn-only", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    _check(result.returncode == 0, f"--warn-only exits 0 even with findings (got {result.returncode})")
+    payload = json.loads(result.stdout)
+    _check(payload["blocking"] > 0, "warn-only control actually has non-allowlisted findings")
 
 
 def _case_allowlist_parse_malformed_skipped() -> None:
@@ -261,19 +258,16 @@ def _case_allowlist_parse_malformed_skipped() -> None:
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tmp:
         tmp.write("# comment\n")
         tmp.write(
-            "D1.1::some/file.py::*  # owner: smoke reason: test fixture "
-            "expires: 2099-01-01\n",
+            "D1.1::some/file.py::*  # owner: smoke reason: test fixture expires: 2099-01-01\n",
         )
         tmp.write(
-            "malformed_no_separators  # owner: smoke reason: malformed key "
-            "expires: 2099-01-01\n",
+            "malformed_no_separators  # owner: smoke reason: malformed key expires: 2099-01-01\n",
         )
         tmp.write("\n")  # blank line
         tmp_path = tmp.name
     try:
         allowlist = load_allowlist(Path(tmp_path))
-        _check(len(allowlist.entries) == 1,
-               f"one valid entry parsed (got {len(allowlist.entries)})")
+        _check(len(allowlist.entries) == 1, f"one valid entry parsed (got {len(allowlist.entries)})")
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
@@ -297,7 +291,7 @@ def main() -> int:
     _case_scope_venv_and_cache_out()
     _case_findings_from_module_message_shape()
     _case_end_to_end_against_real_tree()
-    _case_end_to_end_without_allowlist()
+    _case_end_to_end_with_empty_allowlist()
     _case_warn_only_always_exits_zero()
     _case_allowlist_parse_malformed_skipped()
 

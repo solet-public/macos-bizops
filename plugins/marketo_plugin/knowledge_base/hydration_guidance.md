@@ -13,11 +13,15 @@ Embedding Description: Operator-facing pitch and setup steps for connecting a so
 With `marketo_plugin` installed but no instance registered, every Marketo verb
 returns `marketo.not_configured` — the plugin is present and harmless, but
 does nothing. Connecting it lets the solet read and act on a Marketo
-Engage instance directly: leads, campaigns, lists — including permanently
+Engage instance directly: leads, companies, opportunities and their lead
+roles, sales persons, named accounts and named account lists, custom object
+records, campaigns, lists, asset folders and local My Tokens — including permanently
 deleting lead records (`delete_leads`) and irreversibly merging lead records
 (`merge_leads` — with `merge_in_crm=true`, the merge also reaches and
 permanently combines the synced CRM record). Both are genuinely destructive,
-unlike `zuora_plugin`'s no-delete posture. Ask before doing any of it: "This
+and available operations follow the vendor role's permissions. The generic
+`request` verb is also available for authenticated relative-path REST operations
+under the same vendor RBAC boundary. Ask before doing any of it: "This
 solet can read and modify your Marketo instance — leads, campaigns,
 lists — including permanently deleting or merging lead records (a merge can
 also permanently combine the synced CRM record). That needs a Marketo
@@ -46,9 +50,10 @@ overview article
 the Role, API-only User, and LaunchPoint service") — this is the condensed
 version for the hydration conversation:
 
-1. **New service?** Role (Access API: `Read-Write Person`, `Read-Only
-   Activity`, `Read-Only Campaign`, `Execute Campaign`) → API-only User →
-   LaunchPoint Custom Service → Get Token.
+1. **New service?** Create a Role with the Access API permissions the work
+   requires (including write, delete, merge, or campaign permissions as
+   needed) → API-only User → LaunchPoint Custom Service → Get Token. Vendor
+   RBAC is the only capability boundary; do not request a read-only role.
 2. **Reusing an existing service?** Skip straight to Get Token on it.
 3. **Copy** the client secret (the operator's only browser act beyond
    clicking through the above) — the agent harvests it via `pbpaste` into a
@@ -77,24 +82,39 @@ manager or cross-device sync could in principle capture it in that window.
 
 Once `marketo_instance` is registered: run `test_connection` (credentials
 valid?) then `check_setup` (what does the Role actually grant?).
-`check_setup` runs six safe read-only probes and names the exact missing
+`check_setup` runs six safe read probes and names the exact missing
 Access API permission for anything that fails, plus which admin screen fixes
-it. It **cannot** check write/execute permissions (`create_or_update_leads`,
-`delete_leads`, `merge_leads`, `add_leads_to_list`, `remove_leads_from_list`,
-`trigger_campaign`) without performing them — those are listed as
-`writes_unverified` and will surface as `marketo.permission_denied`, naming
-the gap, on first real use if the Role is short one.
+it. It **cannot** check write/execute permissions without performing them:
+`create_or_update_leads`, `delete_leads`, `merge_leads`, `add_leads_to_list`,
+`remove_leads_from_list`, `trigger_campaign`, the `sync_`/`delete_` verbs for
+companies, opportunities, opportunity roles, sales persons, named accounts,
+named account lists and custom objects, and
+`add_`/`remove_named_account_list_members`, `create_asset_folder`,
+`update_asset_folder`, `delete_asset_folder`, `set_asset_token` and
+`delete_asset_token` are listed as `writes_unverified`
+and will surface as `marketo.permission_denied`, naming the gap, on first real
+use if the Role is short one. The object read verbs (`describe_`/`get_` for
+those objects, `get_named_account_list_members` and `list_custom_object_types`)
+are not probed either. They need the Role's Read-Only (or Read-Write) Company,
+Opportunity, Sales Person, Named Account and Named Account List permissions,
+and the Role's custom-object permission on a subscription that includes
+custom objects; the operator confirms these on the Role screen.
 
-There is a **second** limit worth saying to the operator, because it is the one
-they alone can settle: all six probes are Lead-API reads, so a green
-`check_setup` says nothing about Marketo's separate **`Read-Only Asset`**
-entitlement, which gates the `/rest/asset/v1/…` surface (programs, emails,
-landing pages, smart-campaign smart lists). No verb here touches that surface
-today, so there is nothing for the plugin to probe and nothing to 403 — the
-answer lives on the operator's own Admin → Users & Roles screen. Do not add it
-to the four checkboxes above on this plugin's account; just never assume an
-existing API role carries it, and say it is a requirement to verify rather than
-something this setup has confirmed.
+The Asset API surface (`/rest/asset/v1/…`: programs, smart campaigns, smart
+lists, emails, email templates, landing pages, forms, files, tokens, folders,
+tags, channels) is **reachable now** through the generic `request` verb,
+including create, clone, update, approve and delete with JSON or form bodies
+(file uploads need multipart support that `request` does not have yet); typed
+Folder and My Token verbs are now typed: folder browse/by-id/by-name/content,
+create/update/archive/unarchive/delete, and token read/set/delete. Other typed
+Asset families follow in later builds. What it can do is decided by the Role's **`Read-Only Assets`**
+and **`Read-Write Assets`** Access API permissions and by the asset's
+workspace. All six `check_setup` probes are Lead-API reads, so a green
+`check_setup` says nothing about Asset access. Ask the operator to confirm on
+Admin → Users & Roles that the API role carries the Assets permissions the work
+needs, in the workspaces it targets; a missing one shows up as the vendor's
+`603 Access denied` in the typed Asset job error or the `request` job result. State it as a permission to
+verify, not one this setup has confirmed.
 
 On decline: stop, leave the plugin dormant. `marketo.not_configured` on every
 verb is the fully-supported steady state, not a broken one.

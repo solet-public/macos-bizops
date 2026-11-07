@@ -1,0 +1,5 @@
+# Fragment of the gate-smoke register for env-less (desktop-app) Claude Code
+# session identity (prb_a41724b2, iss_776b9c77, unt_d943d887). Hermetic: temp
+# XDG_RUNTIME_DIR/HOME, mock bridge transport, hook subprocesses with no route
+# to a live solet.
+plugins/agent_messaging_plugin/tests/desktop_session_identity_smoke.py

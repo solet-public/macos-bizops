@@ -32,6 +32,7 @@ _REPO_IMPORT_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_IMPORT_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_IMPORT_ROOT))
 
+from quality_gates.git_environment import scrubbed_git_environment  # noqa: E402
 from quality_gates.source_root import (  # noqa: E402
     SourceRootError,
     gate_script_path,
@@ -130,9 +131,7 @@ def _validate_relative_path(raw_path: str, *, field: str) -> str:
     if path.is_absolute():
         raise CandidatePathError(f"{field} path must be repository-relative: {raw_path!r}")
     if raw_path != path.as_posix() or any(part in {"", ".", ".."} for part in path.parts):
-        raise CandidatePathError(
-            f"{field} path must be normalized and traversal-free: {raw_path!r}"
-        )
+        raise CandidatePathError(f"{field} path must be normalized and traversal-free: {raw_path!r}")
     if path.parts[0] == ".git":
         raise CandidatePathError(f"{field} path may not address .git: {raw_path!r}")
     return raw_path
@@ -146,9 +145,7 @@ def _validated_scope(paths: Sequence[str]) -> tuple[str, ...]:
     return tuple(sorted(normalized))
 
 
-def _validated_renames(
-    renames: Sequence[Rename], scope: tuple[str, ...]
-) -> tuple[Rename, ...]:
+def _validated_renames(renames: Sequence[Rename], scope: tuple[str, ...]) -> tuple[Rename, ...]:
     normalized = tuple(
         Rename(
             old=_validate_relative_path(rename.old, field="rename old"),
@@ -164,9 +161,7 @@ def _validated_renames(
         raise CandidatePathError(f"duplicate or chained rename sides: {duplicates}")
     missing_scope = sorted(set(sides) - set(scope))
     if missing_scope:
-        raise CandidatePathError(
-            f"every rename side must be present in the exact scope: {missing_scope}"
-        )
+        raise CandidatePathError(f"every rename side must be present in the exact scope: {missing_scope}")
     return tuple(sorted(normalized, key=lambda rename: (rename.old, rename.new)))
 
 
@@ -174,15 +169,14 @@ def _git_output(repo_root: Path, arguments: Sequence[str], *, input_bytes: bytes
     result = subprocess.run(
         ["git", *arguments],
         cwd=repo_root,
+        env=scrubbed_git_environment(),
         check=False,
         capture_output=True,
         input=input_bytes,
     )
     if result.returncode != 0:
         detail = result.stderr.decode(errors="replace").strip()
-        raise CandidateGitError(
-            f"git {' '.join(arguments)} failed: {detail or f'exit {result.returncode}'}"
-        )
+        raise CandidateGitError(f"git {' '.join(arguments)} failed: {detail or f'exit {result.returncode}'}")
     return result.stdout
 
 
@@ -208,9 +202,7 @@ def _parse_git_entries(raw: bytes, *, source: str) -> tuple[_GitBlob, ...]:
         elif mode == "160000" and object_type == "commit":
             continue
         else:
-            raise CandidateGitError(
-                f"{source} contains unsupported entry {mode} {object_type}: {relpath}"
-            )
+            raise CandidateGitError(f"{source} contains unsupported entry {mode} {object_type}: {relpath}")
     return tuple(sorted(blobs, key=lambda blob: blob.path))
 
 
@@ -243,14 +235,10 @@ def _git_index_blobs(repo_root: Path) -> tuple[_GitBlob, ...]:
     return _parse_git_entries(bytes(normalized), source="staged index")
 
 
-def _read_batch_blob(
-    raw: bytes, offset: int, expected_object_id: str
-) -> tuple[bytes, int]:
+def _read_batch_blob(raw: bytes, offset: int, expected_object_id: str) -> tuple[bytes, int]:
     header_end = raw.find(b"\n", offset)
     if header_end < 0:
-        raise CandidateGitError(
-            f"git cat-file omitted a header for {expected_object_id}"
-        )
+        raise CandidateGitError(f"git cat-file omitted a header for {expected_object_id}")
     header = raw[offset:header_end]
     try:
         returned_object_id, object_type, raw_size = header.decode("ascii").split()
@@ -258,9 +246,7 @@ def _read_batch_blob(
     except (UnicodeError, ValueError) as exc:
         raise CandidateGitError(f"malformed git cat-file header: {header!r}") from exc
     if returned_object_id != expected_object_id or object_type != "blob":
-        raise CandidateGitError(
-            f"git cat-file returned {header!r} for blob {expected_object_id}"
-        )
+        raise CandidateGitError(f"git cat-file returned {header!r} for blob {expected_object_id}")
     content_start = header_end + 1
     content_end = content_start + size
     if content_end >= len(raw) or raw[content_end : content_end + 1] != b"\n":
@@ -280,9 +266,7 @@ def _git_blob_contents(repo_root: Path, blobs: Sequence[_GitBlob]) -> dict[str, 
     contents: dict[str, bytes] = {}
     offset = 0
     for expected_object_id in object_ids:
-        contents[expected_object_id], offset = _read_batch_blob(
-            raw, offset, expected_object_id
-        )
+        contents[expected_object_id], offset = _read_batch_blob(raw, offset, expected_object_id)
     if offset != len(raw):
         raise CandidateGitError("git cat-file returned unexpected trailing bytes")
     return contents
@@ -298,10 +282,7 @@ def _assert_portable_path_set(paths: Sequence[str], *, source: str) -> None:
         key = _portable_path_key(relpath)
         previous = owners.setdefault(key, relpath)
         if previous != relpath:
-            raise CandidateGitError(
-                f"{source} contains case-fold or Unicode-normalization collision: "
-                f"{previous!r} and {relpath!r}"
-            )
+            raise CandidateGitError(f"{source} contains case-fold or Unicode-normalization collision: {previous!r} and {relpath!r}")
 
 
 def _write_snapshot_file(snapshot_root: Path, relpath: str, content: _Content) -> None:
@@ -324,9 +305,7 @@ def _write_snapshot_file(snapshot_root: Path, relpath: str, content: _Content) -
             try:
                 target = content.data.decode("utf-8")
             except UnicodeError as exc:
-                raise CandidateOverlayError(
-                    f"candidate symlink target is not UTF-8: {relpath!r}"
-                ) from exc
+                raise CandidateOverlayError(f"candidate symlink target is not UTF-8: {relpath!r}") from exc
             # Git symlink blobs are target strings, not files to resolve.  In
             # particular, a tracked aggregation link may deliberately point to
             # a sibling repository.  This materializer and `_snapshot_paths`
@@ -340,9 +319,7 @@ def _write_snapshot_file(snapshot_root: Path, relpath: str, content: _Content) -
         raise CandidateOverlayError(f"cannot materialize candidate file {relpath!r}: {exc}") from exc
 
 
-def _materialize_git_blobs(
-    repo_root: Path, snapshot_root: Path, blobs: Sequence[_GitBlob], *, source: str
-) -> tuple[str, ...]:
+def _materialize_git_blobs(repo_root: Path, snapshot_root: Path, blobs: Sequence[_GitBlob], *, source: str) -> tuple[str, ...]:
     paths = tuple(blob.path for blob in blobs)
     _assert_portable_path_set(paths, source=source)
     tracked_artifacts = sorted(path for path in paths if _is_generated_artifact(path))
@@ -350,27 +327,18 @@ def _materialize_git_blobs(
         # The census exclusion below is only sound while no committed base
         # tracks a generated artifact.  If one ever does, stop rather than
         # silently drop real content out of the manifest.
-        raise CandidateGitError(
-            f"{source} tracks generated artifacts the candidate census excludes: "
-            f"{tracked_artifacts}"
-        )
+        raise CandidateGitError(f"{source} tracks generated artifacts the candidate census excludes: {tracked_artifacts}")
     contents = _git_blob_contents(repo_root, blobs)
     for blob in sorted(blobs, key=lambda blob: (len(PurePosixPath(blob.path).parts), blob.path)):
         try:
             content = contents[blob.object_id]
         except KeyError as exc:
-            raise CandidateGitError(
-                f"{source} blob was not returned: {blob.object_id} {blob.path}"
-            ) from exc
-        _write_snapshot_file(
-            snapshot_root, blob.path, _Content(data=content, mode=blob.mode)
-        )
+            raise CandidateGitError(f"{source} blob was not returned: {blob.object_id} {blob.path}") from exc
+        _write_snapshot_file(snapshot_root, blob.path, _Content(data=content, mode=blob.mode))
     return paths
 
 
-def _working_path(
-    repo_root: Path, relpath: str, scope: frozenset[str]
-) -> Path | None:
+def _working_path(repo_root: Path, relpath: str, scope: frozenset[str]) -> Path | None:
     current = repo_root
     for part in PurePosixPath(relpath).parts[:-1]:
         current /= part
@@ -379,45 +347,33 @@ def _working_path(
         except FileNotFoundError:
             return repo_root / relpath
         if stat.S_ISLNK(mode):
-            raise CandidateOverlayError(
-                f"scope path traverses a working-tree symlink: {relpath!r}"
-            )
+            raise CandidateOverlayError(f"scope path traverses a working-tree symlink: {relpath!r}")
         if not stat.S_ISDIR(mode):
             current_relpath = current.relative_to(repo_root).as_posix()
             if current_relpath in scope and stat.S_ISREG(mode):
                 return None
-            raise CandidateOverlayError(
-                f"scope path has a non-directory parent {current.relative_to(repo_root)!s}"
-            )
+            raise CandidateOverlayError(f"scope path has a non-directory parent {current.relative_to(repo_root)!s}")
     return repo_root / relpath
 
 
-def _read_working_regular_file(
-    repo_root: Path, relpath: str, scope: frozenset[str]
-) -> _Content | None:
+def _read_working_regular_file(repo_root: Path, relpath: str, scope: frozenset[str]) -> _Content | None:
     source = _working_path(repo_root, relpath, scope)
     if source is None:
         return None
     return _read_working_entry(source, relpath, scope)
 
 
-def _read_working_entry(
-    source: Path, relpath: str, scope: frozenset[str]
-) -> _Content | None:
+def _read_working_entry(source: Path, relpath: str, scope: frozenset[str]) -> _Content | None:
     try:
         mode = source.lstat().st_mode
     except FileNotFoundError:
         return None
-    if stat.S_ISDIR(mode) and any(
-        candidate.startswith(f"{relpath}/") for candidate in scope
-    ):
+    if stat.S_ISDIR(mode) and any(candidate.startswith(f"{relpath}/") for candidate in scope):
         return None
     if stat.S_ISLNK(mode):
         return _read_working_symlink(source, relpath)
     if not stat.S_ISREG(mode):
-        raise CandidateOverlayError(
-            f"scoped working-tree path must be a regular file, symlink, or an absent deletion: {relpath!r}"
-        )
+        raise CandidateOverlayError(f"scoped working-tree path must be a regular file, symlink, or an absent deletion: {relpath!r}")
     return _read_regular_file(source, relpath)
 
 
@@ -428,9 +384,7 @@ def _read_regular_file(source: Path, relpath: str) -> _Content:
         with os.fdopen(descriptor, "rb") as stream:
             opened = os.fstat(stream.fileno())
             if not stat.S_ISREG(opened.st_mode):
-                raise CandidateOverlayError(
-                    f"scoped path changed away from a regular file while reading: {relpath!r}"
-                )
+                raise CandidateOverlayError(f"scoped path changed away from a regular file while reading: {relpath!r}")
             return _Content(
                 data=stream.read(),
                 mode=_EXECUTABLE_MODE if opened.st_mode & stat.S_IXUSR else _REGULAR_MODE,
@@ -458,9 +412,7 @@ def _remove_candidate_path(snapshot_root: Path, relpath: str) -> None:
     except FileNotFoundError:
         return
     if not (stat.S_ISREG(mode) or stat.S_ISLNK(mode)):
-        raise CandidateOverlayError(
-            f"candidate deletion target is not a regular file or symlink: {relpath!r}"
-        )
+        raise CandidateOverlayError(f"candidate deletion target is not a regular file or symlink: {relpath!r}")
     destination.unlink()
     parent = destination.parent
     while parent != snapshot_root:
@@ -480,23 +432,14 @@ def _overlay_scope(
 ) -> tuple[str, ...]:
     base_set = set(base_paths)
     scope_set = frozenset(scope)
-    working_contents = {
-        relpath: _read_working_regular_file(repo_root, relpath, scope_set)
-        for relpath in scope
-    }
+    working_contents = {relpath: _read_working_regular_file(repo_root, relpath, scope_set) for relpath in scope}
     for rename in renames:
         if rename.old not in base_set:
-            raise CandidateOverlayError(
-                f"rename old path is absent from the committed base: {rename.old!r}"
-            )
+            raise CandidateOverlayError(f"rename old path is absent from the committed base: {rename.old!r}")
         if working_contents[rename.old] is not None:
-            raise CandidateOverlayError(
-                f"rename old path still exists in the working tree: {rename.old!r}"
-            )
+            raise CandidateOverlayError(f"rename old path still exists in the working tree: {rename.old!r}")
         if working_contents[rename.new] is None:
-            raise CandidateOverlayError(
-                f"rename new path is absent from the working tree: {rename.new!r}"
-            )
+            raise CandidateOverlayError(f"rename new path is absent from the working tree: {rename.new!r}")
 
     return _apply_content_overlay(snapshot_root, base_paths, working_contents)
 
@@ -508,29 +451,17 @@ def _apply_content_overlay(
 ) -> tuple[str, ...]:
     base_set = set(base_paths)
 
-    deletions = tuple(
-        relpath for relpath, content in contents.items() if content is None
-    )
+    deletions = tuple(relpath for relpath, content in contents.items() if content is None)
     missing = sorted(set(deletions) - base_set)
     if missing:
-        raise CandidateOverlayError(
-            f"scoped paths are absent from both base and working tree: {missing}"
-        )
-    additions = {
-        relpath: content
-        for relpath, content in contents.items()
-        if content is not None
-    }
+        raise CandidateOverlayError(f"scoped paths are absent from both base and working tree: {missing}")
+    additions = {relpath: content for relpath, content in contents.items() if content is not None}
     expected = tuple(sorted((base_set - set(deletions)) | set(additions)))
     _assert_portable_path_set(expected, source="final candidate path set")
 
-    for relpath in sorted(
-        deletions, key=lambda path: (-len(PurePosixPath(path).parts), path)
-    ):
+    for relpath in sorted(deletions, key=lambda path: (-len(PurePosixPath(path).parts), path)):
         _remove_candidate_path(snapshot_root, relpath)
-    for relpath in sorted(
-        additions, key=lambda path: (len(PurePosixPath(path).parts), path)
-    ):
+    for relpath in sorted(additions, key=lambda path: (len(PurePosixPath(path).parts), path)):
         _write_snapshot_file(snapshot_root, relpath, additions[relpath])
     return expected
 
@@ -540,6 +471,12 @@ def _snapshot_paths(snapshot_root: Path) -> tuple[str, ...]:
     for path in sorted(snapshot_root.rglob("*")):
         mode = path.lstat().st_mode
         relpath = path.relative_to(snapshot_root).as_posix()
+        if path.name == ".git" and not stat.S_ISDIR(mode):
+            # A `.git` FILE (or symlink) anywhere is a pointer that redirects Git
+            # to a directory OUTSIDE the candidate, the shared-repository escape
+            # the private repository exists to prevent.  No materializer writes
+            # one, so one present was placed by hand: refuse it, never skip it.
+            raise CandidateManifestError(f"candidate snapshot contains a .git pointer file: {relpath!r}")
         if PurePosixPath(relpath).parts[0] == ".git":
             # A private candidate repository provisions `.git` AFTER
             # materialization so gates needing Git can run inside the tree.  It
@@ -559,24 +496,17 @@ def _snapshot_paths(snapshot_root: Path) -> tuple[str, ...]:
             # sibling-repository aggregation links are valid tracked content.
             os.readlink(path)
         elif not stat.S_ISREG(mode):
-            raise CandidateManifestError(
-                f"candidate snapshot contains a special file: {relpath!r}"
-            )
+            raise CandidateManifestError(f"candidate snapshot contains a special file: {relpath!r}")
         paths.append(_validate_relative_path(relpath, field="snapshot"))
     return tuple(sorted(paths))
 
 
-def _assert_snapshot_matches(
-    expected: Sequence[str], actual: Sequence[str], *, source: str
-) -> None:
+def _assert_snapshot_matches(expected: Sequence[str], actual: Sequence[str], *, source: str) -> None:
     if tuple(expected) == tuple(actual):
         return
     missing = sorted(set(expected) - set(actual))
     unexpected = sorted(set(actual) - set(expected))
-    raise CandidateManifestError(
-        f"{source} differs from the materialized snapshot: "
-        f"missing={missing} unexpected={unexpected}"
-    )
+    raise CandidateManifestError(f"{source} differs from the materialized snapshot: missing={missing} unexpected={unexpected}")
 
 
 def _manifest_bytes(paths: Sequence[str]) -> bytes:
@@ -598,16 +528,12 @@ def validate_candidate_manifest(snapshot_root: Path, manifest: Path) -> tuple[st
     if duplicates:
         raise CandidateManifestError(f"candidate manifest contains duplicates: {duplicates}")
     if raw != _manifest_bytes(tuple(sorted(listed))):
-        raise CandidateManifestError(
-            "candidate manifest bytes are not the canonical sorted newline-delimited form"
-        )
+        raise CandidateManifestError("candidate manifest bytes are not the canonical sorted newline-delimited form")
     actual = _snapshot_paths(snapshot_root)
     if listed != actual:
         missing = sorted(set(actual) - set(listed))
         unexpected = sorted(set(listed) - set(actual))
-        raise CandidateManifestError(
-            f"candidate manifest is incomplete: missing={missing} unexpected={unexpected}"
-        )
+        raise CandidateManifestError(f"candidate manifest is incomplete: missing={missing} unexpected={unexpected}")
     return listed
 
 
@@ -627,9 +553,7 @@ def censusable_manifest_paths(snapshot_root: Path, manifest: Path) -> tuple[str,
     """
 
     listed = validate_candidate_manifest(snapshot_root, manifest)
-    return tuple(
-        relpath for relpath in listed if not (snapshot_root / relpath).is_symlink()
-    )
+    return tuple(relpath for relpath in listed if not (snapshot_root / relpath).is_symlink())
 
 
 def materialize_candidate_tree(
@@ -652,10 +576,7 @@ def materialize_candidate_tree(
     if not root.is_dir():
         raise CandidatePathError(f"repository root is not a directory: {root}")
     if str(destination) != str(destination.resolve()):
-        raise CandidatePathError(
-            "candidate destination must already be its own physical path: "
-            f"{destination} resolves to {destination.resolve()}"
-        )
+        raise CandidatePathError(f"candidate destination must already be its own physical path: {destination} resolves to {destination.resolve()}")
     scope = _validated_scope(scope_paths)
     if not scope:
         raise CandidatePathError("candidate scope must contain at least one explicit path")
@@ -678,9 +599,7 @@ def materialize_candidate_tree(
     return CandidateTree(root=snapshot_root, manifest=manifest, paths=validated)
 
 
-def _frozen_entry_contents(
-    entries: Sequence[FrozenEntry], paths: Sequence[str]
-) -> dict[str, _Content | None]:
+def _frozen_entry_contents(entries: Sequence[FrozenEntry], paths: Sequence[str]) -> dict[str, _Content | None]:
     """Translate closed public frozen entries into the internal overlay form."""
     by_path = {entry.path: entry for entry in entries}
     if len(by_path) != len(entries):
@@ -694,9 +613,7 @@ def _frozen_entry_contents(
             contents[path] = None
             continue
         if entry.mode not in _SUPPORTED_MODES:
-            raise CandidateOverlayError(
-                f"frozen entry has an unsupported mode at {path!r}: {entry.mode!r}"
-            )
+            raise CandidateOverlayError(f"frozen entry has an unsupported mode at {path!r}: {entry.mode!r}")
         contents[path] = _Content(data=entry.data, mode=entry.mode)
     return contents
 
@@ -718,10 +635,7 @@ def materialize_frozen_entries(
     if not root.is_dir():
         raise CandidatePathError(f"repository root is not a directory: {root}")
     if str(destination) != str(destination.resolve()):
-        raise CandidatePathError(
-            "candidate destination must already be its own physical path: "
-            f"{destination} resolves to {destination.resolve()}"
-        )
+        raise CandidatePathError(f"candidate destination must already be its own physical path: {destination} resolves to {destination.resolve()}")
     if not entries:
         raise CandidatePathError("frozen-entry composition requires at least one entry")
     paths = _validated_scope(tuple(entry.path for entry in entries))
@@ -786,10 +700,7 @@ def materialize_staged_tree(
     if not root.is_dir():
         raise CandidatePathError(f"repository root is not a directory: {root}")
     if str(destination) != str(destination.resolve()):
-        raise CandidatePathError(
-            "candidate destination must already be its own physical path: "
-            f"{destination} resolves to {destination.resolve()}"
-        )
+        raise CandidatePathError(f"candidate destination must already be its own physical path: {destination} resolves to {destination.resolve()}")
     scope = None if scope_paths is None else _validated_scope(scope_paths)
     if scope is not None and not scope:
         raise CandidatePathError("staged candidate scope must not be empty")
@@ -797,9 +708,7 @@ def materialize_staged_tree(
     snapshot_root = destination / "tree"
     snapshot_root.mkdir(parents=True)
     if scope is None:
-        expected = _materialize_git_blobs(
-            root, snapshot_root, index_blobs, source="staged index"
-        )
+        expected = _materialize_git_blobs(root, snapshot_root, index_blobs, source="staged index")
     else:
         base_blobs = _git_tree_blobs(root, base_ref)
         base_paths = _materialize_git_blobs(
@@ -868,9 +777,7 @@ def read_rename_file(path: Path) -> tuple[Rename, ...]:
     for line_number, line in enumerate(content.splitlines(), start=1):
         fields = line.split("\t")
         if len(fields) != 2 or not all(fields):
-            raise CandidatePathError(
-                f"rename file line {line_number} must be OLD<TAB>NEW"
-            )
+            raise CandidatePathError(f"rename file line {line_number} must be OLD<TAB>NEW")
         renames.append(Rename(old=fields[0], new=fields[1]))
     return tuple(renames)
 
@@ -898,27 +805,13 @@ def main(argv: list[str] | None = None) -> int:
             raise CandidatePathError("the candidate identity check must be selected")
         if args.staged:
             if args.rename_file is not None:
-                raise CandidatePathError(
-                    "--staged may not be combined with a rename file"
-                )
-            scope = (
-                None
-                if args.scope_file is None
-                else read_scope_file(args.scope_file)
-            )
-            tree = build_staged_tree(
-                args.repo_root, scope, base_ref=args.base_ref
-            )
-            summary = (
-                "candidate_tree staged snapshot"
-                if scope is None
-                else f"candidate_tree staged snapshot: scope={len(scope)}"
-            )
+                raise CandidatePathError("--staged may not be combined with a rename file")
+            scope = None if args.scope_file is None else read_scope_file(args.scope_file)
+            tree = build_staged_tree(args.repo_root, scope, base_ref=args.base_ref)
+            summary = "candidate_tree staged snapshot" if scope is None else f"candidate_tree staged snapshot: scope={len(scope)}"
         else:
             if args.scope_file is None or args.rename_file is None:
-                raise CandidatePathError(
-                    "candidate overlay requires --scope-file and --rename-file"
-                )
+                raise CandidatePathError("candidate overlay requires --scope-file and --rename-file")
             scope = read_scope_file(args.scope_file)
             renames = read_rename_file(args.rename_file)
             tree = build_candidate_tree(
@@ -929,9 +822,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             summary = f"candidate_tree snapshot: base={args.base_ref} scope={len(scope)}"
         with tree as candidate:
-            print(
-                f"{summary} files={len(candidate.paths)}"
-            )
+            print(f"{summary} files={len(candidate.paths)}")
             # The gate SCRIPT must come from the candidate's own materialized
             # copy, never from wherever this process happens to be invoked —
             # the invoking checkout can be a stale or behind-master worktree

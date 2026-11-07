@@ -21,7 +21,7 @@ contained recovery proof uses a disposable real tmux session.
 
 from __future__ import annotations
 
-import hashlib
+import json
 import os
 import shlex
 import shutil
@@ -29,10 +29,12 @@ import subprocess
 import sys
 import tempfile
 import time
+import unittest
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -41,7 +43,12 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src")
 
 from _real_state_fake import RealShapeState  # noqa: E402
 from _recorded_lane_worktree_fixture import RecordedLaneWorktreeFixture  # noqa: E402
-from _register_unit_double import RegisterUnitDouble  # noqa: E402
+from _register_unit_double import (  # noqa: E402  # noqa: E402
+    FIXTURE_UNIT_ID,
+    RegisterUnitDouble,  # noqa: E402
+    fixture_assignment,
+    fixture_assignment_record,
+)
 from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
     AGENT_ROLE_BINDING_NAMESPACE,
     COL_AGENT_INSTANCE_ID,
@@ -74,15 +81,21 @@ from agent_messaging_plugin.managed_dispatch import (  # noqa: E402
     DispatchActor,
     DispatchError,
     DispatchSpec,
+    _update_dispatch,
     dispatch_managed_work,
+    mark_dispatch_worker_lost,
+    prepare_managed_dispatch,
     read_managed_dispatch,
+    record_first_turn_evidence,
     report_managed_dispatch,
+    resolve_managed_dispatch,
 )
 from agent_messaging_plugin.plugin import (  # noqa: E402
     AgentMessagingPlugin,
     _spawn_session_request_from_params,
 )
-from agent_messaging_plugin.schema import get_managed_session_schema  # noqa: E402
+from agent_messaging_plugin.register_unit_client import PsoletRegisterUnitClient, RegisterActor, RegisterUnitError  # noqa: E402
+from agent_messaging_plugin.schema import TABLE_MANAGED_DISPATCH, TABLE_MANAGED_DISPATCH_EVENT, get_managed_session_schema  # noqa: E402
 from agent_messaging_plugin.session_hosts import (  # noqa: E402
     DriverChannelSendError,
     HostCannotSpawnError,
@@ -92,7 +105,10 @@ from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
     backfill_registration,
     read_managed_session,
 )
-from agent_messaging_plugin.session_lifecycle_verbs import SpawnSessionRequest  # noqa: E402
+from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
+    SpawnSessionRequest,  # noqa: E402
+    spawn_dispatch_attempt,  # noqa: E402
+)
 from agent_messaging_plugin.session_sweep import sweep_managed_dispatches  # noqa: E402
 
 # Hoisted out of codex_common to the runner-neutral solet_cli (2026-08-14):
@@ -141,12 +157,16 @@ def _codex_home(path: Path, *, plugin_enabled: bool = True) -> Path:
     home.mkdir()
     enabled = "true" if plugin_enabled else "false"
     (home / "config.toml").write_text(
-        "[mcp_servers.testhom]\n"
-        "command = \"solet-bridge\"\n"
-        "[plugins.\"coordination-hooks@testhom-development\"]\n"
-        f"enabled = {enabled}\n",
+        f'[mcp_servers.testhom]\ncommand = "solet-bridge"\n[plugins."coordination-hooks@testhom-development"]\nenabled = {enabled}\n',
     )
     return home
+
+
+def _seed_register(state: RealShapeState) -> RegisterUnitDouble:
+    register = RegisterUnitDouble()
+    register.add_unit()
+    _seed_worker_binding(state, role="Coordinator-Main", instance="agi-coordinator")
+    return register
 
 
 def _composite_spec(
@@ -156,8 +176,6 @@ def _composite_spec(
     *,
     agent_runtime: str = "codex",
 ) -> DispatchSpec:
-    brief = root / f"{dispatch_id}-brief.md"
-    brief.write_text("exact managed Codex brief\n", encoding="utf-8")
     # The register Unit is resolved from the lane root, so the fixture names
     # its own temp checkout rather than inheriting the runner's APP_HOME.
     (root / ".git").mkdir(exist_ok=True)
@@ -169,8 +187,7 @@ def _composite_spec(
         role_class="project",
         work_class="production_mutation",
         budget_line="codex-managed-smoke",
-        brief_ref=str(brief),
-        brief_sha256=hashlib.sha256(brief.read_bytes()).hexdigest(),
+        unit_id=FIXTURE_UNIT_ID,
         expected_path=str(root / f"{dispatch_id}-report.md"),
         completion_contract={
             "evidence_obligations": [
@@ -186,7 +203,6 @@ def _composite_spec(
         visibility="visible" if host == "tmux" else "headless",
         local_name=f"{dispatch_id}-Builder",
         report_by_seconds=900,
-
         allowed_tools=("Read",),
         permission_mode="bypassPermissions",
         transport="mcp",
@@ -198,7 +214,6 @@ def _composite_spec(
         uptake_due_at=(now + timedelta(minutes=2)).isoformat(),
         report_by=(now + timedelta(minutes=15)).isoformat(),
         watchdog_due_at=(now + timedelta(minutes=3)).isoformat(),
-
         dispatch_kind="infrastructure",
         repository_root=str(root),
     )
@@ -208,7 +223,8 @@ def _composite_spawn_request(spec: DispatchSpec, host: str) -> SpawnSessionReque
     return SpawnSessionRequest(
         role_class=spec.role_class,
         lane_id=spec.lane_id,
-        brief_ref=spec.brief_ref,
+        unit_id=FIXTURE_UNIT_ID,
+        assignment=fixture_assignment(),
         repository_root=spec.repository_root,
         work_class=spec.work_class,
         budget_line=spec.budget_line,
@@ -219,7 +235,6 @@ def _composite_spawn_request(spec: DispatchSpec, host: str) -> SpawnSessionReque
         model=spec.model,
         effort=spec.effort,
         report_by_seconds=spec.report_by_seconds,
-
         spawned_by_instance_id=spec.spawned_by_instance_id,
         spawned_by_role=spec.spawned_by_role,
         directed_by=spec.directed_by,
@@ -349,11 +364,13 @@ def test_claude_headless_and_tmux_use_the_same_composite_state_machine() -> None
                     host,
                     agent_runtime=session_hosts.AGENT_RUNTIME_CLAUDE_CODE,
                 )
+                register = _seed_register(state)
                 result = dispatch_managed_work(
                     state,  # type: ignore[arg-type]
                     spec,
-                    _composite_spawn_request(spec, host),
-                    register=RegisterUnitDouble(),
+                    actor=DispatchActor("agi-coordinator", "ases-agi-coordinator", "live_peer_binding"),
+                    spawn_attempt=lambda row, state=state, register=register: spawn_dispatch_attempt(state, row, register=register, actor=RegisterActor("agi-coordinator", "ases-agi-coordinator", "Coordinator-Main", "fixture-lane")),
+                    register=register,
                 )
                 attempt_id = str(result["attempt"]["agent_instance_id"])
                 backfill_registration(
@@ -381,18 +398,15 @@ def test_claude_headless_and_tmux_use_the_same_composite_state_machine() -> None
                     ),
                     prior_version=int(result["dispatch"]["version"]),
                     payload={
-                        "brief_sha256": spec.brief_sha256,
+                        "assignment_sha256": fixture_assignment().sha256,
+                        "revision_id": "drv_fixture-revision",
                         "role_binding": spec.role_name,
                         "scope_readback_sha256": "a" * 64,
                         "plan_sha256": "b" * 64,
                     },
                     observed_at=datetime.now(UTC),
                 )
-                outcomes.append(
-                    result["dispatch"]["state"] == DISPATCH_UPTAKE_PENDING
-                    and active["state"] == DISPATCH_ACTIVE
-                    and len(driver.channel.sent) == 1
-                )
+                outcomes.append(result["dispatch"]["state"] == DISPATCH_UPTAKE_PENDING and active["state"] == DISPATCH_ACTIVE and len(driver.channel.sent) == 1)
         finally:
             if prior is None:
                 session_hosts._REGISTRY.pop(key, None)  # noqa: SLF001
@@ -449,11 +463,13 @@ def test_codex_headless_composite_requires_model_ack() -> None:
         try:
             state = RealShapeState()
             spec = _composite_spec(root, "mdp-codex-headless", "headless")
+            register = _seed_register(state)
             result = dispatch_managed_work(
                 state,  # type: ignore[arg-type]
                 spec,
-                _composite_spawn_request(spec, "headless"),
-                register=RegisterUnitDouble(),
+                actor=DispatchActor("agi-coordinator", "ases-agi-coordinator", "live_peer_binding"),
+                spawn_attempt=lambda row, state=state, register=register: spawn_dispatch_attempt(state, row, register=register, actor=RegisterActor("agi-coordinator", "ases-agi-coordinator", "Coordinator-Main", "fixture-lane")),
+                register=register,
             )
             attempt_id = str(result["attempt"]["agent_instance_id"])
             backfill_registration(
@@ -486,7 +502,8 @@ def test_codex_headless_composite_requires_model_ack() -> None:
                 ),
                 prior_version=int(result["dispatch"]["version"]),
                 payload={
-                    "brief_sha256": spec.brief_sha256,
+                    "assignment_sha256": fixture_assignment().sha256,
+                    "revision_id": "drv_fixture-revision",
                     "role_binding": spec.role_name,
                     "scope_readback_sha256": "a" * 64,
                     "plan_sha256": "b" * 64,
@@ -506,7 +523,8 @@ def test_codex_headless_composite_requires_model_ack() -> None:
                 ),
                 prior_version=int(result["dispatch"]["version"]),
                 payload={
-                    "brief_sha256": spec.brief_sha256,
+                    "assignment_sha256": fixture_assignment().sha256,
+                    "revision_id": "drv_fixture-revision",
                     "role_binding": spec.role_name,
                     "scope_readback_sha256": "a" * 64,
                     "plan_sha256": "b" * 64,
@@ -528,7 +546,8 @@ def test_codex_headless_composite_requires_model_ack() -> None:
                     ),
                     prior_version=int(result["dispatch"]["version"]),
                     payload={
-                        "brief_sha256": spec.brief_sha256,
+                        "assignment_sha256": fixture_assignment().sha256,
+                        "revision_id": "drv_fixture-revision",
                         "role_binding": spec.role_name,
                         "scope_readback_sha256": "c" * 64,
                         "plan_sha256": "d" * 64,
@@ -546,13 +565,11 @@ def test_codex_headless_composite_requires_model_ack() -> None:
         _check(pending["state"] == DISPATCH_UPTAKE_PENDING, "Codex registration stays uptake_pending")
         _check(active["state"] == DISPATCH_ACTIVE, "Codex model-turn ACK activates the dispatch")
         _check(
-            session["agent_session_id"] == f"ases-{attempt_id}"
-            and active["current_agent_instance_id"] == attempt_id,
+            session["agent_session_id"] == f"ases-{attempt_id}" and active["current_agent_instance_id"] == attempt_id,
             "09 real re-registration preserves managed attempt lineage",
         )
         _check(
-            duplicate["version"] == active["version"]
-            and competing_code == "stale_dispatch_version",
+            duplicate["version"] == active["version"] and competing_code == "stale_dispatch_version",
             "09 duplicate/competing ACK order is idempotent and causal",
         )
         _check(session["first_turn_delivered"] is True, "Codex first-turn receipt is durable on attempt")
@@ -606,11 +623,13 @@ def test_codex_tmux_disappearance_converges() -> None:
         try:
             state = RealShapeState()
             spec = _composite_spec(root, "mdp-codex-tmux", "tmux")
+            register = _seed_register(state)
             result = dispatch_managed_work(
                 state,  # type: ignore[arg-type]
                 spec,
-                _composite_spawn_request(spec, "tmux"),
-                register=RegisterUnitDouble(),
+                actor=DispatchActor("agi-coordinator", "ases-agi-coordinator", "live_peer_binding"),
+                spawn_attempt=lambda row, state=state, register=register: spawn_dispatch_attempt(state, row, register=register, actor=RegisterActor("agi-coordinator", "ases-agi-coordinator", "Coordinator-Main", "fixture-lane")),
+                register=register,
             )
             attempt_id = str(result["attempt"]["agent_instance_id"])
             backfill_registration(
@@ -623,6 +642,7 @@ def test_codex_tmux_disappearance_converges() -> None:
             sweep = sweep_managed_dispatches(
                 state,  # type: ignore[arg-type]
                 now=datetime.now(UTC),
+                register=None,
             )
             dispatch = read_managed_dispatch(
                 state,  # type: ignore[arg-type]
@@ -650,7 +670,7 @@ def test_runtime_is_schema_and_restart_sticky() -> None:
         {
             "role_class": "ephemeral",
             "lane_id": "lane-codex",
-            "brief_ref": "brief.md",
+            "unit_id": FIXTURE_UNIT_ID,
             "work_class": "read_only",
             "budget_line": "budget",
             "agent_runtime": "codex",
@@ -662,7 +682,7 @@ def test_runtime_is_schema_and_restart_sticky() -> None:
         {
             "role_class": "ephemeral",
             "lane_id": "lane-claude",
-            "brief_ref": "brief.md",
+            "unit_id": FIXTURE_UNIT_ID,
             "work_class": "read_only",
             "budget_line": "budget",
         },
@@ -674,7 +694,8 @@ def test_runtime_is_schema_and_restart_sticky() -> None:
     )
     params = AgentMessagingPlugin()._build_restart_spawn_params(  # noqa: SLF001
         {
-            "brief_ref": "brief.md",
+            **fixture_assignment_record(),
+            "unit_id": FIXTURE_UNIT_ID,
             "work_class": "read_only",
             "budget_line": "budget",
             "agent_runtime": "codex",
@@ -705,13 +726,14 @@ def test_headless_spawn_uses_codex_native_config_and_identity() -> None:
         )
         host_ref = driver.spawn(
             {
+                **fixture_assignment_record(),
                 "agent_instance_id": "agi-codex-1",
                 "lane_id": "cheap-review",
                 "model": "gpt-5.6-luna",
                 "effort": "low",
                 "transport": "mcp",
                 "role_class": "ephemeral",
-                "brief_ref": "brief.md",
+                "unit_id": FIXTURE_UNIT_ID,
                 "spawned_by_role": "Coordinator-Main",
             },
         )
@@ -724,27 +746,19 @@ def test_headless_spawn_uses_codex_native_config_and_identity() -> None:
             "headless Codex launches persistent app-server with managed hook trust",
         )
         _check(
-            any("model_reasoning_effort=\"low\"" == item for item in argv),
+            any('model_reasoning_effort="low"' == item for item in argv),
             "Codex effort is applied through Codex's own config surface",
         )
         _check(
-            any(
-                'mcp_servers.testhom.env.AGENT_INSTANCE_ID="agi-codex-1"' == item
-                for item in argv
-            ),
+            any('mcp_servers.testhom.env.AGENT_INSTANCE_ID="agi-codex-1"' == item for item in argv),
             "MCP bridge identity is overridden per managed spawn",
         )
         _check(
-            any(
-                'mcp_servers.testhom.env.AGENT_ROLE_AUTOBIND="0"' == item
-                for item in argv
-            ),
+            any('mcp_servers.testhom.env.AGENT_ROLE_AUTOBIND="0"' == item for item in argv),
             "managed MCP registration preserves label without binding it as a role",
         )
         _check(
-            env["AGENT_IDENTITY"] == "codex"
-            and env["AGENT_SESSION_ID"] == "ases-agi-codex-1"
-            and "AGENT_ROLE" not in env,
+            env["AGENT_IDENTITY"] == "codex" and env["AGENT_SESSION_ID"] == "ases-agi-codex-1" and "AGENT_ROLE" not in env,
             "process env uses Codex identity and grants no role at launch",
         )
         _check(
@@ -769,6 +783,7 @@ def test_codex_provider_overlay_is_refused_loud() -> None:
         try:
             driver.spawn(
                 {
+                    **fixture_assignment_record(),
                     "agent_instance_id": "agi-provider-refuse",
                     "transport": "mcp",
                     "provider_env": {"CLAUDE_CODE_USE_BEDROCK": "1"},
@@ -912,7 +927,7 @@ def test_wedged_code_mode_host_refuses_the_spawn_on_both_hosts() -> None:
         raised = False
         try:
             CodexAppServerHostDriver(**kwargs, client_factory=_FakeClient).spawn(
-                {"agent_instance_id": "agi-code-mode-wedge", "transport": "mcp"},
+                {**fixture_assignment_record(), "agent_instance_id": "agi-code-mode-wedge", "transport": "mcp"},
             )
         except HostCannotSpawnError:
             raised = True
@@ -923,7 +938,8 @@ def test_healthy_and_absent_code_mode_hosts_do_not_block_a_spawn() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         healthy = _codex_tree(
-            root / "healthy", helper="#!/bin/sh\necho 'Usage: codex-code-mode-host'\n",
+            root / "healthy",
+            helper="#!/bin/sh\necho 'Usage: codex-code-mode-host'\n",
         )
         _check(
             not [
@@ -980,8 +996,10 @@ def test_solet_cli_resolves_from_active_venv_when_path_is_minimal() -> None:
         )
         _check(
             _resolve_solet_bin(
-                sibling, python_executable=str(venv_bin / "python3"),
-            ) == sibling,
+                sibling,
+                python_executable=str(venv_bin / "python3"),
+            )
+            == sibling,
             "an explicitly injected private solet path remains authoritative",
         )
 
@@ -1040,8 +1058,7 @@ def test_app_server_channel_translates_clear_compact_and_active_turn() -> None:
     client._active_turn_id = "turn-active"  # noqa: SLF001
     client.send("follow-up")
     _check(
-        calls[-1][0] == "turn/steer"
-        and calls[-1][1]["expectedTurnId"] == "turn-active",
+        calls[-1][0] == "turn/steer" and calls[-1][1]["expectedTurnId"] == "turn-active",
         "an active app-server Codex turn receives explicit work via turn/steer",
     )
 
@@ -1161,8 +1178,7 @@ def test_tmux_channel_enter_waits_for_baseline_change() -> None:
     channel.send("a slow paste")
     _check(
         last_capture_before_enter["value"] == composed,
-        "Enter is sent only once the pane shows the ACTUAL composed text, "
-        f"never the pre-send idle screen (observed: {last_capture_before_enter['value']!r})",
+        f"Enter is sent only once the pane shows the ACTUAL composed text, never the pre-send idle screen (observed: {last_capture_before_enter['value']!r})",
     )
 
 
@@ -1194,15 +1210,12 @@ def test_tmux_channel_refuses_two_enter_noops() -> None:
     enters = [call for call in run.calls if call[-1] == "Enter"]
     _check(
         len(enters) == 0,
-        "a composer that never visibly differs from the pre-send baseline "
-        "refuses BEFORE ever pressing Enter, not after two blind attempts",
+        "a composer that never visibly differs from the pre-send baseline refuses BEFORE ever pressing Enter, not after two blind attempts",
     )
     _check(raised, "a pane that never stabilizes past its own baseline fails loud")
 
 
-LIVE_CODEX_BUSY_STATUS_LINE = (
-    "\u2022 Working (12m 07s \u00b7 esc to interrupt) \u00b7 Checking peer inbox before ending turn"
-)
+LIVE_CODEX_BUSY_STATUS_LINE = "\u2022 Working (12m 07s \u00b7 esc to interrupt) \u00b7 Checking peer inbox before ending turn"
 """Verbatim from a real pane, ``tmux capture-pane -p`` on
 ``fleet-lane-cdx-fix-lm-studio-provisioning-2026-09-08-f0f3ca54`` (Codex
 0.153.4) at 2026-09-09T04:0xZ, while that lane was 12 minutes into a turn."""
@@ -1237,14 +1250,19 @@ def test_idle_pane_is_driveable_though_its_transcript_says_working() -> None:
     """
     idle = _idle_pane("**Working dir:** ~/Workspace/example")
     composed = _idle_pane("**Working dir:** ~/Workspace/example").replace(
-        "\u203a Ask Codex to do anything", "\u203a dispatch text",
+        "\u203a Ask Codex to do anything",
+        "\u203a dispatch text",
     )
     run = _PaneRun([idle, idle, composed, composed, "\u203a dispatch text submitted"])
     clock = _Clock()
     channel = _CodexTmuxDriverChannel(
-        tmux_bin="tmux", session="codex-working-in-transcript", run_fn=run,
-        sleep_fn=clock.sleep, now_fn=clock.now,
-        stable_samples=1, verify_timeout_seconds=2.0,
+        tmux_bin="tmux",
+        session="codex-working-in-transcript",
+        run_fn=run,
+        sleep_fn=clock.sleep,
+        now_fn=clock.now,
+        stable_samples=1,
+        verify_timeout_seconds=2.0,
     )
     pasted = ""
     try:
@@ -1254,14 +1272,12 @@ def test_idle_pane_is_driveable_though_its_transcript_says_working() -> None:
         pasted = f"RAISED: {exc}"
     _check(
         pasted == "ok",
-        "an idle pane whose transcript merely contains the word 'Working' is "
-        "still driveable (no permanent wedge)",
+        "an idle pane whose transcript merely contains the word 'Working' is still driveable (no permanent wedge)",
     )
     literal = [c for c in run.calls if "send-keys" in c and "-l" in c]
     _check(
         [c[-1] for c in literal] == ["dispatch text"],
-        "the wedge fix still actually pastes the text, rather than passing by "
-        "never attempting the send",
+        "the wedge fix still actually pastes the text, rather than passing by never attempting the send",
     )
 
 
@@ -1283,15 +1299,18 @@ def test_ready_gate_reads_the_status_line_not_the_placeholder() -> None:
     busy = _idle_pane(f"prior output\n{LIVE_CODEX_BUSY_STATUS_LINE}")
     _check(
         "\u203a Ask Codex to do anything" in busy,
-        "the live busy fixture really does show the idle placeholder too "
-        "(the measurement this redesign rests on)",
+        "the live busy fixture really does show the idle placeholder too (the measurement this redesign rests on)",
     )
     run = _PaneRun([busy])
     clock = _Clock()
     channel = _CodexTmuxDriverChannel(
-        tmux_bin="tmux", session="codex-mid-turn", run_fn=run,
-        sleep_fn=clock.sleep, now_fn=clock.now,
-        stable_samples=1, verify_timeout_seconds=2.0,
+        tmux_bin="tmux",
+        session="codex-mid-turn",
+        run_fn=run,
+        sleep_fn=clock.sleep,
+        now_fn=clock.now,
+        stable_samples=1,
+        verify_timeout_seconds=2.0,
     )
     failure = ""
     try:
@@ -1325,9 +1344,13 @@ def test_busy_pane_failure_says_busy_not_broken() -> None:
     run = _PaneRun([busy])
     clock = _Clock()
     channel = _CodexTmuxDriverChannel(
-        tmux_bin="tmux", session="codex-mid-turn", run_fn=run,
-        sleep_fn=clock.sleep, now_fn=clock.now,
-        stable_samples=1, verify_timeout_seconds=2.0,
+        tmux_bin="tmux",
+        session="codex-mid-turn",
+        run_fn=run,
+        sleep_fn=clock.sleep,
+        now_fn=clock.now,
+        stable_samples=1,
+        verify_timeout_seconds=2.0,
     )
     failure = ""
     try:
@@ -1337,13 +1360,11 @@ def test_busy_pane_failure_says_busy_not_broken() -> None:
     _check("still mid-turn" in failure, "a busy pane is reported as busy, not as unreachable")
     _check(
         "esc to interrupt" in failure,
-        "the busy report quotes the real status line it measured, so a steward "
-        "can see WHAT the pane was doing",
+        "the busy report quotes the real status line it measured, so a steward can see WHAT the pane was doing",
     )
     _check(
         "retry" in failure,
-        "the busy report tells the caller the lane is healthy and the send is "
-        "worth retrying",
+        "the busy report tells the caller the lane is healthy and the send is worth retrying",
     )
 
 
@@ -1365,16 +1386,10 @@ def test_tmux_channel_ready_check_survives_banner_scroll() -> None:
     A fixture whose pane text still contained the banner would pass before
     and after the fix, proving nothing; this one only passes under the fix.
     """
-    scrolled_idle = (
-        "some prior turn's output, several screens below the banner box\n"
-        "• Ran 1 command\n"
-        "\n"
-        "› Ask Codex to do anything\n"
-        "\n"
-        "  gpt-5.6-terra high · ~/Workspace/example"
-    )
+    scrolled_idle = "some prior turn's output, several screens below the banner box\n• Ran 1 command\n\n› Ask Codex to do anything\n\n  gpt-5.6-terra high · ~/Workspace/example"
     composed = scrolled_idle.replace(
-        "› Ask Codex to do anything", "› banner has scrolled off",
+        "› Ask Codex to do anything",
+        "› banner has scrolled off",
     )
     run = _PaneRun([scrolled_idle, scrolled_idle, composed, composed, "Working\n›"])
     clock = _Clock()
@@ -1441,11 +1456,12 @@ def test_headless_watch_transport_watcher_keeps_spool() -> None:
         )
         driver.spawn(
             {
+                **fixture_assignment_record(),
                 "agent_instance_id": "agi-codex-watch-1",
                 "lane_id": "watch-lane",
                 "transport": "watch",
                 "role_class": "ephemeral",
-                "brief_ref": "brief.md",
+                "unit_id": FIXTURE_UNIT_ID,
                 "spawned_by_role": "Coordinator-Main",
             },
         )
@@ -1488,11 +1504,12 @@ def test_tmux_watch_transport_pane_command_keeps_spool() -> None:
         )
         driver.spawn(
             {
+                **fixture_assignment_record(),
                 "agent_instance_id": "agi-codex-tmux-watch-1",
                 "lane_id": "tmux-watch-lane",
                 "transport": "watch",
                 "role_class": "ephemeral",
-                "brief_ref": "brief.md",
+                "unit_id": FIXTURE_UNIT_ID,
                 "spawned_by_role": "Coordinator-Main",
             },
         )
@@ -1500,21 +1517,11 @@ def test_tmux_watch_transport_pane_command_keeps_spool() -> None:
         pane_command = new_session_call[-1]
         pane_tokens = shlex.split(pane_command)
         release_cli = str(root / "venv" / "bin" / "solet-bridge")
-        codex_path_override = next(
-            value for value in pane_tokens
-            if value.startswith("shell_environment_policy.set.PATH=")
-        )
-        path_env = next(
-            value for value in new_session_call
-            if value.startswith("PATH=")
-        )
-        wake_cli_env = next(
-            value for value in new_session_call
-            if value.startswith("AGENT_WAKE_CLI=")
-        )
+        codex_path_override = next(value for value in pane_tokens if value.startswith("shell_environment_policy.set.PATH="))
+        path_env = next(value for value in new_session_call if value.startswith("PATH="))
+        wake_cli_env = next(value for value in new_session_call if value.startswith("AGENT_WAKE_CLI="))
         _check(
-            path_env.removeprefix("PATH=").split(os.pathsep)[0]
-            == str(root / "venv" / "bin"),
+            path_env.removeprefix("PATH=").split(os.pathsep)[0] == str(root / "venv" / "bin"),
             "tmux receives the resolved CLI directory at the front of PATH",
         )
         _check(
@@ -1527,8 +1534,7 @@ def test_tmux_watch_transport_pane_command_keeps_spool() -> None:
         )
         _check(
             "--no-spool" not in pane_tokens,
-            f"tmux pane command does NOT arm the watch sidecar with --no-spool "
-            f"(got {pane_command!r})",
+            f"tmux pane command does NOT arm the watch sidecar with --no-spool (got {pane_command!r})",
         )
         _check(
             pane_tokens.count("--no-claim") == 1,
@@ -1636,7 +1642,10 @@ def test_real_tmux_parked_composer_requires_interrupt_before_drive() -> None:
         session = f"park-drive-red-{os.getpid()}-{time.monotonic_ns()}"
         subprocess.run(
             [tmux_bin, "new-session", "-d", "-s", session, sys.executable, str(parked_stub)],
-            check=True, capture_output=True, text=True, timeout=5,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         try:
             scripted_parked_captures = False
@@ -1659,8 +1668,12 @@ def test_real_tmux_parked_composer_requires_interrupt_before_drive() -> None:
                 return subprocess.run(argv, **kwargs)
 
             channel = _CodexTmuxDriverChannel(
-                tmux_bin=tmux_bin, session=session, run_fn=run_fn,
-                verify_timeout_seconds=0.4, poll_interval_seconds=0.05, stable_samples=1,
+                tmux_bin=tmux_bin,
+                session=session,
+                run_fn=run_fn,
+                verify_timeout_seconds=0.4,
+                poll_interval_seconds=0.05,
+                stable_samples=1,
             )
             stranded = False
             try:
@@ -1670,7 +1683,10 @@ def test_real_tmux_parked_composer_requires_interrupt_before_drive() -> None:
             scripted_parked_captures = False
             capture = subprocess.run(
                 [tmux_bin, "capture-pane", "-p", "-t", session],
-                check=True, capture_output=True, text=True, timeout=5,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             _check(stranded, "RED proof: parked pane refuses the pre-repair drive")
             _check(
@@ -1685,7 +1701,10 @@ def test_real_tmux_parked_composer_requires_interrupt_before_drive() -> None:
             channel.send("recovered parked drive")
             capture = subprocess.run(
                 [tmux_bin, "capture-pane", "-p", "-t", session],
-                check=True, capture_output=True, text=True, timeout=5,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             _check(
                 "Working" in capture.stdout,
@@ -1698,8 +1717,290 @@ def test_real_tmux_parked_composer_requires_interrupt_before_drive() -> None:
         finally:
             subprocess.run(
                 [tmux_bin, "kill-session", "-t", session],
-                check=False, capture_output=True, text=True, timeout=5,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
+
+
+class CausalAnnotationTests(unittest.TestCase):
+    """Production CAS and client response boundaries; no native parser/PG claim."""
+
+    def setUp(self) -> None:
+        from managed_dispatch_smoke import _spec, _state
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.state = _state()
+        self.spec = _spec(Path(self.tmp.name))
+        self.register = RegisterUnitDouble()
+        self.assigned = self.register.add_unit()
+        self.launches: list[Mapping[str, Any]] = []
+
+    def launch(self, row: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.launches.append(dict(row))
+        return {"agent_instance_id": f"agi-attempt-{len(self.launches)}", "host_ref": "recorded-only"}
+
+    def dispatch(self, spec: DispatchSpec | None = None) -> dict[str, Any]:
+        from managed_dispatch_smoke import T0, _coordinator_actor
+
+        return dispatch_managed_work(self.state, spec or self.spec, register=self.register, actor=_coordinator_actor(), spawn_attempt=self.launch, now=T0)
+
+    def actor(self) -> RegisterActor:
+        return RegisterActor("agi-coordinator", "ases-coordinator", "Coordinator-Main", self.spec.lane_id)
+
+    def preparing(self) -> dict[str, Any]:
+        from managed_dispatch_smoke import T0, _coordinator_actor
+
+        from agent_messaging_plugin.managed_dispatch_unit import capture_annotation_source
+
+        row = prepare_managed_dispatch(self.state, self.spec, register=self.register, actor=_coordinator_actor(), now=T0)
+        return _update_dispatch(self.state, row, {"attempt_receipt": {"annotation_source": capture_annotation_source(row, self.actor())}})
+
+    def uncertain(self, register: Any = None) -> dict[str, Any]:
+        from managed_dispatch_smoke import T0
+
+        return record_first_turn_evidence(
+            self.state,
+            dispatch_id=self.spec.dispatch_id,
+            agent_instance_id="agi-original",
+            source="charter",
+            delivered=False,
+            error="original error",
+            host="headless",
+            host_ref="original-host",
+            agent_runtime="codex",
+            observed_at=T0,
+            register=register,
+            actor=self.actor(),
+        )
+
+    def lost(self, register: Any = None, instance: str = "agi-original") -> dict[str, Any]:
+        from managed_dispatch_smoke import T0
+
+        return mark_dispatch_worker_lost(
+            self.state,
+            dispatch_id=self.spec.dispatch_id,
+            agent_instance_id=instance,
+            observed_at=T0,
+            detail="original liveness detail",
+            register=register,
+        )
+
+    def failures(self) -> list[dict[str, Any]]:
+        return [e for e in cast(RealShapeState, self.state).rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_DISPATCH_EVENT) if e["event_kind"] == "register_annotation_failed"]
+
+    def test_outage_and_missing_client_preserve_both_original_results(self) -> None:
+        from managed_dispatch_smoke import _state
+
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                self.state = _state()
+                self.preparing()
+                client = None if missing else self.register
+                failure = RegisterUnitError("unit_register_unavailable", "exact native outage detail")
+                with patch.object(self.register, "record_unit_event", side_effect=failure):
+                    row = self.uncertain(client)
+                    lost = self.lost(client)
+                self.assertEqual(row["state"], "uptake_uncertain")
+                self.assertEqual(row["first_turn_error"], "original error")
+                self.assertEqual(lost["state"], "worker_lost")
+                self.assertEqual(lost["host_liveness_detail"], "original liveness detail")
+                audits = self.failures()
+                self.assertEqual([e["payload"]["event"] for e in audits], ["uptake_uncertain", "worker_lost"], "ANNOTATION_FAILURE_AUDIT_EXACTLY_ONE")
+                for e in audits:
+                    self.assertEqual(e["actor_instance_id"], self.actor().agent_instance_id)
+                    self.assertEqual(e["attempt_agent_instance_id"], "agi-original")
+                    self.assertEqual(e["payload"]["attempt_number"], 1)
+                    self.assertEqual(e["payload"]["source_actor"]["agent_session_id"], self.actor().agent_session_id)
+                    self.assertEqual(e["payload"]["code"], "unit_register_unavailable")
+                    self.assertEqual(e["payload"]["detail"], "No register client is bound to this call." if missing else failure.detail)
+
+    def test_malformed_old_cross_attempt_and_cross_dispatch_source(self) -> None:
+        from managed_dispatch_smoke import _state
+
+        for mode in ("missing", "container", "malformed", "attempt_number", "dispatch_id", "assignment_sha256"):
+            with self.subTest(mode=mode):
+                self.state = _state()
+                row = self.preparing()
+                receipt = dict(row["attempt_receipt"])
+                source = dict(receipt["annotation_source"])
+                if mode == "missing":
+                    receipt = {}
+                elif mode == "malformed":
+                    receipt["annotation_source"] = {"actor": None}
+                else:
+                    source[mode] = 7 if mode == "attempt_number" else "wrong"
+                    receipt["annotation_source"] = source
+                _update_dispatch(self.state, row, {"attempt_receipt": ["corrupt container"] if mode == "container" else receipt})
+                count = len(self.register.events)
+                self.assertEqual(self.uncertain(self.register)["state"], "uptake_uncertain")
+                self.assertEqual(self.lost(self.register)["state"], "worker_lost")
+                self.assertEqual(len(self.register.events), count, "ANNOTATION_INVALID_SOURCE_ZERO_NATIVE")
+                self.assertEqual(len(self.failures()), 2)
+                self.assertTrue(all(e["payload"]["code"].startswith("annotation_source_") for e in self.failures()))
+
+    def test_duplicate_stale_terminal_and_real_cas_loser_zero_observations(self) -> None:
+        from managed_dispatch_smoke import _state
+
+        self.preparing()
+        row = self.uncertain(self.register)
+        before = len(self.register.events)
+        self.uncertain(self.register)
+        with self.assertRaises(DispatchError):
+            self.lost(self.register, "agi-prior")
+        self.assertEqual(len(self.register.events), before, "ANNOTATION_STALE_DUPLICATE_ZERO")
+        lost = self.lost(self.register)
+        before = len(self.register.events)
+        self.lost(self.register)
+        self.assertEqual(len(self.register.events), before, "ANNOTATION_TERMINAL_ZERO")
+        self.assertEqual(lost["state"], "worker_lost")
+        for terminal in ("cancelled", "completed", "failed_start", "rejected", "expired"):
+            raw = cast(RealShapeState, self.state).rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_DISPATCH)[0]
+            raw["state"] = terminal
+            self.lost(self.register)
+            self.assertEqual(len(self.register.events), before, "ANNOTATION_OTHER_TERMINAL_ZERO")
+        self.state = _state()
+        row = self.preparing()
+        original_update = self.state.update_state
+
+        def lose(namespace: str, query: Any, updates: Any) -> Any:
+            if query.get("table") == TABLE_MANAGED_DISPATCH and updates.get("state") == "uptake_uncertain":
+                original_update(namespace, query, {"version": row["version"] + 1})
+            return original_update(namespace, query, updates)
+
+        with patch.object(self.state, "update_state", side_effect=lose), self.assertRaises(DispatchError) as caught:
+            self.uncertain(self.register)
+        self.assertEqual(caught.exception.code, "stale_dispatch_version")
+        self.assertEqual(len(self.register.events), before, "ANNOTATION_CAS_LOSER_ZERO")
+        from _register_unit_double import check_lost_annotation_cas_loser
+
+        check_lost_annotation_cas_loser(self)
+
+    def test_post_cas_retry_cannot_relabel_original_annotation(self) -> None:
+        from managed_dispatch_smoke import _state
+
+        for trigger in ("uptake_uncertain", "worker_lost"):
+            with self.subTest(trigger=trigger):
+                self.state = _state()
+                self.preparing()
+                if trigger == "worker_lost":
+                    self.uncertain(self.register)
+                original_update = self.state.update_state
+                raced = False
+
+                def replace_after_cas(namespace: str, query: Any, updates: Any, original_update: Callable[..., Any] = original_update, trigger: str = trigger) -> Any:
+                    from managed_dispatch_smoke import T0, _seed_binding
+
+                    nonlocal raced
+                    result = original_update(namespace, query, updates)
+                    if not raced and query.get("table") == TABLE_MANAGED_DISPATCH and updates.get("state") == trigger:
+                        raced = True
+                        current = read_managed_dispatch(self.state, self.spec.dispatch_id)
+                        _seed_binding(self.state, role="Coordinator-Main", instance="agi-successor", session="ases-successor")
+                        resolve_managed_dispatch(
+                            self.state,
+                            dispatch_id=self.spec.dispatch_id,
+                            event_id="racing-retry",
+                            action="request_retry",
+                            actor=DispatchActor("agi-successor", "ases-successor", "live_peer_binding"),
+                            prior_version=current["version"],
+                            payload={"reason": "replacement race"},
+                            observed_at=T0,
+                            register=self.register,
+                            spawn_attempt=lambda _row: {"agent_instance_id": "agi-replacement"},
+                        )
+                    return result
+
+                before = len(self.register.events)
+                with patch.object(self.state, "update_state", side_effect=replace_after_cas):
+                    result = self.uncertain(self.register) if trigger == "uptake_uncertain" else self.lost(self.register)
+                self.assertTrue(raced)
+                self.assertEqual(result["current_agent_instance_id"], "agi-replacement")
+                events = [(d, self.register.event_actors[i]) for i, (_unit, d) in enumerate(self.register.events) if i >= before and d["event"] == trigger]
+                self.assertEqual(len(events), 1)
+                detail, actor = events[0]
+                self.assertEqual((detail["agent_instance_id"], detail["attempt_number"], actor), ("agi-original", 1, self.actor()), "ANNOTATION_RACE_ORIGINAL_IDENTITY")
+                replacement = read_managed_dispatch(self.state, self.spec.dispatch_id)
+                source = replacement["attempt_receipt"]["annotation_source"]
+                self.assertEqual((source["attempt_number"], source["actor"]["agent_instance_id"]), (2, "agi-successor"))
+                self.assertEqual(replacement["spawned_by_instance_id"], "agi-coordinator")
+                first_turn = next(e for e in cast(RealShapeState, self.state).rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_DISPATCH_EVENT) if e["event_kind"] == "first_turn")
+                self.assertEqual(first_turn["payload"]["annotation_source"]["actor"]["agent_instance_id"], "agi-coordinator")
+
+    def test_reserved_duplicate_cannot_expose_source_only_receipt(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        from managed_dispatch_smoke import T0, _coordinator_actor
+
+        def launch(row: Mapping[str, Any]) -> Mapping[str, Any]:
+            self.assertEqual(set(row["attempt_receipt"]), {"annotation_source"})
+            with ThreadPoolExecutor(max_workers=1) as pool, self.assertRaises(DispatchError) as caught:
+                pool.submit(self.dispatch).result(timeout=5)
+            self.assertEqual(caught.exception.code, "dispatch_attempt_in_progress")
+            return {"agent_instance_id": "agi-original", "annotation_source": {"forged": True}}
+
+        result = dispatch_managed_work(self.state, self.spec, register=self.register, actor=_coordinator_actor(), spawn_attempt=launch, now=T0)
+        self.assertEqual(result["attempt"]["annotation_source"]["actor"]["agent_instance_id"], "agi-coordinator")
+        self.assertEqual(len(self.register.events), 1)
+
+    def test_native_history_retains_observation_correction_and_withdrawal(self) -> None:
+        from _register_unit_double import NativeOwnerCLIDouble
+
+        client = NativeOwnerCLIDouble()
+        self.preparing()
+        self.uncertain(client)
+        original = dict(client.native_events[0])
+        for kind in ("correction", "withdrawal"):
+            client._run(  # noqa: SLF001 - inspect the existing client argv double only
+                "db",
+                "unit",
+                "record-event",
+                self.spec.unit_id,
+                "--event-kind",
+                kind,
+                "--target-event",
+                original["event_id"],
+                "--detail",
+                kind + " reason",
+                "--agent-instance-id",
+                self.actor().agent_instance_id,
+            )
+        records = client._run("db", "unit", "events", self.spec.unit_id)  # noqa: SLF001
+        history = json.loads(records.stdout)["records"]
+        self.assertEqual(history[0], original)
+        self.assertEqual([e["event_kind"] for e in history], ["observation", "correction", "withdrawal"])
+        self.assertEqual([e["target_event_id"] for e in history[1:]], [original["event_id"]] * 2)
+        shown = client._run("db", "unit", "event-show", original["event_id"])  # noqa: SLF001
+        self.assertEqual(json.loads(shown.stdout), original)
+
+    def test_production_subprocess_retired_actor_audit_and_exact_argv(self) -> None:
+        from managed_dispatch_smoke import _state
+
+        for retired in (False, True):
+            with self.subTest(retired=retired):
+                self.state = _state()
+                self.preparing()
+                client = PsoletRegisterUnitClient("fixture-psolet", solet_name="annotation-test")
+                stderr = b"project-solet: actor act-original is retired; agi-coordinator ases-coordinator"
+                completed = subprocess.CompletedProcess([], 2 if retired else 0, b"{}", stderr if retired else b"")
+                with patch("agent_messaging_plugin.register_unit_client.subprocess.run", return_value=completed) as process:
+                    row = self.uncertain(client)
+                self.assertEqual(row["state"], "uptake_uncertain")
+                self.assertEqual(row["first_turn_error"], "original error")
+                self.assertEqual(process.call_count, 1, "ANNOTATION_NO_AUTOMATIC_RETRY")
+                argv = process.call_args.args[0]
+                for flag, expected in (("--agent-instance-id", "agi-coordinator"), ("--agent-session-id", "ases-coordinator"), ("--role-name", "Coordinator-Main"), ("--lane-id", self.spec.lane_id)):
+                    self.assertEqual(argv[argv.index(flag) + 1], expected, "ANNOTATION_EXACT_NATIVE_SOURCE_ARGV")
+                self.assertEqual(argv[argv.index("--event-kind") + 1], "observation")
+                if retired:
+                    audit = self.failures()
+                    self.assertEqual(len(audit), 1, "ANNOTATION_RETIRED_EXACT_AUDIT")
+                    self.assertIn(stderr.decode(), audit[0]["payload"]["detail"])
+                    self.assertEqual(audit[0]["actor_instance_id"], "agi-coordinator")
+                else:
+                    self.assertEqual(self.failures(), [])
 
 
 def main() -> int:
@@ -1757,14 +2058,8 @@ def main() -> int:
     if _failed:
         return 1
     if _real_tmux_tier_skipped:
-        print(
-            f'{_SKIP_WITNESS_PREFIX}{{"reason": "ambient_executable_missing", "executable": "tmux"}}'
-        )
-        print(
-            "SKIP: no tmux binary on this host -- the real-tmux parked-composer "
-            "proof (_case_real_tmux_parked_composer) disclosed the gap rather than "
-            f"running; the {_passed} hermetic checks ran and passed."
-        )
+        print(f'{_SKIP_WITNESS_PREFIX}{{"reason": "ambient_executable_missing", "executable": "tmux"}}')
+        print(f"SKIP: no tmux binary on this host -- the real-tmux parked-composer proof (_case_real_tmux_parked_composer) disclosed the gap rather than running; the {_passed} hermetic checks ran and passed.")
         return _SKIP_EXIT_CODE
     return 0
 

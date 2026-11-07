@@ -13,6 +13,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -32,7 +33,15 @@ _LOCK_PATH_ENV = "RUN_SMOKES_HOST_SERIAL_LOCK_PATH"
 _NESTED_SELF_TEST_ENV = "RUN_SMOKES_NESTED_SELF_TEST"
 _HOST_LOCK_PATH = Path.home() / ".ananta" / "locks" / "run_smokes_serial_only.lock"
 _HOST_LOCK_WAIT_SECONDS = 0.5
+# A hang guard for the paired runners, not a timing assertion: ordering is
+# asserted from the recorded intervals. Each runner sleeps at most 1.5 s, yet a
+# 10 s guard expired at host load1 ~19 during a full born-clone run (unit
+# unt_587279e4 event 17). 60 s bounds a genuine hang while tolerating load.
+_RUNNER_PAIR_TIMEOUT_SECONDS = 60
 _SKIP_EXIT_CODE = 77
+# Fixture pacing only: serial runners report attention while the stub holds
+# the host lock, so non-overlap proves attention never releases it.
+_ATTENTION_FIXTURE_ENVIRONMENT = {"SMOKE_PROCESS_ATTENTION_SECONDS": "0.2"}
 
 
 def _record_stub() -> int:
@@ -64,7 +73,7 @@ def _run_runner(
     env = os.environ.copy()
     env.update(
         {
-            "SOLET_NAME": "host-lock-test",
+            "SOLET_NAME": os.environ["SOLET_NAME"],
             _STUB_MODE: "serial" if serial else "pooled",
             _STUB_EVENTS: str(events),
             _STUB_LABEL: label,
@@ -84,6 +93,7 @@ def _run_runner(
     ]
     if serial:
         command.extend(["--serial-only-override", _SELF_ENTRY])
+        env.update(_ATTENTION_FIXTURE_ENVIRONMENT)
     return subprocess.Popen(
         command,
         cwd=_REPO_ROOT,
@@ -108,9 +118,7 @@ def _require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def _host_lock_contention_outcome(
-    lock_path: Path = _HOST_LOCK_PATH, *, skip_log_path: Path | None = None
-) -> tuple[str, str] | None:
+def _host_lock_contention_outcome(lock_path: Path = _HOST_LOCK_PATH, *, skip_log_path: Path | None = None) -> tuple[str, str] | None:
     """Decide the smoke's outcome when the host lock cannot be acquired promptly.
 
     Returns ``None`` when there is no contention at all. Otherwise returns
@@ -140,9 +148,7 @@ def _host_lock_contention_outcome(
                     if holder_pid is not None and not contention_signal.holder_pid_is_alive(holder_pid):
                         return (
                             "fail",
-                            "FAIL host serial-only lock held by dead pid "
-                            f"{holder_pid} after {_HOST_LOCK_WAIT_SECONDS:.1f}s "
-                            f"(leaked lock, not live contention): {holder_text or lock_path}",
+                            f"FAIL host serial-only lock held by dead pid {holder_pid} after {_HOST_LOCK_WAIT_SECONDS:.1f}s (leaked lock, not live contention): {holder_text or lock_path}",
                         )
                     contention_signal.record_host_lock_skip_event(
                         holder_pid=holder_pid,
@@ -153,8 +159,7 @@ def _host_lock_contention_outcome(
                     detail = holder_text or str(lock_path)
                     return (
                         "skip",
-                        "SKIP host serial-only lock contention after "
-                        f"{_HOST_LOCK_WAIT_SECONDS:.1f}s; holder {detail}",
+                        f"SKIP host serial-only lock contention after {_HOST_LOCK_WAIT_SECONDS:.1f}s; holder {detail}",
                     )
                 time.sleep(0.05)
 
@@ -219,11 +224,32 @@ def _assert_live_holder_pid_skips_and_logs() -> None:
             _require(skip_log.exists(), "a legitimate live-holder skip did not record a skip event")
             events = [json.loads(line) for line in skip_log.read_text(encoding="utf-8").splitlines()]
             _require(len(events) == 1, f"expected exactly one skip event, got {events!r}")
-            _require(events[0]["holder_pid"] == holder.pid, events)
-            _require(events[0]["holder_alive"] is True, events)
+            _require(events[0]["holder_pid"] == holder.pid, events)  # pyright: ignore[reportArgumentType]
+            _require(events[0]["holder_alive"] is True, events)  # pyright: ignore[reportArgumentType]
         finally:
             holder.terminate()
             holder.wait(timeout=5)
+
+
+def _assert_runner_interrupt_cleanup(signum: int | None = signal.SIGINT, serial: bool | None = True) -> None:
+    """Interrupts reap registered groups before removing their owned roots."""
+    from _run_smokes_scratch_fixture import interrupt_cleanup
+
+    interrupt_cleanup(signum, serial)
+
+
+def _assert_stale_runner_scratch_is_swept() -> None:
+    """Only old dead owners are swept, with live and malformed controls."""
+    from _run_smokes_scratch_fixture import stale_scratch
+
+    stale_scratch()
+
+
+def _assert_runner_scratch_root_budget() -> None:
+    """Measure actual resolved filesystem bytes before testing ownership."""
+    from _run_smokes_scratch_fixture import _scratch_run
+
+    _scratch_run("length")
 
 
 def main() -> None:
@@ -235,6 +261,9 @@ def main() -> None:
         status, message = outcome
         print(message)
         raise SystemExit(1 if status == "fail" else _SKIP_EXIT_CODE)
+    _assert_runner_interrupt_cleanup(None, None)
+    _assert_stale_runner_scratch_is_swept()
+    _assert_runner_scratch_root_budget()
     _assert_dead_holder_pid_fails_not_skips()
     _assert_live_holder_pid_skips_and_logs()
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -261,24 +290,24 @@ def main() -> None:
             serial=True,
             lock_path=lock_path,
         )
-        first_stdout, first_stderr = first.communicate(timeout=10)
-        second_stdout, second_stderr = second.communicate(timeout=10)
+        first_stdout, first_stderr = first.communicate(timeout=_RUNNER_PAIR_TIMEOUT_SECONDS)
+        second_stdout, second_stderr = second.communicate(timeout=_RUNNER_PAIR_TIMEOUT_SECONDS)
         _require(first.returncode == 0, f"first serial runner failed: {first_stdout}{first_stderr}")
         _require(second.returncode == 0, f"second serial runner failed: {second_stdout}{second_stderr}")
+        _require(f"ATTENTION {_REPO_ROOT / _SELF_ENTRY}: running " in first_stderr, f"held serial stub reported no attention: {first_stderr}")
         serial = _intervals(events, "serial")
         first_interval = serial["serial-first"]
         second_interval = serial["serial-second"]
         _require(
-            first_interval[1] <= second_interval[0]
-            or second_interval[1] <= first_interval[0],
+            first_interval[1] <= second_interval[0] or second_interval[1] <= first_interval[0],
             f"serial intervals overlap: {first_interval!r}, {second_interval!r}",
         )
         events.unlink()
         pooled_first = _run_runner(register, events, label="pooled-first", sleep_seconds=1.5, serial=False)
         time.sleep(0.2)
         pooled_second = _run_runner(register, events, label="pooled-second", sleep_seconds=1.5, serial=False)
-        pooled_first_stdout, pooled_first_stderr = pooled_first.communicate(timeout=10)
-        pooled_second_stdout, pooled_second_stderr = pooled_second.communicate(timeout=10)
+        pooled_first_stdout, pooled_first_stderr = pooled_first.communicate(timeout=_RUNNER_PAIR_TIMEOUT_SECONDS)
+        pooled_second_stdout, pooled_second_stderr = pooled_second.communicate(timeout=_RUNNER_PAIR_TIMEOUT_SECONDS)
         _require(
             pooled_first.returncode == 0,
             f"first pooled runner failed: {pooled_first_stdout}{pooled_first_stderr}",
@@ -291,8 +320,7 @@ def main() -> None:
         pooled_first_interval = pooled["pooled-first"]
         pooled_second_interval = pooled["pooled-second"]
         _require(
-            max(pooled_first_interval[0], pooled_second_interval[0])
-            < min(pooled_first_interval[1], pooled_second_interval[1]),
+            max(pooled_first_interval[0], pooled_second_interval[0]) < min(pooled_first_interval[1], pooled_second_interval[1]),
             f"pooled intervals did not overlap: {pooled_first_interval!r}, {pooled_second_interval!r}",
         )
 

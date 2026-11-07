@@ -1,29 +1,12 @@
 #!/usr/bin/env python3
-"""A solet recorded at the r55-r63 setup contract reconciles to r64's (chg_04232fcc, iss_f510b5c9).
+"""Released setup contracts reconcile to the active wording contract without losing progress.
 
-r64 stops recommending LM Studio for inference and rewords three LM Studio descriptions
-in ``macos_setup_flow.json``.  That file is a digested contract file, so the setup
-contract's release identity moves from ``19350a8d`` to ``ce20096b``.  Every stable seed
-published from r55 through r63 records ``19350a8d`` with its own seed commit as the
-flow source revision, and reconciliation matches that pair exactly.  This smoke proves:
-
-* the active bundle is the pinned r64 identity, and the ``19350a8d`` fixture is the
-  released bytes (it matches the published seeds' contract files);
-* the two contracts differ only at the four r64 JSON paths, and they declare the same
-  stages, stage-probe identities, operations, probes and completion probes, so the
-  declared bridge needs no stage-probe mapping, reset or answer rewrite;
-* each published stable seed revision at ``19350a8d`` resolves in one declared hop;
-* a setup-incomplete transaction with verified progress reconciles with every
-  stage-probe, operation, stage and completion status unchanged, including a solet
-  that chose LM Studio for inference;
-* the Manager's full reconcile-contract preview and apply succeed for the live
-  stable revision (r63) and record the new digest without re-running a stage;
-* an unknown revision at ``19350a8d`` is still refused (control);
-* every historical source that reached ``19350a8d`` reaches ``ce20096b``.
-
-Offline, reads only shipped files.  Run from the repository root with
-``.venv/bin/python3 solet_cli/tests/contract_reconciliation_lm_studio_not_recommended_smoke.py``.
-"""
+The r64 LM Studio wording change and the later Git-control explanation change
+advance contract identity without changing stages, operations, probes or answers.
+Sealed fixtures retain both released source identities. Each supported seed has
+an exact source-revision bridge to the active tree, and the real Manager previews
+and applies the bridge with verified progress preserved. Unknown source revisions
+retain the existing integrity refusal."""
 
 from __future__ import annotations
 
@@ -66,12 +49,8 @@ from solet_manager.transaction import (
 
 _CONTRACTS = _ROOT / "plugins/github_midwife_plugin/knowledge_base"
 _SOURCE_DIGEST = "sha256:19350a8d3b0b29139afe25b6f11648c0f3f2e1fdb8ca91f81d5bfa1280fc7492"
-_DESTINATION_DIGEST = "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
-_SOURCE_FIXTURE = (
-    _ROOT
-    / "solet_cli/tests/fixtures/reconciliation_operation_status_reset"
-    / _SOURCE_DIGEST.removeprefix("sha256:")
-)
+_DESTINATION_DIGEST = "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
+_SOURCE_FIXTURE = _ROOT / "solet_cli/tests/fixtures/reconciliation_operation_status_reset" / _SOURCE_DIGEST.removeprefix("sha256:")
 # Every solet-public/macos-bizops commit whose five digested contract files hash to
 # 19350a8d: r55 and r56 (RELEASE_NOTES r57), the stable cuts after them through r61
 # (1e167174), and r63 (a5732c9f).
@@ -96,10 +75,22 @@ _EARLIER_SOURCES = (
 )
 _R64_FLOW_PATHS = frozenset(
     {
+        "decisions.git_mutation_control.description",
+        "decisions.git_mutation_control.option_source.options.single_session.description",
+        "decisions.git_mutation_control.option_source.options.single_session.implications.security",
+        "decisions.git_mutation_control.option_source.options.single_session.implications.performance",
+        "decisions.git_mutation_control.option_source.options.designated_controller.description",
+        "decisions.git_mutation_control.option_source.options.designated_controller.implications.security",
         "decisions.inference_implementation.recommended_option_refs",
         "decisions.embeddings_implementation.option_source.options.lm_studio.description",
         "decisions.inference_implementation.option_source.options.lm_studio.description",
         "plugins.default_inference_plugin.description",
+        "decisions.coding_agents.recommended_option_refs",
+        "consents.codex_mcp_configuration_consent.required",
+        "consents.codex_mcp_configuration_consent.required_when",
+        "consents.codex_mcp_configuration_consent.decline.consequence",
+        "operations.run_genesis.parameters.selected_coding_agents",
+        "operations.install_shell_integration.parameters",
     }
 )
 _CHECKS: list[str] = []
@@ -173,12 +164,7 @@ def _flow_diff(before: JsonValue, after: JsonValue, path: str = "") -> set[str]:
 
 
 def _stage_probe_identities(bundle: ContractBundle, answers: dict[str, JsonValue]) -> set[tuple[str, str, str]]:
-    return {
-        (stage_id, boundary, probe_id)
-        for stage_id, boundaries in initial_stage_probe_statuses(bundle, answers).items()
-        for boundary, probes in boundaries.items()
-        for probe_id in probes
-    }
+    return {(stage_id, boundary, probe_id) for stage_id, boundaries in initial_stage_probe_statuses(bundle, answers).items() for boundary, probes in boundaries.items() for probe_id in probes}
 
 
 def _check_contract_delta(source: ContractBundle, destination: ContractBundle) -> None:
@@ -190,7 +176,7 @@ def _check_contract_delta(source: ContractBundle, destination: ContractBundle) -
             (source.directory / name).read_bytes() == (destination.directory / name).read_bytes(),
         )
     changed = _flow_diff(source.flow, destination.flow)
-    _check("the setup flow changes only at the four r64 paths", changed == _R64_FLOW_PATHS, sorted(changed))
+    _check("the setup flow changes only at the r64 and Git-control wording paths", cast("set[str] | frozenset[str]", changed) == _R64_FLOW_PATHS, sorted(changed))
     _check("both contracts declare the same stages in order", list(source.stages) == list(destination.stages))
     _check("both contracts declare the same operations", set(source.operations) == set(destination.operations))
     _check("both contracts declare the same probes", set(source.probes) == set(destination.probes))
@@ -203,7 +189,7 @@ def _check_contract_delta(source: ContractBundle, destination: ContractBundle) -
         "every stage-probe identity exists in both contracts, so the bridge mapping is identity",
         _stage_probe_identities(source, answers) == _stage_probe_identities(destination, answers),
     )
-    inference = cast(dict[str, JsonValue], destination.decisions["inference_implementation"])
+    inference = destination.decisions["inference_implementation"]
     options = cast(dict[str, dict[str, JsonValue]], cast(dict[str, JsonValue], inference["option_source"])["options"])
     _check("lm_studio is no longer a recommended inference option", "lm_studio" not in cast(list[str], inference["recommended_option_refs"]))
     _check("lm_studio stays a supported inference option", options["lm_studio"]["availability"] == "supported")
@@ -233,11 +219,7 @@ def _transaction(source: ContractBundle, target: Path, revision: str) -> Transac
 def _with_progress(source: ContractBundle, transaction: Transaction) -> Transaction:
     """Record the verified progress a mid-setup solet carries: a stage probe and an operation."""
 
-    stage_id, boundaries = next(
-        (stage_id, boundaries)
-        for stage_id, boundaries in transaction.stage_probe_statuses.items()
-        if any(boundaries.values())
-    )
+    stage_id, boundaries = next((stage_id, boundaries) for stage_id, boundaries in transaction.stage_probe_statuses.items() if any(boundaries.values()))
     boundary, probes = next((boundary, probes) for boundary, probes in boundaries.items() if probes)
     probe_id = next(iter(probes))
     progressed = transaction.with_stage_probe_status(
@@ -260,10 +242,7 @@ def _with_progress(source: ContractBundle, transaction: Transaction) -> Transact
         },
     )
     operation_id = "install_postgresql"
-    operation_stage = next(
-        stage for stage, definition in source.stages.items()
-        if operation_id in cast(list[str], definition.get("operation_refs", []))
-    )
+    operation_stage = next(stage for stage, definition in source.stages.items() if operation_id in cast(list[str], definition.get("operation_refs", [])))
     result = OperationResult(
         request_id=str(uuid.uuid4()),
         operation_id=operation_id,
@@ -315,10 +294,7 @@ def _check_resolution(declarations: tuple[ContractReconciliation, ...]) -> None:
         )
         _check(
             f"the {revision[:8]} bridge maps, resets and rewrites nothing",
-            bridge.stage_probe_mappings == ()
-            and bridge.operation_statuses_to_reset == ()
-            and bridge.answer_value_migrations == ()
-            and bridge.first_use_inactive_probe_migrations == (),
+            bridge.stage_probe_mappings == () and bridge.operation_statuses_to_reset == () and bridge.answer_value_migrations == () and bridge.first_use_inactive_probe_migrations == (),
         )
     try:
         _resolve("f" * 40, _SOURCE_DIGEST, declarations)
@@ -344,9 +320,7 @@ def _activation_states(transaction: Transaction) -> dict[str, str]:
 def _check_state_preserved(source: ContractBundle, destination: ContractBundle, declarations: tuple[ContractReconciliation, ...]) -> None:
     for revision in _STABLE_SEED_REVISIONS:
         before = _transaction(source, Path("/tmp/fixture"), revision)
-        after = reconcile_contract_stage_probe_state(
-            destination, before, _resolve(revision, _SOURCE_DIGEST, declarations)
-        )
+        after = reconcile_contract_stage_probe_state(destination, before, _resolve(revision, _SOURCE_DIGEST, declarations))
         _check(
             f"{revision[:8]}: every status survives reconciliation unchanged",
             after.flow_contract_digest == _DESTINATION_DIGEST
@@ -361,16 +335,16 @@ def _check_state_preserved(source: ContractBundle, destination: ContractBundle, 
         )
 
 
-def _manager(root: Path, source: ContractBundle) -> tuple[ContractReconciliationManager, ManagerPaths, Transaction]:
+def _manager(root: Path, source: ContractBundle, revision: str = _LIVE_STABLE_REVISION) -> tuple[ContractReconciliationManager, ManagerPaths, Transaction]:
     target = root / "target"
-    transaction = _transaction(source, target, _LIVE_STABLE_REVISION)
+    transaction = _transaction(source, target, revision)
     projection = target / ".solet" / "install-state.json"
     projection.parent.mkdir(parents=True, mode=0o700)
     projection.write_text(json.dumps(target_install_state_projection(transaction)) + "\n", encoding="utf-8")
     projection.chmod(0o600)
     contracts = target / "plugins/github_midwife_plugin/knowledge_base"
     contracts.mkdir(parents=True)
-    for path in _SOURCE_FIXTURE.iterdir():
+    for path in source.directory.iterdir():
         (contracts / path.name).write_bytes(path.read_bytes())
     paths = ManagerPaths.resolve(explicit_home=root / "manager")
     write_transaction(paths.transaction_path("fixture"), transaction)
@@ -399,9 +373,9 @@ def _manager(root: Path, source: ContractBundle) -> tuple[ContractReconciliation
     return ContractReconciliationManager(paths=paths, contract_directory=_CONTRACTS), paths, transaction
 
 
-def _check_manager_ceremony(source: ContractBundle) -> None:
+def _check_manager_ceremony(source: ContractBundle, revision: str = _LIVE_STABLE_REVISION) -> None:
     with tempfile.TemporaryDirectory(prefix="r64-reconcile-") as raw:
-        manager, paths, before = _manager(Path(raw), source)
+        manager, paths, before = _manager(Path(raw), source, revision)
         preview = manager.run("fixture", dry_run=True, approved_fingerprint=None)
         _check("the live stable solet previews reconciliation instead of being refused", preview.status == "preview_ready", preview.message)
         applied = manager.run("fixture", dry_run=False, approved_fingerprint=str(preview.data["approval_fingerprint"]))
@@ -409,24 +383,61 @@ def _check_manager_ceremony(source: ContractBundle) -> None:
         after = load_transaction(paths.transaction_path("fixture"))
         _check("the journal remains readable", after is not None)
         assert after is not None
-        _check("the journal records the r64 setup contract", after.flow_contract_digest == _DESTINATION_DIGEST)
-        _check("the journal keeps its seed revision", after.flow_source_revision == _LIVE_STABLE_REVISION)
+        _check("the journal records the active setup contract", after.flow_contract_digest == _DESTINATION_DIGEST)
+        _check("the journal keeps its seed revision", after.flow_source_revision == revision)
         _check(
             "no stage, probe or operation is reset, so setup resumes where it stopped",
-            after.stage_probe_statuses == before.stage_probe_statuses
-            and after.operation_statuses == before.operation_statuses
-            and after.stages == before.stages
-            and after.completion == before.completion,
+            after.stage_probe_statuses == before.stage_probe_statuses and after.operation_statuses == before.operation_statuses and after.stages == before.stages and after.completion == before.completion,
         )
         record = InstanceRegistry(paths.registry_path).require("fixture")
-        _check("the registry records the r64 setup contract", record.flow_contract_digest == _DESTINATION_DIGEST)
+        _check("the registry records the active setup contract", record.flow_contract_digest == _DESTINATION_DIGEST)
+
+
+def _check_git_control_bridge(source: ContractBundle, destination: ContractBundle, declarations: tuple[ContractReconciliation, ...]) -> None:
+    """Check the exact text delta and identity migration for one released source."""
+    changed = _flow_diff(source.flow, destination.flow)
+    old_wording = {
+        "decisions.inference_implementation.recommended_option_refs",
+        "decisions.embeddings_implementation.option_source.options.lm_studio.description",
+        "decisions.inference_implementation.option_source.options.lm_studio.description",
+        "plugins.default_inference_plugin.description",
+    }
+    expected = set(_R64_FLOW_PATHS) - old_wording
+    _check("the new contract changes only Git-control descriptions and Codex-optional paths", changed == expected, changed)
+    bridge = _resolve(source.source_revision, source.contract_digest, declarations)
+    _check("the wording bridge rewrites and resets nothing", not (bridge.stage_probe_mappings or bridge.operation_statuses_to_reset or bridge.answer_value_migrations or bridge.first_use_inactive_probe_migrations))
+
+
+def _check_git_control_revision(destination: ContractBundle, declarations: tuple[ContractReconciliation, ...]) -> None:
+    """The prior released contract advances through the real Manager without resetting work."""
+    digest = "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+    fixture = _SOURCE_FIXTURE.with_name(digest.removeprefix("sha256:"))
+    catalog = json.loads((_ROOT / "solet_cli/release_contracts/stable_predecessor_contracts.v1.json").read_text())
+    revisions = [row["flow_source_revision"] for row in catalog["supported_predecessor_contracts"] if row["flow_contract_digest"] == digest]
+    _check("four supported seeds record the prior contract", len(revisions) == 4)
+    for revision in revisions:
+        source = ContractBundle.load(source_revision=revision, directory=fixture, expected_digest=digest)
+        _check_git_control_bridge(source, destination, declarations)
+        _check_manager_ceremony(source, revision)
+    decision = destination.decisions["git_mutation_control"]
+    option_source = cast(dict[str, JsonValue], decision["option_source"])
+    options = cast(dict[str, dict[str, str]], option_source["options"])
+    _check("the single-session option describes repository-owned controls", "repository-owned controls" in options["single_session"]["description"])
+    _check("the designated-controller option describes a recorded choice", "recorded coordination choice" in options["designated_controller"]["description"])
+    _check("neither option claims a mutation gate", "mutation gate" not in json.dumps(destination.decisions["git_mutation_control"]))
+    try:
+        _resolve("f" * 40, digest, declarations)
+    except StateConflictError:
+        _check("an unknown prior-contract revision retains the existing integrity refusal", True)
+    else:
+        _check("an unknown prior-contract revision retains the existing integrity refusal", False)
 
 
 def main() -> int:
     source = ContractBundle.load(source_revision=_LIVE_STABLE_REVISION, directory=_SOURCE_FIXTURE, expected_digest=_SOURCE_DIGEST)
     destination = ContractBundle.load(source_revision=_LIVE_STABLE_REVISION, directory=_CONTRACTS)
     _check(
-        "the active setup contract is the pinned r64 identity",
+        "the active setup contract is the pinned Codex-optional identity",
         destination.contract_digest == _DESTINATION_DIGEST,
         destination.contract_digest,
     )
@@ -435,6 +446,7 @@ def main() -> int:
     _check_resolution(declarations)
     _check_state_preserved(source, destination, declarations)
     _check_manager_ceremony(source)
+    _check_git_control_revision(destination, declarations)
     print(f"contract_reconciliation_lm_studio_not_recommended_smoke OK: {len(_CHECKS)} checks passed")
     return 0
 

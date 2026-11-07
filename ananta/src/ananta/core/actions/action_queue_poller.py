@@ -47,6 +47,7 @@ from ananta.constants import (
     TEMPLATE_VAR_RESULT,
     TEMPLATE_VAR_SESSION_ID,
 )
+from ananta.core.actions import _measured_action_lane as measured_lane
 from ananta.core.actions.action_path_liveness import (
     ACTION_PATH_LIVENESS,
     DEPLOY_REAP_EXEMPTION_CEILING_SECONDS,
@@ -72,7 +73,6 @@ from ananta.core.actions.state_update_result import (
     updated_row_count,
 )
 from ananta.core.contexts.normalization import normalize_flow_id, normalize_session_id
-from ananta.core.domain.enums import JobStatus
 from ananta.core.domain.types import ActionResult
 from ananta.core.plans import parse as parse_plan
 from ananta.core.plans.windowing import (
@@ -101,6 +101,8 @@ from ananta.core.result_processing.enums import (
 from ananta.core.result_processing.error_dispatch import (
     ResultProcessingErrorDispatcher,
 )
+from ananta.core.runtime.loop_executors import run_action
+from ananta.core.runtime.loop_lag import CURRENT_PROCESS_KEY
 from ananta.core.state.execution_token_context import result_processor_context
 from ananta.core.state.flow_runtime_graph import FlowRuntimeGraph, TokenState
 from ananta.core.tracking.attachment_extractor import (
@@ -121,16 +123,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 WBS_STEP_REF_RE = re.compile(r"WBS Step (\d+)")
-
-# Non-terminal complement of the ``core__job`` status domain. That domain is
-# closed by a CHECK constraint to ``JobStatus``'s members; a "pending" job is
-# one NOT in a terminal state {completed, cancelled}, i.e. {queued, processing,
-# error}. The legacy raw query filtered ``status NOT IN ('completed', 'failed',
-# 'cancelled')`` — its 'failed' term was vestigial ('failed' is not in the job
-# domain, which uses 'error'), so this complement is behavior-identical.
-_PENDING_JOB_STATES: frozenset[JobStatus] = frozenset(
-    {JobStatus.QUEUED, JobStatus.PROCESSING, JobStatus.ERROR}
-)
 
 # Over-read window for the dispatch fetch. Set to the ``query_ordered`` hard cap
 # (``_MAX_ORDERED_LIMIT`` in ``ananta.services.state_service.ordered_query`` = 100):
@@ -154,12 +146,14 @@ _ORPHAN_REAP_EVERY_N_CYCLES = 300
 # The drain loop starts these as a background task instead of awaiting them, so
 # queued actions keep dispatching while a deploy runs (wgr_5de9baf3). At most one
 # is in flight; another deploy row stays queued until it finishes.
-DETACHED_DEPLOY_PROCESS_KEYS: Final[frozenset[str]] = frozenset({
-    "service_interface::lifecycle_management_service::apply_manifest",
-    "service_interface::self_deployment_service::restart_with_manifest",
-    "service_interface::local_self_deployment_service::rollback_release",
-    "service_interface::local_self_deployment_service::cutover_release",
-})
+DETACHED_DEPLOY_PROCESS_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "service_interface::lifecycle_management_service::apply_manifest",
+        "service_interface::self_deployment_service::restart_with_manifest",
+        "service_interface::local_self_deployment_service::rollback_release",
+        "service_interface::local_self_deployment_service::cutover_release",
+    }
+)
 
 # REL-03 swap-window guard. The two VERTEX result/error-PROCESSING process
 # keys — the ONLY action class that produced the mid-cutover
@@ -168,15 +162,9 @@ DETACHED_DEPLOY_PROCESS_KEYS: Final[frozenset[str]] = frozenset({
 # and re-terminates an already-failed flow). Scoping the terminated-flow drop
 # to exactly these keys lets terminal EDGE_SINK deliveries, bridge
 # deliver_error escape-valve actions, and cleanup pass through untouched.
-_INFERENCE_PROCESS_ERROR_KEY: Final[str] = (
-    "service_interface::inference_service::process_error"
-)
-_INFERENCE_PROCESS_RESULTS_KEY: Final[str] = (
-    "service_interface::inference_service::process_results"
-)
-_RESULT_ERROR_PROCESSING_KEYS: Final[frozenset[str]] = frozenset(
-    {_INFERENCE_PROCESS_ERROR_KEY, _INFERENCE_PROCESS_RESULTS_KEY}
-)
+_INFERENCE_PROCESS_ERROR_KEY: Final[str] = "service_interface::inference_service::process_error"
+_INFERENCE_PROCESS_RESULTS_KEY: Final[str] = "service_interface::inference_service::process_results"
+_RESULT_ERROR_PROCESSING_KEYS: Final[frozenset[str]] = frozenset({_INFERENCE_PROCESS_ERROR_KEY, _INFERENCE_PROCESS_RESULTS_KEY})
 # Bounded FIFO tombstone of terminated flow_ids. flow_ids are never reused, so
 # a stale entry can only ever match a genuinely-terminated flow — the cap
 # bounds memory without a TTL. Mirrors the deferred-vertex LRU cap style.
@@ -216,20 +204,14 @@ class QueuedAction:
 
 
 class ActionProcessorProtocol(Protocol):
-    def process_action(
-        self, process_key: str, parameters: dict[str, object]
-    ) -> dict[str, object]: ...
+    def process_action(self, process_key: str, parameters: dict[str, object]) -> dict[str, object]: ...
     def execute_action(self, action: QueuedAction) -> dict[str, object]: ...
 
 
 class ActionFactoryProtocol(Protocol):
     def create_action(self, action_data: dict[str, object]) -> dict[str, object]: ...
-    def submit_result_with_template(
-        self, results_data: dict[str, object], template_data: dict[str, object]
-    ) -> str: ...
-    def submit_action_definition(
-        self, action_def: dict[str, object], context: dict[str, object] | None = None
-    ) -> str: ...
+    def submit_result_with_template(self, results_data: dict[str, object], template_data: dict[str, object]) -> str: ...
+    def submit_action_definition(self, action_def: dict[str, object], context: dict[str, object] | None = None) -> str: ...
     def get_process_customizations(self, process_key: str) -> dict[str, object] | None: ...
 
 
@@ -328,8 +310,7 @@ def _log_if_slow(action: QueuedAction, elapsed_seconds: float) -> None:
     if elapsed_seconds <= SLOW_ACTION_THRESHOLD_SECONDS:
         return
     logger.error(
-        "SLOW_ACTION: action %s (%s) held the serial dispatch loop for %.1fs "
-        "(threshold %.0fs); every queued action waited behind it",
+        "SLOW_ACTION: action %s (%s) held the serial dispatch loop for %.1fs (threshold %.0fs); every queued action waited behind it",
         action.id,
         action.process_key,
         elapsed_seconds,
@@ -338,7 +319,10 @@ def _log_if_slow(action: QueuedAction, elapsed_seconds: float) -> None:
 
 
 def _terminal_write_landed(
-    result: ActionResult, action_id: str, status: str, expected_status: str,
+    result: ActionResult,
+    action_id: str,
+    status: str,
+    expected_status: str,
 ) -> bool:
     """Whether a guarded terminal status write changed the row; log when it did not.
 
@@ -355,9 +339,7 @@ def _terminal_write_landed(
         return True
     if updated == 0:
         logger.warning(
-            "TERMINAL_WRITE_SKIPPED: action %s was not '%s' when this process tried "
-            "to mark it '%s'; the row was left unchanged (another writer changed "
-            "or removed it)",
+            "TERMINAL_WRITE_SKIPPED: action %s was not '%s' when this process tried to mark it '%s'; the row was left unchanged (another writer changed or removed it)",
             action_id,
             expected_status,
             status,
@@ -424,28 +406,19 @@ class ActionQueuePoller:
     ) -> None:
         # FAIL-FAST: blob_storage_service is required for attachment extraction
         if blob_storage_service is None:
-            raise RuntimeError(
-                "BlobStorageService is required for ActionQueuePoller. "
-                "Attachment extraction cannot work without it."
-            )
+            raise RuntimeError("BlobStorageService is required for ActionQueuePoller. Attachment extraction cannot work without it.")
 
         self.state_service = state_service
         self.action_processor = action_processor
         self._flow_runtime_graph = flow_runtime_graph  # Required: FRG token completion
         self.action_factory = action_factory  # Required: action submission and templates
-        self.execution_context_manager = (
-            execution_context_manager  # Phase 1: ExecutionContext lifecycle
-        )
+        self.execution_context_manager = execution_context_manager  # Phase 1: ExecutionContext lifecycle
         self.template_registry = template_registry  # For resolving <<<:...>>> template functions
         self.memory_service = memory_service  # For recording tool uses to memory
         self._blob_storage_service = blob_storage_service  # For attachment extraction
-        self._context_management_service = (
-            context_management_service  # For tracking discovered processes
-        )
+        self._context_management_service = context_management_service  # For tracking discovered processes
         self._discovery_service = discovery_service  # For getting built-in processes
-        self._io_interface_service = (
-            io_interface_service  # For IO plugin detection and artifact delivery
-        )
+        self._io_interface_service = io_interface_service  # For IO plugin detection and artifact delivery
         self.app_home = app_home  # For template function context
         self.poll_interval = poll_interval
         self.max_actions_per_poll = max_actions_per_poll
@@ -491,9 +464,7 @@ class ActionQueuePoller:
         # IO post_message detection: build frozenset from registry at init time
         if io_interface_service is not None:
             io_namespaces = io_interface_service.registry.get_namespaces()
-            self._io_post_message_keys: frozenset[str] = frozenset(
-                f"plugin::{ns}::post_message" for ns in io_namespaces
-            )
+            self._io_post_message_keys: frozenset[str] = frozenset(f"plugin::{ns}::post_message" for ns in io_namespaces)
         else:
             self._io_post_message_keys = frozenset()
 
@@ -583,9 +554,7 @@ class ActionQueuePoller:
         for att in attachments:
             metadata = att.get(AttachmentFields.ADDITIONAL_METADATA)
             if not isinstance(metadata, dict):
-                raise AttachmentExtractionError(
-                    "Attachment missing additional_metadata after extraction"
-                )
+                raise AttachmentExtractionError("Attachment missing additional_metadata after extraction")
             external_id = metadata.get(MetadataFields.EXTERNAL_ID)
             if not isinstance(external_id, str):
                 raise AttachmentExtractionError("Attachment missing external_id after extraction")
@@ -595,14 +564,10 @@ class ActionQueuePoller:
         # Inject available_attachments into result["data"]
         self._inject_available_attachments(result, external_ids)
 
-        logger.debug(
-            "Extracted %d attachments for flow %s: %s", len(attachments), flow_id, external_ids
-        )
+        logger.debug("Extracted %d attachments for flow %s: %s", len(attachments), flow_id, external_ids)
         return attachments
 
-    def _inject_available_attachments(
-        self, result: dict[str, object], external_ids: list[str]
-    ) -> None:
+    def _inject_available_attachments(self, result: dict[str, object], external_ids: list[str]) -> None:
         """Inject available_attachments into result['data'].
 
         Raises:
@@ -610,15 +575,10 @@ class ActionQueuePoller:
         """
         data = result.get("data")
         if not isinstance(data, dict):
-            raise AttachmentExtractionError(
-                f"Cannot inject available_attachments: result['data'] is not a dict, "
-                f"got {type(data).__name__}. This violates the plugin result contract."
-            )
+            raise AttachmentExtractionError(f"Cannot inject available_attachments: result['data'] is not a dict, got {type(data).__name__}. This violates the plugin result contract.")
         data[AttachmentFields.AVAILABLE_ATTACHMENTS] = external_ids
 
-    def _inject_available_attachments_if_possible(
-        self, result: dict[str, object], external_ids: list[str]
-    ) -> None:
+    def _inject_available_attachments_if_possible(self, result: dict[str, object], external_ids: list[str]) -> None:
         """Inject available_attachments into result['data'] if possible.
 
         Unlike _inject_available_attachments, this silently skips if result['data']
@@ -650,14 +610,11 @@ class ActionQueuePoller:
 
         wbs_id, wbs_step_number, run_id = context
         store = WorkProductStoreAdapter(
-            self.state_service, work_product_run_id=run_id,
+            self.state_service,
+            work_product_run_id=run_id,
         )
         register_data = store.load_register(wbs_id)
-        register = (
-            WorkProductRegister.deserialize(register_data)
-            if register_data
-            else WorkProductRegister()
-        )
+        register = WorkProductRegister.deserialize(register_data) if register_data else WorkProductRegister()
         recorded = record_successful_action_products(
             register=register,
             wbs_run_id=wbs_id,
@@ -738,12 +695,7 @@ class ActionQueuePoller:
         if isinstance(process, dict):
             fn = process.get("function_name")
             provider = process.get("provider")
-            return (
-                fn == "post_message"
-                and isinstance(provider, str)
-                and self._io_interface_service is not None
-                and self._io_interface_service.registry.is_registered(provider)
-            )
+            return fn == "post_message" and isinstance(provider, str) and self._io_interface_service is not None and self._io_interface_service.registry.is_registered(provider)
         return False
 
     def _is_io_post_message_queued(self, action: QueuedAction) -> bool:
@@ -814,10 +766,7 @@ class ActionQueuePoller:
         # Reject internal ID prefixes - MUST happen BEFORE normalize_name
         # Otherwise "flow-123" becomes "flow123" and bypasses rejection
         if normalized.startswith(self._INTERNAL_ID_PREFIXES):
-            raise ValueError(
-                f"Invalid attachment name: '{normalized}' is an internal ID, not an attachment. "
-                f"Only use names from available_attachments."
-            )
+            raise ValueError(f"Invalid attachment name: '{normalized}' is an internal ID, not an attachment. Only use names from available_attachments.")
 
         # Normalize to external_id rules (lowercase, underscores, strip extension)
         base_name, _ = os.path.splitext(normalized)
@@ -848,9 +797,7 @@ class ActionQueuePoller:
 
         return validated or None
 
-    def _resolve_refs_to_attachments(
-        self, refs: list[str], flow_id: str
-    ) -> list[dict[str, object]]:
+    def _resolve_refs_to_attachments(self, refs: list[str], flow_id: str) -> list[dict[str, object]]:
         """Resolve refs to attachment objects from pending buffer.
 
         Fails fast on unknown refs - the schema constraint should prevent this,
@@ -895,16 +842,11 @@ class ActionQueuePoller:
             return
 
         try:
-            resolved_attachments = self._io_interface_service._prepare_attachments(
-                None, action.job_result_ref
-            )
+            resolved_attachments = self._io_interface_service._prepare_attachments(None, action.job_result_ref)
             if resolved_attachments:
                 parameters[AttachmentFields.ATTACHMENTS] = resolved_attachments
                 action.parameters = json.dumps(parameters)
-                logger.debug(
-                    f"Resolved {len(resolved_attachments)} attachments from "
-                    f"job_result_ref for {action.process_key}"
-                )
+                logger.debug(f"Resolved {len(resolved_attachments)} attachments from job_result_ref for {action.process_key}")
         except Exception as e:
             logger.warning(f"Failed to resolve job_result_ref for {action.process_key}: {e}")
 
@@ -963,7 +905,8 @@ class ActionQueuePoller:
         return self._claim_instance_id or process_instance_id()
 
     def set_plan_lifecycle_resolver(
-        self, resolver: Callable[[], object | None],
+        self,
+        resolver: Callable[[], object | None],
     ) -> None:
         """Wire lazy plan-lifecycle resolution for deterministic advancement.
 
@@ -1004,6 +947,7 @@ class ActionQueuePoller:
                 await task
             except asyncio.CancelledError:
                 pass
+        await measured_lane.stop(self)
 
     async def _poll_loop(self) -> None:
         """Main polling loop - runs continuously until stopped.
@@ -1019,7 +963,7 @@ class ActionQueuePoller:
                     await self._poll_once()
                     self.total_poll_cycles += 1
                     self.last_poll_time = datetime.now(UTC)
-                    self._maybe_reap_orphans()
+                    await measured_lane.run_blocking(self._maybe_reap_orphans)
 
             except Exception as e:
                 logger.error(f"Error in polling cycle: {e}", exc_info=True)
@@ -1031,6 +975,7 @@ class ActionQueuePoller:
     async def _poll_once(self) -> None:
         """Execute one polling cycle"""
         self._report_stalled_deploy()
+        measured_lane.report(self)
         # Query for queued actions
         queued_actions = await self._get_queued_actions()
 
@@ -1051,7 +996,7 @@ class ActionQueuePoller:
         # actually begun.
         dispatched = 0
         for action in queued_actions:
-            if self._is_active_color_getter is not None and not self._is_active_color_getter():
+            if measured_lane.color_gated_off(self._is_active_color_getter):
                 # A swap gated this colour off mid-batch (the deploy's own thread
                 # does it). The rest stays queued for the new colour; claiming it
                 # here could claim this colour's own complete_swap.
@@ -1062,7 +1007,9 @@ class ActionQueuePoller:
                 # One deploy at a time: this row stays queued, unclaimed.
                 self._note_held_back(running, action.id, action.process_key)
                 continue
-            if not self._mark_action_processing(action.id):
+            if measured_lane.held(self, action.process_key):
+                continue
+            if not await measured_lane.run_blocking(self._mark_action_processing, action.id):
                 # A competing poller or a cancellation transitioned the row
                 # after our bounded queue read.  This poller did not acquire
                 # it, so it must never execute it.
@@ -1071,7 +1018,8 @@ class ActionQueuePoller:
                 # Not awaited: a deploy is minutes to hours of build and swap,
                 # and everything queued behind it would wait that long.
                 ACTION_PATH_LIVENESS.begin_detached_deploy(
-                    action_id=action.id, process_key=action.process_key,
+                    action_id=action.id,
+                    process_key=action.process_key,
                 )
                 self._detached_deploy = _DetachedDeploy(
                     action.id,
@@ -1080,10 +1028,14 @@ class ActionQueuePoller:
                 )
                 dispatched += 1
                 continue
+            if measured_lane.start(self, action):
+                dispatched += 1
+                continue
             # Name the in-flight action for /health before entering it, so a
             # handler that never returns is identified, not just inferred.
             ACTION_PATH_LIVENESS.begin_action(
-                action_id=action.id, process_key=action.process_key,
+                action_id=action.id,
+                process_key=action.process_key,
             )
             try:
                 dispatched += await self._dispatch_claimed(action)
@@ -1107,8 +1059,11 @@ class ActionQueuePoller:
             logger.error(f"Failed to process action {action.id}: {e}", exc_info=True)
             # Mark action as failed, carrying the exception's typing when it
             # has any — str(e) alone discards an AnantaError's error_code.
-            self._mark_action_failed(
-                action.id, str(e), error_detail=_typed_error_detail(e),
+            await measured_lane.run_blocking(
+                self._mark_action_failed,
+                action.id,
+                str(e),
+                error_detail=_typed_error_detail(e),
             )
             return 0
         self.total_actions_processed += 1
@@ -1123,8 +1078,7 @@ class ActionQueuePoller:
             # The failure write itself raised. In the loop that reaches
             # ``_poll_loop``'s handler; nothing awaits this task, so say it here.
             logger.error(
-                "DEPLOY_DETACHED_UNRECORDED: action %s (%s) could not be recorded; "
-                "the row is left processing for the orphan reaper",
+                "DEPLOY_DETACHED_UNRECORDED: action %s (%s) could not be recorded; the row is left processing for the orphan reaper",
                 action.id,
                 action.process_key,
                 exc_info=True,
@@ -1150,8 +1104,7 @@ class ActionQueuePoller:
             return
         deploy.held_back.add(action_id)
         logger.warning(
-            "DEPLOY_HELD_BACK: deploy action %s (%s) stays queued behind deploy %s "
-            "(%s), in flight %.0fs; one deploy runs at a time",
+            "DEPLOY_HELD_BACK: deploy action %s (%s) stays queued behind deploy %s (%s), in flight %.0fs; one deploy runs at a time",
             action_id,
             process_key,
             deploy.action_id,
@@ -1175,9 +1128,7 @@ class ActionQueuePoller:
             return
         deploy.stall_logged_monotonic = now
         logger.error(
-            "DEPLOY_STALLED: deploy action %s (%s) has been in flight %.0fs "
-            "(stall threshold %.0fs); later deploy rows stay queued behind it, and "
-            "the orphan reaper stops exempting it at %.0fs",
+            "DEPLOY_STALLED: deploy action %s (%s) has been in flight %.0fs (stall threshold %.0fs); later deploy rows stay queued behind it, and the orphan reaper stops exempting it at %.0fs. A naturally completing task releases its slot; reaping its row does not cancel a hung task, whose slot requires process restart to release.",
             deploy.action_id,
             deploy.process_key,
             age,
@@ -1194,8 +1145,8 @@ class ActionQueuePoller:
         deploy = self._running_deploy()
         age = ACTION_PATH_LIVENESS.detached_deploy_age_seconds()
         if deploy is None or age is None or age > DEPLOY_REAP_EXEMPTION_CEILING_SECONDS:
-            return frozenset()
-        return frozenset({deploy.action_id})
+            return measured_lane.live_ids(self)
+        return frozenset({deploy.action_id}) | measured_lane.live_ids(self)
 
     def _maybe_reap_orphans(self) -> None:
         """Run the D8 orphan reap occasionally, never on every cycle.
@@ -1214,25 +1165,25 @@ class ActionQueuePoller:
             return
         try:
             reap_orphaned_processing_actions(
-                self.state_service, live_action_ids=self._live_detached_action_ids(),
+                self.state_service,
+                live_action_ids=self._live_detached_action_ids(),
             )
             reap_abandoned_pinned_rows(
-                self.state_service, own_instance_id=self._own_instance_id(),
+                self.state_service,
+                own_instance_id=self._own_instance_id(),
             )
         except Exception as exc:  # noqa: BLE001 — maintenance must not stop dispatch
             logger.error("Orphan reap pass failed: %s", exc, exc_info=True)
 
     def _requires_main_thread(self, process_key: str) -> bool:
-        """
-        Determine if an action requires main thread execution.
+        """Only an explicitly identified main-thread operation may run inline.
 
-        Console actions (VSCode, terminal) need main thread for signal handling.
-        Inference actions can run in thread pool to prevent blocking.
+        No shipped queued handler installs signals: those hooks belong to
+        runtime startup. Names containing terminal/vscode/console do not give
+        arbitrary handler work permission to block the runtime loop.
         """
-        main_thread_patterns = ["start_console", "console_plugin", "vscode", "terminal"]
-
-        process_key_lower = process_key.lower()
-        return any(pattern in process_key_lower for pattern in main_thread_patterns)
+        main_thread_process_keys: frozenset[str] = frozenset()
+        return process_key in main_thread_process_keys
 
     def _handles_own_completion(self, process_key: str) -> bool:
         """
@@ -1300,15 +1251,15 @@ class ActionQueuePoller:
         namespace and applied a JSONB ``excluded_versions`` containment filter,
         neither expressible in the state grammar. Restructured into a
         single-namespace ``query_ordered`` read (``status='queued'`` ordered by
-        ``sequence`` then ``id``, capped at ``_DISPATCH_READ_CAP``), a Python
-        ``excluded_versions`` filter, a take of ``max_actions_per_poll``, and one
+        ``sequence`` then ``id``, capped at ``_DISPATCH_READ_CAP``), Python
+        eligibility filtering, deploy holdback, a take of ``max_actions_per_poll``, and one
         batch namespace-enrichment read. Exact in practice: the rows that carry
         ``excluded_versions`` are the self-deployment ``complete_deploy`` row and
         each instance's pinned starting actions (``instance_pin``). Another
         instance's pinned rows are claimed by it within seconds, or failed by
         ``reap_abandoned_pinned_rows`` once abandoned, so the oldest-N window is
-        never materially thinned; ``_warn_if_dispatch_starved`` is the fail-loud
-        tripwire if that ever stops holding. An instance restricted to its own
+        never materially thinned; ``_warn_if_dispatch_starved`` reports the
+        measured causes if a full page still leaves slots empty. An instance restricted to its own
         rows reads only rows that carry ``excluded_versions``. ``include_deleted=True``
         matches the legacy query, which carried no ``is_deleted`` predicate. The
         ``id`` tie-break is new (the raw query ordered by ``sequence`` alone) and
@@ -1321,7 +1272,8 @@ class ActionQueuePoller:
             # bounded read window.
             filters["excluded_versions"] = {"op": "is_not_null"}
         try:
-            result = self.state_service.query_ordered(
+            result = await measured_lane.query_ordered(
+                self,
                 "core",
                 {
                     "table": "action_events",
@@ -1336,21 +1288,25 @@ class ActionQueuePoller:
             # read these rows to do its own work, so publishing the count costs
             # nothing and needs no extra query on the health path.
             self._last_observed_queue_depth = len(rows)
-            claimable = [
-                row
-                for row in rows
-                if self._claimable(row) and not self._held_back_behind_deploy(row)
-            ]
+            eligibility_rejected = 0
+            deploy_held_back = 0
+            claimable: list[dict[str, object]] = []
+            for row in rows:
+                if not self._claimable(row):
+                    eligibility_rejected += 1
+                    continue
+                if self._held_back_behind_deploy(row):
+                    deploy_held_back += 1
+                    continue
+                claimable.append(row)
             taken = claimable[: self.max_actions_per_poll]
-            self._warn_if_dispatch_starved(len(rows), len(taken))
+            self._warn_if_dispatch_starved(len(rows), len(taken), eligibility_rejected, deploy_held_back, len(claimable))
 
-            namespaces = self._fetch_session_namespaces(taken)
+            namespaces = await measured_lane.run_blocking(self._fetch_session_namespaces, taken)
             actions: list[QueuedAction] = []
             for row in taken:
                 session_id = row.get("core__sessions_id")
-                namespace = (
-                    namespaces.get(session_id) if isinstance(session_id, str) else None
-                )
+                namespace = namespaces.get(session_id) if isinstance(session_id, str) else None
                 try:
                     actions.append(self._build_queued_action(row, namespace))
                 except OversizedActionPayloadError as exc:
@@ -1368,8 +1324,11 @@ class ActionQueuePoller:
                         row.get("process_key"),
                         exc,
                     )
-                    self._mark_action_failed(
-                        exc.action_id, str(exc), expected_status=ActionStatus.QUEUED,
+                    await measured_lane.run_blocking(
+                        self._mark_action_failed,
+                        exc.action_id,
+                        str(exc),
+                        expected_status=ActionStatus.QUEUED,
                     )
             return actions
 
@@ -1416,30 +1375,27 @@ class ActionQueuePoller:
         """
         return self._solet_version in exclusion_entries(raw)
 
-    def _warn_if_dispatch_starved(self, rows_read: int, dispatched: int) -> None:
-        """Fail-loud tripwire (Q2 ground-truth guard). The over-read hit the cap
-        — so MORE queued rows exist beyond the window — yet ``excluded_versions``
-        filtering left fewer than a full batch. Under the load-bearing invariant
-        (only the ``complete_deploy`` row and other instances' pinned starting
-        actions are excluded, and those are claimed or reaped) this should not
-        happen; if it fires, ``excluded_versions`` has gone high-cardinality and
-        the queued backlog may stall behind the filter.
-        """
+    def _warn_if_dispatch_starved(
+        self,
+        rows_read: int,
+        dispatched: int,
+        eligibility_rejected: int,
+        deploy_held_back: int,
+        eligible_available: int,
+    ) -> None:
+        """Explain why a full bounded page did not fill all dispatch slots."""
         if rows_read == _DISPATCH_READ_CAP and dispatched < self.max_actions_per_poll:
             logger.warning(
-                "DISPATCH-TRIPWIRE: read hit the %d-row cap but only %d of %d "
-                "slots filled after excluded_versions filtering — excluded_versions "
-                "may have gone high-cardinality (expected complete_deploy and "
-                "other instances' pinned starting actions only); "
-                "queued backlog may stall.",
+                "DISPATCH-TRIPWIRE: read hit the %d-row cap; %d of %d slots filled; eligibility_rejected=%d (version or pin eligibility), deploy_held_back=%d, eligible_available=%d; queued backlog may stall.",
                 _DISPATCH_READ_CAP,
                 dispatched,
                 self.max_actions_per_poll,
+                eligibility_rejected,
+                deploy_held_back,
+                eligible_available,
             )
 
-    def _fetch_session_namespaces(
-        self, rows: list[dict[str, object]]
-    ) -> dict[str, str | None]:
+    def _fetch_session_namespaces(self, rows: list[dict[str, object]]) -> dict[str, str | None]:
         """Batch-resolve ``core__sessions_id`` → ``namespace`` for the dispatch
         rows (replaces the legacy ``LEFT JOIN core__sessions``). One ``=ANY``
         read; a row whose session has no match (the LEFT-JOIN-NULL case) gets no
@@ -1468,10 +1424,7 @@ class ActionQueuePoller:
             str(ActionStatus.COMPLETED),
             ActionStatus.COMPLETED.value,
         ):
-            raise RuntimeError(
-                "dispatch namespace enrichment: sessions read returned "
-                f"{result.get('action_status')!r}"
-            )
+            raise RuntimeError(f"dispatch namespace enrichment: sessions read returned {result.get('action_status')!r}")
         namespaces: dict[str, str | None] = {}
         for record in self._query_records(result):
             session_id = record.get("id")
@@ -1494,9 +1447,7 @@ class ActionQueuePoller:
         value = row.get(key)
         return cast("str | None", value) if value else None
 
-    def _build_queued_action(
-        self, row: dict[str, object], template_namespace: str | None
-    ) -> QueuedAction:
+    def _build_queued_action(self, row: dict[str, object], template_namespace: str | None) -> QueuedAction:
         """Marshal one dispatch row + its enriched namespace into a QueuedAction.
 
         Fields are read by column name (the rows are ``SELECT *`` dicts).
@@ -1581,25 +1532,24 @@ class ActionQueuePoller:
         skip validation and let ActionProcessor handle the parse error).
         """
         try:
-            parameters: dict[str, object] = (
-                json.loads(action.parameters) if action.parameters else {}
-            )
+            parameters: dict[str, object] = json.loads(action.parameters) if action.parameters else {}
         except json.JSONDecodeError:
             return None
 
         parameters = self._repair_argument_aliases(action.process_key, parameters)
         parameters = self._inject_layer_policy(
-            action.process_key, parameters, action.session_id or "",
+            action.process_key,
+            parameters,
+            action.session_id or "",
         )
         schema_properties = arguments_schema.get("properties", {})
-        if (
-            isinstance(schema_properties, dict)
-            and arguments_schema.get("additionalProperties") is False
-        ):
+        if isinstance(schema_properties, dict) and arguments_schema.get("additionalProperties") is False:
             parameters = {k: v for k, v in parameters.items() if k in schema_properties}
         if isinstance(schema_properties, dict):
             parameters = self._clamp_schema_properties(
-                action.process_key, parameters, schema_properties,
+                action.process_key,
+                parameters,
+                schema_properties,
             )
         return parameters
 
@@ -1717,11 +1667,7 @@ class ActionQueuePoller:
             if not process_key.endswith(suffix):
                 continue
             for wrong, correct in aliases.items():
-                if (
-                    correct not in parameters
-                    and wrong in parameters
-                    and isinstance(parameters[wrong], str)
-                ):
+                if correct not in parameters and wrong in parameters and isinstance(parameters[wrong], str):
                     parameters[correct] = parameters.pop(wrong)
                     logger.info(
                         "ALIAS REPAIR: %s — renamed argument '%s' → '%s'",
@@ -1750,13 +1696,19 @@ class ActionQueuePoller:
             if isinstance(mn, (int, float)) and val < mn:
                 logger.warning(
                     "VALIDATION_CLAMP: %s.%s clamped %r → %r (minimum)",
-                    process_key, key, val, mn,
+                    process_key,
+                    key,
+                    val,
+                    mn,
                 )
                 result[key] = type(val)(mn)
             elif isinstance(mx, (int, float)) and val > mx:
                 logger.warning(
                     "VALIDATION_CLAMP: %s.%s clamped %r → %r (maximum)",
-                    process_key, key, val, mx,
+                    process_key,
+                    key,
+                    val,
+                    mx,
                 )
                 result[key] = type(val)(mx)
         return result
@@ -1802,10 +1754,10 @@ class ActionQueuePoller:
         # ``_prepare_action_for_execution`` so no FRG token / ExecutionContext
         # work happens for a doomed action.
         if self._is_terminated_flow_sibling(action):
-            self._drop_terminated_flow_sibling(action)
+            await measured_lane.run_blocking(self._drop_terminated_flow_sibling, action)
             return
 
-        if not self._prepare_action_for_execution(action):
+        if not await measured_lane.run_blocking(self._prepare_action_for_execution, action):
             return
 
         # Whether THIS execution's own completion write has landed. Result
@@ -1820,24 +1772,23 @@ class ActionQueuePoller:
             nonlocal completion_written
             completion_written = True
 
+        process_key_token = CURRENT_PROCESS_KEY.set(action.process_key)
         try:
-            self._resolve_io_context(action)
+            await measured_lane.run_blocking(self._resolve_io_context, action)
 
             # Execute the action via ActionProcessor (dispatch only, don't wait for completion)
             # SMART FIX: Use thread pool for blocking actions, main thread for console actions
             if self._requires_main_thread(action.process_key):
                 result = self.action_processor.execute_action(action)
             else:
-                loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(
-                    None, self.action_processor.execute_action, action
-                )
+                result = await run_action(action.process_key, self.action_processor.execute_action, action)
 
             # Actions are marked as 'completed' immediately after successful dispatch
             # The actual work (like inference) happens asynchronously and creates new actions for responses
             is_success = bool(result.get("success", False))
             if is_success:
-                self._mark_action_completed(
+                await measured_lane.run_blocking(
+                    self._mark_action_completed,
                     action.id,
                     result,
                     action.flow_token_id,
@@ -1850,7 +1801,8 @@ class ActionQueuePoller:
                 # ``error_value`` is frequently a full plugin ErrorDetail dict;
                 # str() above keeps the readable message, and the typed copy
                 # rides alongside it instead of being thrown away.
-                self._mark_action_failed(
+                await measured_lane.run_blocking(
+                    self._mark_action_failed,
                     action.id,
                     error_msg,
                     action.flow_token_id,
@@ -1867,15 +1819,16 @@ class ActionQueuePoller:
             # Immediate dispatch failure, or result processing raising after
             # this execution already marked the row completed.
             logger.error(f"Failed to dispatch action {action.id}: {e}", exc_info=True)
-            self._mark_action_failed(
+            await measured_lane.run_blocking(
+                self._mark_action_failed,
                 action.id,
                 str(e),
                 action.flow_token_id,
                 error_detail=_typed_error_detail(e),
-                expected_status=(
-                    ActionStatus.COMPLETED if completion_written else ActionStatus.PROCESSING
-                ),
+                expected_status=(ActionStatus.COMPLETED if completion_written else ActionStatus.PROCESSING),
             )
+        finally:
+            CURRENT_PROCESS_KEY.reset(process_key_token)
 
     def _prepare_action_for_execution(self, action: QueuedAction) -> bool:
         """Returns True if the action is ready for execution, False if it was rejected."""
@@ -1891,9 +1844,7 @@ class ActionQueuePoller:
         # Pre-execution validation: check arguments against canonical invocation_schema
         is_valid, validation_error, canonical_schema = self._validate_action_arguments(action)
         if not is_valid:
-            logger.info(
-                f"VALIDATION FAILED: {action.process_key} (id={action.id}) - routing to error processor"
-            )
+            logger.info(f"VALIDATION FAILED: {action.process_key} (id={action.id}) - routing to error processor")
             self._mark_action_failed(
                 action.id,
                 validation_error or "Argument validation failed",
@@ -1936,30 +1887,25 @@ class ActionQueuePoller:
             updates={"status": ActionStatus.PROCESSING.value},
         )
         if result.get("action_status") not in _COMPLETED_READ_STATUSES:
-            raise RuntimeError(
-                f"Failed to claim queued action {action_id}: "
-                f"state-service status={result.get('action_status')!r}"
-            )
+            raise RuntimeError(f"Failed to claim queued action {action_id}: state-service status={result.get('action_status')!r}")
         data = result.get("data")
         if not isinstance(data, dict):
             raise RuntimeError(f"Failed to claim queued action {action_id}: missing data envelope")
         inner = data.get("result")
         if not isinstance(inner, dict):
-            raise RuntimeError(
-                f"Failed to claim queued action {action_id}: missing result envelope"
-            )
+            raise RuntimeError(f"Failed to claim queued action {action_id}: missing result envelope")
         updated = inner.get("updated")
         if isinstance(updated, bool) or not isinstance(updated, int):
-            raise RuntimeError(
-                f"Failed to claim queued action {action_id}: invalid updated count {updated!r}"
-            )
+            raise RuntimeError(f"Failed to claim queued action {action_id}: invalid updated count {updated!r}")
         if updated > 1:
-            raise RuntimeError(
-                f"Claim of action {action_id} updated {updated} rows (expected at most one)"
-            )
+            raise RuntimeError(f"Claim of action {action_id} updated {updated} rows (expected at most one)")
         return updated == 1
 
-    def _update_action_status_to_completed(self, action_id: str) -> None:
+    def _update_action_status_to_completed(
+        self,
+        action_id: str,
+        on_status_written: Callable[[], None] | None = None,
+    ) -> None:
         """Complete the action AND clear any ``error_message`` a prior attempt left.
 
         This writer used to set ``status`` alone, while its failure counterpart
@@ -1980,16 +1926,17 @@ class ActionQueuePoller:
         clear the field, and treat having had something to clear as a detected
         double execution worth announcing.
 
-        The status write stays faithful (``WHERE id =``) and zero-affected
-        stays tolerated: a status write that misses a deleted/cancelled row
-        must never raise inside the drain loop. It is deliberately NOT guarded
+        An error envelope, malformed count or zero updated rows raises
+        ``StateUpdateResultError`` inside ``_process_action``'s existing try,
+        routing through ``_mark_action_failed(expected_status=PROCESSING)``
+        without requeueing. It is deliberately NOT guarded
         on ``status='processing'``: that guard (review N1 of the iss_30fb08fd
         fix) would keep a failed row failed while this execution's success
         result is still stored and delivered -- the split envelope of #9 again.
         Held for a decision; see the unit report.
         """
         stale_error = self._read_stale_error_message(action_id)
-        self.state_service.update_state(
+        write_result = self.state_service.update_state(
             namespace="core",
             query={"table": "action_events", "filters": {"id": action_id}},
             updates={
@@ -1999,6 +1946,13 @@ class ActionQueuePoller:
                 "error_message": None,
             },
         )
+        updated = updated_row_count(write_result, what=f"complete action {action_id}")
+        if updated != 1:
+            raise StateUpdateResultError(
+                f"complete action {action_id}: expected one updated row, got {updated}",
+            )
+        if on_status_written is not None:
+            on_status_written()
         if stale_error is not None:
             self._report_double_execution(action_id, stale_error)
 
@@ -2022,9 +1976,7 @@ class ActionQueuePoller:
         )
         if read.get("action_status") not in _COMPLETED_READ_STATUSES:
             logger.warning(
-                "DOUBLE-EXECUTION DETECTOR BLIND: could not read action_events "
-                "for %s before clearing error_message (read envelope status=%r); "
-                "a stale error on this row would be cleared unannounced.",
+                "DOUBLE-EXECUTION DETECTOR BLIND: could not read action_events for %s before clearing error_message (read envelope status=%r); a stale error on this row would be cleared unannounced.",
                 action_id,
                 read.get("action_status"),
             )
@@ -2056,12 +2008,7 @@ class ActionQueuePoller:
         self.total_double_executions_detected += 1
         previous_at, previous_rows = self._previous_result_row_summary(action_id)
         logger.warning(
-            "DOUBLE-EXECUTION DETECTED: action %s completed, but an earlier "
-            "attempt at the SAME action row had already failed and stamped "
-            "error_message. Clearing the stale error. "
-            "previous_attempt_result_at=%s this_completion_at=%s "
-            "previous_result_rows=%d detections_this_process=%d "
-            "cleared_error_message=%r",
+            "DOUBLE-EXECUTION DETECTED: action %s completed, but an earlier attempt at the SAME action row had already failed and stamped error_message. Clearing the stale error. previous_attempt_result_at=%s this_completion_at=%s previous_result_rows=%d detections_this_process=%d cleared_error_message=%r",
             action_id,
             previous_at if previous_at is not None else "unknown",
             datetime.now(UTC).isoformat(),
@@ -2175,9 +2122,7 @@ class ActionQueuePoller:
                 return None
         return None
 
-    def _store_action_result(
-        self, action_id: str, result: dict[str, object], process_key: str
-    ) -> None:
+    def _store_action_result(self, action_id: str, result: dict[str, object], process_key: str) -> None:
         """Store the result data in core__action_results table.
 
         Raises:
@@ -2191,20 +2136,14 @@ class ActionQueuePoller:
             "result_source": process_key,
         }
 
-        store_result = self.state_service.write_state(
-            namespace="core", data={"table": "action_results", "record": result_record}
-        )
+        store_result = self.state_service.write_state(namespace="core", data={"table": "action_results", "record": result_record})
 
         if store_result.get("action_status") != "completed":
             raise RuntimeError(f"Failed to store action result for {action_id}: {store_result}")
 
     def _is_sql_query_result(self, result_data: object) -> bool:
         """Check if result data contains SQL query results."""
-        return (
-            isinstance(result_data, dict)
-            and "data" in result_data
-            and "records" in result_data["data"]
-        )
+        return isinstance(result_data, dict) and "data" in result_data and "records" in result_data["data"]
 
     def _extract_sql_records(self, result: dict[str, object]) -> dict[str, object] | list[object]:
         """Extract SQL query records from nested result structure."""
@@ -2248,9 +2187,7 @@ class ActionQueuePoller:
             return result
         return result
 
-    def _extract_result_data_for_template(
-        self, result: dict[str, object]
-    ) -> dict[str, object] | list[object]:
+    def _extract_result_data_for_template(self, result: dict[str, object]) -> dict[str, object] | list[object]:
         """Extract useful data from result for template processing."""
         if "data" not in result:
             return result
@@ -2308,9 +2245,7 @@ class ActionQueuePoller:
             return json.dumps(parsed)
         return result_processor
 
-    def _inject_context_field_into_template(
-        self, template_data: dict[str, object], field_name: str, field_value: str | None
-    ) -> None:
+    def _inject_context_field_into_template(self, template_data: dict[str, object], field_name: str, field_value: str | None) -> None:
         """Inject action context into template metadata, never process arguments."""
         if not field_value or field_name in template_data:
             return
@@ -2441,19 +2376,11 @@ class ActionQueuePoller:
         if isinstance(actions, list):
             for idx, action_template in enumerate(actions):
                 if not isinstance(action_template, dict):
-                    logger.error(
-                        f"RESULT-PROCESSOR: Skipping invalid action template at index {idx}"
-                    )
+                    logger.error(f"RESULT-PROCESSOR: Skipping invalid action template at index {idx}")
                     continue
-                templates.append(
-                    self._prepare_template_copy(
-                        action_template, session_id, flow_id, context_id, notes
-                    )
-                )
+                templates.append(self._prepare_template_copy(action_template, session_id, flow_id, context_id, notes))
         else:
-            templates.append(
-                self._prepare_template_copy(template_data, session_id, flow_id, context_id, notes)
-            )
+            templates.append(self._prepare_template_copy(template_data, session_id, flow_id, context_id, notes))
 
         return templates
 
@@ -2484,9 +2411,7 @@ class ActionQueuePoller:
             notes,
             action_parameters,
         )
-        templates = self._extract_templates_to_submit(
-            template_data, session_id, flow_id, context_id, notes
-        )
+        templates = self._extract_templates_to_submit(template_data, session_id, flow_id, context_id, notes)
 
         # NOTE: oneOf schema injection REMOVED - it caused LM Studio hangs
         # The model reads process schemas from SYSTEM message (built-in) and
@@ -2495,9 +2420,7 @@ class ActionQueuePoller:
         # See: knowledge_base/2026-02-02_inference_and_discord_troubleshooting.md
 
         for action_template in templates:
-            template_result = self.action_factory.submit_result_with_template(
-                results_data, action_template
-            )
+            template_result = self.action_factory.submit_result_with_template(results_data, action_template)
             if not template_result:
                 raise RuntimeError(f"Template submission failed for action {action_id}")
 
@@ -2565,9 +2488,7 @@ class ActionQueuePoller:
         if not self._validate_result_processor_requirements(result_processor):
             return
 
-        template_data = self._prepare_template_data_and_context(
-            result_processor, session_id, flow_id, context_id
-        )
+        template_data = self._prepare_template_data_and_context(result_processor, session_id, flow_id, context_id)
         self._execute_action_factory_template_processing(
             action_id,
             result,
@@ -2633,24 +2554,15 @@ class ActionQueuePoller:
             and was routed to process_error.
         """
         if not isinstance(action_def, dict):
-            raise ValueError(
-                f"Invalid action definition at index {index}: expected dict, got {type(action_def)}"
-            )
+            raise ValueError(f"Invalid action definition at index {index}: expected dict, got {type(action_def)}")
 
         # Fail-fast: post_message requires context_id in platform mode
         # Without context_id, OUTPUT events cannot be written to conversation history.
         # Check both the inherited parent context_id AND the action_def's own context_id
         # (the inference plugin sets context_id directly on generated actions).
         effective_context_id = context_id or action_def.get("context_id")
-        if (
-            self._context_management_service is not None
-            and self._is_io_post_message_action(action_def)
-            and effective_context_id is None
-        ):
-            raise ValueError(
-                f"post_message action at index {index} requires context_id in platform mode. "
-                "Without context_id, ASSISTANT messages cannot be added to conversation history."
-            )
+        if self._context_management_service is not None and self._is_io_post_message_action(action_def) and effective_context_id is None:
+            raise ValueError(f"post_message action at index {index} requires context_id in platform mode. Without context_id, ASSISTANT messages cannot be added to conversation history.")
 
         self._inject_context_fields(action_def, session_id, flow_id, context_id, notes)
         self._expand_json_arguments(action_def)
@@ -2662,9 +2574,7 @@ class ActionQueuePoller:
             process_key = str(action_def.get("process_key", "unknown"))
             failed_args = action_def.get("arguments")
             canonical_schema = self._get_canonical_arguments_schema(process_key)
-            logger.error(
-                f"Invalid LLM-returned action {index + 1}/{total}: {e}. Routing to process_error."
-            )
+            logger.error(f"Invalid LLM-returned action {index + 1}/{total}: {e}. Routing to process_error.")
             self._route_failed_edge_to_inference(
                 error_message=f"Action submission failed: {e}",
                 process_key=process_key,
@@ -2716,9 +2626,7 @@ class ActionQueuePoller:
         if notes and TEMPLATE_VAR_NOTES not in action_def:
             action_def[TEMPLATE_VAR_NOTES] = notes[:NOTES_MAX_LENGTH]
 
-    def _build_timestamp_context(
-        self, session_id: str | None, flow_id: str | None
-    ) -> dict[str, object]:
+    def _build_timestamp_context(self, session_id: str | None, flow_id: str | None) -> dict[str, object]:
         """Build compilation context with timestamp variables."""
         import time
         from datetime import UTC, datetime
@@ -2876,9 +2784,7 @@ class ActionQueuePoller:
             "core",
             {
                 "table": "process_registry",
-                "filters": {
-                    "process_key": _INFERENCE_PROCESS_ERROR_KEY
-                },
+                "filters": {"process_key": _INFERENCE_PROCESS_ERROR_KEY},
             },
         )
 
@@ -2934,10 +2840,7 @@ class ActionQueuePoller:
 
         # Inject model config - required for inference (FAIL-FAST: no defaults)
         if not self.inference_model_name:
-            raise ValueError(
-                "ActionQueuePoller requires inference_model_name for error routing. "
-                "Cannot route errors without explicit model configuration."
-            )
+            raise ValueError("ActionQueuePoller requires inference_model_name for error routing. Cannot route errors without explicit model configuration.")
 
         arguments = template_copy.get("arguments", {})
         if isinstance(arguments, dict):
@@ -2992,8 +2895,7 @@ class ActionQueuePoller:
         # later. See ``_flow_has_no_vertex_binding`` for the contract.
         if self._flow_has_no_vertex_binding(flow_id):
             logger.warning(
-                "ERROR-ROUTING: Flow %s has no IO origin — terminating flow without "
-                "process_error (programmatic submission failed: %s). Error: %s",
+                "ERROR-ROUTING: Flow %s has no IO origin — terminating flow without process_error (programmatic submission failed: %s). Error: %s",
                 flow_id,
                 process_key,
                 error_message,
@@ -3010,8 +2912,7 @@ class ActionQueuePoller:
             self._recoverable_error_counts[retry_key] = count
             if count > self._max_recoverable_retries:
                 logger.error(
-                    "ERROR-ROUTING: Process %s exceeded max recoverable retries "
-                    "(%d/%d) in flow %s — terminating flow. Latest: %s",
+                    "ERROR-ROUTING: Process %s exceeded max recoverable retries (%d/%d) in flow %s — terminating flow. Latest: %s",
                     process_key,
                     count,
                     self._max_recoverable_retries,
@@ -3049,14 +2950,10 @@ class ActionQueuePoller:
             notes,
         )
 
-        prepared_template = self._prepare_error_template(
-            template, session_id, flow_id, context_id, process_key
-        )
+        prepared_template = self._prepare_error_template(template, session_id, flow_id, context_id, process_key)
 
         # Submit through ActionFactory - template functions resolved via NewTemplateEngine
-        submitted_id = self.action_factory.submit_result_with_template(
-            error_data, prepared_template
-        )
+        submitted_id = self.action_factory.submit_result_with_template(error_data, prepared_template)
         if submitted_id:
             return True
 
@@ -3132,11 +3029,7 @@ class ActionQueuePoller:
         actions, and only these two keys pay the tombstone lookup, so the
         universal dequeue path takes on no DB read.
         """
-        return (
-            action.process_key in _RESULT_ERROR_PROCESSING_KEYS
-            and action.flow_id is not None
-            and action.flow_id in self._terminated_flow_ids
-        )
+        return action.process_key in _RESULT_ERROR_PROCESSING_KEYS and action.flow_id is not None and action.flow_id in self._terminated_flow_ids
 
     def _drop_terminated_flow_sibling(self, action: QueuedAction) -> None:
         """Mark a doomed result/error-processing sibling failed WITHOUT
@@ -3150,16 +3043,13 @@ class ActionQueuePoller:
         record, continuation for a dead flow is moot, and skipping the token
         write avoids a missing-row raise inside the serial poll loop.
         """
-        reason = (
-            f"SWAP-GUARD: flow {action.flow_id} already terminated — dropping "
-            f"queued {action.process_key} sibling (id={action.id}) without "
-            "execution (REL-03 swap-window burst guard)"
-        )
+        reason = f"SWAP-GUARD: flow {action.flow_id} already terminated — dropping queued {action.process_key} sibling (id={action.id}) without execution (REL-03 swap-window burst guard)"
         logger.info(reason)
         self._update_action_status_to_failed(action.id, reason)
 
     def _extract_trigger_data_from_flow_row(
-        self, flow_id: str,
+        self,
+        flow_id: str,
     ) -> dict[str, object] | None:
         """Read the ``flows`` row for ``flow_id`` and return its parsed
         ``trigger_data`` dict, or ``None`` if the row is missing / malformed /
@@ -3234,10 +3124,7 @@ class ActionQueuePoller:
         has_io_source = isinstance(source_namespace, str) and bool(source_namespace)
         vertex_instance = trigger_data.get("inference_vertex_session_id")
         vertex_role = trigger_data.get("inference_vertex_role")
-        has_vertex_binding = (
-            (isinstance(vertex_instance, str) and bool(vertex_instance))
-            or (isinstance(vertex_role, str) and bool(vertex_role))
-        )
+        has_vertex_binding = (isinstance(vertex_instance, str) and bool(vertex_instance)) or (isinstance(vertex_role, str) and bool(vertex_role))
         return not has_io_source and not has_vertex_binding
 
     def _get_flow_error_count(self, flow_id: str) -> int:
@@ -3283,9 +3170,7 @@ class ActionQueuePoller:
             # now an ERROR in the log naming the flow, so "the breaker is not
             # firing" can be distinguished from "there is nothing to fire on".
             logger.error(
-                "ERROR-ROUTING: could not read the failed-action count for flow "
-                "%s — the max-flow-errors breaker CANNOT FIRE this pass and the "
-                "flow continues. Envelope: %r",
+                "ERROR-ROUTING: could not read the failed-action count for flow %s — the max-flow-errors breaker CANNOT FIRE this pass and the flow continues. Envelope: %r",
                 flow_id,
                 result,
             )
@@ -3398,9 +3283,7 @@ class ActionQueuePoller:
         """
 
         # Step 1: Update action status to completed
-        self._update_action_status_to_completed(action_id)
-        if on_status_written is not None:
-            on_status_written()
+        self._update_action_status_to_completed(action_id, on_status_written)
 
         # Step 2: Get action details for result processing
         action_details = self._retrieve_action_details(action_id)
@@ -3442,9 +3325,7 @@ class ActionQueuePoller:
         # Step 4: Submit actions returned by the plugin (Pattern 6a support)
         # If any returned action fails validation, it is routed to process_error.
         # In that case, skip Step 5 — the error flow handles the response.
-        actions_submitted = self._submit_returned_actions(
-            result, notes, session_id, flow_id, context_id
-        )
+        actions_submitted = self._submit_returned_actions(result, notes, session_id, flow_id, context_id)
 
         dispatch_outcome = self._maybe_dispatch_result_processing(
             action_id=action_id,
@@ -3470,29 +3351,21 @@ class ActionQueuePoller:
         # Contract violations also block — the result row stays
         # completed, but the parent flow must not auto-advance until
         # the process-level error handler resolves the violation.
-        blocked = (
-            bool(result.get("blocks_continuation", False))
-            or dispatch_outcome is DispatchOutcome.CONTRACT_VIOLATION_DISPATCHED
-        )
+        blocked = bool(result.get("blocks_continuation", False)) or dispatch_outcome is DispatchOutcome.CONTRACT_VIOLATION_DISPATCHED
         if blocked:
-            logger.info(
-                f"BLOCKED: {process_key} (id={action_id}) — "
-                f"result blocks_continuation={result.get('blocks_continuation', False)}, "
-                f"dispatch_outcome={dispatch_outcome}"
-            )
+            logger.info(f"BLOCKED: {process_key} (id={action_id}) — result blocks_continuation={result.get('blocks_continuation', False)}, dispatch_outcome={dispatch_outcome}")
 
-        # Only complete token if no pending jobs are linked to it
+        # A linked job owns token resolution, even after its terminal commit.
+        # Its completion routing may still be in flight on the worker.
         if flow_token_id:
-            if self._token_has_pending_jobs(flow_token_id):
-                # Token has pending jobs - transition to WAITING_JOB
+            if self._token_has_linked_jobs(flow_token_id):
+                # A fast worker may have resolved it already; FRG transitions are monotonic.
                 self._flow_runtime_graph.update_token_state(flow_token_id, TokenState.WAITING_JOB)
             else:
-                # No pending jobs - complete the token
+                # No job owns this token - complete it here
                 # Default to "completed" if service didn't explicitly set action_status
                 result_summary = {"action_status": result.get("action_status", "completed")}
-                self._flow_runtime_graph.complete_token(
-                    flow_token_id, success=not blocked, result_summary=result_summary
-                )
+                self._flow_runtime_graph.complete_token(flow_token_id, success=not blocked, result_summary=result_summary)
 
     def _maybe_dispatch_result_processing(
         self,
@@ -3523,10 +3396,7 @@ class ActionQueuePoller:
         Otherwise delegates to :meth:`_dispatch_result_processing`.
         """
         if actions_submitted is False and result.get("actions"):
-            logger.info(
-                f"Skipping result_processor for {process_key}: "
-                "returned action submission failed, routed to process_error"
-            )
+            logger.info(f"Skipping result_processor for {process_key}: returned action submission failed, routed to process_error")
             return None
         # EDGE_SINK actions (e.g. ``deliver_result``, ``deliver_error``,
         # plugin ``start_interface``) carry no result-side routing — they
@@ -3536,14 +3406,9 @@ class ActionQueuePoller:
         # attached for failure handling; that path runs from
         # ``_mark_action_failed`` and is not gated here.
         if result_processor_kind is None and result_processor is None:
-            logger.debug(
-                f"EDGE_SINK_SKIP: {process_key} (id={action_id}) — terminal action, "
-                "no dispatch"
-            )
+            logger.debug(f"EDGE_SINK_SKIP: {process_key} (id={action_id}) — terminal action, no dispatch")
             return None
-        logger.debug(
-            f"FRG_CONTEXT_SET: Setting parent context to flow_token_id={flow_token_id}"
-        )
+        logger.debug(f"FRG_CONTEXT_SET: Setting parent context to flow_token_id={flow_token_id}")
         with result_processor_context(flow_token_id):
             return self._dispatch_result_processing(
                 action_id=action_id,
@@ -3604,14 +3469,8 @@ class ActionQueuePoller:
             notes=notes,
             result_processor=result_processor,
             error_processor=error_processor,
-            result_processor_kind=(
-                ResultProcessorKind(result_processor_kind)
-                if result_processor_kind else None
-            ),
-            error_processor_kind=(
-                ErrorProcessorKind(error_processor_kind)
-                if error_processor_kind else None
-            ),
+            result_processor_kind=(ResultProcessorKind(result_processor_kind) if result_processor_kind else None),
+            error_processor_kind=(ErrorProcessorKind(error_processor_kind) if error_processor_kind else None),
             result_processor_target=result_processor_target,
             session_id=session_id,
             flow_id=flow_id,
@@ -3634,9 +3493,8 @@ class ActionQueuePoller:
             from ananta.core.actions.result_processing_glue import (
                 build_result_processing_coordinator,
             )
-            self._result_processing_coordinator = (
-                build_result_processing_coordinator(self)
-            )
+
+            self._result_processing_coordinator = build_result_processing_coordinator(self)
         return self._result_processing_coordinator
 
     def _get_error_dispatcher(self) -> ResultProcessingErrorDispatcher:
@@ -3650,6 +3508,7 @@ class ActionQueuePoller:
             from ananta.core.actions.result_processing_glue import (
                 build_error_dispatcher,
             )
+
             self._result_processing_error_dispatcher = build_error_dispatcher(self)
         return self._result_processing_error_dispatcher
 
@@ -3678,15 +3537,27 @@ class ActionQueuePoller:
             },
         )
         _terminal_write_landed(
-            result, action_id, ActionStatus.FAILED.value, expected_status.value,
+            result,
+            action_id,
+            ActionStatus.FAILED.value,
+            expected_status.value,
         )
 
     def _retrieve_failed_action_details(
         self, action_id: str
-    ) -> tuple[
-        str, object, str | None, str | None, str | None,
-        str | None, str | None, str | None,
-    ] | None:
+    ) -> (
+        tuple[
+            str,
+            object,
+            str | None,
+            str | None,
+            str | None,
+            str | None,
+            str | None,
+            str | None,
+        ]
+        | None
+    ):
         """Retrieve action details for error processing. Returns None on failure.
 
         Tuple shape:
@@ -3854,10 +3725,7 @@ class ActionQueuePoller:
                 result_processor=None,
                 error_processor=error_processor,
                 result_processor_kind=None,
-                error_processor_kind=(
-                    ErrorProcessorKind(error_processor_kind)
-                    if error_processor_kind else None
-                ),
+                error_processor_kind=(ErrorProcessorKind(error_processor_kind) if error_processor_kind else None),
                 result_processor_target=None,
                 session_id=session_id,
                 flow_id=flow_id,
@@ -3878,9 +3746,7 @@ class ActionQueuePoller:
 
         # FRG token failure handling
         if flow_token_id:
-            self._flow_runtime_graph.complete_token(
-                flow_token_id, success=False, result_summary={"error": error_message}
-            )
+            self._flow_runtime_graph.complete_token(flow_token_id, success=False, result_summary={"error": error_message})
 
     def _inject_ids_into_template(
         self,
@@ -3914,9 +3780,7 @@ class ActionQueuePoller:
         if isinstance(actions_list, list):
             for idx, action_template in enumerate(actions_list):
                 if not isinstance(action_template, dict):
-                    logger.error(
-                        f"ERROR-PROCESSOR: Skipping invalid action template at index {idx}"
-                    )
+                    logger.error(f"ERROR-PROCESSOR: Skipping invalid action template at index {idx}")
                     continue
                 template_copy = deepcopy(action_template)
                 self._inject_ids_into_template(template_copy, session_id, flow_id, context_id)
@@ -3985,31 +3849,19 @@ class ActionQueuePoller:
             error_data[TEMPLATE_VAR_NOTES] = notes
 
         # Prepare and submit error recovery templates
-        templates = self._prepare_error_recovery_templates(
-            template_data, session_id, flow_id, context_id, notes
-        )
+        templates = self._prepare_error_recovery_templates(template_data, session_id, flow_id, context_id, notes)
         for action_template in templates:
             if not self.action_factory.submit_result_with_template(error_data, action_template):
-                raise RuntimeError(
-                    f"Failed to submit error recovery template for action {action_id}"
-                )
+                raise RuntimeError(f"Failed to submit error recovery template for action {action_id}")
 
-    def _token_has_pending_jobs(self, token_id: str) -> bool:
-        """Check if token has pending jobs linked to it.
-
-        Returns True if there are jobs with this token that are not in a
-        terminal state. Used to decide whether to complete the token or
-        transition it to WAITING_JOB. The non-terminal status set is the
-        closed-domain complement ``_PENDING_JOB_STATES`` (see its definition).
-        """
+    def _token_has_linked_jobs(self, token_id: str) -> bool:
+        """Leave resolution to the job worker, including the terminal-commit race."""
         result = self.state_service.query_state(
             "core",
             {
                 "table": "job",
-                "filters": {
-                    "flow_token_id": token_id,
-                    "status": [status.value for status in _PENDING_JOB_STATES],
-                },
+                "filters": {"flow_token_id": token_id},
+                "limit": 1,
             },
         )
         return len(self._query_records(result)) > 0

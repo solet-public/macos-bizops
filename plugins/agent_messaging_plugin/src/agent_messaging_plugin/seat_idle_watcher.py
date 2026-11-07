@@ -190,7 +190,10 @@ def read_process_env_var(pid: int, var_name: str) -> str | None:
     try:
         result = subprocess.run(
             ["ps", "eww", "-p", str(pid)],
-            capture_output=True, text=True, timeout=10, check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -199,7 +202,7 @@ def read_process_env_var(pid: int, var_name: str) -> str | None:
     prefix = f"{var_name}="
     for token in result.stdout.split():
         if token.startswith(prefix):
-            return token[len(prefix):]
+            return token[len(prefix) :]
     return None
 
 
@@ -289,7 +292,9 @@ def transcript_path_for(project_dir_slug: str, claude_session_id: str) -> Path:
 
 
 def cross_check_idle(
-    identity: SeatIdentity, transcript_path: Path, *,
+    identity: SeatIdentity,
+    transcript_path: Path,
+    *,
     agreement_tolerance_seconds: float = 5.0,
 ) -> bool:
     """``True`` when the transcript corroborates the status file's claimed
@@ -329,8 +334,11 @@ def _solet_inbox() -> dict[str, Any] | None:
         return None
     try:
         result = subprocess.run(
-            ["solet-bridge", "inbox", "--observer"], capture_output=True, text=True,
-            timeout=20, check=False,
+            ["solet-bridge", "inbox", "--observer"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         _log(f"solet-bridge inbox failed to run: {exc}")
@@ -394,7 +402,9 @@ def _record_poke(state_path: Path, *, at: float) -> None:
 
 
 def is_poke_on_cooldown(
-    last_poke_at: float | None, *, now: float,
+    last_poke_at: float | None,
+    *,
+    now: float,
     cooldown_seconds: float = _rotation_thresholds.POKE_COOLDOWN_SECONDS,
 ) -> bool:
     if last_poke_at is None:
@@ -403,7 +413,10 @@ def is_poke_on_cooldown(
 
 
 def decide_action(
-    *, idle_seconds: float, pending_count: int, poke_on_cooldown: bool,
+    *,
+    idle_seconds: float,
+    pending_count: int,
+    poke_on_cooldown: bool,
     idle_poke_threshold_seconds: float = _rotation_thresholds.IDLE_POKE_THRESHOLD_SECONDS,
     idle_rotate_threshold_seconds: float = _rotation_thresholds.IDLE_ROTATE_THRESHOLD_SECONDS,
 ) -> WatchDecision:
@@ -418,8 +431,7 @@ def decide_action(
     if poke_due and not poke_on_cooldown:
         return WatchDecision(
             ACTION_POKE,
-            f"idle {idle_seconds:.0f}s >= poke threshold "
-            f"({idle_poke_threshold_seconds:.0f}s) with {pending_count} pending",
+            f"idle {idle_seconds:.0f}s >= poke threshold ({idle_poke_threshold_seconds:.0f}s) with {pending_count} pending",
         )
     if has_pending:
         cooldown_note = "poke on cooldown" if poke_on_cooldown else "idle below poke threshold"
@@ -430,14 +442,16 @@ def decide_action(
     if rotate_due:
         return WatchDecision(
             ACTION_ROTATE,
-            f"idle {idle_seconds:.0f}s >= rotate threshold "
-            f"({idle_rotate_threshold_seconds:.0f}s), nothing pending",
+            f"idle {idle_seconds:.0f}s >= rotate threshold ({idle_rotate_threshold_seconds:.0f}s), nothing pending",
         )
     return WatchDecision(ACTION_NONE, "below both thresholds, nothing pending")
 
 
 async def _confirm_pane_ready_for_action(
-    role_tag: str, cleared_signature: str, *, settle_timeout_seconds: float,
+    role_tag: str,
+    cleared_signature: str,
+    *,
+    settle_timeout_seconds: float,
 ) -> tuple[bool, str]:
     """Condition 5's dedicated outer gate: fresh pane resolution, a
     stable-screen check, THEN a positive empty-composer check -- performed
@@ -462,7 +476,8 @@ async def _confirm_pane_ready_for_action(
     session = session_by_id[match.session_id]
     try:
         await _rotation_helper.wait_for_screen_stable(
-            session, timeout_seconds=settle_timeout_seconds,
+            session,
+            timeout_seconds=settle_timeout_seconds,
         )
     except _rotation_helper.ScreenStabilityTimeoutError:
         return False, "screen not stable (mid-redraw or an active turn in progress)"
@@ -474,8 +489,13 @@ async def _confirm_pane_ready_for_action(
 
 
 async def run_tick(
-    *, role_tag: str, cleared_signature: str, pickup_prompt_path: Path,
-    poke_message: str, marker_dir: Path, project_dir: Path,
+    *,
+    role_tag: str,
+    cleared_signature: str,
+    pickup_prompt_path: Path,
+    poke_message: str,
+    marker_dir: Path,
+    project_dir: Path,
     idle_poke_threshold_seconds: float = _rotation_thresholds.IDLE_POKE_THRESHOLD_SECONDS,
     idle_rotate_threshold_seconds: float = _rotation_thresholds.IDLE_ROTATE_THRESHOLD_SECONDS,
     poke_cooldown_seconds: float = _rotation_thresholds.POKE_COOLDOWN_SECONDS,
@@ -485,7 +505,7 @@ async def run_tick(
     check pending mail, decide, gate, act. Every branch returns a
     JSON-serializable envelope describing exactly what happened (or didn't)
     -- nothing is silently swallowed."""
-    identity = resolve_seat_identity(role_tag)
+    identity = await _rotation_helper.SEAT_IO.run(resolve_seat_identity, role_tag)
     if identity is None:
         return {"tick_status": "skipped", "reason": f"could not resolve a live session for role_tag={role_tag!r}"}
 
@@ -495,49 +515,63 @@ async def run_tick(
         return {"tick_status": "skipped", "reason": "seat not idle", "status": identity.status}
 
     transcript_path = transcript_path_for(project_dir_slug_for(project_dir), identity.claude_session_id)
-    if not cross_check_idle(identity, transcript_path):
+    if not await _rotation_helper.SEAT_IO.run(cross_check_idle, identity, transcript_path):
         return {"tick_status": "skipped", "reason": "idle-file/transcript-mtime cross-check disagreed; fail-safe skip"}
 
-    pending_count = resolve_pending_count(identity.agent_session_id)
+    pending_count = await _rotation_helper.SEAT_IO.run(resolve_pending_count, identity.agent_session_id)
     if pending_count is None:
         pending_count = 0
 
     state_path = _state_path(marker_dir, identity.agent_instance_id, identity.claude_session_id)
     on_cooldown = is_poke_on_cooldown(
-        _read_last_poke_at(state_path), now=now, cooldown_seconds=poke_cooldown_seconds,
+        await _rotation_helper.SEAT_IO.run(_read_last_poke_at, state_path),
+        now=now,
+        cooldown_seconds=poke_cooldown_seconds,
     )
     decision = decide_action(
-        idle_seconds=idle_seconds, pending_count=pending_count, poke_on_cooldown=on_cooldown,
+        idle_seconds=idle_seconds,
+        pending_count=pending_count,
+        poke_on_cooldown=on_cooldown,
         idle_poke_threshold_seconds=idle_poke_threshold_seconds,
         idle_rotate_threshold_seconds=idle_rotate_threshold_seconds,
     )
     if decision.action == ACTION_NONE:
         return {
-            "tick_status": "no_action", "reason": decision.reason,
-            "idle_seconds": idle_seconds, "pending_count": pending_count,
+            "tick_status": "no_action",
+            "reason": decision.reason,
+            "idle_seconds": idle_seconds,
+            "pending_count": pending_count,
         }
 
     ready, ready_reason = await _confirm_pane_ready_for_action(
-        role_tag, cleared_signature, settle_timeout_seconds=settle_timeout_seconds,
+        role_tag,
+        cleared_signature,
+        settle_timeout_seconds=settle_timeout_seconds,
     )
     if not ready:
         return {
-            "tick_status": "refused", "decision": decision.action,
+            "tick_status": "refused",
+            "decision": decision.action,
             "reason": f"ACT-time gate failed: {ready_reason}",
         }
 
     if decision.action == ACTION_POKE:
         result = await _rotation_helper.run_rotation(
-            role_tag, poke_message, cleared_signature=cleared_signature,
-            settle_timeout_seconds=settle_timeout_seconds, inject_only=True,
+            role_tag,
+            poke_message,
+            cleared_signature=cleared_signature,
+            settle_timeout_seconds=settle_timeout_seconds,
+            inject_only=True,
         )
         if result.get("status") == "completed":
-            _record_poke(state_path, at=now)
+            await _rotation_helper.SEAT_IO.run(_record_poke, state_path, at=now)
         return {"tick_status": "acted", "action": ACTION_POKE, "result": result}
 
-    pickup_text = pickup_prompt_path.read_text(encoding="utf-8")
+    pickup_text = await _rotation_helper.SEAT_IO.run(pickup_prompt_path.read_text, encoding="utf-8")
     result = await _rotation_helper.run_rotation(
-        role_tag, pickup_text, cleared_signature=cleared_signature,
+        role_tag,
+        pickup_text,
+        cleared_signature=cleared_signature,
         settle_timeout_seconds=settle_timeout_seconds,
     )
     return {"tick_status": "acted", "action": ACTION_ROTATE, "result": result}
@@ -569,13 +603,17 @@ async def poll_forever(args: argparse.Namespace) -> None:
                 poke_cooldown_seconds=args.poke_cooldown_seconds,
                 settle_timeout_seconds=args.settle_timeout_seconds,
             )
-            _log(json.dumps(result))
+            await _rotation_helper.SEAT_IO.run(_log_tick, result)
         except Exception as exc:  # noqa: BLE001 -- the watcher must never crash-loop silently
             _log(f"tick raised: {exc!r}")
-        write_liveness(liveness_path, pid=os.getpid(), last_poll_at=time.time())
+        await _rotation_helper.SEAT_IO.run(write_liveness, liveness_path, pid=os.getpid(), last_poll_at=time.time())
         if args.once:
             return
         await asyncio.sleep(args.poll_interval_seconds)
+
+
+def _log_tick(result: dict[str, Any]) -> None:
+    _log(json.dumps(result))
 
 
 def _default_marker_dir() -> str:
@@ -597,27 +635,33 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--project-dir", default=str(Path.cwd()))
     parser.add_argument(
-        "--poll-interval-seconds", type=float,
+        "--poll-interval-seconds",
+        type=float,
         default=_rotation_thresholds.WATCH_POLL_INTERVAL_SECONDS,
     )
     parser.add_argument(
-        "--idle-poke-threshold-seconds", type=float,
+        "--idle-poke-threshold-seconds",
+        type=float,
         default=_rotation_thresholds.IDLE_POKE_THRESHOLD_SECONDS,
     )
     parser.add_argument(
-        "--idle-rotate-threshold-seconds", type=float,
+        "--idle-rotate-threshold-seconds",
+        type=float,
         default=_rotation_thresholds.IDLE_ROTATE_THRESHOLD_SECONDS,
     )
     parser.add_argument(
-        "--poke-cooldown-seconds", type=float,
+        "--poke-cooldown-seconds",
+        type=float,
         default=_rotation_thresholds.POKE_COOLDOWN_SECONDS,
     )
     parser.add_argument(
-        "--settle-timeout-seconds", type=float,
+        "--settle-timeout-seconds",
+        type=float,
         default=_rotation_helper.DEFAULT_SETTLE_TIMEOUT_SECONDS,
     )
     parser.add_argument(
-        "--once", action="store_true",
+        "--once",
+        action="store_true",
         help="Run a single tick and exit (status checks, manual testing) instead of looping forever.",
     )
     return parser

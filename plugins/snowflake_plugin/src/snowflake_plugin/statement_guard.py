@@ -1,13 +1,9 @@
-"""Read-only statement guard — FAST-FAIL ONLY, not the write boundary.
+"""Validate SQL input before forwarding it to Snowflake.
 
-Unlike external_postgres_plugin's guard (a belt alongside the LOAD-BEARING
-``conn.read_only`` connection characteristic), Snowflake has no session-level
-read-only flag. This guard is the ONLY connector-side line: it cannot, by
-itself, stop an over-privileged role from writing. The TRUE developer-proof
-boundary is the read-only ROLE the connection is pinned to (GRANT
-SELECT/USAGE only — no INSERT/UPDATE/DELETE/MERGE/DDL); the account
-connection runbook (knowledge_base/01_snowflake_overview.md) treats that
-role grant as MANDATORY, not optional.
+Snowflake's vendor role is the access boundary. This module only rejects
+empty or comment-led input, then lets the existing query runner forward any
+statement shape to the registered account. Snowflake's own driver handles its
+single-statement contract.
 
 Single-statement is NATIVE (Snowflake's ``MULTI_STATEMENT_COUNT`` defaults to
 1, and this plugin never calls ``execute_string``) — no statement-splitting
@@ -22,11 +18,11 @@ from __future__ import annotations
 
 import re
 
-from .constants import ERROR_INVALID_PARAMS, ERROR_READ_ONLY_VIOLATION, READ_LEADERS
+from .constants import ERROR_INVALID_PARAMS
 
 
 class StatementGuardError(RuntimeError):
-    """Raised when a statement is refused by the read-only leader guard."""
+    """Raised when SQL input is malformed before it reaches Snowflake."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -34,25 +30,17 @@ class StatementGuardError(RuntimeError):
 
 
 def assert_read_statement(sql: str) -> None:
-    """Refuse a statement whose leading keyword is not a permitted read leader.
+    """Validate SQL input, preserving the existing internal function name.
 
     Comment-led input is refused outright (fail loud, no comment-stripping
-    parser) — matching the rev-D near-code spec.
+    parser). Non-empty statements are passed through; vendor RBAC decides
+    whether Snowflake authorizes the operation.
     """
     stripped = sql.lstrip()
     if stripped.startswith("--") or stripped.startswith("/*"):
-        raise StatementGuardError(
-            ERROR_INVALID_PARAMS, "strip comments before submitting sql"
-        )
+        raise StatementGuardError(ERROR_INVALID_PARAMS, "strip comments before submitting sql")
     if not stripped:
         raise StatementGuardError(ERROR_INVALID_PARAMS, "no SQL statement was provided")
-    leader = leading_keyword(sql)
-    if leader not in READ_LEADERS:
-        raise StatementGuardError(
-            ERROR_READ_ONLY_VIOLATION,
-            f"statement leader '{leader or '?'}' is not a permitted read statement; "
-            "this connector is read-only",
-        )
 
 
 def leading_keyword(sql: str) -> str:

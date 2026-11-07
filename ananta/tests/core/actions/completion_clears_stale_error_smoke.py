@@ -50,6 +50,7 @@ Run:
 
 from __future__ import annotations
 
+import inspect
 import logging
 import sys
 from pathlib import Path
@@ -60,16 +61,14 @@ sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
 from ananta.core.actions.action_queue_poller import ActionQueuePoller  # noqa: E402
+from ananta.core.actions.state_update_result import StateUpdateResultError  # noqa: E402
 
 from agent_messaging_plugin.platform_surface import PlatformSurface  # noqa: E402
 
 _POLLER_LOGGER = "ananta.core.actions.action_queue_poller"
 _ACTION_ID = "ae-issue9"
 _PROCESS_KEY = "plugin::agent_messaging_plugin::deliver_result"
-_STALE_ERROR = (
-    "{'type': 'agent_messaging_error', 'code': 'unsupported_on_host', "
-    "'message': 'host_ref not recognised by this process'}"
-)
+_STALE_ERROR = "{'type': 'agent_messaging_error', 'code': 'unsupported_on_host', 'message': 'host_ref not recognised by this process'}"
 
 _passed = 0
 _failed: list[str] = []
@@ -106,6 +105,7 @@ class _FakeStateService:
         self.results: list[dict[str, Any]] = []
         self.update_payloads: list[dict[str, Any]] = []
         self.read_envelope_status = "completed"
+        self.update_result: dict[str, Any] | None = None
         self._clock = 0
 
     @staticmethod
@@ -139,11 +139,11 @@ class _FakeStateService:
         rows = self._rows(query["table"], query.get("filters", {}))
         return self._ok({"records": rows, "count": len(rows)})
 
-    def update_state(
-        self, namespace: str, query: dict[str, Any], updates: dict[str, Any]
-    ) -> dict[str, Any]:
+    def update_state(self, namespace: str, query: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
         _ = namespace
         self.update_payloads.append(dict(updates))
+        if self.update_result is not None:
+            return self.update_result
         updated = 0
         for row in self.events.values():
             if self._match(row, query["filters"]):
@@ -171,9 +171,7 @@ class _LogCapture(logging.Handler):
         self.records.append(record)
 
     def warnings(self) -> list[str]:
-        return [
-            r.getMessage() for r in self.records if r.levelno >= logging.WARNING
-        ]
+        return [r.getMessage() for r in self.records if r.levelno >= logging.WARNING]
 
 
 def _poller(state: _FakeStateService) -> ActionQueuePoller:
@@ -197,9 +195,7 @@ def _envelope(state: _FakeStateService) -> dict[str, Any]:
     return surface.process_result(_ACTION_ID)
 
 
-def _run_failed_then_succeeded() -> tuple[
-    _FakeStateService, ActionQueuePoller, _LogCapture, dict[str, Any]
-]:
+def _run_failed_then_succeeded() -> tuple[_FakeStateService, ActionQueuePoller, _LogCapture, dict[str, Any]]:
     """Replay #9: attempt 1 fails, attempt 2 succeeds, on ONE action row.
 
     Both attempts go through the shipped writers, in the shipped order
@@ -240,8 +236,7 @@ def test_the_split_envelope_is_gone() -> None:
 
     _check(
         len(state.results) == 2,
-        "fixture precondition: the action row owns TWO result rows "
-        f"(got {len(state.results)}) — without this the merge cannot occur",
+        f"fixture precondition: the action row owns TWO result rows (got {len(state.results)}) — without this the merge cannot occur",
     )
     _check(
         envelope.get("status") == "completed",
@@ -249,8 +244,7 @@ def test_the_split_envelope_is_gone() -> None:
     )
     _check(
         envelope.get("error_message") is None,
-        "the rendered envelope no longer pairs a stale error with the success "
-        f"(got {envelope.get('error_message')!r})",
+        f"the rendered envelope no longer pairs a stale error with the success (got {envelope.get('error_message')!r})",
     )
     result = envelope.get("result")
     _check(
@@ -262,11 +256,7 @@ def test_the_split_envelope_is_gone() -> None:
 def test_the_completed_write_clears_the_column_explicitly() -> None:
     """The clear must live in THIS writer — the asymmetry is the bug."""
     state, _poller_obj, _capture, _envelope_out = _run_failed_then_succeeded()
-    completed_writes = [
-        payload
-        for payload in state.update_payloads
-        if payload.get("status") == "completed"
-    ]
+    completed_writes = [payload for payload in state.update_payloads if payload.get("status") == "completed"]
     _check(
         len(completed_writes) == 1,
         f"exactly one completed status write was issued (got {len(completed_writes)})",
@@ -274,42 +264,103 @@ def test_the_completed_write_clears_the_column_explicitly() -> None:
     payload = completed_writes[0] if completed_writes else {}
     _check(
         "error_message" in payload and payload["error_message"] is None,
-        "the completed status write clears error_message EXPLICITLY "
-        f"(payload was {payload!r})",
+        f"the completed status write clears error_message EXPLICITLY (payload was {payload!r})",
+    )
+
+
+def test_failed_completed_write_leaves_completion_unacknowledged() -> None:
+    state = _FakeStateService()
+    state.update_result = {
+        "action_status": "failed",
+        "data": {"result": {"updated": 0}},
+        "error": {"message": "write failed"},
+    }
+    poller = _poller(state)
+    completion_written = False
+    callback_calls = 0
+
+    def note_completion_written() -> None:
+        nonlocal completion_written, callback_calls
+        completion_written = True
+        callback_calls += 1
+
+    poller._retrieve_action_details = lambda _action_id: None
+    try:
+        poller._mark_action_completed(
+            _ACTION_ID,
+            {},
+            on_status_written=note_completion_written,
+        )
+    except StateUpdateResultError:
+        pass
+
+    _check(
+        not completion_written and callback_calls == 0,
+        "failed completed write leaves completion_written False",
     )
 
 
 def test_clearing_announces_a_double_execution() -> None:
     """★ The instrument. A silent clear closes #9 and hides its cause."""
-    _state, _poller_obj, capture, _envelope_out = _run_failed_then_succeeded()
-    announcements = [
-        message
-        for message in capture.warnings()
-        if "DOUBLE-EXECUTION DETECTED" in message
-    ]
+    state = _FakeStateService(error_message=_STALE_ERROR)
+    poller = _poller(state)
+    capture = _LogCapture()
+    order: list[str] = []
+    original_report = poller._report_double_execution
+
+    def report(action_id: str, stale_error: str) -> None:
+        order.append("diagnostic")
+        original_report(action_id, stale_error)
+
+    poller._report_double_execution = report
+    supports_writer_callback = (
+        "on_status_written"
+        in inspect.signature(
+            poller._update_action_status_to_completed,
+        ).parameters
+    )
+    logger = logging.getLogger(_POLLER_LOGGER)
+    logger.addHandler(capture)
+    try:
+        if supports_writer_callback:
+            poller._update_action_status_to_completed(
+                _ACTION_ID,
+                on_status_written=lambda: order.append("ack"),
+            )
+        else:
+            poller._retrieve_action_details = lambda _action_id: None
+            poller._mark_action_completed(
+                _ACTION_ID,
+                {},
+                on_status_written=lambda: order.append("ack"),
+            )
+    finally:
+        logger.removeHandler(capture)
+    announcements = [message for message in capture.warnings() if "DOUBLE-EXECUTION DETECTED" in message]
     _check(
         len(announcements) == 1,
-        "clearing a stale error announces a DOUBLE-EXECUTION at WARNING "
-        f"(got {len(announcements)} such warnings)",
+        f"clearing a stale error announces a DOUBLE-EXECUTION at WARNING (got {len(announcements)} such warnings)",
     )
     message = announcements[0] if announcements else ""
     _check(
         _ACTION_ID in message,
         "the announcement names the action row it happened on",
     )
+    if supports_writer_callback:
+        _check(
+            order == ["ack", "diagnostic"],
+            f"completion callback runs once before double-execution diagnostics (order was {order!r})",
+        )
 
 
 def test_the_announcement_carries_both_timestamps() -> None:
     """Both halves of the race, or the signal cannot be measured against."""
     state, _poller_obj, capture, _envelope_out = _run_failed_then_succeeded()
-    message = next(
-        (m for m in capture.warnings() if "DOUBLE-EXECUTION DETECTED" in m), ""
-    )
+    message = next((m for m in capture.warnings() if "DOUBLE-EXECUTION DETECTED" in m), "")
     failed_attempt_created_at = state.results[0]["created_at"] if state.results else ""
     _check(
         f"previous_attempt_result_at={failed_attempt_created_at}" in message,
-        "the announcement carries the action_id and BOTH timestamps — earlier "
-        f"attempt at {failed_attempt_created_at!r} (message was {message!r})",
+        f"the announcement carries the action_id and BOTH timestamps — earlier attempt at {failed_attempt_created_at!r} (message was {message!r})",
     )
     _check(
         "this_completion_at=2" in message,
@@ -317,8 +368,7 @@ def test_the_announcement_carries_both_timestamps() -> None:
     )
     _check(
         "unsupported_on_host" in message,
-        "the cleared error text is preserved in the log — the row no longer "
-        "holds it, so the announcement is now the only copy",
+        "the cleared error text is preserved in the log — the row no longer holds it, so the announcement is now the only copy",
     )
 
 
@@ -327,8 +377,7 @@ def test_the_counter_counts_the_detection() -> None:
     _state, poller, _capture, _envelope_out = _run_failed_then_succeeded()
     _check(
         poller.total_double_executions_detected == 1,
-        "the telemetry counter counts the detection "
-        f"(got {poller.total_double_executions_detected})",
+        f"the telemetry counter counts the detection (got {poller.total_double_executions_detected})",
     )
     _check(
         poller.get_metrics().get("total_double_executions_detected") == 1,
@@ -355,19 +404,15 @@ def test_a_clean_completion_stays_silent() -> None:
 
     _check(
         not [m for m in capture.warnings() if "DOUBLE-EXECUTION" in m],
-        "a clean completion stays silent (the instrument must not cry wolf) — "
-        f"warnings were {capture.warnings()!r}",
+        f"a clean completion stays silent (the instrument must not cry wolf) — warnings were {capture.warnings()!r}",
     )
     _check(
         poller.total_double_executions_detected == 0,
-        "a clean completion leaves the counter alone "
-        f"(got {poller.total_double_executions_detected})",
+        f"a clean completion leaves the counter alone (got {poller.total_double_executions_detected})",
     )
     _check(
-        state.update_payloads
-        and state.update_payloads[-1].get("error_message", "missing") is None,
-        "…but the column is still cleared unconditionally — the clear is the "
-        "fix, the announcement is only the instrument",
+        state.update_payloads and state.update_payloads[-1].get("error_message", "missing") is None,
+        "…but the column is still cleared unconditionally — the clear is the fix, the announcement is only the instrument",
     )
     _check(
         state.events[_ACTION_ID]["status"] == "completed",
@@ -390,13 +435,11 @@ def test_an_unreadable_row_is_announced_not_swallowed() -> None:
 
     _check(
         [m for m in capture.warnings() if "DETECTOR BLIND" in m],
-        "an unreadable row is announced as a DETECTOR BLIND SPOT "
-        f"(warnings were {capture.warnings()!r})",
+        f"an unreadable row is announced as a DETECTOR BLIND SPOT (warnings were {capture.warnings()!r})",
     )
     _check(
         state.events[_ACTION_ID]["error_message"] is None,
-        "control: the completion and the clear still happen — a blind detector "
-        "must not block the drain loop",
+        "control: the completion and the clear still happen — a blind detector must not block the drain loop",
     )
 
 

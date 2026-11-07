@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::sql_api",
+  "display_name": "Snowflake: SQL API Statements",
+  "description": "Run SQL through the Snowflake SQL API on the registered account. operation submit POSTs /api/v2/statements with body.statement and optional timeout, database, schema, warehouse, role, bindings and parameters (MULTI_STATEMENT_COUNT for several statements; '0' for any count); query takes requestId, async, nullable and retry, and a requestId is generated when omitted. status GETs /api/v2/statements/{statement_handle} with optional requestId and partition. cancel POSTs /api/v2/statements/{statement_handle}/cancel with an optional requestId. Any statement the role permits runs, including DELETE, MERGE, DDL, GRANT and CALL. Returns job_id/status queued; the HTTP result follows.",
+  "embedding_description": "Run Snowflake SQL over the SQL API REST endpoint: submit one or many statements (DELETE, DDL, MERGE, CALL) with bindings and MULTI_STATEMENT_COUNT, check a statement handle's status, page result partitions, or cancel a running statement. Uses the registered RSA key pair; vendor role grants decide.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake SQL API call queued",
+    "result_type": "snowflake_sql_api_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: family, operation, method, status (HTTP), headers, body (ResultSet with resultSetMetaData.partitionInfo and data rows, QueryStatus for 202, QueryFailureStatus for 422), body_encoding, correlation_id, request_id for submit, error_code for 4xx/5xx, and pagination: statement_handle, statement_handles for multi-statement submits, partition, partition_count and next_partition.",
+    "presentation_guidance": "This operation may have changed vendor state. Queued means the job was accepted, not that Snowflake completed the operation. Report the HTTP status, error_code and body faithfully. A 202 means the statement is still running: call status with pagination.statement_handle. For multi-statement submits, fetch each handle in statement_handles. Fetch further rows with status and partition=pagination.next_partition. Resubmitting the same request_id with retry=true does not re-run a statement that already succeeded. Credential values are replaced with [REDACTED]."
+  },
+  "error_processor_customizations": {
+    "action_context": "Run SQL statements through the registered Snowflake account's SQL API.",
+    "error_interpretation": "snowflake.invalid_params is raised before any vendor call when the operation, identifiers, query parameter names or types, createMode, resultLimit range or required body members do not match the documented vendor shape. Vendor HTTP errors are completion data with status, body and error_code: auth_failed (401), permission_denied (403), object_not_found (404), timeout (408), conflict (409), rate_limited (429), statement_failed (422, SQL API only), api_error otherwise. snowflake.api_error without a status is a transport or configuration failure.",
+    "recovery_guidance": "Read the vendor status and body before retrying. A 403 means the registered role lacks the grant: grant it in Snowflake, the plugin adds no gate of its own. Double-quote identifiers that contain other characters. For a 202, call the same verb with operation fetch_result and the pagination.result_handler. Never silently retry a mutation after a transport error: read the object first."
+  }
+}

@@ -6,7 +6,7 @@ Article Role: plugin_reference
 
 Article Tags: planning-stage:execution, evidence-category:capability-reference, domain:google-workspace, domain:local-solet, domain:cloud-solet
 
-Embedding Description: Google Workspace plugin reference — the one-time operator setup for connecting Gmail, Drive, Sheets, Docs, and Slides to a Workspace account (Desktop-app loopback flow for local solets, Web-application redirect flow for cloud), where the client ID, client secret, and account tokens live (address book vs vault), the 26 verbs with argument shapes, typed gsuite.* errors, recovery for a failed Google token exchange, where created sheets, docs, and slides land in Drive (My Drive root of the connected account) with how to build their URLs from returned ids, and how to create multi-tab spreadsheets from csv/tsv files and apply tab renames or cell formatting via the Sheets batch-update verb.
+Embedding Description: Google Workspace plugin reference — the one-time operator setup for connecting Gmail, Drive, Sheets, Docs, and Slides to one or more Google accounts, Workspace or personal Gmail (Desktop-app loopback flow for local solets, Web-application redirect flow for cloud), where the client ID, client secret, and account tokens live (address book vs vault), the account verbs and the optional account argument, the Gmail and Workspace verbs with argument shapes, typed gsuite.* errors, recovery for a failed Google token exchange, where created sheets, docs, and slides land in Drive (My Drive root of the connected account) with how to build their URLs from returned ids, and how to create multi-tab spreadsheets from csv/tsv files and apply tab renames or cell formatting via the Sheets batch-update verb.
 
 Solet-native access to Google Workspace — **Gmail, Drive, Sheets, Docs,
 Slides** — for the solet, peers, and plans. It is the platform
@@ -34,14 +34,42 @@ solet itself act on Workspace, including on cloud solets.
 
 ## Auth model (operator-decided)
 
-- **Enterprise-only, single-account, full read/write.** The OAuth app is
-  configured **user type = Internal** (locked to one Workspace org — no
-  unverified-app consent screen, no test-user cap). Personal-Gmail support is
-  out of scope.
-- Per-account refresh/access tokens live in **vault** (scoped keys
-  `<solet>.g_suite_plugin.refresh_token` / `.access_token`). Google refresh
-  tokens are durable and are **not** rotated on each refresh (unlike Schwab), so
-  the refresh path updates only the access token.
+- **Several accounts, full read/write (Operator ord 89/90, 2026-11-07).** Any
+  number of Google accounts can be connected (for example work and home), each
+  a Workspace account or a personal `@gmail.com` account. A Workspace-only
+  deployment can keep the OAuth app at **user type = Internal**; personal Gmail
+  accounts, or accounts in more than one org, need **External**. An External app
+  in **Testing** mode must list each account as a test user, and Google expires
+  its refresh tokens **7 days** after consent (the plugin then returns
+  `gsuite.auth_expired` naming that cause); set the consent screen to **In
+  production** to stop the weekly expiry.
+- Each account's refresh/access tokens live in **vault** under per-account keys
+  (`<solet>.g_suite_plugin.account__<slug>_<hash>__refresh_token` /
+  `__access_token`), indexed by `<solet>.g_suite_plugin.accounts_index` (email,
+  alias, default flag). The access entry also records the scopes Google granted
+  and the account tier (`consumer` or `workspace_user`, read from the Gmail
+  profile address; `unknown` when Gmail was not granted and the account was
+  identified by its Drive user email instead). The pre-multi-account pair
+  `<solet>.g_suite_plugin.refresh_token` / `.access_token` is copied to its
+  account on first use, or by `connect_account` before it adds another
+  account, so it stays the default unless `set_default=true` is passed. It is
+  kept until that account is disconnected. If the copy fails, nothing is
+  deleted, the result says so, and the next call retries it.
+  Google refresh tokens are durable and are **not** rotated on each refresh
+  (unlike Schwab), and refresh never re-sends scopes, so adding a scope never
+  breaks an existing account.
+- **Every verb** takes an optional `account` (email or alias). One account: no
+  argument needed. Several: the default is used (the first connected, or the
+  one set by `set_default_account` / `connect_account set_default=true`), and
+  every result names the account it used. An unknown account returns
+  `gsuite.unknown_account` listing the connected accounts. No unified inbox,
+  cross-account search or sync.
+- **Scopes:** the consent requests `gmail.modify` (covers every Gmail verb
+  except permanent delete), `drive`, `documents`, `spreadsheets`,
+  `presentations`. `connect_account gmail_permanent_delete=true` also requests
+  `https://mail.google.com/`, the only scope Gmail accepts for permanent
+  delete. A call the grant does not cover returns `gsuite.missing_scope`
+  naming the scope and the reconnect step.
 - App identity (client_id, redirect_uri, and a `vault::` client-secret
   reference) lives in the **address book** entry `google_oauth_app`. The secret
   is chain-consumed by the address book under its own identity — the plugin
@@ -125,11 +153,12 @@ tokens are durable (no rotation), so this never needs re-running.
 
 11. Dispatch `start_interface` with the port from step 10 (local: host
     `127.0.0.1`)
-12. Dispatch `connect_account` → open the returned `authorize_url` → approve
-13. Verify: `gmail_list_messages` with `{"max": 3}` returns real message ids
-    (not `gsuite.not_connected`), and the token keys
-    `<solet>.g_suite_plugin.refresh_token` / `.access_token` exist
-    (existence-check only)
+12. Dispatch `connect_account` (optional `alias`, `set_default`,
+    `gmail_permanent_delete`) → open the returned `authorize_url` → sign in with
+    the account to connect → approve. Repeat for each further account.
+13. Verify: `list_accounts` shows each account with its tier and granted
+    scopes, and `gmail_list_messages` with `{"max": 3}` (plus `account` when
+    several are connected) returns real message ids.
 
 Note for agent-driven setup: the connector verbs are export-denied on bridge
 surfaces (RATIFY-3), so a bridge session cannot `process_call` them directly —
@@ -151,16 +180,22 @@ holder session to dispatch and report the action id.
   URI — comparing the raw Keychain string against the plaintext secret will
   always "mismatch"; decode before comparing.
 
-## Verbs (built — 26 total)
+## Verbs (built — 59 total: 4 setup, 3 account, 32 Gmail, 20 Drive, Sheets, Docs and Slides)
 
 | Verb | Args | Returns |
 |---|---|---|
 | `connect_account` | — | `{authorize_url, state, redirect_uri, instructions}` |
 | `start_interface` | `host?`, `port?` | `{host, port, callback_url}` |
 | `stop_interface` | — | `{stopped}` |
-| `gmail_list_messages` | `query?`, `max?` (default+cap 500) | `{messages:[{id, thread_id}], count}` |
-| `gmail_get_message` | `id` | `{id, thread_id, snippet, headers, body_text, attachments}` |
-| `gmail_send` | `to`, `subject?`, `body?`, `attachments?` | `{id, thread_id}` |
+| `list_accounts` | — | `{accounts:[{email, alias, tier, granted_scopes, default, token_health}], count}` |
+| `set_default_account` | `account` | `{account, alias, default}` |
+| `disconnect_account` | `account` | `{account, revoke_status, credentials_deleted, new_default}` |
+| `gmail_list_messages` | `query?`, `label_ids?`, `page_token?`, `include_spam_trash?`, `max?` (default+cap 500 per page) | `{messages:[{id, thread_id}], count, next_page_token, result_size_estimate}` |
+| `gmail_get_message` | `id`, `format?` (full, raw, metadata, minimal), `metadata_headers?` | full: `{id, thread_id, label_ids, snippet, headers, body_text, body_html, attachments, ...}`; raw: `{raw, raw_rfc822, ...}` |
+| `gmail_send` | `to`, `cc?`, `bcc?`, `subject?`, `body?`, `html_body?`, `attachments?`, `thread_id?`, `in_reply_to?`, `references?` | `{id, thread_id, label_ids}` |
+| 29 more Gmail verbs | messages (insert, import, modify, batch modify, trash, untrash, delete, batch delete), attachments, threads, labels, drafts, history, profile | see `vendor_api_coverage.md` in this knowledge base for the full table, scopes and tiers |
+
+Every verb above and below also takes the optional `account` argument.
 | `drive_list_files` | `query?`, `max?`, `acknowledge_default_limit_override?`, `row_limit?` (default 500, cap 1000) | `{files:[{id, name, mime, modified, size}], count}` |
 | `drive_download_file` | `id` | `{file_blob_key, name, mime}` |
 | `drive_upload_file` | `name`, `blob_key`, `parent?`, `mime?` | `{id, web_view_link}` |
@@ -319,5 +354,15 @@ no `addSheet`-reply lookup.
 ## Status
 
 All five products (Gmail, Drive, Sheets, Docs, Slides) are built and
-whole-tree gate-clean. Scopes for all five were granted in one consent set at
+whole-tree gate-clean. Gmail build 1 (2026-11-07) covers the core Gmail API, 32
+methods, with several accounts. Gmail settings and push watch are the next
+build, then Calendar; `vendor_api_coverage.md` tracks the remainder. Scopes for all five were granted in one consent set at
 connect time, so no re-consent was needed when Docs/Slides shipped.
+
+## Drive, Contacts and Tasks
+
+The complete Drive v3, People v1 and Tasks v1 surface is registered as 102
+additional typed operations, including writes, deletes, media and paging. See
+[Drive, People and Tasks API coverage](workspace_api_coverage.md) for the method
+inventory, exact argument conventions, account/tier rules, scopes and lifecycle
+examples. Existing accounts reconnect to grant the new scopes.

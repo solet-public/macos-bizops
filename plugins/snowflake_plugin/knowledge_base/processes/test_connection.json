@@ -2,7 +2,7 @@
   "process_key": "plugin::snowflake_plugin::test_connection",
   "display_name": "Snowflake: Test Connection",
   "description": "Open the configured Snowflake account and confirm it: account, user, role, warehouse, and server version. Use this to verify the connector is reachable and the granted role is what you expect. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the job finishing; the connection details are delivered when the job completes.",
-  "embedding_description": "Verify the Snowflake connector is configured and reachable, surfacing the resolved account, user, active role, warehouse, and server version -- confirms the operator-granted role is read-only as expected. Dispatches asynchronously; the connection details land on job completion.",
+  "embedding_description": "Verify the Snowflake connector is configured and reachable, surfacing the resolved account, user, active role, warehouse, and server version -- confirms the operator-registered role and vendor authorization context. Dispatches asynchronously; the connection details land on job completion.",
   "result_processor_customizations": {
     "action_label": "Snowflake connection test queued",
     "result_type": "snowflake_test_connection_result",

@@ -18,6 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
@@ -36,18 +37,135 @@ def _fixture_env() -> dict[str, str]:
     rather than trusted.
     """
 
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith("GIT_")
-    }
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     environment.update(
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_SYSTEM=os.devnull,
         GIT_AUTHOR_NAME="Candidate Smoke",
         GIT_AUTHOR_EMAIL="candidate@example.invalid",
         GIT_COMMITTER_NAME="Candidate Smoke",
         GIT_COMMITTER_EMAIL="candidate@example.invalid",
     )
     return environment
+
+
+def _git_snapshot(*roots: Path) -> dict[str, bytes]:
+    """Capture all fixture Git bytes, including objects and linked indexes."""
+    return {str(path): path.read_bytes() for root in roots for path in sorted((root / ".git").rglob("*")) if path.is_file()}
+
+
+def _foreign_repo(workspace: Path) -> Path:
+    foreign = workspace / "foreign"
+    foreign.mkdir()
+    _git(foreign, "init", "-q", "-b", "foreign")
+    _write(foreign, "src/stable.txt", "FOREIGN bytes\n")
+    _write(foreign, "foreign-only.txt", "FOREIGN only\n")
+    _git(foreign, "add", "-A")
+    _git(foreign, "commit", "-qm", "FOREIGN")
+    return foreign
+
+
+def _hostile_git_cases(foreign: Path) -> tuple[dict[str, str], ...]:
+    """Independent steering keys, config channels, and their combined case."""
+    config = foreign.parent / "hostile.gitconfig"
+    config.write_text("[core]\n\tworktree = " + str(foreign) + "\n", encoding="utf-8")
+    cases = (
+        {"GIT_DIR": str(foreign / ".git")},
+        {"GIT_WORK_TREE": str(foreign)},
+        {"GIT_INDEX_FILE": str(foreign / ".git/index")},
+        {"GIT_COMMON_DIR": str(foreign / ".git")},
+        {"GIT_OBJECT_DIRECTORY": str(foreign / ".git/objects")},
+        {"GIT_ALTERNATE_OBJECT_DIRECTORIES": str(foreign / ".git/objects")},
+        {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree", "GIT_CONFIG_VALUE_0": str(foreign)},
+        {"GIT_CONFIG_GLOBAL": str(config)},
+        {"GIT_CONFIG_SYSTEM": str(config)},
+    )
+    combined = {key: value for case in cases for key, value in case.items()}
+    return (*cases, combined, {})
+
+
+def _check_source_git_environment() -> int:
+    with TemporaryDirectory() as temporary:
+        workspace = Path(temporary).resolve()
+        repo = workspace / "source"
+        repo.mkdir()
+        expected = _build_fixture_repo(repo)
+        foreign = _foreign_repo(workspace)
+        before = _git_snapshot(repo, foreign)
+        for hostile in _hostile_git_cases(foreign):
+            with patch.dict(os.environ, _fixture_env() | hostile, clear=True):
+                ambient = dict(os.environ)
+                head = candidate_repo._git(repo, "rev-parse", "HEAD").decode().strip()
+                assert head == expected, ("SOURCE_ROOT_IS_REQUESTED", hostile.keys(), head, expected)
+                assert candidate_repo.measure_shared_repo(repo).head == expected, "SOURCE_ROOT_IS_REQUESTED"
+                assert candidate_repo._head_pointer(repo) == ("ref", "refs/heads/main"), "SOURCE_ROOT_IS_REQUESTED"
+                assert dict(os.environ) == ambient, "CALLER_ENVIRONMENT_UNCHANGED"
+        assert _git_snapshot(repo, foreign) == before, "SOURCE_AND_FOREIGN_BYTES_UNCHANGED"
+    return 45
+
+
+def _check_sanitizer_lifecycle() -> int:
+    from quality_gates.git_environment import scrubbed_git_environment
+
+    original = dict(os.environ)
+    with patch.dict(os.environ, {"KEEP_ME": "first", "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree", "GIT_CONFIG_VALUE_0": "foreign", "GIT_UNKNOWN_FUTURE_SELECTOR": "foreign"}, clear=True):
+        ambient = dict(os.environ)
+        environment = scrubbed_git_environment({"GIT_DIR": "private", "GIT_WORK_TREE": "candidate", "GIT_CONFIG_GLOBAL": "foreign"})
+        assert environment == {"KEEP_ME": "first", "GIT_DIR": "private", "GIT_WORK_TREE": "candidate", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}, "ALL_INHERITED_GIT_KEYS_REMOVED"
+        assert dict(os.environ) == ambient, "CALLER_ENVIRONMENT_UNCHANGED"
+        os.environ["KEEP_ME"] = "corrected"
+        assert scrubbed_git_environment()["KEEP_ME"] == "corrected", "NEXT_CALL_SEES_CORRECTION"
+        del os.environ["KEEP_ME"]
+        assert "KEEP_ME" not in scrubbed_git_environment(), "NEXT_CALL_SEES_CLEAR"
+        assert "GIT_DIR" not in scrubbed_git_environment(), "PRIVATE_OVERRIDES_NOT_CACHED"
+    assert dict(os.environ) == original
+    return 6
+
+
+def _check_private_git_environment() -> int:
+    """An inherited index must never survive operation-owned Git routing."""
+    with TemporaryDirectory() as temporary:
+        workspace = Path(temporary).resolve()
+        repo = workspace / "source"
+        repo.mkdir()
+        base = _build_fixture_repo(repo)
+        linked = workspace / "linked"
+        _git(repo, "worktree", "add", "-q", "-b", "lane/hostile", str(linked), base)
+        _write(linked, _OVERLAY, "reviewed overlay bytes\n")
+        foreign = _foreign_repo(workspace)
+        before = _git_snapshot(repo, foreign)
+        cases = ({"GIT_INDEX_FILE": str(foreign / ".git/index")}, *_hostile_git_cases(foreign))
+        for number, hostile in enumerate(cases):
+            with patch.dict(os.environ, _fixture_env() | hostile, clear=True):
+                _assert_private_git_case(repo, linked, foreign, workspace, base, before, number)
+    return 192
+
+
+def _assert_private_git_case(repo: Path, linked: Path, foreign: Path, workspace: Path, base: str, before: dict[str, bytes], number: int) -> None:
+    ambient = dict(os.environ)
+    candidate = candidate_repo.materialize_candidate_tree(linked, workspace / f"candidate-{number}", (_OVERLAY,), base_ref="HEAD")
+    candidate_repo.provision_private_git(linked, candidate, base_ref="HEAD", scope=(_OVERLAY,))
+    assert _git_snapshot(repo, foreign) == before, "FOREIGN_INDEX_BYTES_UNCHANGED"
+    built, proof = candidate_repo.build(linked, workspace / f"built-{number}", (_OVERLAY,), renames=(), base_ref="HEAD", with_git=True)
+    assert proof.head == base and built.paths == candidate.paths, "BUILDER_SOURCE_IS_REQUESTED"
+    assert _git_snapshot(repo, foreign) == before, "FOREIGN_INDEX_BYTES_UNCHANGED"
+    _assert_private_git_identity(candidate.root, base)
+    _assert_candidate_is_ours_only(candidate.root)
+    assert dict(os.environ) == ambient, "CALLER_ENVIRONMENT_UNCHANGED"
+    # Existing invalid-base outcome must also preserve every sentinel.
+    try:
+        candidate_repo.build(linked, workspace / f"invalid-{number}", (_OVERLAY,), renames=(), base_ref="missing-base", with_git=True)
+    except candidate_repo.CandidateTreeError:
+        pass
+    else:
+        raise AssertionError("missing base accepted")
+    assert _git_snapshot(repo, foreign) == before, "ERROR_PATH_SENTINELS_UNCHANGED"
+
+
+def _assert_private_git_identity(root: Path, base: str) -> None:
+    assert (root / ".git/index").is_file(), "CANDIDATE_INDEX_IS_PRIVATE"
+    assert _git(root, "rev-parse", "HEAD") == base, "CANDIDATE_HEAD_IS_REQUESTED"
+    assert candidate_repo._head_pointer(root) == ("ref", "refs/heads/lane/hostile")
 
 
 def _git(root: Path, *arguments: str) -> str:
@@ -177,9 +295,7 @@ def _check_linked_worktree_is_measurable() -> int:
         # one common directory, whichever checkout asks.
         from_main = candidate_repo.measure_shared_repo(repo)
         from_worktree = candidate_repo.measure_shared_repo(linked)
-        assert from_worktree.config_digest == from_main.config_digest, (
-            f"{from_worktree.render()} != {from_main.render()}"
-        )
+        assert from_worktree.config_digest == from_main.config_digest, f"{from_worktree.render()} != {from_main.render()}"
         # A genuinely different checkout: the other lane's staged work lives in
         # the main index only, so the worktree protects nothing.
         assert from_main.protected_paths == 2, from_main.render()
@@ -200,9 +316,7 @@ def _check_linked_worktree_is_measurable() -> int:
 
         candidate_git_dir = candidate.root / ".git"
         assert candidate_git_dir.is_dir(), "the candidate did not get a real Git directory"
-        assert not (candidate_git_dir / "worktrees").exists(), (
-            "the candidate inherited worktree admin pointers into the shared tree"
-        )
+        assert not (candidate_git_dir / "worktrees").exists(), "the candidate inherited worktree admin pointers into the shared tree"
         # HEAD describes the tree the candidate was built from, not the main
         # checkout the common directory happens to belong to.
         head = (candidate_git_dir / "HEAD").read_text(encoding="utf-8").strip()
@@ -290,13 +404,9 @@ def _seed_fixture_venv(repo: Path) -> None:
         capture_output=True,
     )
     site_packages = next(venv.glob("lib/python3.*/site-packages"))
-    (site_packages / "__editable__.fixture_pkg-1.0.0.pth").write_text(
-        f"{repo / 'src'}\n", encoding="utf-8"
-    )
+    (site_packages / "__editable__.fixture_pkg-1.0.0.pth").write_text(f"{repo / 'src'}\n", encoding="utf-8")
     console_script = venv / "bin" / "fixturetool"
-    console_script.write_text(
-        f"#!{venv / 'bin' / 'python3'}\nprint('fixture')\n", encoding="utf-8"
-    )
+    console_script.write_text(f"#!{venv / 'bin' / 'python3'}\nprint('fixture')\n", encoding="utf-8")
     console_script.chmod(0o755)
     (venv / "bin" / "fixturebinary").write_bytes(b"\xcf\xfa\xed\xfe not utf-8 \x00\x01")
 
@@ -453,12 +563,8 @@ def _check_candidate_venv_rehomes_from_a_worktree() -> int:
 
         candidate_venv = candidate.root / ".venv"
         site_packages = next(candidate_venv.glob("lib/python3.*/site-packages"))
-        payload = (site_packages / "__editable__.fixture_pkg-1.0.0.pth").read_text(
-            encoding="utf-8"
-        )
-        assert payload.strip() == str(candidate.root / "src"), (
-            f"pointer was not re-homed from the worktree: {payload!r}"
-        )
+        payload = (site_packages / "__editable__.fixture_pkg-1.0.0.pth").read_text(encoding="utf-8")
+        assert payload.strip() == str(candidate.root / "src"), f"pointer was not re-homed from the worktree: {payload!r}"
         assert str(repo) not in payload, f"pointer still names the venv's owner: {payload!r}"
 
         # The property that matters: the IMPORT lands in the candidate.
@@ -473,12 +579,8 @@ def _check_candidate_venv_rehomes_from_a_worktree() -> int:
             text=True,
         )
         marker, resolved = probe.stdout.split()
-        assert marker == "lane-worktree", (
-            f"the candidate imported the WRONG tree: marker={marker!r} from {resolved}"
-        )
-        assert Path(resolved).resolve() == (candidate.root / "src" / "fixture_pkg.py").resolve(), (
-            f"import resolved outside the candidate: {resolved}"
-        )
+        assert marker == "lane-worktree", f"the candidate imported the WRONG tree: marker={marker!r} from {resolved}"
+        assert Path(resolved).resolve() == (candidate.root / "src" / "fixture_pkg.py").resolve(), f"import resolved outside the candidate: {resolved}"
     return 4
 
 
@@ -497,19 +599,13 @@ def _check_rehoming_respects_path_boundaries() -> int:
     candidate_root = Path("/w/candidate")
 
     sibling = "/w/base_lane_worktrees/l/src\n"
-    assert _rehome_under_test(sibling, source_root, candidate_root) == sibling, (
-        "a sibling path sharing a name prefix was rewritten"
-    )
+    assert _rehome_under_test(sibling, source_root, candidate_root) == sibling, "a sibling path sharing a name prefix was rewritten"
 
     contained = "/w/base/ananta/src\n"
-    assert (
-        _rehome_under_test(contained, source_root, candidate_root) == "/w/candidate/ananta/src\n"
-    ), "a genuinely contained path was not re-homed"
+    assert _rehome_under_test(contained, source_root, candidate_root) == "/w/candidate/ananta/src\n", "a genuinely contained path was not re-homed"
 
     exact = "/w/base\n"
-    assert _rehome_under_test(exact, source_root, candidate_root) == "/w/candidate\n", (
-        "the root itself was not re-homed at a line end"
-    )
+    assert _rehome_under_test(exact, source_root, candidate_root) == "/w/candidate\n", "the root itself was not re-homed at a line end"
     return 3
 
 
@@ -540,13 +636,9 @@ def _check_pointer_guard_can_still_fail() -> int:
         # A pointer whose path is NOT under source_root, so re-homing cannot
         # rewrite it and the guard is the only thing standing between an
         # escaping pointer and a green build.
-        (shared / "__editable__.escaping-1.0.0.pth").write_text(
-            f"{workspace / 'elsewhere'}\n{source_root}/pkg\n", encoding="utf-8"
-        )
+        (shared / "__editable__.escaping-1.0.0.pth").write_text(f"{workspace / 'elsewhere'}\n{source_root}/pkg\n", encoding="utf-8")
         try:
-            candidate_repo._install_site_packages(
-                shared, candidate_site, source_root, candidate_root
-            )
+            candidate_repo._install_site_packages(shared, candidate_site, source_root, candidate_root)
             raise AssertionError("an escaping pointer outside the candidate root was accepted")
         except candidate_repo.CandidateRepoError as exc:
             assert "does not resolve inside the candidate root" in str(exc), str(exc)
@@ -572,9 +664,7 @@ def _check_pointer_guard_accepts_rehomed_prefix_sibling() -> int:
         for directory in (source_root, candidate_root, shared, candidate_site):
             directory.mkdir(parents=True, exist_ok=True)
 
-        (shared / "__editable__.rehomed-1.0.0.pth").write_text(
-            f"{source_root}/pkg\n", encoding="utf-8"
-        )
+        (shared / "__editable__.rehomed-1.0.0.pth").write_text(f"{source_root}/pkg\n", encoding="utf-8")
         candidate_repo._install_site_packages(shared, candidate_site, source_root, candidate_root)
         payload = (candidate_site / "__editable__.rehomed-1.0.0.pth").read_text(encoding="utf-8")
         assert payload == f"{candidate_root}/pkg\n", payload
@@ -609,9 +699,7 @@ def _check_venv_intruder_guard_can_still_fail() -> int:
 
         candidate_repo.subprocess.run = _intruding_probe
         try:
-            candidate_repo._assert_venv_spelling(
-                candidate_root, candidate_venv, repo_root, source_root
-            )
+            candidate_repo._assert_venv_spelling(candidate_root, candidate_venv, repo_root, source_root)
             raise AssertionError("a candidate sys.path intruder was accepted")
         except candidate_repo.CandidateRepoError as exc:
             assert "candidate sys.path reaches the shared checkout" in str(exc), str(exc)
@@ -651,9 +739,7 @@ def _check_provisioning_never_writes_the_shared_index() -> int:
 
         common_dir = candidate_repo._git_common_dir(linked)
         main_index = common_dir / "index"
-        worktree_index = Path(
-            (linked / ".git").read_text(encoding="utf-8").split("gitdir:", 1)[1].strip()
-        ) / "index"
+        worktree_index = Path((linked / ".git").read_text(encoding="utf-8").split("gitdir:", 1)[1].strip()) / "index"
         assert main_index.is_file(), f"fixture has no main index at {main_index}"
         assert worktree_index.is_file(), f"fixture has no worktree index at {worktree_index}"
 
@@ -684,11 +770,7 @@ def _check_wave_candidate_never_rereads_source_overlay() -> int:
         candidate, proof = candidate_repo.prepare_wave_integration_candidate(
             repo,
             workspace / "candidate",
-            (
-                candidate_repo.FrozenEntry(
-                    _OVERLAY, b"frozen manifest bytes\n", "100644"
-                ),
-            ),
+            (candidate_repo.FrozenEntry(_OVERLAY, b"frozen manifest bytes\n", "100644"),),
             base_ref=base_ref,
             with_venv=False,
         )
@@ -755,10 +837,7 @@ def _check_head_detaches_at_base_ref_when_worktree_diverges() -> int:
             check=False,
             capture_output=True,
         )
-        assert symbolic.returncode != 0, (
-            "candidate HEAD must be DETACHED at base_ref, not carry the "
-            f"source worktree's own branch: {symbolic.stdout!r}"
-        )
+        assert symbolic.returncode != 0, f"candidate HEAD must be DETACHED at base_ref, not carry the source worktree's own branch: {symbolic.stdout!r}"
         head_commit = subprocess.run(
             ("git", "rev-parse", "HEAD"),
             cwd=candidate.root,
@@ -779,9 +858,7 @@ def _check_head_detaches_at_base_ref_when_worktree_diverges() -> int:
         ).stdout.split()
         assert staged == [_OVERLAY], staged
 
-        provenance = (
-            candidate.manifest.parent / "candidate-provenance.txt"
-        ).read_text(encoding="utf-8")
+        provenance = (candidate.manifest.parent / "candidate-provenance.txt").read_text(encoding="utf-8")
         assert "source_head_kind=ref" in provenance, provenance
         assert "source_head_value=refs/heads/lane/behind" in provenance, provenance
         assert f"base_commit={ahead_base_ref}" in provenance, provenance
@@ -802,18 +879,13 @@ def _write_transient_git_controls(repo: Path, git_dir: Path, base_ref: str) -> N
 
 
 def _assert_candidate_omits_locks(candidate_git_dir: Path) -> None:
-    copied_locks = sorted(
-        str(path.relative_to(candidate_git_dir))
-        for path in candidate_git_dir.rglob("*.lock")
-    )
+    copied_locks = sorted(str(path.relative_to(candidate_git_dir)) for path in candidate_git_dir.rglob("*.lock"))
     assert not copied_locks, f"the candidate inherited live lock files: {copied_locks}"
 
 
 def _assert_candidate_omits_operation_markers(candidate_git_dir: Path) -> None:
     for name in ("MERGE_HEAD", "MERGE_MSG", "objects/tmp_obj_abc123"):
-        assert not (candidate_git_dir / name).exists(), (
-            f"the candidate inherited in-flight control state: {name}"
-        )
+        assert not (candidate_git_dir / name).exists(), f"the candidate inherited in-flight control state: {name}"
 
 
 def _assert_candidate_keeps_required_git_content(candidate_git_dir: Path) -> None:
@@ -885,7 +957,11 @@ def _check_transient_control_files_are_not_copied() -> int:
         before = candidate_repo.measure_shared_repo(repo)
 
         candidate, after = candidate_repo.build(
-            repo, workspace / "candidate", (_OVERLAY,), renames=(), base_ref=base_ref,
+            repo,
+            workspace / "candidate",
+            (_OVERLAY,),
+            renames=(),
+            base_ref=base_ref,
             with_git=True,
         )
         assert before == after, "the fixture repository changed during the build"
@@ -901,7 +977,10 @@ def _check_transient_control_files_are_not_copied() -> int:
 
 
 def main() -> int:
-    check_count = _check_inherited_index_is_replaced()
+    check_count = _check_source_git_environment()
+    check_count += _check_private_git_environment()
+    check_count += _check_sanitizer_lifecycle()
+    check_count += _check_inherited_index_is_replaced()
     check_count += _check_linked_worktree_is_measurable()
     check_count += _check_index_free_git_dir_is_not_the_fix()
     check_count += _check_destination_must_be_physical()

@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::warehouse",
+  "display_name": "Snowflake: Warehouses",
+  "description": "Manage Snowflake virtual warehouses under /api/v2/warehouses. Operations: list (like; the vendor returns every match in one response), create (body Warehouse with name, for example warehouse_size, auto_suspend, auto_resume, initially_suspended; createMode), get, create_or_alter (PUT, full Warehouse body), delete (ifExists), resume, suspend, abort (cancel every query on the warehouse), enable, disable (each ifExists), rename (body with the new name; ifExists), set_tags and unset_tags (tags; ifExists), get_tags (withLineage) and fetch_result (result_handler, page). The deprecated warehouses/{name}:use path stays on request. Vendor RBAC alone decides. Returns job_id/status queued.",
+  "embedding_description": "Create, resize, resume, suspend, rename, drop and tag Snowflake virtual warehouses through the Warehouse REST API, and abort every running query on a warehouse. Use to control compute and credit spend: suspend idle warehouses, resume before loads, change size or auto-suspend. Vendor role grants decide every operation.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake warehouse operation queued",
+    "result_type": "snowflake_warehouse_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: family, operation, method, status (HTTP), headers, body (Warehouse objects, the vendor's status message or a SuccessAcceptedResponse), body_encoding, correlation_id, error_code for 4xx/5xx, and pagination: Link relations, location and result_handler for 202 responses; list takes only like and returns every match.",
+    "presentation_guidance": "This operation may have changed vendor state and credit spend. Queued means the job was accepted, not that Snowflake completed the operation. Report the HTTP status, error_code and body faithfully. abort cancels every query running on the warehouse. Report resumes, suspends and deletes from the vendor status, never from job completion alone."
+  },
+  "error_processor_customizations": {
+    "action_context": "Manage Snowflake warehouses with the registered role's grants.",
+    "error_interpretation": "snowflake.invalid_params is raised before any vendor call when the operation, identifiers, query parameter names, types or ranges (boolean ifExists), createMode or required body members do not match the documented vendor shape. Vendor HTTP errors are completion data with status, body and error_code: auth_failed (401), permission_denied (403), object_not_found (404), timeout (408), conflict (409), rate_limited (429), api_error otherwise. snowflake.api_error without a status is a transport or configuration failure.",
+    "recovery_guidance": "Read the vendor status and body before retrying. A 403 means the registered role lacks the grant: grant it in Snowflake, the plugin adds no gate of its own. Double-quote identifiers that contain other characters. For a 202, call the same verb with operation fetch_result and the pagination.result_handler. Never silently retry a mutation after a transport error: read the object first."
+  }
+}

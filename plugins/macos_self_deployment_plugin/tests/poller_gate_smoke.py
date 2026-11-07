@@ -31,7 +31,9 @@ Run:
 from __future__ import annotations
 
 import sys
+import tempfile
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -110,9 +112,10 @@ class _SuccessReleaseManager:
     def build_candidate(
         self, *, manifest_etag: str = "",
         manifest_plugins: tuple[str, ...] | None = None,
-        schema_snapshot_fn: object = None,
+        schema_snapshot_fn: Callable[[Path], dict[str, object]] | None = None,
+        reconciliation_provenance: dict[str, str] | None = None,
     ) -> CandidatePaths:
-        del manifest_etag, manifest_plugins, schema_snapshot_fn
+        del manifest_etag, manifest_plugins, schema_snapshot_fn, reconciliation_provenance
         base = Path("/nonexistent/rel-ok")
         return CandidatePaths(
             release_id="rel-ok", release_dir=base, code_root=base / "code",
@@ -171,6 +174,8 @@ def _additive(
 def _part1_flip_before_enqueue() -> None:
     stub = _SuccessRouter()
     action_factory = _RecordingActionFactory()
+    runtime_temp = tempfile.TemporaryDirectory(prefix="poller-gate-smoke-runtime-")
+    runtime_dir = Path(runtime_temp.name)
     # Each flip records (active, #complete_swaps enqueued so far) — proving order.
     flip_log: list[tuple[bool, int]] = []
 
@@ -201,9 +206,12 @@ def _part1_flip_before_enqueue() -> None:
             preflight_probe=_smoke_green_probe,
             set_color_active=rec_set_color_active,
             spawn_fn=fake_spawn,
+            runtime_dir=runtime_dir,
             ready_timeout_seconds=2,
             ready_poll_interval_seconds=0.01,
         )
+        if orch._executor._pending_finisher_path.resolve().parent != runtime_dir.resolve():  # noqa: SLF001
+            raise AssertionError("poller smoke pending-finisher path escaped temporary runtime")
         result = orch.restart(
             reason="poller-gate-smoke",
             expected_etag="etag-x",
@@ -226,6 +234,7 @@ def _part1_flip_before_enqueue() -> None:
         len(action_factory.submissions) == 1,
         f"complete_swap WAS enqueued (after the flip): {len(action_factory.submissions)}",
     )
+    runtime_temp.cleanup()
 
 
 class _RollbackRouter:

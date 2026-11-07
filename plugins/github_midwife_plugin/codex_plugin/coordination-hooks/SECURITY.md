@@ -1,9 +1,8 @@
 # Security notes — stock-Codex coordination-hooks
 
 This page describes the complete stock-Codex package. The plugin currently
-registers six handler entries backed by six entry-point scripts: the fixed
-`step_zero_reminder.js`, `check_messages_reminder.js`, and
-`role_binding_reminder.js` scripts, the WS-4b.1 Git-Controller gate, the
+registers four handler entries backed by four entry-point scripts: the fixed
+`step_zero_reminder.js` and measured `session_start_context.py` scripts, the
 async `context_status_reporter.py` Stop reporter, and the SYNCHRONOUS
 `inbox_consumer.py` Stop hook (CDX-06, 2026-08-24). The
 sibling hydration package renders the launcher-owned watcher and exact
@@ -41,7 +40,7 @@ operator reviews command, matcher, and timeout in `/hooks` and accepts the
 definition's current hash. Hashes observed on one host are evidence only, never
 seed values or portable policy.
 
-The plugin is same-user mistake-prevention and context plumbing. It is not a
+The plugin is same-user context plumbing and reminders. It is not a
 privilege boundary: a process that can rewrite the plugin, launcher environment,
 or Codex user configuration already has the user's authority.
 
@@ -50,14 +49,7 @@ or Codex user configuration already has the user's authority.
 Inputs, exhaustively:
 
 - hook JSON on stdin;
-- `AGENT_SESSION_ID`, which arms `check_messages_reminder.js` (a functional
-  precondition, not a protection — the inbox it points at is keyed on
-  identity);
-- `AGENT_SESSION_LABEL`, which arms `role_binding_reminder.js` only — the
-  reminder that names the label as its content. `step_zero_reminder.js` is
-  unconditionally armed and reads no environment variable at all (§7 re-key,
-  2026-08-02; parity with the Claude sibling's `2fb49dbf2`);
-- `GIT_CONTROLLER_NAME` and `AGENT_ROLE`, used only by the Bash gate;
+- the live-context configuration and child reads listed below;
 - `AGENT_INSTANCE_ID`, `AGENT_SESSION_ID`, and `AGENT_WAKE_CLI`, which arm the
   context reporter, and separately arm the inbox consumer, only when all
   three are present in each hook's own environment read (no shared state
@@ -71,18 +63,16 @@ Inputs, exhaustively:
   inspects prompt or message content;
 - Codex's `${PLUGIN_ROOT}` expansion in the manifest command paths.
 
-The reminder scripts never read a prompt or message field. The shared
-`check_messages_reminder.js` reads only `hook_event_name`, accepts only
-`UserPromptSubmit` or `SessionStart`, and selects the same fixed reminder for
-both. The role reminder does not interpolate the label it tests.
+The knowledge-base reminder reads only its event name. Live session context
+reads event/source and the two service responses described below. Neither
+relays prompt or peer-message content.
 
 Outputs, exhaustively:
 
 - reminders: one JSON object containing exactly
   `hookSpecificOutput.hookEventName` and fixed
-  `hookSpecificOutput.additionalContext`;
-- gate allow/no-op: no output, exit `0`;
-- gate block: a fixed-format stderr explanation and exit `2`.
+  `hookSpecificOutput.additionalContext`; live context uses the same envelope
+  for bounded register data, role/count observations and failure lines;
 - context reporter success/no-reading/unarmed: inert `{}` JSON, exit `0`;
 - armed reporter contract or delivery failure: fixed-prefix stderr, exit `1`.
 - inbox consumer, nothing pending or unarmed: inert `{}` JSON, exit `0`;
@@ -94,30 +84,63 @@ Outputs, exhaustively:
   Failure modes below — this hook must never trap the session in a failing
   Stop hook).
 
-No handler writes a file, opens a direct network connection, reads credentials,
-or relays peer-message content. The context reporter reads only the transcript
-path supplied by Codex and spawns exactly one argv-only `solet-bridge call` child to
-the declared `report_context_status` process. The inbox consumer spawns at
-most two argv-only children per invocation: `solet-bridge wake --max-wait <N>`
-(discarding its stdout, same discipline as `wake_waiter.py`) and, always,
-`solet-bridge call report_inbox_consumption <json>` — never a shell command, never
-more than these two. One of the three Node hooks
-(`check_messages_reminder.js`) uses built-in `fs` to read stdin; the other two
-(`step_zero_reminder.js`, `role_binding_reminder.js`) never touch stdin —
-`step_zero_reminder.js` reads no environment variable at all, and
-`role_binding_reminder.js` reads only `AGENT_SESSION_LABEL`. The Python gate
-is standard-library-only and imports byte-identical materialized policy
-modules from its plugin directory. CPython may create `__pycache__` files
-unless the launcher sets `PYTHONDONTWRITEBYTECODE=1`; the plugin never reads
-them.
+No handler writes a file or opens a direct network/database connection. The
+live-context child psolet performs its own normal credential lookup. The
+context reporter and inbox consumer retain their existing argv-only child
+contracts. `step_zero_reminder.js` reads stdin through Node's built-in fs.
+The Python entry points import only standard-library modules and no sibling
+policy module, so CPython writes no bytecode beside them.
 
-## No dynamic hook-text channel
+## Live session context — reviewer due diligence (2026-10-08)
 
-All reminder context is compiled into the hook scripts as fixed generic text.
-The plugin does not accept environment-authored instructions or deployment-
-specific command text. Exact commands, process keys, and local routing guidance
-belong in the project's native `AGENTS.md` instructions, where Codex already has
-one reviewable project-instruction surface.
+`session_start_context.py` replaces the static message and role reminders on
+SessionStart `startup`, `resume`, and `clear`. It performs two read operations:
+
+- `[PROJECT_SOLET_CLI, "resume-digest", "--limit", "1"]` reads the bounded,
+  **register-wide** digest. The default executable is
+  `$HOME/Workspace/project-solet/.venv/bin/psolet`; installations elsewhere
+  set `PROJECT_SOLET_CLI` to one executable path. The child resolves its normal
+  `PROJECT_SOLET_DATABASE_DSN` or Keychain credentials; the hook neither reads
+  credentials itself nor prints child stderr. Register previews are data,
+  not instructions or a substitute for full authoritative reads.
+- `[SOLET_BRIDGE, "call", "plugin::agent_messaging_plugin::peer_inbox", JSON]`
+  pages the instance and role sections with `observer: true`. `SOLET_BRIDGE`
+  defaults to `solet-bridge` on PATH. The original `SOLET_NAME`,
+  `AGENT_SESSION_ID` and `AGENT_INSTANCE_ID` are preserved and required.
+  Current bound role names come from `role_read_coverage`, never the local
+  label. Forward instance cursors preserve timestamp ties; role cursors are
+  independent. The hook never acknowledges a page or advances a covered mark.
+
+The role count means **pending above role covered mark (display/consumption
+unknown)**. Observer mode includes display-receipted rows; it cannot prove
+unread state. The instance count is stored-message history, explicitly labelled
+**unread: unknown (no platform unread semantics)**. The hook fetches and
+JSON-parses the complete peer_inbox response, including message objects and
+their body fields. For inbox data it injects only derived counts, current
+bound-role labels, and observation/error text; it never injects message bodies.
+Paging produces an observation over an interval, not an atomic cross-page
+snapshot; a binding change, repeated cursor, partial role failure or identity
+mismatch makes the count unavailable.
+
+The digest child has a three-second timeout, and all inbox pages share a
+separate three-second deadline. The manifest timeout is eight seconds. A failed
+read adds one explicit `unavailable (ErrorClass)` line and exits zero; a missing
+identity is `MissingIdentity`, never zero messages. No cache or static reminder
+fallback exists. JSON serialization escapes all observed strings. The digest
+context is capped at 5800 UTF-8 bytes and inbox context at 1000, leaving room
+inside 8192 for the unchanged knowledge-base reminder. Over-budget output is
+reported as `ByteBudgetExceeded`, never silently clipped into apparent success.
+
+This stdlib Python 3.13 hook uses `subprocess.run` with argument arrays and no
+shell. It creates no files, performs no register writes, claims no role and
+changes no Git policy. Hook installation/trust is separate from candidate delivery;
+these are same-user coordination controls, not a privilege boundary.
+
+The manifest consistency smoke and the reminder hooks smoke cover this candidate's manifest
+and fixed reminder; the live SessionStart subprocess smoke is added by slice S3 of this Change.
+This candidate makes no claim of live host deployment.
+The independent review unit records the due-diligence verdict required by
+`rul_af7c73e3` and `rul_f0e51f93`.
 
 ## Manifest execution contract
 
@@ -126,17 +149,6 @@ Stock Codex 0.141.0 required `hooks/hooks.json` to contain only the top-level
 therefore uses the measured `${PLUGIN_ROOT}` paths and does not add newer
 optional top-level fields. Codex owns expansion and command invocation; the
 scripts do not construct a shell command or interpolate hook input into one.
-
-The `PreToolUse` matcher is exactly `^Bash$`, matching the only live payload
-shape captured before WS-4b.1. This is intentionally narrower than current
-Codex documentation may support. Widening to edit or delegation aliases requires
-a separate live capture, negative control, policy review, and manifest update.
-
-The adversarial identity control is deliberately stronger than a label-only
-check: even when `AGENT_IDENTITY`, `AGENT_INSTANCE_ID`, `AGENT_SESSION_LABEL`,
-`AGENT_SESSION_ID`, and the hook payload's `session_id` are all set to
-`Git-Controller`, a missing or non-controller `AGENT_ROLE` still blocks a
-detected mutation. `AGENT_ROLE` is the only authority input.
 
 `context_status_reporter.py` is explicitly `"async": true`; the current
 official hook contract defines that background mode, and the manifest smoke
@@ -161,16 +173,8 @@ rows carry `reporter_surface` for the same reason.
 
 - `step_zero_reminder.js` is unconditionally armed — no missing variable
   disarms it.
-- Missing `AGENT_SESSION_ID`: `check_messages_reminder.js` is a silent no-op.
-- Missing `AGENT_SESSION_LABEL`: `role_binding_reminder.js` is a silent
-  no-op.
-- Malformed reminder stdin: fixed reminders still exit `0`; the shared reminder
-  uses its harmless prompt-event default.
-- Gate disabled (`GIT_CONTROLLER_NAME` missing): allow.
-- Gate enabled with missing `AGENT_ROLE`: read-only Bash remains allowed, but a
-  detected git mutation is blocked and reports role `<unknown>`.
-- Unexpected gate parse/runtime error: allow, consistent with its explicitly
-  documented same-user mistake-prevention scope.
+- Missing identity or read failure: live context emits a named unavailable line, exit `0`.
+- Malformed reminder stdin: the knowledge-base reminder uses its SessionStart default.
 - All three reporter identity variables missing: deliberate non-fleet no-op.
 - Partially armed reporter: fail loud; no guessed identity or CLI path.
 - No positive `token_count` after the newest `context_compacted` row: no-op;
@@ -191,8 +195,7 @@ rows carry `reporter_surface` for the same reason.
   crash a hook bound to the wrong event).
 
 `context_status_reporter.py` never exits `2` or requests continuation — the
-only blocking outcome for a Codex hook in this manifest is `git_controller_gate.py`'s
-affirmative Bash policy match (`exit 2`), and `inbox_consumer.py`'s
+only blocking outcome for a Codex hook in this manifest is `inbox_consumer.py`'s
 `decision:block` JSON body, which is a DIFFERENT mechanism from an exit
 code (Codex's Stop-hook continuation contract is JSON-body-driven, not
 exit-code-driven — measured live, see the isolated proof cited above).
@@ -218,7 +221,7 @@ edits to `hooks.state` are not part of this package's supported procedure.
 
 ## Transport asymmetries (MCP vs. non-MCP/watch)
 
-The reminders and Git gate do not depend on transport. Capabilities belonging
+The reminders do not depend on transport. Capabilities belonging
 to the coordination layer are disclosed here so a review of this deployment
 does
 not discover any of them as a gap instead of reading it on this page. An
@@ -280,8 +283,8 @@ Codex — the hydration-rendered launcher no longer passes `--no-spool` to
 (2026-08-13) specifically because nothing consumed it then; that premise no
 longer holds. An operator-launched Codex session still gets no automatic
 DRAIN of message content from this hook (it nudges, never relays content —
-see Inputs and outputs above) and the `SessionStart` unread-coordination
-reminder still fires only at startup/resume/`clear`, not per turn — the
+see Inputs and outputs above) and the `SessionStart` live-context
+observation fires only at startup/resume/`clear`, not per turn — the
 operator (or the model, on an armed session, in its continued turn) still
 reads `peer_inbox` explicitly. A managed `spawn_session` worker still also
 gets `drive_on_delivery`'s driver-channel notice, independent of this
@@ -324,6 +327,11 @@ gets its own entry rather than a silent gap.
 
 ## Explicit exclusions and retirement gates
 
+This package ships no git-mutation control. The Bash Git-Controller gate it once
+carried was removed by operator ruling `rul_e71e43be` (commit `91b8ace14`); what
+it refused, and that nothing enforces it now, is inventoried in `README.md` under
+*Retired behaviours*, separately from any replacement claim.
+
 This package does not prove or claim:
 
 - production-fleet-wide inbox consumption or lifecycle survival, despite the
@@ -348,10 +356,9 @@ self-addressed send is not evidence for them.
 
 | claim | evidence |
 |---|---|
-| reminder text is fixed and cannot relay prompt/message/label content | `tests/reminder_hooks_smoke.py` |
+| knowledge-base reminder is fixed and cannot relay prompt/message/label content | `tests/reminder_hooks_smoke.py` |
 | conservative manifest handlers match the shipped entry points and Bash routing | `tests/manifest_consistency_smoke.py` |
 | repo marketplace resolves to this plugin and manifest metadata is consistent | `tests/marketplace_consistency_smoke.py` |
-| Bash allow/block and AGENT_ROLE-only authority | `tests/git_controller_gate_smoke.py` |
 | reporter uses the latest positive post-compaction native measurement, refuses identity mismatch, and never invents cache state | development-checkout behavioral smoke for the reporter (not shipped) |
 | `context_status_reporter.py` is the single declared async subprocess exception; every other `Stop` entry carries no `async` key | `tests/manifest_consistency_smoke.py`'s inventory and source contract |
 | `inbox_consumer.py` gates the fleet precondition, observes pending/empty/unknown via zero-wait `wake`, reports only known pending/empty results, never drains the inbox, decodes decision:block only when pending, and always exits 0 | `plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/inbox_consumer_smoke.py` |

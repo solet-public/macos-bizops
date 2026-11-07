@@ -33,7 +33,6 @@ supply-chain claim these tests exist to defend.
 | `manifest_consistency_smoke.py` | The documents match the tree, and the source never names a network, file-write, or second-subprocess primitive. Static analysis of the shipped files. |
 | `reminder_hooks_smoke.py` | The three reminder hooks inject fixed literals, are default-off, cannot block a session, and cannot be restructured by a hostile session label. Black-box, by execution. |
 | `wake_waiter_smoke.py` | The one privileged hook conveys a single bit, never relays the child command's output, and never traps a session on any failure path. Black-box, against stub CLIs. |
-| `git_controller_gate_smoke.py` | The one hook with authority to block a tool call: which git invocations it blocks/allows (direct, shell-wrapped, chained, path-qualified), the `.git/` write guard, the Task-tool guard, controller-vs-non-controller routing, and the fail-open-when-unset default. 143 cases, two-layer (in-process units + subprocess fixtures). |
 | `run_all.py` | Runs all of the above; one exit code. |
 | `_harness.py` | Shared process runner. Builds each child environment explicitly so a "disarmed" test cannot inherit a variable that silently arms the hook. |
 
@@ -43,23 +42,7 @@ supply-chain claim these tests exist to defend.
 trace.** The no-network, no-file-write, one-subprocess and supply-chain
 assertions prove the code never *names* the primitive. That is what makes
 those claims auditable by reading, and reading is how they should be
-confirmed; the test keeps them from drifting. `git_controller_gate_smoke.py`
-is the exception: its Layer B cases drive the hook as a real subprocess and
-assert its actual exit code and stderr, not just its source.
-
-## The gate exists in two copies — this file is the canonical one
-
-`git_controller_gate.py` also lives, genericized, at `.claude/hooks/` in the
-repository this plugin is developed in (that copy is what the repo's own
-`.claude/settings.json` wires; it never ships). `.claude/hooks/tests/git_controller_gate_smoke.py`
-there is a DRIVER, not a fork: it re-invokes this file with
-`GATE_SMOKE_HOOK_DIR` pointed at the local copy, so the 143 cases are
-single-sourced across both and cannot drift in what they assert. Two literals
-are still pinned per copy (`GATE_SMOKE_EXPECTED_ENV`, the env-var name; and
-`GATE_SMOKE_AUTHORITY_NOUN`, the operator-facing refusal wording) because the
-shared cases read `gate.GIT_CONTROLLER_ENV` and would otherwise pass against
-either copy no matter which name that constant holds — blind to exactly the
-drift that silently disables a fail-open gate.
+confirmed; the test keeps them from drifting.
 
 ## Reading a failure
 

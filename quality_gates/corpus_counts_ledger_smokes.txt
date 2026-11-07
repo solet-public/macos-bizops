@@ -1,0 +1,2 @@
+quality_gates/tests/ledger_corpus_counts_smoke.py
+ananta/tests/session_ledger_service/interfaces_split_no_god_class_smoke.py

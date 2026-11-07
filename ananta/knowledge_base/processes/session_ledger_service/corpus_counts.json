@@ -1,0 +1,7 @@
+{
+  "process_key": "service_interface::session_ledger_service::corpus_counts",
+  "display_name": "Ledger Corpus Counts",
+  "description": "Count all nondeleted event rows owned by the session ledger in one scalar StateManagementInterface count. The scope includes events from every source and canonical or sibling session, including events from disabled sources. It returns a fixed-size response with UTC observation bounds. A failed or malformed count is reported as unavailable with an advisory, never as zero. COUNT database work still grows with the matching corpus.",
+  "embedding_description": "Session ledger corpus event count; exact scalar COUNT of live nondeleted events across all source kinds, disabled sources, canonical sessions, and sibling sessions. Distinguishes an empty corpus from unavailable count data. Fixed response size does not imply constant database work.",
+  "parameters": {}
+}

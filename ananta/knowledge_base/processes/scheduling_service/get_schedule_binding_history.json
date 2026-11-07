@@ -1,0 +1,18 @@
+{
+  "process_key": "service_interface::scheduling_service::get_schedule_binding_history",
+  "display_name": "Get Schedule Binding History",
+  "description": "Read append-only schedule binding/lifecycle events by schedule_id, including after active-row deletion. limit is 1 through 100. after is the prior next_cursor composite [created_at,id]. Events include observed baseline or creation, correction/reversal, recovery, execution error/completion and clear, with exact action snapshot, target/status before/after, server-observed actor, reason and revision. History cannot be edited or cleared independently; namespace uninstall retires it.",
+  "embedding_description": "Read immutable schedule binding and lifecycle history, including after deletion of the active schedule. Page by created_at and id, at most 100 events. Inspect action snapshots, destination changes, revisions, server attribution and reasons for corrections, recovery and terminal transitions.",
+  "result_processor_customizations": {
+    "action_label": "Get Schedule Binding History",
+    "result_type": "schedule_lifecycle",
+    "result_description": "Read append-only schedule binding/lifecycle events by schedule_id, including after active-row deletion. limit is 1 through 100. after is the prior next_cursor composite [created_at,id]. Events include observed baseline or creation, correction/reversal, recovery, execution error/completion and clear, with exact action snapshot, target/status before/after, server-observed actor, reason and revision. History cannot be edited or cleared independently; namespace uninstall retires it.",
+    "presentation_guidance": "Show completeness, holder observation, revision and activation advisories explicitly. A registered route is an observation, not a delivery guarantee.",
+    "output_action_guidance": "Read current revision before a mutation. Recovery is a separate explicit action. Pre-boundary queued work is unchanged."
+  },
+  "error_processor_customizations": {
+    "action_context": "get schedule binding history",
+    "error_interpretation": "A stale revision or invalid lifecycle transition is a data-integrity refusal; unavailable observations are advisories.",
+    "recovery_guidance": "Read the current owner projection and history, then make an explicit correction with its current revision. Do not recreate a schedule to bypass a stale revision."
+  }
+}

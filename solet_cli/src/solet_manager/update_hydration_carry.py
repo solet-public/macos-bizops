@@ -42,7 +42,7 @@ from solet_setup_contracts.agent_instruction_block import (
     render_agent_instructions,
 )
 
-from .create_applied_edits import accepted_edit_paths, rebind_applied_edit
+from .create_applied_edits import accepted_edit_paths, applied_edits_path, load_applied_edits, rebind_applied_edit, record_applied_edits
 from .errors import RestoreTargetDivergedError, SourceError, StateError, UpdateBlockedError
 from .existing_install_inspection import ExistingInstallFacts, RawRow
 from .installer_pins import BlobReader, read_target_blob, worktree_bytes
@@ -122,6 +122,18 @@ class CarryPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class _PreparedCarry:
+    """One fully checked target write; ``mode=None`` means the carried bytes are already present."""
+
+    path: str
+    before_sha256: str
+    after_sha256: str
+    raw: bytes
+    destination: Path
+    mode: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class _Inputs:
     """The shared inputs of one preview's recognition, read once."""
 
@@ -191,12 +203,15 @@ def set_aside(paths: ManagerPaths, record: InstanceInventoryRecordV2, operation_
     """Before the fast-forward: back each carried file up byte-exact, then put its committed bytes back for Git."""
     target = Path(record.target.canonical_path)
     read_target = read_target_blob(target)
+    prepared: list[tuple[Path, bytes, int]] = []
     for carry in carries:
         destination = target / carry.path
         backup = write_backup(paths, record.instance_id, operation_id, _backup_id(carry.path, carry.before_sha256), destination)
         if backup.sha256 != f"sha256:{carry.before_sha256}" or backup.mode is None:
             raise UpdateBlockedError("probe_drift", f"{carry.path} changed after the lock-time revalidation", repair="Inspect the target; do not reset it.")
-        atomic_replace_bytes(destination, read_target(f"{record.source_release.commit}:{carry.path}"), mode=backup.mode)
+        prepared.append((destination, read_target(f"{record.source_release.commit}:{carry.path}"), backup.mode))
+    for destination, committed, mode in prepared:
+        atomic_replace_bytes(destination, committed, mode=mode)
 
 
 def put_back(paths: ManagerPaths, record: InstanceInventoryRecordV2, journal: dict[str, JsonValue]) -> tuple[str, ...]:
@@ -209,12 +224,21 @@ def put_back(paths: ManagerPaths, record: InstanceInventoryRecordV2, journal: di
         return ()
     target, operation_id = Path(record.target.canonical_path), cast(str, journal["operation_id"])
     baseline = cast(str, cast(dict[str, JsonValue], journal["baseline"])["commit"])
-    restored: list[str] = []
+    prepared: list[tuple[str, str, str]] = []
     for path, digest in sorted(_journal_digests(journal).items()):
         artifact = _backup_id(path, digest)
-        if not backup_exists(paths, record.instance_id, operation_id, artifact) or file_sha256(target / path) == read_backup(paths, record.instance_id, operation_id, artifact).sha256:
+        if not backup_exists(paths, record.instance_id, operation_id, artifact):
+            continue
+        backup = read_backup(paths, record.instance_id, operation_id, artifact)
+        current = file_sha256(target / path)
+        if current == backup.sha256:
             continue
         committed = f"sha256:{_sha256(read_target_blob(target)(f'{baseline}:{path}'))}"
+        if current != committed:
+            raise _uncarriable(path, backup_root(paths, record.instance_id, operation_id), "holds neither its backed-up bytes nor the committed bytes the update put there")
+        prepared.append((path, artifact, committed))
+    restored: list[str] = []
+    for path, artifact, committed in prepared:
         try:
             restore_artifact(paths, record.instance_id, operation_id, artifact, expected_after_sha256=committed)
         except RestoreTargetDivergedError as exc:
@@ -234,21 +258,34 @@ def carry_into_journal(paths: ManagerPaths, record: InstanceInventoryRecordV2, j
     if CARRY_ACTION not in cast(list[str], journal["planned_actions"]) or any(row.get("operation_id") == CARRY_ACTION for row in revisions):
         return journal
     candidate_commit = cast(str, cast(dict[str, JsonValue], journal["candidate"])["commit"])
-    moved = _carry(paths, record, cast(str, journal["operation_id"]), _journal_digests(journal), candidate_commit)
+    prepared, create_operation_id = _prepare_carry(paths, record, cast(str, journal["operation_id"]), _journal_digests(journal), candidate_commit)
+    moved: Moved = {item.path: (item.before_sha256, item.after_sha256, len(item.raw)) for item in prepared}
     if not moved:
         raise StateError("the approved hydration carry has no set-aside file to carry")
     current = _carried_snapshot(cast(dict[str, JsonValue], local_state["current"]), moved)
     next_value = record_local_state_revision(journal, revision=_revision(moved), current=current)
+    _apply_carry(paths, record, prepared, create_operation_id)
     write_update_journal(journal_path, journal, next_value)
     executed.append(CARRY_ACTION)
     return next_value
 
 
-def _carry(paths: ManagerPaths, record: InstanceInventoryRecordV2, operation_id: str, digests: dict[str, str], candidate_commit: str) -> Moved:
-    """Merge each backed-up block onto the candidate's bytes; returns ``path -> (before, after, size)``."""
+def _prepare_carry(
+    paths: ManagerPaths,
+    record: InstanceInventoryRecordV2,
+    operation_id: str,
+    digests: dict[str, str],
+    candidate_commit: str,
+) -> tuple[tuple[_PreparedCarry, ...], str | None]:
+    """Resolve every refusal precondition before any target, ledger, or journal write."""
     target = Path(record.target.canonical_path)
     saved = backup_root(paths, record.instance_id, operation_id)
-    moved: Moved = {}
+    transaction = load_transaction(paths.transaction_path(record.name))
+    if transaction is not None:
+        # A malformed ledger is a refusal precondition. Validate it before the first target write;
+        # the instance lock keeps this Manager-private state stable through the later rebind.
+        load_applied_edits(applied_edits_path(paths, record.name))
+    prepared: list[_PreparedCarry] = []
     for path, digest in sorted(digests.items()):
         artifact = _backup_id(path, digest)
         if not backup_exists(paths, record.instance_id, operation_id, artifact):
@@ -259,20 +296,47 @@ def _carry(paths: ManagerPaths, record: InstanceInventoryRecordV2, operation_id:
         if carried is None:
             raise _uncarriable(path, saved, "cannot take the block back after the fast-forward")
         raw = carried.encode("utf-8")
-        _write_carried(target / path, candidate_raw, raw, saved)
         after = _sha256(raw)
-        rebind_applied_edit(paths, name=record.name, path=path, before=f"sha256:{digest}", after=f"sha256:{after}")
-        moved[path] = (digest, after, len(raw))
-    return moved
+        destination = target / path
+        prepared.append(_PreparedCarry(path, digest, after, raw, destination, _carried_mode(destination, candidate_raw, raw, saved)))
+    return tuple(prepared), None if transaction is None else transaction.operation_id
 
 
-def _write_carried(destination: Path, candidate_raw: bytes, raw: bytes, saved: Path) -> None:
-    """The fast-forward left the candidate's bytes: write the carried ones; a carried file is already done; anything else stops."""
+def _apply_carry(paths: ManagerPaths, record: InstanceInventoryRecordV2, prepared: tuple[_PreparedCarry, ...], create_operation_id: str | None) -> None:
+    """Commit one preflighted batch; an imported solet has no create-owned ledger to update."""
+    target = Path(record.target.canonical_path)
+    for item in prepared:
+        if item.mode is not None:
+            atomic_replace_bytes(item.destination, item.raw, mode=item.mode)
+    if create_operation_id is not None:
+        for item in prepared:
+            rebound = rebind_applied_edit(
+                paths,
+                name=record.name,
+                path=item.path,
+                before=f"sha256:{item.before_sha256}",
+                after=f"sha256:{item.after_sha256}",
+            )
+            if not rebound:
+                record_applied_edits(
+                    paths,
+                    name=record.name,
+                    target=str(target),
+                    create_operation_id=create_operation_id,
+                    operation_id=CARRY_ACTION,
+                    before={},
+                    after={item.path: f"sha256:{item.after_sha256}"},
+                )
+
+
+def _carried_mode(destination: Path, candidate_raw: bytes, raw: bytes, saved: Path) -> int | None:
+    """Validate one destination before any carry write; return its mode, or ``None`` when already carried."""
     current = worktree_bytes(destination.parent, destination.name)
     if current == candidate_raw:
-        atomic_replace_bytes(destination, raw, mode=destination.lstat().st_mode & 0o7777)
-    elif current != raw:
-        raise _uncarriable(destination.name, saved, "changed during the fast-forward")
+        return destination.lstat().st_mode & 0o7777
+    if current == raw:
+        return None
+    raise _uncarriable(destination.name, saved, "changed during the fast-forward")
 
 
 def _journal_digests(journal: dict[str, JsonValue]) -> dict[str, str]:
@@ -322,7 +386,7 @@ def _uncarriable(path: str, saved: Path, detail: str) -> UpdateBlockedError:
     return UpdateBlockedError(
         UNCARRIABLE_REASON,
         f"{path} {detail}; its bytes from before the update, hydration block included, are saved under {saved}",
-        repair=f"Do not reset. Compare {path} with the saved `before.bytes` under {saved}, put the hydration block back by hand, then resume the update.",
+        repair=f"Do not reset. Restore the saved `before.bytes` byte-exactly to {path} from {saved}, then resume the update.",
     )
 
 

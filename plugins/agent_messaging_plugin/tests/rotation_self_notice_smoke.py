@@ -31,6 +31,10 @@ sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
 from ananta.llm.agent_messaging.schema import TABLE_AGENT_MESSAGE  # noqa: E402
+from ananta.services.state_service.ordered_query import (  # noqa: E402
+    OrderedQueryError,
+    parse_ordered_query,
+)
 
 from agent_messaging_plugin import rotation_notice_retention as rnr  # noqa: E402
 from agent_messaging_plugin import rotation_self_notice as rsn  # noqa: E402
@@ -1599,10 +1603,24 @@ def test_the_notice_thread_is_bounded_by_its_own_writer() -> None:
     Asserts WHICH rows survive, not merely that something was deleted: keeping
     the wrong end would look identical in a count.
     """
-    state = _FakeState([])
+    class _ParserCheckingState(_FakeState):
+        parser_error: OrderedQueryError | None = None
+
+        def query_ordered(self, namespace: str, spec: dict[str, Any]) -> dict[str, Any]:
+            try:
+                parse_ordered_query(spec)
+            except OrderedQueryError as error:
+                self.parser_error = error
+            return super().query_ordered(namespace, spec)
+
+    state = _ParserCheckingState([])
     state.seed_thread("agt-t", [1, 2, 3, 4, 5, 6, 7])
     deleted = prune_rotation_notices(state, thread_id="agt-t", keep=3)  # type: ignore[arg-type]
     survivors = sorted(int(r["cursor"]) for r in state.messages["agt-t"])
+    _check(
+        state.parser_error is None,
+        "rotation notice retention spec passes the real ordered-query parser",
+    )
     _check(
         deleted == 4 and survivors == [5, 6, 7],
         f"the NEWEST three survive and the older four go -- got "
@@ -2267,6 +2285,7 @@ def main() -> int:
     print("rotation self-notice (L4c) smoke\n")
     test_a_live_session_with_an_arrested_gauge_is_still_notified()
     test_a_stale_row_with_no_live_session_is_still_dropped()
+    test_the_notice_thread_is_bounded_by_its_own_writer()
     test_a_lapsed_report_by_does_not_vouch_for_liveness()
     test_liveness_fails_closed_on_an_unreadable_report_by()
     test_a_non_live_lifecycle_row_does_not_vouch_for_liveness()
@@ -2293,7 +2312,6 @@ def main() -> int:
     test_the_surface_event_keeps_its_own_name()
     test_a_watcher_held_session_is_counted_as_a_subset_not_an_extra()
     test_an_unwired_service_yields_an_empty_tally_not_a_surface_only_sweep()
-    test_the_notice_thread_is_bounded_by_its_own_writer()
     test_a_thread_below_the_bound_is_not_touched_at_all()
     test_a_pruned_thread_still_pages_forward_from_a_stale_cursor()
     test_a_keep_of_zero_is_refused_rather_than_emptying_the_thread()

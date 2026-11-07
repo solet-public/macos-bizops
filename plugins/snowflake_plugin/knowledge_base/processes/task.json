@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::task",
+  "display_name": "Snowflake: Tasks",
+  "description": "Manage Snowflake tasks under /api/v2/databases/{database}/schemas/{schema}/tasks. Operations: list (like, startsWith, showLimit, fromName, rootOnly), create (body Task with name and definition; createMode), get, create_or_alter (PUT, full Task body), delete (ifExists), execute (asyncExec, retryLast), resume, suspend, dependents (recursive), current_graphs (resultLimit 1-10000), complete_graphs (resultLimit 1-10000, errorOnly), set_tags and unset_tags (tags; ifExists), get_tags (withLineage) and fetch_result (result_handler, page). Vendor RBAC alone decides. Returns job_id/status queued.",
+  "embedding_description": "Create, alter, list, execute, suspend, resume and delete Snowflake tasks through the Task REST API, and read task graph run history, dependents and tags. Use for scheduled SQL jobs and DAGs; executing a task requests a run without waiting for it. Vendor role grants decide every operation.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake task operation queued",
+    "result_type": "snowflake_task_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: family, operation, method, status (HTTP), headers, body (Task objects, TaskRun graph history or the vendor's status message), body_encoding, correlation_id, error_code for 4xx/5xx, and pagination: next_from_name when a list filled showLimit, Link relations, location and result_handler for 202 responses.",
+    "presentation_guidance": "This operation may have changed vendor state. Queued means the job was accepted, not that Snowflake completed the operation. Report the HTTP status, error_code and body faithfully. execute returns when Snowflake accepts the run, not when the run finishes: read complete_graphs or current_graphs for the outcome. To page a list, repeat it with query.fromName set to pagination.next_from_name. Report deletes and alters from the vendor status, never from job completion alone."
+  },
+  "error_processor_customizations": {
+    "action_context": "Manage Snowflake tasks with the registered role's grants.",
+    "error_interpretation": "snowflake.invalid_params is raised before any vendor call when the operation, identifiers, query parameter names or types, createMode, resultLimit range or required body members do not match the documented vendor shape. Vendor HTTP errors are completion data with status, body and error_code: auth_failed (401), permission_denied (403), object_not_found (404), timeout (408), conflict (409), rate_limited (429), statement_failed (422, SQL API only), api_error otherwise. snowflake.api_error without a status is a transport or configuration failure.",
+    "recovery_guidance": "Read the vendor status and body before retrying. A 403 means the registered role lacks the grant: grant it in Snowflake, the plugin adds no gate of its own. Double-quote identifiers that contain other characters. For a 202, call the same verb with operation fetch_result and the pagination.result_handler. Never silently retry a mutation after a transport error: read the object first."
+  }
+}

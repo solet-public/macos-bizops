@@ -21,6 +21,15 @@ Verbs:
   the action-queue loop (the fast-return contract).
 * ``plugin::platform_health_plugin::ensure_host_disk_guard_schedule`` — the
   idempotent install primitive for that cron (``is_discoverable=False``).
+* ``plugin::platform_health_plugin::check_model_capability_catalog`` — runs the
+  model capability catalog refresh once and alerts the configured role when the
+  catalog stops renewing (``is_discoverable=False``: it reaches the network).
+* ``plugin::platform_health_plugin::check_model_capability_catalog_cron`` — its
+  daily EDGE_SINK cron target, same background-thread shape as the host-disk one.
+* ``plugin::platform_health_plugin::ensure_model_capability_guard_schedule`` — the
+  idempotent install primitive for that cron (``is_discoverable=False``). Unlike
+  the host-disk installer it does not require ``alert_role``: the refresh itself
+  is the point, so a cron without an alert target is still worth installing.
 
 ``scheduling_service`` is resolved at call time, never at readiness: it lives
 on the orchestrator's ``service_manager``, which startup creates only at its
@@ -79,6 +88,27 @@ from platform_health_plugin.host_disk_guard import (
 from platform_health_plugin.host_disk_guard import (
     ensure_host_disk_guard_schedule as _ensure_host_disk_guard_schedule,
 )
+from platform_health_plugin.model_capability_guard import (
+    CHECK_PROCESS_NAME as MODEL_CAPABILITY_CHECK_PROCESS_NAME,
+)
+from platform_health_plugin.model_capability_guard import (
+    DEFAULT_SCHEDULE_CRON as MODEL_CAPABILITY_DEFAULT_SCHEDULE_CRON,
+)
+from platform_health_plugin.model_capability_guard import (
+    DEFAULT_SCHEDULE_TAG as MODEL_CAPABILITY_DEFAULT_SCHEDULE_TAG,
+)
+from platform_health_plugin.model_capability_guard import (
+    ENSURE_SCHEDULE_PROCESS_NAME as MODEL_CAPABILITY_ENSURE_SCHEDULE_PROCESS_NAME,
+)
+from platform_health_plugin.model_capability_guard import (
+    ModelCapabilityGuardConfig,
+)
+from platform_health_plugin.model_capability_guard import (
+    ensure_model_capability_guard_schedule as _ensure_model_capability_guard_schedule,
+)
+from platform_health_plugin.model_capability_guard import (
+    run_model_capability_guard as _run_model_capability_guard,
+)
 
 
 class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
@@ -94,6 +124,7 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
         # Single slot for the cron-fired check: a fire that lands while the
         # previous check is still running is a no-op, never a second check.
         self._check_lock = threading.Lock()
+        self._catalog_check_lock = threading.Lock()
 
     def prepare_for_readiness(self) -> None:
         if self.orchestrator_ref is None:
@@ -139,6 +170,33 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
 
         threading.Thread(target=body, name="host-disk-headroom-check", daemon=True).start()
         return "started"
+
+    def _dispatch_catalog_check_in_background(self, state: dict[str, Any]) -> str:
+        """Hand one catalog refresh + check to a background thread and return
+        at once: the refresh's network fetches, state reads/writes and alert
+        delivery run off the action-queue loop. A fire landing while the
+        previous one is still running is a no-op."""
+        if not self._active:
+            return "inactive"
+        if not self._catalog_check_lock.acquire(blocking=False):
+            return "already_running"
+
+        def body() -> None:
+            try:
+                self._run_catalog_check(state)
+            except Exception:  # noqa: BLE001 — logged at ERROR with the traceback, never swallowed silently
+                self.logger.exception("%s model-capability catalog check failed", self.name)
+            finally:
+                self._catalog_check_lock.release()
+
+        threading.Thread(target=body, name="model-capability-catalog-check", daemon=True).start()
+        return "started"
+
+    def _run_catalog_check(self, state: dict[str, Any]) -> dict[str, Any]:
+        if self.orchestrator_ref is None:
+            raise RuntimeError(f"{self.name}: orchestrator_ref unavailable; cannot refresh the catalog")
+        config = ModelCapabilityGuardConfig(alert_role=_configured_alert_role())
+        return _run_model_capability_guard(self.orchestrator_ref, config=config, state=state)
 
     def _require_scheduling_service(self) -> Any:
         """``scheduling_service`` resolved NOW, at call time. Raises loudly
@@ -190,6 +248,25 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
                 name=ENSURE_SCHEDULE_PROCESS_NAME,
                 result_processor_template_customizations=MergeResultProcessorCustomizations(
                     result_type="host_disk_guard_schedule_ensure_result",
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            MODEL_CAPABILITY_CHECK_PROCESS_NAME: EdgeProcessDefinition(
+                name=MODEL_CAPABILITY_CHECK_PROCESS_NAME,
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                    result_type="model_capability_guard_result",
+                ),
+                # A retry would run a second live refresh for the same intent.
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            MODEL_CAPABILITY_ENSURE_SCHEDULE_PROCESS_NAME: EdgeProcessDefinition(
+                name=MODEL_CAPABILITY_ENSURE_SCHEDULE_PROCESS_NAME,
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                    result_type="model_capability_guard_schedule_ensure_result",
                 ),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
@@ -470,6 +547,129 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
             alert_role=_configured_alert_role(),
             cron_expression=cron_expression,
             tag=tag,
+        )
+        return _envelope(report)
+
+
+    @platform_process(
+        name="check_model_capability_catalog",
+        is_discoverable=False,
+        context_handling=ContextHandling.NONE,
+        parameters={},
+        output_type="object",
+        output_description="Model capability catalog refresh outcome, severity and alert outcome.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Refresh counts, catalog age, severity, and whether an alert was dispatched.",
+            properties={
+                "status": ParameterMetadata(type=ParameterType.STRING, description="One of: ok, warning, critical."),
+                "reasons": ParameterMetadata(type=ParameterType.LIST, description="Why the status is not ok."),
+                "refresh_failure": ParameterMetadata(type=ParameterType.STRING, description="Set when the refresh raised, failed or returned an unreadable result."),
+                "readings_gathered": ParameterMetadata(type=ParameterType.INTEGER, description="Readings the refresh gathered."),
+                "cells_accepted": ParameterMetadata(type=ParameterType.INTEGER, description="Cells the refresh accepted."),
+                "cells_conflicted": ParameterMetadata(type=ParameterType.INTEGER, description="Cells whose sources disagreed."),
+                "cells_unchanged": ParameterMetadata(type=ParameterType.INTEGER, description="Cells with insufficient new evidence."),
+                "sources_failed": ParameterMetadata(type=ParameterType.LIST, description="Sources whose fetch failed."),
+                "renewed": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether any accepted cell has a newer reading than before the run."),
+                "accepted_cell_count": ParameterMetadata(type=ParameterType.INTEGER, description="Accepted cells in the catalog after the run."),
+                "oldest_cell_age_hours": ParameterMetadata(type=ParameterType.FLOAT, description="Age of the oldest accepted cell, in hours; null with no accepted cell."),
+                "staleness_window_hours": ParameterMetadata(type=ParameterType.FLOAT, description="Tightest staleness window among accepted cells, read from the catalog."),
+                "transitioned": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether status differs from the last status an alert was delivered for."),
+                "alerted": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the alert reached a live holder this call."),
+                "alert_role": ParameterMetadata(type=ParameterType.STRING, description="Role a transition was reported to, or null."),
+                "alert_reason": ParameterMetadata(type=ParameterType.STRING, description="Why a transition was not confirmed delivered."),
+            },
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(
+            action_label="Model capability catalog check",
+            result_type="model_capability_guard_result",
+            result_description="Catalog refresh outcome and renewal health, and whether an operator alert fired.",
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+    )
+    def check_model_capability_catalog(
+        self,
+        params: dict[str, Any],  # noqa: ARG002 — required by @platform_process signature
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        return _envelope(self._run_catalog_check(state))
+
+    # Literal ``name=``: the whole-tree gate resolves a cron target's
+    # processor_policy_category from the literal decorator name.
+    @platform_process(
+        name="check_model_capability_catalog_cron",
+        is_discoverable=False,
+        context_handling=ContextHandling.NONE,
+        parameters={},
+        output_type="object",
+        output_description="Whether this fire started a background model capability catalog check.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Cron fire outcome.",
+            properties={
+                "dispatch": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="started | already_running | inactive",
+                ),
+            },
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
+    )
+    def check_model_capability_catalog_cron(
+        self,
+        params: dict[str, Any],  # noqa: ARG002 — required by @platform_process signature
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        outcome = self._dispatch_catalog_check_in_background(state)
+        self.logger.info("%s model-capability cron fire: %s", self.name, outcome)
+        return _envelope({"dispatch": outcome})
+
+    @platform_process(
+        name="ensure_model_capability_guard_schedule",
+        context_handling=ContextHandling.NONE,
+        is_discoverable=False,
+        parameters={
+            "cron_expression": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description=f"Cron expression (UTC). Default '{MODEL_CAPABILITY_DEFAULT_SCHEDULE_CRON}' (daily).",
+            ),
+            "tag": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description=f"Schedule tag, used for idempotent lookup. Default '{MODEL_CAPABILITY_DEFAULT_SCHEDULE_TAG}'.",
+            ),
+        },
+        output_type="object",
+        output_description="Ensure result for the model capability guard cron.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Whether the cron was created or already present.",
+            properties={
+                "status": ParameterMetadata(type=ParameterType.STRING, description="One of: created, already_present."),
+                "tag": ParameterMetadata(type=ParameterType.STRING, description="Schedule tag."),
+                "cron_expression": ParameterMetadata(type=ParameterType.STRING, description="Set when created."),
+                "schedule_id": ParameterMetadata(type=ParameterType.STRING, description="Set when created."),
+            },
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(
+            action_label="Ensure model capability guard schedule",
+            result_type="model_capability_guard_schedule_ensure_result",
+            result_description="Whether the model capability guard cron was just created or was already present.",
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+    )
+    def ensure_model_capability_guard_schedule(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002 — required by @platform_process signature
+    ) -> dict[str, Any]:
+        report = _ensure_model_capability_guard_schedule(
+            self._require_scheduling_service(),
+            cron_expression=str(params.get("cron_expression") or MODEL_CAPABILITY_DEFAULT_SCHEDULE_CRON),
+            tag=str(params.get("tag") or MODEL_CAPABILITY_DEFAULT_SCHEDULE_TAG),
         )
         return _envelope(report)
 

@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::decrypt_payment_method",
+  "display_name": "Zuora: Create Payment Method From Encrypted Token",
+  "description": "Create an Apple Pay or Google Pay payment method from the wallet's encrypted token (POST /v1/payment-methods/decryption), optionally processing a payment; body needs integrationType, merchantID and paymentToken, which is redacted. Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "Turn an encrypted Apple Pay or Google Pay token captured at checkout into a stored Zuora payment method, and optionally charge an invoice in the same call. Use for mobile wallet checkouts where the merchant holds the encrypted wallet payload rather than a card number.",
+  "result_processor_customizations": {
+    "action_label": "Zuora wallet payment method created",
+    "result_type": "zuora_decrypt_payment_method_result",
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+  },
+  "error_processor_customizations": {
+    "action_context": "Create an Apple Pay or Google Pay payment method from the wallet's encrypted token (POST /v1/payment-methods/decryption), optionally processing a payment; body needs integrationType, merchantID and paymentToken, which is redacted.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape: a bad identifier, header value or query pairing, a body missing a required field, or an unreadable upload file. zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.validation_failed is a vendor 4xx or an HTTP 200 carrying success false, with Zuora's reasons. zuora.object_not_found, zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the needed Payments or Payment Methods permission or enable the vendor feature the reason names (for example Invoice Settlement). Read current vendor state with the matching get or list verb before retrying a write; pass an idempotency_key where offered. Back off on rate limits."
+  }
+}

@@ -7,7 +7,7 @@
   "result_processor_customizations": {
     "action_label": "Lane charter captured",
     "result_type": "capture_lane_charter_result",
-    "result_description": "lane_id (the lane this charter founds), charter_text (the verbatim words just stored), brief_ref (the accompanying workbench path or dispatch id, if any), captured_at (when the operator spoke these words, as passed by the caller — not the row-write time), and directed_by (the server-built principal that captured it).",
+    "result_description": "lane_id (the lane this charter founds), charter_text (the verbatim words just stored), unit_id and revision_id (the registered Unit and brief revision the charter belongs to), captured_at (when the operator spoke these words, as passed by the caller — not the row-write time), and directed_by (the server-built principal that captured it).",
     "presentation_guidance": "Confirm the lane_id the charter was captured for and echo back the captured_at timestamp. Do not quote charter_text back at length in a routine confirmation — the caller already has it verbatim; a one-line excerpt is enough to confirm nothing was mangled in transit."
   },
   "error_processor_customizations": {

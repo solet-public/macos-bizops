@@ -1327,9 +1327,9 @@ class PostgresProvider(StateProviderInterface):
         ``soft_delete=True`` (default) → ``UPDATE ... SET is_deleted = 1 WHERE
         ...`` (reuses ``build_update_sql``, mirroring the autocommit
         ``delete``'s soft path). ``soft_delete=False`` → ``DELETE FROM ... WHERE
-        ...``. ``serialize`` defaults to ``serialize_value_for_txn`` (its only
-        caller is the typed txn ``delete_records``, so scalar WHERE filters
-        honor the F1 seam).
+        ...``. ``serialize`` defaults to ``serialize_value_for_txn`` (its
+        transaction callers use it to honor the F1 seam). Autocommit hard
+        delete passes an identity serializer to retain its raw scalar binding.
         """
         if soft_delete:
             return self.build_update_sql(
@@ -1368,21 +1368,12 @@ class PostgresProvider(StateProviderInterface):
             # Soft delete: set is_deleted flag
             return self.update(namespace, table, conditions, {"is_deleted": 1})
         else:
-            # Hard delete
-            full_table_name = build_table_name(namespace, table)
-
-            where_clauses = []
-            params: list[Any] = []
-
-            for col, val in conditions.items():
-                where_clauses.append(
-                    sql.SQL("{} = {}").format(sql.Identifier(col), sql.Placeholder())
-                )
-                params.append(val)
-
-            delete_sql = sql.SQL("DELETE FROM {} WHERE {}").format(
-                sql.Identifier(self.config.schema_name, full_table_name),
-                sql.SQL(" AND ").join(where_clauses),
+            # Keep the autocommit hard-delete path's raw scalar binding.
+            # The shared builder compiles dict/list predicates instead of
+            # passing operator dictionaries through to the driver.
+            delete_sql, params = self.build_delete_sql(
+                namespace, table, conditions, soft_delete=False,
+                serialize=lambda value: value,
             )
 
             with self.get_connection() as conn, conn.cursor() as cur:

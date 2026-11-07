@@ -1,0 +1,19 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::read_session_usage_window",
+  "display_name": "Read and optionally price a session usage window",
+  "description": "Calls session_ledger_service.session_usage_totals once with since, until and vendor unchanged. With priced absent or false, returns the exact S1 dictionary and adds no metadata. With priced=true, preserves all S1 fields and adds pricing_by_model with USD and basis, unpriced_token_count and sorted unpriced_models. Pricing uses the windowed by_model totals and the agent_messaging_plugin S2 pricing helpers. Partial, bounded and truncated S1 status/advisories remain visible. Unknown models remain in the response and are counted as unpriced; no fallback price is inferred. Session identity arguments are not accepted. Read-only.",
+  "embedding_description": "Reads session ledger token totals for the requested since, until and vendor window and can add catalog-priced USD and basis by model. Raw mode preserves the S1 response exactly; priced mode keeps unknown models and unpriced-token counts. Both retain bounded, partial or truncated status and advisories, and the call accepts no unit or runtime identity.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Session usage window read",
+    "result_type": "read_session_usage_window_result",
+    "result_description": "The raw S1 response unchanged when priced is absent/false; priced mode preserves those fields and adds pricing_by_model, unpriced_token_count and unpriced_models.",
+    "presentation_guidance": "Keep S1 completeness status and advisories with the token totals. When priced, distinguish priced USD from known unpriced tokens, name the per-model basis, and state that the USD is a catalog estimate. Do not claim unknown model usage is free or complete when S1 reports partial/bounded data.",
+    "output_action_guidance": "Pass since, until and vendor unchanged to S1. Set priced=true only when USD estimates are wanted. Leave runtime_session_ids, unit_id and agent_instance_id out of this window call."
+  },
+  "error_processor_customizations": {
+    "action_context": "One read-only S1 window request, followed by in-memory S2 pricing only when priced=true. No persisted pricing cache or writes.",
+    "error_interpretation": "S1 parameter_invalid caller errors pass through unchanged. A missing ledger service returns status unknown with ledger_service_unavailable. Missing or ambiguous pricing returns null USD with an unpriced basis and a known-token count.",
+    "recovery_guidance": "Correct the S1 since/until/vendor arguments when its caller error is returned. Keep raw mode for token-only reporting. Inspect advisories for bounded data or lower-bound unpriced token counts."
+  }
+}

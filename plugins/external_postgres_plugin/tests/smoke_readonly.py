@@ -1,59 +1,18 @@
 #!/usr/bin/env python3
-"""LIVE read-only enforcement smoke (§8.5) for external_postgres_plugin.
+"""Private live PostgreSQL readonly behavioral proof.
 
-This is the LOAD-BEARING proof: the psycopg3 connection read-only characteristic
-is the developer-proof write-stopper, not the belt guards. It needs a REAL
-Postgres (MagicMock cannot prove SQLSTATE 25006), so it runs against a local
-SCRATCH database — NEVER the platform's own DB.
-
-FIXTURE (documented): a local Homebrew Postgres, database ``epg_smoke_scratch``,
-connected as the local OS user running this smoke (``getpass.getuser()`` —
-the passwordless trust SUPERUSER) over ``localhost:5432``, ``sslmode=disable``.
-Connecting as the superuser is deliberate — it proves that even an
-OVER-PRIVILEGED registered credential cannot write through this tool (the
-read-only characteristic binds regardless of role). Setup/teardown of the
-probe table go through ``psql`` (a read-WRITE path) so this smoke never needs a
-raw driver import.
-
-VISIBLE-SKIP-ON-UNREACHABLE (Coordinator-Day Q2 ruling, GTE-09; UPDATED
-2026-08-08 — undeclared-dependency audit): if Postgres/the local trust
-role/``psql`` are unavailable at SETUP time, the smoke exits the dedicated
-SKIP code (77 — the automake/Meson/CTest convention) with an unmissable
-SKIPPED-LIVE-DB-UNREACHABLE banner, and ``run_smokes.py`` now reports that
-distinctly from both a pass and a fail (it used to only surface a smoke's
-output on FAIL, so the original GTE-09 ruling made this fail loud instead
-of a silent exit-0 skip — that gap is closed, so the workaround is too). A
-failure once checks are already RUNNING (fixture broke mid-run, not just
-absent) still fails loud (exit 1) rather than folding into the skip path,
-since that could be a real bug. The scratch cluster is the same 24/7
-instance the platform needs, so this path is pathological. It runs FOR
-REAL wherever the scratch DB is reachable.
-
-Proves:
-  1. conn.read_only is True
-  2. test_connection echoes the RESOLVED host it actually connected to and it
-     equals the host we connected with (F1 — Rev-A R-D2 "surfaces resolved host")
-  3. SHOW transaction_read_only == 'on' in the SAME transaction as the user query
-     (the exact Codex BLOCKER: proves the CURRENT txn is read-only, not just
-     default_transaction_read_only)
-  4. EXPLAIN / SHOW / SELECT succeed
-  5. INSERT/UPDATE/DELETE/CREATE/CREATE TEMP/EXPLAIN ANALYZE <write> all refused
-     with SQLSTATE 25006
-  6. a write as the VERY FIRST statement on a fresh connection is refused — no
-     write-capable window (the rev-E point)
-
-Run:
-    SOLET_NAME=<name> .venv/bin/python3 \
-        plugins/external_postgres_plugin/tests/smoke_readonly.py
-
-Exits 0 only when the live proof actually ran and passed; exits 1 on a real
-failure OR when the fixture is unreachable (loud, never silent).
+Run under quality_gates/provision_test_pg.py; the private manifest variable
+selects this smoke's independent database on the owned loopback cluster.
+No fixture returns 77; provisioned setup or body failures return nonzero.
+The original SQL behavior, read/write probes and dynamic OS-user assertions
+remain exercised. See quality_gates/private_postgres.md.
 """
 
 from __future__ import annotations
 
 import getpass
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -61,16 +20,27 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_ROOT))
+REPO_ROOT = _ROOT
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "external_postgres_plugin" / "src"))
 
 from external_postgres_plugin import query_actions  # noqa: E402
 from external_postgres_plugin.app_config import ExternalDsn  # noqa: E402
 from external_postgres_plugin.connection import connect  # noqa: E402
 
-_SCRATCH_DB = "epg_smoke_scratch"
-_HOST = "localhost"
-_PORT = 5432
+from quality_gates.private_test_pg import (  # noqa: E402
+    MANIFEST_ENV,
+    FixtureIntegrityError,
+    load_fixture,
+    pg_binary,
+    skip_fixture,
+    without_libpq,
+)
+
+_SCRATCH_DB = ""
+_HOST = "127.0.0.1"
+_PORT = 0
 _USER = getpass.getuser()
 _SSLMODE = "disable"
 _PROBE = "epg_probe"
@@ -90,6 +60,14 @@ def _assert(label: str, cond: bool, msg: str = "") -> None:
         print(f"  FAIL  {label}: {msg or 'assertion failed'}")
 
 
+def _configure_fixture() -> None:
+    global _HOST, _PORT, _SCRATCH_DB
+    config = load_fixture("external_readonly")
+    if config.user != _USER:
+        raise FixtureIntegrityError("fixture user differs from the current OS user")
+    _HOST, _PORT, _SCRATCH_DB = config.host, config.port, config.database
+
+
 def _dsn() -> ExternalDsn:
     return ExternalDsn(
         name="scratch",
@@ -102,9 +80,10 @@ def _dsn() -> ExternalDsn:
     )
 
 
-def _psql(sql: str, dbname: str = _SCRATCH_DB) -> subprocess.CompletedProcess[str]:
+def _psql(sql: str, dbname: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["psql", "-U", _USER, "-d", dbname, "-v", "ON_ERROR_STOP=1", "-c", sql],
+        [str(pg_binary("psql")), "-X", *load_fixture("external_readonly").endpoint_args(), "-d", dbname or _SCRATCH_DB, "-v", "ON_ERROR_STOP=1", "-c", sql],
+        env=without_libpq(os.environ),
         capture_output=True,
         text=True,
         timeout=20,
@@ -114,13 +93,8 @@ def _psql(sql: str, dbname: str = _SCRATCH_DB) -> subprocess.CompletedProcess[st
 def _setup() -> bool:
     """Create the scratch DB + seed the probe table via psql (read-write path)."""
     try:
-        subprocess.run(
-            ["createdb", "-U", _USER, _SCRATCH_DB], capture_output=True, text=True, timeout=20
-        )  # ignore failure — the DB may already exist
-        seed = _psql(
-            f"DROP TABLE IF EXISTS {_PROBE}; CREATE TABLE {_PROBE}(id int); "
-            f"INSERT INTO {_PROBE} VALUES (1), (2);"
-        )
+        subprocess.run([str(pg_binary("createdb")), *load_fixture("external_readonly").endpoint_args(), "--maintenance-db=postgres", _SCRATCH_DB], env=without_libpq(os.environ), capture_output=True, text=True, timeout=20)  # ignore failure — the DB may already exist
+        seed = _psql(f"DROP TABLE IF EXISTS {_PROBE}; CREATE TABLE {_PROBE}(id int); INSERT INTO {_PROBE} VALUES (1), (2);")
         return seed.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
@@ -200,33 +174,6 @@ def _run_live_checks() -> None:
         _assert("first-statement write refused (no window)", first_state == _READ_ONLY_SQLSTATE)
     finally:
         fresh.close()
-
-
-_SKIP_EXIT_CODE = 77
-
-
-def _unreachable_skip(detail: str) -> int:
-    # UPDATED 2026-08-08 (undeclared-dependency audit): the Coordinator-Day Q2 /
-    # GTE-09 ruling made this FAIL LOUD (exit 1) rather than a silent exit-0
-    # skip, because run_smokes.py only surfaced a smoke's output on FAIL --
-    # a genuine skip would have been invisible in the suite. That gap is now
-    # closed: run_smokes.py reports passed/skipped/failed distinctly via the
-    # automake/Meson/CTest SKIP_RETURN_CODE convention (77), so a setup-time
-    # unreachable fixture can now be a VISIBLE skip instead of an over-broad
-    # fail that blocked every commit on a machine without a local scratch
-    # Postgres. workbench/2026-08-08_undeclared_system_dependencies_findings_d3-impl.md.
-    # This function covers ONLY setup-time unreachability (the fixture never
-    # came up) -- a failure mid-run, once checks are already executing, stays
-    # a genuine FAIL via _mid_run_fail below, since that could be a real bug,
-    # not just an absent dependency.
-    print("=" * 70)
-    print("SKIPPED-LIVE-DB-UNREACHABLE")
-    print('BORN_CLONE_SKIP_WITNESS={"reason":"local_postgres_fixture_unreachable"}')
-    print(f"  {detail}")
-    print("  The LIVE read-only 25006 proof DID NOT RUN. Bring up local Postgres")
-    print("  (the local trust-auth user @ localhost:5432 + createdb/psql) and re-run.")
-    print("=" * 70)
-    return _SKIP_EXIT_CODE
 
 
 def _mid_run_fail(detail: str) -> int:
@@ -318,10 +265,11 @@ def main() -> int:
         print(f"Results: {_passed} passed, {len(_failed)} failed")
         print("FAILED:", _failed)
         return 1
+    if not os.environ.get(MANIFEST_ENV):
+        return skip_fixture()
+    _configure_fixture()
     if not _setup():
-        return _unreachable_skip(
-            "scratch Postgres fixture unreachable (createdb/psql/local-trust-user/localhost:5432)."
-        )
+        return _mid_run_fail("provisioned private fixture setup failed")
     try:
         _run_live_checks()
     except Exception as exc:  # fixture failed mid-run -> loud FAIL, not a silent skip
@@ -334,6 +282,7 @@ def main() -> int:
         print("FAILED:", _failed)
         return 1
     print("All LIVE read-only checks passed.")
+    print("PRIVATE_PG_BODY external_readonly")
     return 0
 
 

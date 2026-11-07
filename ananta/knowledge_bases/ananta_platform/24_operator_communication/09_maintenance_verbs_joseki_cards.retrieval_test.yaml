@@ -24,6 +24,12 @@ target_queries:
   - "seat self-rotation delegated helper drives the seat terminal"
   - "hydrate or drain the local memory passthrough projection"
   - "check how close a session is to its context window ceiling"
+  - "how to hand a delivered candidate through review and readiness to landing"
+  - "psolet delivered-to-review after a failed review or retired reviewer"
+  - "run reviewed-to-ready after the reviewer records PASS"
+  - "which repository can run psolet landing run dry-run"
+  - "author delivery report proposed landing commit message doc impact READY message"
+  - "a peer receipt is not landing authorization"
 
 # forbidden_min_rank is 2, not the platform-conventional 4, for the same reason
 # as 06_fleet_launcher_session_configuration.retrieval_test.yaml: the delegated
@@ -34,6 +40,7 @@ target_queries:
 # 06 for 06's own self-clear queries (must not reach rank 1).
 forbidden_queries:
   - "how does a session clear its own context and keep working"     # 06_fleet_launcher_session_configuration owns this; adjacent-card exception, see above
+  - "change model effort advisor transport for a fleet launcher role" # 06_fleet_launcher_session_configuration owns launcher configuration
   - "session start orientation standing governance documents"       # 04_session_start_orientation owns this
   - "seed hydration runbook operator environment setup fleet coordination offer" # github_midwife_plugin/01_hydration_runbook owns this
 
@@ -42,4 +49,5 @@ forbidden_queries:
 min_rank: 1
 forbidden_min_rank: 2
 
-process_key_assertions: []
+process_key_assertions:
+  - "plugin::agent_messaging_plugin::peer_send_by_name" # interim Main-to-Git-Controller READY relay

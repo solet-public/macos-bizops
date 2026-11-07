@@ -237,10 +237,7 @@ def _probe_evidence(states: list[ArtifactState]) -> list[JsonObject]:
 
 def _conflict_repair(state: ArtifactState) -> str:
     if state.kind == "launchd_plist":
-        return (
-            f"The LaunchAgent plist at {state.destination} is not a legacy_direct plist for this solet (its Label is not local.solet.<name>, it does not launch ananta.cli directly, or it does not parse), so the update will not replace it. "
-            "Replace it by hand: see the seed update runbook, Part C Step 5."
-        )
+        return f"The LaunchAgent plist at {state.destination} is not a legacy_direct plist for this solet (its Label is not local.solet.<name>, it does not launch ananta.cli directly, or it does not parse), so the update will not replace it. Replace it by hand: see the seed update runbook, Part C Step 5."
     return f"Managed artifact {state.artifact_id} at {state.destination}: {state.conflict}. Re-run hydration for it by hand or remove the block; it is never rewritten silently."
 
 
@@ -290,10 +287,9 @@ def _adopt_diff_evidence(state: ArtifactState) -> JsonObject:
 
 
 def _read_managed(path: Path) -> tuple[str | None, str | None]:
-    """The file's text, read the way ``read_text`` reads it (UTF-8, newlines translated), and the digest of the raw bytes it was decoded from.
+    """The file's decoded text without newline translation and the digest of the same raw bytes.
 
-    The digest is of the bytes the update will replace, so the Manager's backup of them, which hashes raw bytes, agrees with it for a file with CRLF line
-    endings too; a digest of the translated text would not.  Both come from one read.
+    Keeping the original text lets a section refresh retain its exact tail; the digest still agrees with the Manager's raw-byte backup.
     """
     try:
         raw = path.read_bytes()
@@ -303,7 +299,12 @@ def _read_managed(path: Path) -> tuple[str | None, str | None]:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise NotTextError(path) from exc
-    return text.replace("\r\n", "\n").replace("\r", "\n"), sha256_bytes(raw)
+    return text, sha256_bytes(raw)
+
+
+def _normalize_newlines(text: str) -> str:
+    """Return a comparison view with all supported newline forms represented as LF."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _artifact_state(artifact: ArtifactDeclaration, destination: str, context: _Context) -> ArtifactState:
@@ -311,7 +312,8 @@ def _artifact_state(artifact: ArtifactDeclaration, destination: str, context: _C
     existing, digest = _read_managed(path)
     mode = file_mode(path, 0o644)
     if artifact.kind == "managed_block":
-        return _managed_block_state(artifact, destination, existing, digest, mode, context)
+        comparison = None if existing is None else _normalize_newlines(existing)
+        return _managed_block_state(artifact, destination, comparison, digest, mode, context)
     return _whole_file_state(artifact, destination, existing, digest, mode, context)
 
 
@@ -378,6 +380,8 @@ def _full_digest(match: BlockMatch, artifact: ArtifactDeclaration) -> str:
 def _whole_file_state(artifact: ArtifactDeclaration, destination: str, existing: str | None, digest: str | None, mode: int, context: _Context) -> ArtifactState:
     if artifact.section_end is not None:
         return _section_state(artifact, destination, existing, digest, mode, context)
+    if existing is not None:
+        existing = _normalize_newlines(existing)
     outcome = _Outcome(artifact, destination, existing, digest, mode)
     candidate = _whole_render(artifact, _template_bytes(context.request.target, artifact.template_ref), artifact.template_digest, context, stamped=True)
     if existing is None:
@@ -390,17 +394,17 @@ def _whole_file_state(artifact: ArtifactDeclaration, destination: str, existing:
     return _unstamped_whole_state(outcome, existing, candidate, context)
 
 
-_CONTROLLER_LINE = re.compile(r'^[ \t]*GIT_CONTROLLER_NAME="([^"\n]*)" \\$', re.MULTILINE)
+_CONTROLLER_LINE = re.compile(r'^[ \t]*GIT_CONTROLLER_NAME="([^"\n]*)" \\\r?$', re.MULTILINE)
 
 
 def _section_state(artifact: ArtifactDeclaration, destination: str, existing: str | None, digest: str | None, mode: int, context: _Context) -> ArtifactState:
     """Refresh only the launcher section of a file the operator also writes into.
 
-    The section is the text above the first line starting with ``section_end``; the operator's role functions
-    below it are kept byte-for-byte.  The one operator-chosen value inside the section, the ``GIT_CONTROLLER_NAME``
-    line, is read from the file and rendered back unchanged, so a section that differs from a known render only
-    in that value still matches it.  A missing file is not created; a section that matches no known render, or
-    that has lost its marker or its controller line, is reported and left in place without blocking the update.
+    The section is the text above the first line starting with ``section_end``; only its comparison view is newline-normalized.
+    The refreshed head keeps a CRLF style when the saved head uses CRLF throughout, and the original operator tail is composed unchanged.
+    The one operator-chosen value inside the section, the ``GIT_CONTROLLER_NAME`` line, is read from the file and rendered back unchanged,
+    so a section that differs from a known render only in that value still matches it.  A missing file is not created; a section that
+    matches no known render, or that has lost its marker or its controller line, is reported and left in place without blocking the update.
     """
     outcome = _Outcome(artifact, destination, existing, digest, mode)
     if existing is None:
@@ -414,23 +418,26 @@ def _section_state(artifact: ArtifactDeclaration, destination: str, existing: st
     candidate_head = _render_section(artifact, _template_bytes(context.request.target, artifact.template_ref), artifact.template_digest, context, values, stamped=True)
     if candidate_head is None:
         raise RuntimeError(f"{artifact.artifact_id}: the candidate template has no line starting {artifact.section_end!r}")
-    if head == candidate_head:
+    if _normalize_newlines(head) == candidate_head:
         return outcome.state("stamped_current", "none", artifact.template_digest, None, None)
-    return _older_section_state(outcome, head, candidate_head + tail, values, context)
+    crlf_head = "\r\n" in head and "\n" not in head.replace("\r\n", "")
+    refreshed_head = candidate_head.replace("\n", "\r\n") if crlf_head else candidate_head
+    return _older_section_state(outcome, head, refreshed_head + tail, values, context)
 
 
 def _older_section_state(outcome: _Outcome, head: str, refreshed: str, values: dict[str, str], context: _Context) -> ArtifactState:
     """A section that is not the candidate's: a previous render is replaced, anything else is reported and left."""
     artifact = outcome.artifact
-    stamped = stamped_digest(head, cast(str, artifact.stamp), artifact.template_ref)
+    comparison_head = _normalize_newlines(head)
+    stamped = stamped_digest(comparison_head, cast(str, artifact.stamp), artifact.template_ref)
     if stamped is not None:
         previous = _template_bytes_by_digest(artifact, stamped, context)
-        if previous is not None and head == _render_section(artifact, previous, stamped, context, values, stamped=True):
+        if previous is not None and comparison_head == _render_section(artifact, previous, stamped, context, values, stamped=True):
             return outcome.state("stamped_previous", "render_whole", stamped, None, refreshed)
         return outcome.state("locally_modified", "none", stamped, None, None)
     for digest in (*artifact.previous_template_digests, artifact.template_digest):
         previous = _template_bytes_by_digest(artifact, digest, context)
-        if previous is not None and head == _render_section(artifact, previous, digest, context, values, stamped=False):
+        if previous is not None and comparison_head == _render_section(artifact, previous, digest, context, values, stamped=False):
             return outcome.state("legacy_matched", "render_whole", None, None, refreshed)
     return outcome.state("unknown_origin", "none", None, None, None)
 
@@ -526,9 +533,7 @@ def _adopt_diff(existing: str, candidate: str) -> str:
 #: ``solet_manager.adapter_validation._SECRET_PATTERNS`` (Manager evidence), name password, secret, token, api key, private key and credential; this set
 #: also names a passphrase, authorization and ``DSN``, and a whole-word ``PASS``, ``PAT`` or ``KEY`` (``DB_PASS``, ``GH_PAT``, ``STRIPE_KEY``; not ``PATH``,
 #: ``KEYBOARD`` or ``KEYCHAIN``).
-_SECRET_PLIST_KEY = re.compile(
-    r"(?i)password|passwd|passphrase|secret|token|api[_-]?key|private[_-]?key|credential|authorization|dsn|(?<![a-z0-9])(?:pass|pat|key)(?![a-z0-9])"
-)
+_SECRET_PLIST_KEY = re.compile(r"(?i)password|passwd|passphrase|secret|token|api[_-]?key|private[_-]?key|credential|authorization|dsn|(?<![a-z0-9])(?:pass|pat|key)(?![a-z0-9])")
 #: A line of an evidence ``observed`` array is held to the Manager's ``public_string`` rules by ``setup_adapter_contract.neutralized`` below, which replaces a
 #: secret-shaped run with ``[REDACTED]`` and a Homebrew keg path with ``[keg path]`` and leaves the rest of the line readable (iss_67472e3f).  A refusal
 #: there raises out of the whole preview, so the seed never hands the Manager a line that breaks one.  The seed does not import the Manager.
@@ -644,12 +649,7 @@ def _template_bytes(target: Path, template_ref: str) -> bytes:
 
 
 def _resolve_destination(artifact: ArtifactDeclaration, request: AdapterRequest, runtime: Runtime) -> str:
-    return (
-        artifact.logical_destination.replace("{HOME}", str(runtime.home))
-        .replace("{TARGET}", str(request.target))
-        .replace("{PROFILE_HOME}", str(request.target / "profile"))
-        .replace("{NAME}", request.name)
-    )
+    return artifact.logical_destination.replace("{HOME}", str(runtime.home)).replace("{TARGET}", str(request.target)).replace("{PROFILE_HOME}", str(request.target / "profile")).replace("{NAME}", request.name)
 
 
 def _planned_destinations(request: AdapterRequest) -> dict[str, str]:

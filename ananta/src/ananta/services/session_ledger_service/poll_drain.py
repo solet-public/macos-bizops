@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 
 
 def start_importer_poll_drain(
-    executor: SummaryExecutor, importer: SessionLedgerImporter,
+    executor: SummaryExecutor,
+    importer: SessionLedgerImporter,
+    oversized_executor: SummaryExecutor,
 ) -> dict[str, Any]:
     """Submit the importer poll pass to its single slot; report started/no-op.
 
@@ -33,16 +35,21 @@ def start_importer_poll_drain(
     ``{"poller": "already_running"}`` (slot held → no-op); per-pass counts are logged at drain
     completion (async).
     """
-    started = executor.submit(lambda: run_importer_poll_drain(importer))
+    started = executor.submit(lambda: run_importer_poll_drain(importer, oversized_executor))
     outcome = "started" if started else "already_running"
     logger.info("ledger poll drain %s", outcome)
     return {"poller": outcome}
 
 
-def run_importer_poll_drain(importer: SessionLedgerImporter) -> None:
+def run_importer_poll_drain(importer: SessionLedgerImporter, oversized_executor: SummaryExecutor) -> None:
     """Background body of the ``trigger_poll`` heartbeat: one full ``poll_once`` pass on the
     single-slot poll-drain thread (off the action queue), restart-safe via per-source cursors +
     the self-expiring lease. All lease/batch/per-session-failure isolation lives in ``poll_once``.
     """
     report = importer.poll_once()
     logger.info("ledger poll DRAIN complete: %s", report)
+    # Independent single slot, never waited on. A non-yielding normal source
+    # can still delay this producer. No hidden queue: the next five-minute
+    # heartbeat recomputes eligibility from durable checkpoints.
+    started = oversized_executor.submit(importer.poll_one_oversized)
+    logger.info("ledger oversized drain %s; next heartbeat retries", "started" if started else "occupied_or_not_admitted")

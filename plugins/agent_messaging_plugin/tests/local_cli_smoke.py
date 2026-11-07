@@ -10,11 +10,19 @@ Exercises the CLI and its `BridgeClient` end-to-end against an in-process
 * install-location identity resolution (root_manifest name -> clone basename),
 * the CLI import chain needs NO ambient env (the package __init__ re-exports
   the server plugin lazily, so a bare `<name>` command works at birth).
+
+One working-watch case additionally requires local tmux. Its disposable
+pane exits itself and has no agent identity. Without a tmux binary that case
+is not run: the smoke runs every other case and exits the dedicated skip
+code, 77, with the born-clone skip witness, never a silent pass. Loop cases use a controlled poll
+clock and real BridgeClient HTTP envelopes; lifecycle cases reach the actual
+plugin handler against schema-aware state rather than contacting a live Solet.
 """
 
 from __future__ import annotations
 
 # ruff: noqa: E402
+import importlib
 import json
 import os
 import subprocess
@@ -28,10 +36,23 @@ from unittest.mock import patch
 
 import httpx
 
+_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(_ROOT))
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 _SRC = _PLUGIN_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+
+# Resolve sibling fixtures from this file even in Pyright's external overlay.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Preserve the existing global test surface and main() discovery.
+_attend_cases = importlib.import_module("_local_cli_attend_cases")
+globals().update({name: obj for name, obj in vars(_attend_cases).items() if name.startswith("test_")})
+
+from composer_tmux_fixture import report_tmux_unmeasured, tmux_missing
+
+# Real-tmux cases that could not run on this host (no tmux binary on PATH).
+_unmeasured: list[str] = []
 
 from ananta.constants import ExitCodes
 from click.testing import CliRunner, Result
@@ -42,6 +63,13 @@ import agent_messaging_plugin.local_cli.client as client_mod
 import agent_messaging_plugin.local_cli.spool as spool_mod
 
 Handler = Callable[[httpx.Request], httpx.Response]
+
+# These cases exercise the launcher-env identity contract. An ambient Claude
+# Code session id (this smoke run by hand inside a Claude session with AGENT_*
+# scrubbed) would select the env-less persisted-identity path instead, and a
+# "watch must refuse" case would then reach a LIVE bridge. That path is
+# desktop_session_identity_smoke.py's, so it is removed for this process.
+os.environ.pop(env_contract.CLAUDE_SESSION_ID_ENV, None)
 
 
 def _make_handler(
@@ -66,20 +94,18 @@ def _make_handler(
         if path == "/api/v1/bridge/open":
             open_bodies.append(json.loads(request.content or b"{}"))
             return httpx.Response(
-                200, json={"bridge_id": "agc-smoke", "session_id": "s"},
+                200,
+                json={"bridge_id": "agc-smoke", "session_id": "s"},
             )
         if path.endswith("/process/call"):
             return httpx.Response(
-                200, json={"status": "queued", "action_id": "ae-smoke"},
+                200,
+                json={"status": "queued", "action_id": "ae-smoke"},
             )
         if "/process/result/" in path:
             idx = min(calls["result"], len(result_statuses) - 1)
             raw_status = result_statuses[idx]
-            status = (
-                "completed"
-                if raw_status == "completed_without_result"
-                else raw_status
-            )
+            status = "completed" if raw_status == "completed_without_result" else raw_status
             calls["result"] += 1
             body: dict[str, object] = {"action_id": "ae-smoke", "status": status}
             if raw_status == "completed":
@@ -87,7 +113,8 @@ def _make_handler(
             return httpx.Response(200, json=body)
         if path.endswith("/process/search"):
             return httpx.Response(
-                200, json={"process_keys": ["a::b::c"], "action_status": "completed"},
+                200,
+                json={"process_keys": ["a::b::c"], "action_status": "completed"},
             )
         if path == "/api/v1/bridge/health":
             return httpx.Response(200, json={"status": "healthy"})
@@ -115,6 +142,48 @@ def _invoke(args: list[str], handler: Handler) -> Result:
         return CliRunner().invoke(cli_mod.cli, args, obj={})
 
 
+def test_send_by_name_uses_attributed_direct_route() -> None:
+    """Both controller shapes use their launcher key; no receiving bridge id input."""
+    for session in ("ases-origin-controller", "ases-project-solet-controller"):
+        opened: list[dict[str, Any]] = []
+        paths: list[str] = []
+        base, _ = _make_handler(["queued"], opened)
+        receipt = {
+            "message_id": "arm-fixture",
+            "delivery": "queued_for_replay",
+            "thread_id": "role:Main",
+        }
+
+        def handler(
+            request: httpx.Request,
+            paths: list[str] = paths,
+            base: Handler = base,
+            receipt: dict[str, str] = receipt,
+        ) -> httpx.Response:
+            paths.append(request.url.path)
+            if request.url.path.endswith("/peer/send_by_name"):
+                assert json.loads(request.content) == {
+                    "name": "Main",
+                    "content": "COMMIT LANDED.\n",
+                }
+                return httpx.Response(200, json=receipt)
+            return base(request)
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.txt"
+            report.write_text("COMMIT LANDED.\n")
+            with patch.dict(os.environ, {"AGENT_SESSION_ID": session}):
+                result = _invoke(["send-by-name", "Main", "--content-file", str(report)], handler)
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == receipt
+        assert opened[0]["caller_agent_session_id"] == session
+        assert paths == [
+            "/api/v1/bridge/open",
+            "/api/v1/bridge/agc-smoke/peer/send_by_name",
+            "/api/v1/bridge/agc-smoke/close",
+        ]
+
+
 def test_health() -> None:
     handler, _ = _make_handler(["completed"])
     result = _invoke(["health"], handler)
@@ -127,6 +196,91 @@ def test_search() -> None:
     result = _invoke(["search", "q"], handler)
     assert result.exit_code == 0, result.output
     assert "a::b::c" in result.output
+
+
+def test_schema_cli_projection_round_trips_two_call_positionals() -> None:
+    """A discovered CLI example must use exactly the two ``call`` positionals.
+
+    The canonical process API envelope has three fields (process, reason, and
+    arguments) and is not valid ``solet-bridge call`` argv. The projection
+    exposes the canonical schema separately and maps its process key and
+    arguments schema onto the CLI's actual two positional tokens.
+
+    Mutant killed here: projecting process/reason/arguments as separate CLI
+    positionals. The exact argv assertion fails before that malformed command
+    can be mistaken for a runnable CLI example.
+    """
+    process_key = "plugin::fake::echo"  # wint:negative-fixture
+    arguments_schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+    }
+    canonical_schema: dict[str, Any] = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+            "process": {"type": "object"},
+            "reason": {"type": "string"},
+            "arguments": arguments_schema,
+        },
+        "required": ["process", "reason", "arguments"],
+    }
+    canonical_response = {
+        "process_key": process_key,
+        "invocation_schema": canonical_schema,
+    }
+    process_calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/bridge/open":
+            return httpx.Response(
+                200,
+                json={"bridge_id": "agc-schema", "session_id": "s"},
+            )
+        if path.endswith("/process/schema"):
+            assert json.loads(request.content)["process_key"] == process_key
+            return httpx.Response(200, json=canonical_response)
+        if path.endswith("/process/call"):
+            process_calls.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                json={"status": "queued", "action_id": "ae-schema"},
+            )
+        if path.endswith("/process/result/ae-schema"):
+            return httpx.Response(
+                200,
+                json={"status": "completed", "result": {"data": {"ok": True}}},
+            )
+        if path.endswith("/close"):
+            return httpx.Response(200, json={"status": "closed"})
+        return httpx.Response(404, json={"detail": f"unmapped {path}"})
+
+    schema_result = _invoke(["schema", process_key], handler)
+    assert schema_result.exit_code == 0, schema_result.output
+    schema_payload = json.loads(schema_result.output)
+    assert schema_payload["canonical_process_api"] == canonical_response
+    projection = schema_payload["local_cli_invocation"]
+    assert projection["argv_template"] == ["call", process_key, "<ARGUMENTS_JSON>"]
+    assert projection["arguments_schema"] == arguments_schema
+    assert projection["mapping"] == {
+        "process_key": "canonical_process_api.process_key",
+        "arguments_json": "canonical_process_api.invocation_schema.properties.arguments",
+    }
+
+    mutant_result = _invoke(
+        ["call", process_key, "<PROCESS_JSON>", "<REASON>", "<ARGUMENTS_JSON>"],
+        handler,
+    )
+    assert mutant_result.exit_code != 0, f"the mutant that projects canonical envelope fields as separate CLI positionals must be rejected: {mutant_result.output}"
+
+    arguments = {"value": "projection smoke"}
+    projected_argv = list(projection["argv_template"])
+    projected_argv[2] = json.dumps(arguments, separators=(",", ":"))
+    call_result = _invoke(projected_argv, handler)
+    assert call_result.exit_code == 0, call_result.output
+    assert len(process_calls) == 1, process_calls
+    assert process_calls[0] == {"process_key": process_key, "arguments": arguments}
 
 
 def test_call_polls_until_completion() -> None:
@@ -145,10 +299,7 @@ def test_call_waits_for_completed_result_payload() -> None:
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["result"] == {"data": {"ok": True}}, payload
-    assert calls["result"] >= 2, (
-        "completed-without-result must be treated as a persistence race, "
-        f"saw {calls['result']} polls"
-    )
+    assert calls["result"] >= 2, f"completed-without-result must be treated as a persistence race, saw {calls['result']} polls"
 
 
 def test_one_shot_never_registers_peer() -> None:
@@ -174,10 +325,7 @@ def test_attribution_still_never_registers_peer() -> None:
     handler, calls = _make_handler(["completed"])
     with patch.dict(os.environ, {"AGENT_SESSION_ID": "ases-attributed-1"}):
         _invoke(["call", "x::y::z", "{}"], handler)
-    assert calls["register"] == 0, (
-        "sender attribution must never register a peer identity — that would "
-        "evict the caller's own registry row"
-    )
+    assert calls["register"] == 0, "sender attribution must never register a peer identity — that would evict the caller's own registry row"
 
 
 def test_call_sends_caller_session_key_for_attribution() -> None:
@@ -219,7 +367,9 @@ def test_call_exit_nonzero_when_not_completed() -> None:
 
 
 def _role_addressed_inbox_page(
-    *, role_section_status: str = "ok", role_section_error: str | None = None,
+    *,
+    role_section_status: str = "ok",
+    role_section_error: str | None = None,
     role_entries: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
@@ -227,6 +377,9 @@ def _role_addressed_inbox_page(
         "recipient_agent_instance_id": "agi-msg04-test",
         "entries": [],
         "next_after_created_at": None,
+        "next_since_created_at": None,
+        "next_since_cursor": None,
+        "instance_exhausted": True,
         "role_entries": [] if role_entries is None else role_entries,
         "next_role_cursor": None,
         "role_section_status": role_section_status,
@@ -246,7 +399,8 @@ def _process_result_handler(data: dict[str, Any]) -> Handler:
         path = request.url.path
         if path == "/api/v1/bridge/open":
             return httpx.Response(
-                200, json={"bridge_id": "agc-smoke", "session_id": "s"},
+                200,
+                json={"bridge_id": "agc-smoke", "session_id": "s"},
             )
         if path.endswith("/close"):
             return httpx.Response(200, json={"status": "closed"})
@@ -273,10 +427,16 @@ def test_inbox_surfaces_role_addressed_mail_the_entries_only_idiom_misses() -> N
         "sender_agent_instance_id": "agi-adamain0000000000000000000001",
         "sender_session_label": "Coordinator-Seat",
         "message": {
-            "id": "m-1", "cursor": "c-1", "role": "user", "kind": "text",
+            "id": "m-1",
+            "cursor": "c-1",
+            "role": "user",
+            "kind": "text",
             "content": [{"type": "text", "text": "role-addressed dispatch"}],
-            "action_id": None, "backend_session_id": None, "error": None,
-            "artifacts": [], "metadata": {},
+            "action_id": None,
+            "backend_session_id": None,
+            "error": None,
+            "artifacts": [],
+            "metadata": {},
             "created_at": "2026-08-20T05:00:00+00:00",
         },
     }
@@ -284,10 +444,7 @@ def test_inbox_surfaces_role_addressed_mail_the_entries_only_idiom_misses() -> N
 
     # THE OLD IDIOM, unaltered: this is the exact incident-transcript parser.
     old_idiom_count = len(page["entries"])
-    assert old_idiom_count == 0, (
-        "sanity check on the fixture: the old entries-only idiom must miss "
-        "this role-addressed message, or this test is not exercising MSG-04"
-    )
+    assert old_idiom_count == 0, "sanity check on the fixture: the old entries-only idiom must miss this role-addressed message, or this test is not exercising MSG-04"
 
     with patch.dict(os.environ, {"AGENT_SESSION_ID": "ases-msg04-test"}):
         result = _invoke(["inbox"], _process_result_handler(page))
@@ -299,10 +456,54 @@ def test_inbox_surfaces_role_addressed_mail_the_entries_only_idiom_misses() -> N
     assert payload["complete"] is True, payload
     role_messages = [m for m in payload["messages"] if m["section"] == "role"]
     assert len(role_messages) == 1, payload
-    assert any(
-        "role-addressed dispatch" in part["text"]
-        for part in role_messages[0]["message"]["content"]
-    ), payload
+    assert any("role-addressed dispatch" in part["text"] for part in role_messages[0]["message"]["content"]), payload
+
+
+def test_cov_cli_pages() -> None:
+    direct = [[_entry(f"d{i}", f"2026-08-20T05:00:0{5 - i}")] for i in range(3)]
+    roles = [[_entry(f"r{i}", f"2026-08-20T06:00:0{5 - i}")] for i in range(3)]
+    render = _paging_inbox(direct, roles)
+
+    def coverage(entries: Any) -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "count": len(entries),
+            "first": entries[0]["message"] if entries else None,
+            "last": entries[-1]["message"] if entries else None,
+        }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/peer/inbox_for_session"):
+            page = render(dict(request.url.params))
+            page["read_coverage"] = {
+                "direct": coverage(page["entries"]),
+                "role": coverage(page["role_entries"]),
+            }
+            return httpx.Response(200, json=page)
+        return _process_result_handler({})(request)
+
+    with patch.dict(os.environ, {"AGENT_SESSION_ID": "ases-cov"}):
+        result = _invoke(["inbox", "--observer", "--limit", "1"], handler)
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    cov = payload["read_coverage"]
+    assert [p["count"] for p in cov["direct_pages"]] == [1, 1, 1, 0], "cov: CLI full direct page list"
+    assert [p["count"] for p in cov["role_pages"]] == [1, 1, 1], "cov: CLI full role page list"
+    assert [p["first"]["id"] for p in cov["direct_pages"][:-1]] == ["d0", "d1", "d2"], "cov: CLI direct page ranges"
+    assert [p["last"]["id"] for p in cov["role_pages"]] == ["r0", "r1", "r2"], "cov: CLI role page ranges"
+    assert payload["complete"] is True and cov["complete_semantics"] == "drain_exhaustion_within_requested_scope"
+    assert cov["unread_count"] is None and cov["outside_query"] == "unknown"
+
+
+def test_cov_cli_unknown() -> None:
+    with patch.dict(os.environ, {"AGENT_SESSION_ID": "ases-cov"}):
+        result = _invoke(["inbox", "--observer"], _process_result_handler(_role_addressed_inbox_page()))
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    for section in ("direct_pages", "role_pages"):
+        for page in payload["read_coverage"][section]:
+            assert page["status"] == "unknown" and page["advisory"], "cov: older server explicit unknown"
+            assert "first" not in page and "count" not in page, "cov: no invented older server ranges"
 
 
 def test_inbox_needs_caller_session_id() -> None:
@@ -319,7 +520,8 @@ def test_inbox_reports_incomplete_loudly_on_a_role_section_fault() -> None:
     still see the fault.
     """
     page = _role_addressed_inbox_page(
-        role_section_status="error", role_section_error="boom",
+        role_section_status="error",
+        role_section_error="boom",
     )
     with patch.dict(os.environ, {"AGENT_SESSION_ID": "ases-msg04-test"}):
         result = _invoke(["inbox"], _process_result_handler(page))
@@ -333,7 +535,9 @@ def test_inbox_reports_incomplete_loudly_on_a_role_section_fault() -> None:
 
 
 def _ack_pages_handler(
-    *, fail_first_ack: bool = False, timeline: list[str] | None = None,
+    *,
+    fail_first_ack: bool = False,
+    timeline: list[str] | None = None,
 ) -> tuple[Handler, list[str]]:
     """Direct inbox-page route plus the process-call ack, with two issued role page tokens."""
     calls: list[str] = []
@@ -362,16 +566,13 @@ def _ack_pages_handler(
             calls.append(str(arguments["page_token"]))
             if timeline is not None:
                 timeline.append(f"ack:{arguments['page_token']}")
-            pending[action] = (
-                {"action_status": "failed", "error": "ack down"}
-                if fail_first_ack and len(calls) == 1
-                else {"action_status": "completed", "data": {"status": "acked"}}
-            )
+            pending[action] = {"action_status": "failed", "error": "ack down"} if fail_first_ack and len(calls) == 1 else {"action_status": "completed", "data": {"status": "acked"}}
             return httpx.Response(200, json={"status": "queued", "action_id": action})
         if "/process/result/" in path:
             action = path.rsplit("/", 1)[-1]
             return httpx.Response(200, json={"status": "completed", "result": pending[action]})
         return httpx.Response(404, json={"detail": path})
+
     return handler, calls
 
 
@@ -382,7 +583,9 @@ def test_inbox_flushes_complete_output_before_all_page_acks() -> None:
     with (
         patch.dict(os.environ, {"AGENT_SESSION_ID": "ases-ack-test"}),
         patch.object(
-            cli_mod, "_emit", lambda value: (order.append("emit"), original_emit(value))[1],
+            cli_mod,
+            "_emit",
+            lambda value: (order.append("emit"), original_emit(value))[1],
         ),
         patch.object(cli_mod, "_flush_inbox_output", lambda: order.append("flush")),
     ):
@@ -446,7 +649,11 @@ def test_cli_import_chain_needs_no_ambient_env() -> None:
     env = {k: v for k, v in os.environ.items() if k != "SOLET_NAME"}
     proc = subprocess.run(
         [sys.executable, "-c", "import agent_messaging_plugin.local_cli.cli"],
-        capture_output=True, text=True, env=env, timeout=60, check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        check=False,
     )
     assert proc.returncode == 0, proc.stderr
 
@@ -468,6 +675,44 @@ def test_identity_falls_back_to_basename_on_placeholder() -> None:
         patch.object(client_mod, "load_manifest", lambda _p: (None, "unreadable")),
     ):
         assert client_mod.resolve_solet_name() == "shelby"
+
+
+def test_clone_root_pass_path_ignores_client_cwd() -> None:
+    # Client-repository cwd: the clone root is the install-derived manifest
+    # ancestor, so running from an unrelated directory must not change it.
+    before = client_mod.resolve_clone_root()
+    assert (before / client_mod.MANIFEST_FILENAME).is_file(), before
+    original = os.getcwd()
+    try:
+        os.chdir(tempfile.mkdtemp())
+        assert client_mod.resolve_clone_root() == before
+    finally:
+        os.chdir(original)
+
+
+def test_clone_root_refuses_when_identity_is_missing() -> None:
+    # No root_manifest ancestor of the installed CLI -> refuse, never guess from cwd.
+    with patch.object(client_mod, "_clone_root", lambda: None):
+        try:
+            client_mod.resolve_clone_root()
+        except client_mod.SoletIdentityError as exc:
+            assert "refusing to guess" in str(exc), str(exc)
+        else:
+            raise AssertionError("missing clone identity was not refused")
+
+
+def test_clone_root_refuses_when_identity_is_ambiguous() -> None:
+    # Manifest present but unreadable -> refuse rather than retarget by basename.
+    with (
+        patch.object(client_mod, "_clone_root", lambda: Path("/tmp/shelby")),
+        patch.object(client_mod, "load_manifest", lambda _p: (None, "malformed")),
+    ):
+        try:
+            client_mod.resolve_clone_root()
+        except client_mod.SoletIdentityError as exc:
+            assert "ambiguous" in str(exc), str(exc)
+        else:
+            raise AssertionError("ambiguous clone identity was not refused")
 
 
 _WATCH_ENV = {
@@ -511,13 +756,13 @@ def _paging_inbox(
     last entry's timestamp as ``after``; role pages use an opaque
     ``role_after`` token.
     """
+
     def render(params: dict[str, str]) -> dict[str, object]:
         after = params.get("after", "")
         idx = 0
         if after:
             idx = next(
-                (i + 1 for i, page in enumerate(instance_pages)
-                 if page and str(page[-1]["message"]["created_at"]) == after),  # type: ignore[index]
+                (i + 1 for i, page in enumerate(instance_pages) if page and str(page[-1]["message"]["created_at"]) == after),  # type: ignore[index]
                 len(instance_pages),
             )
         entries = instance_pages[idx] if idx < len(instance_pages) else []
@@ -530,10 +775,9 @@ def _paging_inbox(
             "next_after_created_at": (
                 str(entries[-1]["message"]["created_at"]) if entries else None  # type: ignore[index]
             ),
-            "next_role_cursor": (
-                f"rc-{ridx + 1}" if ridx + 1 < len(role_pages) else None
-            ),
+            "next_role_cursor": (f"rc-{ridx + 1}" if ridx + 1 < len(role_pages) else None),
         }
+
     return render
 
 
@@ -640,7 +884,8 @@ def test_watch_arms_then_streams_then_detects_drop() -> None:
     }
     handler, seen, _counts = _watch_handler([batch, "drop"])
     client = client_mod.BridgeClient(
-        "http://test", transport=httpx.MockTransport(handler),
+        "http://test",
+        transport=httpx.MockTransport(handler),
     )
     client.open()
     identity = cli_mod.WatchIdentity(
@@ -652,7 +897,9 @@ def test_watch_arms_then_streams_then_detects_drop() -> None:
     captured: list[str] = []
     try:
         with patch.object(
-            cli_mod.click, "echo", lambda s, **_kw: captured.append(str(s)),
+            cli_mod.click,
+            "echo",
+            lambda s, **_kw: captured.append(str(s)),
         ):
             cli_mod._arm_and_stream(client, identity, None, _tmp_marks())
     except client_mod.BridgeCallError:
@@ -664,7 +911,8 @@ def test_watch_arms_then_streams_then_detects_drop() -> None:
 
 
 def _assert_watch_arm_requests(
-    seen: dict[str, object], identity: cli_mod.WatchIdentity,
+    seen: dict[str, object],
+    identity: cli_mod.WatchIdentity,
 ) -> None:
     register = seen["register"]
     assert isinstance(register, dict)
@@ -702,18 +950,22 @@ def _assert_watch_stream_output(captured: list[str]) -> None:
 
 
 def _drain(
-    inbox: Callable[[dict[str, str]], dict[str, object]], marks: Path,
+    inbox: Callable[[dict[str, str]], dict[str, object]],
+    marks: Path,
 ) -> tuple[list[str], dict[str, object]]:
     """Run ONE arm-time drain against ``inbox``; return (emitted lines, seen)."""
     handler, seen, _counts = _watch_handler(["drop"], inbox)
     client = client_mod.BridgeClient(
-        "http://test", transport=httpx.MockTransport(handler),
+        "http://test",
+        transport=httpx.MockTransport(handler),
     )
     client.open()
     captured: list[str] = []
     try:
         with patch.object(
-            cli_mod.click, "echo", lambda s, **_kw: captured.append(str(s)),
+            cli_mod.click,
+            "echo",
+            lambda s, **_kw: captured.append(str(s)),
         ):
             cli_mod._drain_inbox(client, None, marks)
     finally:
@@ -751,12 +1003,7 @@ def test_drain_pages_both_sections_and_never_repeats_across_arms() -> None:
 
     # Arm 2: exactly the new entries, once each.
     second, seen = _drain(inbox, marks)
-    ids = [
-        i
-        for line in second
-        for i in ("i1", "i2", "i3", "i4", "r1", "r2", "r3", "r4")
-        if f'"id": "{i}"' in line
-    ]
+    ids = [i for line in second for i in ("i1", "i2", "i3", "i4", "r1", "r2", "r3", "r4") if f'"id": "{i}"' in line]
     assert ids == ["i4", "r4"], (ids, second)
 
     # Arm 3: nothing new -> nothing spooled. This is the re-emission half.
@@ -784,19 +1031,16 @@ def test_drain_walks_the_role_section_back_only_to_its_mark() -> None:
     ]
     marks = _tmp_marks()
     spool_mod.write_watch_marks(
-        marks, instance_after="", role_high_water="2026-07-30T10:00:00",
+        marks,
+        instance_after="",
+        role_high_water="2026-07-30T10:00:00",
     )
     emitted, seen = _drain(_paging_inbox([], role_pages), marks)
     # The EMITTED SEQUENCE, not a membership set: a membership assertion cannot
     # see duplication, and duplication is half the defect. r4/r5 are newer than
     # the mark; r3 IS the mark; r1/r2 are older and must never be walked to --
     # and the order is chronological, oldest first.
-    ids = [
-        i
-        for line in emitted
-        for i in ("r1", "r2", "r3", "r4", "r5")
-        if f'"id": "{i}"' in line
-    ]
+    ids = [i for line in emitted for i in ("r1", "r2", "r3", "r4", "r5") if f'"id": "{i}"' in line]
     assert ids == ["r4", "r5"], (ids, emitted)
     # It stopped walking: page 3 was never requested.
     role_queries = [q for q in seen["inbox_queries"] if "role_after" in q]  # type: ignore[union-attr]
@@ -824,7 +1068,9 @@ def test_third_state_role_mark_empty_seeds_independently() -> None:
     ]
     marks = _tmp_marks()
     spool_mod.write_watch_marks(
-        marks, instance_after="2026-07-30T09:00:00", role_high_water="",
+        marks,
+        instance_after="2026-07-30T09:00:00",
+        role_high_water="",
     )
     emitted, seen = _drain(_paging_inbox([], role_pages), marks)
     assert not any('"section": "role_entries"' in line for line in emitted), emitted
@@ -860,7 +1106,9 @@ def test_instance_section_seeding_is_unchanged_by_the_per_section_split() -> Non
     ]
     marks = _tmp_marks()
     spool_mod.write_watch_marks(
-        marks, instance_after="", role_high_water="2026-07-30T07:00:00",
+        marks,
+        instance_after="",
+        role_high_water="2026-07-30T07:00:00",
     )
     emitted, _seen = _drain(_paging_inbox(instance_pages, []), marks)
     ids = [i for line in emitted for i in ("i1", "i2") if f'"id": "{i}"' in line]
@@ -888,7 +1136,8 @@ def test_watch_heartbeat_reregisters_during_stream() -> None:
     batch = {"events": [], "next_cursor": 0}
     handler, _seen, counts = _watch_handler([batch, batch, batch, "drop"])
     client = client_mod.BridgeClient(
-        "http://test", transport=httpx.MockTransport(handler),
+        "http://test",
+        transport=httpx.MockTransport(handler),
     )
     client.open()
     identity = cli_mod.WatchIdentity(
@@ -923,9 +1172,7 @@ def _no_ledger_id_env(overrides: Mapping[str, str]) -> dict[str, str]:
     this helper is asking for the no-ledger-id branch regardless of what the
     base fixture carries.
     """
-    stripped = {
-        k: v for k, v in os.environ.items() if k != "AGENT_INSTANCE_ID"
-    }
+    stripped = {k: v for k, v in os.environ.items() if k != "AGENT_INSTANCE_ID"}
     stripped.update(overrides)
     stripped.pop("AGENT_INSTANCE_ID", None)
     return stripped
@@ -960,10 +1207,7 @@ def test_watch_prefers_ledger_instance_id_when_present() -> None:
     env["AGENT_INSTANCE_ID"] = "agi-82be2462c96a9bcc2e12d25db4e1fdde"
     with patch.dict(os.environ, env, clear=True):
         identity = cli_mod._resolve_watch_identity(None, "claude_code")
-    assert identity.agent_instance_id == "agi-82be2462c96a9bcc2e12d25db4e1fdde", (
-        "the ledger AGENT_INSTANCE_ID must win outright, not just influence "
-        f"the derived digest (got {identity.agent_instance_id!r})"
-    )
+    assert identity.agent_instance_id == "agi-82be2462c96a9bcc2e12d25db4e1fdde", f"the ledger AGENT_INSTANCE_ID must win outright, not just influence the derived digest (got {identity.agent_instance_id!r})"
     assert not identity.agent_instance_id.startswith(
         spool_mod.WATCH_AGENT_INSTANCE_PREFIX,
     )
@@ -980,7 +1224,8 @@ def test_watch_falls_back_to_derived_id_with_no_ledger_row() -> None:
 
 
 def _claim_refusal_client(
-    status: int, body: Mapping[str, object],
+    status: int,
+    body: Mapping[str, object],
 ) -> client_mod.BridgeClient:
     """A bridge whose claim route refuses with a given status + code body."""
 
@@ -997,7 +1242,8 @@ def _claim_refusal_client(
         return httpx.Response(404, json={"detail": f"unmapped {path}"})
 
     client = client_mod.BridgeClient(
-        "http://test", transport=httpx.MockTransport(handler),
+        "http://test",
+        transport=httpx.MockTransport(handler),
     )
     client.open()
     return client
@@ -1018,7 +1264,8 @@ def test_watch_permanent_claim_refusal_dies_loud() -> None:
     reconnect path against that would retry forever against a gate that said no.
     """
     client = _claim_refusal_client(
-        409, {"code": "role_held_live", "message": "held by a live session"},
+        409,
+        {"code": "role_held_live", "message": "held by a live session"},
     )
     try:
         cli_mod._register_and_claim(client, _CLAIM_IDENTITY)
@@ -1042,7 +1289,8 @@ def test_watch_transient_claim_failure_retries_instead_of_dying() -> None:
     is exactly the mid-startup/mid-swap case.
     """
     client = _claim_refusal_client(
-        503, {"code": "state_service_unavailable", "message": "state service down"},
+        503,
+        {"code": "state_service_unavailable", "message": "state service down"},
     )
     try:
         cli_mod._register_and_claim(client, _CLAIM_IDENTITY)
@@ -1090,16 +1338,21 @@ def test_permanent_claim_failures_excludes_peer_identity_unregistered() -> None:
     literal because the danger is a future edit, not today's code.
     """
     assert "peer_identity_unregistered" not in cli_mod.PERMANENT_ARM_FAILURES
-    assert frozenset({
-        "role_held_live",
-        "system_slot_claim_denied",
-        "missing_argument",
-        "missing_session_id",
-        "missing_role_name",
-        # §4.3.3a — the ARM sequence is register-then-claim, so a permanent
-        # REGISTER refusal belongs here too: it reaches the same retry loop.
-        "session_id_bound_to_live_session",
-    }) == cli_mod.PERMANENT_ARM_FAILURES
+    assert (
+        frozenset(
+            {
+                "role_held_live",
+                "system_slot_claim_denied",
+                "missing_argument",
+                "missing_session_id",
+                "missing_role_name",
+                # §4.3.3a — the ARM sequence is register-then-claim, so a permanent
+                # REGISTER refusal belongs here too: it reaches the same retry loop.
+                "session_id_bound_to_live_session",
+            }
+        )
+        == cli_mod.PERMANENT_ARM_FAILURES
+    )
 
 
 def _register_refusal_client(status: int, body: dict[str, str]) -> client_mod.BridgeClient:
@@ -1116,7 +1369,8 @@ def _register_refusal_client(status: int, body: dict[str, str]) -> client_mod.Br
         return httpx.Response(404, json={"detail": f"unmapped {path}"})
 
     client = client_mod.BridgeClient(
-        "http://test", transport=httpx.MockTransport(handler),
+        "http://test",
+        transport=httpx.MockTransport(handler),
     )
     client.open()
     return client
@@ -1134,10 +1388,13 @@ def test_r7a_live_session_id_refusal_dies_loud() -> None:
     The refusal must be PERMANENT: retrying under the same inherited id against
     the same live incumbent can never succeed.
     """
-    client = _register_refusal_client(409, {
-        "code": "session_id_bound_to_live_session",
-        "message": "held by a LIVE session: label 'Coordinator-Day'",
-    })
+    client = _register_refusal_client(
+        409,
+        {
+            "code": "session_id_bound_to_live_session",
+            "message": "held by a LIVE session: label 'Coordinator-Day'",
+        },
+    )
     try:
         cli_mod._register_and_claim(client, _CLAIM_IDENTITY)
         raise AssertionError("live-session-id register refusal did not exit")
@@ -1154,10 +1411,13 @@ def test_r7b_transient_register_failure_still_retries() -> None:
     on the permanent list has to reach the reconnect loop, exactly as a
     transient claim failure does; dying here would re-create D2 one layer up.
     """
-    client = _register_refusal_client(503, {
-        "code": "state_service_unavailable",
-        "message": "state service down",
-    })
+    client = _register_refusal_client(
+        503,
+        {
+            "code": "state_service_unavailable",
+            "message": "state service down",
+        },
+    )
     try:
         cli_mod._register_and_claim(client, _CLAIM_IDENTITY)
         raise AssertionError("transient register failure did not raise")
@@ -1239,7 +1499,10 @@ def test_watch_ctrl_c_exits_clean() -> None:
 
     with patch.object(cli_mod, "_watch_forever", interrupt):
         result = CliRunner().invoke(
-            cli_mod.cli, ["watch"], env=dict(_WATCH_ENV), obj={},
+            cli_mod.cli,
+            ["watch"],
+            env=dict(_WATCH_ENV),
+            obj={},
         )
     assert result.exit_code == 0, result.output
 
@@ -1263,7 +1526,11 @@ _A_ROLE = "Git-Controller"
 
 
 def _role_event(
-    cursor: int, msg_id: str, *, row_created_at: str, event_created_at: str,
+    cursor: int,
+    msg_id: str,
+    *,
+    row_created_at: str,
+    event_created_at: str,
 ) -> dict[str, object]:
     """One live role delivery in the shape ``/events`` serves (asdict).
 
@@ -1292,6 +1559,7 @@ def _role_inbox(
     role_entries: list[dict[str, object]],
 ) -> Callable[[dict[str, str]], dict[str, object]]:
     """A one-page inbox serving ``role_entries`` NEWEST-FIRST, no instance mail."""
+
     def render(params: dict[str, str]) -> dict[str, object]:  # noqa: ARG001
         return {
             "entries": [],
@@ -1299,6 +1567,7 @@ def _role_inbox(
             "next_after_created_at": None,
             "next_role_cursor": None,
         }
+
     return render
 
 
@@ -1310,7 +1579,8 @@ def _arm_once(
     """One whole bridge lifetime: arm -> drain -> stream -> drop."""
     handler, _seen, _counts = _watch_handler(events_batches, inbox)
     client = client_mod.BridgeClient(
-        "http://test", transport=httpx.MockTransport(handler),
+        "http://test",
+        transport=httpx.MockTransport(handler),
     )
     client.open()
     identity = cli_mod.WatchIdentity(
@@ -1322,7 +1592,9 @@ def _arm_once(
     captured: list[str] = []
     try:
         with patch.object(
-            cli_mod.click, "echo", lambda s, **_kw: captured.append(str(s)),
+            cli_mod.click,
+            "echo",
+            lambda s, **_kw: captured.append(str(s)),
         ):
             cli_mod._arm_and_stream(client, identity, None, marks)
     except client_mod.BridgeCallError:
@@ -1334,13 +1606,7 @@ def _arm_once(
 
 def _spooled_role_ids(captured: list[str], candidates: tuple[str, ...]) -> list[str]:
     """Ids the DRAIN spooled — the re-emission surface, not the live one."""
-    return [
-        c
-        for line in captured
-        if '"watch": "inbox"' in line
-        for c in candidates
-        if f'"id": "{c}"' in line
-    ]
+    return [c for line in captured if '"watch": "inbox"' in line for c in candidates if f'"id": "{c}"' in line]
 
 
 def test_live_role_delivery_is_not_replayed_on_the_next_arm() -> None:
@@ -1353,12 +1619,14 @@ def test_live_role_delivery_is_not_replayed_on_the_next_arm() -> None:
     marks = _tmp_marks()
     r1 = _entry("r1", "2026-07-30T10:00:00")
     live = _role_event(
-        1, "r2",
+        1,
+        "r2",
         row_created_at="2026-07-30T11:00:00",
         event_created_at="2026-07-30T11:00:05",
     )
     _arm_once(
-        _role_inbox([r1]), marks,
+        _role_inbox([r1]),
+        marks,
         [{"events": [live], "next_cursor": 1}, "drop"],
     )
     # Re-arm. The inbox now also holds the durable row for the live-delivered
@@ -1383,12 +1651,14 @@ def test_gap_role_mail_still_emits_in_full_after_a_live_delivery() -> None:
     marks = _tmp_marks()
     r1 = _entry("r1", "2026-07-30T10:00:00")
     live = _role_event(
-        1, "r2",
+        1,
+        "r2",
         row_created_at="2026-07-30T11:00:00",
         event_created_at="2026-07-30T11:00:05",
     )
     _arm_once(
-        _role_inbox([r1]), marks,
+        _role_inbox([r1]),
+        marks,
         [{"events": [live], "next_cursor": 1}, "drop"],
     )
     r2 = _entry("r2", "2026-07-30T11:00:00")
@@ -1411,15 +1681,19 @@ def test_the_live_delivery_mark_is_written_to_the_sidecar() -> None:
     """
     marks = _tmp_marks()
     spool_mod.write_watch_marks(
-        marks, instance_after="2026-07-30T09:00:00", role_high_water="",
+        marks,
+        instance_after="2026-07-30T09:00:00",
+        role_high_water="",
     )
     live = _role_event(
-        1, "r2",
+        1,
+        "r2",
         row_created_at="2026-07-30T11:00:00",
         event_created_at="2026-07-30T23:00:00",
     )
     _arm_once(
-        _role_inbox([]), marks,
+        _role_inbox([]),
+        marks,
         [{"events": [live], "next_cursor": 1}, "drop"],
     )
     instance_after, role_high_water = spool_mod.read_watch_marks(marks)
@@ -1441,15 +1715,19 @@ def test_a_role_delivery_without_the_row_timestamp_leaves_the_mark_alone() -> No
     """
     marks = _tmp_marks()
     spool_mod.write_watch_marks(
-        marks, instance_after="", role_high_water="2026-07-30T10:00:00",
+        marks,
+        instance_after="",
+        role_high_water="2026-07-30T10:00:00",
     )
     live = _role_event(
-        1, "r2",
+        1,
+        "r2",
         row_created_at="",  # pre-deploy server: the key is absent
         event_created_at="2026-07-31T23:00:00",
     )
     _arm_once(
-        _role_inbox([]), marks,
+        _role_inbox([]),
+        marks,
         [{"events": [live], "next_cursor": 1}, "drop"],
     )
     _instance_after, role_high_water = spool_mod.read_watch_marks(marks)
@@ -1469,7 +1747,9 @@ def test_only_role_deliveries_advance_the_role_mark_and_it_never_rewinds() -> No
     """
     marks = _tmp_marks()
     spool_mod.write_watch_marks(
-        marks, instance_after="", role_high_water="2026-07-30T11:00:00",
+        marks,
+        instance_after="",
+        role_high_water="2026-07-30T11:00:00",
     )
     # A NON-role event that nonetheless carries a timestamp under the shared
     # key. Shaped this way on purpose: it is what distinguishes "gated on the
@@ -1484,16 +1764,52 @@ def test_only_role_deliveries_advance_the_role_mark_and_it_never_rewinds() -> No
         "created_at": "2026-07-31T23:00:00",
     }
     stale_role = _role_event(
-        2, "r0",
+        2,
+        "r0",
         row_created_at="2026-07-30T08:00:00",  # OLDER than the mark
         event_created_at="2026-07-31T23:00:00",
     )
     _arm_once(
-        _role_inbox([]), marks,
+        _role_inbox([]),
+        marks,
         [{"events": [direct, stale_role], "next_cursor": 2}, "drop"],
     )
     _instance_after, role_high_water = spool_mod.read_watch_marks(marks)
     assert role_high_water == "2026-07-30T11:00:00", role_high_water
+
+
+_tick_support = importlib.import_module("local_cli_tick_support")
+
+
+def test_working_watch_ticks_independently_and_recaptures() -> None:
+    _tick_support.check_working_watch_ticks_independently_and_recaptures()
+
+
+def test_working_watch_requires_positive_parent_and_turn_evidence() -> None:
+    _tick_support.check_working_watch_requires_positive_parent_and_turn_evidence()
+
+
+def test_working_watch_report_failure_does_not_stop_stream() -> None:
+    _tick_support.check_working_watch_report_failure_does_not_stop_stream()
+
+
+def test_working_watch_real_disposable_tmux_parent_mapping() -> None:
+    if tmux_missing():
+        _unmeasured.append("test_working_watch_real_disposable_tmux_parent_mapping")
+        return
+    _tick_support.check_working_watch_real_disposable_tmux_parent_mapping()
+
+
+def test_working_watch_rearms_and_recovers_real_lifecycle_handler() -> None:
+    _tick_support.check_working_watch_rearms_and_recovers_real_lifecycle_handler()
+
+
+def test_working_watch_stale_transition_is_refused() -> None:
+    _tick_support.check_working_watch_stale_transition_is_refused()
+
+
+def test_working_watch_terminal_refusal_preserves_deadline() -> None:
+    _tick_support.check_working_watch_terminal_refusal_preserves_deadline()
 
 
 def main() -> None:
@@ -1509,6 +1825,8 @@ def main() -> None:
     if failures:
         print(f"{failures}/{len(tests)} failed")
         sys.exit(1)
+    if _unmeasured:
+        sys.exit(report_tmux_unmeasured(f"{', '.join(_unmeasured)} did not run; the other {len(tests) - len(_unmeasured)} tests passed"))
     print(f"all {len(tests)} passed")
 
 

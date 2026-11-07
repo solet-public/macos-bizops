@@ -16,6 +16,12 @@ again, and nothing is left running to keep stamping on its behalf.
 Throttled to at most once per :data:`_THROTTLE_SECONDS` via a per-worker
 local marker file's mtime (cheap -- a stat(), no CLI/network round trip on
 most firings) rather than checking the platform on every single tool call.
+After a recorded failure, a second stat() -- of the worker's own
+``<agent_instance_id>.failures.json`` -- backs off for
+:data:`_FAILURE_BACKOFF_SECONDS` (180 s) from that file's mtime: firings
+inside the window skip both the worktree attestation and report_alive, so a
+failing session pays git plus report_alive once per window instead of on
+every tool call. The failure record is kept and reported by the next attempt.
 When the throttle allows a stamp, shells out to ``solet-bridge call
 plugin::agent_messaging_plugin::report_alive`` -- PATH-resolved, argv
 literally ``["solet-bridge", "call", ...]`` per SECURITY.md's disclosed contract,
@@ -41,7 +47,6 @@ Stdlib-only -- fires outside the venv, mirrors this repo's other hooks
 (.claude/hooks/capture_session_mapping.py,
 .claude/hooks/headless_tool_allowlist_gate.py).
 """
-
 
 from __future__ import annotations
 
@@ -87,11 +92,16 @@ _INSTANCE_ID_ENV = "AGENT_INSTANCE_ID"
 # brief scope is "small"); a future slice can widen this if a lane's window
 # is ever set below this value.
 _THROTTLE_SECONDS = 180.0
+# One window, not a second knob: a failing session retries once per throttle
+# period, keyed on its failure file's mtime (refreshed by every _record_failure).
+_FAILURE_BACKOFF_SECONDS = _THROTTLE_SECONDS
 
 _REPORT_ALIVE_PROCESS_KEY = "plugin::agent_messaging_plugin::report_alive"
 _WAKE_CLI_ENV = "AGENT_WAKE_CLI"
 _WORKTREE_SNAPSHOT_FILE = "worktree-resync.json"
 _WORKTREE_SNAPSHOT_VERSION = 1
+_MAX_FAILURE_DETAIL_CHARS = 200
+_MAX_FAILURE_REASON_CHARS = len("TimeoutExpired: ") + _MAX_FAILURE_DETAIL_CHARS
 
 
 def _warn(message: str) -> None:
@@ -122,6 +132,17 @@ def _throttled(marker_path: Path) -> bool:
     return age < _THROTTLE_SECONDS
 
 
+def _in_failure_backoff(failure_path: Path) -> bool:
+    """True means "skip -- a failure was recorded inside the backoff window".
+    A missing or unstattable failure file, or one whose mtime is in the
+    future, never backs off (the safe default is to attempt, not to skip)."""
+    try:
+        age = time.time() - failure_path.stat().st_mtime
+    except OSError:
+        return False
+    return 0 <= age < _FAILURE_BACKOFF_SECONDS
+
+
 def _touch_marker(marker_path: Path) -> None:
     marker_path.parent.mkdir(parents=True, exist_ok=True)
     marker_path.write_text(str(time.time()))
@@ -138,7 +159,7 @@ def _worktree_snapshot_path(identity_dir: Path) -> Path:
 
 def _git_output(args: list[str], cwd: Path) -> str:
     result = subprocess.run(
-        ["git", *args],
+        ["git", "--no-optional-locks", *args],
         cwd=cwd,
         capture_output=True,
         text=True,
@@ -156,7 +177,8 @@ def _capture_worktree_snapshot(cwd: Path) -> dict[str, object]:
     repository_root = _git_output(["rev-parse", "--show-toplevel"], cwd).strip()
     head = _git_output(["rev-parse", "HEAD"], cwd).strip()
     porcelain = _git_output(
-        ["status", "--porcelain=v1", "--untracked-files=all", "-z"], cwd,
+        ["status", "--porcelain=v1", "--untracked-files=all", "-z"],
+        cwd,
     )
     if not repository_root or not head:
         raise RuntimeError("git returned an empty repository root or HEAD")
@@ -205,8 +227,9 @@ def _worktree_resync_fault(snapshot_path: Path, cwd: Path) -> str | None:
     Ordinary edits may change a dirty fingerprint between tool calls, and a
     legitimate commit changes HEAD. The dangerous shape observed in 794 is
     narrower: a prior dirty worktree becomes clean while its HEAD is unchanged.
-    Keep the old snapshot on that fault so every later tool completion repeats
-    the independent disk attestation until an operator investigates it.
+    Keep the old snapshot on that fault so every later firing outside the
+    failure backoff window repeats the independent disk attestation until an
+    operator investigates it.
     """
     previous, read_fault = _load_worktree_snapshot(snapshot_path)
     if read_fault is not None:
@@ -220,11 +243,7 @@ def _worktree_resync_fault(snapshot_path: Path, cwd: Path) -> str | None:
         same_head = previous["head"] == current["head"]
         vanished_wip = previous["dirty"] is True and current["dirty"] is False
         if same_repository and same_head and vanished_wip:
-            return (
-                "WORKTREE RESYNC MISMATCH: the prior heartbeat observed dirty WIP, "
-                "but disk is now clean with the same HEAD; stop relying on session "
-                "memory and re-read the worktree before reporting progress."
-            )
+            return "WORKTREE RESYNC MISMATCH: the prior heartbeat observed dirty WIP, but disk is now clean with the same HEAD; stop relying on session memory and re-read the worktree before reporting progress."
     try:
         _write_worktree_snapshot(snapshot_path, current)
     except OSError as exc:
@@ -263,16 +282,34 @@ def _pending_failure_count(pending: dict[str, object]) -> int:
     return value if isinstance(value, int) and value >= 0 else 0
 
 
+def _exception_failure_reason(exc: OSError | subprocess.TimeoutExpired) -> str:
+    """Keep subprocess failures useful without persisting their full argv.
+
+    ``TimeoutExpired.__str__`` and ``repr`` include ``cmd``. That command
+    carries the previous failure reason in its JSON payload, so persisting it
+    recursively expands the next retry's command line.
+    """
+    if isinstance(exc, subprocess.TimeoutExpired):
+        detail = f"timed out after {exc.timeout} seconds"
+    else:
+        detail = str(exc)
+    return f"{type(exc).__name__}: {detail[:_MAX_FAILURE_DETAIL_CHARS]}"[:_MAX_FAILURE_REASON_CHARS]
+
+
 def _record_failure(path: Path, reason: str) -> None:
     previous = _pending_failures(path)
     count = _pending_failure_count(previous) + 1
     now = datetime.now(UTC).isoformat()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "count": count,
-        "first_failure_at": str(previous.get("first_failure_at") or now),
-        "last_reason": reason,
-    }))
+    path.write_text(
+        json.dumps(
+            {
+                "count": count,
+                "first_failure_at": str(previous.get("first_failure_at") or now),
+                "last_reason": reason[:_MAX_FAILURE_REASON_CHARS],
+            }
+        )
+    )
 
 
 def _solet_call_env() -> dict[str, str]:
@@ -358,13 +395,16 @@ def _call_report_alive(agent_instance_id: str, failure_path: Path | None = None)
     try:
         result = subprocess.run(
             ["solet-bridge", "call", _REPORT_ALIVE_PROCESS_KEY, payload],
-            capture_output=True, text=True, timeout=20, check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
             env=_solet_call_env(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         _warn(f"report_alive subprocess failed to run: {exc}")
         if failure_path is not None:
-            _record_failure(failure_path, repr(exc))
+            _record_failure(failure_path, _exception_failure_reason(exc))
         return False
     if result.returncode != 0:
         _warn(f"report_alive exited {result.returncode}: {result.stderr.strip()[:200]}")
@@ -413,6 +453,8 @@ def main() -> int:
 
     marker_path = _marker_path(identity_dir, agent_instance_id)
     failure_path = _failure_path(marker_path)
+    if _in_failure_backoff(failure_path):
+        return 0
     has_resync_fault = _record_worktree_resync_fault(identity_dir, failure_path)
 
     if not has_resync_fault and _throttled(marker_path):

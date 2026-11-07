@@ -1,0 +1,3 @@
+# prb_2e7713d4 (unt_9be67a79, Main-seat ruling ord 26): a first knowledge-base install killed part way resumes with only the
+# remainder, is paced by SOLET_KB_INSTALL_DUTY and stops between chunks at shutdown. In-memory fakes, offline, about 4 s.
+plugins/default_knowledge_plugin/tests/resumable_kb_install_smoke.py

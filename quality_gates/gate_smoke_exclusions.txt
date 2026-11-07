@@ -4,9 +4,10 @@
 # new smoke unless it is registered in gate_smokes.txt or has one of these
 # reviewable owner/reason/expiry records (iss_fb75bf89).
 
+plugins/github_midwife_plugin/tests/codex_optional_smoke.py  # owner: chg_c8e1e3e9 reason: offline setup regression passes 14 tests but the shipped dependency scan misclassifies its self.target-generated .agents marketplace fixture as a repo dependency; deliberately excluded pending fixture-base classification expires: 2027-03-20
+
 ananta/tests/core/actions/inference_result_processor_argument_shape_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31
 ananta/tests/core/actions/poller_batch_claim_regression_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31
-ananta/tests/llm/agent_messaging/repository_migration_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31
 ananta/tests/llm/session_ledger/cross_host_kara_ledger_live_smoke.py  # owner: iss_fb75bf89 reason: requires a live external or production service expires: 2026-12-31
 ananta/tests/llm/session_ledger/cross_source_dedupe_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31
 ananta/tests/platform/install_plugin_from_path_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31
@@ -66,7 +67,6 @@ plugins/default_knowledge_plugin/tests/w5p_orphan_invariant_smoke.py  # owner: i
 plugins/default_scheduling_plugin/tests/action_factory_injection_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31
 plugins/default_scheduling_plugin/tests/clear_scheduled_action_orphan_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31
 plugins/default_scheduling_plugin/tests/cron_action_contract_validator_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31
-plugins/default_scheduling_plugin/tests/list_schedules_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31
 plugins/default_thinking_plugin/tests/default_thinking_update_state_migration_live_smoke.py  # owner: iss_fb75bf89 reason: requires a live external or production service expires: 2026-12-31
 plugins/github_midwife_plugin/codex_plugin/coordination-hooks/tests/context_status_reporter_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31
 plugins/github_midwife_plugin/tests/cli_resolution_cask_retry_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31

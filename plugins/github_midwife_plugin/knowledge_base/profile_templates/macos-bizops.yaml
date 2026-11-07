@@ -40,8 +40,10 @@ description: |
   Excludes: every solet-cloning/AWS-hosting plugin (macos/aws midwife,
   aws undertaker, aws self-deployment, aws account admin, and the four
   AWS-managed-alternative split-service plugins), the full audio/media/
-  creative stack, all seven Codex-family session sources (no Codex usage),
-  the ChatGPT-export ingest, and the two dev/test fixture plugins.
+  creative stack, seven of the eight Codex-family session sources, the
+  ChatGPT-export ingest, and the two dev/test fixture plugins. The Codex
+  filesystem source ships for setup's opt-in codex_local option; Codex stays
+  optional and a declined install indexes nothing.
   Reconciled 2026-07-21 to the operator's plugin-scoping sheet
   (branch_bizops column).
 
@@ -96,6 +98,11 @@ plugins:
   - claude_ai_export_session_source_plugin
   - session_bridge_plugin
   - session_shipper_bootstrap_plugin
+  # Opt-in Codex local sessions, backing setup's codex_local option
+  # (prb_8c652bf3). Boot registers ~/.codex/sessions only once setup has
+  # written that root into ledger_allowed_roots, so a declined or Codex-free
+  # install indexes nothing. Do NOT add a Codex root to the allow-list below.
+  - codex_filesystem_session_source_plugin
 
   # Dev tooling: the AI code-vetting suite (wraps the shipped quality_gates/
   # scripts), the read-only platform dev surface (its readiness probe needs a
@@ -238,6 +245,7 @@ service_bindings:
   blob_storage_service: default_blob_storage_plugin
   knowledge_service: default_knowledge_plugin
   thinking_service: default_thinking_plugin
+  quality_service: platform_dev_surface_plugin
   self_deployment_service: macos_self_deployment_plugin
   local_self_deployment_service: macos_self_deployment_plugin
 
@@ -269,7 +277,7 @@ notes:
     rds_postgres_state_management_plugin, rds_pgvector_service_plugin, s3_blob_storage_plugin, secrets_manager_vault_plugin, titanv2_embeddings_plugin: The AWS-hosted half of each local/cloud split-service pair — falls under the same AWS-hosting exclusion.
     demo_canary_plugin, probe_smoke_broken_plugin: Dev/test fixtures — never belong in a production manifest (the latter's own docstring says so verbatim).
     audio_processing_plugin, audio_separation_plugin, cosyvoice2_tts_plugin, comfyui_image_generation_plugin, musical_synthesis_plugin, sound_effects_plugin, voice_embeddings_plugin, whisper_asr_plugin, generative_composition_plugin, pedalboard_effects_plugin, soundcloud_artist_studio_plugin, ssml_plugin: Dropped — heavyweight audio/media/creative stack, out of scope for a business-ops deployment ("nobody's gonna be writing music at work").
-    codex_ambient_session_source_plugin, codex_cloud_session_source_plugin, codex_filesystem_session_source_plugin, codex_goals_session_source_plugin, codex_history_session_source_plugin, codex_memories_session_source_plugin, codex_pushed_session_source_plugin, codex_state_session_source_plugin: The full Codex-family session-source suite — operator-ratified exclusion ("the company is not using Codex"), generalized from the one plugin originally asked about to all seven siblings.
+    codex_ambient_session_source_plugin, codex_cloud_session_source_plugin, codex_goals_session_source_plugin, codex_history_session_source_plugin, codex_memories_session_source_plugin, codex_pushed_session_source_plugin, codex_state_session_source_plugin: The Codex-family session-source suite — operator-ratified exclusion ("the company is not using Codex"). codex_filesystem_session_source_plugin is the one exception — it ships so setup's opt-in codex_local option works (seat decision under the Codex-optional ruling, prb_cdb23ea5 / prb_8c652bf3), and it indexes nothing unless the operator selects codex_local.
     chatgpt_export_session_source_plugin: ChatGPT data-export ingest — unchecked in the branch_bizops sheet column (2026-07-21 reconcile); personal-export ingest is not a work-deployment capability. Ships in the samantha/developer profiles instead.
     discord_plugin, signal_plugin: Not a business communication channel in use.
     iterm2_coding_agent_management_plugin: iTerm2 AppleScript driver for coding-agent sessions — unchecked in every sheet column. NOTE the sheet's own pair-mismatch flag — it drives macos_coding_agent_session_plugin (which IS included here); revisit if the pair is wanted end-to-end.

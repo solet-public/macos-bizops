@@ -1,6 +1,7 @@
-# Serial-only smoke schedule -- the ONE source of truth for which registered
-# smokes hold a HOST-EXCLUSIVE resource for their whole run and therefore
-# cannot share the host with ANY concurrently-running smoke.
+# Serial-only smoke schedule -- the ONE source of truth for registered smokes
+# that hold a host-exclusive resource or have a measured pooled timing failure.
+# Timing-sensitive entries are candidates for capacity admission, not claims
+# that their fixtures hold an exclusive resource.
 #
 # Consumed by BOTH schedulers that run the register: quality_gates/run_smokes.py
 # (the checkout battery, which reads this file next to itself) and the born-clone
@@ -12,8 +13,9 @@
 # made to disagree.
 #
 # Grammar is the register's: one repo-relative smoke path per line, `#` starts a
-# comment. An entry names the specific resource MEASURED, not a guess. An entry
-# absent from the register being run is inert. Members are run one at a time
+# comment. Each entry names its measured exclusive resource or measured pooled
+# timing failure. An entry absent from the register being run is inert.
+# Members are run one at a time
 # before the worker pool starts; run_smokes.py additionally host-serializes that
 # phase across separate batteries (iss_0fb8f519). The same contention class is
 # filed cross-lane as GTE-16/GTE-17; when those land as per-run-unique
@@ -22,6 +24,7 @@
 # Shells out to REAL `pip install -e` / `pip uninstall` against the shared repo
 # venv three times per run -- rewrites the __editable__ .pth site configuration
 # every pooled smoke's freshly-spawned interpreter would be reading mid-flight.
+# exclusive resource: this checkout's shared .venv site configuration.
 ananta/tests/lifecycle_management_service/set_plugin_enabled_reenable_smoke.py
 
 # Real-tmux tier spawns an actual session under a FIXED name (agi-realtmux01)
@@ -29,6 +32,7 @@ ananta/tests/lifecycle_management_service/set_plugin_enabled_reenable_smoke.py
 # watch sidecar whose registration row is visible to any concurrently-running
 # smoke that reads live fleet state. GTE-17's fix (transport=mcp, no sidecar)
 # makes this poolable; until it lands this stays serial.
+# exclusive resource: host tmux server's fixed agi-realtmux01 session and live watch row.
 plugins/agent_messaging_plugin/tests/tmux_adapter_smoke.py
 
 # Real-tmux-PTY wall-clock stabilization proof
@@ -37,6 +41,7 @@ plugins/agent_messaging_plugin/tests/tmux_adapter_smoke.py
 # fixture/port collision -- 550/565 pooled failure vs. 70/70 isolated pass in
 # the born-clone gate (iss_cf3a897d); the same red-under-concurrency /
 # green-under-serial mechanism was reproduced directly in the checkout battery.
+# timing-sensitive: pooled failure iss_cf3a897d; candidate for capacity admission, not an exclusive resource.
 plugins/agent_messaging_plugin/tests/codex_managed_session_smoke.py
 
 # Both exercise existing_solet_diagnostics' pinned static read, whose stability
@@ -48,7 +53,9 @@ plugins/agent_messaging_plugin/tests/codex_managed_session_smoke.py
 # churns). The contended resource is the host-shared temp directory's metadata,
 # i.e. the whole suite; poolable only if the predicate stops spanning shared
 # ancestors or the fixtures move off the shared temp root.
+# exclusive resource: shared macOS per-user temporary root metadata.
 solet_cli/tests/inspect_command_smoke.py
+# exclusive resource: shared macOS per-user temporary root metadata.
 solet_cli/tests/existing_solet_diagnostic_smoke.py
 
 # _check_no_index_formula_install builds a --system-site-packages venv
@@ -64,6 +71,7 @@ solet_cli/tests/existing_solet_diagnostic_smoke.py
 # pinned-resources install. The retry survives a few seconds of contention;
 # it does not survive a longer disruption from another concurrently-running
 # battery or gate verification also touching this same shared prefix.
+# exclusive resource: Homebrew python@3.13 system prefix.
 solet_cli/homebrew/tests/release_payload_smoke.py
 
 # The FSEvents-driven-restart scenario depends on real OS kernel event
@@ -77,6 +85,7 @@ solet_cli/homebrew/tests/release_payload_smoke.py
 # each gate failure. Same red-under-concurrency / green-under-serial
 # mechanism as codex_managed_session_smoke.py above (iss_55cda20b-6765-4c1a-
 # 9d90-d073d0eee69c).
+# timing-sensitive: pooled failure gr_00908dd4/gr_103b79f3; candidate for capacity admission, not an exclusive resource.
 plugins/macos_coding_agent_session_plugin/tests/coding_agent_session_smoke.py
 
 # These crash-sweep and cold-host slices repeatedly build real-style fixtures,
@@ -85,16 +94,26 @@ plugins/macos_coding_agent_session_plugin/tests/coding_agent_session_smoke.py
 # slice 4 and cold-host slice 3 hit the unchanged 120s runner limit. Isolated
 # controls passed: write slices 1/2 in 87.10/88.59s on the candidate and
 # 95.35/96.41s on clean master, write slice 8 in 69.5s, router-failure slice
-# 4 in 80.9s, and cold-host slice 3 in 54.2s. The shared resource is host
-# CPU/I/O capacity during many concurrent fixture builds. Other slices passed
-# in the same battery and remain pooled.
+# 4 in 80.9s, and cold-host slice 3 in 54.2s. This is measured CPU/I/O timing
+# sensitivity during concurrent fixture builds, not an exclusive resource.
+# Other slices passed in the same battery and remain pooled.
+# timing-sensitive: pooled 120s timeout (2026-09-22); candidate for capacity admission, not an exclusive resource.
 solet_cli/tests/existing_install_router_failure_sweep_4_smoke.py
+# timing-sensitive: pooled 120s timeout (2026-09-22); candidate for capacity admission, not an exclusive resource.
 solet_cli/tests/cold_host_matrix_3_smoke.py
+# timing-sensitive: pooled 120s timeout (2026-09-22); candidate for capacity admission, not an exclusive resource.
 solet_cli/tests/real_style_sweep_writes_1_smoke.py
+# timing-sensitive: pooled 120s timeout (2026-09-22); candidate for capacity admission, not an exclusive resource.
 solet_cli/tests/real_style_sweep_writes_2_smoke.py
+# timing-sensitive: pooled 120s timeout (2026-09-22); candidate for capacity admission, not an exclusive resource.
 solet_cli/tests/real_style_sweep_writes_3_smoke.py
+# timing-sensitive: pooled 120s timeout (2026-09-22); candidate for capacity admission, not an exclusive resource.
 solet_cli/tests/real_style_sweep_writes_4_smoke.py
+# timing-sensitive: pooled 120s timeout (2026-09-22); candidate for capacity admission, not an exclusive resource.
 solet_cli/tests/real_style_sweep_writes_5_smoke.py
+# timing-sensitive: pooled 120s timeout (2026-09-22); candidate for capacity admission, not an exclusive resource.
 solet_cli/tests/real_style_sweep_writes_6_smoke.py
+# timing-sensitive: pooled 120s timeout (2026-09-22); candidate for capacity admission, not an exclusive resource.
 solet_cli/tests/real_style_sweep_writes_7_smoke.py
+# timing-sensitive: pooled 120s timeout (2026-09-22); candidate for capacity admission, not an exclusive resource.
 solet_cli/tests/real_style_sweep_writes_8_smoke.py

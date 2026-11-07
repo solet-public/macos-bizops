@@ -157,7 +157,16 @@ def invoke_existing_adapter(registry: ExistingInstallAdapterRegistry, request: O
         return _synthetic_failure(request, "adapter_timeout", int((time.monotonic() - started) * 1000), timed_out=True)
     elapsed = int((time.monotonic() - started) * 1000)
     if completed.returncode != 0:
-        return _synthetic_failure(request, "adapter_exit_error", elapsed, exit_code=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
+        return OperationResult.from_process_exit(
+            request,
+            returncode=completed.returncode,
+            error_kind="adapter_exit_error",
+            retry_safe=False,
+            duration_ms=elapsed,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            repair="Inspect the signal diagnosis and redacted adapter diagnostics before retrying.",
+        )
     try:
         raw: object = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:

@@ -3,7 +3,7 @@
 Extracted from `PluginBase` during the Step 9.B decomposition
 (design record, Step 9.2, dev-checkout workbench — not part of the shipped tree).
 
-Walks a plugin instance's class surface, identifies `@platform_process`-
+Walks a plugin instance's runtime surface, identifies `@platform_process`-
 decorated action methods, validates each method's signature against the
 fixed (`params`, `state`) action-method contract, and returns the list
 of resolved `ActionMetadata` objects.
@@ -24,6 +24,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from ananta.core.actions.action_metadata import ActionMetadata
+from ananta.core.process_registry.registration_census import is_candidate_action_name
 from ananta.error_handling import PluginError
 
 if TYPE_CHECKING:
@@ -32,61 +33,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Methods that exist on PluginBase or are commonly added by plugins but
-# are NOT @platform_process action methods. Discovered methods with these
-# names are skipped during action enumeration. Names that don't exist on
-# the class are harmlessly absent from `dir(plugin)` anyway, so this set
-# can stay permissive without harm.
-_SKIP_METHODS: frozenset[str] = frozenset({
-    "get_default_config",
-    "set_orchestrator_ref",
-    "get_available_actions",
-    "execute",
-    "set_config_provider",
-    "set_event_bus",
-    "_resolve_io_process_key",
-    "set_validation_registry",
-    "get_parameter_validators",
-    "get_action_validators",
-    "is_service_provider",
-    "prepare_for_readiness",
-    "supports_template_functions",
-    "execute_template_function",
-    "get_template_functions",
-    "cleanup",
-    "cleanup_event_handlers",
-    "initialize_event_handlers",
-    "execute_async",
-    "get_custom_validators",
-    "is_ready",
-    "set_ready",
-    "set_error",
-    "set_action_factory",
-    "set_state_service",
-    "get_schema_definitions",
-    "query_model",
-    "query_model_async",
-    "get_plugin_param",
-    "set_blob_storage_service",
-    "get_available_providers",
-    "get_default_params",
-    "get_service_metadata",
-    "get_template_engine",
-    "get_variable_resolver",
-    "register_provider",
-    "start_services",
-    "stop_services",
-    "clear_scheduled_action_async",
-    "clear_scheduled_actions_by_tag_async",
-    "create_cron_schedule_async",
-    "execute_in_seconds_async",
-    "process_telegram_action",
-    "initialize",
-})
-
-
 def discover_actions(plugin: PluginBase) -> list[ActionMetadata]:
-    """Walk a plugin's class surface and return all `@platform_process` actions.
+    """Walk a plugin's runtime instance surface and return all `@platform_process` actions.
 
     For each candidate method:
       1. Skip private names, dunders, descriptors, and known non-action methods.
@@ -119,10 +67,7 @@ def discover_actions(plugin: PluginBase) -> list[ActionMetadata]:
         except PluginError:
             raise
         except Exception as e:
-            logger.error(
-                f"Failed to process decorator metadata for '{plugin.name}.{name}': {e}, "
-                f"falling back to default metadata"
-            )
+            logger.error(f"Failed to process decorator metadata for '{plugin.name}.{name}': {e}, falling back to default metadata")
             action_metadata = _create_default_action_metadata(plugin, name)
             actions.append(action_metadata)
 
@@ -131,19 +76,8 @@ def discover_actions(plugin: PluginBase) -> list[ActionMetadata]:
 
 def _is_candidate_action_method(plugin: PluginBase, name: str) -> bool:
     """Check if method name is a candidate for action discovery."""
-    if name.startswith("_"):
+    if not is_candidate_action_name(type(plugin), name):
         return False
-    if name == "__init__":
-        return False
-    if name in _SKIP_METHODS:
-        return False
-
-    # Check for property/descriptor on the class BEFORE calling getattr
-    # on the instance — getattr triggers the property getter, which may
-    # fail during startup (e.g., assertions on uninitialized services).
-    for cls in type(plugin).__mro__:
-        if name in cls.__dict__ and isinstance(cls.__dict__[name], property):
-            return False
 
     attr = getattr(plugin, name)
     if not callable(attr):
@@ -151,9 +85,7 @@ def _is_candidate_action_method(plugin: PluginBase, name: str) -> bool:
     return True
 
 
-def _process_decorated_method(
-    plugin: PluginBase, name: str, method: Callable[..., Any]
-) -> ActionMetadata:
+def _process_decorated_method(plugin: PluginBase, name: str, method: Callable[..., Any]) -> ActionMetadata:
     """Process a decorated method and return its ActionMetadata.
 
     Validates the action signature. Result/error customizations are
@@ -189,9 +121,7 @@ def _build_action_metadata(plugin: PluginBase, name: str) -> ActionMetadata:
     )
 
 
-def _create_default_action_metadata(
-    plugin: PluginBase, name: str
-) -> ActionMetadata:
+def _create_default_action_metadata(plugin: PluginBase, name: str) -> ActionMetadata:
     """Create default action metadata as a recovery fallback."""
     return _build_action_metadata(plugin, name)
 
@@ -213,9 +143,7 @@ def _extract_method_params(method: Callable[..., Any]) -> list[inspect.Parameter
     return params
 
 
-def validate_action_signature(
-    plugin: PluginBase, method_name: str, method: Callable[..., Any]
-) -> None:
+def validate_action_signature(plugin: PluginBase, method_name: str, method: Callable[..., Any]) -> None:
     """Validate that an action method has the correct signature.
 
     All plugin action methods MUST have this signature:
@@ -236,9 +164,7 @@ def validate_action_signature(
     if len(actual_params) != len(expected_params):
         _raise_param_count_error(plugin, method_name, method, expected_params, actual_params)
 
-    for i, (param, (exp_name, _exp_kind, exp_default)) in enumerate(
-        zip(actual_params, expected_params, strict=True)
-    ):
+    for i, (param, (exp_name, _exp_kind, exp_default)) in enumerate(zip(actual_params, expected_params, strict=True)):
         _validate_single_param(plugin, method_name, param, exp_name, exp_default, i)
 
 
@@ -280,23 +206,20 @@ def _validate_single_param(
     """Validate a single parameter matches expected name and default."""
     if param.name != exp_name:
         raise PluginError(
-            f"Invalid signature for '{plugin.name}.{method_name}' - "
-            f"Parameter {index + 1} should be named '{exp_name}', got '{param.name}'",
+            f"Invalid signature for '{plugin.name}.{method_name}' - Parameter {index + 1} should be named '{exp_name}', got '{param.name}'",
             error_code=f"{plugin.name}.invalid_param_name",
             details={"method": method_name, "expected": exp_name, "actual": param.name},
         )
     if exp_default is inspect.Parameter.empty:
         if param.default != inspect.Parameter.empty:
             raise PluginError(
-                f"Invalid signature for '{plugin.name}.{method_name}' - "
-                f"Required parameter '{exp_name}' should NOT have a default value",
+                f"Invalid signature for '{plugin.name}.{method_name}' - Required parameter '{exp_name}' should NOT have a default value",
                 error_code=f"{plugin.name}.unexpected_default_value",
                 details={"method": method_name, "parameter": exp_name},
             )
     elif param.default == inspect.Parameter.empty:
         raise PluginError(
-            f"Invalid signature for '{plugin.name}.{method_name}' - "
-            f"Optional parameter '{exp_name}' must have a default value (= None)",
+            f"Invalid signature for '{plugin.name}.{method_name}' - Optional parameter '{exp_name}' must have a default value (= None)",
             error_code=f"{plugin.name}.missing_default_value",
             details={"method": method_name, "parameter": exp_name},
         )

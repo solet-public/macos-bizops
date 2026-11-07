@@ -61,6 +61,7 @@ def deliver_and_record_gauge_notice(
     observed_s: float,
     last_report_alive_at: datetime | None = None,
     gauge_measured_at: datetime | None = None,
+    signal_waiter: bool = True,
 ) -> bool:
     """Deliver one gauge notice if there is anywhere to deliver it, record that
     it fired either way, and report whether delivery happened.
@@ -78,12 +79,26 @@ def deliver_and_record_gauge_notice(
         outcome = NOTICE_DELIVERY_NO_STEWARD_BINDING
     else:
         try:
-            bridge_manager.append_event(
-                binding.bridge_id, notice_type, prose(), {"flow_id": flow_id},
-            )
+            if signal_waiter:
+                bridge_manager.append_event(
+                    binding.bridge_id,
+                    notice_type,
+                    prose(),
+                    {"flow_id": flow_id},
+                )
+            else:
+                bridge_manager.append_event(
+                    binding.bridge_id,
+                    notice_type,
+                    prose(),
+                    {"flow_id": flow_id},
+                    signal_waiter=False,
+                )
         except Exception:  # noqa: BLE001 — best-effort notify, never fails the sweep
             logger.warning(
-                "session %s %s append failed", agent_instance_id, notice_type,
+                "session %s %s append failed",
+                agent_instance_id,
+                notice_type,
                 exc_info=True,
             )
             outcome = NOTICE_DELIVERY_APPEND_FAILED

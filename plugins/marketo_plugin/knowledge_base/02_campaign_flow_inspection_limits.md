@@ -6,7 +6,7 @@ Article Role: capability_reference
 
 Article Tags: planning-stage:execution, evidence-category:capability-reference, domain:marketo, domain:campaign-safety
 
-Embedding Description: What can and cannot be discovered about a Marketo Smart Campaign before `trigger_campaign` runs it — the flow steps (what the campaign DOES to people: send email, alert sales, change score, move program status) are exposed by no Marketo REST endpoint and there is no dry-run or preview, while the campaign's metadata and its smart-list triggers and filters (who qualifies, what fires it) sit behind the separate Read-Only Asset permission this plugin does not use; includes the recommended caller posture of triggering only self-authored campaigns, why the flow is readable only by a human in the Marketo UI, and why a plugin-side simulated dry-run is refused.
+Embedding Description: What can and cannot be discovered about a Marketo Smart Campaign before `trigger_campaign` runs it — the flow steps (what the campaign DOES to people: send email, alert sales, change score, move program status) are exposed by no Marketo REST endpoint and there is no dry-run or preview, while the campaign's metadata and its smart-list triggers and filters (who qualifies, what fires it) sit behind the separate Read-Only Assets permission and are reachable through the generic request verb; includes the recommended caller posture of triggering only self-authored campaigns, why the flow is readable only by a human in the Marketo UI, and why a plugin-side simulated dry-run is refused.
 
 `trigger_campaign` runs a Smart Campaign's flow against people you supply. That
 flow may send email, alert sales, change scoring, or move program status —
@@ -54,11 +54,13 @@ discarded update.
 
 Two limits on the readable set:
 
-- Every endpoint above requires the **`Read-Only Asset`** permission, which is
+- Every endpoint above requires the **`Read-Only Assets`** permission, which is
   distinct from the `Read-Only Campaigns` / `Read-Only Lead` /
-  `Read-Only Activity` permissions this plugin's verbs use. The plugin calls no
-  `/rest/asset/v1/…` path today, and `check_setup` — whose probes are all
-  Lead-API reads — cannot detect whether an API user has it. Never assume an
+  `Read-Only Activity` permissions the typed lead and campaign verbs use. The
+  generic `request` verb reaches these `/rest/asset/v1/…` paths today (a GET
+  with the path above), and `check_setup` — whose probes are all Lead-API
+  reads — cannot detect whether an API user has it; a missing permission
+  shows up as the vendor's `603 Access denied` in the request job result. Never assume an
   operator's existing API role carries it; state the requirement and let them
   verify.
 - The smart-list endpoints support only user-created smart lists, not built-in

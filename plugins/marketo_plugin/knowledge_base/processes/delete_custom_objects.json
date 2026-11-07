@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::delete_custom_objects",
+  "display_name": "Marketo: Delete Custom Objects",
+  "description": "Permanently delete up to 300 Marketo custom object records (POST /rest/v1/customobjects/{api_name}/delete.json). delete_by is dedupeFields (the type's dedupeFields from describe_custom_objects, default) or idField (marketoGUID). Destructive async write: poll check_marketo_job_status for per-record deleted/skipped status and reasons.",
+  "embedding_description": "Permanently delete Marketo custom object records of one type (api_name), up to 300 per batch, matched by the type's dedupe fields or by marketoGUID. Destructive async write; returns per-record deleted or skipped status with vendor reasons such as object not found. The custom object type itself is not deleted.",
+  "result_processor_customizations": {
+    "action_label": "Marketo custom objects delete job dispatched",
+    "result_type": "marketo_delete_custom_objects_result",
+    "result_description": "Dict with job_id and status 'queued'. The completed job result is Marketo's per-record results array (seq, marketoGUID or id, status, reasons), row_count and tallies (status -> count).",
+    "presentation_guidance": "This changes vendor state and is destructive: deleted records are not recoverable through the API. A queued job is not vendor success: poll check_marketo_job_status, then report the tallies and any skipped records with their reasons."
+  },
+  "error_processor_customizations": {
+    "action_context": "Delete Marketo custom object records on the configured instance.",
+    "error_interpretation": "marketo.invalid_params: refused at dispatch before any vendor call (missing or malformed parameters, more than 300 entries, an action/dedupe_by/delete_by value Marketo does not define, an api_name that is empty or a relative path segment). On the finished job: marketo.permission_denied (vendor 603 or HTTP 403) means the API user's Role lacks the Access API permission; marketo.auth_failed (601/602 after one re-mint, or HTTP 401) means the credential was rejected; marketo.validation_failed and other vendor codes carry Marketo's own message. A transport fault after dispatch may follow a vendor mutation.",
+    "recovery_guidance": "marketo.permission_denied: grant the Role's write permission for custom objects under Admin > Users & Roles > Roles > the API role > Access API (Adobe's Custom Objects page names no checkbox; look for Read-Write Custom Object and confirm the label on that screen), then retry. Custom objects also require a subscription that includes them. Read the records back with get_custom_objects before retrying a write that ended in a transport fault."
+  }
+}

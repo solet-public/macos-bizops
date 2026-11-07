@@ -24,6 +24,25 @@ solet create bizops
 Homebrew prints `Next: run solet create` as a conventional caveat; it does not
 launch the wizard or mutate instance/user state during `brew install`.
 
+### An enrolled directory has been replaced
+
+`solet-manager inspect --target <clone> --channel stable --json` reads both the
+create registry and the v2 maintenance inventory. Its `manager_inventory` check
+lists enrolled instance ids, their recorded paths, and whether the inspected
+directory matches their recorded filesystem identities. An absent create
+registry does not mean an existing v2 enrollment is missing.
+
+When the directory at an enrolled path has been replaced, `update` reports
+`managed_identity_drift`, `doctor` reports `target_identity_invalid`, and
+`import --dry-run` reports `registry_uniqueness_violation` before asking for
+approval. `reconcile` with no active update explains the same identity mismatch
+instead of directing another update attempt. Follow the printed inspection
+command to read the enrollment, then locate the originally enrolled directory
+with its recorded filesystem identity. Copying files into a new directory does
+not restore that identity. If the original directory is unavailable, a supported
+same-path rebind is needed; the Manager does not provide that repair yet. Preserve
+the inventory and stop retrying import, update and reconciliation.
+
 ### The Manager uses the `python@3.13` already on the Mac
 
 The Formula does not declare `depends_on "python@3.13"` (from r61). A source
@@ -84,6 +103,51 @@ repository (Homebrew shorthand `solet-public/tap`). That route does not require
 acceptance into `homebrew/core`. Before publication, acceptance uses a
 disposable local/private tap on a fresh CI runner. The later release lane tests
 the actual published upstream tap; the local fixture is not publication proof.
+
+### What the payload archive must contain
+
+`solet_cli/homebrew/scripts/stage_release.py` does not keep a list of the files the payload needs.
+It derives them, at the manager commit it stages, from the code that reads them:
+
+- **Runtime readers.** Every Python module the Formula `pip_install`s is parsed,
+  and every path rooted at `Path(sys.prefix)`, `Path(__file__)` or
+  `importlib.resources.files(...)` is followed through constant joins, module
+  and imported constants, local assignments, loops over constant tuples,
+  no-argument filename providers and same-module call sites. A
+  `sys.prefix/share/solet/...` leaf is mapped to its archive source through
+  the Formula's own `install`, `write` and `install_symlink` statements; a
+  package-relative leaf must also match the distribution's `package-data`.
+- **Install-time readers.** Each `pip_install buildpath/"<dir>"` needs
+  `<dir>/pyproject.toml`, and each file the Formula installs from the archive
+  is required as well.
+
+Every derived leaf must be a regular member of the archive before the archive is
+written. A directory that exists, even a non-empty one, never stands in for a
+missing leaf. A known missing leaf refuses staging, naming the reader line and
+the leaf. That includes a leaf a reader needs below `share/solet/contracts`
+that the Formula does not install.
+
+The derivation is deliberately narrow. It explains the forms this payload uses
+and makes no claim about arbitrary Python. Two kinds of read are printed as
+`payload advisory:` lines and never counted as coverage:
+
+- an anchored path it cannot finish, such as a dynamically chosen module's
+  `__file__`;
+- a read of a derived leaf through a path that is not production-anchored,
+  such as an explicit or development-relative directory. That kind of read can
+  pass in a checkout and still fail in the installed layout.
+
+Directories in the archive that hold a bundle's leaves are listed as
+`payload mirror:` lines with the leaves they lack. That listing is evidence, not
+a gate.
+
+`solet_cli/homebrew/tests/payload_requirements_smoke.py` stages fixtures that
+add, omit and misread payload resources. `quality_gates/tests/payload_reader_coverage_smoke.py`
+rebuilds the installed `share/solet/contracts` layout from a staged archive. It
+then checks that the production `ContractBundle` entry loads that layout and
+refuses it once any derived leaf is removed. It also runs every tracked
+bundle mirror through the same loader and reports each one it rejects as
+uncovered.
 
 The focused `solet_cli/homebrew/tests/release_payload_smoke.py` check is
 host-dependent by design:

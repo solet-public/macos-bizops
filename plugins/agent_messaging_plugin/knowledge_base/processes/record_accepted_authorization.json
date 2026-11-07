@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::record_accepted_authorization",
+  "display_name": "Record an accepted authorization that has not fired yet",
+  "description": "Accepted-authorization obligations (wgr_d854aa6c). Records one authorization a seat ACCEPTED whose act waits on an external precondition — for example a standing seed-clone authorization that fires only once a clone URL and sealed sha are published. The accepting seat (usually the owed_by_role holder, such as Git-Controller) calls this at acceptance time: nothing ingests messages automatically, so an acceptance that is never recorded stays invisible to a successor. The entry starts in state accepted at version 1 with an immutable record event, both written in one transaction, and list_held_authorizations reports it beside open refusals with entry_kind accepted. A reissue that moves the predicate is a correction (change_accepted_authorization), not a new record. Bookkeeping only: recording performs no act, and the entry is an obligation index — never proof that the authorization is valid and never landing permission, which only the register's landing-authorization receipt gives. Open to any caller like the refusal-queue verbs: actor is reported provenance, not a grant.",
+  "embedding_description": "Writing down a standing authorization that was accepted but has not fired yet because it waits on a precondition, such as a seed clone that fires once a URL and sealed sha are published. Stores who owes the act, the authorizing message, the act and its exact predicate so a fresh successor sees the open obligation.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Accepted authorization recorded",
+    "result_type": "record_accepted_authorization_result",
+    "result_description": "{\"entry_id\": \"aau_...\", \"status\": \"recorded\", \"state\": \"accepted\", \"version\": 1, \"event_id\": \"aae_...\", \"entry\": {projection snapshot}} — entry_id and version are what the next change_accepted_authorization call needs.",
+    "presentation_guidance": "Name the act that is owed, who owes it and the predicate it waits on. Never describe the entry as authority to act or to land; it records an obligation."
+  },
+  "error_processor_customizations": {
+    "action_context": "One typed state transaction inserting the accepted_authorization row and its record event. No caller-identity check — the record-at-acceptance convention is documented, not enforced.",
+    "error_interpretation": "missing_argument: one of requesting_peer, owed_by_role, branch_or_request_ref, authorizing_message_id, act, predicate, reason or actor was empty. invalid_argument: notes was supplied blank. state_service_unavailable: the state service is not bound.",
+    "recovery_guidance": "Fix argument errors and resend. Not safe to blind-retry after a fault of unknown outcome: a retry after a write that actually landed records a second entry, so read back with get_authorization_history by authorizing_message_id (or list_held_authorizations) first. This verb is never retried automatically."
+  }
+}

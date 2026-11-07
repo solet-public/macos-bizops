@@ -166,13 +166,21 @@ class DiscoveryServiceAPI(ABC):
         ),
     )
     @abstractmethod
-    def query_process_registry(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    def query_process_registry(
+        self,
+        query: str,
+        exclude_tags: list[str] | None = None,
+        include_tags: list[str] | None = None,
+        max_results: int = 10,
+        state: dict[str, object] | None = None,
+    ) -> dict[str, object]:
         """Search for processes by semantic query using vector embeddings.
 
-        This is the plugin-level interface. Plugins receive bundled params.
-        Internally calls the provider's process discovery method.
+        This is the service interface for semantic process discovery.
+        Tag filters are deprecated and rejected by the concrete method.
 
-        APP_HOME is obtained from self.orchestrator_ref.APP_HOME in prepare_for_readiness().
+        APP_HOME is obtained from self.orchestrator_ref.APP_HOME in
+        prepare_for_readiness().
         """
         ...
 
@@ -214,13 +222,11 @@ class DiscoveryServiceAPI(ABC):
         is_enabled=True,
     )
     @abstractmethod
-    def get_service_health(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    def get_service_health(self) -> dict[str, Any]:
         """Get discovery service health and statistics.
 
-        This is the plugin-level interface. Plugins receive bundled params.
-        Internally calls the provider's health check method.
-
-        APP_HOME is obtained from self.orchestrator_ref.APP_HOME in prepare_for_readiness().
+        APP_HOME is obtained from self.orchestrator_ref.APP_HOME in
+        prepare_for_readiness().
         """
         ...
 
@@ -314,15 +320,19 @@ class DiscoveryServiceAPI(ABC):
     )
     @abstractmethod
     def execute_embeddings_search(
-        self, params: dict[str, Any], state: dict[str, Any]
-    ) -> dict[str, Any]:
+        self,
+        query: str,
+        original_input: str,
+        max_results: int = 10,
+        state: dict[str, object] | None = None,
+    ) -> dict[str, object]:
         """Execute vector embeddings search for process discovery.
 
-        Returns matched processes for the result processor.
-
         Args:
-            params: Contains 'query' (operation) and 'original_input'
-            state: Current application state
+            query: Abstract operation query (e.g., 'generate audio')
+            original_input: User's original input for context
+            max_results: Maximum number of results to return
+            state: Application state (injected by action processor, unused)
 
         Returns:
             Discovery results with matched processes
@@ -417,7 +427,7 @@ class DiscoveryServiceAPI(ABC):
         ),
     )
     @abstractmethod
-    def get_process_schema(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    def get_process_schema(self, process_key: str) -> dict[str, object]:
         """Retrieve the full invocation schema for a process.
 
         This is Step 2 of the two-step discovery workflow:
@@ -425,8 +435,7 @@ class DiscoveryServiceAPI(ABC):
         2. get_process_schema - get full schema for selected process
 
         Args:
-            params: Contains 'process_key' (required)
-            state: Current application state
+            process_key: The process key (format: 'provider_type::provider::function_name')
 
         Returns:
             ActionResult with process_key, description, and invocation_schema

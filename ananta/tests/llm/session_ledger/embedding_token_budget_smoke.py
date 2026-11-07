@@ -39,6 +39,8 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+_ROOT = REPO_ROOT
+sys.path.insert(0, str(_ROOT))
 sys.path[:0] = [
     str(REPO_ROOT / "ananta" / "src"),
     str(REPO_ROOT / "ananta" / "tests" / "llm" / "session_ledger"),
@@ -232,7 +234,6 @@ def test_2629_token_message() -> None:
     _check(_covers(message, new), "token-aware chunking covers the whole message")
 
 
-
 def test_2629_token_message_embeds() -> None:
     message = _message(2629)
     new = chunk_event_content(message, _BUDGET)
@@ -305,9 +306,13 @@ def test_policy_backfill() -> None:
         halted = writer.drain_missing_events(page_size=1)
     finally:
         event_embeddings.chunk_event_content = original
-    _check(not halted["halted_on_error"] and halted["events_failed"] == 1 and "evt_long:0" not in vectors.present and "evt_b:0" in vectors.present, "before the fix: the over-budget event is skipped and counted, and the drain still embeds everything after it (iss_6aa96266)")
+    _check(not halted["halted_on_error"] and halted["events_failed"] == 1 and "evt_long:0" not in vectors.present and "evt_b:0" in vectors.present, "restored old-window control: the over-budget event is skipped and counted, and the drain still embeds everything after it (iss_6aa96266)")
     repository = writer._repository  # noqa: SLF001
-    _check(repository.get_event_embed_chunk_policy() is None, "a sweep that skipped an event records no policy, so the backfill repeats")
+    _check(repository.get_event_embed_chunk_policy() is None, "a sweep that skipped an event retains pending policy work")
+    ordinary = writer.drain_missing_events(page_size=1)
+    _check(not ordinary["reconcile"] and ordinary["pending_checkpoint"], "pending poison does not restart on ordinary fires")
+    for _ in range(event_embeddings._RECONCILE_EVERY_FIRES - 3):
+        repository.bump_event_embed_drain_counter()
     swept = writer.drain_missing_events(page_size=1)
     _check(swept["policy_backfill"] and swept["reconcile"] and not swept["halted_on_error"], "the first drain under the new policy is a full backfill sweep")
     _check({"evt_long:0", "evt_long:1", "evt_b:0"} <= vectors.present, "the previously failed event is embedded by the repeated sweep")
@@ -462,6 +467,7 @@ def test_coreai_host_floor() -> None:
 
 # Every module that sends text to ``generate_embeddings`` and how it meets the provider budget.
 _REVIEWED_CALLERS = {
+    "ananta/src/ananta/core/actions/_measured_action_lane.py": "routes queued generate_embeddings actions onto its own measured lane by process key; sends no text itself; the facade still refuses over-budget text",
     "ananta/src/ananta/llm/session_ledger/event_embeddings.py": "splits every event to the budget; refuses an over-budget query",
     "ananta/src/ananta/llm/session_ledger/summarization.py": "one vector per summary; the facade refuses over-budget text loudly",
     "ananta/src/ananta/services/discovery_service/service.py": "one vector per process description or query; the facade refuses loudly",
@@ -488,7 +494,20 @@ def test_enumeration() -> None:
 
 def main() -> int:
     print("embedding token budget (iss_9166af93) smoke")
-    for test in (test_split_to_fit, test_2629_token_message, test_2629_token_message_embeds, test_old_window_mutation, test_facade_refuses_loudly_and_counts, test_policy_backfill, test_policy_backfill_reembeds_truncated, test_query_refusal, test_knowledge_indexer_splits, test_coreai_declares_its_ceiling, test_coreai_host_floor, test_enumeration):
+    for test in (
+        test_split_to_fit,
+        test_2629_token_message,
+        test_2629_token_message_embeds,
+        test_old_window_mutation,
+        test_facade_refuses_loudly_and_counts,
+        test_policy_backfill,
+        test_policy_backfill_reembeds_truncated,
+        test_query_refusal,
+        test_knowledge_indexer_splits,
+        test_coreai_declares_its_ceiling,
+        test_coreai_host_floor,
+        test_enumeration,
+    ):
         print(f"\n[{test.__name__}]")
         test()
     print(f"\n{_passed} passed, {len(_failed)} failed")

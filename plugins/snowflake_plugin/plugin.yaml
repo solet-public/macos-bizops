@@ -1,8 +1,11 @@
 name: snowflake_plugin
 description: >
-  Snowflake warehouse connector — read-only queries, warehouse/database/schema
+  Snowflake warehouse connector — queries and statements, warehouse/database/schema
   introspection, and full-result export to workspace .tsv files (contained
-  under export_allowed_roots). Executor: snowflake-connector-python.
+  under export_allowed_roots). Executor: snowflake-connector-python. The same
+  key pair also signs Snowflake REST calls: the generic request verb and the
+  typed sql_api, task, stream, dynamic_table, database, schema, warehouse,
+  stage, table, view, sequence and pipe (with Snowpipe ingestion) families.
   Auth: key-pair (RSA JWT) as the operator's own Snowflake user, resolved from
   the address book entry "snowflake_account" via chain-consumed vault::
   references — no PAT, no browser flow, no callback server.
@@ -12,10 +15,10 @@ description: >
   operator-registered "snowflake_account" address-book entry — no account
   parameter on any verb. It never imports or touches the platform state DB.
 
-  READ-ONLY, HARD (operator-ratified RATIFY-2): no write verb exists. Snowflake
-  has no session-level read-only flag (unlike Postgres), so the TRUE
-  developer-proof boundary is the read-only ROLE the connection is pinned
-  to — the connector's statement-leader guard is fast-fail UX only.
+  Statements are forwarded to Snowflake under the operator-registered role.
+  Writes and deletes are supported where that role permits them; vendor RBAC
+  is the only access boundary. Snowflake has no session-level authorization flag
+  (unlike Postgres), and this plugin does not add a separate write gate.
 optional: true
 
 implements:

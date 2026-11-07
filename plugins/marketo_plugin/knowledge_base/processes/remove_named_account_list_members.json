@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::remove_named_account_list_members",
+  "display_name": "Marketo: Remove Named Account List Members",
+  "description": "Remove up to 300 named accounts, by marketoGUID, from one Marketo named account list (POST /rest/v1/namedAccountList/{list_id}/namedAccounts/remove.json). The accounts themselves are not deleted. Async write: poll check_marketo_job_status for per-record status and reasons.",
+  "embedding_description": "Remove Marketo named accounts from one named account list (ABM account list membership), up to 300 marketoGUIDs per batch. The accounts themselves stay in the database. Async write returns Marketo's per-record status with reasons. Distinct from delete_named_accounts, which deletes the accounts, and add_named_account_list_members.",
+  "result_processor_customizations": {
+    "action_label": "Marketo named account list members remove job dispatched",
+    "result_type": "marketo_remove_named_account_list_members_result",
+    "result_description": "Dict with job_id and status 'queued'. The completed job result is Marketo's per-record results array (seq, marketoGUID or id, status, reasons), row_count and tallies (status -> count).",
+    "presentation_guidance": "This changes vendor state. A queued job is not vendor success: poll check_marketo_job_status, then report the tallies and any skipped records with their reasons."
+  },
+  "error_processor_customizations": {
+    "action_context": "Remove named accounts from a Marketo named account list on the configured instance.",
+    "error_interpretation": "marketo.invalid_params: refused at dispatch before any vendor call (missing or malformed parameters, more than 300 entries, an action/dedupe_by/delete_by value Marketo does not define, a list_id that is empty or a relative path segment, or a named_account_ids entry that is not a non-empty string). On the finished job: marketo.permission_denied (vendor 603 or HTTP 403) means the API user's Role lacks the Access API permission; marketo.auth_failed (601/602 after one re-mint, or HTTP 401) means the credential was rejected; marketo.validation_failed and other vendor codes carry Marketo's own message. A transport fault after dispatch may follow a vendor mutation.",
+    "recovery_guidance": "marketo.permission_denied: grant Read-Write Named Account under Admin > Users & Roles > Roles > the API role > Access API, then retry. Read the records back with get_named_account_list_members before retrying a write that ended in a transport fault."
+  }
+}

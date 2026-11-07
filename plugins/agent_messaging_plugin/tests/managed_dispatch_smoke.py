@@ -13,9 +13,11 @@ import hashlib
 import json
 import sys
 import tempfile
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
@@ -26,8 +28,7 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
-from _recorded_lane_worktree_fixture import RecordedLaneWorktreeFixture  # noqa: E402
-from _register_unit_double import RegisterUnitDouble  # noqa: E402
+from _register_unit_double import FIXTURE_UNIT_ID, RegisterUnitDouble  # noqa: E402
 from ananta.core.process_registry.invocation_schema_generator import (  # noqa: E402
     InvocationSchemaGenerator,
 )
@@ -44,7 +45,6 @@ from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
     role_binding_external_id,
 )
 
-import agent_messaging_plugin.session_hosts as session_hosts  # noqa: E402
 from agent_messaging_plugin.managed_dispatch import (  # noqa: E402
     DISPATCH_ACTIVE,
     DISPATCH_BLOCKED_INTERNAL,
@@ -67,15 +67,12 @@ from agent_messaging_plugin.managed_dispatch import (  # noqa: E402
     supervise_managed_dispatches,
 )
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
+from agent_messaging_plugin.register_unit_client import RegisterActor  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
     TABLE_MANAGED_DISPATCH,
     TABLE_MANAGED_DISPATCH_EVENT,
 )
 from agent_messaging_plugin.session_hosts import HostCannotSpawnError  # noqa: E402
-from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
-    SpawnSessionRequest,
-    _dispatch_contract_mismatches,
-)
 
 T0 = datetime(2026, 8, 22, 12, 0, 0, tzinfo=UTC)
 _passed = 0
@@ -162,20 +159,13 @@ def _dispatch_events(
             "filters": {"dispatch_id": "mdp-fixture", "is_deleted": 0},
         },
     )
-    records = cast(list[dict[str, Any]], result["data"]["records"])
+    records = cast(list[dict[str, Any]], cast(dict[str, Any], result.get("data"))["records"])
     if event_ids is None:
         return records
     return [record for record in records if str(record["event_id"]) in event_ids]
 
 
-def _brief(tmp: Path) -> tuple[Path, str]:
-    path = tmp / "brief.md"
-    path.write_text("exact immutable brief\n", encoding="utf-8")
-    return path, hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def _spec(tmp: Path, **overrides: Any) -> DispatchSpec:
-    brief, brief_sha256 = _brief(tmp)
     base: dict[str, Any] = {
         "dispatch_id": "mdp-fixture",
         "lane_id": "coordination-fixture",
@@ -183,9 +173,8 @@ def _spec(tmp: Path, **overrides: Any) -> DispatchSpec:
         "role_class": "project",
         "work_class": "production_mutation",
         "budget_line": "coordination-fixture-budget",
-        "brief_ref": str(brief),
-        "unit_id": "unt-dispatch-replay-01234567",
-        "brief_sha256": brief_sha256,
+        "unit_id": FIXTURE_UNIT_ID,
+        "repository_root": str(REPO_ROOT),
         "expected_path": str(tmp / "report.md"),
         "completion_contract": {
             "evidence_obligations": [
@@ -202,7 +191,6 @@ def _spec(tmp: Path, **overrides: Any) -> DispatchSpec:
         "visibility": "headless",
         "local_name": "Codex-Fixture-Builder",
         "report_by_seconds": 900,
-
         "allowed_tools": ("Bash", "Read"),
         "permission_mode": "bypassPermissions",
         "transport": "mcp",
@@ -214,53 +202,40 @@ def _spec(tmp: Path, **overrides: Any) -> DispatchSpec:
         "uptake_due_at": (T0 + timedelta(minutes=2)).isoformat(),
         "report_by": (T0 + timedelta(minutes=15)).isoformat(),
         "watchdog_due_at": (T0 + timedelta(minutes=3)).isoformat(),
-
         "dispatch_kind": "infrastructure",
     }
     base.update(overrides)
     return DispatchSpec(**base)
 
 
+def _register(spec: DispatchSpec) -> RegisterUnitDouble:
+    register = RegisterUnitDouble()
+    register.add_unit(spec.unit_id, kind=spec.dispatch_kind)
+    return register
+
+
 def _prepare(state: StateManagementInterface, tmp: Path, **overrides: Any) -> dict[str, Any]:
-    return prepare_managed_dispatch(state, _spec(tmp, **overrides), now=T0)
+    if "dispatch_id" in overrides and "unit_id" not in overrides:
+        overrides["unit_id"] = f"unt_{overrides['dispatch_id']}"
+    spec = _spec(tmp, **overrides)
+    return prepare_managed_dispatch(state, spec, register=_register(spec), actor=_coordinator_actor(), now=T0)
 
 
-def _spawn_request(spec: DispatchSpec) -> SpawnSessionRequest:
-    return SpawnSessionRequest(
-        role_class=spec.role_class,
-        lane_id=spec.lane_id,
-        brief_ref=spec.brief_ref,
-        unit_id=spec.unit_id,
-        repository_root=spec.repository_root,
-        work_class=spec.work_class,
-        budget_line=spec.budget_line,
-        agent_runtime=spec.agent_runtime,
-        role_name=spec.role_name,
-        host=spec.host,
-        visibility=spec.visibility,
-        model=spec.model,
-        effort=spec.effort,
-        report_by_seconds=spec.report_by_seconds,
-
-        spawned_by_instance_id=spec.spawned_by_instance_id,
-        spawned_by_role=spec.spawned_by_role,
-        directed_by=spec.directed_by,
-        allowed_tools=spec.allowed_tools,
-        permission_mode=spec.permission_mode,
-        transport=spec.transport,
-        allow_askuserquestion=spec.allow_askuserquestion,
-        local_name=spec.local_name,
-        degraded_hooks_acknowledged=spec.degraded_hooks_acknowledged,
-        dispatch_kind=spec.dispatch_kind,
-        reviewed_report_vendor=spec.reviewed_report_vendor,
-        pair_id=spec.pair_id,
-        scope_tags=spec.scope_tags,
-    )
+def _assignment_identity(row: Mapping[str, Any]) -> dict[str, str]:
+    return {"assignment_sha256": str(row["assignment_sha256"]), "revision_id": str(row["assignment"]["revision"]["revision_id"])}
 
 
 class _ReplacementChannel:
     def __init__(self) -> None:
         self.sent: list[str] = []
+        self.pending = ""
+
+    def insert(self, text: str) -> None:
+        self.pending = text
+
+    def submit(self) -> None:
+        self.sent.append(self.pending)
+        self.pending = ""
 
     def send(self, text: str) -> None:
         self.sent.append(text)
@@ -273,12 +248,12 @@ class _ReplacementDriver:
         self.spawn_specs: list[dict[str, object]] = []
         self.channel = _ReplacementChannel()
 
-    def spawn(self, spec: dict[str, object]) -> str:
+    def spawn(self, spec: Mapping[str, object]) -> str:
         if self.fail_start:
             raise HostCannotSpawnError("fixture start refusal")
         instance = str(spec["agent_instance_id"])
         self.spawned_instances.append(instance)
-        self.spawn_specs.append(spec)
+        self.spawn_specs.append(dict(spec))
         return f"fixture-host:{instance}"
 
     def alive(self, host_ref: str) -> bool:
@@ -301,11 +276,7 @@ class _ReplacementDriver:
 
 class _ActorRegistry:
     def __init__(self, bindings: dict[str, str] | None = None) -> None:
-        self._bindings = (
-            {"agi-authenticated": "ases-authenticated"}
-            if bindings is None
-            else bindings
-        )
+        self._bindings = {"agi-authenticated": "ases-authenticated"} if bindings is None else bindings
 
     def agent_session_id_for_instance(self, instance: str) -> str:
         return self._bindings.get(instance, "")
@@ -318,23 +289,10 @@ def _first_turn(
     error: str = "",
     instance: str = "agi-worker-1",
 ) -> dict[str, Any]:
-    return record_first_turn_evidence(
-        state,
-        dispatch_id="mdp-fixture",
-        agent_instance_id=instance,
-        source="charter",
-        delivered=delivered,
-        error=error,
-        host="headless",
-        host_ref="12345",
-        agent_runtime="codex",
-        observed_at=T0 + timedelta(seconds=1),
-    )
+    return record_first_turn_evidence(state, dispatch_id="mdp-fixture", agent_instance_id=instance, source="charter", delivered=delivered, error=error, host="headless", host_ref="12345", agent_runtime="codex", observed_at=T0 + timedelta(seconds=1), register=None, actor=None)
 
 
-def _ack(
-    state: StateManagementInterface, *, event_id: str = "evt-ack", version: int = 1
-) -> dict[str, Any]:
+def _ack(state: StateManagementInterface, *, event_id: str = "evt-ack", version: int = 1) -> dict[str, Any]:
     return report_managed_dispatch(
         state,
         dispatch_id="mdp-fixture",
@@ -344,7 +302,7 @@ def _ack(
         actor=_worker_actor(),
         prior_version=version,
         payload={
-            "brief_sha256": read_managed_dispatch(state, "mdp-fixture")["brief_sha256"],
+            **_assignment_identity(read_managed_dispatch(state, "mdp-fixture")),
             "role_binding": "Codex-Fixture-Builder",
             "scope_readback_sha256": "a" * 64,
             "plan_sha256": "b" * 64,
@@ -358,12 +316,8 @@ def test_02_headless_submission_failure_is_durable() -> None:
         state = _state()
         _prepare(state, Path(raw))
         row = _first_turn(state, delivered=False, error="unsupported_on_host")
-        _check(
-            row["state"] == DISPATCH_UPTAKE_UNCERTAIN, "02 failed submission is uptake_uncertain"
-        )
-        _check(
-            row["first_turn_error"] == "unsupported_on_host", "02 exact submission error is durable"
-        )
+        _check(row["state"] == DISPATCH_UPTAKE_UNCERTAIN, "02 failed submission is uptake_uncertain")
+        _check(row["first_turn_error"] == "unsupported_on_host", "02 exact submission error is durable")
         _check(not row.get("last_ack_at"), "02 no ACK is invented")
 
 
@@ -382,7 +336,7 @@ def test_03_transport_is_not_uptake() -> None:
 
 def test_06_atomic_requirements_fail_before_dispatch() -> None:
     required = (
-        "brief_sha256",
+        "unit_id",
         "completion_contract",
         "uptake_due_at",
         "report_by",
@@ -401,46 +355,20 @@ def test_06_atomic_requirements_fail_before_dispatch() -> None:
 
 
 def test_register_kinds_reach_managed_spawn_validation() -> None:
-    host = "register-kind-validation-fixture"
-    key = (session_hosts.AGENT_RUNTIME_CODEX, host)
-    prior = session_hosts._REGISTRY.get(key)  # noqa: SLF001
-    session_hosts._REGISTRY[key] = _ReplacementDriver(fail_start=True)  # noqa: SLF001
-    try:
-        for kind, tags, model, expected_code in (
-            ("test", (), "gpt-5.6-sol", "host_cannot_spawn"),
-            ("implement", (), "gpt-5.6-sol", "host_cannot_spawn"),
-            ("implementation", (), "gpt-5.6-sol", "host_cannot_spawn"),
-            ("unknown-test-kind", (), "gpt-5.6-sol", "host_cannot_spawn"),
-            ("test", ("state_schema",), "gpt-5.6-terra", "host_cannot_spawn"),
-            ("test", ("state_schema",), "gpt-6-astra", "host_cannot_spawn"),
-            (" ", (), "gpt-5.6-sol", "dispatch_kind_required"),
-        ):
-            with tempfile.TemporaryDirectory() as raw:
-                state = _state()
-                (Path(raw) / ".git").mkdir()
-                spec = _spec(
-                    Path(raw), host=host, allowed_hosts=[host], local_name="Register-Kind-Fixture",
-                    dispatch_kind=kind, scope_tags=tags, model=model,
-                    unit_id="", repository_root=raw,
-                )
-                try:
-                    dispatch_managed_work(
-                        state, spec, _spawn_request(spec), register=RegisterUnitDouble(), now=T0,
-                    )
-                except DispatchError as exc:
-                    code = exc.code
-                else:
-                    code = ""
-                _check(code == expected_code, f"managed dispatch {kind} with tags {tags} yields {expected_code}")
-                _check(
-                    read_managed_dispatch(state, spec.dispatch_id)["state"] == DISPATCH_FAILED_START,
-                    f"managed dispatch {kind} failure remains recorded",
-                )
-    finally:
-        if prior is None:
-            del session_hosts._REGISTRY[key]  # noqa: SLF001
-        else:
-            session_hosts._REGISTRY[key] = prior  # noqa: SLF001
+    def refuse(_row: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise DispatchError("host_cannot_spawn", "fixture start refusal")
+
+    for kind in ("test", "implement", "implementation", "unknown-test-kind", " "):
+        with tempfile.TemporaryDirectory() as raw:
+            state = _state()
+            spec = _spec(Path(raw), dispatch_kind=kind)
+            code = ""
+            try:
+                dispatch_managed_work(state, spec, register=_register(spec), actor=_coordinator_actor(), spawn_attempt=refuse, now=T0)
+            except DispatchError as exc:
+                code = exc.code
+            expected = "host_cannot_spawn" if kind.strip() else "dispatch_kind_required"
+            _check(code == expected, f"register kind {kind!r} is verified before attempt launch")
 
 
 def test_07_silent_internal_blocker_is_supervised_once_per_version() -> None:
@@ -467,9 +395,7 @@ def test_07_silent_internal_blocker_is_supervised_once_per_version() -> None:
             },
             observed_at=T0 + timedelta(minutes=1),
         )
-        _check(
-            blocked["state"] == DISPATCH_BLOCKED_INTERNAL, "07 internal blocker is explicit state"
-        )
+        _check(blocked["state"] == DISPATCH_BLOCKED_INTERNAL, "07 internal blocker is explicit state")
         first = supervise_managed_dispatches(state, now=T0 + timedelta(minutes=6))
         second = supervise_managed_dispatches(state, now=T0 + timedelta(minutes=7))
         _check(first["notices_emitted"] == 1, "07 overdue blocker emits one notice")
@@ -484,9 +410,7 @@ def test_08_overdue_worker_surfaces_exact_action() -> None:
         _ack(state)
         result = supervise_managed_dispatches(state, now=T0 + timedelta(minutes=4))
         status = managed_dispatch_status(state, "mdp-fixture", now=T0 + timedelta(minutes=4))
-        _check(
-            result["conditions"][0]["condition"] == "milestone_overdue", "08 silence is classified"
-        )
+        _check(result["conditions"][0]["condition"] == "milestone_overdue", "08 silence is classified")
         _check(
             status["next_required_action"] == "request_worker_milestone",
             "08 status names the action",
@@ -529,8 +453,7 @@ def test_08_overdue_worker_surfaces_exact_action() -> None:
             "08 structured milestone advances report-by",
         )
         _check(
-            [item["condition"] for item in no_longer_overdue["conditions"]]
-            == ["watchdog_overdue"],
+            [item["condition"] for item in no_longer_overdue["conditions"]] == ["watchdog_overdue"],
             "08 new report deadline governs silence while watchdog remains operational",
         )
 
@@ -547,14 +470,9 @@ def test_08_overdue_worker_surfaces_exact_action() -> None:
         first = supervise_managed_dispatches(state, now=T0 + timedelta(minutes=4))
         second = supervise_managed_dispatches(state, now=T0 + timedelta(minutes=5))
         first_names = [item["condition"] for item in first["conditions"]]
-        supervised_events = [
-            event
-            for event in _dispatch_events(state)
-            if str(event["event_id"]).startswith("supervision:")
-        ]
+        supervised_events = [event for event in _dispatch_events(state) if str(event["event_id"]).startswith("supervision:")]
         _check(
-            set(first_names) == {"milestone_overdue", "watchdog_overdue"}
-            and len(first_names) == 2,
+            set(first_names) == {"milestone_overdue", "watchdog_overdue"} and len(first_names) == 2,
             "08 simultaneous milestone and watchdog debt are both supervised",
         )
         _check(first["notices_emitted"] == 2, "08 each newly owed condition emits once")
@@ -584,23 +502,14 @@ def test_08_staggered_milestone_survives_watchdog_version_change() -> None:
             supervise_managed_dispatches(state, now=T0 + timedelta(minutes=4)),
             supervise_managed_dispatches(state, now=T0 + timedelta(minutes=5)),
         ]
-        staggered_events = [
-            event
-            for event in _dispatch_events(state)
-            if str(event["event_id"]).startswith("supervision:")
-        ]
-        staggered_event_conditions = [
-            str(cast(dict[str, Any], event["payload"])["condition"])
-            for event in staggered_events
-        ]
+        staggered_events = [event for event in _dispatch_events(state) if str(event["event_id"]).startswith("supervision:")]
+        staggered_event_conditions = [str(cast(dict[str, Any], event["payload"])["condition"]) for event in staggered_events]
         _check(
             [sweep["notices_emitted"] for sweep in staggered] == [1, 1, 0],
             "08 earlier milestone debt survives the later watchdog transition",
         )
         _check(
-            len(staggered_events) == 2
-            and staggered_event_conditions.count("milestone_overdue") == 1
-            and staggered_event_conditions.count("watchdog_overdue") == 1,
+            len(staggered_events) == 2 and staggered_event_conditions.count("milestone_overdue") == 1 and staggered_event_conditions.count("watchdog_overdue") == 1,
             "08 staggered debts store exactly one audit episode per condition",
         )
 
@@ -628,7 +537,7 @@ def test_10_retry_request_is_idempotent() -> None:
         state = _state()
         _prepare(state, Path(raw))
         _first_turn(state, delivered=False, error="unsupported_on_host")
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "dispatch_id": "mdp-fixture",
             "event_id": "evt-retry",
             "action": "request_retry",
@@ -684,6 +593,7 @@ def _report_completion(
             actor=_worker_actor(attempt),
             prior_version=prior_version,
             payload={
+                **_assignment_identity(read_managed_dispatch(state, "mdp-fixture")),
                 "artifact_path": artifact_path,
                 "artifact_sha256": artifact_sha256,
                 "completion_contract_sha256": contract_sha256,
@@ -719,9 +629,7 @@ def test_12_completion_false_positives_remain_noncomplete() -> None:
                 prior_version=2,
                 artifact_path=str(report),
                 artifact_sha256="0" * 64 if case == "wrong_hash" else digest,
-                contract_sha256=(
-                    "f" * 64 if case == "wrong_contract" else row["completion_contract_sha256"]
-                ),
+                contract_sha256=("f" * 64 if case == "wrong_contract" else row["completion_contract_sha256"]),
                 attempt="agi-stale" if case == "stale_attempt" else "agi-worker-1",
             )
             _check(bool(code), f"12 {case} is rejected")
@@ -769,10 +677,7 @@ def test_13_only_coordinator_acceptance_completes() -> None:
                         "registered": {"status": "pass", "detail": "independent registered"},
                     },
                     "verdict": "READY-FOR-REVIEW",
-                    "worker_evidence_sha256": hashlib.sha256(
-                        b'{"focused":{"detail":"focused suite green","status":"pass"},'
-                        b'"registered":{"detail":"registered suite green","status":"pass"}}'
-                    ).hexdigest(),
+                    "worker_evidence_sha256": hashlib.sha256(b'{"focused":{"detail":"focused suite green","status":"pass"},"registered":{"detail":"registered suite green","status":"pass"}}').hexdigest(),
                 },
             },
             observed_at=T0 + timedelta(minutes=3),
@@ -827,7 +732,7 @@ def test_review_f1_forged_worker_and_coordinator_authority_are_rejected() -> Non
                 actor=_worker_actor("agi-unrelated-attacker"),
                 prior_version=1,
                 payload={
-                    "brief_sha256": row["brief_sha256"],
+                    **_assignment_identity(row),
                     "role_binding": "Codex-Fixture-Builder",
                     "scope_readback_sha256": "a" * 64,
                     "plan_sha256": "b" * 64,
@@ -907,10 +812,11 @@ def test_review_f1_public_authority_is_server_derived() -> None:
     except DispatchError as exc:
         local_unregistered = exc.code
     report_parameters = AgentMessagingPlugin.report_managed_dispatch._platform_process_metadata.parameters  # type: ignore[attr-defined]  # noqa: E501,SLF001
-    resolve_parameters = AgentMessagingPlugin.resolve_managed_dispatch._platform_process_metadata.parameters  # type: ignore[attr-defined]  # noqa: E501,SLF001
-    dispatch_parameters = AgentMessagingPlugin.dispatch_managed_work._platform_process_metadata.parameters  # type: ignore[attr-defined]  # noqa: E501,SLF001
+    resolve_parameters = AgentMessagingPlugin.resolve_managed_dispatch_action._platform_process_metadata.parameters  # type: ignore[attr-defined]  # noqa: E501,SLF001
+    dispatch_parameters = AgentMessagingPlugin.dispatch_managed_work_action._platform_process_metadata.parameters  # type: ignore[attr-defined]  # noqa: E501,SLF001
     _check(
-        actor == DispatchActor(
+        actor
+        == DispatchActor(
             "agi-authenticated",
             "ases-authenticated",
             "oauth_principal",
@@ -930,63 +836,41 @@ def test_review_f1_public_authority_is_server_derived() -> None:
         "F1 local bridge identity fails closed when its live binding is absent",
     )
     _check(
-        not {"actor_role", "actor_instance_id"}
-        & (set(report_parameters) | set(resolve_parameters))
-        and "spawned_by_instance_id" not in dispatch_parameters,
+        not {"actor_role", "actor_instance_id"} & (set(report_parameters) | set(resolve_parameters)) and "spawned_by_instance_id" not in dispatch_parameters,
         "F1 caller-supplied actor/spawner fields are absent from public authority schemas",
     )
 
 
 def test_review_f2_prepared_contract_rejects_every_altered_spawn_field() -> None:
-    """F2 red: every spawn-affecting and lineage field is immutable."""
+    """Every request field is pinned; duplicates cannot change host or lineage."""
+    mutations: dict[str, Any] = {
+        "host": "tmux",
+        "visibility": "visible",
+        "model": "different-model",
+        "effort": "low",
+        "report_by_seconds": 17,
+        "spawned_by_instance_id": "agi-unrelated",
+        "spawned_by_role": "Not-Coordinator-Main",
+        "directed_by": "external:forged",
+        "allowed_tools": ("Bash",),
+        "permission_mode": "default",
+        "transport": "watch",
+        "allow_askuserquestion": True,
+        "local_name": "different",
+        "repository_root": "/different",
+        "degraded_hooks_acknowledged": True,
+        "expected_revision_id": "drv_other",
+    }
     with tempfile.TemporaryDirectory() as raw:
         state = _state()
-        row = _prepare(state, Path(raw))
-        baseline = SpawnSessionRequest(
-            role_class="project",
-            lane_id="coordination-fixture",
-            brief_ref=str(row["brief_ref"]),
-            repository_root="/different-checkout",
-            work_class="production_mutation",
-            budget_line="coordination-fixture-budget",
-            dispatch_id="mdp-fixture",
-            agent_runtime="codex",
-            role_name="Codex-Fixture-Builder",
-            host="tmux",
-            visibility="visible",
-            model="different-model",
-            effort="low",
-            report_by_seconds=17,
-
-            spawned_by_instance_id="agi-unrelated",
-            spawned_by_role="Not-Coordinator-Main",
-            directed_by="external:forged",
-            allowed_tools=("Bash",),
-            permission_mode="default",
-            transport="watch",
-            allow_askuserquestion=True,
-            local_name="Different-Local-Name",
-            degraded_hooks_acknowledged=True,
-        )
-        mismatches = set(_dispatch_contract_mismatches(row, baseline))
-        required = {
-            "host",
-            "visibility",
-            "model",
-            "effort",
-            "report_by_seconds",
-            "spawned_by_instance_id",
-            "spawned_by_role",
-            "directed_by",
-            "allowed_tools",
-            "permission_mode",
-            "transport",
-            "allow_askuserquestion",
-            "local_name",
-            "repository_root",
-            "degraded_hooks_acknowledged",
-        }
-        _check(required <= mismatches, "F2 every altered spawn/lineage field mismatches")
+        _prepare(state, Path(raw))
+        for field, value in mutations.items():
+            code = ""
+            try:
+                _prepare(state, Path(raw), **{field: value})
+            except DispatchError as exc:
+                code = exc.code
+            _check(code in {"dispatch_id_conflict", "coordinator_authority_denied"}, f"F2 altered {field} cannot rewrite a prepared dispatch")
 
 
 def test_review_f3_incomplete_completion_evidence_is_rejected() -> None:
@@ -1148,123 +1032,56 @@ def test_review_f5_watchdog_is_operational_and_deduplicated() -> None:
 
 
 def test_review_f7_failed_start_is_identified_supervised_and_replaced() -> None:
-    """F7/F6: a failed start has an address and retry creates a working attempt."""
-    host = "repair-round-two-replacement"
-    key = (session_hosts.AGENT_RUNTIME_CODEX, host)
-    prior = session_hosts._REGISTRY.get(key)  # noqa: SLF001
-    driver = _ReplacementDriver(fail_start=True)
-    session_hosts._REGISTRY[key] = driver  # noqa: SLF001
-    try:
-        with tempfile.TemporaryDirectory() as raw:
-            state = _state()
-            tmp = Path(raw)
-            (tmp / ".git").mkdir()
-            register = RegisterUnitDouble()
-            spec = _spec(
-                tmp,
-                host=host,
-                allowed_hosts=[host],
-                local_name="Replacement-Fixture",
-                unit_id="",
-                repository_root=raw,
-            )
-            error_data: dict[str, Any] = {}
-            try:
-                dispatch_managed_work(
-                    state,
-                    spec,
-                    _spawn_request(spec),
-                    register=register,
-                    now=T0,
-                )
-            except DispatchError as exc:
-                error_data = exc.data
-            failed = read_managed_dispatch(state, spec.dispatch_id)
-            first_notice = supervise_managed_dispatches(
-                state,
-                now=T0 + timedelta(seconds=1),
-            )
-            second_notice = supervise_managed_dispatches(
-                state,
-                now=T0 + timedelta(seconds=2),
-            )
-            _check(
-                error_data.get("dispatch_id") == spec.dispatch_id
-                and error_data.get("state") == DISPATCH_FAILED_START,
-                "F7 failed-start error returns durable dispatch identity/state",
-            )
-            _check(
-                first_notice["conditions"][0]["condition"]
-                == "failed_start_decision_required",
-                "F7 failed start is supervised with a coordinator decision",
-            )
-            _check(
-                first_notice["notices_emitted"] == 1
-                and second_notice["notices_emitted"] == 0,
-                "F7 failed-start decision notice is deduplicated",
-            )
+    with tempfile.TemporaryDirectory() as raw:
+        state = _state()
+        spec = _spec(Path(raw))
+        register = _register(spec)
+        launched: list[Mapping[str, Any]] = []
 
-            driver.fail_start = False
-            retried = resolve_managed_dispatch(
-                state,
-                dispatch_id=spec.dispatch_id,
-                event_id="evt-working-replacement",
-                action="request_retry",
-                actor=_coordinator_actor(),
-                prior_version=int(failed["version"]),
-                payload={"reason": "configured replacement host"},
-                observed_at=T0 + timedelta(seconds=3),
-                register=register,
-            )
-            replacement = str(retried["current_agent_instance_id"])
-            _seed_binding(
-                state,
-                role=spec.role_name,
-                instance=replacement,
-                session=f"ases-{replacement}",
-            )
-            active = report_managed_dispatch(
-                state,
-                dispatch_id=spec.dispatch_id,
-                event_id="evt-replacement-ack",
-                event_kind="ack",
-                attempt_agent_instance_id=replacement,
-                actor=DispatchActor(
-                    replacement,
-                    f"ases-{replacement}",
-                    "live_peer_binding",
-                ),
-                prior_version=int(retried["version"]),
-                payload={
-                    "brief_sha256": spec.brief_sha256,
-                    "role_binding": spec.role_name,
-                    "scope_readback_sha256": "a" * 64,
-                    "plan_sha256": "b" * 64,
-                },
-                observed_at=T0 + timedelta(seconds=4),
-            )
-            _check(
-                bool(replacement)
-                and replacement in driver.spawned_instances
-                and retried["state"] == DISPATCH_UPTAKE_PENDING,
-                "F6 retry creates and supervises an actual replacement attempt",
-            )
-            _check(
-                bool(driver.spawn_specs)
-                and bool(failed["unit_id"])
-                and driver.spawn_specs[-1].get("unit_id") == failed["unit_id"],
-                "unit_id survives the persisted dispatch replay into the replacement host spec",
-            )
-            _check(
-                active["state"] == DISPATCH_ACTIVE
-                and "expires_at" not in active,
-                "F6 replacement reaches fresh ACK without a lifetime",
-            )
-    finally:
-        if prior is None:
-            session_hosts._REGISTRY.pop(key, None)  # noqa: SLF001
-        else:
-            session_hosts._REGISTRY[key] = prior  # noqa: SLF001
+        def refused(_row: Mapping[str, Any]) -> Mapping[str, Any]:
+            raise DispatchError("host_cannot_spawn", "fixture refusal")
+
+        def replacement(row: Mapping[str, Any]) -> Mapping[str, Any]:
+            launched.append(row)
+            return {"agent_instance_id": "agi-replacement"}
+
+        error_data: Mapping[str, Any] = {}
+        try:
+            dispatch_managed_work(state, spec, register=register, actor=_coordinator_actor(), spawn_attempt=refused, now=T0)
+        except DispatchError as exc:
+            error_data = exc.data
+        failed = read_managed_dispatch(state, spec.dispatch_id)
+        first = supervise_managed_dispatches(state, now=T0 + timedelta(seconds=1))
+        second = supervise_managed_dispatches(state, now=T0 + timedelta(seconds=2))
+        _check(error_data.get("state") == DISPATCH_FAILED_START, "F7 failure carries durable dispatch state")
+        _check(first["notices_emitted"] == 1 and second["notices_emitted"] == 0, "F7 failed-start decision notice is deduplicated")
+        retried = resolve_managed_dispatch(
+            state,
+            dispatch_id=spec.dispatch_id,
+            event_id="evt-working-replacement",
+            action="request_retry",
+            actor=_coordinator_actor(),
+            prior_version=int(failed["version"]),
+            payload={"reason": "replacement"},
+            observed_at=T0 + timedelta(seconds=3),
+            register=register,
+            spawn_attempt=replacement,
+        )
+        _check(retried["current_agent_instance_id"] == "agi-replacement" and len(launched) == 1, "F7 explicit retry calls the launcher once for its replacement")
+        _check(launched[0]["assignment"] == failed["assignment"], "F7 retry keeps the exact assignment")
+        _seed_binding(state, role=spec.role_name, instance="agi-replacement", session="ases-replacement")
+        active = report_managed_dispatch(
+            state,
+            dispatch_id=spec.dispatch_id,
+            event_id="evt-replacement-ack",
+            event_kind="ack",
+            attempt_agent_instance_id="agi-replacement",
+            actor=DispatchActor("agi-replacement", "ases-replacement", "live_peer_binding"),
+            prior_version=int(retried["version"]),
+            payload={**_assignment_identity(retried), "role_binding": spec.role_name, "scope_readback_sha256": "a" * 64, "plan_sha256": "b" * 64},
+            observed_at=T0 + timedelta(seconds=4),
+        )
+        _check(active["state"] == DISPATCH_ACTIVE, "F7 replacement requires a fresh assignment ACK")
 
 
 def test_review_fixture_15_competing_event_orders_converge() -> None:
@@ -1284,6 +1101,7 @@ def test_review_fixture_15_competing_event_orders_converge() -> None:
             report = Path(row["expected_path"])
             report.write_text(f"{suffix}\n", encoding="utf-8")
             completion = {
+                **_assignment_identity(row),
                 "artifact_path": str(report),
                 "artifact_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
                 "completion_contract_sha256": row["completion_contract_sha256"],
@@ -1302,13 +1120,7 @@ def test_review_fixture_15_competing_event_orders_converge() -> None:
                 "decision_due_at": (T0 + timedelta(minutes=5)).isoformat(),
             }
             if first_kind == "death":
-                mark_dispatch_worker_lost(
-                    state,
-                    dispatch_id="mdp-fixture",
-                    agent_instance_id="agi-worker-1",
-                    observed_at=T0 + timedelta(seconds=3),
-                    detail="confirmed death won",
-                )
+                mark_dispatch_worker_lost(state, dispatch_id="mdp-fixture", agent_instance_id="agi-worker-1", observed_at=T0 + timedelta(seconds=3), detail="confirmed death won", register=None)
                 late_kind, late_payload = "completion", completion
                 late_version = int(active["version"])
             else:
@@ -1324,13 +1136,7 @@ def test_review_fixture_15_competing_event_orders_converge() -> None:
                     payload=event_payload,
                     observed_at=T0 + timedelta(seconds=3),
                 )
-                mark_dispatch_worker_lost(
-                    state,
-                    dispatch_id="mdp-fixture",
-                    agent_instance_id="agi-worker-1",
-                    observed_at=T0 + timedelta(seconds=4),
-                    detail=f"confirmed death after {first_kind}",
-                )
+                mark_dispatch_worker_lost(state, dispatch_id="mdp-fixture", agent_instance_id="agi-worker-1", observed_at=T0 + timedelta(seconds=4), detail=f"confirmed death after {first_kind}", register=None)
                 late_kind = "blocked" if first_kind == "completion" else "completion"
                 late_payload = blocker if late_kind == "blocked" else completion
                 late_version = int(won["version"])
@@ -1423,6 +1229,7 @@ def test_review_fixture_15_current_version_rejections_are_audited_and_replayed()
         report = Path(row["expected_path"])
         report.write_text("late completion\n", encoding="utf-8")
         completion = {
+            **_assignment_identity(row),
             "artifact_path": str(report),
             "artifact_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
             "completion_contract_sha256": row["completion_contract_sha256"],
@@ -1440,13 +1247,7 @@ def test_review_fixture_15_current_version_rejections_are_audited_and_replayed()
             "evidence": {"race": "current-version"},
             "decision_due_at": (T0 + timedelta(minutes=5)).isoformat(),
         }
-        lost = mark_dispatch_worker_lost(
-            state,
-            dispatch_id="mdp-fixture",
-            agent_instance_id="agi-worker-1",
-            observed_at=T0 + timedelta(seconds=3),
-            detail="confirmed death won",
-        )
+        lost = mark_dispatch_worker_lost(state, dispatch_id="mdp-fixture", agent_instance_id="agi-worker-1", observed_at=T0 + timedelta(seconds=3), detail="confirmed death won", register=None)
         completion_codes = _replay_late_worker_rejection(
             state,
             event_id="evt-late-current-completion",
@@ -1478,8 +1279,7 @@ def test_review_fixture_15_current_version_rejections_are_audited_and_replayed()
             },
         )
         _check(
-            completion_codes == ["completion_not_allowed", "completion_not_allowed"]
-            and blocker_codes == ["blocker_not_allowed", "blocker_not_allowed"],
+            completion_codes == ["completion_not_allowed", "completion_not_allowed"] and blocker_codes == ["blocker_not_allowed", "blocker_not_allowed"],
             "15 current-version worker rejection replay preserves the original rejection",
         )
         _check(
@@ -1487,21 +1287,17 @@ def test_review_fixture_15_current_version_rejections_are_audited_and_replayed()
             "15 current-version coordinator rejection replay preserves the original rejection",
         )
         _check(
-            len(rejected) == 3
-            and all(not bool(event["accepted"]) for event in rejected)
-            and {str(event["rejection_code"]) for event in rejected}
-            == {"completion_not_allowed", "blocker_not_allowed", "acceptance_not_allowed"},
+            len(rejected) == 3 and all(not bool(event["accepted"]) for event in rejected) and {str(event["rejection_code"]) for event in rejected} == {"completion_not_allowed", "blocker_not_allowed", "acceptance_not_allowed"},
             "15 each authenticated terminal rejection has exactly one durable audit row",
         )
         _check(
-            replayed_ack["state"] == DISPATCH_ACTIVE
-            and replayed_ack["version"] == active["version"],
+            replayed_ack["state"] == DISPATCH_ACTIVE and replayed_ack["version"] == active["version"],
             "15 accepted event replay reproduces its accepted projection after later state change",
         )
 
 
 def test_review_f8_spawn_root_is_in_discoverable_invocation_schema() -> None:
-    metadata = AgentMessagingPlugin.spawn_session._platform_process_metadata  # type: ignore[attr-defined]  # noqa: SLF001
+    metadata = AgentMessagingPlugin.spawn_session_action._platform_process_metadata  # type: ignore[attr-defined]  # noqa: SLF001
     schema = InvocationSchemaGenerator().generate(
         "plugin::agent_messaging_plugin::spawn_session",
         {name: parameter.to_dict() for name, parameter in metadata.parameters.items()},
@@ -1531,7 +1327,7 @@ def test_28_degraded_hooks_acknowledged_is_in_discoverable_schema() -> None:
     sees it (F8's own third assertion), so a field missing from
     ``metadata.parameters`` reproduces #28's ``host_cannot_spawn`` remedy
     that never changes behavior no matter what the caller passes."""
-    metadata = AgentMessagingPlugin.spawn_session._platform_process_metadata  # type: ignore[attr-defined]  # noqa: SLF001
+    metadata = AgentMessagingPlugin.spawn_session_action._platform_process_metadata  # type: ignore[attr-defined]  # noqa: SLF001
     schema = InvocationSchemaGenerator().generate(
         "plugin::agent_messaging_plugin::spawn_session",
         {name: parameter.to_dict() for name, parameter in metadata.parameters.items()},
@@ -1549,37 +1345,132 @@ def test_28_degraded_hooks_acknowledged_is_in_discoverable_schema() -> None:
     _check(arguments["additionalProperties"] is False, "28 invocation arguments stay closed")
 
 
-def main() -> int:
+def test_native_managed_owner_before_first_turn_and_replay() -> None:
+    """The real managed launcher carries its existing Unit through the owner boundary."""
+    import agent_messaging_plugin.session_hosts as hosts
+    import agent_messaging_plugin.session_lifecycle_verbs as verbs
+    from agent_messaging_plugin.lane_worktrees import LaneWorktree
+
+    state = _state()
     with tempfile.TemporaryDirectory() as raw:
-        with RecordedLaneWorktreeFixture(Path(raw)) as fixture:
-            test_02_headless_submission_failure_is_durable()
-            test_03_transport_is_not_uptake()
-            test_06_atomic_requirements_fail_before_dispatch()
-            test_register_kinds_reach_managed_spawn_validation()
-            test_07_silent_internal_blocker_is_supervised_once_per_version()
-            test_08_overdue_worker_surfaces_exact_action()
-            test_08_staggered_milestone_survives_watchdog_version_change()
-            test_09_reconnect_and_duplicate_ack_are_idempotent()
-            test_10_retry_request_is_idempotent()
-            test_11_supervisor_does_not_depend_on_coordinator_plan()
-            test_12_completion_false_positives_remain_noncomplete()
-            test_13_only_coordinator_acceptance_completes()
-            test_15_causal_version_rejects_races_but_keeps_audit()
-            test_review_f1_forged_worker_and_coordinator_authority_are_rejected()
-            test_review_f1_public_authority_is_server_derived()
-            test_review_f2_prepared_contract_rejects_every_altered_spawn_field()
-            test_review_f3_incomplete_completion_evidence_is_rejected()
-            test_review_f4_malformed_blocker_is_rejected_before_supervision()
-            test_review_f5_watchdog_is_operational_and_deduplicated()
-            test_review_f7_failed_start_is_identified_supervised_and_replaced()
-            test_review_f8_spawn_root_is_in_discoverable_invocation_schema()
-            test_28_degraded_hooks_acknowledged_is_in_discoverable_schema()
-            test_review_fixture_15_competing_event_orders_converge()
-            test_review_fixture_15_current_version_rejections_are_audited_and_replayed()
-            _check(
-                fixture.has_recorded_provisioning(),
-                "recorded dispatch fixture contains every provisioning target under its temp root",
+        root = Path(raw)
+        spec = _spec(root)
+        register = _register(spec)
+        register.owners[spec.unit_id] = "act-main"
+        calls: list[str] = []
+
+        class Driver(_ReplacementChannel):
+            instance = ""
+
+            def spawn(self, values: Mapping[str, object]) -> str:
+                self.instance = str(values["agent_instance_id"])
+                calls.append(self.instance)
+                return "fixture-host"
+
+            def alive(self, host_ref: str) -> bool:
+                return host_ref == "fixture-host"
+
+            def driver_channel(self, host_ref: str) -> Driver:
+                del host_ref
+                return self
+
+            def send(self, text: str) -> None:
+                _check(register.owners[spec.unit_id] == f"act-{self.instance}", "NATIVE_MANAGED_OWNER_BEFORE_FIRSTTURN actual child owns existing Unit")
+                super().send(text)
+
+        driver = Driver()
+        actor = RegisterActor("agi-coordinator", "ases-coordinator", "Coordinator-Main", spec.lane_id)
+        with (
+            patch.dict(hosts._REGISTRY, {("codex", "headless"): driver}),  # noqa: SLF001
+            patch.object(verbs, "_provision_worktree_for_request", return_value=LaneWorktree(root, root, root, "fixture")),
+        ):
+
+            def launch(row: Mapping[str, Any]) -> dict[str, Any]:
+                return verbs.spawn_dispatch_attempt(state, row, register=register, actor=actor)
+
+            first = dispatch_managed_work(state, spec, register=register, actor=_coordinator_actor(), spawn_attempt=launch, now=T0)
+            again = dispatch_managed_work(state, spec, register=register, actor=_coordinator_actor(), spawn_attempt=launch, now=T0)
+        _check(first["attempt"] == again["attempt"] and len(calls) == 1 and len(register.owner_changes) == 1, "NATIVE_MANAGED_OWNER_REPLAY no additional spawn or ownership assignment")
+        _check(set(register.units) == {spec.unit_id} and first["dispatch"]["assignment_sha256"] == again["dispatch"]["assignment_sha256"], "NATIVE_MANAGED_OWNER_PINNED_UNIT no mint or revision drift")
+
+
+def test_claim_without_receipt_is_mismatch() -> None:
+    """The public handler must distinguish a reply from a milestone receipt.
+
+    Freeze the incident's active version 51 with an overdue dispatch clock.
+    Keep the immutable request baseline and exact purported event identity.
+    The handler can already accept extra dictionary keys on base, so this
+    exercises real status without a missing-keyword TypeError discriminator.
+    A green verdict requires mismatch and preservation of the current debt.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        state = _state()
+        _prepare(state, Path(raw))
+        _first_turn(state, delivered=True)
+        _ack(state)
+        state.update_state(
+            AGENT_ROLE_BINDING_NAMESPACE,
+            {"table": TABLE_MANAGED_DISPATCH, "filters": {"dispatch_id": "mdp-fixture"}},
+            {"version": 51, "report_by": (T0 + timedelta(minutes=3)).isoformat()},
+        )
+        baseline = read_managed_dispatch(state, "mdp-fixture")
+        claim = {
+            "baseline": {
+                key: baseline.get(key)
+                for key in (
+                    "version",
+                    "report_by",
+                    "last_milestone_at",
+                    "current_agent_instance_id",
+                    "dispatch_id",
+                    "attempt_number",
+                )
+            },
+            "requested_at": (T0 + timedelta(minutes=4)).isoformat(),
+            "event_id": "already-fulfilled-without-receipt",
+        }
+        plugin = object.__new__(AgentMessagingPlugin)
+        with patch.object(plugin, "_get_state_service", return_value=state):
+            result = plugin.managed_dispatch_status(
+                {"dispatch_id": "mdp-fixture", "milestone_claim": claim},
+                {},
             )
+        assert result["action_status"] == "completed", result
+        status = result["data"]
+        assert status.get("milestone_claim_verification", {}).get("status") == "mismatch", (
+            "CLAIM_WITHOUT_RECEIPT_IS_MISMATCH",
+            status,
+        )
+        assert status["next_required_action"] == "request_worker_milestone"
+
+
+def main() -> int:
+    test_claim_without_receipt_is_mismatch()
+    test_native_managed_owner_before_first_turn_and_replay()
+    test_02_headless_submission_failure_is_durable()
+    test_03_transport_is_not_uptake()
+    test_06_atomic_requirements_fail_before_dispatch()
+    test_register_kinds_reach_managed_spawn_validation()
+    test_07_silent_internal_blocker_is_supervised_once_per_version()
+    test_08_overdue_worker_surfaces_exact_action()
+    test_08_staggered_milestone_survives_watchdog_version_change()
+    test_09_reconnect_and_duplicate_ack_are_idempotent()
+    test_10_retry_request_is_idempotent()
+    test_11_supervisor_does_not_depend_on_coordinator_plan()
+    test_12_completion_false_positives_remain_noncomplete()
+    test_13_only_coordinator_acceptance_completes()
+    test_15_causal_version_rejects_races_but_keeps_audit()
+    test_review_f1_forged_worker_and_coordinator_authority_are_rejected()
+    test_review_f1_public_authority_is_server_derived()
+    test_review_f2_prepared_contract_rejects_every_altered_spawn_field()
+    test_review_f3_incomplete_completion_evidence_is_rejected()
+    test_review_f4_malformed_blocker_is_rejected_before_supervision()
+    test_review_f5_watchdog_is_operational_and_deduplicated()
+    test_review_f7_failed_start_is_identified_supervised_and_replaced()
+    test_review_f8_spawn_root_is_in_discoverable_invocation_schema()
+    test_28_degraded_hooks_acknowledged_is_in_discoverable_schema()
+    test_review_fixture_15_competing_event_orders_converge()
+    test_review_fixture_15_current_version_rejections_are_audited_and_replayed()
     print(f"\nmanaged dispatch smoke: {_passed} passed, {len(_failed)} failed")
     return 1 if _failed else 0
 

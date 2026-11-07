@@ -1,0 +1,2 @@
+plugins/actr_memory_plugin/tests/corpus_counts_smoke.py
+plugins/actr_memory_plugin/tests/cron_remediation_smoke.py

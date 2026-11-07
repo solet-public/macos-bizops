@@ -26,6 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
+from _register_unit_double import FIXTURE_UNIT_ID, fixture_assignment, fixture_assignment_record  # noqa: E402
+
 from agent_messaging_plugin import authority_contract  # noqa: E402
 from agent_messaging_plugin.authority_contract import (  # noqa: E402
     UnresolvedPlaceholderError,
@@ -36,6 +38,7 @@ from agent_messaging_plugin.plugin import (  # noqa: E402
     AgentMessagingPlugin,
     _spawn_session_request_from_params,
 )
+from agent_messaging_plugin.register_unit_client import RegisterUnitError  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
@@ -56,7 +59,7 @@ def _render(**overrides: str) -> str:
         "agent_instance_id": "agi-contract-1",
         "role_class": "project",
         "lane_id": "fleet-token-efficiency",
-        "brief_ref": "workbench/2026-08-04_wave_dispatch_brief.md",
+        "assignment": fixture_assignment(),
         "spawned_by_role": "Coordinator-Main",
     }
     fields.update(overrides)
@@ -68,9 +71,16 @@ def test_all_placeholders_resolve() -> None:
     _check("agi-contract-1" in text, "agent_instance_id substitutes")
     _check("'project'" in text, "role_class substitutes")
     _check("'fleet-token-efficiency'" in text, "lane_id substitutes")
-    _check("workbench/2026-08-04_wave_dispatch_brief.md" in text, "brief_ref substitutes")
+    _check("drv_fixture-revision" in text, "registered revision substitutes")
     _check("'Coordinator-Main'" in text, "spawned_by_role substitutes")
-    for name in ("agent_instance_id", "role_class", "lane_id", "brief_ref", "spawned_by_role"):
+    for name in (
+        "agent_instance_id",
+        "role_class",
+        "lane_id",
+        "revision_id",
+        "unit_id",
+        "spawned_by_role",
+    ):
         _check(f"{{{name}}}" not in text, f"no unresolved {{{name}}} remains")
 
 
@@ -85,12 +95,15 @@ def test_target_repository_scopes_bindings() -> None:
         "contract delegates repository-specific rules to the target bootstrap",
     )
     _check(
-        all(rule in text for rule in (
-            "Agent/Task tool is forbidden",
-            "git merge-base --is-ancestor",
-            "waiting on a peer wake with no fallback",
-            "conflict between your task and its brief",
-        )),
+        all(
+            rule in text
+            for rule in (
+                "Agent/Task tool is forbidden",
+                "git merge-base --is-ancestor",
+                "waiting on a peer wake with no fallback",
+                "conflict between your task and its brief",
+            )
+        ),
         "fleet-wide conduct rules remain present for every target repository",
     )
     _check(
@@ -99,6 +112,7 @@ def test_target_repository_scopes_bindings() -> None:
     )
     from_worktree = _authority_system_prompt(
         {
+            **fixture_assignment_record(),
             "agent_instance_id": "agi-contract-worktree",
             "worktree_path": "/workspace/project-solet-lane",
         },
@@ -152,8 +166,7 @@ def test_edit_3_tier_statement_replaces_never_wait_clause() -> None:
     text = _render()
     _check(
         "must never request, expect, or wait for" not in text,
-        "the REJECTED clause ('must never request, expect, or wait for ... "
-        "confirmation') never appears",
+        "the REJECTED clause ('must never request, expect, or wait for ... confirmation') never appears",
     )
     _check(
         "tier-1" in text and "SEAT-NATIVE" in text,
@@ -161,13 +174,34 @@ def test_edit_3_tier_statement_replaces_never_wait_clause() -> None:
     )
     _check(
         "You will never be asked to author, spec, or execute a tier-1 action" in text,
-        "the contract states plainly that tier-1 is never asked of a worker "
-        "-- the honest replacement text, verbatim",
+        "the contract states plainly that tier-1 is never asked of a worker -- the honest replacement text, verbatim",
     )
     _check(
         "routing it to your spawning role over the peer channel is the DESIGNED path" in text,
-        "handing a tier-1-shaped task up to the spawning role is stated as "
-        "the designed path, not an exception",
+        "handing a tier-1-shaped task up to the spawning role is stated as the designed path, not an exception",
+    )
+
+
+def test_native_relay_pointer_reaches_spawned_contract() -> None:
+    """The adapter-loaded worker prompt points platform relay work at the
+    canonical procedure without granting new authority."""
+    text = _authority_system_prompt(
+        {
+            **fixture_assignment_record(),
+            "agent_instance_id": "agi-relay-pointer",
+            "role_class": "ephemeral",
+            "lane_id": "relay-pointer",
+            "spawned_by_role": "Coordinator-Main",
+            "repository_root": "/workspace/platform-repository",
+        }
+    )
+    _check(
+        "RELAY WORKFLOW POINTER" in text and "canonical Git-Controller commit skill" in text,
+        "adapter-rendered prompt points at the canonical relay procedure",
+    )
+    _check(
+        "This is a source pointer; the registered brief and repository authority still govern the work." in text,
+        "relay pointer does not expand authority",
     )
 
 
@@ -177,82 +211,98 @@ def test_missing_fields_render_as_blank_not_raise() -> None:
     must render blank slots, never raise, so authority-at-first-contact
     stays ON by default even for a caller that doesn't know about T2."""
     text = render_authority_delegation_contract(
-        agent_instance_id="agi-bare-1", role_class="", lane_id="", brief_ref="",
+        agent_instance_id="agi-bare-1",
+        role_class="",
+        lane_id="",
+        assignment=fixture_assignment(),
         spawned_by_role="",
     )
     _check("agi-bare-1" in text, "the one field that WAS supplied still substitutes")
     _check("{role_class}" not in text, "an empty-string field is still a resolved substitution")
 
 
-def test_optional_unit_id_reaches_the_authority_contract() -> None:
-    """Killing test: raw spawn input must retain its exact optional work-unit
-    identity through the typed request and the adapter's trusted contract.
-    Omitting it must produce precisely the legacy contract, not a blank field."""
+def test_task_controls_peer_ack_while_native_uptake_remains_required() -> None:
+    """Exercise the real template through both its renderer and host adapter."""
+    _check(
+        Path(authority_contract.__file__).resolve() == REPO_ROOT / "plugins/agent_messaging_plugin/src/agent_messaging_plugin/authority_contract.py",
+        "authority renderer imports from this checkout",
+    )
+    _check(
+        authority_contract._TEMPLATE_PATH.resolve()  # noqa: SLF001
+        == REPO_ROOT / "plugins/agent_messaging_plugin/templates/authority_delegation_contract.txt",
+        "renderer reads this checkout's actual authority template",
+    )
+    adapted = _authority_system_prompt(
+        {
+            **fixture_assignment_record(),
+            "agent_instance_id": "agi-contract-1",
+            "role_class": "project",
+            "lane_id": "fleet-token-efficiency",
+            "spawned_by_role": "Coordinator-Main",
+            "repository_root": "/workspace/target",
+        }
+    )
+    _check(
+        adapted == _render(repository_root="/workspace/target"),
+        "adapter and direct renderer load identical real template bytes",
+    )
+    for text in (_render(), adapted):
+        _check(
+            "Ack to 'Coordinator-Main' with a scope read-back before touching code." not in text,
+            "no unconditional peer scope-ACK prerequisite reaches the worker",
+        )
+        _check(
+            "Peer ACK messages are required only when the bound task explicitly requires them." in text,
+            "bound task controls peer ACK messages, including explicit requirements",
+        )
+        _check(
+            "Do not generate an extra peer ACK or wake from this generic contract." in text,
+            "generic bootstrap adds no peer ACK or wake",
+        )
+        _check(
+            "For managed dispatch, before touching code, verify your own current attempt, role binding,"
+            " assignment digest and exact registered revision through managed_dispatch_status;"
+            " submit the required structured native ACK through report_managed_dispatch and verify"
+            " its accepted event and fresh active status." in text,
+            "managed identity verification and accepted native ACK still precede code",
+        )
+        _check(
+            "Peer prose, report_alive and first_turn_delivered do not substitute for managed uptake." in text,
+            "transport, liveness and peer prose cannot substitute for native uptake",
+        )
+
+
+def test_required_unit_id_reaches_the_authority_contract() -> None:
     raw = {
         "role_class": "ephemeral",
         "lane_id": "lane-unit-id",
-        "brief_ref": "workbench/unit-id.md",
-        "unit_id": "unt-01234567-89ab-cdef-0123-456789abcdef",
+        "unit_id": FIXTURE_UNIT_ID,
         "work_class": "read_only",
         "budget_line": "test",
     }
     request = _spawn_session_request_from_params(raw, "operator:test")
-    metadata = AgentMessagingPlugin.spawn_session._platform_process_metadata  # type: ignore[attr-defined]  # noqa: SLF001
-    _check("unit_id" in metadata.parameters, "spawn_session declares unit_id in its closed invocation schema")
-    _check(
-        metadata.parameters["unit_id"].required is False,
-        "spawn_session keeps unit_id optional",
-    )
+    metadata = AgentMessagingPlugin.spawn_session_action._platform_process_metadata
+    _check(metadata.parameters["unit_id"].required is True, "public spawn requires an existing Unit")
     present = _authority_system_prompt(
         {
             "agent_instance_id": "agi-unit-id",
             "role_class": request.role_class,
             "lane_id": request.lane_id,
-            "brief_ref": request.brief_ref,
-            "unit_id": request.unit_id,
+            **fixture_assignment_record(),
             "spawned_by_role": "Test-Dispatcher",
             "repository_root": "/fixture/project-solet",
-        },
+        }
     )
     _check(
-        request.unit_id == raw["unit_id"],
-        "spawn_session raw unit_id reaches SpawnSessionRequest unaltered",
+        f"UNIT ID: {FIXTURE_UNIT_ID}" in present and "drv_fixture-revision" in present,
+        "host authority retains Unit and pinned revision",
     )
-    _check(
-        f"UNIT ID: {raw['unit_id']}" in present,
-        "the exact unit_id reaches the adapter-rendered authority contract",
-    )
-
-    absent_request = _spawn_session_request_from_params(
-        {key: value for key, value in raw.items() if key != "unit_id"}, "operator:test",
-    )
-    absent = _authority_system_prompt(
-        {
-            "agent_instance_id": "agi-unit-id",
-            "role_class": absent_request.role_class,
-            "lane_id": absent_request.lane_id,
-            "brief_ref": absent_request.brief_ref,
-            "unit_id": absent_request.unit_id,
-            "spawned_by_role": "Test-Dispatcher",
-            "repository_root": "",
-        },
-    )
-    legacy_template = authority_contract._TEMPLATE_PATH.read_text().replace(  # noqa: SLF001
-        "UNIT ID: {unit_id}\n", "",
-    )
-    legacy_values = {
-        "agent_instance_id": "agi-unit-id",
-        "role_class": absent_request.role_class,
-        "lane_id": absent_request.lane_id,
-        "brief_ref": absent_request.brief_ref,
-        "spawned_by_role": "Test-Dispatcher",
-        "repository_root": "",
-    }
-    for name, value in legacy_values.items():
-        legacy_template = legacy_template.replace("{" + name + "}", value)
-    _check(absent_request.unit_id == "", "omitted unit_id stays optional and empty")
-    _check("UNIT ID:" not in absent, "omitted unit_id emits no blank authority-contract field")
-    _check(absent == legacy_template, "omitted unit_id is byte-identical to the legacy contract")
+    try:
+        _authority_system_prompt({"agent_instance_id": "agi-missing"})
+    except RegisterUnitError as exc:
+        _check(exc.code == "unit_assignment_historical", "missing native assignment cannot launch")
+    else:
+        raise AssertionError("host accepted an unassigned historical row")
 
 
 def test_unresolved_placeholder_raises() -> None:
@@ -279,13 +329,15 @@ def test_unresolved_placeholder_raises() -> None:
         finally:
             authority_contract._TEMPLATE_PATH = original_path  # noqa: SLF001
     _check(
-        raised, "an unresolved placeholder raises UnresolvedPlaceholderError, never silently ships",
+        raised,
+        "an unresolved placeholder raises UnresolvedPlaceholderError, never silently ships",
     )
 
 
 def test_render_is_deterministic() -> None:
     _check(
-        _render() == _render(), "identical inputs produce identical output, no hidden randomness",
+        _render() == _render(),
+        "identical inputs produce identical output, no hidden randomness",
     )
 
 
@@ -295,8 +347,10 @@ def main() -> int:
     test_edit_1_worker_of_class_not_claiming_role()
     test_edit_2_first_actions_never_claims_the_class_string()
     test_edit_3_tier_statement_replaces_never_wait_clause()
+    test_native_relay_pointer_reaches_spawned_contract()
+    test_task_controls_peer_ack_while_native_uptake_remains_required()
     test_missing_fields_render_as_blank_not_raise()
-    test_optional_unit_id_reaches_the_authority_contract()
+    test_required_unit_id_reaches_the_authority_contract()
     test_unresolved_placeholder_raises()
     test_render_is_deterministic()
 

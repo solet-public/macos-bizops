@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::g_suite_plugin::set_default_account",
+  "display_name": "Google Workspace: Set Default Account",
+  "description": "Make one connected Google account the default. With several accounts connected, every Gmail and Workspace verb called without an `account` argument runs as the default and names it in the result. account accepts the email or alias from list_accounts.",
+  "embedding_description": "Choose which linked Google account (for example work or home) the assistant uses by default when a mail, Drive or Docs request does not name an account. Takes the email address or alias of an already connected account and returns the new default.",
+  "result_processor_customizations": {
+    "action_label": "Default Google account changed",
+    "result_type": "g_suite_set_default_account_result",
+    "result_description": "{account, alias, default: true}.",
+    "presentation_guidance": "Confirm the new default account by email and alias."
+  },
+  "error_processor_customizations": {
+    "action_context": "Change the default connected Google account.",
+    "error_interpretation": "gsuite.unknown_account: no connected account matches; the message lists the connected accounts. gsuite.invalid_params: account missing.",
+    "recovery_guidance": "Pick an email or alias from the listed accounts, or run connect_account to add the account first."
+  }
+}

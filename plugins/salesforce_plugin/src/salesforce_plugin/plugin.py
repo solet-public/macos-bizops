@@ -1,4 +1,4 @@
-"""Salesforce plugin entry point — SOQL + record CRUD + describe.
+"""Salesforce plugin entry point — SOQL, record CRUD, describe, Bulk v2 and typed API families.
 
 Auth (operator-ratified 2026-07-14, full CLI delegation): every verb shells
 out to the operator's `sf` CLI — the ``salesforce_org`` address-book entry
@@ -21,6 +21,11 @@ concurrency of one.
     absolute output_tsv_path contained under export_allowed_roots; refuse-all when unset)
   - get_record / describe_sobject / list_sobjects   — read
   - create_record / update_record / delete_record   — write
+  - bulk_ingest_submit / bulk_job_*                 — Bulk API 2.0 ingest, hardDelete included
+  - composite / tooling / bulk_jobs / reports /     — typed families (typed_families.py):
+    dashboards / rest_resources / actions             reads, writes and deletes alike;
+                                                      Salesforce permissions decide each operation
+  - authenticated_request                           — any other endpoint
   - test_connection                                 — diagnostic
   - probe_cli                                       — offline local CLI diagnostic
 
@@ -60,7 +65,7 @@ from ananta.interfaces.edge_process_provider import (
     EdgeProcessProvider,
 )
 
-from . import async_jobs, export_containment, import_containment
+from . import async_jobs, export_containment, import_containment, typed_families
 from .app_config import AppConfigError, AppConfigLoader
 from .client import SalesforceCliExecutor
 from .constants import (
@@ -79,13 +84,19 @@ from .constants import (
     ERROR_NOT_CONFIGURED,
     ERROR_PROVISION_CONSENT_REQUIRED,
     PARAM_ACKNOWLEDGE_OVERRIDE,
+    PARAM_INCLUDE_DELETED,
     PARAM_ROW_LIMIT,
     PLUGIN_NAME,
+    RESULT_TYPE_ACTIONS,
+    RESULT_TYPE_AUTHENTICATED_REQUEST,
     RESULT_TYPE_BULK_INGEST_SUBMIT,
     RESULT_TYPE_BULK_JOB_ABORT,
     RESULT_TYPE_BULK_JOB_RESULTS,
     RESULT_TYPE_BULK_JOB_STATUS,
+    RESULT_TYPE_BULK_JOBS,
+    RESULT_TYPE_COMPOSITE,
     RESULT_TYPE_CREATE_RECORD,
+    RESULT_TYPE_DASHBOARDS,
     RESULT_TYPE_DELETE_RECORD,
     RESULT_TYPE_DESCRIBE_SOBJECT,
     RESULT_TYPE_EXPORT_SOQL,
@@ -93,13 +104,62 @@ from .constants import (
     RESULT_TYPE_LIST_SOBJECTS,
     RESULT_TYPE_PROBE_CLI,
     RESULT_TYPE_PROVISION_CLI,
+    RESULT_TYPE_REPORTS,
+    RESULT_TYPE_REST_RESOURCES,
     RESULT_TYPE_SOQL_QUERY,
     RESULT_TYPE_TEST_CONNECTION,
+    RESULT_TYPE_TOOLING,
     RESULT_TYPE_UPDATE_RECORD,
     SOQL_EXPORT_ROW_CAP,
     SOQL_MAX_RECORDS_CAP,
 )
 from .errors import SalesforceServiceError, classify_salesforce_error
+
+_PATH_PARAMETER_TEXT: dict[str, str] = {
+    "sobject": "sObject API name in the path, e.g. Account, Invoice__c, Order_Event__e, or a Tooling type such as ApexClass.",
+    "external_id_field": "External ID field API name, e.g. External_Id__c.",
+    "external_id": "External ID value of the record; percent-encoded into the path.",
+    "next_records_url": "nextRecordsUrl from a query result, for query_more.",
+    "id": "15- or 18-character record id.",
+    "relationship": "Relationship name to traverse from the record, e.g. Contacts or Owner.",
+    "job_id": "Bulk API 2.0 job id from query_create, query_list or bulk_ingest_submit.",
+    "report_id": "15- or 18-character report id (00O...).",
+    "instance_id": "Asynchronous report instance id from run_async or instances.",
+    "report_type": "Report type API name from report_types, e.g. Opportunity or CustomEntity$Invoice__c.",
+    "dashboard_id": "15- or 18-character dashboard id (01Z...).",
+    "action_type": "Custom invocable action type from list_custom, e.g. apex, flow, quickAction or emailAlert.",
+    "action": "Invocable action name, e.g. chatterPost, a flow API name or Account.NewCase.",
+}
+
+_FAMILY_RETURN = ReturnValueSchema(
+    type=ParameterType.OBJECT,
+    description="Queue receipt; the vendor outcome follows asynchronously.",
+    properties={
+        "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+        "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+    },
+)
+
+_INCLUDE_DELETED = ParameterMetadata(
+    type=ParameterType.BOOLEAN,
+    required=False,
+    description="true queries through the vendor queryAll resource, which also returns deleted (recycle bin) and archived records. Default false.",
+)
+
+
+def _family_parameters(family: str) -> dict[str, ParameterMetadata]:
+    """Typed family inputs; typed_families validates them against the vendor shape."""
+    parameters = {
+        "operation": ParameterMetadata(type=ParameterType.STRING, required=True, description=f"One of: {typed_families.operation_names(family)}."),
+        "query": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Vendor query parameters by their documented names (e.g. q, ids, fields, allOrNone, locator, maxRecords, queryLocator, includeDetails, cloneId, runningUser, filter1, isStickyFilterSave, updateOnly, start, end, limit, explain)."),
+        "body": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Vendor JSON request body for operations that take one, passed unchanged."),
+        "headers": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Optional documented request headers such as Sforce-Query-Options, Sforce-Call-Options or If-Match. Authorization and Host are managed by the CLI."),
+    }
+    for key in typed_families.path_parameters(family):
+        parameters[key] = ParameterMetadata(type=ParameterType.STRING, required=False, description=_PATH_PARAMETER_TEXT[key])
+    if typed_families.writes_csv(family):
+        parameters["output_csv_path"] = ParameterMetadata(type=ParameterType.STRING, required=False, description="ABSOLUTE .csv destination for query_results, contained under an export_allowed_roots entry.")
+    return parameters
 
 
 class SalesforcePlugin(PluginBase, EdgeProcessProvider):
@@ -154,10 +214,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         self.logger = logging.getLogger(self.name)
         self._address_book_service = self.orchestrator_ref.get_service("address_book_service")
         if self._address_book_service is None:
-            raise RuntimeError(
-                f"{ERROR_ADDRESS_BOOK_NOT_AVAILABLE}: {self.name} requires "
-                "address_book_service to resolve the salesforce_org credentials"
-            )
+            raise RuntimeError(f"{ERROR_ADDRESS_BOOK_NOT_AVAILABLE}: {self.name} requires address_book_service to resolve the salesforce_org credentials")
         self._app_config_loader = AppConfigLoader(self._address_book_service)
         config = self._load_plugin_config()
         api_version = config.get(CONFIG_KEY_API_VERSION, DEFAULT_API_VERSION)
@@ -202,13 +259,10 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         raw_roots = self._load_plugin_config().get(CONFIG_KEY_EXPORT_ALLOWED_ROOTS)
         roots: list[str] = []
         if raw_roots is not None:
-            if not isinstance(raw_roots, list) or not all(
-                isinstance(entry, str) for entry in raw_roots
-            ):
+            if not isinstance(raw_roots, list) or not all(isinstance(entry, str) for entry in raw_roots):
                 raise SalesforceServiceError(
                     ERROR_NOT_CONFIGURED,
-                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory "
-                    "path strings",
+                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory path strings",
                 )
             roots = list(raw_roots)
         return export_containment.assert_export_path_allowed(
@@ -223,13 +277,10 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         raw_roots = self._load_plugin_config().get(CONFIG_KEY_EXPORT_ALLOWED_ROOTS)
         roots: list[str] = []
         if raw_roots is not None:
-            if not isinstance(raw_roots, list) or not all(
-                isinstance(entry, str) for entry in raw_roots
-            ):
+            if not isinstance(raw_roots, list) or not all(isinstance(entry, str) for entry in raw_roots):
                 raise SalesforceServiceError(
                     ERROR_NOT_CONFIGURED,
-                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory "
-                    "path strings",
+                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory path strings",
                 )
             roots = list(raw_roots)
         return export_containment.assert_export_path_allowed(
@@ -250,13 +301,10 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         raw_roots = self._load_plugin_config().get(CONFIG_KEY_IMPORT_ALLOWED_ROOTS)
         roots: list[str] = []
         if raw_roots is not None:
-            if not isinstance(raw_roots, list) or not all(
-                isinstance(entry, str) for entry in raw_roots
-            ):
+            if not isinstance(raw_roots, list) or not all(isinstance(entry, str) for entry in raw_roots):
                 raise SalesforceServiceError(
                     ERROR_NOT_CONFIGURED,
-                    f"{CONFIG_KEY_IMPORT_ALLOWED_ROOTS} must be a list of directory "
-                    "path strings",
+                    f"{CONFIG_KEY_IMPORT_ALLOWED_ROOTS} must be a list of directory path strings",
                 )
             roots = list(raw_roots)
         return import_containment.assert_import_path_allowed(
@@ -324,12 +372,18 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         return self._error(code, message)
 
     def _dispatch_async(
-        self, action_name: str, params: dict[str, Any], state: dict[str, Any],
+        self,
+        action_name: str,
+        params: dict[str, Any],
+        state: dict[str, Any],
     ) -> dict[str, Any]:
         """D0.3 ms-scale dispatch: create the job, return immediately — no `sf` CLI call here."""
         try:
             create_result = async_jobs.create_job(
-                self, action_name=action_name, params=params, state=state,
+                self,
+                action_name=action_name,
+                params=params,
+                state=state,
             )
         except ValueError as exc:
             return self._error(ERROR_INVALID_PARAMS, str(exc))
@@ -347,27 +401,18 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
 
     def get_edge_process_definitions(self) -> dict[str, EdgeProcessDefinition]:
         return {
+            "authenticated_request": _edge("authenticated_request", RESULT_TYPE_AUTHENTICATED_REQUEST, retryable=False),
             "probe_cli": _edge("probe_cli", RESULT_TYPE_PROBE_CLI, retryable=True),
-            "provision_cli": _edge(
-                "provision_cli", RESULT_TYPE_PROVISION_CLI, retryable=True
-            ),
-            "soql_query": _edge(
-                "soql_query", RESULT_TYPE_SOQL_QUERY, retryable=True
-            ),
-            "export_soql": _edge(
-                "export_soql", RESULT_TYPE_EXPORT_SOQL, retryable=True
-            ),
-            "get_record": _edge(
-                "get_record", RESULT_TYPE_GET_RECORD, retryable=True
-            ),
+            "provision_cli": _edge("provision_cli", RESULT_TYPE_PROVISION_CLI, retryable=True),
+            "soql_query": _edge("soql_query", RESULT_TYPE_SOQL_QUERY, retryable=True),
+            "export_soql": _edge("export_soql", RESULT_TYPE_EXPORT_SOQL, retryable=True),
+            "get_record": _edge("get_record", RESULT_TYPE_GET_RECORD, retryable=True),
             "describe_sobject": _edge(
                 "describe_sobject",
                 RESULT_TYPE_DESCRIBE_SOBJECT,
                 retryable=True,
             ),
-            "list_sobjects": _edge(
-                "list_sobjects", RESULT_TYPE_LIST_SOBJECTS, retryable=True
-            ),
+            "list_sobjects": _edge("list_sobjects", RESULT_TYPE_LIST_SOBJECTS, retryable=True),
             "create_record": _edge(
                 "create_record",
                 RESULT_TYPE_CREATE_RECORD,
@@ -408,11 +453,69 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
                 RESULT_TYPE_BULK_JOB_ABORT,
                 retryable=False,
             ),
+            "composite": _edge("composite", RESULT_TYPE_COMPOSITE, retryable=False),
+            "tooling": _edge("tooling", RESULT_TYPE_TOOLING, retryable=False),
+            "bulk_jobs": _edge("bulk_jobs", RESULT_TYPE_BULK_JOBS, retryable=False),
+            "reports": _edge("reports", RESULT_TYPE_REPORTS, retryable=False),
+            "dashboards": _edge("dashboards", RESULT_TYPE_DASHBOARDS, retryable=False),
+            "rest_resources": _edge("rest_resources", RESULT_TYPE_REST_RESOURCES, retryable=False),
+            "actions": _edge("actions", RESULT_TYPE_ACTIONS, retryable=False),
         }
 
     # ------------------------------------------------------------------
     # @platform_process implementations
     # ------------------------------------------------------------------
+
+    @platform_process(
+        name="authenticated_request",
+        display_name="Salesforce: Authenticated Request",
+        description=(
+            "Send an authenticated request to any relative endpoint on the registered Salesforce org. "
+            "Supports REST, Tooling, Bulk, Apex REST and SOAP XML bodies, including writes and deletes. "
+            "Salesforce credential permissions determine access. Returns a queued job; completion "
+            "contains HTTP status, selected headers, JSON/text body and nextRecordsUrl when supplied."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "method": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="HTTP method, e.g. GET, POST, PUT, PATCH or DELETE.",
+            ),
+            "path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="Path relative to the registered instance, e.g. /services/data/v62.0/tooling/query.",
+            ),
+            "query": ParameterMetadata(
+                type=ParameterType.OBJECT,
+                required=False,
+                description="Optional query parameters; arrays repeat keys.",
+            ),
+            "headers": ParameterMetadata(
+                type=ParameterType.OBJECT,
+                required=False,
+                description="Optional string HTTP headers, including Content-Type and SOAPAction. Authorization and Host are managed by the CLI.",
+            ),
+            "body": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="Raw JSON, XML, CSV or text body, passed unchanged.",
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Queue receipt; HTTP outcome follows asynchronously.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def authenticated_request(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async("authenticated_request", params, state)
 
     @platform_process(
         name="probe_cli",
@@ -445,11 +548,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="provision_cli",
         display_name="Salesforce: Provision CLI",
-        description=(
-            "Provision the local sf formula only after explicit system-change acknowledgement, "
-            "then bind the verified absolute executable path into salesforce_plugin config. "
-            "A compliant executable is never reinstalled; this does not log in to Salesforce."
-        ),
+        description=("Provision the local sf formula only after explicit system-change acknowledgement, then bind the verified absolute executable path into salesforce_plugin config. A compliant executable is never reinstalled; this does not log in to Salesforce."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "acknowledge_system_change": ParameterMetadata(
@@ -477,9 +576,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
 
         acknowledge = params.get("acknowledge_system_change") is True
         try:
-            observed = self._require_executor().provision_cli(
-                acknowledge_system_change=acknowledge
-            )
+            observed = self._require_executor().provision_cli(acknowledge_system_change=acknowledge)
             executable_path = observed.get("executable_path")
             version = observed.get("version")
             if not isinstance(executable_path, str) or not executable_path.startswith("/"):
@@ -529,11 +626,11 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         name="soql_query",
         display_name="Salesforce: SOQL Query",
         description=(
-            "Run a SOQL query (e.g. \"SELECT Id, Name FROM Account WHERE …\") against the "
+            'Run a SOQL query (e.g. "SELECT Id, Name FROM Account WHERE …") against the '
             "configured Salesforce org. Returns immediately with a job_id and status 'queued' "
             "(D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the job "
             "finishing. When the job completes, the result is ALWAYS written to the "
-            "caller-supplied output_tsv_path, never returned inline — this plugin never executes "
+            "caller-supplied output_tsv_path, never returned inline — this verb never runs SOQL inside "
             "Apex, so the 50,000-record Apex governor limit does not apply to it; the actual "
             "Salesforce fact for this call path (sf CLI -> jsforce REST client) is a 2,000-record "
             "REST query batch size with no vendor total ceiling, and jsforce's autoFetch already "
@@ -552,35 +649,25 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "query": ParameterMetadata(
-                type=ParameterType.STRING, required=True, description="The SOQL query string."
-            ),
+            "query": ParameterMetadata(type=ParameterType.STRING, required=True, description="The SOQL query string."),
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=(
-                    "ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."
-                ),
+                description=("ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."),
             ),
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
                 description=(
-                    "Must be exactly true, together with row_limit, to fetch more than the "
-                    f"default {DEFAULT_ROW_LIMIT} records. Requires understanding why the default "
-                    "exists: avoiding exhausted API request limits/disk, and pulling all records "
-                    "to filter client-side instead of writing a proper SOQL WHERE clause."
+                    f"Must be exactly true, together with row_limit, to fetch more than the default {DEFAULT_ROW_LIMIT} records. Requires understanding why the default exists: avoiding exhausted API request limits/disk, and pulling all records to filter client-side instead of writing a proper SOQL WHERE clause."
                 ),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Explicit record ceiling, up to {SOQL_MAX_RECORDS_CAP}. Only honored together "
-                    f"with acknowledge_default_limit_override=true; refused (not clamped) above "
-                    f"{SOQL_MAX_RECORDS_CAP}."
-                ),
+                description=(f"Explicit record ceiling, up to {SOQL_MAX_RECORDS_CAP}. Only honored together with acknowledge_default_limit_override=true; refused (not clamped) above {SOQL_MAX_RECORDS_CAP}."),
             ),
+            PARAM_INCLUDE_DELETED: _INCLUDE_DELETED,
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -606,8 +693,8 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             "returning is NOT the same as the job finishing. The path must lie "
             "under an operator-configured export_allowed_roots entry (empty config refuses every "
             "export). Nested relationship objects are serialized as JSON text in their cells. Same "
-            "read rules and override mechanism as soql_query, with a higher hard cap: this plugin "
-            "never executes Apex, so the 50,000-record Apex governor limit does not apply; the "
+            "read rules and override mechanism as soql_query, with a higher hard cap: this verb "
+            "never runs SOQL inside Apex, so the 50,000-record Apex governor limit does not apply; the "
             "actual Salesforce fact for this call path is a 2,000-record REST query batch size "
             "with no vendor total ceiling, and jsforce's autoFetch already pages past that "
             f"internally via the SF_ORG_MAX_QUERY_LIMIT env override. Defaults to "
@@ -623,35 +710,25 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "query": ParameterMetadata(
-                type=ParameterType.STRING, required=True, description="The SOQL query."
-            ),
+            "query": ParameterMetadata(type=ParameterType.STRING, required=True, description="The SOQL query."),
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=(
-                    "ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."
-                ),
+                description=("ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."),
             ),
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
                 description=(
-                    "Must be exactly true, together with row_limit, to fetch more than the "
-                    f"default {DEFAULT_ROW_LIMIT} records. Requires understanding why the default "
-                    "exists: avoiding exhausted API request limits/disk, and pulling all records "
-                    "to filter client-side instead of writing a proper SOQL WHERE clause."
+                    f"Must be exactly true, together with row_limit, to fetch more than the default {DEFAULT_ROW_LIMIT} records. Requires understanding why the default exists: avoiding exhausted API request limits/disk, and pulling all records to filter client-side instead of writing a proper SOQL WHERE clause."
                 ),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Explicit record ceiling, up to {SOQL_EXPORT_ROW_CAP}. Only honored together "
-                    f"with acknowledge_default_limit_override=true; refused (not clamped) above "
-                    f"{SOQL_EXPORT_ROW_CAP}."
-                ),
+                description=(f"Explicit record ceiling, up to {SOQL_EXPORT_ROW_CAP}. Only honored together with acknowledge_default_limit_override=true; refused (not clamped) above {SOQL_EXPORT_ROW_CAP}."),
             ),
+            PARAM_INCLUDE_DELETED: _INCLUDE_DELETED,
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -670,17 +747,10 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="get_record",
         display_name="Salesforce: Get Record",
-        description=(
-            "Fetch one record by sobject + id, optionally trimmed to specific fields. Returns "
-            "immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the "
-            "dispatch returning is NOT the same as the job finishing; the record's fields are "
-            "delivered when the job completes."
-        ),
+        description=("Fetch one record by sobject + id, optionally trimmed to specific fields. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the job finishing; the record's fields are delivered when the job completes."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "sobject": ParameterMetadata(
-                type=ParameterType.STRING, required=True, description="The sobject API name, e.g. 'Account'."
-            ),
+            "sobject": ParameterMetadata(type=ParameterType.STRING, required=True, description="The sobject API name, e.g. 'Account'."),
             "id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The record id."),
             "fields": ParameterMetadata(
                 type=ParameterType.LIST,
@@ -705,17 +775,10 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="describe_sobject",
         display_name="Salesforce: Describe SObject",
-        description=(
-            "Describe an sobject's fields (name/type/label/nillable/updateable, trimmed). Returns "
-            "immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the "
-            "dispatch returning is NOT the same as the job finishing; the field metadata is "
-            "delivered when the job completes."
-        ),
+        description=("Describe an sobject's fields (name/type/label/nillable/updateable, trimmed). Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the job finishing; the field metadata is delivered when the job completes."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "sobject": ParameterMetadata(
-                type=ParameterType.STRING, required=True, description="The sobject API name, e.g. 'Account'."
-            ),
+            "sobject": ParameterMetadata(type=ParameterType.STRING, required=True, description="The sobject API name, e.g. 'Account'."),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -734,11 +797,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="list_sobjects",
         display_name="Salesforce: List SObjects",
-        description=(
-            "List the org's sobjects (API name + label). Returns immediately with a job_id and "
-            "status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the "
-            "same as the job finishing; the sobject list is delivered when the job completes."
-        ),
+        description=("List the org's sobjects (API name + label). Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the job finishing; the sobject list is delivered when the job completes."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
         return_value_schema=ReturnValueSchema(
@@ -759,19 +818,12 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         name="create_record",
         display_name="Salesforce: Create Record",
         description=(
-            "Create a record of the given sobject type with the given fields. Write action. "
-            "Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion "
-            "shape) — the dispatch returning is NOT the same as the record being created; the "
-            "confirmation (new record id) is delivered when the job completes."
+            "Create a record of the given sobject type with the given fields. Write action. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the record being created; the confirmation (new record id) is delivered when the job completes."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "sobject": ParameterMetadata(
-                type=ParameterType.STRING, required=True, description="The sobject API name, e.g. 'Contact'."
-            ),
-            "fields": ParameterMetadata(
-                type=ParameterType.OBJECT, required=True, description="Non-empty object of field values."
-            ),
+            "sobject": ParameterMetadata(type=ParameterType.STRING, required=True, description="The sobject API name, e.g. 'Contact'."),
+            "fields": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="Non-empty object of field values."),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -790,19 +842,12 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="update_record",
         display_name="Salesforce: Update Record",
-        description=(
-            "Apply a non-empty fields object to an existing record by sobject + id. Write action. "
-            "Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion "
-            "shape) — the dispatch returning is NOT the same as the update being applied; the "
-            "confirmation is delivered when the job completes."
-        ),
+        description=("Apply a non-empty fields object to an existing record by sobject + id. Write action. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the update being applied; the confirmation is delivered when the job completes."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "sobject": ParameterMetadata(type=ParameterType.STRING, required=True, description="The sobject API name."),
             "id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The record id."),
-            "fields": ParameterMetadata(
-                type=ParameterType.OBJECT, required=True, description="Non-empty object of field values to set."
-            ),
+            "fields": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="Non-empty object of field values to set."),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -876,8 +921,9 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         name="bulk_ingest_submit",
         display_name="Salesforce: Bulk Ingest Submit",
         description=(
-            "Submit a Bulk API v2 ingest job (insert, update, upsert, or delete — NOT hardDelete, "
-            "which is excluded) from a CSV file already on disk. Returns immediately with a job_id "
+            "Submit a Bulk API v2 ingest job (insert, update, upsert, delete, or hardDelete, which "
+            "bypasses the recycle bin and needs the vendor's Bulk API Hard Delete permission) from "
+            "a CSV file already on disk. Returns immediately with a job_id "
             "and status 'queued' (D0.3 deferred-completion shape) — this is the PLUGIN's own async "
             "job envelope, distinct from the Salesforce Bulk job id delivered when this job "
             "completes. The Salesforce job is submitted with --async and NEVER waited on inline — "
@@ -892,20 +938,13 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             "operation": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=(
-                    f"One of: {', '.join(sorted(BULK_INGEST_OPERATIONS))}. hardDelete is excluded — "
-                    "bypasses the recycle bin and needs a separate org permission."
-                ),
+                description=(f"One of: {', '.join(sorted(BULK_INGEST_OPERATIONS))}. hardDelete bypasses the recycle bin; Salesforce requires the Bulk API Hard Delete permission for it."),
             ),
-            "sobject": ParameterMetadata(
-                type=ParameterType.STRING, required=True, description="The sobject API name, e.g. 'Account'."
-            ),
+            "sobject": ParameterMetadata(type=ParameterType.STRING, required=True, description="The sobject API name, e.g. 'Account'."),
             "csv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=(
-                    "ABSOLUTE path to the ingest CSV, contained under an import_allowed_roots entry."
-                ),
+                description=("ABSOLUTE path to the ingest CSV, contained under an import_allowed_roots entry."),
             ),
             "external_id_field": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -1041,6 +1080,142 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
     )
     def bulk_job_abort(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         return self._dispatch_async("bulk_job_abort", params, state)
+
+    def _dispatch_family(self, family: str, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Reject malformed typed input at dispatch, before a job exists; the worker re-validates."""
+        api_version = self._cli_executor.api_version if self._cli_executor is not None else DEFAULT_API_VERSION
+        try:
+            typed_families.build_request(family, params, api_version)
+        except typed_families.TypedFamilyError as exc:
+            return self._error(ERROR_INVALID_PARAMS, str(exc))
+        return self._dispatch_async(family, params, state)
+
+    @platform_process(
+        name="composite",
+        display_name="Salesforce: Composite Resources",
+        description=(
+            "Run Salesforce REST composite resources on the registered org: composite (up to 25 "
+            "dependent subrequests with reference ids, allOrNone), graph (composite graph), batch, "
+            "tree (sObject tree create), and sObject Collections (collections_create, "
+            "collections_retrieve, collections_retrieve_many, collections_update, "
+            "collections_upsert, collections_delete). Reads, writes and deletes alike; Salesforce "
+            "permissions decide each operation. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("composite"),
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def composite(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("composite", params, state)
+
+    @platform_process(
+        name="tooling",
+        display_name="Salesforce: Tooling API",
+        description=(
+            "Use the Salesforce Tooling API on the registered org: query and query_more, search, "
+            "execute_anonymous (anonymous Apex), run_tests_async, run_tests_sync, completions, "
+            "list_sobjects, sobject_info, describe, and Tooling record create, get, update and delete (ApexClass, "
+            "ApexTrigger, TraceFlag and other Tooling types). Salesforce permissions decide each "
+            "operation, including Apex execution and deletes. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("tooling"),
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def tooling(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("tooling", params, state)
+
+    @platform_process(
+        name="bulk_jobs",
+        display_name="Salesforce: Bulk API 2.0 Jobs",
+        description=(
+            "Manage Salesforce Bulk API 2.0 jobs on the registered org: query jobs (query_create "
+            "with operation query or queryAll, query_get, query_list, query_results, query_abort, "
+            "query_delete) and ingest jobs (ingest_list, ingest_delete). query_results writes one "
+            "CSV page to an ABSOLUTE output_csv_path under export_allowed_roots and returns the "
+            "next locator. Salesforce permissions decide each operation. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("bulk_jobs"),
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def bulk_jobs(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("bulk_jobs", params, state)
+
+    @platform_process(
+        name="reports",
+        display_name="Salesforce: Reports",
+        description=(
+            "Use the Salesforce Reports REST API on the registered org: list, create, clone, describe, "
+            "run (synchronous, includeDetails), run_filtered (with reportMetadata filters), run_async, "
+            "instances, instance_results, query (run unsaved metadata), update, delete, report_types and "
+            "describe_report_type. Reads, writes and deletes alike; Salesforce permissions decide each "
+            "operation. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("reports"),
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def reports(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("reports", params, state)
+
+    @platform_process(
+        name="dashboards",
+        display_name="Salesforce: Dashboards",
+        description="Use the Salesforce Dashboards REST API on the registered org: list, clone, describe, results, refresh and status (with runningUser and filter1 to filter3), update and delete. Reads, writes and deletes alike; Salesforce permissions decide each operation. Returns a queued job.",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("dashboards"),
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def dashboards(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("dashboards", params, state)
+
+    @platform_process(
+        name="rest_resources",
+        display_name="Salesforce: REST Resources",
+        description=(
+            "Use Salesforce REST API resources beyond record CRUD on the registered org: resources, "
+            "limits, recent, describe_global, sobject_info, describe, updated and deleted record ids, "
+            "get_by_external_id, upsert_by_external_id, delete_by_external_id, relationship traversal, "
+            "query, query_all, query_more, explain, search and parameterized_search. Reads, writes and "
+            "deletes alike; Salesforce permissions decide each operation. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("rest_resources"),
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def rest_resources(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("rest_resources", params, state)
+
+    @platform_process(
+        name="actions",
+        display_name="Salesforce: Invocable Actions",
+        description=(
+            "Discover and invoke Salesforce invocable actions on the registered org: list, "
+            "list_standard, list_custom, list_custom_type (apex, flow, quickAction, emailAlert...), "
+            "describe_standard, describe_custom, invoke_standard and invoke_custom with an inputs "
+            "list. Salesforce permissions decide each invocation. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("actions"),
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def actions(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("actions", params, state)
 
 
 def _edge(

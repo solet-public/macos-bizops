@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::g_suite_plugin::drive_replies_create",
+  "display_name": "Drive Replies Create",
+  "description": "drive.replies.create: POST files/{fileId}/comments/{commentId}/replies. Creates a reply to a comment. For more information, see [Manage comments and replies](https://developers.google.com/workspace/drive/api/guides/manage-comments). Runs as a background job; completion preserves vendor response fields and names the selected account. Pass pageToken for the next page. Parameters use exact vendor names. See workspace_api_coverage.md for body schemas, scopes and lifecycle.",
+  "embedding_description": "Use Drive Replies Create to creates a reply to a comment. Acts on the selected connected Google account and returns Google's complete response, including pagination tokens when available. Supply vendor field names for filters, request bodies and updates.",
+  "result_processor_customizations": {
+    "action_label": "Drive Replies Create queued",
+    "result_type": "g_suite_drive_replies_create_result",
+    "result_description": "Job queued; completion includes account, method and full vendor response or media blob.",
+    "presentation_guidance": "Show paging tokens so the caller can continue.",
+    "output_action_guidance": "Return one short message through the active IO plugin."
+  },
+  "error_processor_customizations": {
+    "action_context": "Drive Replies Create",
+    "error_interpretation": "gsuite.unknown_account names connected accounts; gsuite.invalid_params names invalid arguments; gsuite.missing_scope requires reconnect; gsuite.auth_expired includes Testing-mode renewal guidance; gsuite.permission_denied includes tier or vendor denial; gsuite.not_found and gsuite.rate_limited preserve vendor messages.",
+    "recovery_guidance": "Choose a connected account, correct vendor parameters, or reconnect with start_interface and connect_account to approve missing scopes. Retry rate limits later."
+  }
+}

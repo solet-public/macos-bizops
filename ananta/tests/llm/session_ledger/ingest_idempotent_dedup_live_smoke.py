@@ -38,7 +38,8 @@ from typing import Any, LiteralString, cast
 REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(
-    0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
+    0,
+    str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -94,11 +95,7 @@ def _create_schema_tables(provider: PostgresProvider) -> None:
     via the PRODUCTION DDL renderer — the same path schema adoption drives."""
     schema = SchemaStandardizer().standardize_schema(get_session_ledger_schema())
     schema_name = provider.config.schema_name
-    ops = [
-        op
-        for table in schema.tables.values()
-        for op in emit_create_table_ops(NAMESPACE, table, schema_name)
-    ]
+    ops = [op for table in schema.tables.values() for op in emit_create_table_ops(NAMESPACE, table, schema_name)]
     with provider.get_transactional_connection() as conn, conn.cursor() as cur:
         provider.apply_schema_change_ops(cur, schema, ops)
 
@@ -230,17 +227,26 @@ def test_dedup(provider: PostgresProvider, schema_name: str) -> None:
         "oversized null-vendor event derives a STABLE id across re-ingest (content-addressed)",
     )
     o1 = _append(
-        repo, session_id, batch_id, external_id=eid_big1, text=oversized, content_blob_id="bmd_off_A",
+        repo,
+        session_id,
+        batch_id,
+        external_id=eid_big1,
+        text=oversized,
+        content_blob_id="bmd_off_A",
     )
     _check(o1.deduped is False, "first oversized/offloaded append inserts (blob pointer bmd_off_A)")
     rows_after_big = _count_events(provider, schema_name)
     o2 = _append(
-        repo, session_id, batch_id, external_id=eid_big2, text=oversized, content_blob_id="bmd_off_B",
+        repo,
+        session_id,
+        batch_id,
+        external_id=eid_big2,
+        text=oversized,
+        content_blob_id="bmd_off_B",
     )
     _check(
         o2.deduped is True,
-        "re-ingest with a DIFFERENT blob pointer (bmd_off_B) DEDUPS — external_id is "
-        "content-addressed, not keyed on the per-offload random blob_id",
+        "re-ingest with a DIFFERENT blob pointer (bmd_off_B) DEDUPS — external_id is content-addressed, not keyed on the per-offload random blob_id",
     )
     _check(
         _count_events(provider, schema_name) == rows_after_big,
@@ -251,11 +257,9 @@ def test_dedup(provider: PostgresProvider, schema_name: str) -> None:
 def main() -> int:
     if os.environ.get("LEDGER_DEDUP_LIVE_SMOKE") != "1":
         print("=== ingest_idempotent_dedup_live_smoke ===")
-        print(
-            "  SKIP  set LEDGER_DEDUP_LIVE_SMOKE=1 to run; "
-            "needs the live solet DB."
-        )
-        return 0
+        print("  SKIP  set LEDGER_DEDUP_LIVE_SMOKE=1 to run; needs the live solet DB.")
+        print('BORN_CLONE_SKIP_WITNESS={"reason":"opt_in_toggle_not_enabled","toggle":"LEDGER_DEDUP_LIVE_SMOKE"}')
+        return 77
     print("=== ingest_idempotent_dedup_live_smoke ===")
     schema_name = f"example_test_dedup_{secrets.token_hex(3)}"
     config = _load_pg_config()

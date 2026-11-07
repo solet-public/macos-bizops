@@ -1,0 +1,28 @@
+# Focused register for chg_8b9fd8d2 (payload requirements derived from
+# runtime readers; blue-green code roots derived from root_manifest.yaml).
+# Run from the repository root with quality_gates/run_smokes.py --register
+# naming this file. Every entry is also registered in quality_gates/gate_smokes.txt.
+solet_cli/homebrew/tests/payload_requirements_smoke.py
+quality_gates/tests/payload_reader_coverage_smoke.py
+solet_cli/homebrew/tests/stage_release_smoke.py
+quality_gates/tests/release_workflow_parity_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_builder_dirty_tree_gate_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_code_collection_offline_gate_smoke.py
+
+# Change-impact consumers. stage_release.py is loaded by path (helper load and
+# Formula parse at import) by these two; every registered smoke that drives the
+# real ReleaseBuilder.build now takes its roots from select_code_roots().
+solet_cli/tests/existing_install_bundle_smoke.py
+plugins/seed_factory_plugin/tests/release_run_smoke.py
+plugins/macos_self_deployment_plugin/tests/reconciliation_provenance_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_manager_cow_dedup_smoke.py
+plugins/macos_self_deployment_plugin/tests/durable_rollback_proxy_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_manager_pth_validation_smoke.py
+plugins/macos_self_deployment_plugin/tests/autostart_seed_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_manager_schema_snapshot_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_manager_call_sequence_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_manager_rehydrate_smoke.py
+plugins/macos_self_deployment_plugin/tests/no_repo_pollution_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_manager_cutover_contract_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_manager_crash_consistency_smoke.py
+plugins/macos_self_deployment_plugin/tests/release_code_collection_batching_equivalence_smoke.py

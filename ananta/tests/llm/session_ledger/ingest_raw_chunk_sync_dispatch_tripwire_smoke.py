@@ -32,7 +32,7 @@ LOAD-BEARING: that safety holds ONLY while ``ingest_raw_chunk`` stays a
 synchronous service-interface process. If it is ever made ``is_async`` /
 self-completing (e.g. converted to an async plugin process, or the
 ``@service_interface_process`` decorator gains an ``is_async`` knob that gets
-flipped, or the service-interface scanner stops hard-coding ``is_async=False``),
+flipped),
 the serial fence breaks and the read-compute-write race returns SILENTLY. This
 tripwire turns that emergent property into a GUARDED invariant: it fails loudly
 the moment any of those structural facts changes.
@@ -85,10 +85,7 @@ def main() -> int:
     if method is None:
         return 1
 
-    # (1) It is a service-interface process — service-interface processes are
-    # dispatched synchronously (the SI scanner hard-codes is_async=False; there
-    # is no other dispatch path for them). Converting it to a plugin/async
-    # process would drop this marker and trip the wire.
+    # This operation remains registered as a synchronous service process.
     raw_metadata = getattr(method, "_service_interface_metadata", None)
     _check(
         raw_metadata is not None,
@@ -106,27 +103,15 @@ def main() -> int:
         "ingest_raw_chunk is an EDGE process (synchronous terminal, not async inference)",
     )
 
-    # (3) The @service_interface_process decorator exposes NO is_async parameter,
-    # so service-interface processes structurally cannot be individually marked
-    # async. If this changes, the load-bearing assumption needs re-verification.
-    decorator_params = set(inspect.signature(service_interface_process).parameters)
+    # Deferred service adapters are opt-in. This operation must keep its
+    # synchronous body and the default completion metadata.
     _check(
-        "is_async" not in decorator_params,
-        "@service_interface_process has no is_async parameter "
-        "(SI processes cannot be flagged async at the decorator)",
+        inspect.signature(service_interface_process).parameters["is_async"].default is False
+        and metadata.is_async is False,
+        "ingest_raw_chunk keeps the synchronous default despite optional async adapters",
     )
 
-    # (4) THE PRODUCTION READ PATH (Architect 2026-06-21 — assert the field the
-    # poller ACTUALLY reads, not a correlated proxy). The action queue's
-    # ``_read_async_flag_from_registry`` (action_queue_poller.py:817-821) reads
-    # ``action_blueprint["metadata"]["is_async"]`` — and for an SI process the
-    # ``action_blueprint`` is what ``generate_action_blueprint_from_metadata``
-    # produces, whose ``metadata`` dict is ``{is_inference_capable,
-    # estimated_duration, version}`` with NO ``is_async`` key. So the poller does
-    # ``bool(None)`` → False: synchronous dispatch is guaranteed by the ABSENCE
-    # of the key. (The top-level ``is_async`` the SI scanner hard-codes at
-    # process-entry level is a DIFFERENT registry field the poller never reads —
-    # asserting it would be a false guard.) Mirror the poller's exact read here.
+    # Read the exact blueprint field the production poller consumes.
     process_key = f"service_interface::{metadata.provider}::{metadata.name}"
     action_blueprint = InvocationSchemaGenerator().generate_action_blueprint_from_metadata(
         process_key, metadata
@@ -143,14 +128,9 @@ def main() -> int:
         "(bool(action_blueprint['metadata'].get('is_async')) — the exact "
         "_read_async_flag_from_registry computation)",
     )
-    # (5) Belt-and-suspenders: the key is ABSENT, not present-and-falsy. If a
-    # future change ADDS ``is_async`` to the action_blueprint metadata (even
-    # ``=False``), trip so the fence assumption gets re-verified at that edit.
     _check(
-        isinstance(ab_meta, dict) and "is_async" not in ab_meta,
-        "is_async key is ABSENT from the action_blueprint metadata "
-        "(the fence is absence-of-key; adding it — even =False — should prompt "
-        "a re-verify of the synchronous-dispatch invariant)",
+        isinstance(ab_meta, dict) and ab_meta.get("is_async") is False,
+        "ingest_raw_chunk blueprint explicitly retains synchronous completion",
     )
 
     print("\n----------------------------------------------")

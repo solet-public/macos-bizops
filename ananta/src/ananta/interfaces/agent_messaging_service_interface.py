@@ -31,7 +31,7 @@ Plugins implementing this interface must:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import ClassVar
+from typing import ClassVar, TypedDict
 
 from ananta.llm.agent_messaging.models import (
     AgentThreadMessagesPage,
@@ -43,6 +43,26 @@ from ananta.llm.agent_messaging.models import (
     PeerSendResult,
     ReadThreadMessagesRequest,
 )
+
+
+class ScheduleTarget(TypedDict):
+    """A destination identified from a scheduling action's declared arguments."""
+
+    kind: str
+    value: str
+
+
+class ScheduleTargetObservation(TypedDict):
+    """Point-in-time owner evidence, never a promise of eventual delivery."""
+
+    kind: str
+    value: str
+    status: str
+    observed_at: str
+    resolved_instance: str | None
+    lifecycle_state: str | None
+    delivery_route: str
+    advisory: str | None
 
 
 class AgentMessagingServiceInterface(ABC):
@@ -60,8 +80,19 @@ class AgentMessagingServiceInterface(ABC):
     INTERFACE_VERSION: ClassVar[str] = "1.0.0"
 
     @abstractmethod
+    def get_schedule_target_status(self, targets: list[ScheduleTarget]) -> list[ScheduleTargetObservation]:
+        """Observe destinations using owner bindings and lifecycle history.
+
+        Consumed through the plugin manager, not a bound service. Vacant roles,
+        known retired instances, absent identities and unreadable evidence are
+        distinct. This read never sends, probes a session host, or changes state.
+        """
+        ...
+
+    @abstractmethod
     def list_threads(
-        self, request: ListAgentThreadsRequest,
+        self,
+        request: ListAgentThreadsRequest,
     ) -> AgentThreadsPage:
         """Globally enumerate threads, cursor-paginated by ``(created_at, id)``.
 
@@ -81,7 +112,8 @@ class AgentMessagingServiceInterface(ABC):
 
     @abstractmethod
     def read_thread_messages(
-        self, request: ReadThreadMessagesRequest,
+        self,
+        request: ReadThreadMessagesRequest,
     ) -> AgentThreadMessagesPage:
         """Read ONE thread's messages cursor-paginated, UNSCOPED (GAP-5/D1).
 

@@ -169,8 +169,8 @@ def _check_rendered_plist_fields(root: Path) -> None:
         xml,
     )
     _check(
-        _PATH_ENV.startswith("/opt/homebrew/bin:") and ":/usr/bin:" in _PATH_ENV,
         "the module literal itself puts a Homebrew prefix ahead of the system defaults",
+        _PATH_ENV.startswith("/opt/homebrew/bin:") and ":/usr/bin:" in _PATH_ENV,
         _PATH_ENV,
     )
     _check("plist sets RunAtLoad true", "<key>RunAtLoad</key>\n  <true/>" in xml, xml)
@@ -217,20 +217,20 @@ def _check_path_is_not_an_ambient_capture(root: Path) -> None:
         else:
             os.environ["PATH"] = previous
     _check(
-        _PATH_CAPTURE_SENTINEL not in xml,
         "plist PATH is a fixed literal, NOT a capture of the ambient $PATH "
         "(rendered under a sentinel PATH; a capturing renderer would leak it)",
+        _PATH_CAPTURE_SENTINEL not in xml,
         xml,
     )
     _check(
-        f"<key>PATH</key>\n    <string>{_PATH_ENV}</string>" in xml,
         "and the render still carries the module literal even while the ambient "
         "PATH is the sentinel — proving the renderer ignores the environment",
+        f"<key>PATH</key>\n    <string>{_PATH_ENV}</string>" in xml,
         xml,
     )
     _check(
-        os.environ.get("PATH") == previous,
         "the ambient PATH is restored exactly after the sentinel render",
+        os.environ.get("PATH") == previous,
         f"{os.environ.get('PATH')!r} vs {previous!r}",
     )
 

@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TypedDict
 
 from ananta.constants import FRAMEWORK_NAMESPACE
+from ananta.core.actions._measured_action_lane import run_blocking
 from ananta.core.domain.status import is_status_match
 from ananta.core.plugins.plugin_contracts import ActionStatus
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
@@ -61,9 +62,11 @@ class PerformanceStatsManager:
         """Initialize PerformanceStatsManager with required dependencies."""
         self.state_service = state_service
 
-    async def get_action_performance_stats(
-        self, action_name: str | None = None, hours: int = 24
-    ) -> dict[str, object]:
+    async def get_action_performance_stats(self, action_name: str | None = None, hours: int = 24) -> dict[str, object]:
+        """Read and aggregate the performance window off the runtime loop."""
+        return await run_blocking(self._get_action_performance_stats, action_name, hours)
+
+    def _get_action_performance_stats(self, action_name: str | None = None, hours: int = 24) -> dict[str, object]:
         """
         Retrieve comprehensive action performance statistics with time-window filtering.
 
@@ -147,9 +150,7 @@ class PerformanceStatsManager:
             logger.error(f"Error retrieving action performance stats: {e}")
             return {"error": str(e)}
 
-    def calculate_performance_stats(
-        self, records: list[dict[str, object]], action_name: str | None = None
-    ) -> dict[str, object]:
+    def calculate_performance_stats(self, records: list[dict[str, object]], action_name: str | None = None) -> dict[str, object]:
         """
         Calculate comprehensive performance statistics from execution records.
 

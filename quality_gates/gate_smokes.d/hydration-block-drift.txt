@@ -1,0 +1,10 @@
+# Fragment of the gate-smoke register, owned by one candidate (unit unt_3b7a4f8d,
+# plan upl_64e7c1597213418e953f0112249231b5 version 1). Same grammar and same meaning
+# as quality_gates/gate_smokes.txt: one repo-relative *_smoke.py path per line,
+# text after `#` is a comment.
+#
+# Pass-path and drift-fixture proof for the hydration-block drift check in
+# solet_setup_contracts.agent_instruction_block and its non-blocking advisory in
+# quality_gates/shipped_doc_gate.py. Offline: it writes only to temporary
+# directories.
+quality_gates/tests/hydration_block_drift_smoke.py

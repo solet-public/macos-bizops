@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::snowflake_plugin::stream",
+  "display_name": "Snowflake: Streams",
+  "description": "Manage Snowflake streams under /api/v2/databases/{database}/schemas/{schema}/streams. Operations: list (like, startsWith, showLimit, fromName), create (body Stream with name and stream_source; createMode, copyGrants), get, delete (ifExists), clone (body with the new name; targetDatabase, targetSchema, createMode, copyGrants), set_tags and unset_tags (tags; ifExists), get_tags (withLineage) and fetch_result (result_handler, page). Read or consume change rows with run_query, run_statement or sql_api. Vendor RBAC alone decides. Returns job_id/status queued.",
+  "embedding_description": "Create, list, describe, clone and drop Snowflake streams (change data capture on tables, views, external tables and stages) through the Stream REST API, and manage stream tags. Consume stream change rows with SQL. Vendor role grants decide every operation.",
+  "result_processor_customizations": {
+    "action_label": "Snowflake stream operation queued",
+    "result_type": "snowflake_stream_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: family, operation, method, status (HTTP), headers, body (Stream objects including stale and mode, or the vendor's status message), body_encoding, correlation_id, error_code for 4xx/5xx, and pagination: next_from_name when a list filled showLimit, Link relations, location and result_handler for 202 responses.",
+    "presentation_guidance": "This operation may have changed vendor state. Queued means the job was accepted, not that Snowflake completed the operation. Report the HTTP status, error_code and body faithfully. A stream's stale flag means its offset is beyond retention: recreate it. Consuming a stream's rows happens in a DML statement through run_statement or sql_api. To page a list, repeat it with query.fromName set to pagination.next_from_name. Report deletes from the vendor status."
+  },
+  "error_processor_customizations": {
+    "action_context": "Manage Snowflake streams with the registered role's grants.",
+    "error_interpretation": "snowflake.invalid_params is raised before any vendor call when the operation, identifiers, query parameter names or types, createMode, resultLimit range or required body members do not match the documented vendor shape. Vendor HTTP errors are completion data with status, body and error_code: auth_failed (401), permission_denied (403), object_not_found (404), timeout (408), conflict (409), rate_limited (429), statement_failed (422, SQL API only), api_error otherwise. snowflake.api_error without a status is a transport or configuration failure.",
+    "recovery_guidance": "Read the vendor status and body before retrying. A 403 means the registered role lacks the grant: grant it in Snowflake, the plugin adds no gate of its own. Double-quote identifiers that contain other characters. For a 202, call the same verb with operation fetch_result and the pagination.result_handler. Never silently retry a mutation after a transport error: read the object first."
+  }
+}

@@ -150,6 +150,7 @@ service_bindings:
   blob_storage_service: default_blob_storage_plugin
   knowledge_service: default_knowledge_plugin
   thinking_service: default_thinking_plugin
+  quality_service: platform_dev_surface_plugin
   self_deployment_service: macos_self_deployment_plugin
   local_self_deployment_service: macos_self_deployment_plugin
 

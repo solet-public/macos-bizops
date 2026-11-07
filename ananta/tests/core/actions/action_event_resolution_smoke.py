@@ -38,7 +38,8 @@ the wrong layer let that pass.
 Project policy: no pytest. Exits 0 on success, 1 on first failure.
 
 Run:
-    .venv/bin/python3 ananta/tests/core/actions/action_event_resolution_smoke.py
+    PYTHONPATH="$PWD/ananta/src:$PWD/plugins/default_scheduling_plugin/src" \
+        .venv/bin/python3 ananta/tests/core/actions/action_event_resolution_smoke.py
 """
 
 from __future__ import annotations
@@ -47,14 +48,41 @@ import asyncio
 import copy
 import importlib.util
 import json
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
-sys.path.insert(0, str(REPO_ROOT / "plugins" / "default_scheduling_plugin" / "src"))
+_DECLARED_SOURCE_ROOTS = tuple(
+    Path(entry).resolve()
+    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+    if entry
+)
+_WORKTREE_SOURCE_ROOTS = (
+    REPO_ROOT / "ananta" / "src",
+    REPO_ROOT / "plugins" / "default_scheduling_plugin" / "src",
+)
+_NORMALIZED_SYS_PATH = {
+    Path(entry).resolve()
+    for entry in sys.path
+    if entry
+}
+# Keep the interpreter's declared PYTHONPATH roots first; mutation runs rely on
+# those roots taking precedence over this smoke's worktree fallback sources.
+for _source_root in reversed(_WORKTREE_SOURCE_ROOTS):
+    if _source_root.resolve() not in _NORMALIZED_SYS_PATH:
+        sys.path.insert(1 + len(_DECLARED_SOURCE_ROOTS), str(_source_root))
+
+
+def _first_source_root(package: str) -> Path | None:
+    """Return the first declared or worktree source root containing a package."""
+    for source_root in (*_DECLARED_SOURCE_ROOTS, *_WORKTREE_SOURCE_ROOTS):
+        if (source_root / package).is_dir():
+            return source_root.resolve()
+    return None
 
 from ananta.core.actions.action_event_resolution import (  # noqa: E402
     ActionEventResolutionError,
@@ -66,6 +94,7 @@ from ananta.core.actions.action_queue_poller import (  # noqa: E402
 )
 from ananta.core.actions.orphan_reaper import EVIDENCE_FLOOR_CREATED_AT  # noqa: E402
 from ananta.core.domain.enums import ProcessorPolicyCategory  # noqa: E402
+from ananta.core.domain.types import ActionResult  # noqa: E402
 from ananta.core.plugins.plugin_contracts import ActionStatus  # noqa: E402
 from default_scheduling_plugin.plugin import SchedulingPlugin  # noqa: E402
 
@@ -104,6 +133,29 @@ def _check(condition: object, label: str) -> None:
         print(f"  FAIL {label}")
 
 
+def test_imported_module_identity() -> None:
+    print("\n[0] imports resolve from the declared source roots")
+    imported_packages = (
+        ("ananta.core.actions.action_event_resolution", "ananta"),
+        ("ananta.core.actions.action_queue_poller", "ananta"),
+        ("ananta.core.actions.orphan_reaper", "ananta"),
+        ("ananta.core.domain.enums", "ananta"),
+        ("ananta.core.plugins.plugin_contracts", "ananta"),
+        ("default_scheduling_plugin.plugin", "default_scheduling_plugin"),
+    )
+    for module_name, package in imported_packages:
+        module: ModuleType | None = sys.modules.get(module_name)
+        source_root = _first_source_root(package)
+        module_file = Path(module.__file__).resolve() if module and module.__file__ else None
+        expected_package_root = source_root / package if source_root is not None else None
+        _check(
+            module_file is not None
+            and expected_package_root is not None
+            and module_file.is_relative_to(expected_package_root),
+            f"{module_name} resolves under {expected_package_root} ({module_file})",
+        )
+
+
 def _matches(row: dict[str, Any], filters: dict[str, Any]) -> bool:
     for column, expected in filters.items():
         value = row.get(column)
@@ -126,7 +178,7 @@ class _Store:
         self.flip_before_update: tuple[str, str] | None = None
         self.reads: list[dict[str, Any]] = []
 
-    def query_ordered(self, namespace: str, data: dict[str, object]) -> dict[str, object]:
+    def query_ordered(self, namespace: str, data: dict[str, object]) -> ActionResult:
         assert namespace == "core" and data["table"] == "action_events"
         filters = data["filters"]
         assert isinstance(filters, dict)
@@ -136,7 +188,7 @@ class _Store:
 
     def update_state(
         self, namespace: str, query: dict[str, object], updates: dict[str, object],
-    ) -> dict[str, object]:
+    ) -> ActionResult:
         assert namespace == "core" and query["table"] == "action_events"
         if self.flip_before_update is not None:
             action_id, status = self.flip_before_update
@@ -348,6 +400,7 @@ def test_completed_then_failed_ends_failed() -> None:
 
 def main() -> int:
     print("fail_action_event smoke (iss_6069cf22)")
+    test_imported_module_identity()
     test_accept_paths()
     test_refuse_paths()
     test_plugin_wiring()

@@ -30,9 +30,9 @@ from macos_self_deployment_plugin.release_code_collection import (  # noqa: E402
     ReleaseCodeCollector,
 )
 from macos_self_deployment_plugin.release_manager import (  # noqa: E402
-    CODE_SUBTREES,
     SELECTED_FILE_MANIFEST_FILENAME,
     ReleaseManagerError,
+    select_code_roots,
     write_selected_file_manifest,
 )
 
@@ -62,10 +62,7 @@ def _git(source: Path, *args: str) -> None:
 
 def _committed_source(root: Path) -> Path:
     source = support.build_fake_source(root)
-    (source / ".gitignore").write_text(
-        "plugins/foo_plugin/local-assets/\n"
-        "plugins/foo_plugin/src/foo_plugin/__pycache__/\n"
-    )
+    (source / ".gitignore").write_text("plugins/foo_plugin/local-assets/\nplugins/foo_plugin/src/foo_plugin/__pycache__/\n")
     _git(source, "init", "--quiet")
     _git(source, "add", "-A")
     _git(source, *_GIT_IDENTITY, "commit", "--quiet", "-m", "baseline")
@@ -73,9 +70,10 @@ def _committed_source(root: Path) -> Path:
 
 
 def _collector(source: Path) -> ReleaseCodeCollector:
+    """The collector over the same root snapshot ``build_candidate`` would take."""
     return ReleaseCodeCollector(
         source_root=source,
-        code_subtrees=CODE_SUBTREES,
+        code_subtrees=select_code_roots(source).roots,
         cp_binary="cp",
         clone_timeout_seconds=30.0,
     )

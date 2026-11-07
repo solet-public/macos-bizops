@@ -20,12 +20,20 @@ Coverage:
   emits a CHECK (c) finding.
 * **Corrected versions.** After fix-up edits to each synthetic file,
   re-run the gate against the corrected fixture and assert EXIT 0.
+* **Concrete signatures.** Source-bound discovery, memory and thinking wrappers,
+  imported implementations, local mixins, manager routes and explicit plugin
+  entrypoints; unrelated methods never supply coverage. Unknown routes, imports
+  and nonliteral schemas produce coverage advisories. Exact debt correction,
+  removal and regression restoration retain printed findings and exit codes.
 * **Allowlist absorption.** With each finding allowlisted, assert
   EXIT 0 + allowlisted-marker in output.
 
 Run:
 
     .venv/bin/python3 quality_gates/tests/service_interface_ast_check_smoke.py
+
+The smoke and gate use the invoking Python interpreter. A source-only capture
+does not need a virtual environment inside its checkout.
 
 Exit codes:
   0 — every synthetic case detected + corrected + allowlist-absorbed
@@ -40,14 +48,15 @@ import sys
 import tempfile
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(_ROOT))
+REPO_ROOT = _ROOT
 GATE_SCRIPT = REPO_ROOT / "quality_gates" / "service_interface_ast_check.py"
-VENV_PYTHON = REPO_ROOT / ".venv" / "bin" / "python3"
 
 
 def _run_gate(repo_root: Path, allowlist: Path | None = None) -> tuple[int, str]:
-    """Invoke the gate from ``repo_root``; return (exit_code, combined_output)."""
-    argv = [str(VENV_PYTHON), str(GATE_SCRIPT)]
+    """Use the invoking interpreter, including captures with no checkout venv."""
+    argv = [sys.executable, str(GATE_SCRIPT)]
     if allowlist is not None:
         argv.extend(["--allowlist", str(allowlist)])
     proc = subprocess.run(  # noqa: S603
@@ -83,30 +92,14 @@ _PROVIDER = "synthetic_smoke_service"
 
 def _build_fixture(repo_root: Path, public_py_body: str, json_files: list[str]) -> None:
     """Create a minimal fixture mirroring the platform layout."""
-    services_dir = (
-        repo_root
-        / "ananta"
-        / "src"
-        / "ananta"
-        / "services"
-        / "synthetic_smoke_service"
-        / "interfaces"
-    )
+    services_dir = repo_root / "ananta" / "src" / "ananta" / "services" / "synthetic_smoke_service" / "interfaces"
     services_dir.mkdir(parents=True, exist_ok=True)
     (services_dir / "public.py").write_text(_PUBLIC_PY_HEADER + public_py_body)
 
-    processes_dir = (
-        repo_root
-        / "ananta"
-        / "knowledge_base"
-        / "processes"
-        / "synthetic_smoke_service"
-    )
+    processes_dir = repo_root / "ananta" / "knowledge_base" / "processes" / "synthetic_smoke_service"
     processes_dir.mkdir(parents=True, exist_ok=True)
     for name in json_files:
-        (processes_dir / f"{name}.json").write_text(
-            f'{{"process_key": "service_interface::synthetic_smoke_service::{name}"}}\n'
-        )
+        (processes_dir / f"{name}.json").write_text(f'{{"process_key": "service_interface::synthetic_smoke_service::{name}"}}\n')
 
 
 _BUG_DECORATOR_STACK = '''class SyntheticSmokeAPI(ABC):
@@ -226,10 +219,195 @@ def case_allowlist_absorbs(repo_root: Path) -> bool:
     return True
 
 
+def _write(repo_root: Path, relative: str, text: str) -> Path:
+    path = repo_root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _concrete_fixture(
+    root: Path,
+    provider: str,
+    signature: str,
+    *,
+    imported: bool = False,
+    inherited: bool = False,
+    plugin: bool = False,
+) -> Path:
+    """Model startup constructors, package exports and explicit plugin bindings."""
+    package = f"ananta/src/ananta/services/{provider}"
+    _write(
+        root,
+        package + "/interfaces/public.py",
+        f'''from abc import abstractmethod
+class ProbeAPI:
+    @service_interface_process(name="probe", provider="{provider}", parameters={{"query": {{}}}})
+    @abstractmethod
+    async def probe(self, query): ...
+''',
+    )
+    body = f"class Bound:\n    {signature}: ...\n"
+    if inherited:
+        _write(root, package + "/base.py", body.replace("class Bound:", "class Mixin:"))
+        body = "from .base import Mixin\nclass Bound(Mixin): pass\n"
+    # A same-name method in another class must never be selected.
+    body += "class Unrelated:\n    def probe(self, unrelated): ...\n"
+    relative = package + ("/service.py" if imported else "/__init__.py")
+    implementation = _write(root, relative, body)
+    if imported:
+        _write(root, package + "/__init__.py", "from .service import Bound as Exported\n")
+    export = "Exported" if imported else "Bound"
+    core = "ananta/src/ananta/core/"
+    direct = {provider} if provider != "memory_service" and not plugin else set()
+    _write(
+        root,
+        core + "event_orchestrator.py",
+        f"""class EventOrchestrator:
+    _DIRECT_ATTR_SERVICES = frozenset({sorted(direct)!r})
+    _SERVICE_MANAGER_SERVICES = frozenset([])
+    def get_service(self, service_name):
+        if service_name in self._DIRECT_ATTR_SERVICES:
+            return getattr(self, service_name, None)
+        if service_name in self._SERVICE_MANAGER_SERVICES:
+            return getattr(self.service_manager, service_name, None)
+        if service_name == "memory_service":
+            wrapper = getattr(self, "memory_service", None)
+            return wrapper if wrapper is not None else self._get_bound_plugin_service(service_name)
+        return self._get_bound_plugin_service(service_name)
+""",
+    )
+    _write(
+        root,
+        core + "orchestration/startup_sequence.py",
+        f"""from ananta.services.{provider} import {export} as Selected
+def initialize(orch):
+    orch.{provider} = Selected()
+""",
+    )
+    _write(root, core + "orchestration/service_manager.py", "class ServiceManager: pass\n")
+    _write(root, "profile/config/service_bindings.json", f'{{"{provider}": "fixture_plugin"}}')
+    _write(
+        root,
+        "plugins/fixture_plugin/pyproject.toml",
+        """[project.entry-points."ananta.plugins"]
+fixture_plugin = "fixture_plugin:Plugin"
+""",
+    )
+    _write(root, "plugins/fixture_plugin/src/fixture_plugin/__init__.py", "class Plugin:\n    def probe(self, plugin_only): ...\n")
+    return implementation
+
+
+def _expect(root: Path, exit_code: int, *tokens: str, allowlist: Path | None = None) -> str:
+    code, output = _run_gate(root, allowlist)
+    assert code == exit_code, f"exit {code} != {exit_code}: {output}"
+    for token in tokens:
+        assert token in output, f"missing {token!r}: {output}"
+    return output
+
+
+def case_concrete_routes(root: Path) -> bool:
+    """Concrete-only regressions, correction and exact debt lifecycle."""
+    for provider, imported in (("discovery_service", True), ("memory_service", False), ("thinking_service", False)):
+        fixture = root / provider
+        impl = _concrete_fixture(fixture, provider, "async def probe(self, query, *, concrete_only)", imported=imported)
+        interface = fixture / f"ananta/src/ananta/services/{provider}/interfaces/public.py"
+        frozen = interface.read_bytes()
+        output = _expect(fixture, 2, "CHECK (d)", impl.name, "Bound", "probe", "concrete_only")
+        assert "['plugin_only']" not in output and "['unrelated']" not in output, output
+        assert interface.read_bytes() == frozen, "interface changed"
+        debt = _write(fixture, "debt.txt", f"d::{impl.name}::Wrong::probe\n")
+        _expect(fixture, 2, "concrete_only", allowlist=debt)
+        debt.write_text(f"d::{impl.name}::Bound::probe\n")
+        _expect(fixture, 0, "[allowlisted]", "concrete_only", allowlist=debt)
+        debt.write_text("")
+        _expect(fixture, 2, "concrete_only", allowlist=debt)
+        bad = impl.read_text()
+        impl.write_text(bad.replace(", *, concrete_only", ", state=None, optional=None"))
+        _expect(fixture, 0)
+        impl.write_text(bad)
+        _expect(fixture, 2, "concrete_only")
+        print(f"  OK: {provider} concrete path, precedence, correction and debt lifecycle")
+    return True
+
+
+def case_binding_variants(root: Path) -> bool:
+    """Sync positional, inherited mixins, plugin selection and coverage advisories."""
+    inherited = root / "inherited"
+    _concrete_fixture(inherited, "discovery_service", "def probe(self, query, positional)", imported=True, inherited=True)
+    _expect(inherited, 2, "base.py", "Mixin", "positional")
+    clean = root / "clean"
+    _concrete_fixture(clean, "thinking_service", "def probe(self, query, state, optional=None, *, option=None)")
+    _expect(clean, 0)
+    plugin = root / "plugin"
+    _concrete_fixture(plugin, "synthetic_smoke_service", "def probe(self, query)", plugin=True)
+    _expect(plugin, 2, "fixture_plugin/__init__.py", "Plugin", "plugin_only")
+    _write(
+        plugin,
+        "plugins/other/pyproject.toml",
+        """[project.entry-points."ananta.plugins"]
+other = "other:Other"
+""",
+    )
+    _write(plugin, "plugins/other/src/other/__init__.py", "class Other:\n    def probe(self, query): ...\n")
+    bindings = plugin / "profile/config/service_bindings.json"
+    bindings.write_text('{"synthetic_smoke_service": "other"}')
+    _expect(plugin, 0)
+    bindings.unlink()
+    _expect(plugin, 0, "COVERAGE ADVISORY", "binding")
+    startup = clean / "ananta/src/ananta/core/orchestration/startup_sequence.py"
+    startup.write_text("def initialize(orch):\n    orch.thinking_service = factory()\n")
+    _expect(clean, 0, "COVERAGE ADVISORY", "thinking_service")
+    schema = inherited / "ananta/src/ananta/services/discovery_service/interfaces/public.py"
+    schema.write_text(schema.read_text().replace('parameters={"query": {}}', "parameters=SCHEMA"))
+    _expect(inherited, 0, "COVERAGE ADVISORY", "schema")
+    print("  OK: positional/mixin, optional/state, binding changes and advisory coverage")
+    return True
+
+
+def case_signature_contracts(root: Path) -> bool:
+    """Retain interface (d), manager routing and incomplete-source behavior."""
+    manager = root / "manager"
+    _concrete_fixture(manager, "inference_service", "def probe(self, query)")
+    core = "ananta/src/ananta/core/"
+    orchestrator = manager / (core + "event_orchestrator.py")
+    orchestrator.write_text(
+        orchestrator.read_text()
+        .replace(
+            "_DIRECT_ATTR_SERVICES = frozenset(['inference_service'])",
+            "_DIRECT_ATTR_SERVICES = frozenset([])",
+        )
+        .replace("_SERVICE_MANAGER_SERVICES = frozenset([])", "_SERVICE_MANAGER_SERVICES = frozenset(['inference_service'])")
+    )
+    _write(
+        manager,
+        core + "orchestration/service_manager.py",
+        """from ananta.services.inference_service import Bound as Routed
+class Unrelated:
+    def build(self):
+        self.inference_service = Dynamic()
+class ServiceManager:
+    def initialize(self):
+        self.inference_service = Routed()
+""",
+    )
+    _expect(manager, 0)
+    schema = manager / "ananta/src/ananta/services/inference_service/interfaces/public.py"
+    schema.write_text(schema.read_text().replace('parameters={"query": {}}', "parameters={}"))
+    _expect(manager, 2, "interfaces/public.py", "ProbeAPI", "CHECK (d)", "query")
+    unknown = root / "unknown"
+    implementation = _concrete_fixture(unknown, "discovery_service", "def probe(self, query)")
+    implementation.write_text("from .missing import Missing\nclass Bound(Missing): pass\n")
+    _expect(unknown, 0, "COVERAGE ADVISORY", "import", "missing")
+    _write(unknown, core + "orchestration/startup_sequence.py", "def initialize(orch):\n    orch.discovery_service = dynamic()\n")
+    _expect(unknown, 0, "COVERAGE ADVISORY", "dynamic")
+    debt = unknown / "absent-debt.txt"
+    _expect(unknown, 64, "allowlist file not found", allowlist=debt)
+    print("  OK: manager precedence, interface signature, missing source and usage code")
+    return True
+
+
 def main() -> int:
-    if not VENV_PYTHON.exists():
-        print(f"FAIL: venv python not found at {VENV_PYTHON}")
-        return 1
     if not GATE_SCRIPT.exists():
         print(f"FAIL: gate script not found at {GATE_SCRIPT}")
         return 1
@@ -254,6 +432,14 @@ def main() -> int:
         print("\nCase 3: allowlist absorbs all 3 findings")
         if not case_allowlist_absorbs(tmp_root):
             failures += 1
+
+    for case in (case_concrete_routes, case_binding_variants, case_signature_contracts):
+        with tempfile.TemporaryDirectory(prefix="si_ast_concrete_") as tmp:
+            try:
+                case(Path(tmp))
+            except AssertionError as exc:
+                print(f"FAIL: {case.__name__}: {exc}")
+                failures += 1
 
     if failures:
         print(f"\n{failures} case(s) failed.")

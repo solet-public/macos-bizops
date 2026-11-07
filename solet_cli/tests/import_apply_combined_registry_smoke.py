@@ -43,13 +43,20 @@ def _legacy_record(name: str, target: Path) -> InstanceRecord:
 def _assert_v2_target_collision(paths: ManagerPaths, target: Path) -> None:
     inventory_before = paths.maintenance_inventory_path.read_bytes()
     collision = ImportRequest("other", target, "stable", paths)
-    preview = enrollment.preview_import(collision)
     try:
-        enrollment.enroll_import(collision, preview.fingerprint)
+        enrollment.preview_import(collision)
     except RegistryUniquenessError as error:
         assert error.key_name in {"target", "filesystem_identity"}
     else:
-        raise AssertionError("v2 target collision was accepted")
+        raise AssertionError("v2 target collision was accepted at preview")
+    # A previously approved preview is independently rechecked under registry.lock.
+    preview = enrollment.preview_from_inspection(collision, enrollment.inspect_for_import(collision))
+    try:
+        enrollment.enroll_import_holding_instance_lock(preview)
+    except RegistryUniquenessError as error:
+        assert error.key_name in {"target", "filesystem_identity"}
+    else:
+        raise AssertionError("v2 target collision was accepted under the apply lock")
     assert not paths.operation_path(preview.instance_id, preview.operation_id).exists()
     assert paths.maintenance_inventory_path.read_bytes() == inventory_before
 
@@ -114,9 +121,7 @@ def main() -> int:
             _assert_v2_target_collision(paths, create_target)
             unrelated = root / "unrelated"
             unrelated.mkdir()
-            InstanceRegistry(paths.registry_path, maintenance_inventory_path=paths.maintenance_inventory_path).add(
-                _legacy_record("unrelated", unrelated)
-            )
+            InstanceRegistry(paths.registry_path, maintenance_inventory_path=paths.maintenance_inventory_path).add(_legacy_record("unrelated", unrelated))
         finally:
             enrollment.inspect_existing_install = original_inspection
             enrollment.instance_lock = original_lock

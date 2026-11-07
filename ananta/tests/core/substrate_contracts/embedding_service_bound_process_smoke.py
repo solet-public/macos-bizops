@@ -45,7 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ananta.core.actions.action_processor import ActionProcessor  # noqa: E402
 from ananta.core.actions.action_queue_poller import QueuedAction  # noqa: E402
-from ananta.core.domain.types import ActionResult  # noqa: E402
+from ananta.core.domain.types import ActionResult, ErrorDetail  # noqa: E402
 from ananta.core.event_orchestrator import EventOrchestrator  # noqa: E402
 from ananta.core.orchestration.service_bindings import ServiceBindings, ServiceName  # noqa: E402
 from ananta.core.plugins.plugin_manager import PluginManager  # noqa: E402
@@ -55,6 +55,9 @@ from ananta.interfaces.embedding_service_interface import (  # noqa: E402
     TokenBudget,
 )
 from ananta.services.embedding_service.interfaces.public import EmbeddingServiceAPI  # noqa: E402
+from ananta.services.lifecycle_management_service.manifest_preflight import (  # noqa: E402
+    _emit_service_interface_entries,
+)
 from coreai_embeddings_plugin.contracts import (  # noqa: E402
     DIMENSION,
     MODEL_ID,
@@ -104,9 +107,17 @@ class _FakeProvider(EmbeddingServiceInterface):
 
 
 def _refusal(message: str) -> ActionResult:
+    error: ErrorDetail = {
+        "type": "FakeProviderError",
+        "code": "fake.refused",
+        "message": message,
+        "details": {},
+        "severity": "error",
+        "timestamp": "2026-10-01T00:00:00+00:00",
+    }
     return {
         "action_status": "error", "data": {}, "actions": [], "timestamp": "2026-10-01T00:00:00+00:00",
-        "error": {"type": "FakeProviderError", "code": "fake.refused", "message": message},
+        "error": error,
     }
 
 
@@ -194,6 +205,13 @@ def _payload(envelope: dict[str, Any]) -> dict[str, Any]:
 def _pin_declaration(checker: Checker) -> None:
     """Case A: discoverable, service-keyed, five-field schema, in-bound embedding_description."""
     service_names = {service.value for service in ServiceName}
+    scanned: dict[str, dict[str, Any]] = {}
+    _emit_service_interface_entries(EmbeddingServiceAPI, scanned)
+    scanned_list_models = scanned.get("service_interface::embedding_service::list_models", {})
+    checker.check(
+        scanned_list_models.get("is_discoverable") is True,
+        "A0: real service-interface scanner exposes list_models as discoverable",
+    )
     for verb in ("generate_embeddings", "get_embedding_dimension"):
         metadata = getattr(getattr(EmbeddingServiceAPI, verb), "_service_interface_metadata")  # noqa: B009
         process = metadata.to_process_dict()
@@ -211,6 +229,17 @@ def _pin_declaration(checker: Checker) -> None:
         text = json.loads((_JSON_DIR / f"{verb}.json").read_text())["embedding_description"]
         low, high = _EMBEDDING_DESCRIPTION_BOUNDS
         checker.check(low <= len(text) <= high, f"A4: {verb} embedding_description is {len(text)} chars, within {low}-{high}")
+    embedding_metadata = getattr(EmbeddingServiceAPI.generate_embeddings, "_service_interface_metadata")  # noqa: B009
+    checker.check(
+        embedding_metadata.to_process_dict()["is_inference_capable"] is False,
+        "A6: generate_embeddings is not inference-capable",
+    )
+    list_models_text = json.loads((_JSON_DIR / "list_models.json").read_text())["embedding_description"]
+    low, high = _EMBEDDING_DESCRIPTION_BOUNDS
+    checker.check(
+        low <= len(list_models_text) <= high,
+        f"A7: list_models embedding_description is {len(list_models_text)} chars, within {low}-{high}",
+    )
     schema_text = json.dumps(
         getattr(EmbeddingServiceAPI.generate_embeddings, "_service_interface_metadata").to_process_dict()  # noqa: B009
     )

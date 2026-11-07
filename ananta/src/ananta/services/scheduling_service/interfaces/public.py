@@ -47,22 +47,13 @@ class SchedulingServiceAPI(ABC):
             ),
             "action_definitions": ParameterMetadata(
                 description=(
-                    "Non-empty list of syntactically valid action objects in the "
-                    "canonical {process_key, arguments} shape. Registration validates "
-                    "the shape and scheduled-action policy; execution resolves "
-                    "process_key against processes registered at fire time. Provide "
-                    "exactly one of action_definitions or memory_tag."
+                    "Non-empty list of syntactically valid action objects in the canonical {process_key, arguments} shape. Registration validates the shape and scheduled-action policy; execution resolves process_key against processes registered at fire time. Provide exactly one of action_definitions or memory_tag."
                 ),
                 required=False,
                 type=ParameterType.LIST,
             ),
             "memory_tag": ParameterMetadata(
-                description=(
-                    "Memory tag to read on every run. The scheduled "
-                    "get_memories_by_tag action is terminal: its result is written to "
-                    "the action row and does not start a model turn. Provide exactly "
-                    "one of memory_tag or action_definitions."
-                ),
+                description=("Memory tag to read on every run. The scheduled get_memories_by_tag action is terminal: its result is written to the action row and does not start a model turn. Provide exactly one of memory_tag or action_definitions."),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -82,12 +73,8 @@ class SchedulingServiceAPI(ABC):
             description="Cron schedule creation result.",
             type=ParameterType.OBJECT,
             properties={
-                "schedule_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Unique schedule identifier."
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Human-readable confirmation message."
-                ),
+                "schedule_id": ParameterMetadata(type=ParameterType.STRING, description="Unique schedule identifier."),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Human-readable confirmation message."),
             },
             usage_patterns=[
                 "Recurring async job monitoring.",
@@ -96,7 +83,7 @@ class SchedulingServiceAPI(ABC):
             ],
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def create_cron_schedule(
@@ -122,30 +109,18 @@ class SchedulingServiceAPI(ABC):
             ),
             "action_definitions": ParameterMetadata(
                 description=(
-                    "Non-empty list of syntactically valid action objects in the "
-                    "canonical {process_key, arguments} shape. Registration validates "
-                    "the shape and scheduled-action policy; execution resolves "
-                    "process_key against processes registered at fire time. Provide "
-                    "exactly one of action_definitions or memory_tag."
+                    "Non-empty list of syntactically valid action objects in the canonical {process_key, arguments} shape. Registration validates the shape and scheduled-action policy; execution resolves process_key against processes registered at fire time. Provide exactly one of action_definitions or memory_tag."
                 ),
                 required=False,
                 type=ParameterType.LIST,
             ),
             "memory_tag": ParameterMetadata(
-                description=(
-                    "Memory tag to read after the delay. The scheduled "
-                    "get_memories_by_tag action is terminal: its result is written to "
-                    "the action row and does not start a model turn. Provide exactly "
-                    "one of memory_tag or action_definitions."
-                ),
+                description=("Memory tag to read after the delay. The scheduled get_memories_by_tag action is terminal: its result is written to the action row and does not start a model turn. Provide exactly one of memory_tag or action_definitions."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "content": ParameterMetadata(
-                description=(
-                    "Follow-up instructions to stash as a tagged memory. Content is "
-                    "only valid with memory_tag; action-definition mode rejects it."
-                ),
+                description=("Follow-up instructions to stash as a tagged memory. Content is only valid with memory_tag; action-definition mode rejects it."),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -165,9 +140,7 @@ class SchedulingServiceAPI(ABC):
             description="Delayed execution schedule result.",
             type=ParameterType.OBJECT,
             properties={
-                "schedule_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Unique schedule identifier."
-                ),
+                "schedule_id": ParameterMetadata(type=ParameterType.STRING, description="Unique schedule identifier."),
                 "message": ParameterMetadata(
                     type=ParameterType.STRING,
                     description="Confirmation message describing the scheduled delay.",
@@ -184,7 +157,7 @@ class SchedulingServiceAPI(ABC):
             ],
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def execute_in_seconds(
@@ -215,9 +188,7 @@ class SchedulingServiceAPI(ABC):
             description="Schedule cancellation result.",
             type=ParameterType.OBJECT,
             properties={
-                "schedule_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Cancelled schedule identifier."
-                ),
+                "schedule_id": ParameterMetadata(type=ParameterType.STRING, description="Cancelled schedule identifier."),
                 "message": ParameterMetadata(
                     type=ParameterType.STRING,
                     description="Status message describing the cancellation.",
@@ -229,12 +200,10 @@ class SchedulingServiceAPI(ABC):
             ],
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
-    def clear_scheduled_action(
-        self, schedule_id: str, state: dict[str, Any] | None = None
-    ) -> dict[str, Any]: ...
+    def clear_scheduled_action(self, schedule_id: str, state: dict[str, Any] | None = None) -> dict[str, Any]: ...
 
     @service_interface_process(
         name="clear_scheduled_actions_by_tag",
@@ -252,12 +221,8 @@ class SchedulingServiceAPI(ABC):
             description="Bulk tag cancellation result.",
             type=ParameterType.OBJECT,
             properties={
-                "cleared_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of schedules cancelled."
-                ),
-                "tag": ParameterMetadata(
-                    type=ParameterType.STRING, description="Tag that was cleared."
-                ),
+                "cleared_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of schedules cancelled."),
+                "tag": ParameterMetadata(type=ParameterType.STRING, description="Tag that was cleared."),
             },
             usage_patterns=[
                 "Pattern 6a cleanup when async job completes.",
@@ -265,12 +230,10 @@ class SchedulingServiceAPI(ABC):
             ],
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
-    def clear_scheduled_actions_by_tag(
-        self, tag: str, state: dict[str, Any] | None = None
-    ) -> dict[str, Any]: ...
+    def clear_scheduled_actions_by_tag(self, tag: str, state: dict[str, Any] | None = None) -> dict[str, Any]: ...
 
     @service_interface_process(
         name="get_schedules_by_tag",
@@ -288,12 +251,12 @@ class SchedulingServiceAPI(ABC):
             description="Matching schedules with metadata.",
             type=ParameterType.OBJECT,
             properties={
-                "tag": ParameterMetadata(
-                    type=ParameterType.STRING, description="Tag used for filtering."
-                ),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of matching schedules."
-                ),
+                "complete": ParameterMetadata(type=ParameterType.BOOLEAN, description="Stable exhausted source enumeration; independent of filtering."),
+                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Incomplete enumeration and unavailable owner evidence."),
+                "checked_epochs": ParameterMetadata(type=ParameterType.OBJECT, description="Persistent and memory epochs before and after enumeration."),
+                "observation_token": ParameterMetadata(type=ParameterType.STRING, description="Identity of this list observation."),
+                "tag": ParameterMetadata(type=ParameterType.STRING, description="Tag used for filtering."),
+                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of matching schedules."),
                 "schedules": ParameterMetadata(
                     type=ParameterType.LIST,
                     description="List of matching schedule objects.",
@@ -306,12 +269,10 @@ class SchedulingServiceAPI(ABC):
             ],
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
-    def get_schedules_by_tag(
-        self, tag: str, state: dict[str, Any] | None = None
-    ) -> dict[str, Any]: ...
+    def get_schedules_by_tag(self, tag: str, state: dict[str, Any] | None = None) -> dict[str, Any]: ...
 
     @service_interface_process(
         name="ensure_global_heartbeat",
@@ -374,7 +335,7 @@ class SchedulingServiceAPI(ABC):
             ],
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def ensure_global_heartbeat(
@@ -384,3 +345,106 @@ class SchedulingServiceAPI(ABC):
         memory_tag: str | None = None,
         state: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
+
+    @service_interface_process(
+        name="list_schedules",
+        is_discoverable=True,
+        provider="scheduling_service",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Scheduling owner result",
+            properties={
+                "schedules": ParameterMetadata(type=ParameterType.LIST),
+                "count": ParameterMetadata(type=ParameterType.INTEGER),
+                "complete": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "advisories": ParameterMetadata(type=ParameterType.LIST),
+                "checked_epochs": ParameterMetadata(type=ParameterType.OBJECT),
+                "observation_token": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+        parameters={
+            "status": ParameterMetadata(type=ParameterType.STRING, required=False),
+            "state": _STATE_PARAM,
+        },
+    )
+    @abstractmethod
+    def list_schedules(self, status: str | None = None, state: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Scheduling-owner list schedules operation; see the paired process reference."""
+        ...
+
+    @service_interface_process(
+        name="rebind_scheduled_action",
+        is_discoverable=True,
+        provider="scheduling_service",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Scheduling owner result",
+            properties={
+                "schedule_id": ParameterMetadata(type=ParameterType.STRING),
+                "revision": ParameterMetadata(type=ParameterType.INTEGER),
+                "effective_revision": ParameterMetadata(type=ParameterType.INTEGER),
+                "status": ParameterMetadata(type=ParameterType.STRING),
+                "target_observation": ParameterMetadata(type=ParameterType.OBJECT),
+                "previously_submitted_work": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+        parameters={
+            "schedule_id": ParameterMetadata(type=ParameterType.STRING, required=True),
+            "action_index": ParameterMetadata(type=ParameterType.INTEGER, required=True),
+            "target_kind": ParameterMetadata(type=ParameterType.STRING, required=True),
+            "target_value": ParameterMetadata(type=ParameterType.STRING, required=True),
+            "expected_revision": ParameterMetadata(type=ParameterType.INTEGER, required=True),
+            "reason": ParameterMetadata(type=ParameterType.STRING, required=True),
+            "state": _STATE_PARAM,
+        },
+    )
+    @abstractmethod
+    def rebind_scheduled_action(self, schedule_id: str, action_index: int, target_kind: str, target_value: str, expected_revision: int, reason: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Scheduling-owner rebind scheduled action operation; see the paired process reference."""
+        ...
+
+    @service_interface_process(
+        name="get_schedule_binding_history",
+        is_discoverable=True,
+        provider="scheduling_service",
+        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Scheduling owner result", properties={"schedule_id": ParameterMetadata(type=ParameterType.STRING), "events": ParameterMetadata(type=ParameterType.LIST), "next_cursor": ParameterMetadata(type=ParameterType.LIST)}),
+        parameters={
+            "schedule_id": ParameterMetadata(type=ParameterType.STRING, required=True),
+            "limit": ParameterMetadata(type=ParameterType.INTEGER, required=False),
+            "after": ParameterMetadata(type=ParameterType.LIST, required=False),
+            "state": _STATE_PARAM,
+        },
+    )
+    @abstractmethod
+    def get_schedule_binding_history(self, schedule_id: str, limit: int = 100, after: list[object] | None = None, state: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Scheduling-owner get schedule binding history operation; see the paired process reference."""
+        ...
+
+    @service_interface_process(
+        name="recover_scheduled_action",
+        is_discoverable=True,
+        provider="scheduling_service",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Scheduling owner result",
+            properties={
+                "schedule_id": ParameterMetadata(type=ParameterType.STRING),
+                "revision": ParameterMetadata(type=ParameterType.INTEGER),
+                "effective_revision": ParameterMetadata(type=ParameterType.INTEGER),
+                "status": ParameterMetadata(type=ParameterType.STRING),
+                "activation_status": ParameterMetadata(type=ParameterType.STRING),
+                "effective": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "advisory": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+        parameters={
+            "schedule_id": ParameterMetadata(type=ParameterType.STRING, required=True),
+            "expected_revision": ParameterMetadata(type=ParameterType.INTEGER, required=True),
+            "reason": ParameterMetadata(type=ParameterType.STRING, required=True),
+            "state": _STATE_PARAM,
+        },
+    )
+    @abstractmethod
+    def recover_scheduled_action(self, schedule_id: str, expected_revision: int, reason: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Scheduling-owner recover scheduled action operation; see the paired process reference."""
+        ...

@@ -37,6 +37,10 @@ config:
       completes), or by calling that verb; no shipped profile template
       carries it. The installed cron always reads this key; it takes no
       per-install override.
+      The same key is the alert target of check_model_capability_catalog,
+      the daily model capability catalog refresh guard (installed by the
+      ensure_model_capability_guard_schedule starting action); without it
+      that check still refreshes the catalog but cannot alert anyone.
       Set per-deployment under profile/config/plugins/platform_health_plugin.json
       (an operator config override, never shipped seed content).
 

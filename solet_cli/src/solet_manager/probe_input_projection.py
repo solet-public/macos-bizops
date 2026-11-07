@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import cast
 
@@ -22,9 +23,11 @@ _CODING_AGENT_PROBE_REFS = frozenset(
         "setup::coding_agents.verify_plugins",
         "setup::coding_agents.verify_hooks",
         "plugin::agent_messaging_plugin.peer_identity",
+        "hydration::shell.probe_path",
     }
 )
 _CODING_AGENT_OPTIONS = frozenset({"codex", "claude_code"})
+_DEFAULT_CODING_AGENT_SELECTION = ("claude_code",)
 _EMBEDDING_MODEL_QUALIFICATION_PROBE = "setup::models.qualify_embedding"
 _STRUCTURED_ACTION_QUALIFICATION_PROBE = "setup::models.qualify_structured_actions"
 _REPRESENTATIVE_INFERENCE_PROBE = "setup::models.qualify_representative_inference"
@@ -59,9 +62,17 @@ _LLAMA_CPP_PROBES = frozenset({"setup::llama_cpp.models_present", "setup::llama_
 
 
 _LM_STUDIO_PROBES = frozenset(
-    f"setup::lm_studio.{suffix}" for suffix in (
-        "cli_available", "server_ready", "embedding_artifact_present", "embedding_model_served",
-        "inference_artifact_present", "inference_model_indexed", "inference_model_served", "login_agent_valid", "jit_disabled",
+    f"setup::lm_studio.{suffix}"
+    for suffix in (
+        "cli_available",
+        "server_ready",
+        "embedding_artifact_present",
+        "embedding_model_served",
+        "inference_artifact_present",
+        "inference_model_indexed",
+        "inference_model_served",
+        "login_agent_valid",
+        "jit_disabled",
     )
 )
 
@@ -88,9 +99,16 @@ def _lm_studio_inputs(transaction: Transaction) -> dict[str, JsonValue]:
     inactive = _omitted_inactive_carriers(transaction, decisions, missing)
     projected = {key: "none" if key in inactive else decisions.get(key) for key in carriers}
     projected["lm_studio_base_url"] = inputs.get("lm_studio_base_url")
-    if any(not isinstance(value, str) or not value for value in projected.values()):
+    if not _lm_studio_projection_resolved(projected, carriers):
         raise StateConflictError("LM Studio implementation or loopback URL is unresolved")
     return projected
+
+
+def _lm_studio_projection_resolved(projected: dict[str, JsonValue], carriers: tuple[str, ...]) -> bool:
+    required = list(carriers)
+    if any(projected[key] == "lm_studio" for key in carriers):
+        required.append("lm_studio_base_url")
+    return all(isinstance(projected[key], str) and bool(projected[key]) for key in required)
 
 
 def _implementation_inputs(transaction: Transaction) -> dict[str, JsonValue]:
@@ -111,10 +129,7 @@ def _validate_explicit_lm_studio_tuple(
 ) -> None:
     """Reject a resolved vacancy unless its explicit profile selection is free."""
 
-    if any(
-        not isinstance(decisions[carrier], str) or not decisions[carrier]
-        for carrier in carriers
-    ):
+    if any(not isinstance(decisions[carrier], str) or not decisions[carrier] for carrier in carriers):
         raise StateConflictError("LM Studio implementation is unresolved")
     if decisions["inference_implementation"] != "none":
         return
@@ -165,14 +180,11 @@ def _autostart_decision(transaction: Transaction) -> str:
 
 
 def _coding_agent_selection(transaction: Transaction) -> tuple[str, ...]:
+    """Use the reviewed Claude-only default while recorded selection is unresolved."""
     value = _decisions(transaction).get("coding_agents")
-    if (
-        not isinstance(value, list)
-        or not value
-        or not all(isinstance(item, str) and item in _CODING_AGENT_OPTIONS for item in value)
-        or len(value) != len(set(value))
-    ):
-        raise StateConflictError("transaction coding-agent selection is unresolved or invalid")
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item in _CODING_AGENT_OPTIONS for item in value) or len(value) != len(set(value)):
+        logging.getLogger(__name__).warning("Transaction coding-agent selection is unresolved or invalid; using the reviewed Claude-only default")
+        return _DEFAULT_CODING_AGENT_SELECTION
     return tuple(cast(str, item) for item in value)
 
 

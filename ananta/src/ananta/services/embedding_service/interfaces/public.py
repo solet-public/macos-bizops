@@ -72,7 +72,7 @@ class EmbeddingServiceAPI(ABC):
                 "Embed a batch of texts and check model and dimension against stored vectors",
             ],
         ),
-        is_inference_capable=True,
+        is_inference_capable=False,
     )
     @abstractmethod
     def generate_embeddings(
@@ -112,6 +112,7 @@ class EmbeddingServiceAPI(ABC):
 
     @service_interface_process(
         name="list_models",
+        is_discoverable=True,
         provider="embedding_service",
         parameters={},
         return_value_schema=ReturnValueSchema(

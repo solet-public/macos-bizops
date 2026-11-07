@@ -39,6 +39,8 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src")
 
 import subprocess  # noqa: E402
 
+from _register_unit_double import fixture_assignment_record  # noqa: E402
+
 from agent_messaging_plugin.headless_adapter import (  # noqa: E402
     _WORKER_INJECTED_HOOK_FILENAMES,
     HeadlessHostDriver,
@@ -126,7 +128,7 @@ def test_real_init_event_line_is_captured_and_spooled() -> None:
         os.environ["APP_HOME"] = str(app_home)
         try:
             driver = _configured_driver(Path(tmp), popen_fn=_real_child_popen_fn(child_src))
-            host_ref = driver.spawn({"agent_instance_id": "agi-init-capture-1"})
+            host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-init-capture-1"})
             spool_dir = app_home / "data" / _SPOOL_SUBDIR
             files = _poll_for_spool_files(spool_dir)
             file_count = len(files)
@@ -162,7 +164,7 @@ def test_no_init_event_line_writes_nothing() -> None:
         os.environ["APP_HOME"] = str(app_home)
         try:
             driver = _configured_driver(Path(tmp), popen_fn=_real_child_popen_fn(child_src))
-            host_ref = driver.spawn({"agent_instance_id": "agi-init-capture-2"})
+            host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-init-capture-2"})
             time.sleep(1.0)
             spool_dir = app_home / "data" / _SPOOL_SUBDIR
             files = list(spool_dir.glob("*.json")) if spool_dir.exists() else []
@@ -194,7 +196,7 @@ def test_malformed_first_line_is_non_fatal() -> None:
         os.environ["APP_HOME"] = str(app_home)
         try:
             driver = _configured_driver(Path(tmp), popen_fn=_real_child_popen_fn(child_src))
-            host_ref = driver.spawn({"agent_instance_id": "agi-init-capture-3"})
+            host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-init-capture-3"})
             time.sleep(1.0)
             still_alive_or_exited_cleanly = True  # if spawn() itself didn't raise, this leg passed
             spool_dir = app_home / "data" / _SPOOL_SUBDIR
@@ -223,7 +225,7 @@ def test_missing_app_home_writes_nothing() -> None:
     try:
         with tempfile.TemporaryDirectory() as tmp:
             driver = _configured_driver(Path(tmp), popen_fn=_real_child_popen_fn(child_src))
-            host_ref = driver.spawn({"agent_instance_id": "agi-init-capture-4"})
+            host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-init-capture-4"})
             time.sleep(1.0)
             driver.terminate(host_ref, grace_seconds=2)
             # No APP_HOME means no fixed spool location to even check -- the

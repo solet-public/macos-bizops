@@ -14,8 +14,9 @@ Identity model (KB ``03_inter_agent_messaging``):
 * ``agent_instance_id`` — durable per-bridge UUID, NEW each subprocess.
 * ``agent_session_id`` — the stable logical-session key the CAS self-refresh
   keys on to re-point a rotated ``agent_instance_id`` on reconnect WITHOUT a
-  fresh explicit claim. One CAS, filtered on the session id alone, re-points
-  every role that session holds.
+  fresh explicit claim. The CAS also matches the independently observed
+  predecessor when available; absent evidence retains session-key rotation
+  with ERROR attribution advisories.
 * ``session_label`` — display-only, never a routing key.
 
 This module is pure (no plugin/bridge imports, no live caller until the
@@ -63,6 +64,8 @@ from ananta.llm.agent_messaging.state_results import (
     require_records,
     require_updated,
 )
+
+from ._role_refresh_evidence import RoleRefreshEvidence, advise_missing_attribution
 
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
@@ -606,6 +609,27 @@ def holds_role(
     return resolved.agent_session_id == agent_session_id
 
 
+def holds_role_for_instance(
+    state: StateManagementInterface, name: str, agent_session_id: str, agent_instance_id: str,
+) -> bool:
+    """Registration readback requires both the stable session and current instance.
+
+    Vacant/different holders return False; malformed/provider faults propagate
+    so the registration wrapper reports unknown and preserves recovery.
+    """
+    if not agent_session_id or not agent_instance_id:
+        return False
+    try:
+        resolved = resolve_role_binding_v4(state, name)
+    except RoleBindingVacantError:
+        return False
+    return (
+        resolved.holder_kind == HOLDER_KIND_SESSION
+        and resolved.agent_session_id == agent_session_id
+        and resolved.agent_instance_id == agent_instance_id
+    )
+
+
 def upsert_role_entity(
     state: StateManagementInterface,
     *,
@@ -683,7 +707,8 @@ def legislate_role_class(
     name: str,
     role_class: str,
     directed_by: str,
-    brief_ref: str,
+    unit_id: str,
+    revision_id: str,
 ) -> str:
     """Governance-act creation of the ``role`` entity row with ``role_class``
     stamped AT BIRTH — the ONE sanctioned path that assigns an authority-
@@ -700,7 +725,7 @@ def legislate_role_class(
     (``'already_legislated'``); a DIFFERENT class raises
     :class:`RoleClassConflictError` rather than silently reassigning it.
 
-    ``directed_by`` / ``brief_ref`` are best-effort provenance on the row's
+    ``directed_by`` / registered Unit revision are best-effort provenance on the row's
     ``description``/``properties`` (NOT the durable audit trail — those two
     columns are overwritten by every subsequent ordinary claim's
     ``upsert_role_entity(state, name=name)`` call, which is pre-existing D1
@@ -719,7 +744,7 @@ def legislate_role_class(
         COL_ORIGIN: ROLE_ORIGIN_USER,
         COL_DESCRIPTION: f"legislated role_class={role_class}",
         COL_PROPERTIES: json.dumps(
-            {"directed_by": directed_by, "brief_ref": brief_ref, "legislated_at": _now_iso()},
+            {"directed_by": directed_by, "unit_id": unit_id, "revision_id": revision_id, "legislated_at": _now_iso()},
         ),
     }
     insert_result = require_completed(
@@ -739,7 +764,7 @@ def legislate_role_class(
     if inserted:
         logger.warning(
             "GOVERNANCE ACT: role %r legislated role_class=%r directed_by=%r "
-            "brief_ref=%r", name, role_class, directed_by, brief_ref,
+            "unit_id=%r revision_id=%r", name, role_class, directed_by, unit_id, revision_id,
         )
         return "legislated"
     existing = _read_role_entity_row(state, external_id)
@@ -747,8 +772,8 @@ def legislate_role_class(
     if existing_class == role_class:
         logger.info(
             "GOVERNANCE ACT: role %r already legislated role_class=%r — "
-            "idempotent re-run, directed_by=%r brief_ref=%r",
-            name, role_class, directed_by, brief_ref,
+            "idempotent re-run, directed_by=%r unit_id=%r revision_id=%r",
+            name, role_class, directed_by, unit_id, revision_id,
         )
         return "already_legislated"
     raise RoleClassConflictError(name, existing_class, role_class)
@@ -796,31 +821,42 @@ def refresh_role_binding_cas(
     *,
     agent_session_id: str,
     new_agent_instance_id: str,
+    evidence: RoleRefreshEvidence,
 ) -> int:
-    """Reconnect self-refresh — re-point every role this session holds in one CAS.
+    """Correct reconnect pointers using independently observed predecessor evidence.
 
-    Filtered on the stable ``agent_session_id`` ALONE (no role name): on
-    reconnect a bridge's ``agent_instance_id`` rotates but its
-    ``agent_session_id`` is stable, so a single predicated ``update_state``
-    re-points EVERY binding that session holds to the new instance id. Returns
-    the rows-affected count (``0`` = this session holds no binding → the caller
-    falls through to an explicit claim). An empty / sentinel session id is NOT
-    an identity — fail closed (return ``0`` without touching the table) so a
-    no-carrier session can never CAS-match a real or backfilled binding.
+    A known predecessor is part of the atomic predicate; losing it returns 0,
+    with no reread/retry against the new holder. Known contradictory parents
+    refuse only rotation. Missing evidence preserves rotation with ERROR
+    advisories; no expected instance leaves the original session-key predicate.
+    Only instance/claimed_at change, preserving claim epoch and holder identity.
+    Empty/sentinel session ids still return 0 without accessing the table.
     """
     if not agent_session_id or agent_session_id == UNCLAIMED_SESSION_ID:
         return 0
+    if evidence.contradicts(new_agent_instance_id):
+        logger.error(
+            "role refresh contradiction: session=%s expected=%s new=%s predecessor_parent=%s registering_parent=%s",
+            agent_session_id, evidence.expected_agent_instance_id, new_agent_instance_id,
+            evidence.predecessor_parent_pid, evidence.registering_parent_pid,
+        )
+        return 0
+    advise_missing_attribution(
+        state, agent_session_id=agent_session_id,
+        new_agent_instance_id=new_agent_instance_id, evidence=evidence,
+    )
+    filters: dict[str, object] = {
+        COL_AGENT_SESSION_ID: agent_session_id,
+        COL_HOLDER_KIND: HOLDER_KIND_SESSION,
+        _COL_IS_DELETED: 0,
+    }
+    if evidence.expected_agent_instance_id is not None:
+        filters[COL_AGENT_INSTANCE_ID] = evidence.expected_agent_instance_id
     result = state.update_state(
         AGENT_ROLE_BINDING_NAMESPACE,
         {
-            # §9 CUTOVER: reconnect self-refresh CASes the v4 table (readers + writer
-            # move together). Filter on the stable agent_session_id; re-point ONLY the
-            # rotated agent_instance_id (+ claimed_at). session_label is NOT a v4 column
-            # — it lives in holder_identity JSON (§4.6) and does not rotate on reconnect,
-            # so there is nothing to re-point. A provider holder has no session id so it
-            # never matches — no-op, correct.
             "table": TABLE_ROLE_BINDING,
-            "filters": {COL_AGENT_SESSION_ID: agent_session_id},
+            "filters": filters,
         },
         {
             COL_AGENT_INSTANCE_ID: new_agent_instance_id,
@@ -1124,6 +1160,7 @@ __all__ = [
     "RoleClassConflictError",
     "claim_role_binding_v4",
     "holds_role",
+    "holds_role_for_instance",
     "ingest_role_entity",
     "list_roles_for_agent_instance",
     "migrate_agent_role_binding_to_v4",

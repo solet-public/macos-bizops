@@ -16,6 +16,15 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from quality_gates import candidate_tree  # noqa: E402
+from quality_gates.tests.candidate_repo_smoke import (  # noqa: E402
+    _build_fixture_repo,
+    _foreign_repo,
+    _git_snapshot,
+    _hostile_git_cases,
+)
+from quality_gates.tests.candidate_repo_smoke import (  # noqa: E402
+    _fixture_env as _safe_env,
+)
 
 identity_gate = import_module("quality_gates.macos_" + "bizops_identity_gate")
 _RETIRED = "biz" + "ops" + "_standard"
@@ -37,9 +46,7 @@ def _write(root: Path, relpath: str, content: str) -> None:
 
 
 @contextmanager
-def _mock_base(
-    files: dict[str, bytes], modes: dict[str, str] | None = None
-) -> Generator[None]:
+def _mock_base(files: dict[str, bytes], modes: dict[str, str] | None = None) -> Generator[None]:
     recorded_modes = modes or {}
     blobs = tuple(
         candidate_tree._GitBlob(
@@ -49,10 +56,7 @@ def _mock_base(
         )
         for index, path in enumerate(sorted(files), start=1)
     )
-    contents = {
-        blob.object_id: files[blob.path]
-        for blob in blobs
-    }
+    contents = {blob.object_id: files[blob.path] for blob in blobs}
     with (
         patch.object(candidate_tree, "_git_tree_blobs", return_value=blobs),
         patch.object(candidate_tree, "_git_blob_contents", return_value=contents),
@@ -60,10 +64,16 @@ def _mock_base(
         yield
 
 
+def _fixture_env() -> dict[str, str]:
+    """Drop inherited Git selectors from disposable fixture subprocesses."""
+    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+
 def _git(root: Path, *arguments: str) -> None:
     subprocess.run(
         ("git", *arguments),
         cwd=root,
+        env=_fixture_env(),
         check=True,
         capture_output=True,
     )
@@ -90,13 +100,9 @@ def _assert_overlay_shape(candidate: candidate_tree.CandidateTree) -> None:
     assert "delete.txt" not in candidate.paths
     assert "old.txt" not in candidate.paths
     assert "new.txt" in candidate.paths
-    assert (candidate.root / "tracked-outside.txt").read_bytes() == (
-        b"clean committed bytes\n"
-    )
+    assert (candidate.root / "tracked-outside.txt").read_bytes() == (b"clean committed bytes\n")
     assert not (candidate.root / "untracked-outside.txt").exists()
-    assert candidate_tree.validate_candidate_manifest(
-        candidate.root, candidate.manifest
-    ) == candidate.paths
+    assert candidate_tree.validate_candidate_manifest(candidate.root, candidate.manifest) == candidate.paths
 
 
 def _assert_scanner_isolation(candidate: candidate_tree.CandidateTree) -> None:
@@ -180,23 +186,53 @@ def _check_manifest_fail_closed() -> int:
         with _combined_candidate(Path(temporary)) as candidate:
             candidate.manifest.write_text("added.txt\n", encoding="utf-8")
             try:
-                candidate_tree.validate_candidate_manifest(
-                    candidate.root, candidate.manifest
-                )
+                candidate_tree.validate_candidate_manifest(candidate.root, candidate.manifest)
             except candidate_tree.CandidateManifestError as exc:
                 assert "incomplete" in str(exc)
             else:
                 raise AssertionError("an incomplete candidate manifest must fail closed")
             candidate.manifest.write_text("added.txt\nadded.txt\n", encoding="utf-8")
             try:
-                candidate_tree.validate_candidate_manifest(
-                    candidate.root, candidate.manifest
-                )
+                candidate_tree.validate_candidate_manifest(candidate.root, candidate.manifest)
             except candidate_tree.CandidateManifestError as exc:
                 assert "duplicates" in str(exc)
             else:
                 raise AssertionError("a duplicate candidate manifest must fail closed")
     return 2
+
+
+def _assert_git_pointer_refused(candidate: candidate_tree.CandidateTree, relpath: str, place: str) -> None:
+    pointer = candidate.root / relpath
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    if place == "symlink":
+        pointer.symlink_to("/nonexistent-shared-git-dir")
+    else:
+        pointer.write_text("gitdir: /shared/checkout/.git/worktrees/lane\n", encoding="utf-8")
+    try:
+        candidate_tree.validate_candidate_manifest(candidate.root, candidate.manifest)
+    except candidate_tree.CandidateManifestError as exc:
+        assert "a .git pointer file" in str(exc) and relpath in str(exc), str(exc)
+    else:
+        raise AssertionError(f"a hand-placed {place} .git pointer at {relpath} must be refused")
+    pointer.unlink()
+    assert candidate_tree.validate_candidate_manifest(candidate.root, candidate.manifest) == candidate.paths
+
+
+def _check_git_pointer_file_refused() -> int:
+    """iss_97f1764b: a `.git` pointer FILE anywhere in a candidate tree is refused, while the private `.git` directory is not."""
+    with TemporaryDirectory() as temporary:
+        with _combined_candidate(Path(temporary)) as candidate:
+            private = candidate.root / ".git"
+            private.mkdir()
+            (private / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            assert candidate_tree.validate_candidate_manifest(candidate.root, candidate.manifest) == candidate.paths
+            private_file = private / "HEAD"
+            private_file.unlink()
+            private.rmdir()
+            _assert_git_pointer_refused(candidate, ".git", "file")
+            _assert_git_pointer_refused(candidate, "nested/dir/.git", "file")
+            _assert_git_pointer_refused(candidate, ".git", "symlink")
+    return 7
 
 
 def _expect_path_failure(root: Path, scope: tuple[str, ...]) -> None:
@@ -226,9 +262,7 @@ def _check_invalid_inputs() -> int:
                 with candidate_tree.build_candidate_tree(
                     root,
                     ("old.txt", "new.txt"),
-                    renames=(
-                        candidate_tree.Rename(old="old.txt", new="new.txt"),
-                    ),
+                    renames=(candidate_tree.Rename(old="old.txt", new="new.txt"),),
                 ):
                     pass
             except candidate_tree.CandidateOverlayError as exc:
@@ -269,12 +303,8 @@ def _check_raw_git_tree_bytes() -> int:
         _write(root, "overlay.txt", "ordinary overlay\n")
         with candidate_tree.build_candidate_tree(root, ("overlay.txt",)) as candidate:
             assert "ignored.txt" in candidate.paths
-            assert (candidate.root / "ignored.txt").read_text(encoding="utf-8") == (
-                "must remain in the raw candidate\n"
-            )
-            assert (candidate.root / "subst.txt").read_text(encoding="utf-8") == (
-                "$Format:%H$\n"
-            )
+            assert (candidate.root / "ignored.txt").read_text(encoding="utf-8") == ("must remain in the raw candidate\n")
+            assert (candidate.root / "subst.txt").read_text(encoding="utf-8") == ("$Format:%H$\n")
     return 3
 
 
@@ -308,22 +338,16 @@ def _check_path_type_transitions() -> int:
         root = Path(temporary)
         _write(root, "node", "replacement file\n")
         with _mock_base({"node/child.txt": b"base child\n"}):
-            with candidate_tree.build_candidate_tree(
-                root, ("node", "node/child.txt")
-            ) as candidate:
+            with candidate_tree.build_candidate_tree(root, ("node", "node/child.txt")) as candidate:
                 assert candidate.paths == ("node",)
                 assert (candidate.root / "node").read_bytes() == b"replacement file\n"
     with TemporaryDirectory() as temporary:
         root = Path(temporary)
         _write(root, "node/child.txt", "replacement child\n")
         with _mock_base({"node": b"base file\n"}):
-            with candidate_tree.build_candidate_tree(
-                root, ("node", "node/child.txt")
-            ) as candidate:
+            with candidate_tree.build_candidate_tree(root, ("node", "node/child.txt")) as candidate:
                 assert candidate.paths == ("node/child.txt",)
-                assert (candidate.root / "node/child.txt").read_bytes() == (
-                    b"replacement child\n"
-                )
+                assert (candidate.root / "node/child.txt").read_bytes() == (b"replacement child\n")
     return 4
 
 
@@ -343,9 +367,7 @@ def _check_mode_fidelity() -> int:
         }
         modes = {"link": "120000", "scripts/run.sh": "100755"}
         with _mock_base(base, modes):
-            with candidate_tree.build_candidate_tree(
-                root, ("overlay.txt", "overlay-exec.sh")
-            ) as candidate:
+            with candidate_tree.build_candidate_tree(root, ("overlay.txt", "overlay-exec.sh")) as candidate:
                 _assert_exec_bits_survive(candidate)
                 _assert_symlink_survives(candidate)
                 _assert_census_excludes_exhaust(candidate)
@@ -378,9 +400,7 @@ def _assert_census_excludes_exhaust(candidate: candidate_tree.CandidateTree) -> 
     polluted = candidate.root / "pkg/__pycache__/real.cpython-313.pyc"
     polluted.parent.mkdir(parents=True, exist_ok=True)
     polluted.write_bytes(b"\x00bytecode\n")
-    revalidated = candidate_tree.validate_candidate_manifest(
-        candidate.root, candidate.manifest
-    )
+    revalidated = candidate_tree.validate_candidate_manifest(candidate.root, candidate.manifest)
     assert revalidated == candidate.paths, "bytecode contaminated the census"
 
 
@@ -512,18 +532,9 @@ def _check_frozen_entry_composition() -> int:
 def _check_nested_identity_candidate() -> int:
     bare = "biz" + "ops"
     cases = {
-        "nested_mapping.py": (
-            f'payload = {{"bundle": {{"name": "{bare}"}}}}  '
-            "# user-created instance name\n"
-        ),
-        "nested_subscript.py": (
-            f'payload["bundle"]["name"] = "{bare}"  '
-            "# user-created instance name\n"
-        ),
-        "deep_mapping.py": (
-            f'payload = {{"provenance": {{"bundle": {{"name": "{bare}"}}}}}}  '
-            "# user-created instance name\n"
-        ),
+        "nested_mapping.py": (f'payload = {{"bundle": {{"name": "{bare}"}}}}  # user-created instance name\n'),
+        "nested_subscript.py": (f'payload["bundle"]["name"] = "{bare}"  # user-created instance name\n'),
+        "deep_mapping.py": (f'payload = {{"provenance": {{"bundle": {{"name": "{bare}"}}}}}}  # user-created instance name\n'),
         "nested.yaml": f"bundle:\n  name: {bare}  # user-created instance name\n",
         "multiline.yaml": f"profile_name:\n  {bare}  # business operations\n",
     }
@@ -539,12 +550,18 @@ def _check_nested_identity_candidate() -> int:
     return len(cases) + 1
 
 
+def _assert_step75_directory_scanner_selection(skill: str) -> None:
+    step75_start = skill.index("**Scoped Step 7.5 for ordinary landings**")
+    step75_end = skill.index("**Deploy collection trigger.**", step75_start)
+    step75 = skill[step75_start:step75_end]
+    assert 'if grep -Eq "$SCANNER_API_RE" "$smoke"; then' in step75 and '[ "$root" = "plugins" ] && [ "$smoke" = "solet_cli/tests/real_style_tree_2_smoke.py" ]' in step75, "Step 7.5 directory scanner selector is missing"
+    assert ('if [ -s "$CANDIDATE_SCOPE_FILE" ] && grep -Eq \'(evaluate_repository|scan_repository)[[:space:]]*\\([[:space:]]*_REPO_ROOT|[[:alnum:]_]+[[:space:]]*\\([^)]*cwd[[:space:]]*=[[:space:]]*_REPO_ROOT\' "$smoke"; then selected=1; fi') in step75, "Step 7.5 real-root evaluator selector is missing"
+
+
 def _assert_controller_delivery(skill: str) -> None:
     candidate_step = skill.index("### Step 9.25")
     role_check = skill.index("### Step 9.5")
-    lane_branch_provision = skill.index(
-        "The spawn path already created `LANE_BRANCH` when it created this worktree."
-    )
+    lane_branch_provision = skill.index("The spawn path already created `LANE_BRANCH` when it created this worktree.")
     assert candidate_step < role_check < lane_branch_provision
     candidate_section = skill[candidate_step:role_check]
     assert candidate_section.count("quality_gates/candidate_tree.py") == 1
@@ -557,6 +574,7 @@ def _assert_controller_delivery(skill: str) -> None:
     assert "git add -A\n" not in skill
     assert "staged-path equality" in skill
     assert "root-manifest" in skill[commit_step:]
+    _assert_step75_directory_scanner_selection(skill)
 
 
 def _assert_procedure_delivery(procedure: str, hook: str) -> None:
@@ -576,17 +594,12 @@ def _check_delivery_order() -> int:
     if (_REPO_ROOT / "PROVENANCE.json").is_file():
         print("SKIP  delivery-order contract: origin-side surfaces are pruned from seed clones")
         return 0
-    skill = (_REPO_ROOT / ".claude/skills/git-controller-commit/SKILL.md").read_text(
-        encoding="utf-8"
-    )
-    procedure = (
-        _REPO_ROOT
-        / "ananta/knowledge_bases/ananta_platform/22_testing/03_peer_precompletion_gate_procedure.md"
-    ).read_text(encoding="utf-8")
+    skill = (_REPO_ROOT / ".claude/skills/git-controller-commit/SKILL.md").read_text(encoding="utf-8")
+    procedure = (_REPO_ROOT / "ananta/knowledge_bases/ananta_platform/22_testing/03_peer_precompletion_gate_procedure.md").read_text(encoding="utf-8")
     hook = (_REPO_ROOT / ".githooks/pre-commit").read_text(encoding="utf-8")
     _assert_controller_delivery(skill)
     _assert_procedure_delivery(procedure, hook)
-    return 12
+    return 13
 
 
 def _check_gate_script_resolves_from_candidate_not_invoking_checkout() -> int:
@@ -631,12 +644,14 @@ def _check_gate_script_resolves_from_candidate_not_invoking_checkout() -> int:
                 "base",
             ),
             cwd=repo,
+            env=_fixture_env(),
             check=True,
             capture_output=True,
         )
         base_ref = subprocess.run(
             ("git", "rev-parse", "HEAD"),
             cwd=repo,
+            env=_fixture_env(),
             check=True,
             capture_output=True,
             text=True,
@@ -668,25 +683,49 @@ def _check_gate_script_resolves_from_candidate_not_invoking_checkout() -> int:
                 "--run-identity-gate",
             ),
             cwd=repo,
+            env=_fixture_env(),
             check=False,
             capture_output=True,
             text=True,
         )
         combined = result.stdout + result.stderr
-        assert stale_sentinel not in combined, (
-            "wrong-tree regression: the invoking checkout's stale gate script "
-            f"ran instead of the candidate's own copy\n{combined}"
-        )
+        assert stale_sentinel not in combined, f"wrong-tree regression: the invoking checkout's stale gate script ran instead of the candidate's own copy\n{combined}"
         assert candidate_sentinel in combined, combined
         assert result.returncode == 0, (result.returncode, combined)
     return 1
 
 
+def _check_hostile_git_environment() -> int:
+    with TemporaryDirectory() as temporary:
+        workspace = Path(temporary).resolve()
+        repo = workspace / "source"
+        repo.mkdir()
+        _build_fixture_repo(repo)
+        foreign = _foreign_repo(workspace)
+        before = _git_snapshot(repo, foreign)
+        for number, hostile in enumerate(_hostile_git_cases(foreign)):
+            with patch.dict(os.environ, _safe_env() | hostile, clear=True):
+                ambient = dict(os.environ)
+                candidate = candidate_tree.materialize_candidate_tree(repo, workspace / f"tree-{number}", ("src/overlay.txt",), base_ref="HEAD")
+                assert (candidate.root / "src/stable.txt").read_bytes() == b"stable base\n", "MATERIALIZED_TREE_IS_REQUESTED"
+                assert "foreign-only.txt" not in candidate.paths, "MATERIALIZED_TREE_IS_REQUESTED"
+                assert candidate_tree.validate_candidate_manifest(candidate.root, candidate.manifest) == candidate.paths
+                assert (candidate.root / "link").is_symlink()
+                assert (candidate.root / "scripts/run.sh").stat().st_mode & 0o111
+                staged = candidate_tree.materialize_staged_tree(repo, workspace / f"staged-{number}", ("other_lane/protected.txt", "other_lane/added.txt"), base_ref="HEAD")
+                assert (staged.root / "other_lane/protected.txt").read_bytes() == b"other lane STAGED bytes\n", "STAGED_TREE_IS_REQUESTED"
+                assert dict(os.environ) == ambient, "CALLER_ENVIRONMENT_UNCHANGED"
+        assert _git_snapshot(repo, foreign) == before, "SOURCE_AND_FOREIGN_BYTES_UNCHANGED"
+    return 78
+
+
 def main() -> int:
-    check_count = _check_overlay_and_isolation()
+    check_count = _check_hostile_git_environment()
+    check_count += _check_overlay_and_isolation()
     check_count += _check_explicit_manifest_evaluation()
     check_count += _check_censusable_manifest_excludes_symlinks()
     check_count += _check_manifest_fail_closed()
+    check_count += _check_git_pointer_file_refused()
     check_count += _check_invalid_inputs()
     check_count += _check_raw_git_tree_bytes()
     check_count += _check_portable_path_integrity()

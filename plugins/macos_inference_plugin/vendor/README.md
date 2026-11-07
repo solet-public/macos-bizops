@@ -22,10 +22,10 @@ recomputes `RECORD`; the SDK modules and libraries are copied without changes.
 Install proof on a physical macOS 27.0 arm64 host with Python 3.13:
 
 ```bash
-python3.13 -m venv /tmp/apple-fm-wheel-proof
-/tmp/apple-fm-wheel-proof/bin/python -m pip install --no-index --no-deps \
+python3.13 -m venv "$HOME/.apple-fm-wheel-proof"
+"$HOME/.apple-fm-wheel-proof/bin/python" -m pip install --no-index --no-deps \
   plugins/macos_inference_plugin/vendor/apple_fm_sdk-0.2.1-py3-none-macosx_27_0_arm64.whl
-/tmp/apple-fm-wheel-proof/bin/python -c 'import apple_fm_sdk as fm; print(fm.SystemLanguageModel().is_available())'
+"$HOME/.apple-fm-wheel-proof/bin/python" -c 'import apple_fm_sdk as fm; print(fm.SystemLanguageModel().is_available())'
 ```
 
 The measured result was `(True, None)` with `context_size == 8192`. The plugin

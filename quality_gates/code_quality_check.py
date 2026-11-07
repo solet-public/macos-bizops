@@ -41,22 +41,42 @@ platform's quality surface only — `ananta/src`, `ananta/tests` (operator-ruled
 2026-07-07, GTE-05), `plugins/*/src`, `plugins/*/tests`, and
 `quality_gates`. Operator-tooling (research/tools/migrations/
 parity_tests/, workbench, deployment, top-level utilities) is excluded.
+
+Scoped run: on a landing merge (HEAD with two parents, clean tree), syntax,
+radon_cc and radon_mi run only on the files that merge touched; god_class and
+pyright run on those files and the files that import them; every other class
+runs full. Each run prints a CLASS REPORT with one row per class, and an
+ADVISORY line for each scoped class that fell back to full. The planning lives
+in quality_gates/code_quality_scope.py. Exit codes are unchanged.
 """
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path, PurePosixPath
+from typing import TypeVar
 
+from code_quality_scope import (
+    ClassPlan,
+    ScopeReport,
+    derive_touched_surface,
+    full_plan,
+    plan_classes,
+    scope_advisories,
+)
 from gate_scope import (
     BUNDLED_VENV_PREFIX,
     GateCrashError,
     repo_files,
 )
+
+_T = TypeVar("_T")
 
 _QUALITY_GATES_DIR = Path("quality_gates")
 _GOD_CLASS_CHECK = _QUALITY_GATES_DIR / "god_class_check.py"
@@ -80,9 +100,7 @@ _RETURN_SHAPE_ALLOWLIST = _QUALITY_GATES_DIR / "return_shape_allowlist.txt"
 _SHIPPED_DOC_CHECK = _QUALITY_GATES_DIR / "shipped_doc_gate.py"
 _SHIPPED_DOC_ALLOWLIST = _QUALITY_GATES_DIR / "cited_path_gate_allowlist.txt"
 _EMBEDDING_BOUND_CHECK = _QUALITY_GATES_DIR / "embedding_description_bound_gate.py"
-_EMBEDDING_BOUND_ALLOWLIST = (
-    _QUALITY_GATES_DIR / "embedding_description_bound_allowlist.txt"
-)
+_EMBEDDING_BOUND_ALLOWLIST = _QUALITY_GATES_DIR / "embedding_description_bound_allowlist.txt"
 _BUNDLE_LICENSE_CHECK = _QUALITY_GATES_DIR / "bundle_license_gate.py"
 _BUNDLE_LICENSE_ALLOWLIST = _QUALITY_GATES_DIR / "bundle_license_allowlist.txt"
 _SCHEMA_INIT_CHECK = _QUALITY_GATES_DIR / "schema_init_gate.py"
@@ -113,6 +131,7 @@ class _GateOutcome(Enum):
     BLOCKING = "blocking"
     CRASH = "crash"
 
+
 # Per-file gate scope: the platform's quality surface, mirroring the
 # SKILL Step 6 SCOPE regex and the radon_cc/mi allowlists' coverage.
 # Narrowing operator ruling, 2026-08-08 ("quality gates apply to
@@ -122,10 +141,9 @@ class _GateOutcome(Enum):
 # `.claude/hooks`, and plugin `policies/` are being brought in-scope,
 # fix-first, one class per landing — see
 # workbench/2026-08-08_gate_scope_widening_measurement_d3-impl.md.
-# `.claude/hooks` is deferred: rotation-impl has live untracked/dirty
-# work there as of 2026-08-08, and this scope walk is filesystem-based
-# (rglob), not git-tracked-only, so widening now would sweep its WIP into
-# this gate. workbench/ remains out per the (assumption, not
+# `.claude/hooks` is in scope, including nested tests (iss_76dc47ad).
+# Repository membership still excludes ignored/vendor inputs.
+# workbench/ remains out per the (assumption, not
 # operator-ruled) ephemeral-scratch carve-out in that same findings
 # file. `deployment/` is only partly out: `deployment/scripts` (one
 # file) is in-scope, fix-first, as part of ruling 1's "tail" class —
@@ -145,12 +163,20 @@ class _GateOutcome(Enum):
 # regex, not from this table, and an entry missing there is silently
 # un-gated per-file (caught live 2026-08-09 on initialization/tests/).
 _PER_FILE_GATE_TOP_LEVEL = (
-    Path("ananta/src"), Path("ananta/tests"), Path("quality_gates"),
-    Path("ananta/setup.py"), Path("bootstrap.py"), Path("deployment/scripts"),
-    Path("initialization/__init__.py"), Path("initialization/profile_loader.py"),
-    Path("initialization/tests"), Path("initialization/src"),
-    Path("plugins/github_midwife_plugin/coordination_hooks_common"),
-    Path("solet_cli/src"), Path("solet_cli/tests"), Path("bootstrap_adapter"),
+    Path("ananta/src"),
+    Path("ananta/tests"),
+    Path("quality_gates"),
+    Path("ananta/setup.py"),
+    Path("bootstrap.py"),
+    Path("deployment/scripts"),
+    Path("initialization/__init__.py"),
+    Path("initialization/profile_loader.py"),
+    Path("initialization/tests"),
+    Path("initialization/src"),
+    Path("solet_cli/src"),
+    Path("solet_cli/tests"),
+    Path("bootstrap_adapter"),
+    Path(".claude/hooks"),
 )
 # `solet_cli/src`, `solet_cli/tests`, `bootstrap_adapter` added 2026-09-20
 # (lane-fix-gates-b-ungated-surfaces-20260920, unt_26776365, closing
@@ -242,7 +268,7 @@ def _matches_top_level_scope(candidate: PurePosixPath) -> bool:
 
 def _matches_declared_root(candidate: PurePosixPath, root: Path) -> bool:
     root_parts = root.parts
-    if candidate.parts[:len(root_parts)] != root_parts:
+    if candidate.parts[: len(root_parts)] != root_parts:
         return False
     if root.suffix == ".py":
         return candidate.parts == root_parts
@@ -262,10 +288,8 @@ def _matches_plugin_pattern(candidate: PurePosixPath, pattern: PurePosixPath) ->
         return False
     if not exact_file and len(candidate.parts) <= len(pattern.parts):
         return False
-    return all(
-        expected == "*" or actual == expected
-        for actual, expected in zip(candidate.parts, pattern.parts, strict=False)
-    )
+    return all(expected == "*" or actual == expected for actual, expected in zip(candidate.parts, pattern.parts, strict=False))
+
 
 # Path-segment prefix that flags a directory as a bundled venv (e.g.
 # `.venv`, `.venv_cosyvoice`). Bundled venvs ship vendored library code
@@ -312,9 +336,7 @@ def _staged_files_touch_prompt_assembly() -> bool:
         staged = result.stdout.strip().splitlines()
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
-    return any(
-        f.startswith(trigger) for f in staged for trigger in _PROMPT_ASSEMBLY_TRIGGERS
-    )
+    return any(f.startswith(trigger) for f in staged for trigger in _PROMPT_ASSEMBLY_TRIGGERS)
 
 
 _PROMPT_SET_DIR = "plugins/default_inference_plugin/research/prompt_engineering/prompt_sets"
@@ -333,12 +355,7 @@ def _staged_prompt_json_files() -> list[str]:
         staged = result.stdout.strip().splitlines()
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return []
-    return [
-        f for f in staged
-        if f.startswith(_PROMPT_SET_DIR)
-        and f.endswith("_prompt.json")
-        and "/archive/" not in f
-    ]
+    return [f for f in staged if f.startswith(_PROMPT_SET_DIR) and f.endswith("_prompt.json") and "/archive/" not in f]
 
 
 def _existing_readable_title(readable: Path) -> str | None:
@@ -370,9 +387,7 @@ def _check_single_readable(project_root: Path, venv_python: Path, renderer: Path
     json_file = project_root / rel_json
     if not json_file.is_file():
         return None
-    readable = json_file.with_name(
-        json_file.name.replace("_prompt.json", "_readable.txt")
-    )
+    readable = json_file.with_name(json_file.name.replace("_prompt.json", "_readable.txt"))
     if not readable.exists():
         return f"  missing: {readable.relative_to(project_root)}"
 
@@ -406,11 +421,7 @@ def _check_readable_freshness(project_root: Path, venv_python: Path) -> bool:
         return False
 
     print("\n📊 Readable Fixture Freshness Check...")
-    stale = [
-        marker
-        for rel_json in staged_jsons
-        if (marker := _check_single_readable(project_root, venv_python, renderer, rel_json)) is not None
-    ]
+    stale = [marker for rel_json in staged_jsons if (marker := _check_single_readable(project_root, venv_python, renderer, rel_json)) is not None]
 
     if not stale:
         print("✅ Readable fixtures up-to-date with staged JSON sources")
@@ -455,6 +466,7 @@ def _run_fixture_replay_if_needed(project_root: Path, venv_python: Path) -> bool
 class _CheckResults:
     has_type_errors: bool = False
     has_lint_errors: bool = False
+    pyright_unmeasured: bool = False
     # Names of blocking structural gates (coherence trio, W-INT,
     # service-interface AST) that reported non-allowlisted findings —
     # the summary attributes the failure to each gate by name.
@@ -464,6 +476,10 @@ class _CheckResults:
     # gate produced no verdict" instead of asserting violations that were
     # never counted.
     crashed_gates: list[tuple[str, str]] = field(default_factory=list)
+    # Per-class scope plan for this run (code_quality_scope), and the CLASS
+    # REPORT rows that each class fills as it runs or is skipped.
+    plan: dict[str, ClassPlan] = field(default_factory=lambda: full_plan("no scope plan supplied: runs full"))
+    report: ScopeReport = field(default_factory=ScopeReport)
 
 
 @dataclass(frozen=True)
@@ -651,8 +667,9 @@ _SCHEMA_INIT_GATE = _GateSpec(
 
 # Repo-level shipped-smoke source contract lint gate (iss_59385149, wgr_42e3a251).
 # Tree-walking (no scope-path argv splicing) — checks that every checkout-only
-# smoke declaration agrees across all three surfaces (gate_smokes.txt marker,
-# shipped_smoke_contract.yaml entry, seed_manifest.yaml exclude_paths), the
+# smoke declaration agrees across all three surfaces (the gate-smoke register's
+# marker, the shipped-smoke contract's entry, the seed manifest's
+# exclude_paths — each an effective union, see below), the
 # same V1 predicate ``assemble()`` runs, but reachable before a bundle exists,
 # and that no capability profile reports a per-profile contract row beyond the
 # allowlisted baseline (``check_source_tree_contract``, ~15 s, hence 120 s).
@@ -660,6 +677,22 @@ _SCHEMA_INIT_GATE = _GateSpec(
 # battery and two reviews passed it, and the gap surfaced one publish lap
 # later at assembly (``rrun_78ae868f``). Exit codes follow the canonical
 # _WRAPPER_OK (0) / _WRAPPER_BLOCKING (2) pattern.
+#
+# EVERY SURFACE IS AN EFFECTIVE UNION (prb_ae6d81ea, chg_46d4755e). Each of the
+# three is its main file plus the per-candidate fragments beside it:
+# ``gate_smokes.d/*.txt``, ``shipped_smoke_contract.d/*.yaml`` and
+# ``seed_manifest.d/*.yaml``. A candidate declaring a checkout-only smoke
+# therefore writes three files of its own and shares no path with another
+# candidate doing the same, which is the serialization prb_ae6d81ea measured.
+# The plugin reads the register through its own
+# ``seed_factory_plugin.knowledge_fragments`` rather than this repository-root
+# dev package, because a shipped plugin cannot import ``quality_gates`` — it is
+# not on the plugin's path and not part of what the plugin ships — and
+# ``quality_gates/tests/shipped_contract_fragment_union_smoke.py`` proves the two
+# readers agree file for file instead of leaving it asserted in prose.
+# The agreement itself is UNWEAKENED: this gate compares the UNIONS, so a
+# declaration present in one surface and missing from another is still a finding
+# wherever each part lives, and a marker-only declaration still fails.
 _SMOKE_CONTRACT_LINT_GATE = _GateSpec(
     name="smoke_contract_lint",
     description="shipped-smoke source contract (checkout-only consistency and per-profile rows)",
@@ -670,11 +703,7 @@ _SMOKE_CONTRACT_LINT_GATE = _GateSpec(
 
 def _scope_roots(project_root: Path) -> list[Path]:
     """Resolve the declared quality-surface roots that exist in this checkout."""
-    roots = [
-        candidate
-        for top in _PER_FILE_GATE_TOP_LEVEL
-        if (candidate := project_root / top).exists()
-    ]
+    roots = [candidate for top in _PER_FILE_GATE_TOP_LEVEL if (candidate := project_root / top).exists()]
     for pattern in _PER_FILE_GATE_PLUGIN_GLOBS:
         roots.extend(sorted(project_root.glob(pattern)))
     return roots
@@ -683,13 +712,11 @@ def _scope_roots(project_root: Path) -> list[Path]:
 def _per_file_gate_paths(project_root: Path) -> list[Path]:
     """Enumerate every in-scope `.py` file (KB "Peer Pre-Completion Gate Procedure").
 
-    Walks each scope root recursively and keeps a path only if git tracks it.
-    The tracked filter is the load-bearing one: a `.venv`-prefixed name prune
-    catches the bundled venvs we happen to have (and is kept below as cheap
-    defence in depth), but it is a NAME check, so any vendored tree called
-    something else — `node_modules`, `site-packages`, a plain `vendor/` —
-    walks straight through it. Being untracked is the property that actually
-    distinguishes vendored code from ours.
+    Walks each scope root recursively and keeps paths recognized by
+    `repo_files`: tracked files plus untracked, non-ignored files. That set is
+    the load-bearing filter; a `.venv`-prefixed name prune is cheap defence in
+    depth, but vendored trees called `node_modules`, `site-packages`, or
+    `vendor/` need the ignore filter to stay out of scope.
 
     Measured 2026-08-16: `plugins/cosyvoice2_tts_plugin/src/.venv_cosyvoice`
     holds 18,321 `.py` files against that plugin's 15 tracked ones, and one
@@ -705,12 +732,7 @@ def _per_file_gate_paths(project_root: Path) -> list[Path]:
         if root.is_file():
             candidates = [root]
         else:
-            candidates = [
-                path for path in root.rglob("*.py")
-                if not any(
-                    part.startswith(BUNDLED_VENV_PREFIX) for part in path.parts
-                )
-            ]
+            candidates = [path for path in root.rglob("*.py") if not any(part.startswith(BUNDLED_VENV_PREFIX) for part in path.parts)]
         py_files.extend(p for p in candidates if p.resolve() in tracked)
     return py_files
 
@@ -729,7 +751,10 @@ def _resolve_gate_artifacts(project_root: Path, gate: _GateSpec) -> tuple[Path, 
 
 
 def _invoke_gate_subprocess(
-    venv_python: Path, script: Path, scope_paths: list[Path], allowlist: Path,
+    venv_python: Path,
+    script: Path,
+    scope_paths: list[Path],
+    allowlist: Path,
 ) -> subprocess.CompletedProcess[str] | str:
     """Invoke the wrapper script; return CompletedProcess or an error string."""
     argv = [
@@ -747,8 +772,7 @@ def _invoke_gate_subprocess(
         return f"cannot invoke gate: {exc}"
 
 
-def _print_gate_blocking(gate_name: str, combined: str, venv_python: Path,
-                         script: Path, allowlist: Path) -> None:
+def _print_gate_blocking(gate_name: str, combined: str, rerun_hint: str) -> None:
     """Print the blocking-finding report for one gate.
 
     Filters out [allowlisted] lines (they're tracked debt, not findings),
@@ -772,7 +796,7 @@ def _print_gate_blocking(gate_name: str, combined: str, venv_python: Path,
     extra = max(0, len(survivors) - 30)
     if extra:
         print(f"   ... and {extra} more lines")
-    print(f"\n💡 Re-run: {venv_python} {script} <paths> --allowlist {allowlist}")
+    print(f"\n💡 Re-run: {rerun_hint}")
 
 
 def _print_gate_ok(gate_name: str, combined: str) -> None:
@@ -834,8 +858,11 @@ def _classify_gate_exit(returncode: int, combined: str, blocking_code: int) -> _
 
 
 def _interpret_gate_result(
-    gate_name: str, result: subprocess.CompletedProcess[str],
-    venv_python: Path, script: Path, allowlist: Path,
+    gate_name: str,
+    result: subprocess.CompletedProcess[str],
+    venv_python: Path,
+    script: Path,
+    allowlist: Path,
     results: _CheckResults,
 ) -> _GateOutcome:
     """Translate a wrapper's exit code into what the run established."""
@@ -845,20 +872,25 @@ def _interpret_gate_result(
         _print_gate_ok(gate_name, combined)
         return outcome
     if outcome is _GateOutcome.CRASH:
-        results.crashed_gates.append(
-            (gate_name, _print_gate_crash(gate_name, result.returncode, combined))
-        )
+        results.crashed_gates.append((gate_name, _print_gate_crash(gate_name, result.returncode, combined)))
         return outcome
     if result.returncode == _WRAPPER_USAGE_ERROR:
         print(f"❌ BLOCKING: {gate_name} gate usage error (exit 64):")
         print(combined or "(no output)")
         return outcome
-    _print_gate_blocking(gate_name, combined, venv_python, script, allowlist)
+    _print_gate_blocking(
+        gate_name,
+        combined,
+        f"{venv_python} {script} <paths> --allowlist {allowlist}",
+    )
     return outcome
 
 
 def _run_coherence_gate(
-    venv_python: Path, gate: _GateSpec, project_root: Path, scope_paths: list[Path],
+    venv_python: Path,
+    gate: _GateSpec,
+    project_root: Path,
+    scope_paths: list[Path],
     results: _CheckResults,
 ) -> _GateOutcome:
     """Run one coherence gate and report what it established."""
@@ -875,12 +907,63 @@ def _run_coherence_gate(
         print(f"🛑 GATE CRASH: {gate.name} produced NO VERDICT — {result}")
         return _GateOutcome.CRASH
     return _interpret_gate_result(
-        gate.name, result, venv_python, script, allowlist, results,
+        gate.name,
+        result,
+        venv_python,
+        script,
+        allowlist,
+        results,
     )
 
 
-def _check_coherence_gates(project_root: Path, venv_python: Path,
-                           results: _CheckResults) -> list[str]:
+def _explicit_path_skip_reason(
+    resolved: Path,
+    quality_roots: tuple[Path, ...],
+    measured_paths: set[Path],
+) -> str | None:
+    """Return why a resolved hint is absent from the existing gate scope.
+
+    Scope membership is checked after the whole-tree paths are computed, so
+    these reasons classify inputs without narrowing the measurement.
+    """
+    checks = (
+        (resolved.suffix != ".py", "not a .py file"),
+        (
+            not any(resolved.is_relative_to(root) for root in quality_roots),
+            "outside quality-surface roots",
+        ),
+        (resolved not in measured_paths, "not in the unignored in-repo quality-surface set"),
+    )
+    return next((reason for failed, reason in checks if failed), None)
+
+
+def _report_explicit_path(
+    argument: str,
+    repository_root: Path,
+    quality_roots: tuple[Path, ...],
+    measured_paths: set[Path],
+) -> None:
+    """Report one positional hint; all invalid or skipped paths stay advisory.
+
+    Relative hints are rooted at the checkout. Resolution failures and paths
+    outside the computed scope are reported without changing gate inputs.
+    """
+    try:
+        resolved = (repository_root / Path(argument)).resolve(strict=True)
+    except FileNotFoundError:
+        print(f"ADVISORY explicit path skipped: {argument} (path does not exist)")
+        return
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"ADVISORY explicit path skipped: {argument} (cannot resolve: {exc})")
+        return
+    reason = _explicit_path_skip_reason(resolved, quality_roots, measured_paths)
+    if reason is None:
+        print(f"INFO explicit path included in whole-tree per-file checks: {argument}")
+    else:
+        print(f"ADVISORY explicit path skipped: {argument} ({reason})")
+
+
+def _check_coherence_gates(project_root: Path, venv_python: Path, results: _CheckResults) -> list[str]:
     """Run all three coherence gates; return the names of gates that blocked.
 
     Crashes are recorded on `results.crashed_gates` rather than returned:
@@ -893,22 +976,39 @@ def _check_coherence_gates(project_root: Path, venv_python: Path,
         print(f"\n🛑 GATE CRASH: per-file gate scope could not be resolved — {exc}")
         results.crashed_gates.append(("per-file-scope-resolution", str(exc)))
         return []
+    if sys.argv[1:]:
+        repository_root = project_root.resolve()
+        quality_roots = tuple(root.resolve() for root in _scope_roots(project_root))
+        measured_paths = {path.resolve() for path in scope_paths}
+        for argument in sys.argv[1:]:
+            _report_explicit_path(
+                argument,
+                repository_root,
+                quality_roots,
+                measured_paths,
+            )
     if not scope_paths:
         print("\n❌ BLOCKING: per-file gate scope resolved to zero paths")
         return ["per-file-scope-resolution"]
     print(f"   scope: {len(scope_paths)} in-repo .py file(s)")
-    return [
-        gate.name
-        for gate in _COHERENCE_GATES
-        if _run_coherence_gate(venv_python, gate, project_root, scope_paths, results)
-        is _GateOutcome.BLOCKING
-    ]
+    blocking: list[str] = []
+    for gate in _COHERENCE_GATES:
+        plan = results.plan[gate.name]
+        paths = scope_paths if plan.paths is None else list(plan.paths)
+        outcome = _run_class(results, gate.name, _run_coherence_gate, venv_python, gate, project_root, paths, results)
+        if outcome is _GateOutcome.BLOCKING:
+            blocking.append(gate.name)
+    return blocking
 
 
 def _interpret_tree_gate_result(
-    gate: _GateSpec, result: subprocess.CompletedProcess[str],
-    venv_python: Path, script: Path, allowlist: Path,
-    results: _CheckResults, blocking_code: int = _WRAPPER_BLOCKING,
+    gate: _GateSpec,
+    result: subprocess.CompletedProcess[str],
+    venv_python: Path,
+    script: Path,
+    allowlist: Path,
+    results: _CheckResults,
+    blocking_code: int = _WRAPPER_BLOCKING,
 ) -> bool:
     """Shared tail for the whole-tree gates. True iff blocking FINDINGS.
 
@@ -922,16 +1022,13 @@ def _interpret_tree_gate_result(
         _print_gate_ok(gate.name, combined)
         return False
     if outcome is _GateOutcome.CRASH:
-        results.crashed_gates.append(
-            (gate.name, _print_gate_crash(gate.name, result.returncode, combined))
-        )
+        results.crashed_gates.append((gate.name, _print_gate_crash(gate.name, result.returncode, combined)))
         return False
-    _print_gate_blocking(gate.name, combined, venv_python, script, allowlist)
+    _print_gate_blocking(gate.name, combined, shlex.join(result.args))
     return True
 
 
-def _check_whole_tree_integration_gate(project_root: Path, venv_python: Path,
-                                       results: _CheckResults) -> bool:
+def _check_whole_tree_integration_gate(project_root: Path, venv_python: Path, results: _CheckResults) -> bool:
     """Run the W-INT gate (structural mode). True iff non-allowlisted findings."""
     artifacts = _resolve_gate_artifacts(project_root, _W_INT_GATE)
     if artifacts is None:
@@ -950,13 +1047,20 @@ def _check_whole_tree_integration_gate(project_root: Path, venv_python: Path,
         return True
 
     return _interpret_tree_gate_result(
-        _W_INT_GATE, result, venv_python, script, allowlist, results,
+        _W_INT_GATE,
+        result,
+        venv_python,
+        script,
+        allowlist,
+        results,
         blocking_code=_W_INT_WRAPPER_BLOCKING,
     )
 
 
 def _check_flow_probe_registry_gate(
-    project_root: Path, venv_python: Path, results: _CheckResults,
+    project_root: Path,
+    venv_python: Path,
+    results: _CheckResults,
 ) -> bool:
     """Run the setup-flow probe resolver gate against the live repository."""
     artifacts = _resolve_gate_artifacts(project_root, _FLOW_PROBE_REGISTRY_GATE)
@@ -965,8 +1069,7 @@ def _check_flow_probe_registry_gate(
     script, allowlist = artifacts
 
     print(
-        f"\n📊 {_FLOW_PROBE_REGISTRY_GATE.description.title()} "
-        f"Gate ({_FLOW_PROBE_REGISTRY_GATE.name})...",
+        f"\n📊 {_FLOW_PROBE_REGISTRY_GATE.description.title()} Gate ({_FLOW_PROBE_REGISTRY_GATE.name})...",
     )
     argv = [str(venv_python), str(script), "--allowlist", str(allowlist)]
     try:
@@ -989,8 +1092,7 @@ def _check_flow_probe_registry_gate(
     )
 
 
-def _check_service_interface_ast_gate(project_root: Path, venv_python: Path,
-                                      results: _CheckResults) -> bool:
+def _check_service_interface_ast_gate(project_root: Path, venv_python: Path, results: _CheckResults) -> bool:
     """Run the service-interface AST gate. True iff non-allowlisted findings.
 
     Tree-walking gate per design v1 §5 — walks every interfaces/public.py +
@@ -1015,12 +1117,16 @@ def _check_service_interface_ast_gate(project_root: Path, venv_python: Path,
         return True
 
     return _interpret_tree_gate_result(
-        _SI_AST_GATE, result, venv_python, script, allowlist, results,
+        _SI_AST_GATE,
+        result,
+        venv_python,
+        script,
+        allowlist,
+        results,
     )
 
 
-def _check_return_shape_gate(project_root: Path, venv_python: Path,
-                             results: _CheckResults) -> bool:
+def _check_return_shape_gate(project_root: Path, venv_python: Path, results: _CheckResults) -> bool:
     """Run the process return-shape gate. True iff non-allowlisted findings.
 
     Tree-walking gate (GTE-07): AST over every decorated verb; a non-dict
@@ -1045,12 +1151,16 @@ def _check_return_shape_gate(project_root: Path, venv_python: Path,
         return True
 
     return _interpret_tree_gate_result(
-        _RETURN_SHAPE_GATE, result, venv_python, script, allowlist, results,
+        _RETURN_SHAPE_GATE,
+        result,
+        venv_python,
+        script,
+        allowlist,
+        results,
     )
 
 
-def _check_shipped_doc_gate(project_root: Path, venv_python: Path,
-                            results: _CheckResults) -> bool:
+def _check_shipped_doc_gate(project_root: Path, venv_python: Path, results: _CheckResults) -> bool:
     """Run the shipped-document gate (GTE-10). True iff non-allowlisted findings.
 
     Tree-walking gate: no scope-path argv splicing — it derives its own file
@@ -1064,8 +1174,7 @@ def _check_shipped_doc_gate(project_root: Path, venv_python: Path,
     script, allowlist = artifacts
 
     print(f"\n📊 {_SHIPPED_DOC_GATE.description.title()} Gate ({_SHIPPED_DOC_GATE.name})...")
-    argv = [str(venv_python), str(script), "--repo-root", str(project_root),
-            "--allowlist", str(allowlist)]
+    argv = [str(venv_python), str(script), "--repo-root", str(project_root), "--allowlist", str(allowlist)]
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
@@ -1076,12 +1185,16 @@ def _check_shipped_doc_gate(project_root: Path, venv_python: Path,
         return True
 
     return _interpret_tree_gate_result(
-        _SHIPPED_DOC_GATE, result, venv_python, script, allowlist, results,
+        _SHIPPED_DOC_GATE,
+        result,
+        venv_python,
+        script,
+        allowlist,
+        results,
     )
 
 
-def _check_bundle_license_gate(project_root: Path, venv_python: Path,
-                               results: _CheckResults) -> bool:
+def _check_bundle_license_gate(project_root: Path, venv_python: Path, results: _CheckResults) -> bool:
     """Run the blocking bundle-license gate. True iff findings remain."""
 
     artifacts = _resolve_gate_artifacts(project_root, _BUNDLE_LICENSE_GATE)
@@ -1090,8 +1203,7 @@ def _check_bundle_license_gate(project_root: Path, venv_python: Path,
     script, allowlist = artifacts
 
     print(
-        f"\n📊 {_BUNDLE_LICENSE_GATE.description.title()} "
-        f"Gate ({_BUNDLE_LICENSE_GATE.name})...",
+        f"\n📊 {_BUNDLE_LICENSE_GATE.description.title()} Gate ({_BUNDLE_LICENSE_GATE.name})...",
     )
     argv = [str(venv_python), str(script), "--allowlist", str(allowlist)]
     try:
@@ -1114,8 +1226,7 @@ def _check_bundle_license_gate(project_root: Path, venv_python: Path,
     )
 
 
-def _check_schema_init_gate(project_root: Path, venv_python: Path,
-                            results: _CheckResults) -> bool:
+def _check_schema_init_gate(project_root: Path, venv_python: Path, results: _CheckResults) -> bool:
     """Run the schema-init boot gate. True iff non-allowlisted findings.
 
     Behavioral, tree-walking gate: no scope-path argv splicing, because a
@@ -1130,8 +1241,7 @@ def _check_schema_init_gate(project_root: Path, venv_python: Path,
     script, allowlist = artifacts
 
     print(f"\n📊 {_SCHEMA_INIT_GATE.description.title()} Gate ({_SCHEMA_INIT_GATE.name})...")
-    argv = [str(venv_python), str(script), "--repo-root", str(project_root),
-            "--allowlist", str(allowlist)]
+    argv = [str(venv_python), str(script), "--repo-root", str(project_root), "--allowlist", str(allowlist)]
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
@@ -1142,12 +1252,16 @@ def _check_schema_init_gate(project_root: Path, venv_python: Path,
         return True
 
     return _interpret_tree_gate_result(
-        _SCHEMA_INIT_GATE, result, venv_python, script, allowlist, results,
+        _SCHEMA_INIT_GATE,
+        result,
+        venv_python,
+        script,
+        allowlist,
+        results,
     )
 
 
-def _check_smoke_contract_lint_gate(project_root: Path, venv_python: Path,
-                                    results: _CheckResults) -> bool:
+def _check_smoke_contract_lint_gate(project_root: Path, venv_python: Path, results: _CheckResults) -> bool:
     """Run the shipped-smoke checkout-only contract lint gate (iss_59385149).
 
     Tree-walking gate: no scope-path argv splicing — it reads this repo's own
@@ -1162,8 +1276,7 @@ def _check_smoke_contract_lint_gate(project_root: Path, venv_python: Path,
     script, allowlist = artifacts
 
     print(f"\n📊 {_SMOKE_CONTRACT_LINT_GATE.description.title()} Gate ({_SMOKE_CONTRACT_LINT_GATE.name})...")
-    argv = [str(venv_python), str(script), "--repo-root", str(project_root),
-            "--allowlist", str(allowlist)]
+    argv = [str(venv_python), str(script), "--repo-root", str(project_root), "--allowlist", str(allowlist)]
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
@@ -1174,12 +1287,16 @@ def _check_smoke_contract_lint_gate(project_root: Path, venv_python: Path,
         return True
 
     return _interpret_tree_gate_result(
-        _SMOKE_CONTRACT_LINT_GATE, result, venv_python, script, allowlist, results,
+        _SMOKE_CONTRACT_LINT_GATE,
+        result,
+        venv_python,
+        script,
+        allowlist,
+        results,
     )
 
 
-def _check_embedding_bound_gate(project_root: Path, venv_python: Path,
-                                results: _CheckResults) -> bool:
+def _check_embedding_bound_gate(project_root: Path, venv_python: Path, results: _CheckResults) -> bool:
     """Run the embedding_description bound gate. True iff non-allowlisted findings.
 
     Tree-walking gate: every discoverable process JSON's embedding_description
@@ -1194,8 +1311,7 @@ def _check_embedding_bound_gate(project_root: Path, venv_python: Path,
     script, allowlist = artifacts
 
     print(
-        f"\n📊 {_EMBEDDING_BOUND_GATE.description.title()} "
-        f"Gate ({_EMBEDDING_BOUND_GATE.name})...",
+        f"\n📊 {_EMBEDDING_BOUND_GATE.description.title()} Gate ({_EMBEDDING_BOUND_GATE.name})...",
     )
     argv = [str(venv_python), str(script), "--allowlist", str(allowlist)]
     try:
@@ -1208,12 +1324,19 @@ def _check_embedding_bound_gate(project_root: Path, venv_python: Path,
         return True
 
     return _interpret_tree_gate_result(
-        _EMBEDDING_BOUND_GATE, result, venv_python, script, allowlist, results,
+        _EMBEDDING_BOUND_GATE,
+        result,
+        venv_python,
+        script,
+        allowlist,
+        results,
     )
 
 
 def _check_wint2_warn_only_gate(
-    project_root: Path, venv_python: Path, gate: _GateSpec,
+    project_root: Path,
+    venv_python: Path,
+    gate: _GateSpec,
 ) -> None:
     """Run a W-INT Cycle 2 wrapper script in WARN mode.
 
@@ -1229,35 +1352,33 @@ def _check_wint2_warn_only_gate(
     allowlist = project_root / gate.allowlist
     if not script.exists():
         print(
-            f"⚠️ {gate.name} gate script missing: {script} "
-            "(warn mode: continuing)",
+            f"⚠️ {gate.name} gate script missing: {script} (warn mode: continuing)",
         )
         return
     if not allowlist.exists():
         print(
-            f"⚠️ {gate.name} gate allowlist missing: {allowlist} "
-            "(warn mode: continuing)",
+            f"⚠️ {gate.name} gate allowlist missing: {allowlist} (warn mode: continuing)",
         )
         return
 
     print(f"\n📊 {gate.description.title()} Gate ({gate.name})...")
     argv = [
-        str(venv_python), str(script),
-        "--allowlist", str(allowlist),
+        str(venv_python),
+        str(script),
+        "--allowlist",
+        str(allowlist),
         "--warn-only",
     ]
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=180)
     except subprocess.TimeoutExpired:
         print(
-            f"⚠️ {gate.name} gate timed out after 180s "
-            "(warn mode: continuing)",
+            f"⚠️ {gate.name} gate timed out after 180s (warn mode: continuing)",
         )
         return
     except FileNotFoundError as exc:
         print(
-            f"⚠️ {gate.name} gate cannot invoke: {exc} "
-            "(warn mode: continuing)",
+            f"⚠️ {gate.name} gate cannot invoke: {exc} (warn mode: continuing)",
         )
         return
 
@@ -1266,8 +1387,7 @@ def _check_wint2_warn_only_gate(
         _print_gate_ok(gate.name, combined)
         return
     print(
-        f"⚠️ {gate.name} gate unexpected exit "
-        f"{result.returncode} (warn mode: continuing):",
+        f"⚠️ {gate.name} gate unexpected exit {result.returncode} (warn mode: continuing):",
     )
     print(combined or "(no output)")
 
@@ -1283,37 +1403,27 @@ def _check_wint2_driver_import_gate(project_root: Path, venv_python: Path) -> No
     script = project_root / _W_WINT2_GATE.script
     allowlist = project_root / _W_WINT2_GATE.allowlist
     if not script.exists():
-        print(
-            f"⚠️ {_W_WINT2_GATE.name} gate script missing: {script} "
-            "(warn mode: continuing)"
-        )
+        print(f"⚠️ {_W_WINT2_GATE.name} gate script missing: {script} (warn mode: continuing)")
         return
     if not allowlist.exists():
-        print(
-            f"⚠️ {_W_WINT2_GATE.name} gate allowlist missing: {allowlist} "
-            "(warn mode: continuing)"
-        )
+        print(f"⚠️ {_W_WINT2_GATE.name} gate allowlist missing: {allowlist} (warn mode: continuing)")
         return
 
     print(f"\n📊 {_W_WINT2_GATE.description.title()} Gate ({_W_WINT2_GATE.name})...")
     argv = [
-        str(venv_python), str(script),
-        "--allowlist", str(allowlist),
+        str(venv_python),
+        str(script),
+        "--allowlist",
+        str(allowlist),
         "--warn-only",
     ]
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=180)
     except subprocess.TimeoutExpired:
-        print(
-            f"⚠️ {_W_WINT2_GATE.name} gate timed out after 180s "
-            "(warn mode: continuing)"
-        )
+        print(f"⚠️ {_W_WINT2_GATE.name} gate timed out after 180s (warn mode: continuing)")
         return
     except FileNotFoundError as exc:
-        print(
-            f"⚠️ {_W_WINT2_GATE.name} gate cannot invoke: {exc} "
-            "(warn mode: continuing)"
-        )
+        print(f"⚠️ {_W_WINT2_GATE.name} gate cannot invoke: {exc} (warn mode: continuing)")
         return
 
     combined = (result.stdout + result.stderr).rstrip()
@@ -1322,10 +1432,7 @@ def _check_wint2_driver_import_gate(project_root: Path, venv_python: Path) -> No
     if result.returncode == _WRAPPER_OK:
         _print_gate_ok(_W_WINT2_GATE.name, combined)
         return
-    print(
-        f"⚠️ {_W_WINT2_GATE.name} gate unexpected exit "
-        f"{result.returncode} (warn mode: continuing):"
-    )
+    print(f"⚠️ {_W_WINT2_GATE.name} gate unexpected exit {result.returncode} (warn mode: continuing):")
     print(combined or "(no output)")
 
 
@@ -1404,51 +1511,55 @@ def _report_pyright_errors(output: str, error_count: int) -> None:
     print("\n💡 Run: pyright")
 
 
+# Blocking whole-tree gates, in run order. Each class name is also the name the
+# summary reports when that gate blocks.
+_BLOCKING_GATE_CHECKS: tuple[tuple[str, Callable[..., bool]], ...] = (
+    ("whole_tree_integration", _check_whole_tree_integration_gate),
+    ("flow_probe_registry", _check_flow_probe_registry_gate),
+    ("service_interface_ast", _check_service_interface_ast_gate),
+    ("return_shape", _check_return_shape_gate),
+    ("embedding_description_bound", _check_embedding_bound_gate),
+    ("shipped_doc", _check_shipped_doc_gate),
+    ("bundle_license", _check_bundle_license_gate),
+    ("schema_init", _check_schema_init_gate),
+    ("smoke_contract_lint", _check_smoke_contract_lint_gate),
+)
+
+
 def _run_blocking_gates(
-    project_root: Path, venv_python: Path, results: _CheckResults,
+    project_root: Path,
+    venv_python: Path,
+    results: _CheckResults,
 ) -> None:
-    """Run the seven whole-tree blocking gates + the two warn-only gates into
+    """Run the blocking whole-tree gates + the two warn-only gates into
     `results`. Split out of `main()` purely to keep its own branch count
     (and cyclomatic complexity) down -- no behavior change, same calls in
     the same order."""
-    if _check_whole_tree_integration_gate(project_root, venv_python, results):
-        results.failed_blocking_gates.append(_W_INT_GATE.name)
-    if _check_flow_probe_registry_gate(project_root, venv_python, results):
-        results.failed_blocking_gates.append(_FLOW_PROBE_REGISTRY_GATE.name)
-    if _check_service_interface_ast_gate(project_root, venv_python, results):
-        results.failed_blocking_gates.append(_SI_AST_GATE.name)
-    if _check_return_shape_gate(project_root, venv_python, results):
-        results.failed_blocking_gates.append(_RETURN_SHAPE_GATE.name)
-    if _check_embedding_bound_gate(project_root, venv_python, results):
-        results.failed_blocking_gates.append(_EMBEDDING_BOUND_GATE.name)
-    if _check_shipped_doc_gate(project_root, venv_python, results):
-        results.failed_blocking_gates.append(_SHIPPED_DOC_GATE.name)
-    if _check_bundle_license_gate(project_root, venv_python, results):
-        results.failed_blocking_gates.append(_BUNDLE_LICENSE_GATE.name)
-    if _check_schema_init_gate(project_root, venv_python, results):
-        results.failed_blocking_gates.append(_SCHEMA_INIT_GATE.name)
-    if _check_smoke_contract_lint_gate(project_root, venv_python, results):
-        results.failed_blocking_gates.append(_SMOKE_CONTRACT_LINT_GATE.name)
+    for name, check in _BLOCKING_GATE_CHECKS:
+        if _run_class(results, name, check, project_root, venv_python, results):
+            results.failed_blocking_gates.append(name)
     # W-INT Cycle 2 driver-import gate runs in WARN mode per master plan
     # §1.7 — emits findings but never blocks. Mode flip at W-WINT2-FINAL.
-    _check_wint2_driver_import_gate(project_root, venv_python)
+    _run_class(results, "wint2_driver_import", _check_wint2_driver_import_gate, project_root, venv_python)
     # W-INT Cycle 2 vault-key-declaration gate (W-PLUGIN-LAUNCH-KEYS sub-1)
     # runs in WARN mode per brief §5.3 — emits findings but never blocks.
     # Mode flip at sub-2 W-VAULT-CALLER-ENFORCE in lockstep with the
     # runtime readiness gate.
-    _check_wint2_warn_only_gate(
-        project_root, venv_python, _W_WINT2_VAULT_KEY_GATE,
-    )
+    _run_class(results, "wint2_vault_key_declaration", _check_wint2_warn_only_gate, project_root, venv_python, _W_WINT2_VAULT_KEY_GATE)
 
 
 def _run_pyright_checked(
-    project_root: Path, venv_python: Path, results: _CheckResults,
+    project_root: Path,
+    venv_python: Path,
+    results: _CheckResults,
 ) -> int | None:
     """Run pyright into `results`; return an exit code to bail `main()` with,
     or None to continue. Split out of `main()` to keep the fatal-vs-continue
     branch from adding to `main()`'s own cyclomatic complexity."""
     try:
-        results.has_type_errors = _check_pyright(project_root, venv_python)
+        pyright_result = _check_pyright(project_root, venv_python, results.plan["pyright"].paths)
+        results.pyright_unmeasured = pyright_result is None
+        results.has_type_errors = pyright_result is True
     except ToolUnavailableError as exc:
         # Same exit code as the venv-missing precondition failure -- a
         # checker that never ran is the same class of "cannot proceed as
@@ -1459,7 +1570,9 @@ def _run_pyright_checked(
 
 
 def _run_ruff_checked(
-    project_root: Path, venv_python: Path, results: _CheckResults,
+    project_root: Path,
+    venv_python: Path,
+    results: _CheckResults,
 ) -> int | None:
     """Run ruff into `results`; same shape and reasoning as
     `_run_pyright_checked` -- kept as a separate, parallel function rather
@@ -1473,8 +1586,11 @@ def _run_ruff_checked(
     return None
 
 
-def _check_pyright(project_root: Path, venv_python: Path) -> bool:
-    """Run pyright; return True if blocking type errors were found.
+def _check_pyright(project_root: Path, venv_python: Path, files: Sequence[Path] | None = None) -> bool | None:
+    """Run pyright; return True for errors, False for success, or None if unmeasured.
+
+    ``files`` is the scoped list from code_quality_scope; None checks the whole
+    surface with the command unchanged.
 
     Raises ToolUnavailableError if pyright's own module never resolved (the
     interpreter's own "No module named" failure) -- distinct from the
@@ -1483,9 +1599,10 @@ def _check_pyright(project_root: Path, venv_python: Path) -> bool:
     unclear" outcome. Do not collapse the two: one means the checker ran and
     said something odd, the other means it never checked anything.
     """
-    venv_activate = venv_python.parent / "activate"
+    wrapper = project_root / "quality_gates/pyright_repo.py"
     print("\n📊 Type Checking with pyright (strict)...")
-    pyright_cmd = f"cd {project_root} && source {venv_activate} && python3 -m pyright 2>&1"
+    scope = f" {shlex.join(str(path) for path in files)}" if files else ""
+    pyright_cmd = f"cd {shlex.quote(str(project_root))} && {shlex.quote(str(venv_python))} {shlex.quote(str(wrapper))}{scope} 2>&1"
     success, output = run_command(pyright_cmd, "Running pyright", timeout=120)
 
     error_count = 0
@@ -1499,11 +1616,9 @@ def _check_pyright(project_root: Path, venv_python: Path) -> bool:
         print("✅ ZERO type errors - strict enforcement passed!")
         return False
     if _module_unavailable(output, "pyright"):
-        raise ToolUnavailableError(
-            f"pyright never ran -- its module could not be resolved: {output.strip()!r}"
-        )
+        raise ToolUnavailableError(f"pyright never ran -- its module could not be resolved: {output.strip()!r}")
     print("⚠️ pyright check completed but status unclear")
-    return False
+    return None
 
 
 def _check_ruff(project_root: Path, venv_python: Path) -> bool:
@@ -1525,7 +1640,7 @@ def _check_ruff(project_root: Path, venv_python: Path) -> bool:
             "checks the config target before invoking ruff at all, not after. Pull an "
             "update that ships this file (born-clone-gate-toolchain fix).",
         )
-    ruff_cmd = f"cd {project_root} && {venv_python} -m ruff check ananta/src ananta/tests plugins initialization/src quality_gates solet_cli/src solet_cli/tests bootstrap_adapter --config pyproject.toml 2>&1"
+    ruff_cmd = f"cd {project_root} && {venv_python} -m ruff check ananta/src ananta/tests plugins initialization/src quality_gates solet_cli/src solet_cli/tests bootstrap_adapter .claude/hooks --config pyproject.toml 2>&1"
     success, output = run_command(ruff_cmd, "Running ruff linter")
 
     if success:
@@ -1533,9 +1648,7 @@ def _check_ruff(project_root: Path, venv_python: Path) -> bool:
         return False
 
     if _module_unavailable(output, "ruff"):
-        raise ToolUnavailableError(
-            f"ruff never ran -- its module could not be resolved: {output.strip()!r}"
-        )
+        raise ToolUnavailableError(f"ruff never ran -- its module could not be resolved: {output.strip()!r}")
 
     lint_lines = [line for line in output.split("\n") if line.strip()]
     if not lint_lines:
@@ -1545,12 +1658,15 @@ def _check_ruff(project_root: Path, venv_python: Path) -> bool:
         print(f"   {line}")
     if len(lint_lines) > 10:
         print(f"   ... and {len(lint_lines) - 10} more")
-    print("\n💡 Run: ruff check ananta/src ananta/tests plugins initialization/src quality_gates solet_cli/src solet_cli/tests bootstrap_adapter --config pyproject.toml --fix")
+    print("\n💡 Run: ruff check ananta/src ananta/tests plugins initialization/src quality_gates solet_cli/src solet_cli/tests bootstrap_adapter .claude/hooks --config pyproject.toml --fix")
     return True
 
 
-def _check_syntax(project_root: Path, venv_python: Path) -> list[str]:
+def _check_syntax(project_root: Path, venv_python: Path, only: tuple[Path, ...] | None = None) -> list[str]:
     """Validate Python syntax across the tree; return list of error strings.
+
+    `only` is the scoped file list from code_quality_scope; None walks the
+    whole tree as before.
 
     Compiles under `venv_python` -- the same already-resolved validated
     interpreter every other checker in this module uses -- never a bare
@@ -1560,7 +1676,8 @@ def _check_syntax(project_root: Path, venv_python: Path) -> list[str]:
     """
     print("\n📊 Python Syntax Validation...")
     syntax_errors: list[str] = []
-    for py_file in project_root.glob("**/*.py"):
+    py_files = project_root.glob("**/*.py") if only is None else iter(only)
+    for py_file in py_files:
         if ".venv" in str(py_file) or "venv" in str(py_file):
             continue
         result = subprocess.run(
@@ -1608,10 +1725,14 @@ def _summary_exit_code(results: _CheckResults) -> int:
 
 
 def _print_summary(results: _CheckResults) -> int:
+    _print_class_report(results)
     print("\n" + "=" * 60)
     print("📊 CODE QUALITY CHECK SUMMARY")
     print("=" * 60)
     exit_code = _summary_exit_code(results)
+    if exit_code == 0 and results.pyright_unmeasured:
+        print("⚠️ Code quality checks completed; pyright is unmeasured (no verdict).")
+        return 0
     if exit_code == 0:
         print("✅ All code quality checks passed!")
         return 0
@@ -1620,19 +1741,34 @@ def _print_summary(results: _CheckResults) -> int:
     if results.has_lint_errors:
         print("❌ FAILED: Lint errors found - fix before committing!")
     if results.failed_blocking_gates:
-        print(
-            "❌ FAILED: Blocking gate violations "
-            f"({', '.join(results.failed_blocking_gates)}) — fix before committing!"
-        )
+        print(f"❌ FAILED: Blocking gate violations ({', '.join(results.failed_blocking_gates)}) — fix before committing!")
     if results.crashed_gates:
         names = ", ".join(name for name, _ in results.crashed_gates)
-        print(
-            f"🛑 GATE CRASH: no verdict from ({names}). This is NOT a violation "
-            "count — these gates raised instead of measuring, so this run says "
-            "NOTHING about the code they cover. Investigate the excerpt above; "
-            "do not read it as complexity or structural debt."
-        )
+        print(f"🛑 GATE CRASH: no verdict from ({names}). This is NOT a violation count — these gates raised instead of measuring, so this run says NOTHING about the code they cover. Investigate the excerpt above; do not read it as complexity or structural debt.")
     return exit_code
+
+
+def plan_run_scope(project_root: Path) -> dict[str, ClassPlan]:
+    """Plan this run: scoped to the landing merge where that can be proven, full everywhere else."""
+    surface = derive_touched_surface(project_root)
+    try:
+        return plan_classes(project_root, surface, _per_file_gate_paths(project_root))
+    except GateCrashError as exc:
+        # _check_coherence_gates reports the same crash itself; full is the safe plan.
+        return full_plan(f"per-file gate scope could not be resolved: {exc}")
+
+
+def _run_class(results: _CheckResults, name: str, fn: Callable[..., _T], *args: object) -> _T | None:
+    """Run one class through the scope report: timed, planned, and recorded as a CLASS REPORT row."""
+    return results.report.run(name, results.plan[name], fn, *args)
+
+
+def _print_class_report(results: _CheckResults) -> None:
+    """Print the CLASS REPORT once at least one class has recorded a row."""
+    if not results.report.rows:
+        return
+    for line in results.report.render():
+        print(line)
 
 
 def main() -> int:
@@ -1652,27 +1788,30 @@ def main() -> int:
     if not _check_gate_toolchain(project_root):
         return 4
 
-    results = _CheckResults()
-    pyright_bail = _run_pyright_checked(project_root, venv_python, results)
+    results = _CheckResults(plan=plan_run_scope(project_root))
+    for line in scope_advisories(results.plan):
+        print(line)
+    pyright_bail = _run_class(results, "pyright", _run_pyright_checked, project_root, venv_python, results)
     if pyright_bail is not None:
+        _print_class_report(results)
         return pyright_bail
-    ruff_bail = _run_ruff_checked(project_root, venv_python, results)
+    ruff_bail = _run_class(results, "ruff", _run_ruff_checked, project_root, venv_python, results)
     if ruff_bail is not None:
+        _print_class_report(results)
         return ruff_bail
-    results.failed_blocking_gates.extend(
-        _check_coherence_gates(project_root, venv_python, results)
-    )
+    results.failed_blocking_gates.extend(_check_coherence_gates(project_root, venv_python, results))
     _run_blocking_gates(project_root, venv_python, results)
 
-    if _check_syntax(project_root, venv_python):
+    if _run_class(results, "syntax", _check_syntax, project_root, venv_python, results.plan["syntax"].paths):
+        _print_class_report(results)
         return 4
 
-    _check_debuggers(project_root)
+    _run_class(results, "debugger_scan", _check_debuggers, project_root)
 
-    if _run_fixture_replay_if_needed(project_root, venv_python):
+    if _run_class(results, "fixture_replay", _run_fixture_replay_if_needed, project_root, venv_python):
         results.has_type_errors = True  # Block commit on fixture failures
 
-    if _check_readable_freshness(project_root, venv_python):
+    if _run_class(results, "readable_freshness", _check_readable_freshness, project_root, venv_python):
         results.has_type_errors = True  # Block commit on stale readable files
 
     return _print_summary(results)

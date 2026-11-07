@@ -1,0 +1,27 @@
+# Fragment of the gate-smoke register, owned by one candidate (prb_ae6d81ea).
+#
+# Same grammar and same meaning as quality_gates/gate_smokes.txt: one
+# repo-relative *_smoke.py path per line, text after `#` is a comment. Entries
+# here are unioned with the main register by quality_gates/gate_smoke_register.py,
+# which every reader calls.
+#
+# WRITE YOUR OWN FILE HERE. The whole point is that two candidates registering a
+# smoke share no path, so neither invalidates the other's frozen base entries.
+# Do not add your entry to someone else's fragment, and do not migrate or
+# reorder entries that already live in gate_smokes.txt.
+
+# Proves the fragment registration route end to end: the loader's union,
+# ordering, de-duplication and advisories, and that run_smokes, the quality
+# service allowlist, focused_smoke_selector, the registration census and the
+# three-surface agreement all see a fragment-registered smoke. Its own
+# registration is this line, which is the outcome demonstrating itself. Offline.
+quality_gates/tests/gate_smoke_register_smoke.py
+
+# Pass-path proof for the selected-test Pyright overlay (iss_1f392041): the
+# pre-commit hook's own type check could not resolve any import in a selected
+# quality_gates/tests file, so no author on that path could pass the gate. Red
+# first with the real Pyright: the pre-fix overlay payload still reproduces the
+# defect, the current payload comes back clean, and a genuine typing error is
+# still reported. Registered HERE rather than in gate_smokes.txt, so the fix
+# that unblocked this candidate's own commit uses the mechanism it added.
+quality_gates/tests/pyright_repo_selected_config_smoke.py

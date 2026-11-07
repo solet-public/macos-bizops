@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
+from _register_unit_double import fixture_assignment  # noqa: E402
 from ananta.llm.session_ledger.schema import NAMESPACE as LEDGER_NAMESPACE  # noqa: E402
 from ananta.llm.session_ledger.schema import TABLE_EVENT as LEDGER_TABLE_EVENT  # noqa: E402
 from ananta.llm.session_ledger.schema import TABLE_SESSION as LEDGER_TABLE_SESSION  # noqa: E402
@@ -92,7 +93,7 @@ def _spawn(
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id=agent_instance_id, lane_id=lane_id, brief_ref="",
+            agent_instance_id=agent_instance_id, lane_id=lane_id, assignment=fixture_assignment(),
             work_class=WORK_CLASS_READ_ONLY, budget_line=budget_line, host=host, model=model,
         ),
     )

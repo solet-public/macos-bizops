@@ -40,10 +40,7 @@ class MemoryService(BootstrappableServiceInterface, MemoryServiceInterface):
         memory_plugin_name: str,
     ) -> None:
         if not memory_plugin_name:
-            raise FrameworkError(
-                "memory_plugin_name is required. "
-                "Ensure MEMORY_SERVICE is bound in config/service_bindings.json."
-            )
+            raise FrameworkError("memory_plugin_name is required. Ensure MEMORY_SERVICE is bound in config/service_bindings.json.")
 
         self._memory_plugin_name = memory_plugin_name
         self._memory_plugin: MemoryServiceInterface | None = None
@@ -52,9 +49,7 @@ class MemoryService(BootstrappableServiceInterface, MemoryServiceInterface):
         self.plugin_manager: PluginManager = plugin_manager
 
     def _init_bootstrap(self) -> None:
-        raise FrameworkError(
-            "MemoryService does not support bootstrap mode."
-        )
+        raise FrameworkError("MemoryService does not support bootstrap mode.")
 
     def _init_plugin(self) -> None:
         """Eagerly initialize the memory plugin. Fails fast on any error."""
@@ -64,10 +59,7 @@ class MemoryService(BootstrappableServiceInterface, MemoryServiceInterface):
         plugin = self.plugin_manager.get_plugin(self._memory_plugin_name)
 
         if not isinstance(plugin, MemoryServiceInterface):
-            raise FrameworkError(
-                f"Memory plugin '{self._memory_plugin_name}' does not implement "
-                f"MemoryServiceInterface. Plugin type: {type(plugin)}"
-            )
+            raise FrameworkError(f"Memory plugin '{self._memory_plugin_name}' does not implement MemoryServiceInterface. Plugin type: {type(plugin)}")
 
         # Validate readiness immediately - fail fast if not ready
         if not plugin.is_ready():
@@ -89,10 +81,7 @@ class MemoryService(BootstrappableServiceInterface, MemoryServiceInterface):
         it means _init_plugin() was never called, which is a programming error.
         """
         if self._memory_plugin is None:
-            raise FrameworkError(
-                "Memory plugin not initialized. "
-                "This indicates _init_plugin() was not called - programming error."
-            )
+            raise FrameworkError("Memory plugin not initialized. This indicates _init_plugin() was not called - programming error.")
         return self._memory_plugin
 
     # ==========================================================================
@@ -108,8 +97,11 @@ class MemoryService(BootstrappableServiceInterface, MemoryServiceInterface):
         embed: bool = True,
     ) -> dict[str, Any]:
         return self._get_backend().remember(
-            content=content, tags=tags, source_file=source_file,
-            session_id=session_id, embed=embed,
+            content=content,
+            tags=tags,
+            source_file=source_file,
+            session_id=session_id,
+            embed=embed,
         )
 
     def recall(
@@ -158,6 +150,9 @@ class MemoryService(BootstrappableServiceInterface, MemoryServiceInterface):
     def memory_stats(self) -> dict[str, Any]:
         return self._get_backend().memory_stats()
 
+    def corpus_counts(self) -> dict[str, Any]:
+        return self._get_backend().corpus_counts()
+
     def list_memories(
         self,
         memory_type: str | None = None,
@@ -166,9 +161,7 @@ class MemoryService(BootstrappableServiceInterface, MemoryServiceInterface):
         sort_by: str = "strength",
         limit: int = 20,
     ) -> dict[str, Any]:
-        return self._get_backend().list_memories(
-            memory_type=memory_type, status=status, tag=tag, sort_by=sort_by, limit=limit
-        )
+        return self._get_backend().list_memories(memory_type=memory_type, status=status, tag=tag, sort_by=sort_by, limit=limit)
 
     def consolidate(
         self,
@@ -176,9 +169,7 @@ class MemoryService(BootstrappableServiceInterface, MemoryServiceInterface):
         min_age_days: int = 7,
         dry_run: bool = False,
     ) -> dict[str, Any]:
-        return self._get_backend().consolidate(
-            strength_threshold=strength_threshold, min_age_days=min_age_days, dry_run=dry_run
-        )
+        return self._get_backend().consolidate(strength_threshold=strength_threshold, min_age_days=min_age_days, dry_run=dry_run)
 
     def export_memories(
         self,
@@ -274,9 +265,7 @@ class MemoryService(BootstrappableServiceInterface, MemoryServiceInterface):
         tags: list[str] | None = None,
         session_id: str | None = None,
     ) -> dict[str, Any]:
-        return self._get_backend().upsert_memory_by_tag(
-            content=content, tag=tag, tags=tags, session_id=session_id
-        )
+        return self._get_backend().upsert_memory_by_tag(content=content, tag=tag, tags=tags, session_id=session_id)
 
     def memorize_by_tag(self, tag: str) -> dict[str, Any]:
         return self._get_backend().memorize_by_tag(tag)
@@ -330,13 +319,9 @@ class MemoryService(BootstrappableServiceInterface, MemoryServiceInterface):
         file_path: str,
         regenerate_embeddings: bool = True,
     ) -> dict[str, Any]:
-        return self._get_backend().import_memories(
-            file_path=file_path, regenerate_embeddings=regenerate_embeddings
-        )
+        return self._get_backend().import_memories(file_path=file_path, regenerate_embeddings=regenerate_embeddings)
 
-    def cleanup_orphaned_vectors(
-        self, dry_run: bool = False, confirm: bool = False
-    ) -> dict[str, Any]:
+    def cleanup_orphaned_vectors(self, dry_run: bool = False, confirm: bool = False) -> dict[str, Any]:
         return self._get_backend().cleanup_orphaned_vectors(dry_run=dry_run, confirm=confirm)
 
     def reindex_orphaned_vectors(self) -> dict[str, Any]:
@@ -352,9 +337,7 @@ class MemoryService(BootstrappableServiceInterface, MemoryServiceInterface):
         session_id: str | None = None,
         chunk_by_turns: bool = True,
     ) -> dict[str, Any]:
-        return self._get_backend().ingest_session(
-            transcript=transcript, session_id=session_id, chunk_by_turns=chunk_by_turns
-        )
+        return self._get_backend().ingest_session(transcript=transcript, session_id=session_id, chunk_by_turns=chunk_by_turns)
 
     def learn(
         self,
@@ -364,9 +347,7 @@ class MemoryService(BootstrappableServiceInterface, MemoryServiceInterface):
         memorize: bool = False,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        return self._get_backend().learn(
-            path=path, pattern=pattern, recursive=recursive, memorize=memorize, tags=tags
-        )
+        return self._get_backend().learn(path=path, pattern=pattern, recursive=recursive, memorize=memorize, tags=tags)
 
     # ==========================================================================
     # AUDIT
@@ -377,18 +358,14 @@ class MemoryService(BootstrappableServiceInterface, MemoryServiceInterface):
         include_completed: bool = False,
         strength_threshold: float | None = None,
     ) -> dict[str, Any]:
-        return self._get_backend().audit_pinned_notes(
-            include_completed=include_completed, strength_threshold=strength_threshold
-        )
+        return self._get_backend().audit_pinned_notes(include_completed=include_completed, strength_threshold=strength_threshold)
 
     def review_blocked_intents(
         self,
         min_age_days: int = 7,
         strength_threshold: float = -1.0,
     ) -> dict[str, Any]:
-        return self._get_backend().review_blocked_intents(
-            min_age_days=min_age_days, strength_threshold=strength_threshold
-        )
+        return self._get_backend().review_blocked_intents(min_age_days=min_age_days, strength_threshold=strength_threshold)
 
     # ==========================================================================
     # FOCUS BUFFER (session-scoped — JOS-02)
@@ -413,11 +390,7 @@ class MemoryService(BootstrappableServiceInterface, MemoryServiceInterface):
                 return injected
         if not session_id:
             raise FrameworkError(
-                message=(
-                    "focus-buffer operation requires an acting session; pass "
-                    "session_id (Python callers) or invoke via an action that "
-                    "carries one (verb callers)"
-                ),
+                message=("focus-buffer operation requires an acting session; pass session_id (Python callers) or invoke via an action that carries one (verb callers)"),
                 error_code="memory.session_required",
             )
         return session_id

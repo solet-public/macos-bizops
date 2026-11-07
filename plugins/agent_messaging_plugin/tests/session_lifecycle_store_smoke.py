@@ -32,10 +32,13 @@ Run:
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+_ROOT = REPO_ROOT
+sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -44,30 +47,37 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
+from _register_unit_double import fixture_assignment  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
 from ananta.llm.agent_messaging.state_results import require_records  # noqa: E402
 
 from agent_messaging_plugin.http_routes import (  # noqa: E402
     _managed_session_registration_backfill,
 )
+from agent_messaging_plugin.register_unit_client import VerbError, assignment_from_record  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
     LIFECYCLE_IDLE,
     LIFECYCLE_LIVE,
     LIFECYCLE_RETIRED,
     LIFECYCLE_SPAWNING,
     LIFECYCLE_TERMINATED,
+    TABLE_LANE_CHARTER,
     TABLE_SESSION_TRANSITION,
 )
+from agent_messaging_plugin.session_lifecycle_control import HostAttempt, read_host_attempt  # noqa: E402
 from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
     IllegalLifecycleTransitionError,
+    LaneCharterSpec,
     ManagedSessionSpec,
     SessionNotFoundError,
     StaleLifecycleStateError,
     backfill_registration,
+    capture_lane_charter,
     insert_managed_session,
     iter_managed_sessions_unbounded,
     list_managed_sessions,
     read_managed_session,
+    resolve_lane_charter,
     set_host_ref,
     transition_lifecycle_state,
 )
@@ -103,7 +113,7 @@ def test_insert_and_read() -> None:
     spec = ManagedSessionSpec(
         agent_instance_id="agi-spawn-1",
         lane_id="lane-x",
-        brief_ref="workbench/brief.md",
+        assignment=fixture_assignment(),
         work_class="analysis_deliverable",
         budget_line="budget-1",
         host="headless",
@@ -131,7 +141,7 @@ def test_list_filters() -> None:
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-1",
             lane_id="lane-x",
-            brief_ref="",
+            assignment=fixture_assignment(),
             work_class="analysis_deliverable",
             budget_line="budget-1",
             host="headless",
@@ -142,7 +152,7 @@ def test_list_filters() -> None:
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-2",
             lane_id="lane-y",
-            brief_ref="",
+            assignment=fixture_assignment(),
             work_class="read_only",
             budget_line="budget-2",
             host="operator",
@@ -174,7 +184,7 @@ def test_transition_guards() -> None:
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-1",
             lane_id="lane-x",
-            brief_ref="",
+            assignment=fixture_assignment(),
             work_class="analysis_deliverable",
             budget_line="budget-1",
             host="headless",
@@ -217,13 +227,11 @@ def test_transition_guards() -> None:
     )
     _check(
         read_managed_session(state, "agi-spawn-1")["lifecycle_state"] == LIFECYCLE_LIVE,
-        "an illegal-edge attempt leaves lifecycle_state untouched (the Python check "
-        "fired BEFORE any state write — the CAS was never reached)",
+        "an illegal-edge attempt leaves lifecycle_state untouched (the Python check fired BEFORE any state write — the CAS was never reached)",
     )
     _check(
         _transition_count(state, "agi-spawn-1") == 1,
-        "an illegal-edge attempt inserts NO audit row (still exactly one, from the "
-        "earlier legal transition)",
+        "an illegal-edge attempt inserts NO audit row (still exactly one, from the earlier legal transition)",
     )
 
     # --- legal edge, lost race: predicated CAS itself refuses ---
@@ -249,20 +257,15 @@ def test_transition_guards() -> None:
         stale_raised = True
     _check(
         stale_raised,
-        "a LEGAL edge (live->idle) that lost the race (row already moved to "
-        "terminated by a concurrent writer) raises StaleLifecycleStateError — "
-        "the PREDICATED WRITE itself refused, a different code path than the "
-        "illegal-edge Python check above",
+        "a LEGAL edge (live->idle) that lost the race (row already moved to terminated by a concurrent writer) raises StaleLifecycleStateError — the PREDICATED WRITE itself refused, a different code path than the illegal-edge Python check above",
     )
     _check(
         read_managed_session(state, "agi-spawn-1")["lifecycle_state"] == LIFECYCLE_TERMINATED,
-        "a stale-race attempt leaves the concurrent writer's state intact "
-        "(never clobbered by the losing caller)",
+        "a stale-race attempt leaves the concurrent writer's state intact (never clobbered by the losing caller)",
     )
     _check(
         _transition_count(state, "agi-spawn-1") == 1,
-        "a lost-race attempt inserts NO audit row (ledger-write-before-audit-insert "
-        "ordering — never document a transition that didn't happen)",
+        "a lost-race attempt inserts NO audit row (ledger-write-before-audit-insert ordering — never document a transition that didn't happen)",
     )
 
 
@@ -273,7 +276,7 @@ def test_backfill_registration_fires_once() -> None:
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-3",
             lane_id="lane-z",
-            brief_ref="",
+            assignment=fixture_assignment(),
             work_class="read_only",
             budget_line="budget-3",
             host="headless",
@@ -310,7 +313,7 @@ def test_backfill_reconnect_does_not_refire() -> None:
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-3",
             lane_id="lane-z",
-            brief_ref="",
+            assignment=fixture_assignment(),
             work_class="read_only",
             budget_line="budget-3",
             host="headless",
@@ -335,8 +338,7 @@ def test_backfill_reconnect_does_not_refire() -> None:
     )
     _check(
         row["agent_session_id"] == "sess-3-b",
-        "a reconnect backfill still re-writes agent_session_id (self-correcting, "
-        "mirrors the state-table self-refresh pattern)",
+        "a reconnect backfill still re-writes agent_session_id (self-correcting, mirrors the state-table self-refresh pattern)",
     )
     _check(
         _transition_count(state, "agi-spawn-3") == 1,
@@ -358,8 +360,7 @@ def test_backfill_with_no_managed_session_row_is_noop() -> None:
         no_row_raised = True
     _check(
         not no_row_raised,
-        "backfill_registration on an agent_instance_id with no managed_session "
-        "row returns cleanly so the registration route can decide whether to birth inventory",
+        "backfill_registration on an agent_instance_id with no managed_session row returns cleanly so the registration route can decide whether to birth inventory",
     )
 
 
@@ -387,9 +388,7 @@ def test_hand_launched_registration_creates_honest_operator_row() -> None:
         "the registration-created row reads back the registering identity",
     )
     _check(
-        row.get("report_by") is None
-        and row.get("expires_at") is None
-        and row["report_by_seconds"] == 0,
+        row.get("report_by") is None and row.get("expires_at") is None and row["report_by_seconds"] == 0,
         "the inventory row carries no fabricated deadline or TTL contract",
     )
     _managed_session_registration_backfill(
@@ -400,8 +399,7 @@ def test_hand_launched_registration_creates_honest_operator_row() -> None:
     )
     reconnected = read_managed_session(state, "agi-hand-launched")
     _check(
-        reconnected["agent_id"] == "codex-reconnected"
-        and _transition_count(state, "agi-hand-launched") == 1,
+        reconnected["agent_id"] == "codex-reconnected" and _transition_count(state, "agi-hand-launched") == 1,
         "a reconnect updates identity without creating a second row or transition",
     )
 
@@ -422,7 +420,7 @@ def test_backfill_registration_recovers_spawn_id_from_agent_session_id() -> None
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-recover",
             lane_id="lane-z",
-            brief_ref="",
+            assignment=fixture_assignment(),
             work_class="read_only",
             budget_line="budget-3",
             host="tmux",
@@ -464,7 +462,7 @@ def test_backfill_registration_fallback_refuses_when_recovered_row_not_spawning(
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-completed",
             lane_id="lane-z",
-            brief_ref="",
+            assignment=fixture_assignment(),
             work_class="read_only",
             budget_line="budget-3",
             host="tmux",
@@ -494,8 +492,7 @@ def test_backfill_registration_fallback_refuses_when_recovered_row_not_spawning(
     row_after = read_managed_session(state, "agi-spawn-completed")
     _check(
         row_after["agent_id"] == "claude_code",
-        "the row's agent_id is unchanged by the refused fallback attempt (a distinguishable "
-        "value proves the guard actually blocked the write, not merely that it wrote the same value twice)",
+        "the row's agent_id is unchanged by the refused fallback attempt (a distinguishable value proves the guard actually blocked the write, not merely that it wrote the same value twice)",
     )
     _check(
         row_after["agent_session_id"] == "ases-agi-spawn-completed",
@@ -561,7 +558,7 @@ def test_set_host_ref() -> None:
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-3",
             lane_id="lane-z",
-            brief_ref="",
+            assignment=fixture_assignment(),
             work_class="read_only",
             budget_line="budget-3",
             host="headless",
@@ -592,7 +589,7 @@ def test_written_columns_are_declared() -> None:
         ManagedSessionSpec(
             agent_instance_id="agi-schema-parity",
             lane_id="lane-schema-parity",
-            brief_ref="workbench/brief.md",
+            assignment=fixture_assignment(),
             work_class="analysis_deliverable",
             budget_line="budget-parity",
             host="tmux",
@@ -600,19 +597,224 @@ def test_written_columns_are_declared() -> None:
             spawned_by_role="Claude-C",
             directed_by="operator:none",
             report_by_seconds=900,
-
         ),
     )
     declared = set(get_managed_session_schema().columns)
     undeclared = sorted(set(record) - declared)
     _check(
         not undeclared,
-        f"every written managed_session column is declared in the schema "
-        f"(undeclared: {undeclared})",
+        f"every written managed_session column is declared in the schema (undeclared: {undeclared})",
     )
 
 
+def test_native_assignment_and_historical_charter() -> None:
+    state = _state()
+    code = ""
+    try:
+        insert_managed_session(
+            state,
+            ManagedSessionSpec(
+                agent_instance_id="agi-no-unit",
+                lane_id="lane",
+                assignment=None,
+                work_class="production_mutation",
+                budget_line="fixture",
+                host="headless",
+            ),
+        )
+    except VerbError as exc:
+        code = exc.code
+    _check(code == "unit_assignment_required", "spawn ledger refuses a missing assignment")
+    row = insert_managed_session(
+        state,
+        ManagedSessionSpec(
+            agent_instance_id="agi-native-unit",
+            lane_id="lane",
+            assignment=fixture_assignment(),
+            work_class="production_mutation",
+            budget_line="fixture",
+            host="headless",
+        ),
+    )
+    _check(assignment_from_record(row) == fixture_assignment(), "session ledger retains exact registered assignment")
+    first = capture_lane_charter(
+        state,
+        LaneCharterSpec(
+            lane_id="native-charter",
+            charter_text="first",
+            captured_at="2026-10-09T00:00:00",
+            unit_id="unt_first",
+            revision_id="drv_first",
+        ),
+    )
+    capture_lane_charter(
+        state,
+        LaneCharterSpec(
+            lane_id="native-charter",
+            charter_text="corrected",
+            captured_at="2026-10-09T00:00:01",
+            unit_id="unt_second",
+            revision_id="drv_second",
+        ),
+    )
+    latest = resolve_lane_charter(state, "native-charter")
+    _check(latest is not None and latest.revision_id == "drv_second", "charter correction appends new registered provenance")
+    rows = cast(RealShapeState, state).rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_LANE_CHARTER)
+    _check(len(rows) == 2 and first["charter_text"] == rows[0]["charter_text"] == "first", "charter correction preserves original bytes")
+    state.write_state(
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {
+            "table": TABLE_LANE_CHARTER,
+            "record": {
+                "lane_id": "historical-charter",
+                "charter_text": "old",
+                "captured_at": "2026-10-09T00:00:00",
+                "brief_ref": "historical/workbench.md",
+            },
+        },
+    )
+    code = ""
+    try:
+        resolve_lane_charter(state, "historical-charter")
+    except VerbError as exc:
+        code = exc.code
+    _check(code == "unit_assignment_historical", "historical charter cannot become a launch fallback")
+
+
+def _attempt_fixture() -> tuple[StateManagementInterface, HostAttempt]:
+    state = _state()
+    insert_managed_session(
+        state,
+        ManagedSessionSpec(
+            agent_instance_id="agi-attempt",
+            lane_id="lane-attempt",
+            assignment=fixture_assignment(),
+            work_class="read_only",
+            budget_line="proof",
+            host="operator",
+        ),
+    )
+    return state, HostAttempt(
+        agent_instance_id="agi-attempt",
+        host="operator",
+        host_ref="",
+        action="none_available",
+        remedy="stop the process manually",
+        observation="unknown",
+        observed_at=datetime.now(UTC).isoformat(),
+        provenance="terminate_session",
+    )
+
+
+def test_attempt_roundtrip() -> None:
+    state, attempt = _attempt_fixture()
+    reason = attempt.reason("human rationale custody_packet=fixture fingerprint=unchanged")
+    transition_lifecycle_state(
+        state,
+        agent_instance_id="agi-attempt",
+        from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_TERMINATED,
+        directed_by="operator:none",
+        reason=reason,
+    )
+    result = read_host_attempt(state, "agi-attempt")
+    _check(result["prior_host_outcome"]["action"] == "none_available", "versioned attempt roundtrips")
+    _check(result["prior_host_reason"] == reason, "human rationale and custody provenance unchanged")
+    _check(result["prior_host_outcome"]["transition_id"] is not None, "history has transition provenance")
+    refused = False
+    try:
+        transition_lifecycle_state(
+            state,
+            agent_instance_id="agi-attempt",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_TERMINATED,
+            directed_by="operator:none",
+            reason="losing writer",
+        )
+    except StaleLifecycleStateError:
+        refused = True
+    _check(refused and _transition_count(state, "agi-attempt") == 1, "stale writer adds no evidence")
+    transition_lifecycle_state(
+        state,
+        agent_instance_id="agi-attempt",
+        from_state=LIFECYCLE_TERMINATED,
+        to_state=LIFECYCLE_RETIRED,
+        directed_by="operator:none",
+        reason="retire custody kept",
+    )
+    _check(read_host_attempt(state, "agi-attempt") == result, "retire does not overwrite termination history")
+
+
+def test_attempt_audit_failure() -> None:
+    state, attempt = _attempt_fixture()
+    cast("RealShapeState", state).fail_next("write")
+    failed = False
+    try:
+        transition_lifecycle_state(
+            state,
+            agent_instance_id="agi-attempt",
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_TERMINATED,
+            directed_by="operator:none",
+            reason=attempt.reason("attempt"),
+        )
+    except RuntimeError:
+        failed = True
+    _check(failed, "audit failure is not a green transition")
+    _check(read_managed_session(state, "agi-attempt")["lifecycle_state"] == LIFECYCLE_TERMINATED, "partial state retained")
+    _check(read_host_attempt(state, "agi-attempt")["prior_host_outcome"] is None, "missing audit never fabricates outcome")
+
+
+def test_expected_observation_nulls() -> None:
+    state, attempt = _attempt_fixture()
+    row = read_managed_session(state, "agi-attempt")
+    fields = ("host", "host_ref", "lifecycle_state", "last_transition_at", "last_heartbeat_at")
+    expected = {key: row.get(key) for key in fields}
+    transition_lifecycle_state(
+        state,
+        agent_instance_id="agi-attempt",
+        from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_TERMINATED,
+        directed_by="operator:none",
+        reason=attempt.reason("observed"),
+        expected_observation=expected,
+    )
+    _check(_transition_count(state, "agi-attempt") == 1, "null observation fields match with is_null")
+
+
+def test_latest_attempt_and_unreadable() -> None:
+    state, attempt = _attempt_fixture()
+    for row_id, reason in (("older", attempt.reason("valid")), ("z-newer", "legacy human rationale")):
+        state.write_state(
+            AGENT_ROLE_BINDING_NAMESPACE,
+            {
+                "table": TABLE_SESSION_TRANSITION,
+                "record": {
+                    "id": row_id,
+                    "agent_instance_id": "agi-attempt",
+                    "from_state": LIFECYCLE_SPAWNING,
+                    "to_state": LIFECYCLE_TERMINATED,
+                    "directed_by": "operator:none",
+                    "reason": reason,
+                    "occurred_at": "2026-10-20T00:00:00+00:00",
+                },
+            },
+        )
+    result = read_host_attempt(state, "agi-attempt")
+    _check(result["prior_host_outcome"] is None, "newest unknown never falls back to older proof")
+    _check(result["prior_host_reason"] == "legacy human rationale", "stable time/id order returns raw latest reason")
+    cast("RealShapeState", state).fail_next("query")
+    result = read_host_attempt(state, "agi-attempt")
+    _check("unreadable" in result["prior_host_advisory"], "read failure becomes explicit advisory")
+    _check(result["prior_host_outcome"] is None, "unreadable history supplies no proof")
+
+
 def main() -> int:
+    test_attempt_roundtrip()
+    test_attempt_audit_failure()
+    test_expected_observation_nulls()
+    test_latest_attempt_and_unreadable()
+    test_native_assignment_and_historical_charter()
     test_insert_and_read()
     test_written_columns_are_declared()
     test_list_filters()

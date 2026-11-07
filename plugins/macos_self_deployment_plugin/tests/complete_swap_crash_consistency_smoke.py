@@ -41,12 +41,15 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "macos_self_deployment_plugin" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 
+from ananta.core.runtime import drain_sentinel as core_drain_sentinel  # noqa: E402
 from ananta.interfaces.lifecycle_result_types import RestartStatus  # noqa: E402
+from macos_self_deployment_plugin import plugin as plugin_module  # noqa: E402
 from macos_self_deployment_plugin import process_identity  # noqa: E402
 from macos_self_deployment_plugin.constants import (  # noqa: E402
     FINISHER_ESCALATION_NEEDS_INTERVENTION,
@@ -70,7 +73,7 @@ from macos_self_deployment_plugin.pending_finisher import (  # noqa: E402
     read_pending_finisher,
     write_pending_finisher,
 )
-from macos_self_deployment_plugin.plugin import MacosSelfDeploymentPlugin, _runtime_dir  # noqa: E402
+from macos_self_deployment_plugin.plugin import MacosSelfDeploymentPlugin  # noqa: E402
 from macos_self_deployment_plugin.release_manager import (  # noqa: E402
     CandidatePaths,
     SwapResult,
@@ -514,22 +517,36 @@ def test_executor_enqueue_failure_is_non_fatal(tmp: Path) -> None:
     _check(read_pending_finisher(path) == record, "durable record PERSISTS (backstop will finish it)")
 
 
-def test_complete_swap_normal_path() -> None:
+def test_complete_swap_normal_path(runtime_dir: Path) -> None:
     print("scenario 7: complete_swap normal path is record-driven + identity-guarded (B2·3)")
     solet = "b2completeswap"
-    path = pending_finisher_path(_runtime_dir(), solet)
+    path = pending_finisher_path(runtime_dir, solet)
+    if path.resolve().parent != runtime_dir.resolve():
+        raise AssertionError("complete_swap smoke record escaped its temporary runtime")
     plugin = MacosSelfDeploymentPlugin()
     plugin._solet_name = solet  # noqa: SLF001
     plugin._router_client = None  # noqa: SLF001 — unregister becomes a skip, identity is the focus
     try:
         # (a) record ABSENT → idempotent no-op (the backstop already converged).
         clear_pending_finisher(path)
-        data = plugin.complete_swap(prior_pid=os.getpid(), prior_instance_id="example-blue-1", prior_color="blue")
+        with (
+            patch.object(core_drain_sentinel, "get_runtime_dir", return_value=runtime_dir),
+            patch.object(plugin_module, "_runtime_dir", return_value=runtime_dir),
+        ):
+            if plugin_module._runtime_dir().resolve() != runtime_dir.resolve():
+                raise AssertionError("complete_swap resolved outside its temporary runtime")
+            data = plugin.complete_swap(prior_pid=os.getpid(), prior_instance_id="example-blue-1", prior_color="blue")
         _check("pending_finisher_absent_noop" in data["steps_completed"], "absent record → no-op (no bare-pid kill)")
 
         # (b) identity MISMATCH on my own live pid (stale token) → never SIGTERM the smoke.
         write_pending_finisher(path, _rec(pid=os.getpid(), token="Thu Jan  1 00:00:00 1970"))
-        data = plugin.complete_swap(prior_pid=os.getpid(), prior_instance_id="example-blue-1", prior_color="blue")
+        with (
+            patch.object(core_drain_sentinel, "get_runtime_dir", return_value=runtime_dir),
+            patch.object(plugin_module, "_runtime_dir", return_value=runtime_dir),
+        ):
+            if plugin_module._runtime_dir().resolve() != runtime_dir.resolve():
+                raise AssertionError("complete_swap resolved outside its temporary runtime")
+            data = plugin.complete_swap(prior_pid=os.getpid(), prior_instance_id="example-blue-1", prior_color="blue")
         _check(
             "prior_pid_reused_skip_sigterm" in data["steps_completed"],
             "token mismatch → skip SIGTERM (the live smoke process is not killed)",
@@ -541,7 +558,13 @@ def test_complete_swap_normal_path() -> None:
         try:
             token = process_identity.start_token(sleeper.pid)
             write_pending_finisher(path, _rec(pid=sleeper.pid, token=token))
-            data = plugin.complete_swap(prior_pid=sleeper.pid, prior_instance_id="example-blue-1", prior_color="blue")
+            with (
+                patch.object(core_drain_sentinel, "get_runtime_dir", return_value=runtime_dir),
+                patch.object(plugin_module, "_runtime_dir", return_value=runtime_dir),
+            ):
+                if plugin_module._runtime_dir().resolve() != runtime_dir.resolve():
+                    raise AssertionError("complete_swap resolved outside its temporary runtime")
+                data = plugin.complete_swap(prior_pid=sleeper.pid, prior_instance_id="example-blue-1", prior_color="blue")
             sleeper.wait(timeout=5)
             _check(sleeper.poll() is not None, "complete_swap SIGTERM'd the real prior")
             _check("pending_finisher_cleared" in data["steps_completed"], "record cleared on the real path")
@@ -558,6 +581,8 @@ def main() -> int:
     ananta_scratch = Path.home() / ".ananta"
     ananta_scratch.mkdir(exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix="b2_smoke_", dir=str(ananta_scratch)))
+    runtime_dir = tmp / "runtime"
+    runtime_dir.mkdir()
     try:
         test_module_round_trip(tmp)
         test_reconcile_matrix()
@@ -565,8 +590,9 @@ def main() -> int:
         test_wrapper_resilience(tmp)
         test_executor_writes_record_before_swap(tmp)
         test_executor_enqueue_failure_is_non_fatal(tmp)
-        test_complete_swap_normal_path()
+        test_complete_swap_normal_path(runtime_dir)
     finally:
+        runtime_dir.rmdir()
         for child in tmp.iterdir():
             child.unlink()
         tmp.rmdir()

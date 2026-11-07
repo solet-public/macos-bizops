@@ -40,7 +40,7 @@ EMBEDDING_DESCRIPTION: Run a fast, mechanical, whole-fleet liveness sweep. Snaps
 
 [ ] 2. Pull the register's open facts
     a) `psolet resume --solet` followed by this deployment's own solet name (never hardcoded — this card ships across solet identities) for `open_decisions`/`changed_issues`/`active_rulings`, and `psolet db unit who-has-work` for current units and their declared `coverage`. Plain CLI — no service binding in this checkout.
-    b) Check Git-Controller's held-authorization queue for anything aged. This queue has no silent TTL by design; the caller judges staleness directly from `created_at`.
+    b) Check Git-Controller's held-authorization queue for anything aged: open refusals plus accepted-but-unfired authorizations (`entry_kind` accepted — an act such as a seed clone waiting on a precondition, shown with its current `act`, `predicate` and `authorizing_message_id`). The verb pages: while `next_cursor` is non-null, call it again with `cursor` set to that value before concluding nothing is owed. `get_authorization_history`, by entry or by any old authorizing message id, shows the predicates a reissue withdrew. This queue has no silent TTL by design; the caller judges staleness directly from `created_at`. It is an obligation index, never proof of authority or landing permission, and only as complete as its producers: the seat that accepts such an authorization records it with `record_accepted_authorization` and keeps it current with `change_accepted_authorization` (correct on a reissue, fire with evidence, withdraw, retire, reopen only on a fresh authorizing message); nothing records an acceptance automatically.
         RESULT_PROCESSOR_KIND: deterministic_continuation
         Call: plugin::agent_messaging_plugin::list_held_authorizations
         Arguments:
@@ -54,14 +54,14 @@ EMBEDDING_DESCRIPTION: Run a fast, mechanical, whole-fleet liveness sweep. Snaps
         {"agent_instance_id": "<<BIND:agent_instance_id>>"}
 
 [ ] 4. Self-drain the caller's own role inbox
-    a) Read the cursor from `workbench/.peer_inbox_last_check` (ISO-8601 UTC; this is a `peer_inbox` `after` argument, not a `log show` cursor — do not conflate it with step 5's cursor file or format). Missing file: use 20 minutes before now.
-    b) Call peer_inbox. Its `after` argument only filters the instance section; the role section (what matters here) has no time-filter argument at all and must be filtered client-side against the cursor. Role entries return newest-first; page further with `role_after` only if the oldest row on the current page is still newer than the cursor.
+    a) Read the cursor from `workbench/.peer_inbox_last_check` (ISO-8601 UTC; this is a `peer_inbox` `since` argument, not a `log show` cursor — do not conflate it with step 5's cursor file or format). Missing file: use 20 minutes before now.
+    b) Call peer_inbox with `since` set to the cursor, never `after` (`after` is a backward cursor and returns rows older than the timestamp). `since` bounds both sections: role entries come back newest-first and only newer than the cursor; check `role_section_status` first: `error` also leaves `role_since_created_at` null and is a role-section fault (drop `role_after`, retry the role section from its first page, never read the empty `role_entries` as no mail). If the retry still returns `error`, report the fault and stop the drain with the cursor unchanged. With status `ok`, `role_since_created_at` is non-null (it echoes the cursor as naive UTC); if it is null the server predates the fix, so filter the role rows client-side and stop at the first row at or before the cursor (rows are newest-first), paging `role_after` only while every row on the page is still newer than the cursor. With the echo present, page `role_after` only while `next_role_cursor` is non-null.
         RESULT_PROCESSOR_KIND: deterministic_continuation
         Call: plugin::agent_messaging_plugin::peer_inbox
         Arguments:
-        {"after": "<<BIND:peer_inbox_cursor>>"}
+        {"since": "<<BIND:peer_inbox_cursor>>"}
     c) For each role row newer than the cursor, check whether it was already acted on this session. A row genuinely new — nothing in this session's own history shows it was seen — is exactly the failure mode this step exists to catch: treat it as a live message arriving now.
-    d) Advance the cursor to now (`date -u +"%Y-%m-%dT%H:%M:%SZ"`) regardless of outcome, and write it back to `workbench/.peer_inbox_last_check`.
+    d) Advance the cursor to now (`date -u +"%Y-%m-%dT%H:%M:%SZ"`) and write it back to `workbench/.peer_inbox_last_check` only after the role section completes successfully, including a successful first-page retry. If the retry returns `error`, report the fault and leave the cursor unchanged so the failed window is retried on the next pass.
 
 [ ] 5. Check for an unexpected host sleep since the last pass
     a) Read the last-checked cursor from `workbench/.sleep_monitor_last_check` — local time, `%Y-%m-%d %H:%M:%S`, the literal format `/usr/bin/log show --start` requires (an ISO-8601 cursor fails closed with a conversion error, not a silently wrong query). Missing file: use 20 minutes before now — do not scan further back, that is fleet-progress-review's job.
@@ -85,18 +85,20 @@ EMBEDDING_DESCRIPTION: Run a fast, mechanical, whole-fleet liveness sweep. Snaps
     b) If the result comes back `drive_unverified`/stranded (text sitting in the composer, never confirmed sent): stop, do not retry. A second attempt deposits an equally-unconfirmable duplicate; this lane needs the operator's direct attention.
 
 [ ] 8. Restart a lane whose host has died
-    a) When step 3 shows `lifecycle_state: overdue` + `host_liveness` not alive (dead): capture the dying row's own `lane_id`/`brief_ref`/`work_class`/`budget_line`/`model`/`effort`/`host` from its `session_status` result before it goes fully terminal, then terminate it (a restart, not a drive). Skip this step when no lane in scope matches this pattern this pass.
+    a) When step 3 shows `lifecycle_state: overdue` + `host_liveness` not alive (dead): capture the dying row's own `lane_id`/`unit_id`/`work_class`/`budget_line`/`model`/`effort`/`host` from its `session_status` result before it goes fully terminal, then terminate it (a restart, not a drive). Skip this step when no lane in scope matches this pattern this pass.
         RESULT_PROCESSOR_KIND: deterministic_continuation
         Call: plugin::agent_messaging_plugin::terminate_session
         Arguments:
         {"agent_instance_id": "<<BIND:agent_instance_id>>"}
 
 [ ] 9. Respawn the restarted lane onto its captured configuration
-    a) Using exactly the `lane_id`/`brief_ref`/`work_class`/`budget_line`/`model`/`effort`/`host` captured in step 8, spawn the replacement. Only reached when step 8 actually ran this pass.
+    a) Using exactly the `lane_id`/`unit_id`/`work_class`/`budget_line`/`model`/`effort`/`host` captured in step 8, spawn the replacement. Only reached when step 8 actually ran this pass.
         RESULT_PROCESSOR_KIND: deterministic_continuation
         Call: plugin::agent_messaging_plugin::spawn_session
         Arguments:
-        {"role_class": "<<BIND:role_class>>", "lane_id": "<<BIND:lane_id>>", "brief_ref": "<<BIND:brief_ref>>", "work_class": "<<BIND:work_class>>", "budget_line": "<<BIND:budget_line>>", "dispatch_kind": "<<BIND:dispatch_kind>>"}
+        {"role_class": "<<BIND:role_class>>", "lane_id": "<<BIND:lane_id>>", "unit_id": "<<BIND:unit_id>>", "work_class": "<<BIND:work_class>>", "budget_line": "<<BIND:budget_line>>", "dispatch_kind": "<<BIND:dispatch_kind>>"}
+
+    b) Retain `data.job_id` and schedule `service_interface::job_service::get_job` with that exact id. While queued/processing, schedule another read and leave this step pending. After terminal success, bind the new `agent_instance_id` from `job.result.data`; on error/cancelled, handle the stored outcome before any dependent step. A receipt never proves a worker exists and never authorizes a second launch.
 
 [ ] 10. Reverify role continuity after a restart
     a) If the session terminated in step 8 was holding a durable role, confirm the role is actually bound to a live holder after step 9's respawn. Only reached when step 8 ran this pass and the dying row held a role.

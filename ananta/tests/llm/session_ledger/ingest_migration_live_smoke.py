@@ -38,13 +38,9 @@ Coverage:
 
 Writes only sentinel rows (tracked by id) and hard-deletes them in a ``finally``.
 There are NO DB-level foreign keys (FKs are repository-enforced), so delete order
-is irrelevant. Env-gated behind ``LEDGER_INGEST_LIVE_SMOKE=1`` (needs the live
-solet DB up).
-
-Run::
-
-    LEDGER_INGEST_LIVE_SMOKE=1 \\
-      .venv/bin/python3 ananta/tests/llm/session_ledger/ingest_migration_live_smoke.py
+is irrelevant. Private fixture: run under quality_gates/provision_test_pg.py using the
+explicit the private manifest variable contract. Without it, exit 77; legacy enable flags
+never select a live profile. See quality_gates/private_postgres.md.
 """
 
 from __future__ import annotations
@@ -52,18 +48,26 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, LiteralString, cast
+from zipfile import ZipFile
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+_ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(_ROOT))
+REPO_ROOT = _ROOT
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(
-    0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
+    0,
+    str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 
-from ananta.constants import SOLET_NAME_ENV_VAR  # noqa: E402
+from ananta.core.domain.types import ActionResult  # noqa: E402
+from ananta.interfaces.state_management_interface import StateManagementInterface  # noqa: E402
+from ananta.llm.session_ledger.importer import _event_external_id, _project_tool_call  # noqa: E402
 from ananta.llm.session_ledger.repository import (  # noqa: E402
     SessionLedgerRepository,
 )
@@ -72,8 +76,11 @@ from ananta.llm.session_ledger.types import (  # noqa: E402
     IngestSourceKind,
     MessageRole,
     NormalizedSessionEvent,
+    RawSessionEvent,
     SourceVendor,
 )
+from ananta.llm.session_ledger.vendor import chatgpt_export, codex, codex_cloud  # noqa: E402
+from ananta.services.state_service import StateService  # noqa: E402
 from postgres_state_management_plugin.plugin import (  # noqa: E402
     _PostgresStateTransaction,
 )
@@ -83,6 +90,8 @@ from postgres_state_management_plugin.postgres_backend.config import (  # noqa: 
 from postgres_state_management_plugin.postgres_backend.provider import (  # noqa: E402
     PostgresProvider,
 )
+
+from quality_gates.private_test_pg import MANIFEST_ENV, PG_SCHEMA, ledger_fixture, load_fixture, skip_fixture  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
@@ -98,21 +107,15 @@ def _check(condition: object, label: str) -> None:
         print(f"  FAIL  {label}")
 
 
-_PROFILE_PG_CONFIG = (
-    REPO_ROOT / "profile" / "config" / "plugins"
-    / "postgres_state_management_plugin.json"
-)
-
-
 def _load_pg_config() -> PostgresConfig:
-    return PostgresConfig(**json.loads(_PROFILE_PG_CONFIG.read_text(encoding="utf-8")))
+    return PostgresConfig.model_validate(load_fixture("ledger_ingest").connection_config(PG_SCHEMA))
 
 
-def _envelope(data: dict[str, Any]) -> dict[str, Any]:
+def _envelope(data: dict[str, Any]) -> ActionResult:
     return {"action_status": "completed", "data": data, "actions": [], "error": None}
 
 
-class _LiveStateAdapter:
+class _LiveStateAdapter(StateService):
     """Full StateManagementInterface stand-in over a real provider.
 
     Autocommit ``write_state`` / ``update_state`` / ``query_state`` /
@@ -125,9 +128,10 @@ class _LiveStateAdapter:
     """
 
     def __init__(self, provider: PostgresProvider) -> None:
+        super().__init__()
         self._provider = provider
 
-    def write_state(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:
+    def write_state(self, namespace: str, data: dict[str, Any], calling_service: str | None = None, calling_namespace: str | None = None) -> ActionResult:
         row_id = self._provider.insert(
             namespace=namespace,
             table=str(data["table"]),
@@ -135,9 +139,7 @@ class _LiveStateAdapter:
         )
         return _envelope({"result": {"generated_id": row_id, "inserted": 1}})
 
-    def update_state(
-        self, namespace: str, query: dict[str, Any], updates: dict[str, Any]
-    ) -> dict[str, Any]:
+    def update_state(self, namespace: str, query: dict[str, Any], updates: dict[str, Any]) -> ActionResult:
         filters = query.get("filters") or {}
         affected = self._provider.update(
             namespace=namespace,
@@ -147,16 +149,17 @@ class _LiveStateAdapter:
         )
         return _envelope({"result": {"updated": affected}})
 
-    def query_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
-        filters = query.get("filters") or {}
+    def query_state(self, namespace: str, filters: dict[str, Any]) -> ActionResult:
+        query = filters
+        conditions = query.get("filters") or {}
         rows = self._provider.select(
             namespace=namespace,
             table=str(query["table"]),
-            conditions=cast("dict[str, Any]", filters) if isinstance(filters, dict) else None,
+            conditions=conditions if isinstance(conditions, dict) else None,
         )
         return _envelope({"records": rows, "count": len(rows)})
 
-    def query_ordered(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:
+    def query_ordered(self, namespace: str, data: dict[str, Any]) -> ActionResult:
         filters = data.get("filters") or {}
         order_by = cast("list[list[str]]", data.get("order_by") or [])
         rows = self._provider.select_ordered(
@@ -169,7 +172,7 @@ class _LiveStateAdapter:
         )
         return _envelope({"records": rows, "count": len(rows)})
 
-    def upsert_state(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:
+    def upsert_state(self, namespace: str, data: dict[str, Any]) -> ActionResult:
         # SQL-lockdown Slice 6: upsert_session's Phase 1 canonical dispatch
         # rides upsert_state DO-NOTHING — the live adapter delegates to the real
         # partial-unique conditional INSERT path.
@@ -182,7 +185,7 @@ class _LiveStateAdapter:
         )
         return _envelope({"result": {"inserted": inserted, "id": record_id}})
 
-    def max_value(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:
+    def max_value(self, namespace: str, data: dict[str, Any]) -> ActionResult:
         # GAP-5: append_event's _next_sequence reads MAX(sequence) via the
         # autocommit aggregate primitive — delegate to the real provider.aggregate.
         value = self._provider.aggregate(
@@ -201,7 +204,7 @@ class _LiveStateAdapter:
 
 
 _MARK = "__ingest_migration_live_smoke__"
-_SCHEMA = os.environ[SOLET_NAME_ENV_VAR]
+_SCHEMA = PG_SCHEMA
 
 # Fixed clock so the COALESCE / LEAST / GREATEST assertions are deterministic.
 _T1 = datetime(2026, 6, 1, 10, 0, 0, tzinfo=UTC)  # earliest
@@ -268,9 +271,7 @@ def _make_event(
 def test_full_ingest_lifecycle(  # noqa: PLR0915 — one linear lifecycle, no branching
     repo: SessionLedgerRepository, provider: PostgresProvider
 ) -> None:
-    created: dict[str, list[str]] = {
-        t: [] for t in ("source", "session", "event", "tool_call", "attachment", "import_batch")
-    }
+    created: dict[str, list[str]] = {t: [] for t in ("source", "session", "event", "tool_call", "attachment", "import_batch")}
     ext = f"ext-{_MARK}"
     try:
         # 1. insert_source — config_json dict → real JSONB column.
@@ -290,7 +291,8 @@ def test_full_ingest_lifecycle(  # noqa: PLR0915 — one linear lifecycle, no br
             f"config_json dict round-trips through JSONB (got {src.config_json if src else None!r})",
         )
         found = repo.find_source_id_by_kind_and_root_uri(
-            source_kind=IngestSourceKind.CODEX_PUSHED, root_uri=f"pushed:{_MARK}",
+            source_kind=IngestSourceKind.CODEX_PUSHED,
+            root_uri=f"pushed:{_MARK}",
         )
         _check(found == source_id, "find_source_id_by_kind_and_root_uri resolves the source")
 
@@ -366,8 +368,7 @@ def test_full_ingest_lifecycle(  # noqa: PLR0915 — one linear lifecycle, no br
         # maintain it (else batch updated_at silently goes stale post-migration).
         _check(
             _as_dt(batch["updated_at"]) > batch_updated_before,
-            "batch.updated_at advanced via the trigger on increment_and_return "
-            "(increment writes no updated_at itself)",
+            "batch.updated_at advanced via the trigger on increment_and_return (increment writes no updated_at itself)",
         )
 
         # 5b. append_event #2 — OUT-OF-ORDER earlier event_at must NOT regress last_event_at.
@@ -467,36 +468,208 @@ def test_full_ingest_lifecycle(  # noqa: PLR0915 — one linear lifecycle, no br
             for rid in ids:
                 _hard_delete(provider, table, rid)
         _check(
-            all(
-                not provider.select(namespace="session_ledger", table=t, conditions={"id": rid})
-                for t, ids in created.items()
-                for rid in ids
-            ),
+            all(not provider.select(namespace="session_ledger", table=t, conditions={"id": rid}) for t, ids in created.items() for rid in ids),
             "all sentinel rows hard-deleted (cleanup)",
         )
 
 
-def main() -> int:
-    if os.environ.get("LEDGER_INGEST_LIVE_SMOKE") != "1":
-        print("=== ingest_migration_live_smoke ===")
-        print(
-            "  SKIP  set LEDGER_INGEST_LIVE_SMOKE=1 to run; "
-            "needs the live solet DB."
+def _cloud_tool_events() -> list[NormalizedSessionEvent]:
+    arguments = ["", "echo 雪\nnext", '{"query":"雪","limit":2}']
+    items: list[dict[str, object]] = []
+    for index, text in enumerate(arguments):
+        items.extend(
+            [
+                {"type": "function_call", "name": "exec_command", "call_id": f"cloud-call-{index}", "arguments": text},
+                {"type": "function_call_output", "call_id": f"cloud-call-{index}", "output": "" if index == 0 else "ok"},
+            ]
         )
-        return 0
-    print("=== ingest_migration_live_smoke ===")
-    provider = PostgresProvider(_load_pg_config())
-    provider.initialize()
-    repo = SessionLedgerRepository(
-        state_service=cast("Any", _LiveStateAdapter(provider)),
-        clock=lambda: _NOW,
+    items.append({"type": "message", "role": "assistant", "content": [{"content_type": "text", "text": "ack"}]})
+    envelope = {
+        "external_session_id": "tool-shapes-cloud",
+        "task_event_at": _T2.isoformat(),
+        "task_details": {
+            "current_user_turn": {"id": "cloud-user", "input_items": [{"type": "message", "role": "user", "content": [{"content_type": "text", "text": "hello"}]}]},
+            "current_assistant_turn": {"id": "cloud-assistant", "output_items": items, "error": {"code": "synthetic", "message": "control"}},
+        },
+    }
+    raw_events = list(codex_cloud.parse_chunk(json.dumps(envelope)))
+    events = [codex_cloud.normalize_raw(raw) for raw in raw_events]
+    _check(len(events) == 9, "cloud real parser emits calls, outputs and user/assistant/SYSTEM controls")
+    _check_cloud_tool_payloads(events, arguments)
+    _check_parser_identity(raw_events, events)
+    return events
+
+
+def _check_cloud_tool_payloads(events: list[NormalizedSessionEvent], arguments: list[str]) -> None:
+    calls = [event for event in events if event.event_type is EventType.TOOL_CALL]
+    _check(len(calls) == 3, "all cloud argument cases reach TOOL_CALL")
+    for index, event in enumerate(calls):
+        _check(event.content_text is None, "cloud TOOL_CALL has no text channel")
+        _check(event.content_json == {"subtype": "function_call", "name": "exec_command", "call_id": f"cloud-call-{index}", "arguments_text": arguments[index]}, "cloud empty/plain/JSON-looking arguments retained verbatim in JSON")
+    _check(any(event.event_type is EventType.TOOL_RESULT and event.content_text == "" for event in events), "cloud empty output retained")
+    _check(any(event.event_type is EventType.SYSTEM and event.role is MessageRole.SYSTEM for event in events), "cloud SYSTEM control unchanged")
+
+
+def _local_tool_events(scratch: Path) -> list[NormalizedSessionEvent]:
+    payloads: list[dict[str, object]] = [{"type": "message", "role": role, "content": [{"type": "input_text", "text": role}]} for role in ("user", "assistant", "system")]
+    payloads.extend(
+        [
+            {"type": "message", "role": "tool", "content": [{"type": "output_text", "text": "tool output"}], "tool_call_id": "vendor-correlation", "metadata": {"vendor": "kept"}},
+            {"type": "message", "role": "tool", "content": []},
+            {"type": "function_call", "name": "exec_command", "call_id": "local-real-call", "arguments": '{"cmd":"true"}'},
+            {"type": "function_call_output", "call_id": "local-real-call", "output": ""},
+        ]
     )
-    test_full_ingest_lifecycle(repo, provider)
+    rollout = scratch / "tool-shapes-local.jsonl"
+    rollout.write_text("".join(json.dumps({"type": "response_item", "timestamp": _T2.isoformat(), "payload": payload}) + "\n" for payload in payloads), encoding="utf-8")
+    raw_events = [raw for _, raw in codex.iter_events_from_path(rollout)]
+    events = [codex.normalize_raw(raw) for raw in raw_events]
+    _check(len(events) == 7, "local real rollout parser emits every fixture event")
+    _check(events[3].content_text == "tool output", "local nonempty tool output retains text")
+    for index in (3, 4):
+        _check(events[index].event_type is EventType.TOOL_RESULT and events[index].role is MessageRole.TOOL, "local tool-role message becomes TOOL_RESULT")
+        _check(events[index].content_json == {**payloads[index], "_codex_item_type": "message"}, "local tool payload and correlation metadata retained exactly")
+        _check(events[index].vendor_parent_event_id is None, "local tool message without parent does not invent a tool-use id")
+    _check(events[4].content_text is None and events[4].content_json is not None, "local empty output retains JSON payload")
+    _check(events[6].vendor_parent_event_id == "local-real-call", "local actual call/output retains real correlation")
+    _check_parser_identity(raw_events, events)
+    return events
+
+
+def _chatgpt_mapping() -> dict[str, object]:
+    mapping: dict[str, object] = {}
+    roles = ("user", "assistant", "system", "tool", "tool")
+    for index, role in enumerate(roles):
+        node_id = f"chat-node-{index}"
+        mapping[node_id] = {
+            "id": node_id,
+            "parent": f"chat-node-{index - 1}" if index else None,
+            "children": [],
+            "message": {
+                "id": node_id,
+                "author": {"role": role, "name": "vendor-tool" if role == "tool" else None},
+                "create_time": _T2.timestamp() + index,
+                "content": {"content_type": "text", "parts": ["" if index == 4 else role]},
+                "metadata": {"tool_call_id": "chat-real-correlation"} if index == 3 else {},
+            },
+        }
+    return mapping
+
+
+def _chatgpt_tool_events(scratch: Path) -> list[NormalizedSessionEvent]:
+    archive = scratch / "chatgpt.zip"
+    with ZipFile(archive, "w") as zf:
+        zf.writestr("conversations.json", json.dumps([{"conversation_id": "tool-shapes-chatgpt", "create_time": _T2.timestamp(), "update_time": _T3.timestamp(), "mapping": _chatgpt_mapping()}]))
+    raw_events = [raw for conversation in chatgpt_export.walk_conversations(archive) for raw in chatgpt_export.iter_events_for_conversation(conversation)]
+    events = [chatgpt_export.normalize_raw(raw) for raw in raw_events]
+    _check(len(events) == 5, "ChatGPT real ZIP/parser retains empty tool output")
+    _check(events[3].content_text == "tool", "ChatGPT nonempty tool output retains text")
+    for index in (3, 4):
+        _check(events[index].event_type is EventType.TOOL_RESULT and events[index].role is MessageRole.TOOL, "ChatGPT tool-role message becomes TOOL_RESULT")
+        _check(events[index].content_json == {"raw_message": raw_events[index].payload["raw_message"]}, "ChatGPT payload, author and correlation metadata retained exactly")
+    _check(events[4].content_text == "", "ChatGPT empty tool output remains empty text")
+    _check_parser_identity(raw_events, events)
+    return events
+
+
+def _check_parser_identity(raw_events: list[RawSessionEvent], events: list[NormalizedSessionEvent]) -> None:
+    for raw, event in zip(raw_events, events, strict=True):
+        _check((event.external_session_id, event.vendor_event_id, event.vendor_parent_event_id, event.event_at) == (raw.external_session_id, raw.vendor_event_id, raw.vendor_parent_event_id, raw.event_at), "parser identity, parent and clock retained")
+        if event.role in {MessageRole.USER, MessageRole.ASSISTANT, MessageRole.SYSTEM} and event.event_type is EventType.MESSAGE:
+            _check(event.content_text in {"user", "assistant", "system", "hello", "ack"}, "non-tool MESSAGE control retains content")
+
+
+def _append_parser_events(
+    repo: SessionLedgerRepository,
+    state: StateManagementInterface,
+    source_kind: IngestSourceKind,
+    vendor: SourceVendor,
+    events: list[NormalizedSessionEvent],
+) -> None:
+    source_id = repo.insert_source(source_kind=source_kind, root_uri=f"pushed:{_MARK}-{source_kind.value}", account_label=_MARK, config={})
+    session_id = repo.upsert_session(source_id=source_id, external_session_id=events[0].external_session_id, vendor=vendor, source_kind=source_kind, vendor_session_label=None, project_path=None, first_event_at=_T2, last_event_at=_T3)
+    batch_id = repo.start_batch(source_id, polling_lease_token="plt-tool-shapes")
+    first_ids: list[str] = []
+    for replay in (False, True):
+        ordinals: dict[tuple[str, str, str | None, str, datetime], int] = {}
+        for index, event in enumerate(events):
+            repo._validate_event_shape(event)
+            external_id = _event_external_id(normalized=event, session_id=session_id, ordinals=ordinals)
+            result = repo.append_event(session_id=session_id, external_id=external_id, normalized=event, batch_id=batch_id, content_blob_id=None, session_vendor=vendor, source_kind=source_kind)
+            _check(result.deduped is replay, "real parser event inserts once and replay dedups")
+            if replay:
+                continue
+            first_ids.append(result.event_id)
+            _project_tool_call(repo, normalized=event, session_id=session_id, event_id=result.event_id)
+            row = repo.list_events_by_ids([result.event_id])[0]
+            _check((row["content_text"], row["content_json"], row["role"], row["event_type"]) == (event.content_text, event.content_json, event.role.value if event.role else None, event.event_type.value), "exact text/JSON/role/type PostgreSQL readback")
+            _check((row["vendor_event_id"], row["vendor_parent_event_id"], row["external_id"], row["session_vendor"], row["source_kind"]) == (event.vendor_event_id, event.vendor_parent_event_id, external_id, vendor.value, source_kind.value), "exact vendor identity and provenance PostgreSQL readback")
+            _check(row["sequence"] == index + 1, "real parser event sequence is monotone")
+    counts = _state_rows(state, "session", {"id": session_id})
+    batches = _state_rows(state, "import_batch", {"id": batch_id})
+    persisted = _state_rows(state, "event", {"session_id": session_id})
+    _check({row["id"] for row in persisted} == set(first_ids), "replay retains exactly the original persisted event identities")
+    _check(counts[0]["event_count"] == len(events) and batches[0]["event_count"] == len(events), "replay leaves session and batch counters unchanged")
+    if source_kind is IngestSourceKind.CODEX_LOCAL:
+        tools = _state_rows(state, "tool_call", {"session_id": session_id})
+        _check(len(tools) == 1 and tools[0]["status"] == "succeeded", "actual local call/result projects once and resolves")
+        _check(tools[0]["call_event_id"] == first_ids[5] and tools[0]["result_event_id"] == first_ids[6], "projection binds actual call/result event identities")
+
+
+def _state_rows(state: StateManagementInterface, table: str, filters: dict[str, object]) -> list[dict[str, Any]]:
+    response = state.query_state("session_ledger", {"table": table, "filters": filters})
+    assert response.get("action_status") == "completed", response
+    data = response.get("data")
+    assert data is not None and isinstance(data.get("records"), list), response
+    return cast("list[dict[str, Any]]", data["records"])
+
+
+def test_tool_call_and_tool_role_results_ingest(repo: SessionLedgerRepository, state: StateManagementInterface) -> None:
+    """Real vendor parsers → strict validator → private PostgreSQL → replay."""
+    with tempfile.TemporaryDirectory(prefix="tool-shapes-parsers-") as scratch:
+        root = Path(scratch)
+        cases = [
+            (IngestSourceKind.CODEX_CLOUD, SourceVendor.CODEX, _cloud_tool_events()),
+            (IngestSourceKind.CODEX_LOCAL, SourceVendor.CODEX, _local_tool_events(root)),
+            (IngestSourceKind.CHATGPT_EXPORT, SourceVendor.CHATGPT, _chatgpt_tool_events(root)),
+        ]
+        for source_kind, vendor, events in cases:
+            controls = {event.role for event in events if event.event_type is EventType.MESSAGE}
+            expected_roles = {MessageRole.USER, MessageRole.ASSISTANT} if source_kind is IngestSourceKind.CODEX_CLOUD else {MessageRole.USER, MessageRole.ASSISTANT, MessageRole.SYSTEM}
+            _check(controls == expected_roles, "unrelated user/assistant/system MESSAGE shapes unchanged")
+            _append_parser_events(repo, state, source_kind, vendor, events)
+        for invalid, expected in (
+            (replace(cases[1][2][3], event_type=EventType.MESSAGE), "MESSAGE events require role"),
+            (replace(next(event for event in cases[0][2] if event.event_type is EventType.TOOL_CALL), content_text="invalid direct caller"), "TOOL_CALL events must carry only content_json"),
+        ):
+            try:
+                repo._validate_event_shape(invalid)
+            except ValueError as error:
+                _check(expected in str(error), "strict validator still rejects invalid direct event shape")
+            else:
+                _check(False, "strict validator must reject invalid direct event shape")
+
+
+def main() -> int:
+    if not os.environ.get(MANIFEST_ENV):
+        return skip_fixture()
+    print("=== ingest_migration_live_smoke ===")
+    with ledger_fixture("ledger_ingest"):
+        provider = PostgresProvider(_load_pg_config())
+        provider.initialize()
+        state = cast("StateManagementInterface", _LiveStateAdapter(provider))
+        repo = SessionLedgerRepository(
+            state_service=state,
+            clock=lambda: _NOW,
+        )
+        test_full_ingest_lifecycle(repo, provider)
+        test_tool_call_and_tool_role_results_ingest(repo, state)
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:
             print(f"  FAILED: {label}")
         return 1
+    print("PRIVATE_PG_BODY ledger_ingest")
     return 0
 
 

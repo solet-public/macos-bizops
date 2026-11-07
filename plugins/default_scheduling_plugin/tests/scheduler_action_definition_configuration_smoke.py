@@ -125,9 +125,7 @@ class _CapturingMemoryService:
         tags: list[str],
         session_id: str | None,
     ) -> dict[str, Any]:
-        self.calls.append(
-            {"content": content, "tags": tags, "session_id": session_id}
-        )
+        self.calls.append({"content": content, "tags": tags, "session_id": session_id})
         return {"success": True}
 
 
@@ -138,6 +136,7 @@ def _call_plugin(
     memory_service: _CapturingMemoryService | None = None,
 ) -> tuple[SchedulingPlugin, dict[str, Any]]:
     plugin = SchedulingPlugin()
+    plugin.configure_memory_store()
     plugin.logger.disabled = True
     if memory_service is not None:
         plugin._memory_service = memory_service  # noqa: SLF001
@@ -152,10 +151,7 @@ def _call_plugin(
 
 def _is_parameter_error(result: dict[str, Any]) -> bool:
     error = result.get("error")
-    return (
-        isinstance(error, dict)
-        and error.get("code") == "default_scheduling_plugin.parameter_error"
-    )
+    return isinstance(error, dict) and error.get("code") == "default_scheduling_plugin.parameter_error"
 
 
 print("Case A: discoverable service-interface schema")
@@ -180,9 +176,7 @@ _check(
     "service memory_tag description does not claim model decision",
 )
 _check(
-    "terminal" in service_params["memory_tag"].description.lower()
-    and "does not start a model turn"
-    in service_params["memory_tag"].description.lower(),
+    "terminal" in service_params["memory_tag"].description.lower() and "does not start a model turn" in service_params["memory_tag"].description.lower(),
     "service memory_tag description states terminal no-model-turn behavior",
 )
 
@@ -207,14 +201,11 @@ try:
 except BaseException as exc:  # noqa: BLE001 - red-first smoke records defect
     service_error = exc
 _check(
-    service_error is None
-    and service_result is not None
-    and service_result["action_status"] == "completed",
+    service_error is None and service_result is not None and service_result["action_status"] == "completed",
     "service accepts action_definitions keyword",
 )
 _check(
-    capturing_plugin.params is not None
-    and capturing_plugin.params.get("action_definitions") == [_PEER_ACTION],
+    capturing_plugin.params is not None and capturing_plugin.params.get("action_definitions") == [_PEER_ACTION],
     "service forwards {process_key, arguments} bytes unchanged",
 )
 _check(
@@ -222,8 +213,7 @@ _check(
     "service does not rewrite canonical action_definitions to the legacy alias",
 )
 _check(
-    capturing_plugin.state is not None
-    and capturing_plugin.state.get("session_id") == "session-contract",
+    capturing_plugin.state is not None and capturing_plugin.state.get("session_id") == "session-contract",
     "service preserves normal state normalization",
 )
 
@@ -243,15 +233,11 @@ try:
 except BaseException as exc:  # noqa: BLE001 - red-first smoke records defect
     delayed_service_error = exc
 _check(
-    delayed_service_error is None
-    and delayed_service_result is not None
-    and delayed_service_result["action_status"] == "completed",
+    delayed_service_error is None and delayed_service_result is not None and delayed_service_result["action_status"] == "completed",
     "delayed service accepts action_definitions keyword",
 )
 _check(
-    capturing_plugin.method == "execute_in_seconds"
-    and capturing_plugin.params is not None
-    and capturing_plugin.params.get("action_definitions") == [_PEER_ACTION],
+    capturing_plugin.method == "execute_in_seconds" and capturing_plugin.params is not None and capturing_plugin.params.get("action_definitions") == [_PEER_ACTION],
     "delayed service forwards {process_key, arguments} bytes unchanged",
 )
 _check(
@@ -259,14 +245,14 @@ _check(
     "delayed service does not rewrite action_definitions to the legacy alias",
 )
 _check(
-    capturing_plugin.state is not None
-    and capturing_plugin.state.get("session_id") == "session-contract",
+    capturing_plugin.state is not None and capturing_plugin.state.get("session_id") == "session-contract",
     "delayed service preserves normal state normalization",
 )
 
 
 print("\nCase C: plugin surface accepts and persists the canonical peer action")
 plugin = SchedulingPlugin()
+plugin.configure_memory_store()
 plugin_result = plugin.create_cron_schedule(
     {
         "cron_expression": "*/15 * * * *",
@@ -279,7 +265,7 @@ _check(
     str(plugin_result.get("action_status", "")).lower() == "completed",
     "plugin create_cron_schedule accepts action_definitions",
 )
-saved = next(iter(plugin._memory_schedules.values()), None)  # noqa: SLF001
+saved = next(iter(plugin._memory_repository.memory_schedules.values()), None)  # noqa: SLF001
 _check(saved is not None and len(saved.actions) == 1, "plugin persists one action")
 if saved is not None and saved.actions:
     saved_action = saved.actions[0]
@@ -292,12 +278,12 @@ if saved is not None and saved.actions:
         "plugin preserves the scheduled arguments",
     )
     _check(
-        saved_action.result_processor is None
-        and saved_action.result_processor_kind is None,
+        saved_action.result_processor is None and saved_action.result_processor_kind is None,
         "scheduled peer action remains terminal without inference",
     )
 
 joseki_plugin = SchedulingPlugin()
+joseki_plugin.configure_memory_store()
 joseki_result = joseki_plugin.create_cron_schedule(
     {
         "cron_expression": "0 6 * * 1",
@@ -310,22 +296,17 @@ _check(
     str(joseki_result.get("action_status", "")).lower() == "completed",
     "plugin accepts deterministic run_joseki action definition",
 )
-joseki_saved = next(iter(joseki_plugin._memory_schedules.values()), None)  # noqa: SLF001
+joseki_saved = next(iter(joseki_plugin._memory_repository.memory_schedules.values()), None)  # noqa: SLF001
 _check(
-    joseki_saved is not None
-    and len(joseki_saved.actions) == 1
-    and joseki_saved.actions[0].name == _JOSEKI_ACTION["process_key"],
+    joseki_saved is not None and len(joseki_saved.actions) == 1 and joseki_saved.actions[0].name == _JOSEKI_ACTION["process_key"],
     "scheduled joseki fixture pins the run_joseki process key",
 )
 _check(
-    joseki_saved is not None
-    and joseki_saved.actions[0].parameters == _JOSEKI_ACTION["arguments"],
+    joseki_saved is not None and joseki_saved.actions[0].parameters == _JOSEKI_ACTION["arguments"],
     "scheduled joseki fixture pins key, bindings, and label arguments",
 )
 _check(
-    joseki_saved is not None
-    and joseki_saved.actions[0].result_processor is None
-    and joseki_saved.actions[0].result_processor_kind is None,
+    joseki_saved is not None and joseki_saved.actions[0].result_processor is None and joseki_saved.actions[0].result_processor_kind is None,
     "scheduled run_joseki submission carries no inference processor",
 )
 
@@ -339,20 +320,15 @@ for method_name in _PLUGIN_METHOD_BASES:
         f"{method_name} accepts a legitimate deterministic result processor",
     )
     processor_saved = next(
-        iter(processor_plugin._memory_schedules.values()),  # noqa: SLF001
+        iter(processor_plugin._memory_repository.memory_schedules.values()),  # noqa: SLF001
         None,
     )
     _check(
-        processor_saved is not None
-        and len(processor_saved.actions) == 1
-        and processor_saved.actions[0].result_processor
-        == _PROCESSOR_ACTION["result_processor"],
+        processor_saved is not None and len(processor_saved.actions) == 1 and processor_saved.actions[0].result_processor == _PROCESSOR_ACTION["result_processor"],
         f"{method_name} preserves result_processor",
     )
     _check(
-        processor_saved is not None
-        and processor_saved.actions[0].result_processor_kind
-        == _PROCESSOR_ACTION["result_processor_kind"],
+        processor_saved is not None and processor_saved.actions[0].result_processor_kind == _PROCESSOR_ACTION["result_processor_kind"],
         f"{method_name} preserves result_processor_kind",
     )
 
@@ -379,7 +355,7 @@ for method_name in _PLUGIN_METHOD_BASES:
     ):
         legacy_plugin, legacy_result = _call_plugin(method_name, legacy_params)
         legacy_saved = next(
-            iter(legacy_plugin._memory_schedules.values()),  # noqa: SLF001
+            iter(legacy_plugin._memory_repository.memory_schedules.values()),  # noqa: SLF001
             None,
         )
         _check(
@@ -387,9 +363,7 @@ for method_name in _PLUGIN_METHOD_BASES:
             f"{method_name} preserves valid {legacy_label}",
         )
         _check(
-            legacy_saved is not None
-            and legacy_saved.actions[0].name == _PEER_ACTION["process_key"]
-            and legacy_saved.actions[0].parameters == _PEER_ACTION["arguments"],
+            legacy_saved is not None and legacy_saved.actions[0].name == _PEER_ACTION["process_key"] and legacy_saved.actions[0].parameters == _PEER_ACTION["arguments"],
             f"{method_name} normalizes valid {legacy_label} without data loss",
         )
 
@@ -421,9 +395,7 @@ if neither_error is not None:
     )
 
 alias_error = _expect_value_error(
-    lambda: ScheduleFactory.parse_actions_from_params(
-        {"actions": [_PEER_ACTION], "action_definitions": [_PEER_ACTION]}
-    ),
+    lambda: ScheduleFactory.parse_actions_from_params({"actions": [_PEER_ACTION], "action_definitions": [_PEER_ACTION]}),
     "factory rejects simultaneous canonical and legacy action aliases",
 )
 if alias_error is not None:
@@ -434,9 +406,7 @@ if alias_error is not None:
 
 for empty_key in ("action_definitions", "actions"):
     empty_error = _expect_value_error(
-        lambda empty_key=empty_key: ScheduleFactory.parse_actions_from_params(
-            {empty_key: []}
-        ),
+        lambda empty_key=empty_key: ScheduleFactory.parse_actions_from_params({empty_key: []}),
         f"factory rejects empty {empty_key} as zero executable work",
     )
     if empty_error is not None:
@@ -456,13 +426,11 @@ invalid_cron_plugin, invalid_cron_result = _call_plugin(
 )
 invalid_cron_error = invalid_cron_result.get("error")
 _check(
-    isinstance(invalid_cron_error, dict)
-    and invalid_cron_error.get("code")
-    == "default_scheduling_plugin.invalid_cron_expression",
+    isinstance(invalid_cron_error, dict) and invalid_cron_error.get("code") == "default_scheduling_plugin.invalid_cron_expression",
     "create_cron_schedule preserves the exact invalid-cron runtime code",
 )
 _check(
-    not invalid_cron_plugin._memory_schedules,  # noqa: SLF001
+    not invalid_cron_plugin._memory_repository.memory_schedules,  # noqa: SLF001
     "invalid cron persists zero schedules",
 )
 
@@ -518,20 +486,12 @@ invalid_action_inputs: tuple[tuple[str, dict[str, Any]], ...] = (
     ("missing action process key", {"action_definitions": [{"arguments": {}}]}),
     (
         "non-object action arguments",
-        {
-            "action_definitions": [
-                {"process_key": _PEER_ACTION["process_key"], "arguments": []}
-            ]
-        },
+        {"action_definitions": [{"process_key": _PEER_ACTION["process_key"], "arguments": []}]},
     ),
     ("empty canonical action list", {"action_definitions": []}),
     (
         "inference-bearing scheduled action",
-        {
-            "action_definitions": [
-                {**_PEER_ACTION, "result_processor_kind": "inference"}
-            ]
-        },
+        {"action_definitions": [{**_PEER_ACTION, "result_processor_kind": "inference"}]},
     ),
 )
 
@@ -547,7 +507,7 @@ for method_name in _PLUGIN_METHOD_BASES:
             f"{method_name} reports PARAMETER_ERROR for {case_label}",
         )
         _check(
-            not invalid_plugin._memory_schedules,  # noqa: SLF001
+            not invalid_plugin._memory_repository.memory_schedules,  # noqa: SLF001
             f"{method_name} persists zero schedules for {case_label}",
         )
 
@@ -570,7 +530,7 @@ for method_name in _PLUGIN_METHOD_BASES:
             f"{method_name} reports PARAMETER_ERROR for {case_label}",
         )
         _check(
-            not invalid_plugin._memory_schedules,  # noqa: SLF001
+            not invalid_plugin._memory_repository.memory_schedules,  # noqa: SLF001
             f"{method_name} persists zero schedules for {case_label}",
         )
 
@@ -596,7 +556,7 @@ _check(
 )
 _check(not mixed_memory.calls, "mixed-mode rejection performs zero memory writes")
 _check(
-    not mixed_plugin._memory_schedules,  # noqa: SLF001
+    not mixed_plugin._memory_repository.memory_schedules,  # noqa: SLF001
     "mixed-mode rejection performs zero schedule writes",
 )
 
@@ -623,15 +583,13 @@ _check(
     "direct-action content rejection performs zero memory writes",
 )
 _check(
-    not direct_content_plugin._memory_schedules,  # noqa: SLF001
+    not direct_content_plugin._memory_repository.memory_schedules,  # noqa: SLF001
     "direct-action content rejection performs zero schedule writes",
 )
 
 
 print("\nCase G: memory_tag remains a legitimate terminal read")
-memory_actions, memory_name, memory_parameters = ScheduleFactory.parse_actions_from_params(
-    {"memory_tag": "terminal:lookup"}
-)
+memory_actions, memory_name, memory_parameters = ScheduleFactory.parse_actions_from_params({"memory_tag": "terminal:lookup"})
 _check(
     memory_name == "service_interface::memory_service::get_memories_by_tag",
     "memory_tag builds the canonical memory lookup",
@@ -641,9 +599,7 @@ _check(
     "memory lookup parameters remain intact",
 )
 _check(
-    len(memory_actions) == 1
-    and memory_actions[0].result_processor is None
-    and memory_actions[0].result_processor_kind is None,
+    len(memory_actions) == 1 and memory_actions[0].result_processor is None and memory_actions[0].result_processor_kind is None,
     "memory lookup is terminal and does not start inference",
 )
 
@@ -669,7 +625,7 @@ _check(
     "valid delayed memory write uses the normalized tag after validation",
 )
 _check(
-    len(valid_memory_plugin._memory_schedules) == 1,  # noqa: SLF001
+    len(valid_memory_plugin._memory_repository.memory_schedules) == 1,  # noqa: SLF001
     "valid delayed memory-tag/content mode persists one schedule",
 )
 
@@ -685,12 +641,11 @@ _check(
     "execute_in_seconds accepts list tags",
 )
 delayed_tags_saved = next(
-    iter(delayed_tags_plugin._memory_schedules.values()),  # noqa: SLF001
+    iter(delayed_tags_plugin._memory_repository.memory_schedules.values()),  # noqa: SLF001
     None,
 )
 _check(
-    delayed_tags_saved is not None
-    and delayed_tags_saved.tags == ["delayed:first", "delayed:second"],
+    delayed_tags_saved is not None and delayed_tags_saved.tags == ["delayed:first", "delayed:second"],
     "execute_in_seconds normalizes and persists list tags",
 )
 
@@ -699,22 +654,18 @@ print("\nCase H: discoverable metadata and references tell the real contract")
 plugin_metadata = SchedulingPlugin.create_cron_schedule._platform_process_metadata  # type: ignore[attr-defined]  # noqa: SLF001
 plugin_params = plugin_metadata.parameters
 _check(
-    plugin_params["tags"].type == service_params["tags"].type
-    and plugin_params["tags"].type.value == "list",
+    plugin_params["tags"].type == service_params["tags"].type and plugin_params["tags"].type.value == "list",
     "direct plugin create-cron tags metadata matches service LIST semantics",
 )
 delayed_plugin_params = SchedulingPlugin.execute_in_seconds._platform_process_metadata.parameters  # type: ignore[attr-defined]  # noqa: SLF001
 delayed_service_params = SchedulingServiceAPI.execute_in_seconds._service_interface_metadata.parameters  # type: ignore[attr-defined]  # noqa: SLF001
 delayed_plugin_tags = delayed_plugin_params.get("tags")
 _check(
-    delayed_plugin_tags is not None
-    and delayed_plugin_tags.type == delayed_service_params["tags"].type
-    and delayed_plugin_tags.type.value == "list",
+    delayed_plugin_tags is not None and delayed_plugin_tags.type == delayed_service_params["tags"].type and delayed_plugin_tags.type.value == "list",
     "direct plugin execute-in-seconds tags metadata matches service LIST semantics",
 )
 _check(
-    "action_definitions" in plugin_params
-    and plugin_params["action_definitions"].required is False,
+    "action_definitions" in plugin_params and plugin_params["action_definitions"].required is False,
     "plugin metadata exposes optional action_definitions",
 )
 _check(
@@ -726,9 +677,7 @@ _check(
     "plugin memory_tag description does not claim model decision",
 )
 _check(
-    "terminal" in plugin_params["memory_tag"].description.lower()
-    and "does not start a model turn"
-    in plugin_params["memory_tag"].description.lower(),
+    "terminal" in plugin_params["memory_tag"].description.lower() and "does not start a model turn" in plugin_params["memory_tag"].description.lower(),
     "plugin memory_tag description states terminal no-model-turn behavior",
 )
 
@@ -753,9 +702,7 @@ metadata_surfaces = (
 for surface_name, surface_params in metadata_surfaces:
     action_description = surface_params["action_definitions"].description.lower()
     _check(
-        "non-empty" in action_description
-        and "syntactically valid" in action_description
-        and "execution resolves" in action_description,
+        "non-empty" in action_description and "syntactically valid" in action_description and "execution resolves" in action_description,
         f"{surface_name} metadata states the validated registration/execution boundary",
     )
     _check(
@@ -772,17 +719,12 @@ for surface_name, surface_params in metadata_surfaces:
         f"{surface_name} metadata rejects content outside memory-tag mode",
     )
 
-process_dir = (
-    REPO_ROOT / "plugins" / "default_scheduling_plugin" / "knowledge_base" / "processes"
-)
+process_dir = REPO_ROOT / "plugins" / "default_scheduling_plugin" / "knowledge_base" / "processes"
 card_docs: list[tuple[str, dict[str, Any]]] = []
 for process_name in ("create_cron_schedule", "execute_in_seconds"):
     process_doc = json.loads((process_dir / f"{process_name}.json").read_text())
     card_docs.append((f"plugin {process_name}", process_doc))
-    combined = " ".join(
-        str(process_doc.get(field, ""))
-        for field in ("description", "embedding_description")
-    ).lower()
+    combined = " ".join(str(process_doc.get(field, "")) for field in ("description", "embedding_description")).lower()
     _check(
         "model decides" not in combined,
         f"{process_name} process description does not promise inference",
@@ -792,25 +734,17 @@ for process_name in ("create_cron_schedule", "execute_in_seconds"):
         f"{process_name} process description identifies terminal no-model-turn lookup",
     )
 
-service_process_dir = (
-    REPO_ROOT / "ananta" / "knowledge_base" / "processes" / "scheduling_service"
-)
+service_process_dir = REPO_ROOT / "ananta" / "knowledge_base" / "processes" / "scheduling_service"
 for process_name in ("create_cron_schedule", "execute_in_seconds"):
-    service_process_doc = json.loads(
-        (service_process_dir / f"{process_name}.json").read_text()
-    )
+    service_process_doc = json.loads((service_process_dir / f"{process_name}.json").read_text())
     card_docs.append((f"service {process_name}", service_process_doc))
-    service_combined = " ".join(
-        str(service_process_doc.get(field, ""))
-        for field in ("description", "embedding_description")
-    ).lower()
+    service_combined = " ".join(str(service_process_doc.get(field, "")) for field in ("description", "embedding_description")).lower()
     _check(
         "model decides" not in service_combined,
         f"service {process_name} description does not promise inference",
     )
     _check(
-        "terminal" in service_combined
-        and "does not start a model turn" in service_combined,
+        "terminal" in service_combined and "does not start a model turn" in service_combined,
         f"service {process_name} description identifies terminal no-model-turn lookup",
     )
     _check(
@@ -821,10 +755,7 @@ for process_name in ("create_cron_schedule", "execute_in_seconds"):
 for card_name, card_doc in card_docs:
     card_text = json.dumps(card_doc).lower()
     _check(
-        "arbitrary" not in card_text
-        and "non-empty" in card_text
-        and "syntactically valid" in card_text
-        and "execution resolves" in card_text,
+        "arbitrary" not in card_text and "non-empty" in card_text and "syntactically valid" in card_text and "execution resolves" in card_text,
         f"{card_name} card states the validated registration/execution boundary",
     )
     _check(
@@ -842,8 +773,7 @@ for card_name, card_doc in card_docs:
         continue
     error_text = json.dumps(card_doc["error_processor_customizations"]).lower()
     _check(
-        "default_scheduling_plugin.invalid_cron_expression" in error_text
-        and "default_scheduling_plugin.parameter_error" in error_text,
+        "default_scheduling_plugin.invalid_cron_expression" in error_text and "default_scheduling_plugin.parameter_error" in error_text,
         f"{card_name} card distinguishes invalid-cron and parameter errors",
     )
 
@@ -856,13 +786,7 @@ for card_name, card_doc in card_docs:
         f"{card_name} card rejects content outside memory-tag mode",
     )
 
-reference = (
-    REPO_ROOT
-    / "plugins"
-    / "default_scheduling_plugin"
-    / "knowledge_base"
-    / "scheduling_reference.md"
-).read_text()
+reference = (REPO_ROOT / "plugins" / "default_scheduling_plugin" / "knowledge_base" / "scheduling_reference.md").read_text()
 _check(
     "plugin::agent_messaging_plugin::peer_send_by_name" in reference,
     "reference includes the scheduled peer_send_by_name fixture",
@@ -872,14 +796,11 @@ _check(
     "reference fixture uses the canonical action_definitions field",
 )
 _check(
-    '"process_key": "service_interface::thinking_service::run_joseki"'
-    in reference,
+    '"process_key": "service_interface::thinking_service::run_joseki"' in reference,
     "reference includes the scheduled run_joseki fixture",
 )
 _check(
-    '"joseki_key": "run_platform_quality_gates"' in reference
-    and '"bindings": {}' in reference
-    and '"label": "Scheduled platform quality sweep"' in reference,
+    '"joseki_key": "run_platform_quality_gates"' in reference and '"bindings": {}' in reference and '"label": "Scheduled platform quality sweep"' in reference,
     "reference pins the mechanizable joseki key, bindings, and label",
 )
 _check(
@@ -887,10 +808,7 @@ _check(
     "reference distinguishes direct execution from terminal memory lookup",
 )
 _check(
-    "non-empty" in reference.lower()
-    and "syntactically valid" in reference.lower()
-    and "execution resolves" in reference.lower()
-    and "arbitrary" not in reference.lower(),
+    "non-empty" in reference.lower() and "syntactically valid" in reference.lower() and "execution resolves" in reference.lower() and "arbitrary" not in reference.lower(),
     "reference states the validated registration/execution boundary",
 )
 _check(
@@ -903,28 +821,17 @@ _check(
 # itself by the factory provenance stamp at its root and prunes that section.
 # There the reference half is out of scope by construction. In the origin
 # checkout the read below stays a hard requirement.
-_template_flow_path = (
-    REPO_ROOT
-    / "ananta"
-    / "knowledge_bases"
-    / "ananta_platform"
-    / "21_scheduling_service"
-    / "01_template_flow_record_lifecycle.md"
-)
+_template_flow_path = REPO_ROOT / "ananta" / "knowledge_bases" / "ananta_platform" / "21_scheduling_service" / "01_template_flow_record_lifecycle.md"
 if (REPO_ROOT / "PROVENANCE.json").is_file() and not _template_flow_path.exists():
     print("SKIP  template-flow reference checks: reference article is pruned from seed clones")
 else:
     template_flow = _template_flow_path.read_text()
     _check(
-        "intentionally not wired through the validator" not in template_flow.lower()
-        and "execute_in_seconds" in template_flow
-        and "before persistence" in template_flow.lower(),
+        "intentionally not wired through the validator" not in template_flow.lower() and "execute_in_seconds" in template_flow and "before persistence" in template_flow.lower(),
         "template-flow contract applies scheduled-action validation to delayed registration",
     )
     _check(
-        "non-empty" in template_flow.lower()
-        and "syntactically valid" in template_flow.lower()
-        and "execution resolves" in template_flow.lower(),
+        "non-empty" in template_flow.lower() and "syntactically valid" in template_flow.lower() and "execution resolves" in template_flow.lower(),
         "template-flow states the validated registration/execution boundary",
     )
 

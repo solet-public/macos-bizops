@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::list_asset_folders",
+  "display_name": "Marketo: List Asset Folders",
+  "description": "Browse Marketo asset folders under an optional root reference, with max_depth and workspace filters. Pages internally using vendor offset/maxReturn up to row_limit, returning a TSV, truncated flag and next_offset when incomplete. Poll check_marketo_job_status for completion.",
+  "embedding_description": "Browse Marketo asset folders under an optional root reference, with max_depth and workspace filters. Pages internally using vendor offset/maxReturn up to row_limit, returning a TSV, truncated flag and next_offset when incomplete. Poll check_marketo_job_status for completion.",
+  "result_processor_customizations": {
+    "action_label": "Marketo: List Asset Folders job dispatched",
+    "result_type": "marketo_list_asset_folders_result",
+    "result_description": "Queued job_id and status. Poll check_marketo_job_status for a TSV handle, row_count, columns, truncated, per-page envelope metadata and next_offset when truncated.",
+    "presentation_guidance": "Poll the job before reporting success. Report path and row_count. Truncated reads can continue from next_offset with identical filters."
+  },
+  "error_processor_customizations": {
+    "action_context": "Browse Marketo asset folders under an optional root reference, with max_depth and workspace filters. Pages internally using vendor offset/maxReturn up to row_limit, returning a TSV, truncated flag and next_offset when incomplete. Poll check_marketo_job_status for completion.",
+    "error_interpretation": "marketo.invalid_params: correct vendor-shaped inputs. marketo.permission_denied: vendor RBAC or workspace access refused. marketo.auth_failed: credential rejected. marketo.validation_failed: vendor rejected the operation. A transport failure may follow a mutation.",
+    "recovery_guidance": "Use the registered credential and vendor Read-Only Assets / Read-Write Assets permissions. Reads do not prove write access. Read back state before retrying an uncertain mutation; these endpoints offer no CAS/ETag."
+  }
+}

@@ -14,6 +14,11 @@ from types import ModuleType
 from typing import Any
 
 import jsonschema
+from bootstrap_adapter_failure_output_support import (
+    check_dependency_closure_failure_detail,
+    check_postgres_configuration_failure_output,
+    check_postgres_configuration_timeout_output,
+)
 from bootstrap_adapter_hba_oracle_support import check_pg_hba_scram_oracle
 from bootstrap_adapter_lm_studio_contract_support import check_lm_studio_routes
 from bootstrap_adapter_operation_contract_support import (
@@ -29,11 +34,7 @@ from bootstrap_adapter_plan_contract_support import check_homebrew_operation_pla
 
 _ROOT = Path(__file__).resolve().parents[3]
 _BOOTSTRAP = _ROOT / "bootstrap.py"
-_SCHEMA = json.loads(
-    (
-        _ROOT / "plugins/github_midwife_plugin/knowledge_base/setup_adapter_envelope.schema.json"
-    ).read_text()
-)
+_SCHEMA = json.loads((_ROOT / "plugins/github_midwife_plugin/knowledge_base/setup_adapter_envelope.schema.json").read_text())
 _CHECKS = 0
 _REVISION = "a" * 40
 _FINGERPRINT = "sha256:" + "b" * 64
@@ -64,9 +65,7 @@ def _module() -> ModuleType:
     return module
 
 
-def _completed(
-    code: int = 0, stdout: str = "", stderr: str = ""
-) -> subprocess.CompletedProcess[str]:
+def _completed(code: int = 0, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess([], code, stdout, stderr)
 
 
@@ -101,9 +100,7 @@ def _request(
     }
 
 
-def _execute(
-    module: ModuleType, request: dict[str, Any], runner: Any, which: Any, **kwargs: Any
-) -> dict[str, Any]:
+def _execute(module: ModuleType, request: dict[str, Any], runner: Any, which: Any, **kwargs: Any) -> dict[str, Any]:
     result = module.execute_adapter_request(
         request,
         runner=runner,
@@ -129,9 +126,7 @@ def _closure_payload(module: ModuleType, target: Path, scenario: str) -> dict[st
     packages = {
         distribution: {
             "version": "1.0.0",
-            "direct_url": json.dumps(
-                {"url": (target / relative).resolve().as_uri(), "dir_info": {"editable": True}}
-            ),
+            "direct_url": json.dumps({"url": (target / relative).resolve().as_uri(), "dir_info": {"editable": True}}),
         }
         for distribution, relative in module._REQUIRED_DISTRIBUTIONS  # noqa: SLF001
     }
@@ -216,11 +211,7 @@ def _check_dependency_closure_install_order(module: ModuleType, root: Path) -> N
     _check(result["checkpoint_status"] == "applied", "contracts-order apply succeeds")
     editable_installs = [call[-1] for call in calls if "pip" in call and "-e" in call]
     contracts_index = next(
-        (
-            index
-            for index, package in enumerate(editable_installs)
-            if package.endswith("/solet_setup_contracts")
-        ),
+        (index for index, package in enumerate(editable_installs) if package.endswith("/solet_setup_contracts")),
         None,
     )
     ananta_index = next(
@@ -233,44 +224,41 @@ def _check_dependency_closure_install_order(module: ModuleType, root: Path) -> N
     )
     _check(ananta_index is not None, "ananta install is present")
     _check(
-        isinstance(contracts_index, int)
-        and isinstance(ananta_index, int)
-        and contracts_index < ananta_index,
+        isinstance(contracts_index, int) and isinstance(ananta_index, int) and contracts_index < ananta_index,
         "contracts install precedes ananta (red: remove contracts from required distributions)",
     )
 
 
 def _check_dependency_closure_failure_detail(module: ModuleType, root: Path) -> None:
-    """Apply failures retain bounded command evidence and the existing repair instruction."""
-    target = root / "failure-detail"
-    _prepare_target(module, target)
-    base = root / "stable-python3.13"
-    base.write_text("fixture")
-    marker = "dependency-closure-known-stderr"
-
-    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        if command == [str(base), "--version"]:
-            return _completed(stdout="Python 3.13.7\n")
-        if "pip" in command and "setuptools" in command:
-            return _completed(17, stderr=marker)
-        return _completed()
-
-    apply = _request(target, phase="apply", purpose=None, approval=_FINGERPRINT)
-    failed = _execute(module, apply, run, lambda _name: None, base_python=str(base))
-    repair = failed["repair"]
-    _check(failed["checkpoint_status"] == "failed", "failure-detail apply reports failed")
-    _check(
-        failed["error_kind"] == "dependency_closure_apply_failed",
-        "failure-detail retains dependency-closure failure kind",
+    check_dependency_closure_failure_detail(
+        module=module,
+        root=root,
+        request_factory=_request,
+        execute=_execute,
+        completed=_completed,
+        check=_check,
+        prepare_target=_prepare_target,
+        fingerprint=_FINGERPRINT,
     )
-    _check(
-        isinstance(repair, str) and "exit 17" in repair and marker in repair,
-        "failure-detail carries exit and stderr marker (red: restore generic repair)",
+
+
+def _check_postgres_configuration_failure_output(module: ModuleType, root: Path) -> None:
+    _ = module
+    check_postgres_configuration_failure_output(
+        root=root,
+        request_factory=_request,
+        check=_check,
+        fingerprint=_FINGERPRINT,
     )
-    _check(
-        isinstance(repair, str)
-        and repair.endswith("Repair the target package or interpreter condition and resume."),
-        "failure-detail retains original repair instruction",
+
+
+def _check_postgres_configuration_timeout_output(module: ModuleType, root: Path) -> None:
+    _ = module
+    check_postgres_configuration_timeout_output(
+        root=root,
+        request_factory=_request,
+        check=_check,
+        fingerprint=_FINGERPRINT,
     )
 
 
@@ -342,21 +330,15 @@ def _check_stage_probe(module: ModuleType, root: Path) -> None:
         operation_ref="setup::git.verify_checkout",
         purpose="stage_exit",
     )
-    wrong = _execute(
-        module, request, _git_runner(_REVISION, wrong=True), lambda name: "/fixture/git" if name == "git" else None
-    )
+    wrong = _execute(module, request, _git_runner(_REVISION, wrong=True), lambda name: "/fixture/git" if name == "git" else None)
     _check(wrong["error_kind"] == "source_identity_mismatch", "wrong peeled commit fails closed")
     _check(
         not wrong["planned_actions"] and not wrong["discovered_candidates"],
         "stage output arrays empty",
     )
-    right = _execute(
-        module, request, _git_runner(_REVISION, wrong=False), lambda name: "/fixture/git" if name == "git" else None
-    )
+    right = _execute(module, request, _git_runner(_REVISION, wrong=False), lambda name: "/fixture/git" if name == "git" else None)
     _check(right["checkpoint_status"] == "verified", "right checkout stage probe verifies")
-    invalid_apply = dict(
-        request, phase="apply", probe_purpose=None, dry_run=False, approval_fingerprint=_FINGERPRINT
-    )
+    invalid_apply = dict(request, phase="apply", probe_purpose=None, dry_run=False, approval_fingerprint=_FINGERPRINT)
     refused = _execute(
         module,
         invalid_apply,
@@ -413,18 +395,13 @@ def _check_postgres_plans(module: ModuleType, root: Path) -> None:
         "PostgreSQL install preview schedules pgvector when a stopped service leaves discovery unknown",
     )
     _check(
-        all(
-            str(item["target"]).startswith("/fixture/brew:")
-            for item in missing["planned_actions"]
-        ),
+        all(str(item["target"]).startswith("/fixture/brew:") for item in missing["planned_actions"]),
         "PostgreSQL preview binds the resolved Homebrew executable into approved actions",
     )
     prefix = root / "brew"
     hba = prefix / "var/postgresql@17/pg_hba.conf"
     hba.parent.mkdir(parents=True)
-    hba.write_text(
-        "local all all trust\nhost all all 127.0.0.1/32 trust\nhost all all ::1/128 trust\n"
-    )
+    hba.write_text("local all all trust\nhost all all 127.0.0.1/32 trust\nhost all all ::1/128 trust\n")
     hba.chmod(0o600)
     configure_request = _request(
         root,
@@ -485,9 +462,7 @@ def _check_postgres_keg_resolution(module: ModuleType, root: Path) -> None:
     )
     prefix = root / "postgresql-17-keg"
     keg_bin = prefix / "bin"
-    keg_binaries = {
-        str(keg_bin / name) for name in ("psql", "pg_isready", "createuser", "createdb")
-    }
+    keg_binaries = {str(keg_bin / name) for name in ("psql", "pg_isready", "createuser", "createdb")}
     keg_calls: list[list[str]] = []
 
     def keg_runner(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -606,9 +581,7 @@ def _check_postgres_keg_resolution(module: ModuleType, root: Path) -> None:
 
     newer_prefix = root / "postgresql-18-keg"
     newer_bin = newer_prefix / "bin"
-    newer_binaries = {
-        str(newer_bin / name) for name in ("psql", "pg_isready", "createuser", "createdb")
-    }
+    newer_binaries = {str(newer_bin / name) for name in ("psql", "pg_isready", "createuser", "createdb")}
 
     def newer_runner(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         joined = " ".join(command)
@@ -628,9 +601,7 @@ def _check_postgres_keg_resolution(module: ModuleType, root: Path) -> None:
         module,
         request,
         newer_runner,
-        lambda name: (
-            "/fixture/brew" if name == "brew" else name if name in newer_binaries else None
-        ),
+        lambda name: "/fixture/brew" if name == "brew" else name if name in newer_binaries else None,
     )
     _check(
         newer["error_kind"] == "postgres_wrong_major",
@@ -651,8 +622,7 @@ def _check_postgres_keg_resolution(module: ModuleType, root: Path) -> None:
         "the supported PostgreSQL 17 keg wins when 17 and 18 are both installed",
     )
     _check(
-        ["/fixture/brew", "--prefix", "postgresql@17"] in both_calls
-        and ["/fixture/brew", "--prefix", "postgresql@18"] not in both_calls,
+        ["/fixture/brew", "--prefix", "postgresql@17"] in both_calls and ["/fixture/brew", "--prefix", "postgresql@18"] not in both_calls,
         "multiple installed PostgreSQL kegs select the supported major first",
     )
 
@@ -677,9 +647,7 @@ def _check_pgvector_failure_kinds(module: ModuleType, root: Path) -> None:
         "pgvector service outage retains postgres service error kind",
     )
 
-    def missing_extension(
-        command: list[str], **_kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
+    def missing_extension(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         completed = _postgres_runner(prefix)(command)
         if "pg_extension" in " ".join(command):
             return _completed(stdout="0\n")
@@ -699,9 +667,7 @@ def _check_pgvector_failure_kinds(module: ModuleType, root: Path) -> None:
 
 
 def _check_protocol_and_stdout(module: ModuleType, root: Path) -> None:
-    unknown = _request(
-        root, operation_id="unknown_operation", operation_ref="bootstrap::unknown.route"
-    )
+    unknown = _request(root, operation_id="unknown_operation", operation_ref="bootstrap::unknown.route")
     result = _execute(module, unknown, lambda *_a, **_k: _completed(), lambda _name: None)
     _check(result["error_kind"] == "adapter_missing", "unknown operation fails closed")
     missing = _request(root, phase="apply", purpose=None, approval=None)
@@ -737,9 +703,7 @@ def _check_protocol_and_stdout(module: ModuleType, root: Path) -> None:
         env={key: value for key, value in os.environ.items() if key != "SOLET_NAME"},
     )
     lines = completed.stdout.splitlines()
-    _check(
-        completed.returncode == 0 and len(lines) == 1, "adapter stdout is exactly one JSON result"
-    )
+    _check(completed.returncode == 0 and len(lines) == 1, "adapter stdout is exactly one JSON result")
     parsed = json.loads(lines[0])
     jsonschema.Draft7Validator(_SCHEMA).validate(parsed)
     _check(not completed.stderr, "valid adapter request emits no stderr diagnostics")
@@ -815,6 +779,8 @@ def main() -> int:
             )
             check_homebrew_operation_plan(root=root, check=_check)
             _check_postgres_plans(module, root)
+            _check_postgres_configuration_failure_output(module, root)
+            _check_postgres_configuration_timeout_output(module, root)
             check_pg_hba_scram_oracle(root, check=_check, now=_NOW)
             _check_postgres_keg_resolution(module, root)
             _check_pgvector_failure_kinds(module, root)

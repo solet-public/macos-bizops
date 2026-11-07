@@ -23,7 +23,7 @@ from .managed_render import (
 )
 from .setup_adapter_contract import AdapterRequest, JsonObject, planned_action, result
 from .setup_adapter_runtime import Runtime
-from .setup_operations import _TEMPLATES, _verified, read_file
+from .setup_operations import _TEMPLATES, _verified, read_file, selected_coding_agents
 
 _ZSHRC_BLOCK_TEMPLATE = "zshrc_block.template"
 _ZSHRC_MARKER_BEGIN = "# BEGIN SOLET {NAME} v{TEMPLATE_DIGEST8}"
@@ -42,9 +42,7 @@ def shell(request: AdapterRequest, runtime: Runtime) -> JsonObject:
     desired = _rendered_files(request)
     zshrc = runtime.home / ".zshrc"
     block = _zshrc_block(request)
-    changed_paths = [
-        path for path, (content, _mode) in desired.items() if read_file(path) != content
-    ]
+    changed_paths = [path for path, (content, _mode) in desired.items() if read_file(path) != content]
     zshrc_changed = _merge_block(read_file(zshrc), block, request.name) != read_file(zshrc)
     if request.phase == "probe":
         return _shell_preview(request, runtime, zshrc, changed_paths, zshrc_changed)
@@ -71,12 +69,8 @@ def _shell_preview(
     if zshrc_changed:
         actions.extend(_zshrc_actions(request, runtime, zshrc))
     if not actions:
-        return _verified(
-            request, "shell_integration", "managed shell artifacts are current", str(zshrc)
-        )
-    return result(
-        request, status="pending", actions=actions, repair="Approve the exact managed files shown."
-    )
+        return _verified(request, "shell_integration", "managed shell artifacts are current", str(zshrc))
+    return result(request, status="pending", actions=actions, repair="Approve the exact managed files shown.")
 
 
 def _zshrc_actions(request: AdapterRequest, runtime: Runtime, zshrc: Path) -> list[JsonObject]:
@@ -152,6 +146,9 @@ def _rendered_files(request: AdapterRequest) -> dict[Path, tuple[str, int]]:
             0o644,
         ),
     }
+    if "codex" not in selected_coding_agents(request):
+        del mapping["codex_launcher.template"]
+        del mapping["codex_marketplace_json.template"]
     if values["{{GIT_CONTROLLER_NAME}}"]:
         mapping["fleet_functions.zsh.template"] = (
             request.target / "client" / f"{request.name}-fleet.zsh",
@@ -182,9 +179,7 @@ def _render_template(template_name: str, values: dict[str, str], shell_values: d
         return _render_json(_TEMPLATES / template_name, values)
     content = _render(_TEMPLATES / template_name, shell_values)
     if not values["{{GIT_CONTROLLER_NAME}}"]:
-        content = "\n".join(
-            line for line in content.splitlines() if "GIT_CONTROLLER_NAME=" not in line
-        ) + "\n"
+        content = "\n".join(line for line in content.splitlines() if "GIT_CONTROLLER_NAME=" not in line) + "\n"
     if template_name in _STAMPED_SHELL_TEMPLATES:
         content = _stamped(content, template_name)
     return content
@@ -223,9 +218,7 @@ def _zsh_quote(value: str) -> str:
 
 def _stamped(content: str, template_name: str) -> str:
     """Insert the ``rendered-from`` stamp after the shebang (or at the top) of a shell render."""
-    stamp = _STAMP.replace("{TEMPLATE_REF}", f"{TEMPLATE_ROOT_REF}/{template_name}").replace(
-        "{TEMPLATE_DIGEST}", template_digest(_TEMPLATES / template_name)
-    )
+    stamp = _STAMP.replace("{TEMPLATE_REF}", f"{TEMPLATE_ROOT_REF}/{template_name}").replace("{TEMPLATE_DIGEST}", template_digest(_TEMPLATES / template_name))
     lines = content.split("\n")
     lines.insert(1 if lines and lines[0].startswith("#!") else 0, stamp)
     return "\n".join(lines)

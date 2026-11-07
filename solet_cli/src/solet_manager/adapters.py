@@ -18,7 +18,7 @@ from .adapter_protocol import (
     OperationResult,
     PlannedAction,
 )
-from .adapter_validation import FORMULA_MARKER, bounded_redacted
+from .adapter_validation import FORMULA_MARKER
 from .errors import AdapterProtocolError, StateConflictError
 from .models import CheckpointStatus
 
@@ -205,6 +205,7 @@ def _dependency_upgrades_are_reviewed(lines: list[str], parents: set[str]) -> bo
 def _python_install_plan_failure(request: OperationRequest, brew: str, environment: dict[str, str]) -> OperationResult | None:
     """Return a public failed result when the read-only package plan is unsafe."""
 
+    started = time.monotonic()
     try:
         dry_run = subprocess.run(  # noqa: S603 - fixed reviewed command vector
             [brew, "install", "--dry-run", "python@3.13"],
@@ -234,12 +235,14 @@ def _python_install_plan_failure(request: OperationRequest, brew: str, environme
         )
     if dry_run.returncode == 0 and _homebrew_install_plan_allowed(f"{dry_run.stdout}\n{dry_run.stderr}", "python@3.13"):
         return None
-    return _python_runtime_result(
+    return OperationResult.from_process_exit(
         request,
-        status=CheckpointStatus.FAILED,
+        returncode=dry_run.returncode,
         error_kind="python_runtime_install_plan_rejected",
         retry_safe=True,
-        exit_code=dry_run.returncode,
+        duration_ms=int((time.monotonic() - started) * 1000),
+        stdout=dry_run.stdout,
+        stderr=dry_run.stderr,
         repair="Homebrew proposed a mutation outside the approved Python formula action.",
     )
 
@@ -365,6 +368,7 @@ def _bootstrap_python_runtime(
     plan_failure = _python_install_plan_failure(request, brew, environment)
     if plan_failure is not None:
         return plan_failure
+    started = time.monotonic()
     try:
         completed = subprocess.run(  # noqa: S603 - fixed reviewed command vector
             [brew, *_PYTHON_RUNTIME_INSTALLER_ARGS],
@@ -393,12 +397,14 @@ def _bootstrap_python_runtime(
             repair="Repair the Homebrew executable and retry the approved Python installation action.",
         )
     if completed.returncode != 0:
-        return _python_runtime_result(
+        return OperationResult.from_process_exit(
             request,
-            status=CheckpointStatus.FAILED,
+            returncode=completed.returncode,
             error_kind="python_runtime_install_failed",
             retry_safe=True,
-            exit_code=completed.returncode,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            stdout=completed.stdout,
+            stderr=completed.stderr,
             repair="Inspect the Homebrew Python 3.13 installation failure and retry the approved action.",
         )
     selected = _select_installed_homebrew_python(request, brew)
@@ -513,23 +519,15 @@ def _exit_result(
     completed: subprocess.CompletedProcess[str],
     elapsed: int,
 ) -> OperationResult:
-    return OperationResult(
-        request.request_id,
-        request.operation_id,
-        request.phase,
-        request.probe_purpose,
-        CheckpointStatus.FAILED,
-        "adapter_exit_error",
-        False,
-        completed.returncode,
-        False,
-        elapsed,
-        bounded_redacted(completed.stdout),
-        bounded_redacted(completed.stderr),
-        (),
-        (),
-        (),
-        "Inspect the redacted adapter diagnostics and repair the target-local operation.",
+    return OperationResult.from_process_exit(
+        request,
+        returncode=completed.returncode,
+        error_kind="adapter_exit_error",
+        retry_safe=False,
+        duration_ms=elapsed,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        repair="Inspect the redacted adapter diagnostics and repair the target-local operation.",
     )
 
 

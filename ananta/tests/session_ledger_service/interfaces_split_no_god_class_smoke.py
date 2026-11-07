@@ -24,10 +24,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-PUBLIC_PY = (
-    REPO_ROOT
-    / "ananta/src/ananta/services/session_ledger_service/interfaces/public.py"
-)
+PUBLIC_PY = REPO_ROOT / "ananta/src/ananta/services/session_ledger_service/interfaces/public.py"
 GATE_SCRIPT = REPO_ROOT / "quality_gates/god_class_check.py"
 
 # v1 §3 verb-routing table + the post-v1 additions (the three backfill ABCs —
@@ -41,11 +38,13 @@ EXPECTED_VERBS_BY_ABC: dict[str, set[str]] = {
     "SessionLedgerReadAPI": {
         "list_sources",
         "list_sessions",
+        "session_usage_totals",
         "list_active_sessions",
         "get_session_timeline",
         "list_tool_calls",
         "list_canonical_contributors",
         "census",
+        "corpus_counts",
     },
     "SessionLedgerQualificationAPI": {
         "qualify_selected_sources",
@@ -55,6 +54,8 @@ EXPECTED_VERBS_BY_ABC: dict[str, set[str]] = {
         "ingest_raw_chunk",
         "get_import_status",
         "backfill_export_blob_identity",
+        "clear_session_label",
+        "list_session_label_clears",
         "set_source_enabled",
     },
     "SessionLedgerPollingDriverAPI": {
@@ -148,8 +149,7 @@ def check_verb_counts() -> int:
     failures = 0
     if set(actual) != set(EXPECTED_VERBS_BY_ABC):
         print(
-            f"  CLASS-SET MISMATCH: expected={sorted(EXPECTED_VERBS_BY_ABC)}"
-            f" actual={sorted(actual)}",
+            f"  CLASS-SET MISMATCH: expected={sorted(EXPECTED_VERBS_BY_ABC)} actual={sorted(actual)}",
         )
         failures += 1
     for abc_name, expected_verbs in sorted(EXPECTED_VERBS_BY_ABC.items()):

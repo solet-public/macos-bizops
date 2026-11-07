@@ -64,9 +64,18 @@ from macos_self_deployment_plugin.swap_orchestrator import (  # noqa: E402
 
 SUBTREES = ("ananta", "plugins")
 _IDENTITY = (
-    "-c", "user.name=r68-smoke", "-c", "user.email=r68-smoke@example.invalid",
-    "-c", "commit.gpgsign=false",
+    "-c",
+    "user.name=r68-smoke",
+    "-c",
+    "user.email=r68-smoke@example.invalid",
+    "-c",
+    "commit.gpgsign=false",
 )
+
+# Private runtime root for the orchestrator's owned-deploy lock and pending-finisher
+# record, so this smoke never touches a live solet's runtime directory.
+_RUNTIME = tempfile.TemporaryDirectory(prefix="release_code_collection_batching_equivalence_runtime_")
+
 _DRIFT_ENVELOPE = "BLOCKING root_manifest drift: 4 untracked repo-root file(s)"
 _REAL_POPEN = subprocess.Popen
 
@@ -76,7 +85,10 @@ _recorder = support.SmokeRecorder()
 def _git(source: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(source), *_IDENTITY, *args],
-        capture_output=True, text=True, check=False, timeout=60,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
     )
     if result.returncode != 0:
         raise RuntimeError(f"git {args!r} failed: {result.stderr.strip()}")
@@ -93,10 +105,7 @@ def _write(path: Path, text: str = "x\n", mode: int | None = None) -> None:
 def _build_source(root: Path, *, data_files: int = 12, commit: bool = True) -> Path:
     """A committed fixture shaped like the release tree, plus untracked extras."""
     source = root / "src"
-    _write(source / ".gitignore", (
-        "*.pyc\nbuild/\n!keep.pyc\nplugins/foo_plugin/local-assets/\n"
-        "plugins/foo_plugin/.venv-ignored/\n__pycache__/\n"
-    ))
+    _write(source / ".gitignore", ("*.pyc\nbuild/\n!keep.pyc\nplugins/foo_plugin/local-assets/\nplugins/foo_plugin/.venv-ignored/\n__pycache__/\n"))
     _write(source / "ananta/src/ananta/__init__.py", "VERSION = 1\n")
     _write(source / "ananta/src/ananta/core.py", "def core() -> int:\n    return 1\n")
     for index in range(data_files):
@@ -136,9 +145,7 @@ def _dirty(source: Path) -> None:
 
 
 def _collector(module: ModuleType, source: Path, cp_binary: str = "cp") -> Any:
-    return module.ReleaseCodeCollector(
-        source_root=source, code_subtrees=SUBTREES, cp_binary=cp_binary, clone_timeout_seconds=60.0
-    )
+    return module.ReleaseCodeCollector(source_root=source, code_subtrees=SUBTREES, cp_binary=cp_binary, clone_timeout_seconds=60.0)
 
 
 def _tree(destination: Path) -> dict[str, tuple[int, str]]:
@@ -238,16 +245,11 @@ def _check_clean_selection(outcome: dict[str, Any]) -> None:
     exclusions = {item["relative_path"]: item["reason"] for item in outcome["plan"]["exclusions"]}
     selected = {item["relative_path"] for item in outcome["plan"]["files"]}
     _recorder.check(
-        exclusions.get("plugins/foo_plugin/local-assets") == "gitignored_path"
-        and exclusions.get("ananta/stray.pyc") == "gitignored_path"
-        and exclusions.get("plugins/foo_plugin/.venv-local") == "nested_python_environment"
-        and exclusions.get("plugins/foo_plugin/.venv-ignored") == "nested_python_environment",
+        exclusions.get("plugins/foo_plugin/local-assets") == "gitignored_path" and exclusions.get("ananta/stray.pyc") == "gitignored_path" and exclusions.get("plugins/foo_plugin/.venv-local") == "nested_python_environment" and exclusions.get("plugins/foo_plugin/.venv-ignored") == "nested_python_environment",
         "[1] fixture exercises ignored directory, ignored file and both nested environments",
     )
     _recorder.check(
-        "ananta/keep.pyc" in selected
-        and "plugins/foo_plugin/src/foo_plugin/odd\nname.py" in selected
-        and "plugins/foo_plugin/src/foo_plugin/-dash.py" in selected,
+        "ananta/keep.pyc" in selected and "plugins/foo_plugin/src/foo_plugin/odd\nname.py" in selected and "plugins/foo_plugin/src/foo_plugin/-dash.py" in selected,
         "[1] a negated ignore, a newline name and a dash name are selected",
     )
     _recorder.check(
@@ -257,13 +259,13 @@ def _check_clean_selection(outcome: dict[str, Any]) -> None:
 
 
 def _check_dirty_mismatches(outcome: dict[str, Any]) -> None:
-    kinds = {
-        mismatch["kind"]
-        for mismatch in outcome["payload"]["artifact_to_head_equality"]["mismatches"]
-    }
+    kinds = {mismatch["kind"] for mismatch in outcome["payload"]["artifact_to_head_equality"]["mismatches"]}
     _recorder.check(
-        kinds == {
-            "missing_from_artifact", "extra_in_artifact", "bytes_differ",
+        kinds
+        == {
+            "missing_from_artifact",
+            "extra_in_artifact",
+            "bytes_differ",
             "executable_mode_differs",
         },
         f"[2] every mismatch kind is exercised and reported ({sorted(kinds)})",
@@ -339,8 +341,13 @@ def _stray_file_verdict(module: ModuleType, source: Path, root: Path) -> tuple[s
 
 def _leg_refusals() -> None:
     for kind in (
-        "untracked symlink", "tracked symlink", "ignored symlink", "fifo",
-        "incomplete environment", "tracked environment", "code subtree link",
+        "untracked symlink",
+        "tracked symlink",
+        "ignored symlink",
+        "fifo",
+        "incomplete environment",
+        "tracked environment",
+        "code subtree link",
     ):
         with _scratch() as root:
             source = _build_source(root)
@@ -348,15 +355,12 @@ def _leg_refusals() -> None:
             ref, fix = _both_verdicts(source, root)
             _recorder.check(ref == fix, f"[3] {kind}: same verdict ({ref[0]})")
             if kind != "ignored symlink":
-                _recorder.check(
-                    ref[0] == "err" and fix[0] == "err", f"[3] {kind}: both collectors refuse"
-                )
+                _recorder.check(ref[0] == "err" and fix[0] == "err", f"[3] {kind}: both collectors refuse")
     with _scratch() as root:
         source = _build_source(root)
         verdicts = [_changed_source_verdict(module, source, root) for module in (reference, batched)]
         _recorder.check(
-            verdicts[0] == verdicts[1] and verdicts[0][0] == "err"
-            and "source changed after selection" in verdicts[0][1],
+            verdicts[0] == verdicts[1] and verdicts[0][0] == "err" and "source changed after selection" in verdicts[0][1],
             f"[3] a source changed after selection refuses identically ({verdicts[1][1]})",
         )
     with _scratch() as root:
@@ -393,8 +397,7 @@ def _leg_copy_failures() -> None:
         source = _build_source(root)
         verdicts = [_copy_verdict(module, source, root, _TAMPERING_CP) for module in (reference, batched)]
         _recorder.check(
-            verdicts[0] == verdicts[1] and verdicts[0][0] == "err"
-            and "materialized bytes differ: ananta/data/f0003.txt" in verdicts[0][1],
+            verdicts[0] == verdicts[1] and verdicts[0][0] == "err" and "materialized bytes differ: ananta/data/f0003.txt" in verdicts[0][1],
             f"[3] one tampered copy among a directory's files is refused identically ({verdicts[1][1]})",
         )
     with _scratch() as root:
@@ -402,8 +405,7 @@ def _leg_copy_failures() -> None:
         verdicts = [_copy_verdict(module, source, root, _FAILING_CP) for module in (reference, batched)]
         _recorder.check(
             all(kind == "err" and "exited 7: planted cp failure" in text for kind, text in verdicts),
-            "[3] a failing cp refuses in both collectors (the batch names its directory, "
-            "not one file)",
+            "[3] a failing cp refuses in both collectors (the batch names its directory, not one file)",
         )
 
 
@@ -447,8 +449,7 @@ def _leg_spawn_counts() -> None:
         base_growth = results["ref"][large][phase] - results["ref"][small][phase]
         _recorder.check(
             base_growth >= growth,
-            f"[5] base {phase}: {results['ref'][small][phase]} -> {results['ref'][large][phase]} "
-            f"spawns for +{growth} files (O(files))",
+            f"[5] base {phase}: {results['ref'][small][phase]} -> {results['ref'][large][phase]} spawns for +{growth} files (O(files))",
         )
     fix_small, fix_large = results["fix"][small], results["fix"][large]
     for phase in ("git check-ignore", "git cat-file"):
@@ -462,8 +463,7 @@ def _leg_spawn_counts() -> None:
     )
     _recorder.check(
         fix_small["cp"] == fix_large["cp"] and fix_small["cp"] < results["ref"][small]["cp"],
-        f"[5] fix cp -c: {fix_small['cp']} -> {fix_large['cp']} spawns (per directory, not per file; "
-        f"base {results['ref'][small]['cp']} -> {results['ref'][large]['cp']})",
+        f"[5] fix cp -c: {fix_small['cp']} -> {fix_large['cp']} spawns (per directory, not per file; base {results['ref'][small]['cp']} -> {results['ref'][large]['cp']})",
     )
     with _scratch() as root:
         source = _build_source(root, data_files=60)
@@ -480,12 +480,9 @@ def _leg_spawn_counts() -> None:
         expected = sum(math.ceil(count / 7) for count in per_directory.values())
         _recorder.check(
             counts["cp"] == expected and expected > len(directories),
-            f"[5] a directory larger than COW_COPY_BATCH_FILES splits into several cp calls "
-            f"({counts['cp']} == {expected})",
+            f"[5] a directory larger than COW_COPY_BATCH_FILES splits into several cp calls ({counts['cp']} == {expected})",
         )
-        reference_tree = _tree(
-            _materialize_reference(source, root / "reference-for-chunk.code")
-        )
+        reference_tree = _tree(_materialize_reference(source, root / "reference-for-chunk.code"))
         _recorder.check(tree_chunked == reference_tree, "[5] the chunked copy materializes the same tree")
 
 
@@ -512,9 +509,13 @@ class _ReleaseManager:
         self.build_count += 1
         base = Path("/nonexistent/rel-r68")
         return CandidatePaths(
-            release_id="rel-r68", release_dir=base, code_root=base / "code",
-            venv_python=base / "venv" / "bin" / "python3", version_file=base / "VERSION",
-            missing_pth_targets=(), schema_snapshot=None,
+            release_id="rel-r68",
+            release_dir=base,
+            code_root=base / "code",
+            venv_python=base / "venv" / "bin" / "python3",
+            version_file=base / "VERSION",
+            missing_pth_targets=(),
+            schema_snapshot=None,
         )
 
     def cutover(self, candidate: CandidatePaths) -> SwapResult:
@@ -534,12 +535,17 @@ class _ReleaseManager:
 
 
 def _drift(candidate: CandidatePaths) -> ProbeOutcome:
-    failure = {"check": "root_manifest", "plugin": None, "message": _DRIFT_ENVELOPE,
-               "error_class": "RootManifestDrift"}
-    return ProbeOutcome(ok=False, payload={
-        "failing_step": "root_manifest", "error_class": "RootManifestDrift",
-        "detail": _DRIFT_ENVELOPE, "failures": [failure], "release_id": candidate.release_id,
-    })
+    failure = {"check": "root_manifest", "plugin": None, "message": _DRIFT_ENVELOPE, "error_class": "RootManifestDrift"}
+    return ProbeOutcome(
+        ok=False,
+        payload={
+            "failing_step": "root_manifest",
+            "error_class": "RootManifestDrift",
+            "detail": _DRIFT_ENVELOPE,
+            "failures": [failure],
+            "release_id": candidate.release_id,
+        },
+    )
 
 
 def _green(candidate: CandidatePaths) -> ProbeOutcome:
@@ -574,11 +580,16 @@ def _harness_restart(decide: Callable[[CandidatePaths], ProbeOutcome]) -> tuple[
         spawn_fn=cast("Any", spawn),
         ready_timeout_seconds=2,
         ready_poll_interval_seconds=0.01,
+        runtime_dir=Path(_RUNTIME.name),
     )
     result = orchestrator.restart(
-        reason="r68-smoke", expected_etag="etag-r68", dry_run=False,
-        app_home=Path("/nonexistent/profile"), self_instance_id="blue-id",
-        self_color=COLOR_BLUE, set_active_targets=[],
+        reason="r68-smoke",
+        expected_etag="etag-r68",
+        dry_run=False,
+        app_home=Path("/nonexistent/profile"),
+        self_instance_id="blue-id",
+        self_color=COLOR_BLUE,
+        set_active_targets=[],
     )
     return result, manager.build_count, probed
 
@@ -590,17 +601,10 @@ def _leg_preflight_order() -> None:
         f"[6] root drift refuses before any build work (builds={builds}, probes={probed})",
     )
     _recorder.check(
-        result.status.value == "failed"
-        and result.reason_code == RestartReasonCode.ROOT_MANIFEST_DRIFT
-        and result.message.startswith("cutover preflight blocked on root_manifest drift:\n")
-        and _DRIFT_ENVELOPE in result.message,
+        result.status.value == "failed" and result.reason_code == RestartReasonCode.ROOT_MANIFEST_DRIFT and result.message.startswith("cutover preflight blocked on root_manifest drift:\n") and _DRIFT_ENVELOPE in result.message,
         f"[6] the early refusal carries the root_manifest_drift classification ({result.reason_code!r})",
     )
-    late, late_builds, late_probed = _harness_restart(
-        lambda candidate: _green(candidate)
-        if candidate.release_id == PRE_BUILD_PROBE_RELEASE_ID
-        else _drift(candidate)
-    )
+    late, late_builds, late_probed = _harness_restart(lambda candidate: _green(candidate) if candidate.release_id == PRE_BUILD_PROBE_RELEASE_ID else _drift(candidate))
     _recorder.check(
         late_builds == 1 and late_probed == [PRE_BUILD_PROBE_RELEASE_ID, "rel-r68"],
         f"[6] a clean source tree still builds, and the candidate probe still runs ({late_probed})",
@@ -613,18 +617,21 @@ def _leg_preflight_order() -> None:
     def other_failure_early(candidate: CandidatePaths) -> ProbeOutcome:
         if candidate.release_id != PRE_BUILD_PROBE_RELEASE_ID:
             return _green(candidate)
-        return ProbeOutcome(ok=False, payload={
-            "failing_step": "plugin_manifest", "error_class": "ImportError",
-            "detail": "planted", "failures": [{"check": "plugin_manifest", "plugin": "p",
-                                              "message": "m", "error_class": "ImportError"}],
-            "release_id": candidate.release_id,
-        })
+        return ProbeOutcome(
+            ok=False,
+            payload={
+                "failing_step": "plugin_manifest",
+                "error_class": "ImportError",
+                "detail": "planted",
+                "failures": [{"check": "plugin_manifest", "plugin": "p", "message": "m", "error_class": "ImportError"}],
+                "release_id": candidate.release_id,
+            },
+        )
 
     _, other_builds, _ = _harness_restart(other_failure_early)
     _recorder.check(
         other_builds == 1,
-        "[6] only root-manifest drift refuses early; any other early finding is left to the "
-        "post-build probe",
+        "[6] only root-manifest drift refuses early; any other early finding is left to the post-build probe",
     )
 
 

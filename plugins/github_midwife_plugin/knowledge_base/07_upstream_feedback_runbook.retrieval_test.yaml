@@ -5,6 +5,9 @@ article_path: knowledge_bases/github_midwife_plugin/07_upstream_feedback_runbook
 consumer_profile: both
 
 target_queries:
+  - "generate a local feedback draft with the leading solet-feedback envelope"
+  - "validate feedback release facts before operator publication approval"
+  - "installed HEAD differs from feedback release tag which commit do I report"
   - "how do I report a platform bug to the seed maintainers"
   - "request a feature upstream from a deployed solet"
   - "file a seed feedback item as a github issue form"

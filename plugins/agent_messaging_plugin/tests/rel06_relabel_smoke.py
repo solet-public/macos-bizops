@@ -19,6 +19,7 @@ Run:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -28,12 +29,21 @@ sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
 from agent_messaging_plugin import peer_dispatch  # noqa: E402
+from agent_messaging_plugin.local_cli.spool import (  # noqa: E402
+    resolve_watch_instance_id,
+)
 
 _passed = 0
 _failed: list[str] = []
 
 _KB = REPO_ROOT / "plugins" / "agent_messaging_plugin" / "knowledge_base"
 _OLD_TOKEN = "woke" + "_native_channel"  # split so THIS pin file is not a hit
+_CHANNEL_GUIDE = Path(
+    os.environ.get(
+        "CHANNEL_GUIDE_PATH",
+        str(_KB / "03_inter_agent_messaging.md"),
+    )
+)
 
 
 def _check(condition: object, label: str) -> None:
@@ -44,6 +54,93 @@ def _check(condition: object, label: str) -> None:
         return
     _failed.append(label)
     print(f"  FAIL  {label}")
+
+
+def _durable_role_row_is_solet_scoped(page: str) -> bool:
+    return any(
+        row.startswith("| **Solet peer bridge — durable role")
+        and "solet-scoped" in row
+        and "role-binding table" in row
+        for row in page.splitlines()
+    )
+
+
+def test_cross_session_channel_choice_guide() -> None:
+    page = _CHANNEL_GUIDE.read_text()
+    _check(
+        "## Choose a cross-session channel" in page
+        and "Runner-native session message" in page
+        and "temporary coordination" in page,
+        "MSG-04 base-failing scenario: document both the durable bridge and "
+        "temporary runner-native route",
+    )
+    _check(
+        _durable_role_row_is_solet_scoped(page),
+        "MSG-04: durable-role row resolves through this solet's role-binding table",
+    )
+
+    role_row = next(
+        (
+            row
+            for row in page.splitlines()
+            if row.startswith("| **Solet peer bridge — durable role")
+        ),
+        None,
+    )
+    mutant = (
+        page
+        if role_row is None
+        else page.replace(role_row, role_row.replace("solet-scoped", "", 1), 1)
+    )
+    _check(
+        not _durable_role_row_is_solet_scoped(mutant),
+        "MUTANT KILLED: removing the solet-scoping qualifier fails the "
+        "durable-role row assertion",
+    )
+
+
+def _routing_row(page: str) -> str:
+    return next(
+        (
+            row for row in page.splitlines()
+            if row.startswith("| **Solet peer bridge — one selected live instance")
+        ),
+        "",
+    )
+
+
+def test_reply_hint_source_and_routing_constraints() -> None:
+    page = _CHANNEL_GUIDE.read_text()
+    routing_row = _routing_row(page)
+    _check(
+        "reply hint/message meta" in routing_row
+        and "peer_list" in routing_row
+        and "Only when it is `peer_unreachable`" in routing_row
+        and "agent_id` matches `peer_id" in routing_row,
+        "MSG-04: session fallback source, order, and same-kind constraint match the implementation",
+    )
+    wrong_source = routing_row.replace(
+        "reply hint/message meta", "peer_list", 1,
+    )
+    _check(
+        "reply hint/message meta" not in wrong_source,
+        "MUTANT KILLED: attributing the session key to peer_list fails the source pin",
+    )
+
+
+def test_watcher_identity_survives_reconnect() -> None:
+    managed_first = resolve_watch_instance_id("ases-managed", "agi-ledger")
+    managed_reconnect = resolve_watch_instance_id("ases-managed", "agi-ledger")
+    manual_first = resolve_watch_instance_id("ases-manual", None)
+    manual_reconnect = resolve_watch_instance_id("ases-manual", None)
+    _check(
+        managed_first == managed_reconnect == "agi-ledger",
+        "managed watcher reuses its ledger instance id after reconnect",
+    )
+    _check(
+        manual_first == manual_reconnect and manual_first.startswith("agi-watch-"),
+        "manual watcher deterministically reuses its derived id after reconnect",
+    )
 
 
 def test_mint_site_new_values() -> None:
@@ -127,6 +224,9 @@ def main() -> None:
     test_old_identifiers_gone()
     test_grep_gate_zero_old_token_outside_workbench()
     test_process_jsons_carry_new_vocabulary()
+    test_cross_session_channel_choice_guide()
+    test_reply_hint_source_and_routing_constraints()
+    test_watcher_identity_survives_reconnect()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

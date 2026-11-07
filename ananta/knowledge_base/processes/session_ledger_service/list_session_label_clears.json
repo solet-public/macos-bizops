@@ -1,0 +1,6 @@
+{
+  "process_key": "service_interface::session_ledger_service::list_session_label_clears",
+  "display_name": "list_session_label_clears",
+  "description": "Operator/operator-equivalent only, server-context authorized. Read immutable clear receipts for one exact session_id, ordered by cleared_at ascending then id ascending. limit defaults to 100 and clamps to 1..100. Supply after_cleared_at and after_id together from next_cursor. A full page returns a cursor without claiming more rows exist; follow until an empty page or a short page. Returns clears, next_cursor and current live row label/token, or explicit not_found. Historical receipts remain readable when the session is deleted or its source is disabled or deleted. Receipts are append-only permanently retained evidence of changed clears, not a full as-of label history; old labels before this feature are not reconstructed. Preview/no-op/conflict produce no receipts. Ingest can restore a label and a later clear appends another receipt without rewriting old ones.",
+  "embedding_description": "Read operator-only clear receipts for one exact ledger session id. Pages use the total order cleared_at and id with a paired cursor, capped at 100. Returns current live label or not_found independently of source eligibility. Immutable receipts survive restore/reclear and begin with this feature."
+}

@@ -11,6 +11,12 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
+from ananta.core.actions.owned_deploy_admission import (
+    OWNED_DEPLOY_EXCLUSION_UNAVAILABLE as _CORE_OWNED_DEPLOY_EXCLUSION_UNAVAILABLE,
+)
+from ananta.core.actions.owned_deploy_admission import (
+    OWNED_DEPLOY_IN_PROGRESS as _CORE_OWNED_DEPLOY_IN_PROGRESS,
+)
 from ananta.core.runtime import (
     DRAINING_SENTINEL_SUFFIX as _CORE_DRAINING_SENTINEL_SUFFIX,
 )
@@ -47,9 +53,7 @@ _COLOR_TOKENS: Final[frozenset[str]] = frozenset({COLOR_BLUE, COLOR_GREEN})
 # only via ``service_interface::local_self_deployment_service::*``; the
 # canonical ABC + ``@service_interface_process`` decorator + KB JSON for
 # ``complete_swap`` were added in commit ``0e72ac15``.
-COMPLETE_SWAP_PROCESS_KEY: Final[str] = (
-    "service_interface::local_self_deployment_service::complete_swap"
-)
+COMPLETE_SWAP_PROCESS_KEY: Final[str] = "service_interface::local_self_deployment_service::complete_swap"
 
 # Result-type tokens for the @platform_process EDGE result-processor merge.
 RESULT_TYPE_RESTART: Final[str] = "local_blue_green_restart_result"
@@ -90,10 +94,7 @@ AUTOSTART_LOG_DIR_DEFAULT: Final[str] = "~/.ananta/logs"
 # (``/opt/homebrew`` Apple Silicon, ``/usr/local`` Intel) rather than
 # arch-detected: a non-existent directory on PATH is inert, and one literal
 # keeps the render arch-independent.
-AUTOSTART_PATH_ENV: Final[str] = (
-    "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:"
-    "/usr/bin:/bin:/usr/sbin:/sbin"
-)
+AUTOSTART_PATH_ENV: Final[str] = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # Option-B supervisor (2026-06-28). The LaunchAgent runs this module —
 # NOT ``ananta.cli`` directly — so the launchd-managed process is a thin,
@@ -199,9 +200,7 @@ DEFAULT_MGMT_SOCKET_PROBE_TIMEOUT_SECONDS: Final[float] = 1.0
 # (fail-closed; blocks the swap). Operator-tunable per Q1 via the plugin
 # config key below; the constant is the default.
 DEFAULT_PREFLIGHT_PROBE_TIMEOUT_SECONDS: Final[float] = 120.0
-CONFIG_KEY_PREFLIGHT_PROBE_TIMEOUT_SECONDS: Final[str] = (
-    "preflight_probe_timeout_seconds"
-)
+CONFIG_KEY_PREFLIGHT_PROBE_TIMEOUT_SECONDS: Final[str] = "preflight_probe_timeout_seconds"
 
 # Option-B supervisor cadence (2026-06-28). The supervisor polls the
 # router every interval and spawns a replacement only when the router has
@@ -265,12 +264,8 @@ DEFAULT_REGISTRATION_POLL_INTERVAL_SECONDS: Final[float] = 0.5
 # rename surfaces the distinction so the next agent reading
 # ``FAILED_REGISTRATION_LOCAL_BRIDGE_PORT_NEVER_APPEARED`` cannot
 # misinterpret the failure mode as a file-side issue.
-FAILED_REGISTRATION_BOUNDED_WINDOW_EXPIRED: Final[str] = (
-    "FAILED_REGISTRATION_BOUNDED_WINDOW_EXPIRED"
-)
-FAILED_REGISTRATION_LOCAL_BRIDGE_PORT_NEVER_APPEARED: Final[str] = (
-    "FAILED_REGISTRATION_LOCAL_BRIDGE_PORT_NEVER_APPEARED"
-)
+FAILED_REGISTRATION_BOUNDED_WINDOW_EXPIRED: Final[str] = "FAILED_REGISTRATION_BOUNDED_WINDOW_EXPIRED"
+FAILED_REGISTRATION_LOCAL_BRIDGE_PORT_NEVER_APPEARED: Final[str] = "FAILED_REGISTRATION_LOCAL_BRIDGE_PORT_NEVER_APPEARED"
 
 # Cross-plugin lookup target for the bridge HTTP port. The plugin owns
 # its own bound port; the deployment plugin reads it via
@@ -299,6 +294,13 @@ DRAINING_SENTINEL_SUFFIX: Final[str] = _CORE_DRAINING_SENTINEL_SUFFIX
 # ignores SIGTERM.
 DEFAULT_STOP_SELF_PRE_SIGTERM_DELAY_SECONDS: Final[float] = 0.5
 DEFAULT_STOP_SELF_SIGKILL_ESCALATION_SECONDS: Final[float] = 10.0
+
+# Owned-deploy admission operation labels, recorded in the per-solet active
+# context. The lock itself is core's (``ananta.core.actions.owned_deploy_admission``)
+# so the core manifest commit and these plugin operations share one inode.
+OWNED_DEPLOY_OPERATION_RESTART: Final[str] = "swap_restart"
+OWNED_DEPLOY_OPERATION_ROLLBACK: Final[str] = "rollback_release"
+OWNED_DEPLOY_OPERATION_STOP_SELF: Final[str] = "stop_self"
 
 # Result-type token for the stop_self EDGE result-processor merge.
 RESULT_TYPE_STOP_SELF: Final[str] = "macos_self_deployment_stop_self_result"
@@ -372,6 +374,12 @@ class RestartReasonCode(StrEnum):
     # the concurrency CAS surface (Architect ruling (c), 2026-06-28).
     NO_ROLLBACK_TARGET = "no_rollback_target"
     STALE_CURRENT_RELEASE = "stale_current_release"
+    # Owned-deploy admission refused before any build/spawn: another
+    # apply/restart/rollback/stop holds this solet's admission
+    # (OWNED_DEPLOY_IN_PROGRESS), or admission could not be established at
+    # all (OWNED_DEPLOY_EXCLUSION_UNAVAILABLE). Core owns both tokens.
+    OWNED_DEPLOY_IN_PROGRESS = _CORE_OWNED_DEPLOY_IN_PROGRESS
+    OWNED_DEPLOY_EXCLUSION_UNAVAILABLE = _CORE_OWNED_DEPLOY_EXCLUSION_UNAVAILABLE
 
     # --- NEEDS_INTERVENTION (automated recovery exhausted) ----------------
     # The post-activate symlink swap failed and the F2-gated router rollback

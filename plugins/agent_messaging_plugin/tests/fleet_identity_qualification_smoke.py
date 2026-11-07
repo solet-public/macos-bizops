@@ -16,7 +16,11 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
+from _register_unit_double import FIXTURE_UNIT_ID, RegisterUnitDouble  # noqa: E402
+from managed_dispatch_smoke import _coordinator_actor, _state  # noqa: E402
+
 import agent_messaging_plugin.plugin as plugin_module  # noqa: E402
+from agent_messaging_plugin.managed_dispatch import DispatchActor  # noqa: E402
 from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
 from agent_messaging_plugin.role_claim import RoleClaimSuccess  # noqa: E402
@@ -49,6 +53,7 @@ class _Registry:
 
 
 class _FakePlugin:
+    _native_spawn_actor = AgentMessagingPlugin._native_spawn_actor
     _qualify_fleet_worker = AgentMessagingPlugin._qualify_fleet_worker
     _wait_for_qualification_binding = AgentMessagingPlugin._wait_for_qualification_binding
     _qualification_action_error = staticmethod(AgentMessagingPlugin._qualification_action_error)
@@ -59,9 +64,18 @@ class _FakePlugin:
         self._bridge_manager = object()
         self.delivery = delivery
         self.releases = 0
+        self.state_service = _state()
+        self.register = RegisterUnitDouble()
+        self.register.add_unit()
 
-    def _get_state_service(self) -> object:
-        return object()
+    def _get_state_service(self) -> Any:
+        return self.state_service
+
+    def _dispatch_actor_from_state(self, _state: dict[str, Any]) -> DispatchActor:
+        return _coordinator_actor()
+
+    def _register_unit_client(self) -> RegisterUnitDouble:
+        return self.register
 
     def _handover_service(self) -> None:
         return None
@@ -90,7 +104,7 @@ def _run(delivery: str) -> tuple[dict[str, Any], _FakePlugin, list[str]]:
     original_claim = plugin_module.claim_role_for_session
     original_retire = plugin_module.lifecycle_retire_session
     plugin_module.lifecycle_spawn_session = (  # type: ignore[assignment]
-        lambda state, request: {"agent_instance_id": _INSTANCE_ID}
+        lambda state, request, *, register, actor: {"agent_instance_id": _INSTANCE_ID}
     )
     plugin_module.claim_role_for_session = lambda **kwargs: RoleClaimSuccess(  # type: ignore[assignment]
         action="claimed", name="qualify-fleet-worker", agent_instance_id=_INSTANCE_ID,
@@ -100,7 +114,10 @@ def _run(delivery: str) -> tuple[dict[str, Any], _FakePlugin, list[str]]:
         retired.append(agent_instance_id) or {"already_retired": False, "dependencies_fired": 0}
     )
     try:
-        result = AgentMessagingPlugin.qualify_fleet(fake, {}, {})
+        result = AgentMessagingPlugin.qualify_fleet(
+            fake, {"unit_id": FIXTURE_UNIT_ID, "spawned_by_role": "Coordinator-Main",
+                   "repository_root": str(REPO_ROOT)}, {},
+        )
     finally:
         plugin_module.lifecycle_spawn_session = original_spawn
         plugin_module.claim_role_for_session = original_claim

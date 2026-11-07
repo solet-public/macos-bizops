@@ -22,7 +22,8 @@ Exercises:
      test_connection wrapper, and a non-2xx response classifying
      topology-safe through the SAME path smoke_data_query.py already covers
      at the ``_run`` level — decoupled entirely from the dispatch call.
-  4. ACTION_HANDLERS carries all 9 migrated verbs — a name typo here would
+  4. ACTION_HANDLERS carries the 10 original verbs plus every typed build-2
+     verb (typed_verbs.TYPED_HANDLERS) — a name typo here would
      silently strand a verb's queued jobs forever (the drain loop only polls
      names present in this dict).
   5. ensure_worker_started is idempotent: two calls produce the same thread
@@ -52,6 +53,7 @@ from zuora_plugin import async_jobs  # noqa: E402
 from zuora_plugin.billing_actions import ZuoraResponseError  # noqa: E402
 from zuora_plugin.constants import ERROR_INVALID_PARAMS, ERROR_OBJECT_NOT_FOUND  # noqa: E402
 from zuora_plugin.plugin import ZuoraPlugin  # noqa: E402
+from zuora_plugin.typed_verbs import TYPED_HANDLERS  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
@@ -90,11 +92,7 @@ class _FakeAsyncJobManager:
         return {"action_status": "completed", "data": {"job_id": job_id, "status": "queued"}}
 
     def list_jobs(self, status: str | None = None, provider_name: str | None = None, **_: Any) -> dict[str, Any]:
-        jobs = [
-            j for j in self._jobs.values()
-            if (status is None or j["status"] == status)
-            and (provider_name is None or j["provider_name"] == provider_name)
-        ]
+        jobs = [j for j in self._jobs.values() if (status is None or j["status"] == status) and (provider_name is None or j["provider_name"] == provider_name)]
         return {"action_status": "completed", "data": {"jobs": jobs}}
 
     def get_job_payload(self, job_id: str, payload_type: str = "request") -> dict[str, Any]:
@@ -129,6 +127,7 @@ _STATE = {"session_id": "s1", "flow_id": "f1"}
 # entry here would not be the *best* fix, so it's not taken; the salesforce/
 # snowflake sibling smokes' allowlist entries predate that doctrine).
 _MIGRATED_VERB_PARAMS: dict[str, dict[str, Any]] = {
+    "request": {"method": "GET", "path": "/workflows"},
     "data_query": {"zoql": "zoql-fixture-id-from-account", "output_tsv_path": "/tmp/x.tsv"},
     "get_object": {"type": "Account", "id": "2c1x"},
     "create_object": {"type": "Account", "fields": {"Name": "Acme"}},
@@ -177,16 +176,17 @@ def test_all_nine_verbs_dispatch_async() -> None:
             str(result),
         )
     _assert(
-        "nine jobs created, one per verb",
+        "one job created per verb",
         len(fake_manager._jobs) == len(_MIGRATED_VERB_PARAMS),  # noqa: SLF001
     )
 
 
 def test_action_handlers_covers_all_nine_verbs() -> None:
+    expected = set(_MIGRATED_VERB_PARAMS.keys()) | set(TYPED_HANDLERS.keys())
     _assert(
-        "ACTION_HANDLERS carries exactly the 9 migrated verb names",
-        set(async_jobs.ACTION_HANDLERS.keys()) == set(_MIGRATED_VERB_PARAMS.keys()),
-        str(sorted(async_jobs.ACTION_HANDLERS.keys())),
+        "ACTION_HANDLERS carries the original verbs, generic request and typed build-2 verbs",
+        set(async_jobs.ACTION_HANDLERS.keys()) == expected,
+        str(sorted(set(async_jobs.ACTION_HANDLERS.keys()) ^ expected)),
     )
 
 
@@ -203,7 +203,9 @@ def test_worker_completes_get_object_on_success() -> None:
     job_id = _dispatch_and_get_job_id(plugin, "get_object", {"type": "Account", "id": "2c1x"})
 
     plugin._client.get.return_value = httpx.Response(  # noqa: SLF001
-        200, json={"Id": "2c1x", "Name": "Acme"}, request=httpx.Request("GET", "https://tenant/v1/object/Account/2c1x"),
+        200,
+        json={"Id": "2c1x", "Name": "Acme"},
+        request=httpx.Request("GET", "https://tenant/v1/object/Account/2c1x"),
     )
     async_jobs._process_job(plugin, fake_manager, job_id, "get_object")  # noqa: SLF001
 
@@ -211,7 +213,7 @@ def test_worker_completes_get_object_on_success() -> None:
     _assert("worker transitioned processing -> completed", statuses == ["processing", "completed"])
     completed = fake_manager.update_calls[-1][1]
     _assert("completed result carries the real object", completed["result"]["object"]["Name"] == "Acme", str(completed))
-    path, = plugin._client.get.call_args.args  # noqa: SLF001
+    (path,) = plugin._client.get.call_args.args  # noqa: SLF001
     _assert("worker GET the object endpoint", path == "/v1/object/Account/2c1x")
 
 
@@ -219,11 +221,15 @@ def test_worker_completes_create_object_write() -> None:
     plugin, fake_manager = _plugin_with_fake_manager()
     plugin._client = MagicMock()  # noqa: SLF001
     job_id = _dispatch_and_get_job_id(
-        plugin, "create_object", {"type": "Account", "fields": {"Name": "Acme"}},
+        plugin,
+        "create_object",
+        {"type": "Account", "fields": {"Name": "Acme"}},
     )
 
     plugin._client.post.return_value = httpx.Response(  # noqa: SLF001
-        200, json={"Id": "new-1", "Success": True}, request=httpx.Request("POST", "https://tenant/v1/object/Account"),
+        200,
+        json={"Id": "new-1", "Success": True},
+        request=httpx.Request("POST", "https://tenant/v1/object/Account"),
     )
     async_jobs._process_job(plugin, fake_manager, job_id, "create_object")  # noqa: SLF001
 
@@ -241,7 +247,9 @@ def test_worker_data_query_writes_tsv_via_export_path_gate() -> None:
     with tempfile.TemporaryDirectory(prefix="zuora_async_smoke_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
         job_id = _dispatch_and_get_job_id(
-            plugin, "data_query", {"zoql": "zoql-fixture-id-name-from-account", "output_tsv_path": out_path},
+            plugin,
+            "data_query",
+            {"zoql": "zoql-fixture-id-name-from-account", "output_tsv_path": out_path},
         )
 
         gate_calls: list[str] = []

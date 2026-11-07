@@ -229,13 +229,11 @@ def test_edge_parity() -> None:
     actions = discover_actions(plugin)
     raised = None
     try:
-        PluginRegistrationValidator().validate_edge_process_provider(
-            "salesforce_plugin", plugin, actions
-        )
+        PluginRegistrationValidator().validate_edge_process_provider("salesforce_plugin", plugin, actions)
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 15 verbs discovered", len(actions) == 15)
+    _assert("all 23 verbs discovered", len(actions) == 23)
 
 
 def main() -> int:

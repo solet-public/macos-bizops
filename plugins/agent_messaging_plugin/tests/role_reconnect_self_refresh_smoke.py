@@ -22,6 +22,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from unittest import TestCase
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
@@ -153,6 +155,7 @@ def _register(
     agent_instance_id: str,
     agent_session_id: str,
     session_role: str = "",
+    parent_pid: int | None = None,
 ) -> Any:
     body: dict[str, Any] = {
         "agent_id": "claude_code",
@@ -162,6 +165,8 @@ def _register(
     }
     if session_role:
         body["session_role"] = session_role
+    if parent_pid is not None:
+        body["parent_pid"] = parent_pid
     return client.post(
         f"/api/v1/bridge/{bridge_id}/peer/register",
         json=body,
@@ -170,6 +175,34 @@ def _register(
 
 def _open_bridge(manager: BridgeSessionManager) -> str:
     return manager.open(solet_name="", parent_pid=123).bridge_id
+
+
+def _predecessor(registry: PeerRegistry, agi: str = "agi-X") -> None:
+    registry.register(BridgeBinding(
+        bridge_id="agc-dead", agent_id="claude_code", agent_instance_id=agi,
+        session_label="session-label", parent_pid=123, agent_session_id="sess-1",
+    ))
+
+
+def test_registration_refresh_rejects_changed_holder() -> None:
+    manager, registry, state = _bridge_manager(), _fresh_peer_registry(), _state()
+    _predecessor(registry, "agi-old")
+    _claim(state, role="R", agi="agi-old", session_id="sess-1")
+    original = registry.register
+
+    def race(binding: BridgeBinding, **kwargs: Any) -> str:
+        label = original(binding, **kwargs)
+        _claim(state, role="R", agi="agi-racer", session_id="sess-1")
+        return label
+
+    client = _client(manager, registry, state)
+    with patch.object(registry, "register", side_effect=race):
+        response = _register(client, _open_bridge(manager), agent_instance_id="agi-new",
+                             agent_session_id="sess-1", parent_pid=123, session_role="R")
+    _check(response.status_code == 200, "changed-holder registration remains 200")
+    _check(resolve_role_binding(state, "R").agent_instance_id == "agi-racer", "expected-holder CAS preserves concurrent pointer")
+    _check(response.json().get("self_refresh") == "no_roles", "lost expected-holder CAS affects zero roles")
+    _check(response.json().get("session_role_held") == "not_held", "same-session stale instance never reports held")
 
 
 def test_register_response_carries_no_rehome_tokens() -> None:
@@ -197,7 +230,10 @@ def test_reconnect_repoints_resolution() -> None:
     _claim(state, role="R", agi="agi-X", session_id="sess-1")
     client = _client(manager, registry, state)
     bridge_id = _open_bridge(manager)
-    resp = _register(client, bridge_id, agent_instance_id="agi-Y", agent_session_id="sess-1")
+    with TestCase().assertLogs("agent_messaging_plugin", level="ERROR") as logs:
+        resp = _register(client, bridge_id, agent_instance_id="agi-Y", agent_session_id="sess-1")
+    _check(all(s in " ".join(logs.output) for s in ("role=R", "session=sess-1", "new=agi-Y", "unverified")),
+           "no predecessor/no parent still rotates with ERROR attribution advisory")
     _check(resp.status_code == 200, "reconnect register returns 200")
     _check(resp.json().get("self_refresh") == "rerouted:1", "self_refresh token = rerouted:1")
     _check(
@@ -286,7 +322,7 @@ def test_empty_register_uses_preserved_session_id_for_self_refresh() -> None:
             agent_session_id="sess-1",
         ),
     )
-    _claim(state, role="R", agi="agi-X", session_id="sess-1")
+    _claim(state, role="R", agi="agi-Y", session_id="sess-1")
     client = _client(manager, registry, state)
     bridge_id = _open_bridge(manager)
     resp = _register(client, bridge_id, agent_instance_id="agi-Y", agent_session_id="")
@@ -318,6 +354,7 @@ def test_state_fault_returns_error_token_still_200() -> None:
     response is 200 with self_refresh='error', and the roles are NOT re-pointed
     (strand until re-claim — the accepted one-shot-at-register tradeoff)."""
     manager, registry, state = _bridge_manager(), _fresh_peer_registry(), _state()
+    _predecessor(registry)
     _claim(state, role="R", agi="agi-X", session_id="sess-1")
     cast("Any", state).fail_next("update")  # force the reconnect CAS update to fault
     client = _client(manager, registry, state)
@@ -326,6 +363,7 @@ def test_state_fault_returns_error_token_still_200() -> None:
         _open_bridge(manager),
         agent_instance_id="agi-Y",
         agent_session_id="sess-1",
+        parent_pid=123,
     )
     _check(resp.status_code == 200, "state fault mid-register: registration STILL succeeds (200)")
     _check(
@@ -344,6 +382,7 @@ def test_session_role_held_answers_held_on_a_healthy_reconnect() -> None:
     /process/call claim path (which phantom-stamps model activity with no model
     turn and can consume an owed wake to an idle session)."""
     manager, registry, state = _bridge_manager(), _fresh_peer_registry(), _state()
+    _predecessor(registry)
     _claim(state, role="R", agi="agi-X", session_id="sess-1")
     client = _client(manager, registry, state)
     resp = _register(
@@ -352,6 +391,7 @@ def test_session_role_held_answers_held_on_a_healthy_reconnect() -> None:
         agent_instance_id="agi-Y",
         agent_session_id="sess-1",
         session_role="R",
+        parent_pid=123,
     )
     _check(
         resp.json().get("self_refresh") == "rerouted:1",
@@ -374,6 +414,7 @@ def test_session_role_held_is_unknown_when_the_self_refresh_faulted() -> None:
     SKIP the one thing that heals it, converting a loud one-shot fault into a
     silent permanent strand. Must read 'unknown' → caller claims as before."""
     manager, registry, state = _bridge_manager(), _fresh_peer_registry(), _state()
+    _predecessor(registry)
     _claim(state, role="R", agi="agi-X", session_id="sess-1")
     cast("Any", state).fail_next("update")  # force the reconnect CAS update to fault
     client = _client(manager, registry, state)
@@ -383,6 +424,7 @@ def test_session_role_held_is_unknown_when_the_self_refresh_faulted() -> None:
         agent_instance_id="agi-Y",
         agent_session_id="sess-1",
         session_role="R",
+        parent_pid=123,
     )
     _check(resp.json().get("self_refresh") == "error", "precondition: the CAS faulted")
     _check(
@@ -453,6 +495,7 @@ def test_self_refresh_is_state_token_not_address_book() -> None:
 
 def main() -> int:
     print("=== S1-S3 role reconnect self-refresh acceptance smoke ===")
+    test_registration_refresh_rejects_changed_holder()
     test_reconnect_repoints_resolution()
     test_backlog_redelivers_across_strand()
     test_multi_role_single_cas()

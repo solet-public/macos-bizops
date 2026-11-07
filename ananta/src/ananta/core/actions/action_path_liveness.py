@@ -75,7 +75,7 @@ SLOW_ACTION_THRESHOLD_SECONDS = 10.0
 # detached deploy is therefore reported in flight with its age, and past this
 # long it is stalled: ``action_path_stalled`` goes true and the poller logs
 # ``DEPLOY_STALLED`` at ERROR (repeated at this interval). Above the 525 to
-# 1000 s a deploy took on 09-28 to 09-30, below the 5345 s ceiling below.
+# 1000 s a deploy took on 09-28 to 09-30, below the 7200 s ceiling below.
 DEPLOY_STALL_THRESHOLD_SECONDS = 1800.0
 
 # The orphan reaper skips the deploy this process is running, because a
@@ -198,16 +198,10 @@ class ActionPathLiveness:
         start, so a poller that never started at all is visible rather than
         reading as ``None`` and being skipped by a naive threshold check.
         """
-        reference = (
-            self.last_poll_monotonic
-            if self.last_poll_monotonic is not None
-            else self.started_monotonic
-        )
+        reference = self.last_poll_monotonic if self.last_poll_monotonic is not None else self.started_monotonic
         return max(0.0, time.monotonic() - reference)
 
-    def stalled(
-        self, *, threshold_seconds: float = DEFAULT_STALL_THRESHOLD_SECONDS
-    ) -> bool:
+    def stalled(self, *, threshold_seconds: float = DEFAULT_STALL_THRESHOLD_SECONDS) -> bool:
         """True when the dispatch path has gone stale.
 
         Stale poll age alone is diagnostic — see the module docstring
@@ -222,9 +216,7 @@ class ActionPathLiveness:
         """
         return self.poll_age_seconds() > threshold_seconds
 
-    def snapshot(
-        self, *, threshold_seconds: float = DEFAULT_STALL_THRESHOLD_SECONDS
-    ) -> dict[str, object]:
+    def snapshot(self, *, threshold_seconds: float = DEFAULT_STALL_THRESHOLD_SECONDS) -> dict[str, object]:
         """Render the liveness view for a health probe.
 
         Ships the derived ``action_path_stalled`` verdict alongside the raw
@@ -239,10 +231,7 @@ class ActionPathLiveness:
         in_flight_age = self.in_flight_age_seconds()
         deploy_age = self.detached_deploy_age_seconds()
         return {
-            "action_path_stalled": (
-                self.stalled(threshold_seconds=threshold_seconds)
-                or self.detached_deploy_stalled()
-            ),
+            "action_path_stalled": (self.stalled(threshold_seconds=threshold_seconds) or self.detached_deploy_stalled()),
             "poll_age_seconds": round(self.poll_age_seconds(), 3),
             "queued_depth": self.last_observed_queue_depth,
             "last_poll_at_utc": self.last_poll_at_utc,
@@ -251,15 +240,11 @@ class ActionPathLiveness:
             "in_flight_action_id": self.in_flight_action_id,
             "in_flight_process_key": self.in_flight_process_key,
             "in_flight_started_at": self.in_flight_started_at,
-            "in_flight_age_seconds": (
-                None if in_flight_age is None else round(in_flight_age, 3)
-            ),
+            "in_flight_age_seconds": (None if in_flight_age is None else round(in_flight_age, 3)),
             "detached_deploy_action_id": self.detached_deploy_action_id,
             "detached_deploy_process_key": self.detached_deploy_process_key,
             "detached_deploy_started_at": self.detached_deploy_started_at,
-            "detached_deploy_age_seconds": (
-                None if deploy_age is None else round(deploy_age, 3)
-            ),
+            "detached_deploy_age_seconds": (None if deploy_age is None else round(deploy_age, 3)),
             "detached_deploy_stalled": self.detached_deploy_stalled(),
         }
 

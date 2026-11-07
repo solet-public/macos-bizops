@@ -23,8 +23,7 @@ def _solet_or_fail() -> str:
     name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "zuora_plugin.constants: SOLET_NAME env var is "
-            "required to resolve the scoped client_secret vault key.",
+            "zuora_plugin.constants: SOLET_NAME env var is required to resolve the scoped client_secret vault key.",
         )
     return name
 
@@ -37,6 +36,56 @@ _SOLET: Final[str] = _solet_or_fail()
 PLUGIN_NAME: Final[str] = "zuora_plugin"
 PLUGIN_VERSION: Final[str] = "1.1.0"
 
+# Generic request transport: vendor RBAC determines available operations.
+RESULT_TYPE_REQUEST: Final[str] = "zuora_request_result"
+REQUEST_REDACTION: Final[str] = "[REDACTED]"
+REQUEST_SENSITIVE_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "authorization",
+        "proxyauthorization",
+        "accesstoken",
+        "refreshtoken",
+        "clientsecret",
+        "password",
+        "apikey",
+        "token",
+        "secret",
+        "cookie",
+        "setcookie",
+    }
+)
+REQUEST_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
+    {
+        "content-type",
+        "content-disposition",
+        "content-encoding",
+        "retry-after",
+        "link",
+        "location",
+        "zuora-request-id",
+        "zuora-track-id",
+        "etag",
+        "last-modified",
+        "ratelimit-limit",
+        "ratelimit-remaining",
+        "ratelimit-reset",
+    }
+)
+REQUEST_PAGINATION_KEYS: Final[tuple[str, ...]] = (
+    "nextPage",
+    "nextPageToken",
+    "next_page",
+    "next_page_token",
+    "next",
+    "cursor",
+    "hasMore",
+    "has_more",
+    "done",
+    "queryLocator",
+    "pagination",
+    "links",
+)
+
 # ---------------------------------------------------------------------------
 # Chain-consumed vault key — the OAuth client_secret.
 # ---------------------------------------------------------------------------
@@ -47,19 +96,14 @@ PLUGIN_VERSION: Final[str] = "1.1.0"
 # post-2026-06-07 vault namespace enforcement requires the key's ``<plugin>``
 # segment to equal the retrieving caller. Therefore NOT declared in
 # get_required_vault_keys / get_declared_vault_keys (both return []).
-VAULT_KEY_CLIENT_SECRET: Final[str] = (
-    f"{_SOLET}.default_address_book_plugin.zuora_client_secret"
-)
+VAULT_KEY_CLIENT_SECRET: Final[str] = f"{_SOLET}.default_address_book_plugin.zuora_client_secret"
 
 # ---------------------------------------------------------------------------
 # Address book entry — Zuora tenant identity + credentials
 # ---------------------------------------------------------------------------
 ADDRESS_BOOK_ENTRY_NAME: Final[str] = "zuora_tenant"
 ADDRESS_BOOK_ENTRY_TYPE: Final[str] = "api"
-ADDRESS_BOOK_ENTRY_DESCRIPTION: Final[str] = (
-    "Zuora tenant identity + credentials (base_url environment selector, "
-    "client_id, client_secret vault-ref) for zuora_plugin."
-)
+ADDRESS_BOOK_ENTRY_DESCRIPTION: Final[str] = "Zuora tenant identity + credentials (base_url environment selector, client_id, client_secret vault-ref) for zuora_plugin."
 ADDRESS_BOOK_FIELD_BASE_URL: Final[str] = "base_url"
 ADDRESS_BOOK_FIELD_CLIENT_ID: Final[str] = "client_id"
 ADDRESS_BOOK_FIELD_CLIENT_SECRET: Final[str] = "client_secret"
@@ -139,9 +183,7 @@ PARAM_ROW_LIMIT: Final[str] = "row_limit"
 # ---------------------------------------------------------------------------
 # Object types this connector CRUDs (Object/Actions API).
 # ---------------------------------------------------------------------------
-SUPPORTED_OBJECT_TYPES: Final[frozenset[str]] = frozenset(
-    {"Account", "Subscription", "Invoice", "Payment", "Product"}
-)
+SUPPORTED_OBJECT_TYPES: Final[frozenset[str]] = frozenset({"Account", "Subscription", "Invoice", "Payment", "Product"})
 
 # ---------------------------------------------------------------------------
 # Error codes (zuora.* prefix — surfaced to callers of the verbs)
@@ -159,6 +201,9 @@ ERROR_RATE_LIMITED: Final[str] = "zuora.rate_limited"
 ERROR_QUERY_FAILED: Final[str] = "zuora.query_failed"
 ERROR_API_ERROR: Final[str] = "zuora.api_error"
 ERROR_EXPORT_PATH_REFUSED: Final[str] = "zuora.export_path_refused"
+# Typed build-2 verbs: a 403 is the vendor's RBAC answer for the registered
+# OAuth client's role, kept distinct from a failed credential (401).
+ERROR_PERMISSION_DENIED: Final[str] = "zuora.permission_denied"
 
 # ---------------------------------------------------------------------------
 # Result types

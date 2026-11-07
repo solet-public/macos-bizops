@@ -1,12 +1,12 @@
 {
   "process_key": "plugin::g_suite_plugin::connect_account",
   "display_name": "Connect Google Workspace Account",
-  "description": "Generate the Google consent URL (OAuth 2.0 with PKCE S256) the operator opens in their browser to grant this solet access to the Workspace account. Returns authorize_url + a fresh state nonce + the redirect_uri. After the operator approves, the plugin's callback handler (start_interface) stores the refresh + access tokens in vault automatically. Requires the callback server running and the 'google_oauth_app' address-book entry to exist.",
-  "embedding_description": "Start Google Workspace OAuth linking by generating a PKCE consent URL with offline access. The operator approves Gmail, Drive, Docs, Sheets, and Slides scopes, then the callback stores a durable refresh token. Use this account-connection step before invoking Workspace data operations.",
+  "description": "Generate the Google consent URL (OAuth 2.0 with PKCE S256) the operator opens in their browser to grant this solet access to a Google account. Repeatable: each account that signs in (a Workspace account or a consumer @gmail.com account) is stored separately, keyed by its Gmail address; re-connecting the same address refreshes it, and the first account is the default. Optional alias (e.g. work, home) names the account for the `account` argument on every verb; set_default makes it the default. The default consent requests gmail.modify plus Drive, Docs, Sheets and Slides; gmail_permanent_delete=true also requests https://mail.google.com/, the only scope Gmail accepts for permanent delete. After approval the callback reads the account's Gmail profile, records its tier (consumer or workspace_user) and the granted scopes, and stores its tokens in vault. Requires the callback server (start_interface) and the 'google_oauth_app' address-book entry.",
+  "embedding_description": "Link a Google account (Workspace or personal Gmail) by generating a PKCE consent URL; repeat it to add more accounts such as work and home, each with an optional alias. The callback stores that account's refresh token, tier and granted scopes. Opt in to permanent mail delete with gmail_permanent_delete.",
   "result_processor_customizations": {
     "action_label": "Google consent URL generated",
     "result_type": "g_suite_connect_account_result",
-    "result_description": "Dict with authorize_url, state nonce, redirect_uri, and human-readable instructions for the operator.",
+    "result_description": "Dict with authorize_url, state nonce, redirect_uri, requested_scopes and human-readable instructions for the operator.",
     "presentation_guidance": "Lead with authorize_url and tell the operator to open it in a browser and approve access. Surface instructions verbatim; surface state + redirect_uri only when debugging the callback."
   },
   "error_processor_customizations": {

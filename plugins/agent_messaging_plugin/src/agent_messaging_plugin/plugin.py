@@ -31,17 +31,20 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import functools
 import json
 import logging
 import os
 import secrets
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 from ananta.constants import FRAMEWORK_ASYNC_JOBS_TABLE, FRAMEWORK_NAMESPACE
 from ananta.core.actions.action_factory import reject_retired_session_arguments
@@ -68,6 +71,8 @@ from ananta.error_handling import FrameworkError
 from ananta.interfaces import IOInterfacePlugin
 from ananta.interfaces.agent_messaging_service_interface import (
     AgentMessagingServiceInterface,
+    ScheduleTarget,
+    ScheduleTargetObservation,
 )
 from ananta.interfaces.chat_interface_support import build_initial_vertex_action
 from ananta.interfaces.edge_process_provider import (
@@ -115,7 +120,18 @@ from ananta.services.inference_service.completion_request_schema import (
     COL_RESUME_PROCESS_KEY as COL_ICR_RESUME_PROCESS_KEY,
 )
 
+from ._permission_prompt_state import permission_mode_advisory, permission_prompt_state
+from .accepted_authorization_verbs import (
+    change_accepted_authorization as lifecycle_change_accepted_authorization,
+)
+from .accepted_authorization_verbs import (
+    get_authorization_history as lifecycle_get_authorization_history,
+)
+from .accepted_authorization_verbs import (
+    record_accepted_authorization as lifecycle_record_accepted_authorization,
+)
 from .autonomic_assignment import AutonomicAssignment
+from .bridge_diagnostics import BridgeDiagnostics
 from .bridge_lifecycle import (
     BridgeLifecycleSweeper,
     purge_preboot_bindings,
@@ -159,6 +175,14 @@ from .constants import (
 )
 from .context_status_verbs import report_context_status as lifecycle_report_context_status
 from .context_status_verbs import session_context_status as lifecycle_session_context_status
+from .delivery_drive import (
+    CodexPickupStore,
+    PickupTrackingMessagingService,
+    get_delivery_pickup_schema,
+    start_delivery_drives,
+    stop_delivery_drives,
+    sweep_codex_pickups,
+)
 from .dispatch_tier_selection import TierSelectionError
 from .fleet_check_run_verbs import (
     recent_fleet_liveness_runs as lifecycle_recent_fleet_liveness_runs,
@@ -171,6 +195,25 @@ from .fleet_check_run_verbs import (
 )
 from .fleet_check_run_verbs import (
     record_fleet_progress_run as lifecycle_record_fleet_progress_run,
+)
+from .fleet_stall_sweep import (
+    DEFAULT_SCHEDULE_CRON as FLEET_STALL_SWEEP_CRON,
+)
+from .fleet_stall_sweep import (
+    DEFAULT_SCHEDULE_TAG as FLEET_STALL_SWEEP_TAG,
+)
+from .fleet_stall_sweep import (
+    DEFAULT_WINDOW_SECONDS as FLEET_STALL_WINDOW_SECONDS,
+)
+from .fleet_stall_sweep import (
+    FleetStallSweepError,
+    PsoletFleetStallReader,
+    ensure_sweep_schedule,
+    read_sweep_status,
+    run_fleet_stall_sweep,
+)
+from .fleet_stall_sweep import (
+    clear_completed_run as clear_fleet_stall_sweep_completed_run,
 )
 from .fleet_status import FleetStatusError
 from .fleet_status import fleet_status as lifecycle_fleet_status
@@ -210,11 +253,12 @@ from .inbox_consumption_verbs import (
 from .inbox_consumption_verbs import (
     session_inbox_consumption_status as lifecycle_session_inbox_consumption_status,
 )
+from .lane_worktree_evidence import PsoletRetirementEvidenceReader, RetirementEvidenceReader
+from .ledger_tmux_reconciliation import collect_ledger_tmux_report
 from .managed_dispatch import (
     DispatchActor,
     DispatchError,
     DispatchSpec,
-    mint_dispatch_id,
 )
 from .managed_dispatch import (
     dispatch_managed_work as lifecycle_dispatch_managed_work,
@@ -234,6 +278,8 @@ from .managed_dispatch import (
 from .managed_dispatch import (
     resolve_managed_dispatch as lifecycle_resolve_managed_dispatch,
 )
+from .managed_dispatch_unit import require_assignment
+from .managed_dispatch_uptake import managed_dispatch_uptake_rate as lifecycle_managed_dispatch_uptake_rate
 from .mcp_streamable import (
     BearerVerifier,
     StreamableSessionManager,
@@ -261,6 +307,9 @@ from .model_capability_verbs import (
     read_model_capability_catalog as catalog_read,
 )
 from .model_capability_verbs import (
+    read_model_capability_history as catalog_history,
+)
+from .model_capability_verbs import (
     read_pool_readings_view as pool_reading_read,
 )
 from .model_capability_verbs import (
@@ -273,6 +322,9 @@ from .model_capability_verbs import (
     refresh_model_capability_catalog as catalog_refresh,
 )
 from .model_capability_verbs import (
+    reinstate_model_capability_cell as catalog_reinstate_cell,
+)
+from .model_capability_verbs import (
     retract_pool_reading as pool_reading_retract,
 )
 from .model_capability_verbs import (
@@ -281,6 +333,11 @@ from .model_capability_verbs import (
 from .model_capability_verbs import (
     select_dispatch_tier as catalog_select_tier,
 )
+from .model_capability_verbs import (
+    withdraw_model_capability_cell as catalog_withdraw_cell,
+)
+from .model_catalog_policy import read_catalog_configuration, set_catalog_configuration
+from .model_cell_enablement import read_model_cell_policy, set_model_cells_enabled
 from .model_dispatch_policy import DispatchPolicyError
 from .operator_session_liveness_reconciliation import (
     reconcile_operator_session_liveness as lifecycle_reconcile_operator_session_liveness,
@@ -310,7 +367,18 @@ from .process_exposure import ProcessExportPolicy
 from .register_unit_client import (
     CONFIG_PSOLET_CLI,
     PsoletRegisterUnitClient,
+    RegisterActor,
+    RegisterUnitError,
     resolve_psolet_cli,
+)
+from .retired_role_registry import (
+    RetiredRoleRegistryError,
+    RetireRoleCall,
+    RoleRetiredError,
+    read_retired_role_registry,
+    refuse_if_retired,
+    retire_role_for_caller,
+    seed_retired_role_registry,
 )
 from .role_binding_store import (
     RoleBindingMalformedError,
@@ -326,6 +394,7 @@ from .role_claim import (
     RoleClaimFailure,
     RoleClaimOrigin,
     claim_role_for_session,
+    live_holder_of,
     send_handover_notice,
 )
 from .role_class_backfill import backfill_role_class
@@ -337,6 +406,7 @@ from .rotation_self_notice import (
 )
 from .route_activity import make_model_activity_middleware
 from .schema import (
+    get_accepted_authorization_schema_definition,
     get_agent_role_binding_schema_definition,
     get_peer_binding_schema_definition,
     get_role_model_schema_definition,
@@ -358,9 +428,11 @@ from .session_claude_mapping_store import (
 )
 from .session_context_status_store import GAUGE_HISTORY_RETENTION
 from .session_inference_provider import SessionInferenceProvider
-from .session_lifecycle_control import describe_retire_gaps
-from .session_lifecycle_store import format_directed_by
-from .session_lifecycle_store import resolve_lane_charter as lifecycle_resolve_lane_charter
+from .session_launch_adapters import bind_bare_assignment, qualification_request, reject_retired_launch_fields, submit_launch
+from .session_launch_jobs import SessionLaunchJobs, run_reserved_restart
+from .session_launch_store import get_session_launch_schema_definition
+from .session_lifecycle_control import report_teardown
+from .session_lifecycle_store import SessionNotFoundError, format_directed_by, read_managed_session
 from .session_lifecycle_verbs import (
     LIST_SESSIONS_DEFAULT_LIMIT,
     LIST_SESSIONS_MAX_LIMIT,
@@ -369,6 +441,8 @@ from .session_lifecycle_verbs import (
     LegislateRoleRequest,
     SpawnSessionRequest,
     VerbError,
+    spawn_dispatch_attempt,
+    validate_spawn_admission,
 )
 from .session_lifecycle_verbs import arm_session_dependency as lifecycle_arm_session_dependency
 from .session_lifecycle_verbs import capture_lane_charter as lifecycle_capture_lane_charter
@@ -377,11 +451,18 @@ from .session_lifecycle_verbs import compact_session as lifecycle_compact_sessio
 from .session_lifecycle_verbs import drive_session as lifecycle_drive_session
 from .session_lifecycle_verbs import legislate_role as lifecycle_legislate_role
 from .session_lifecycle_verbs import list_sessions as lifecycle_list_sessions
+from .session_lifecycle_verbs import preserve_lane_evidence as lifecycle_preserve_lane_evidence
+from .session_lifecycle_verbs import read_lane_evidence as lifecycle_read_lane_evidence
 from .session_lifecycle_verbs import report_alive as lifecycle_report_alive
 from .session_lifecycle_verbs import resolve_local_name as lifecycle_resolve_local_name
 from .session_lifecycle_verbs import (
     resolve_provisioned_role_class as lifecycle_resolve_provisioned_role_class,
 )
+from .session_lifecycle_verbs import resolve_retire_packet as lifecycle_resolve_retire_packet
+from .session_lifecycle_verbs import (
+    retire_completed_lane_sessions as lifecycle_retire_completed_lane_sessions,
+)
+from .session_lifecycle_verbs import retire_packet_selection as lifecycle_retire_packet_selection
 from .session_lifecycle_verbs import retire_session as lifecycle_retire_session
 from .session_lifecycle_verbs import session_status as lifecycle_session_status
 from .session_lifecycle_verbs import spawn_session as lifecycle_spawn_session
@@ -399,6 +480,15 @@ from .session_sweep import (
     sweep_overdue_sessions,
     sweep_rotation_due_sessions,
     sweep_unregistered_spawning_sessions,
+)
+from .session_usage_verbs import (
+    UsageVerbError,
+)
+from .session_usage_verbs import (
+    read_session_usage_window as lifecycle_read_session_usage_window,
+)
+from .session_usage_verbs import (
+    read_unit_usage as lifecycle_read_unit_usage,
 )
 from .system_slots import (
     validate_system_slot_declarations,
@@ -437,68 +527,6 @@ their own thread per recipient instead of interleaving them with scheduler
 traffic.
 """
 SYSTEM_JOB_COMPLETION_LABEL: Final[str] = "System (Job Completion)"
-
-
-def _git_controller_launcher_report(role_name: str) -> dict[str, object]:
-    """Report the rendered launcher gate state without changing it.
-
-    The on-request provisioning verb may create a controller, but an unarmed
-    launcher gate remains an operator-visible deployment condition.  Reading
-    the two generated coding-agent launchers keeps that distinction explicit;
-    this helper never repairs their contents.
-    """
-    app_home = os.environ.get("APP_HOME", "").strip()
-    codex_line = f'export GIT_CONTROLLER_NAME="{role_name}"'
-    if not app_home:
-        return {
-            "status": "unavailable",
-            "armed": False,
-            "reason": "APP_HOME is unset, so this deployment's launcher paths cannot be resolved.",
-            "manual_remedy_lines": [],
-            "launchers": [],
-        }
-    root = Path(app_home).resolve().parent
-    solet_name = os.environ.get("SOLET_NAME", "").strip()
-    if not solet_name:
-        return {
-            "status": "unavailable",
-            "armed": False,
-            "reason": "SOLET_NAME is unset, so this deployment's launcher names cannot be resolved.",
-            "manual_remedy_lines": [],
-            "launchers": [],
-        }
-    launchers = [
-        (root / "client" / "bin" / f"claude-{solet_name}", f'GIT_CONTROLLER_NAME="{role_name}" \\'),
-        (root / "client" / "bin" / f"codex-{solet_name}", codex_line),
-    ]
-    details: list[dict[str, object]] = []
-    for path, manual_remedy_line in launchers:
-        try:
-            content = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            details.append(
-                {
-                    "path": str(path),
-                    "armed": False,
-                    "manual_remedy_line": manual_remedy_line,
-                    "error": str(exc),
-                }
-            )
-            continue
-        details.append(
-            {
-                "path": str(path),
-                "armed": 'GIT_CONTROLLER_NAME="' in content
-                and 'GIT_CONTROLLER_NAME=""' not in content,
-                "manual_remedy_line": manual_remedy_line,
-            }
-        )
-    armed = bool(details) and all(item["armed"] is True for item in details)
-    return {
-        "status": "armed" if armed else "not_armed",
-        "armed": armed,
-        "launchers": details,
-    }
 
 
 def _require_provisioner_authority(
@@ -559,7 +587,8 @@ def _provision_legislation(
     needs_legislation: bool,
     role_name: str,
     role_class: str,
-    brief_ref: str,
+    unit_id: str,
+    revision_id: str,
     directed_by: str,
 ) -> dict[str, object]:
     if not needs_legislation:
@@ -569,10 +598,91 @@ def _provision_legislation(
         LegislateRoleRequest(
             name=role_name,
             role_class=role_class,
-            brief_ref=brief_ref,
+            unit_id=unit_id,
+            revision_id=revision_id,
             directed_by=directed_by,
         ),
     )
+
+
+# A single running operation and FIFO async turn reservations preserve ordering.
+# Waiting callers never occupy an executor worker or its submission queue.
+# The process owns this pool across plugin stop/restart; Python retires it at exit.
+_F5_WORKERS = 1
+_F5_PENDING_BOUND = 1
+_F5_EXECUTOR = ThreadPoolExecutor(max_workers=_F5_WORKERS, thread_name_prefix="agent_messaging-f5")
+_F5_SUBMISSION_LOCK = threading.RLock()
+_f5_in_flight: Future[object] | None = None
+_f5_turn: Future[None] | None = None
+_f5_waiters: deque[Future[None]] = deque()
+logging.getLogger(__name__).info("F5 executor agent_messaging-f5: workers=%s pending=%s", _F5_WORKERS, _F5_PENDING_BOUND)
+
+
+def _release_f5_turn(turn: Future[None]) -> None:
+    global _f5_turn
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is not turn:
+            return
+        if _f5_waiters:
+            next_turn = _f5_waiters.popleft()
+            _f5_turn = next_turn
+            next_turn.set_result(None)
+        else:
+            _f5_turn = None
+
+
+def _cancel_f5_waiter(turn: Future[None]) -> None:
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is turn:
+            _release_f5_turn(turn)
+        elif turn in _f5_waiters:
+            _f5_waiters.remove(turn)
+            turn.cancel()
+
+
+def _complete_f5_operation(turn: Future[None], done: Future[object]) -> None:
+    global _f5_in_flight
+    with _F5_SUBMISSION_LOCK:
+        if _f5_in_flight is done:
+            _f5_in_flight = None
+        _release_f5_turn(turn)
+
+
+def _report_f5_late_failure(done: Future[object]) -> None:
+    error = done.exception()
+    if error is not None:
+        logging.getLogger(__name__).error("F5 operation failed after its waiter cancelled: %s", error)
+
+
+async def _run_f5_blocking[T](operation: Callable[[], T]) -> T:
+    """Reserve FIFO order before waiting; cancellation retains active ownership."""
+    global _f5_in_flight, _f5_turn
+    turn = Future[None]()
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is None:
+            _f5_turn = turn
+            turn.set_result(None)
+        else:
+            _f5_waiters.append(turn)
+    try:
+        await asyncio.shield(asyncio.gather(asyncio.wrap_future(turn), return_exceptions=True))
+    except asyncio.CancelledError:
+        _cancel_f5_waiter(turn)
+        raise
+    try:
+        with _F5_SUBMISSION_LOCK:
+            future = _F5_EXECUTOR.submit(copy_context().run, operation)
+            _f5_in_flight = cast(Future[object], future)
+    except BaseException:
+        _release_f5_turn(turn)
+        raise
+    future.add_done_callback(lambda done: _complete_f5_operation(turn, cast(Future[object], done)))
+    try:
+        await asyncio.shield(asyncio.gather(asyncio.wrap_future(future), return_exceptions=True))
+    except asyncio.CancelledError:
+        future.add_done_callback(lambda done: _report_f5_late_failure(cast(Future[object], done)))
+        raise
+    return future.result()
 
 
 class _UploadRouteAuth(Protocol):
@@ -688,8 +798,7 @@ def _bearer_hmac_key_vault_name() -> str:
     name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "agent_messaging_plugin: SOLET_NAME env var is required to "
-            "resolve the scoped bearer_token_hmac_key vault entry name.",
+            "agent_messaging_plugin: SOLET_NAME env var is required to resolve the scoped bearer_token_hmac_key vault entry name.",
         )
     return f"{name}.agent_messaging_plugin.bearer_token_hmac_key"
 
@@ -732,15 +841,12 @@ def _vault_retrieve_value(vault: Any, name: str) -> str | None:
         )
     if retrieved.get("action_status") != ActionStatus.COMPLETED.value:
         raise VaultEnvelopeError(
-            f"vault.retrieve({name!r}) did not complete: "
-            f"action_status={retrieved.get('action_status')!r}, "
-            f"error={retrieved.get('error')!r}",
+            f"vault.retrieve({name!r}) did not complete: action_status={retrieved.get('action_status')!r}, error={retrieved.get('error')!r}",
         )
     data = retrieved.get("data")
     if not isinstance(data, dict):
         raise VaultEnvelopeError(
-            f"vault.retrieve({name!r}) returned action_status="
-            f"'completed' with a non-dict data payload: {data!r}",
+            f"vault.retrieve({name!r}) returned action_status='completed' with a non-dict data payload: {data!r}",
         )
     value = data.get("value")
     if isinstance(value, str) and value:
@@ -748,9 +854,7 @@ def _vault_retrieve_value(vault: Any, name: str) -> str | None:
     if data.get("found") is False:
         return None
     raise VaultEnvelopeError(
-        f"vault.retrieve({name!r}) returned action_status='completed' "
-        "with an unrecognized data shape (neither a hit with a "
-        f"non-empty 'value' nor a well-formed miss with found=False): {data!r}",
+        f"vault.retrieve({name!r}) returned action_status='completed' with an unrecognized data shape (neither a hit with a non-empty 'value' nor a well-formed miss with found=False): {data!r}",
     )
 
 
@@ -773,11 +877,7 @@ def _load_or_create_bearer_hmac_key(vault: Any) -> bytes:
         base64.b64encode(fresh).decode("ascii"),
         tags=["bearer_token", "hmac", "task53"],
         metadata={
-            "description": (
-                "HMAC secret for Streamable HTTP MCP bearer-token signing "
-                "(HS256). Replacing this value invalidates every outstanding "
-                "bearer token; connected clients must re-authenticate."
-            ),
+            "description": ("HMAC secret for Streamable HTTP MCP bearer-token signing (HS256). Replacing this value invalidates every outstanding bearer token; connected clients must re-authenticate."),
             "byte_length": str(HMAC_KEY_BYTE_LENGTH),
             "algorithm": "HS256",
         },
@@ -982,6 +1082,7 @@ class _SessionLifecyclePolicyConfig:
     work_class_tool_allowlists: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     headless_permission_mode: str = ""
     default_fleet_transport: str = ""
+    historical_cancel_role: str = ""
 
 
 def _run_counted_leg(
@@ -1039,6 +1140,8 @@ _ALLOWANCE_READING_PROPERTIES: dict[str, ParameterMetadata] = {
     "source": ParameterMetadata(type=ParameterType.STRING),
     "recorded_by": ParameterMetadata(type=ParameterType.STRING),
     "recorded_at": ParameterMetadata(type=ParameterType.STRING),
+    "history_appended": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the immutable history snapshot was appended."),
+    "history_error": ParameterMetadata(type=ParameterType.STRING, description="History append failure; the current reading write stood."),
 }
 
 
@@ -1161,12 +1264,10 @@ class AgentMessagingPlugin(
         # pulled from orchestrator_ref (comfyui_image_generation_plugin's own
         # `_try_acquire_job_manager` precedent — there is no generic per-plugin
         # push-injection for it), not pushed at boot. Single dedicated worker
-        # thread per the architect-pass constraint: FlowManager._sequence_cache
-        # is an unlocked shared dict hit on every action submission, and the
-        # comfyui pattern is only race-free because it runs exactly one
-        # background worker — this thread must stay single and serialized,
-        # never spawn a second concurrent choreography worker.
+        # thread preserves choreography ordering. Restart additionally shares
+        # the durable reservation with public launch adapters.
         self._async_job_manager: AsyncJobManager | None = None
+        self._launch_jobs = SessionLaunchJobs()
         self._choreography_stop_event: threading.Event = threading.Event()
         self._choreography_worker_thread: threading.Thread | None = None
 
@@ -1287,6 +1388,10 @@ class AgentMessagingPlugin(
     # ------------------------------------------------------------------
 
     async def start_services(self) -> ActionResult:
+        return await _run_f5_blocking(self._f5_start_services)
+
+    def _f5_start_services(self) -> ActionResult:
+        self._launch_jobs.start()
         self._services_started = True
         self._service_started_at = _now_iso()
         self._start_choreography_worker()
@@ -1302,12 +1407,16 @@ class AgentMessagingPlugin(
         )
 
     async def stop_services(self) -> ActionResult:
+        return await _run_f5_blocking(self._f5_stop_services)
+
+    def _f5_stop_services(self) -> ActionResult:
         # D1 §5: terminate every tracked headless worker so a graceful
         # shutdown/restart never leaves an orphaned Claude Code process
         # burning tokens with nothing tracking it (start_new_session=True
         # detaches it from this process's own group on purpose).
         from .session_hosts import shutdown_all_drivers  # noqa: PLC0415
 
+        self._launch_jobs.stop()
         shutdown_all_drivers()
         self._stop_choreography_worker()
         self._services_started = False
@@ -1333,10 +1442,9 @@ class AgentMessagingPlugin(
         ``comfyui_image_generation_plugin``'s ``_worker_thread`` lifecycle
         exactly (started in ``start_services``, joined with a timeout in
         ``stop_services``). Deliberately ONE thread, never a pool: the
-        architect-pass constraint (2026-08-09) is that
-        ``FlowManager._sequence_cache`` is an unlocked shared dict hit on
-        every action submission, and single-worker execution is what keeps
-        this safe without fixing that race — do not parallelize this loop."""
+        choreography operations retain their serial ordering. Launch work
+        also takes the durable launch reservation shared with public adapters.
+        FlowManager separately locks its local sequence allocator."""
         self._choreography_stop_event.clear()
         self._choreography_worker_thread = threading.Thread(
             target=self._choreography_worker_loop,
@@ -1492,13 +1600,15 @@ class AgentMessagingPlugin(
         job_manager: AsyncJobManager,
         state_service: Any,
     ) -> None:
-        """Dispatch one queued job to the rotate/restart/curation-report
-        runner by ``provider_name`` suffix, and guarantee it reaches a
-        TERMINAL status — every exception path here ends in
-        ``_fail_choreography_job``, never a job left stranded at
-        ``processing`` (the D0.3 doc's own named crash/reap gap is a
-        platform-level absence this function must not add to by letting an
-        exception escape uncaught)."""
+        """Dispatch a selection, which may be stale across runtime colors.
+
+        Restart owns admission, request loading, and terminal persistence.
+        Its request must never reach the unreserved failure paths below.
+        Other choreography runners record their own terminal failures here.
+        """
+        if str(job.get("provider_name") or "").endswith(f".{ACTION_RESTART_SESSION}"):
+            self._run_restart_session_job(str(job.get("id") or ""), job_manager, state_service)
+            return
         resolved = self._resolve_choreography_job_request(job, job_manager)
         if resolved is None:
             return
@@ -1506,8 +1616,6 @@ class AgentMessagingPlugin(
         try:
             if provider_name.endswith(f".{ACTION_ROTATE_SESSION}"):
                 self._run_rotate_session_job(job_id, request_data, job_manager, state_service)
-            elif provider_name.endswith(f".{ACTION_RESTART_SESSION}"):
-                self._run_restart_session_job(job_id, request_data, job_manager, state_service)
             elif provider_name.endswith(f".{ACTION_GENERATE_CURATION_REPORT}"):
                 self._run_generate_curation_report_job(job_id, request_data, job_manager)
             else:
@@ -1556,10 +1664,7 @@ class AgentMessagingPlugin(
         ``existing_ids`` — split out of :func:`_wait_for_new_claude_session`
         so the poll loop and its post-deadline final re-check share exactly
         one query+diff, never two copies to drift."""
-        current_ids = {
-            str(m.get("claude_session_id") or "")
-            for m in lifecycle_list_session_claude_mappings(state_service, agent_instance_id)
-        }
+        current_ids = {str(m.get("claude_session_id") or "") for m in lifecycle_list_session_claude_mappings(state_service, agent_instance_id)}
         new_ids = current_ids - existing_ids
         new_ids.discard("")
         return sorted(new_ids)
@@ -1582,9 +1687,7 @@ class AgentMessagingPlugin(
         ARMED-vs-FIRED distinction the M0 design names explicitly, not a
         bare status re-read or a fixed sleep."""
         deadline = datetime.now(UTC).timestamp() + max_wait_seconds
-        while (
-            datetime.now(UTC).timestamp() < deadline and not self._choreography_stop_event.is_set()
-        ):
+        while datetime.now(UTC).timestamp() < deadline and not self._choreography_stop_event.is_set():
             new_ids = self._check_for_new_claude_session(
                 state_service,
                 agent_instance_id,
@@ -1601,9 +1704,7 @@ class AgentMessagingPlugin(
         identically to a dispatched call) until the new session claims
         ``role_name``, or the deadline passes."""
         deadline = datetime.now(UTC).timestamp() + self._RESTART_VERIFY_MAX_WAIT_SECONDS
-        while (
-            datetime.now(UTC).timestamp() < deadline and not self._choreography_stop_event.is_set()
-        ):
+        while datetime.now(UTC).timestamp() < deadline and not self._choreography_stop_event.is_set():
             result = self.peer_holds_role(
                 {"parameters": {"name": role_name, "agent_instance_id": agent_instance_id}},
                 {},
@@ -1664,8 +1765,7 @@ class AgentMessagingPlugin(
         if send_result.get("action_status") != "completed":
             raise VerbError(
                 "pickup_dispatch_failed",
-                f"peer_send_by_name to role {role_name!r} did not complete cleanly: "
-                f"{send_result!r}",
+                f"peer_send_by_name to role {role_name!r} did not complete cleanly: {send_result!r}",
             )
 
         self._update_choreography_progress(
@@ -1722,9 +1822,7 @@ class AgentMessagingPlugin(
         if not new_ids:
             raise VerbError(
                 "verify_timeout",
-                f"no new claude_session_id observed for {agent_instance_id!r} within "
-                f"{self._ROTATE_VERIFY_MAX_WAIT_SECONDS}s of drive_session — the turn "
-                "may not have started (ARMED ≠ FIRED).",
+                f"no new claude_session_id observed for {agent_instance_id!r} within {self._ROTATE_VERIFY_MAX_WAIT_SECONDS}s of drive_session — the turn may not have started (ARMED ≠ FIRED).",
             )
         self._complete_choreography_job(
             job_manager,
@@ -1754,7 +1852,7 @@ class AgentMessagingPlugin(
         return {
             "role_class": role_class,
             "lane_id": lane_id,
-            "brief_ref": _str_field(old_row.get("brief_ref")),
+            "expected_revision_id": require_assignment(old_row).revision.revision_id,
             "unit_id": _str_field(old_row.get("unit_id")),
             "work_class": _str_field(old_row.get("work_class")),
             "budget_line": _str_field(old_row.get("budget_line")),
@@ -1779,101 +1877,33 @@ class AgentMessagingPlugin(
     def _run_restart_session_job(
         self,
         job_id: str,
-        request_data: dict[str, Any],
         job_manager: AsyncJobManager,
         state_service: Any,
     ) -> None:
-        """§2.2 choreography, run OFF the dispatch path: capture -> terminate
-        -> spawn -> (conditional) role-reclaim drive -> verify. Per the M0
-        design's own gap finding, the role-reclaim drive defaults to ALWAYS
-        firing unless a lane charter is already on file (option (b), coordinator-
-        seat ruled default) — never trusts the automatic first turn alone to carry
-        the role-claim instruction."""
-        old_agent_instance_id = _str_field(request_data.get("agent_instance_id"))
-        role_name = _str_field(request_data.get("role_name"))
-        role_class = _str_field(request_data.get("role_class"))
-        grace_seconds_raw = request_data.get("grace_seconds")
-        grace_seconds = grace_seconds_raw if isinstance(grace_seconds_raw, int) else 30
-
-        self._update_choreography_progress(
+        run_reserved_restart(
             job_manager,
-            job_id,
-            progress_percent=10,
-            leg="capture_old_row",
-        )
-        old_row = lifecycle_session_status(state_service, old_agent_instance_id)
-        lane_id = _str_field(old_row.get("lane_id"))
-
-        self._update_choreography_progress(
-            job_manager,
-            job_id,
-            progress_percent=25,
-            leg="terminate_session",
-        )
-        lifecycle_terminate_session(
             state_service,
-            agent_instance_id=old_agent_instance_id,
-            directed_by=self._CHOREOGRAPHY_DIRECTED_BY,
-            grace_seconds=grace_seconds,
+            job_id,
+            lambda request: self._run_restart_session_operation(job_id, request, job_manager, state_service),
         )
 
-        self._update_choreography_progress(
-            job_manager,
-            job_id,
-            progress_percent=45,
-            leg="spawn_session",
-        )
-        raw_params = self._build_restart_spawn_params(old_row, role_class, lane_id, role_name)
-        spawn_req = _spawn_session_request_from_params(raw_params, self._CHOREOGRAPHY_DIRECTED_BY)
-        spawn_req = _apply_spawn_session_policy(
-            spawn_req, self._build_session_lifecycle_policy_config()
-        )
-        spawn_result = lifecycle_spawn_session(state_service, spawn_req)
-        new_agent_instance_id = str(spawn_result.get("agent_instance_id") or "")
-        if not new_agent_instance_id:
-            raise VerbError(
-                "spawn_failed",
-                "restart_session: spawn_session returned no agent_instance_id.",
-            )
+    def _run_restart_session_operation(
+        self,
+        job_id: str,
+        request_data: dict[str, Any],
+        job_manager: AsyncJobManager,
+        state_service: Any,
+    ) -> dict[str, object]:
+        """Refuse automatic restart before any predecessor effect.
 
-        self._update_choreography_progress(
-            job_manager,
-            job_id,
-            progress_percent=65,
-            leg="role_reclaim_drive",
-        )
-        charter = lifecycle_resolve_lane_charter(state_service, lane_id) if lane_id else None
-        role_reclaim_driven = charter is None
-        if role_reclaim_driven:
-            lifecycle_drive_session(
-                state_service,
-                agent_instance_id=new_agent_instance_id,
-                text=(
-                    f"claim role '{role_name}' via the rename skill / arm a watch "
-                    f"process for it — this is a restart continuing lane {lane_id!r}, "
-                    "not a fresh unbriefed spawn."
-                ),
-                directed_by=self._CHOREOGRAPHY_DIRECTED_BY,
-            )
-
-        self._update_choreography_progress(job_manager, job_id, progress_percent=85, leg="verify")
-        holds = self._wait_for_role_claim(role_name, new_agent_instance_id)
-        if not holds:
-            raise VerbError(
-                "verify_timeout",
-                f"new session {new_agent_instance_id!r} never claimed role "
-                f"{role_name!r} within {self._RESTART_VERIFY_MAX_WAIT_SECONDS}s of "
-                "spawn (claim circle not broken — ARMED ≠ FIRED).",
-            )
-        self._complete_choreography_job(
-            job_manager,
-            job_id,
-            {
-                "old_agent_instance_id": old_agent_instance_id,
-                "new_agent_instance_id": new_agent_instance_id,
-                "role_reclaim_driven": role_reclaim_driven,
-                "role_reclaim_verified": True,
-            },
+        The reserved worker persists this VerbError as a failed job. A queued
+        receipt is admission evidence only; successor preparation and identity
+        fencing are unavailable, including active project continuation.
+        """
+        del job_id, request_data, job_manager, state_service
+        raise VerbError(
+            "restart_successor_preflight_unavailable",
+            "Automatic managed restart is unavailable: validated successor preparation and predecessor identity fencing are required. The predecessor was not terminated; project continuation is unsupported.",
         )
 
     def _run_generate_curation_report_job(
@@ -1913,10 +1943,7 @@ class AgentMessagingPlugin(
         if not solet_name:
             raise VerbError(
                 "solet_name_unset",
-                "Could not resolve a solet name to scope the memory fetch to this "
-                "origin -- SOLET_NAME is unset, root_manifest.yaml is unreadable or "
-                "still carries its unwritten placeholder, and CLAUDE_PROJECT_DIR is unset "
-                "(the final fallback needs it too).",
+                "Could not resolve a solet name to scope the memory fetch to this origin -- SOLET_NAME is unset, root_manifest.yaml is unreadable or still carries its unwritten placeholder, and CLAUDE_PROJECT_DIR is unset (the final fallback needs it too).",
             )
         fetch_result = self._memory_service.get_memories_by_tag(tag=origin_tag(solet_name))
         records = fetch_result.get("memories") if isinstance(fetch_result, dict) else None
@@ -2042,6 +2069,16 @@ class AgentMessagingPlugin(
         ``claude_code_channel_plugin`` for the same pattern).
         """
         return {
+            "preserve_lane_evidence": EdgeProcessDefinition(
+                name="preserve_lane_evidence",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=False),
+            ),
+            "read_lane_evidence": EdgeProcessDefinition(
+                name="read_lane_evidence",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
+            ),
             "send_peer_message": EdgeProcessDefinition(
                 name="send_peer_message",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
@@ -2144,11 +2181,30 @@ class AgentMessagingPlugin(
                     retryable=True,
                 ),
             ),
+            "managed_dispatch_uptake_rate": EdgeProcessDefinition(
+                name="managed_dispatch_uptake_rate",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
+            ),
             "legislate_role": EdgeProcessDefinition(
                 name="legislate_role",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
+                ),
+            ),
+            "retire_role": EdgeProcessDefinition(
+                name="retire_role",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "list_retired_roles": EdgeProcessDefinition(
+                name="list_retired_roles",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
                 ),
             ),
             "capture_lane_charter": EdgeProcessDefinition(
@@ -2267,6 +2323,13 @@ class AgentMessagingPlugin(
                     retryable=False,
                 ),
             ),
+            "reconcile_ledger_tmux": EdgeProcessDefinition(
+                name="reconcile_ledger_tmux",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
             "clear_session": EdgeProcessDefinition(
                 name="clear_session",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
@@ -2297,6 +2360,21 @@ class AgentMessagingPlugin(
             ),
             "retire_session": EdgeProcessDefinition(
                 name="retire_session",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            # Composes ``retire_session`` once per row whose assigned Unit the
+            # register proves terminal.  Not retryable, matching the verb it
+            # composes: although driving it again is safe by construction (an
+            # already-retired row is that verb's own cheap no-op, and a row it
+            # could not prove was never touched), the effects it can cause are
+            # host termination and worktree removal, which are irreversible for
+            # a lane.  An automatic retry is the caller's decision to make
+            # explicitly, not the processor's to take on a transient fault.
+            "retire_completed_lane_sessions": EdgeProcessDefinition(
+                name="retire_completed_lane_sessions",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
@@ -2408,6 +2486,65 @@ class AgentMessagingPlugin(
                     retryable=True,
                 ),
             ),
+            "set_model_catalog_policy": EdgeProcessDefinition(
+                name="set_model_catalog_policy",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=False),
+            ),
+            "set_model_catalog_source": EdgeProcessDefinition(
+                name="set_model_catalog_source",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=False),
+            ),
+            "read_model_catalog_policy": EdgeProcessDefinition(
+                name="read_model_catalog_policy",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=False),
+            ),
+            "set_model_cells_enabled": EdgeProcessDefinition(
+                name="set_model_cells_enabled",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=False),
+            ),
+            "read_model_cell_policy": EdgeProcessDefinition(
+                name="read_model_cell_policy",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
+            ),
+            # iss_ebc1ce9c / iss_c4fbe548: the work-keyed stall sweep. Every
+            # one of these is a READ plus the sweep's own last-run publication;
+            # none acts on a session, so every one is safe to retry.
+            "sweep_fleet_stall": EdgeProcessDefinition(
+                name="sweep_fleet_stall",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            "read_fleet_stall_sweep_status": EdgeProcessDefinition(
+                name="read_fleet_stall_sweep_status",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # The terminal action on the published run row. Retryable: the row
+            # is a single latest-run record, so a repeat clears an already
+            # absent key and reports cleared=false rather than failing.
+            "clear_fleet_stall_sweep_run": EdgeProcessDefinition(
+                name="clear_fleet_stall_sweep_run",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            "ensure_fleet_stall_sweep_schedule": EdgeProcessDefinition(
+                name="ensure_fleet_stall_sweep_schedule",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
             "select_dispatch_tier": EdgeProcessDefinition(
                 name="select_dispatch_tier",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
@@ -2438,6 +2575,33 @@ class AgentMessagingPlugin(
                     retryable=False,
                 ),
             ),
+            # withdraw and reinstate each WRITE a manual refresh_run row, one
+            # acceptance_change observation per cell and the cell update; a
+            # retry after a transient fault whose write already landed would
+            # open a second run for the same intent (the premise guard would
+            # then refuse the repeat with stale_cell_state, but the extra run
+            # row would remain). The history read is retry-safe.
+            "withdraw_model_capability_cell": EdgeProcessDefinition(
+                name="withdraw_model_capability_cell",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "reinstate_model_capability_cell": EdgeProcessDefinition(
+                name="reinstate_model_capability_cell",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "read_model_capability_history": EdgeProcessDefinition(
+                name="read_model_capability_history",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
             # iss_c6fbf9ae allowance-pool readings. Record upserts one row per
             # pool and retract deletes it, so neither is retried after a
             # transient fault; the read is retry-safe.
@@ -2460,6 +2624,22 @@ class AgentMessagingPlugin(
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
+                ),
+            ),
+            # Read-only joins over managed-session metadata, the S1 usage
+            # ledger projection, and S2's pure pricing helpers.
+            "read_unit_usage": EdgeProcessDefinition(
+                name="read_unit_usage",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            "read_session_usage_window": EdgeProcessDefinition(
+                name="read_session_usage_window",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
                 ),
             ),
             # register_synthetic_session WRITES the lifecycle ledger row, so it
@@ -2523,6 +2703,33 @@ class AgentMessagingPlugin(
             # rather than double-acting, so it is safe to retry.
             "retire_held_authorization": EdgeProcessDefinition(
                 name="retire_held_authorization",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # Accepted-authorization obligations (wgr_d854aa6c). record is a
+            # fresh INSERT per call, so a replay after a landed write would
+            # record a second obligation. change is versioned: a replay is
+            # refused stale_version, which would hide that the first attempt
+            # landed. Neither is replayed silently; the caller reads back with
+            # get_authorization_history (read-only, safe to retry) instead.
+            "record_accepted_authorization": EdgeProcessDefinition(
+                name="record_accepted_authorization",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "change_accepted_authorization": EdgeProcessDefinition(
+                name="change_accepted_authorization",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "get_authorization_history": EdgeProcessDefinition(
+                name="get_authorization_history",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
@@ -2703,6 +2910,12 @@ class AgentMessagingPlugin(
     ) -> AgentThreadsPage:
         return self._require_service().list_threads(request)
 
+    def get_schedule_target_status(self, targets: list[ScheduleTarget]) -> list[ScheduleTargetObservation]:
+        """Typed owner accessor; intentionally not a bound service or mutating verb."""
+        from .schedule_target_status import observe_targets
+
+        return observe_targets(self._get_state_service(), self._peer_registry, targets)
+
     def read_thread_messages(
         self,
         request: ReadThreadMessagesRequest,
@@ -2712,10 +2925,7 @@ class AgentMessagingPlugin(
     def peer_send(self, request: PeerSendRequest) -> PeerSendResult:
         if not self._active:
             raise RuntimeError(
-                f"{self.name}: peer_send refused — this color is inactive "
-                "(see LifecycleManaged.set_active). The router should route "
-                "peer dispatch to the active color; a request landing here "
-                "indicates a routing race or misconfiguration.",
+                f"{self.name}: peer_send refused — this color is inactive (see LifecycleManaged.set_active). The router should route peer dispatch to the active color; a request landing here indicates a routing race or misconfiguration.",
             )
         return self._require_service().peer_send(request)
 
@@ -2730,6 +2940,8 @@ class AgentMessagingPlugin(
         return self._require_service().peer_inbox(request)
 
     def get_schema_definitions(self) -> list[SchemaDefinition]:
+        from .model_catalog_policy import get_model_catalog_policy_schema_definition
+
         return [
             get_agent_messaging_schema(),
             get_agent_role_message_schema(),
@@ -2740,6 +2952,10 @@ class AgentMessagingPlugin(
             get_agent_role_binding_schema_definition(),
             get_role_model_schema_definition(),
             get_session_lifecycle_schema_definition(),
+            get_accepted_authorization_schema_definition(),
+            get_model_catalog_policy_schema_definition(),
+            get_session_launch_schema_definition(),
+            get_delivery_pickup_schema(),
         ]
 
     # ------------------------------------------------------------------
@@ -2756,19 +2972,12 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "peer_agent_instance_id": ParameterMetadata(
-                description=(
-                    "Specific instance ID of the recipient peer. "
-                    "Required when multiple instances of peer_id are registered."
-                ),
+                description=("Specific instance ID of the recipient peer. Required when multiple instances of peer_id are registered."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "peer_agent_session_id": ParameterMetadata(
-                description=(
-                    "Stable recipient session ID from peer_list. Used only if "
-                    "peer_agent_instance_id cannot resolve a live binding, which "
-                    "reaches a no-claim watcher registration without inventing a role."
-                ),
+                description=("Stable recipient session ID from peer_list. Used only if peer_agent_instance_id cannot resolve a live binding, which reaches a no-claim watcher registration without inventing a role."),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -2788,6 +2997,8 @@ class AgentMessagingPlugin(
                 "message_id": ParameterMetadata(type=ParameterType.STRING),
                 "delivery": ParameterMetadata(type=ParameterType.STRING),
                 "drive_on_delivery": ParameterMetadata(type=ParameterType.STRING),
+                "send_status": ParameterMetadata(type=ParameterType.STRING),
+                "sender_notice": ParameterMetadata(type=ParameterType.STRING),
                 "delivered_to_agent_id": ParameterMetadata(type=ParameterType.STRING),
                 "delivered_to_agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
             },
@@ -2880,10 +3091,7 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "name": ParameterMetadata(
-                description=(
-                    "Role name registered in agent_role_binding "
-                    "(e.g. 'Coordinator', 'Architect', 'Git-Controller')."
-                ),
+                description=("Role name registered in agent_role_binding (e.g. 'Coordinator', 'Architect', 'Git-Controller')."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -2901,10 +3109,7 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description=(
-            "Delivery outcome plus the resolved (agent_id, agent_instance_id, "
-            "session_label) the name pointed at when the call was made."
-        ),
+        output_description=("Delivery outcome plus the resolved (agent_id, agent_instance_id, session_label) the name pointed at when the call was made."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="peer_send_by_name delivery + resolution result",
@@ -2913,6 +3118,8 @@ class AgentMessagingPlugin(
                 "message_id": ParameterMetadata(type=ParameterType.STRING),
                 "delivery": ParameterMetadata(type=ParameterType.STRING),
                 "drive_on_delivery": ParameterMetadata(type=ParameterType.STRING),
+                "send_status": ParameterMetadata(type=ParameterType.STRING),
+                "sender_notice": ParameterMetadata(type=ParameterType.STRING),
                 "resolved_agent_id": ParameterMetadata(type=ParameterType.STRING),
                 "resolved_agent_instance_id": ParameterMetadata(
                     type=ParameterType.STRING,
@@ -2948,6 +3155,10 @@ class AgentMessagingPlugin(
                 code="state_service_unavailable",
                 message="state_service is not bound on this solet.",
             )
+        # iss_d9c955a2: a retired name is refused before resolve and persist.
+        retired = _retired_role_refusal(state_service, name)
+        if retired is not None:
+            return retired
         # v10 Control #2.C cutover: resolution authority is now the
         # agent_role_binding table (state-interface), not the address book. A
         # backfilled (UNCLAIMED) binding still resolves — the send then queues
@@ -2959,10 +3170,7 @@ class AgentMessagingPlugin(
         if not role.agent_instance_id:
             return _failure_result(
                 code="peer_role_malformed",
-                message=(
-                    f"agent_role_binding row for {name!r} is missing "
-                    "'agent_instance_id'; re-claim via peer_claim_role."
-                ),
+                message=(f"agent_role_binding row for {name!r} is missing 'agent_instance_id'; re-claim via peer_claim_role."),
             )
         content: list[TextPart] = [TextPart(type="text", text=content_text)]
         # v10 Control #4: persist-first role dispatch. The role row was just
@@ -3005,11 +3213,7 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "name": ParameterMetadata(
-                description=(
-                    "Role name to deliver the completion to, taken from the "
-                    "originating flow's completion_route_role stamp. Never "
-                    "caller-supplied in normal operation."
-                ),
+                description=("Role name to deliver the completion to, taken from the originating flow's completion_route_role stamp. Never caller-supplied in normal operation."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -3029,20 +3233,13 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "payload": ParameterMetadata(
-                description=(
-                    "The job's attached result or error payload, embedded in "
-                    "the delivered message so the recipient needs no second "
-                    "lookup."
-                ),
+                description=("The job's attached result or error payload, embedded in the delivered message so the recipient needs no second lookup."),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
         },
         output_type="object",
-        output_description=(
-            "Delivery outcome plus whether the job's completion_reach was "
-            "upgraded to role_inbox_delivered."
-        ),
+        output_description=("Delivery outcome plus whether the job's completion_reach was upgraded to role_inbox_delivered."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="deliver_job_completion delivery + stamp result",
@@ -3108,6 +3305,9 @@ class AgentMessagingPlugin(
                 code="state_service_unavailable",
                 message="state_service is not bound on this solet.",
             )
+        retired = _retired_role_refusal(state_service, name)
+        if retired is not None:
+            return retired
         try:
             role = resolve_role_binding(state_service, name)
         except RoleBindingVacantError as exc:
@@ -3115,10 +3315,7 @@ class AgentMessagingPlugin(
         if not role.agent_instance_id:
             return _failure_result(
                 code="peer_role_malformed",
-                message=(
-                    f"agent_role_binding row for {name!r} is missing "
-                    "'agent_instance_id'; re-claim via peer_claim_role."
-                ),
+                message=(f"agent_role_binding row for {name!r} is missing 'agent_instance_id'; re-claim via peer_claim_role."),
             )
         status = str(raw.get("status", "")).strip()
         payload = raw.get("payload")
@@ -3214,11 +3411,7 @@ class AgentMessagingPlugin(
         try:
             principal = extract_authenticated_principal(state)
         except PermissionError as exc:
-            instance_id = str(
-                state.get("inference_vertex_session_id")
-                or state.get("caller_attribution_instance_id")
-                or ""
-            ).strip()
+            instance_id = str(state.get("inference_vertex_session_id") or state.get("caller_attribution_instance_id") or "").strip()
             if not instance_id:
                 raise DispatchError("dispatch_authentication_required", str(exc)) from exc
             session_id = self._claimant_session_id(instance_id)
@@ -3265,19 +3458,12 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "agent_session_id": ParameterMetadata(
-                description=(
-                    "Stable logical session id for reconnect-safe role binding. "
-                    "When omitted, the plugin sources it from the claimant's "
-                    "live peer_binding row."
-                ),
+                description=("Stable logical session id for reconnect-safe role binding. When omitted, the plugin sources it from the claimant's live peer_binding row."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "session_label": ParameterMetadata(
-                description=(
-                    "Display label as of the claim. May or may not match "
-                    "``name``; both are stored separately."
-                ),
+                description=("Display label as of the claim. May or may not match ``name``; both are stored separately."),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -3298,10 +3484,7 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description=(
-            "agent_role_binding claim outcome (v10): action='claimed', the "
-            "role name, and the bound agent_instance_id."
-        ),
+        output_description=("agent_role_binding claim outcome (v10): action='claimed', the role name, and the bound agent_instance_id."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="peer_claim_role outcome (v10 agent_role_binding claim)",
@@ -3383,9 +3566,7 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description=(
-            "agent_role_binding release outcome (v10): the released flag and the role name."
-        ),
+        output_description=("agent_role_binding release outcome (v10): the released flag and the role name."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="peer_release_role outcome (v10 agent_role_binding release)",
@@ -3415,10 +3596,7 @@ class AgentMessagingPlugin(
         if is_system_role(name):
             return _failure_result(
                 code="system_slot_release_denied",
-                message=(
-                    f"system slot {name!r} cannot be released to vacant (reserved "
-                    f"keyspace); a system slot is only ever re-bound, never released."
-                ),
+                message=(f"system slot {name!r} cannot be released to vacant (reserved keyspace); a system slot is only ever re-bound, never released."),
             )
         state_service = self._get_state_service()
         if state_service is None:
@@ -3449,11 +3627,10 @@ class AgentMessagingPlugin(
         name="spawn_session",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "unit_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "expected_revision_id": ParameterMetadata(required=False, type=ParameterType.STRING),
             "role_class": ParameterMetadata(
-                description=(
-                    "ephemeral | project | principal (§2 taxonomy; primary/chat "
-                    "are never spawn-assigned)."
-                ),
+                description=("ephemeral | project | principal (§2 taxonomy; primary/chat are never spawn-assigned)."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -3462,22 +3639,8 @@ class AgentMessagingPlugin(
                 required=True,
                 type=ParameterType.STRING,
             ),
-            "brief_ref": ParameterMetadata(
-                description="Workbench path or dispatch id backing the spawn (provenance).",
-                required=True,
-                type=ParameterType.STRING,
-            ),
-            "unit_id": ParameterMetadata(
-                description="Optional project-solet work-unit identity resolvable by the spawned lane.",
-                required=False,
-                type=ParameterType.STRING,
-            ),
             "repository_root": ParameterMetadata(
-                description=(
-                    "Optional absolute Git checkout for this lane. Required when the "
-                    "dispatched unit targets a repository other than the serving Solet's "
-                    "own checkout; validated before any worktree side effect."
-                ),
+                description=("Optional absolute Git checkout for this lane. Required when the dispatched unit targets a repository other than the serving Solet's own checkout; validated before any worktree side effect."),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -3492,27 +3655,17 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "agent_runtime": ParameterMetadata(
-                description=(
-                    "Worker runtime using the exact peer-registry agent_id vocabulary: "
-                    "claude_code | codex. Orthogonal to host; omitted defaults to "
-                    "claude_code for compatibility."
-                ),
+                description=("Worker runtime using the exact peer-registry agent_id vocabulary: claude_code | codex. Orthogonal to host; omitted defaults to claude_code for compatibility."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "role_name": ParameterMetadata(
-                description=(
-                    "Named role to fill on boot (project: may mint; principal: "
-                    "fill-never-mint, must already be legislated). Empty for ephemeral."
-                ),
+                description=("Named role to fill on boot (project: may mint; principal: fill-never-mint, must already be legislated). Empty for ephemeral."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "host": ParameterMetadata(
-                description=(
-                    "Per-spawn host override (tmux | headless | operator). Empty "
-                    "falls to FLEET_SESSION_HOST env, then the platform default."
-                ),
+                description=("Per-spawn host override (tmux | headless | operator). Empty falls to FLEET_SESSION_HOST env, then the platform default."),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -3552,7 +3705,7 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "scope_tags": ParameterMetadata(
-                description="Caller-declared work scope tags, e.g. [\"state_schema\"] for a state-service table change. Tags preserve provenance and do not by themselves restrict the model; the state_schema model floor is retired (rul_0c6ec7c7).",
+                description='Caller-declared work scope tags, e.g. ["state_schema"] for a state-service table change. Tags preserve provenance and do not by themselves restrict the model; the state_schema model floor is retired (rul_0c6ec7c7).',
                 required=False,
                 type=ParameterType.LIST,
             ),
@@ -3562,13 +3715,7 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "allowed_tools": ParameterMetadata(
-                description=(
-                    "Explicit tool-name allowlist override for the headless "
-                    "PreToolUse gate (§6 permission-mode ruling, 2026-08-03). "
-                    "Omitted -> resolved from plugin.yaml's per-work_class "
-                    "work_class_tool_allowlists; unconfigured -> empty (the "
-                    "spawn is still gated, just with nothing extra allowed)."
-                ),
+                description=("Explicit tool-name allowlist override for the headless PreToolUse gate (§6 permission-mode ruling, 2026-08-03). Omitted -> resolved from plugin.yaml's per-work_class work_class_tool_allowlists; unconfigured -> empty (the spawn is still gated, just with nothing extra allowed)."),
                 required=False,
                 type=ParameterType.LIST,
             ),
@@ -3618,19 +3765,18 @@ class AgentMessagingPlugin(
                 required=False,
                 type=ParameterType.STRING,
             ),
+            "first_go": ParameterMetadata(
+                description=("Optional exact text durably queued to the new worker's inbox after ownership and before its first-turn release."),
+                required=False,
+                type=ParameterType.STRING,
+            ),
             "dispatch_id": ParameterMetadata(
-                description=(
-                    "Server-issued preparing managed_dispatch identity. Required for "
-                    "project-class work; ordinary callers use dispatch_managed_work."
-                ),
+                description=("Server-issued preparing managed_dispatch identity. Required for project-class work; ordinary callers use dispatch_managed_work."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "local_name": ParameterMetadata(
-                description=(
-                    "Exact name the worker answers to and registers locally; explicit "
-                    "Git-Controller preserves the mutation guard identity."
-                ),
+                description=("Exact name the worker answers to and registers locally; explicit Git-Controller preserves the mutation guard identity."),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -3639,39 +3785,39 @@ class AgentMessagingPlugin(
                 required=False,
                 type=ParameterType.BOOLEAN,
             ),
+            "provider_env": ParameterMetadata(
+                description=(
+                    "Optional per-spawn Claude provider overlay: an object of environment names to string values. "
+                    "Applied to the worker's pane environment only for claude_code workers on the tmux host, carried on the "
+                    "bounded spawn request and never persisted. Refused for non-claude_code runtimes "
+                    "(provider_unsupported_for_runtime), for the headless and operator hosts "
+                    "(provider_selection_not_applied_by_host), and for keys that name managed worker variables. "
+                    "Values are visible to local ps in the tmux argv for the instant of the new-session call. "
+                    "Refusals surface as a failed launch job, not at admission, because the overlay is taken out before preflight."
+                ),
+                required=False,
+                type=ParameterType.OBJECT,
+            ),
         },
+        is_async=True,
         output_type="object",
-        output_description=(
-            "spawn_session outcome: the new session's identity + host dispatch result."
-        ),
+        output_description="Accepted launch job receipt; read the job for the final operation result.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="spawn_session outcome (D1 §4)",
+            description="Submission only; no session or dispatch is asserted by this receipt.",
             properties={
-                "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
-                "agent_runtime": ParameterMetadata(type=ParameterType.STRING),
-                "host": ParameterMetadata(type=ParameterType.STRING),
-                "host_ref": ParameterMetadata(type=ParameterType.STRING),
-                "dispatch_id": ParameterMetadata(type=ParameterType.STRING),
-                "lifecycle_state": ParameterMetadata(type=ParameterType.STRING),
-                "first_turn_source": ParameterMetadata(
-                    description="charter | fallback — which text was driven as turn 1 "
-                    "(phase 2 slice 6).",
-                    type=ParameterType.STRING,
-                ),
-                "first_turn_delivered": ParameterMetadata(
-                    description="Whether the first-turn send succeeded. False never blocks "
-                    "the spawn itself; the failure is logged separately.",
-                    type=ParameterType.BOOLEAN,
-                ),
-                "first_turn_error": ParameterMetadata(
-                    description="Non-empty error detail when first_turn_delivered is False; "
-                    "empty on success.",
-                    type=ParameterType.STRING,
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING),
+                "status": ParameterMetadata(type=ParameterType.STRING),
             },
         ),
     )
+    def spawn_session_action(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        return submit_launch(self, "spawn_session", params, state)
+
     def spawn_session(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         """§4 ``spawn_session`` — validate, write the ledger row (spawning,
         BEFORE host dispatch), dispatch through the resolved host driver.
@@ -3699,15 +3845,20 @@ class AgentMessagingPlugin(
         if req.role_class == "project":
             return _failure_result(
                 code="managed_dispatch_required",
-                message=(
-                    "Public spawn_session cannot create project work, even with a prepared ID; "
-                    "use dispatch_managed_work or resolve_managed_dispatch(request_retry)."
-                ),
+                message=("Public spawn_session cannot create project work, even with a prepared ID; use dispatch_managed_work or resolve_managed_dispatch(request_retry)."),
             )
         req = _apply_spawn_session_policy(req, self._build_session_lifecycle_policy_config())
         try:
-            result = lifecycle_spawn_session(state_service, req)
-        except VerbError as exc:
+            validate_spawn_admission(state_service, req)
+            req = bind_bare_assignment(self, req, raw, state)
+            result = lifecycle_spawn_session(
+                state_service,
+                req,
+                register=self._register_unit_client(),
+                actor=self._native_spawn_actor(state, req.lane_id, req.spawned_by_role),
+                messaging=self._require_service() if req.first_go else None,
+            )
+        except (VerbError, DispatchError) as exc:
             return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
 
@@ -3715,52 +3866,26 @@ class AgentMessagingPlugin(
         name="dispatch_managed_work",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "unit_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "expected_revision_id": ParameterMetadata(required=False, type=ParameterType.STRING),
+            "dispatch_id": ParameterMetadata(required=True, type=ParameterType.STRING),
             "role_class": ParameterMetadata(required=True, type=ParameterType.STRING),
             "lane_id": ParameterMetadata(required=True, type=ParameterType.STRING),
             "role_name": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "brief_ref": ParameterMetadata(required=True, type=ParameterType.STRING),
             "repository_root": ParameterMetadata(required=False, type=ParameterType.STRING),
-            # Register Unit mint (design unt_57725090 s4.1). Empty unit_id mints a
-            # Unit before spawn; a supplied one is verified against the register.
-            "unit_id": ParameterMetadata(
-                required=False, type=ParameterType.STRING,
-                description="Existing register Unit to verify; empty mints one before spawn.",
-            ),
             "repository_id": ParameterMetadata(
-                required=False, type=ParameterType.STRING,
+                required=False,
+                type=ParameterType.STRING,
                 description="Expected register repository; must equal the one resolved from the lane root.",
             ),
-            "unit_key": ParameterMetadata(
-                required=False, type=ParameterType.STRING,
-                description="Minted unit_key override; default <lane_id>-<dispatch_id>.",
-            ),
-            "addresses": ParameterMetadata(
-                required=False, type=ParameterType.LIST,
-                description="Issue ids the minted Unit addresses; ignored when unit_id is supplied.",
-            ),
-            "reference_basis": ParameterMetadata(
-                required=False, type=ParameterType.STRING,
-                description="Register reference basis for a minted fix Unit (existing_pattern or no_existing_pattern).",
-            ),
-            "reference_basis_reason": ParameterMetadata(
-                required=False, type=ParameterType.STRING,
-                description="Nonblank reason required by no_existing_pattern.",
-            ),
-            "brief_repository_root": ParameterMetadata(
-                required=False, type=ParameterType.STRING,
-                description=(
-                    "Absolute root of the registered repository holding a brief that lives outside the lane "
-                    "root (psolet --brief-repo). Never inferred: an outside brief without it is refused."
-                ),
-            ),
-            "brief_sha256": ParameterMetadata(required=True, type=ParameterType.STRING),
             "expected_path": ParameterMetadata(required=True, type=ParameterType.STRING),
             "completion_contract": ParameterMetadata(required=True, type=ParameterType.OBJECT),
             "work_class": ParameterMetadata(required=True, type=ParameterType.STRING),
             "budget_line": ParameterMetadata(required=True, type=ParameterType.STRING),
             "model": ParameterMetadata(required=True, type=ParameterType.STRING),
             "dispatch_kind": ParameterMetadata(
-                required=True, type=ParameterType.STRING,
+                required=True,
+                type=ParameterType.STRING,
                 description="Required nonblank unit-kind provenance text; the value does not choose a model pair.",
             ),
             "difficulty_score": ParameterMetadata(required=True, type=ParameterType.FLOAT),
@@ -3768,7 +3893,9 @@ class AgentMessagingPlugin(
             "reviewed_report_vendor": ParameterMetadata(required=False, type=ParameterType.STRING),
             "pair_id": ParameterMetadata(required=False, type=ParameterType.STRING),
             "scope_tags": ParameterMetadata(
-                required=False, type=ParameterType.LIST, description="Caller-declared work scope tags, e.g. [\"state_schema\"] for a state-service table change. Tags preserve provenance and do not by themselves restrict the model; the state_schema model floor is retired (rul_0c6ec7c7).",
+                required=False,
+                type=ParameterType.LIST,
+                description='Caller-declared work scope tags, e.g. ["state_schema"] for a state-service table change. Tags preserve provenance and do not by themselves restrict the model; the state_schema model floor is retired (rul_0c6ec7c7).',
             ),
             "effort": ParameterMetadata(required=True, type=ParameterType.STRING),
             "agent_runtime": ParameterMetadata(required=True, type=ParameterType.STRING),
@@ -3790,17 +3917,25 @@ class AgentMessagingPlugin(
             "report_by": ParameterMetadata(required=True, type=ParameterType.STRING),
             "watchdog_due_at": ParameterMetadata(required=True, type=ParameterType.STRING),
         },
+        is_async=True,
         output_type="object",
-        output_description="Prepared dispatch plus linked current attempt and first-turn evidence.",
+        output_description="Accepted launch job receipt; read the job for the final operation result.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Managed dispatch plus linked current attempt.",
+            description="Submission only; no session or dispatch is asserted by this receipt.",
             properties={
-                "dispatch": ParameterMetadata(type=ParameterType.OBJECT),
-                "attempt": ParameterMetadata(type=ParameterType.OBJECT),
+                "job_id": ParameterMetadata(type=ParameterType.STRING),
+                "status": ParameterMetadata(type=ParameterType.STRING),
             },
         ),
     )
+    def dispatch_managed_work_action(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        return submit_launch(self, "dispatch_managed_work", params, state)
+
     def dispatch_managed_work(
         self,
         params: dict[str, Any],
@@ -3834,9 +3969,21 @@ class AgentMessagingPlugin(
                     "coordinator_authority_denied",
                     "Authenticated caller does not hold spawned_by_role.",
                 )
+            advisory = permission_mode_advisory(spawn_req.agent_runtime, spawn_req.permission_mode)
+            if advisory:
+                logger.warning("%s", advisory)
             spec = _dispatch_spec_from_params(raw, spawn_req, directed_by)
             result = lifecycle_dispatch_managed_work(
-                state_service, spec, spawn_req, register=self._register_unit_client(),
+                state_service,
+                spec,
+                register=self._register_unit_client(),
+                actor=actor,
+                spawn_attempt=lambda row: spawn_dispatch_attempt(
+                    state_service,
+                    row,
+                    register=self._register_unit_client(),
+                    actor=RegisterActor(actor.agent_instance_id, actor.agent_session_id, str(row["spawned_by_role"]), str(row["lane_id"])),
+                ),
             )
         except (DispatchError, VerbError) as exc:
             return _failure_result(
@@ -3850,33 +3997,21 @@ class AgentMessagingPlugin(
         name="provision_role_session",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "unit_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "expected_revision_id": ParameterMetadata(required=False, type=ParameterType.STRING),
+            "dispatch_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "repository_root": ParameterMetadata(required=False, type=ParameterType.STRING),
             "role_name": ParameterMetadata(required=True, type=ParameterType.STRING),
             "requested_role_class": ParameterMetadata(required=False, type=ParameterType.STRING),
             "lane_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "brief_ref": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "reference_basis": ParameterMetadata(
-                required=False, type=ParameterType.STRING,
-                description="Register reference basis for the minted Unit; required when dispatch_kind is fix.",
-            ),
-            "reference_basis_reason": ParameterMetadata(
-                required=False, type=ParameterType.STRING,
-                description="Nonblank reason required by no_existing_pattern.",
-            ),
-            "brief_repository_root": ParameterMetadata(
-                required=False, type=ParameterType.STRING,
-                description=(
-                    "Absolute root of the registered repository holding a brief that lives outside the lane "
-                    "root (psolet --brief-repo). Never inferred: an outside brief without it is refused."
-                ),
-            ),
-            "brief_sha256": ParameterMetadata(required=True, type=ParameterType.STRING),
             "expected_path": ParameterMetadata(required=True, type=ParameterType.STRING),
             "completion_contract": ParameterMetadata(required=True, type=ParameterType.OBJECT),
             "work_class": ParameterMetadata(required=True, type=ParameterType.STRING),
             "budget_line": ParameterMetadata(required=True, type=ParameterType.STRING),
             "model": ParameterMetadata(required=True, type=ParameterType.STRING),
             "dispatch_kind": ParameterMetadata(
-                required=True, type=ParameterType.STRING,
+                required=True,
+                type=ParameterType.STRING,
                 description="Required nonblank unit-kind provenance text; the value does not choose a model pair.",
             ),
             "difficulty_score": ParameterMetadata(required=True, type=ParameterType.FLOAT),
@@ -3884,7 +4019,9 @@ class AgentMessagingPlugin(
             "reviewed_report_vendor": ParameterMetadata(required=False, type=ParameterType.STRING),
             "pair_id": ParameterMetadata(required=False, type=ParameterType.STRING),
             "scope_tags": ParameterMetadata(
-                required=False, type=ParameterType.LIST, description="Caller-declared work scope tags, e.g. [\"state_schema\"] for a state-service table change. Tags preserve provenance and do not by themselves restrict the model; the state_schema model floor is retired (rul_0c6ec7c7).",
+                required=False,
+                type=ParameterType.LIST,
+                description='Caller-declared work scope tags, e.g. ["state_schema"] for a state-service table change. Tags preserve provenance and do not by themselves restrict the model; the state_schema model floor is retired (rul_0c6ec7c7).',
             ),
             "effort": ParameterMetadata(required=True, type=ParameterType.STRING),
             "agent_runtime": ParameterMetadata(required=True, type=ParameterType.STRING),
@@ -3905,25 +4042,25 @@ class AgentMessagingPlugin(
             "report_by": ParameterMetadata(required=True, type=ParameterType.STRING),
             "watchdog_due_at": ParameterMetadata(required=True, type=ParameterType.STRING),
         },
+        is_async=True,
         output_type="object",
-        output_description=(
-            "One-call role provisioning: resolved class, optional principal legislation, "
-            "managed dispatch attempt, and read-only Git-controller gate status."
-        ),
+        output_description="Accepted launch job receipt; read the job for the final operation result.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Provisioned role-session outcome.",
+            description="Submission only; no session or dispatch is asserted by this receipt.",
             properties={
-                "provisioning_action": ParameterMetadata(type=ParameterType.STRING),
-                "resolved_role_class": ParameterMetadata(type=ParameterType.STRING),
-                "legislation": ParameterMetadata(type=ParameterType.OBJECT),
-                "existing_holder": ParameterMetadata(type=ParameterType.OBJECT),
-                "dispatch": ParameterMetadata(type=ParameterType.OBJECT),
-                "attempt": ParameterMetadata(type=ParameterType.OBJECT),
-                "git_controller_gate": ParameterMetadata(type=ParameterType.OBJECT),
+                "job_id": ParameterMetadata(type=ParameterType.STRING),
+                "status": ParameterMetadata(type=ParameterType.STRING),
             },
         ),
     )
+    def provision_role_session_action(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        return submit_launch(self, "provision_role_session", params, state)
+
     def provision_role_session(
         self,
         params: dict[str, Any],
@@ -3983,16 +4120,8 @@ class AgentMessagingPlugin(
                 "existing_holder": existing_holder,
                 "dispatch": {},
                 "attempt": {},
-                "git_controller_gate": _git_controller_launcher_report(role_name),
             }
-        legislation = _provision_legislation(
-            state_service,
-            needs_legislation=needs_legislation,
-            role_name=role_name,
-            role_class=resolved_role_class,
-            brief_ref=str(raw.get("brief_ref") or ""),
-            directed_by=directed_by,
-        )
+        legislation: dict[str, object] = {"action": "not_required"}
         spawn_raw = dict(raw)
         spawn_raw["role_class"] = resolved_role_class
         spawn_raw["local_name"] = lifecycle_resolve_local_name(
@@ -4006,11 +4135,33 @@ class AgentMessagingPlugin(
             self._build_session_lifecycle_policy_config(),
         )
         spawn_req = replace(spawn_req, spawned_by_instance_id=actor.agent_instance_id)
+
+        def launch(row: Mapping[str, Any]) -> Mapping[str, Any]:
+            assignment = require_assignment(row)
+            legislation.update(
+                _provision_legislation(
+                    state_service,
+                    needs_legislation=needs_legislation,
+                    role_name=role_name,
+                    role_class=resolved_role_class,
+                    unit_id=assignment.unit_id,
+                    revision_id=assignment.revision.revision_id,
+                    directed_by=directed_by,
+                )
+            )
+            return spawn_dispatch_attempt(
+                state_service,
+                row,
+                register=self._register_unit_client(),
+                actor=RegisterActor(actor.agent_instance_id, actor.agent_session_id, str(row["spawned_by_role"]), str(row["lane_id"])),
+            )
+
         result = lifecycle_dispatch_managed_work(
             state_service,
             _dispatch_spec_from_params(spawn_raw, spawn_req, directed_by),
-            spawn_req,
             register=self._register_unit_client(),
+            actor=actor,
+            spawn_attempt=launch,
         )
         return {
             "provisioning_action": "spawned",
@@ -4019,7 +4170,6 @@ class AgentMessagingPlugin(
             "existing_holder": {},
             "dispatch": result["dispatch"],
             "attempt": result["attempt"],
-            "git_controller_gate": _git_controller_launcher_report(role_name),
         }
 
     @platform_process(
@@ -4082,13 +4232,25 @@ class AgentMessagingPlugin(
             "prior_version": ParameterMetadata(required=True, type=ParameterType.INTEGER),
             "payload": ParameterMetadata(required=True, type=ParameterType.OBJECT),
         },
+        is_async=True,
         output_type="object",
-        output_description="Coordinator decision and resulting dispatch projection.",
+        output_description="Accepted launch job receipt; read the job for the final operation result.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Coordinator decision projection.",
+            description="Submission only; no session or dispatch is asserted by this receipt.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING),
+                "status": ParameterMetadata(type=ParameterType.STRING),
+            },
         ),
     )
+    def resolve_managed_dispatch_action(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        return submit_launch(self, "resolve_managed_dispatch", params, state)
+
     def resolve_managed_dispatch(
         self,
         params: dict[str, Any],
@@ -4113,6 +4275,13 @@ class AgentMessagingPlugin(
                 payload=_as_object(raw.get("payload")),
                 observed_at=datetime.now(UTC),
                 register=self._register_unit_client(),
+                spawn_attempt=lambda row: spawn_dispatch_attempt(
+                    state_service,
+                    row,
+                    register=self._register_unit_client(),
+                    actor=RegisterActor(actor.agent_instance_id, actor.agent_session_id, str(row["spawned_by_role"]), str(row["lane_id"])),
+                ),
+                historical_cancel_role=self._build_session_lifecycle_policy_config().historical_cancel_role,
             )
         except DispatchError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -4123,6 +4292,11 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "dispatch_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "milestone_claim": ParameterMetadata(
+                required=False,
+                type=ParameterType.OBJECT,
+                description="Optional baseline, requested_at and exact event_id for read-only milestone verification.",
+            ),
         },
         output_type="object",
         output_description="Decision-oriented aggregate managed-dispatch status.",
@@ -4147,6 +4321,7 @@ class AgentMessagingPlugin(
             result = lifecycle_managed_dispatch_status(
                 state_service,
                 str(raw.get("dispatch_id") or ""),
+                milestone_claim=raw.get("milestone_claim"),
             )
         except DispatchError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -4289,32 +4464,159 @@ class AgentMessagingPlugin(
         return _success_result(data=result)
 
     @platform_process(
-        name="legislate_role",
+        name="managed_dispatch_uptake_rate",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "since": ParameterMetadata(required=True, type=ParameterType.STRING, description="Inclusive contract creation cutoff, aware ISO timestamp."),
+            "as_of": ParameterMetadata(required=False, type=ParameterType.STRING, description="Inclusive receipt observation cutoff; defaults to now."),
+            "window_seconds": ParameterMetadata(required=False, type=ParameterType.INTEGER, description="Uptake window, 1..86400 seconds; default 300."),
+            "sample_size": ParameterMetadata(required=False, type=ParameterType.INTEGER, description="Earliest consecutive eligible contracts, 1..500; default 50."),
+            "runtime": ParameterMetadata(required=False, type=ParameterType.STRING, description="Original first-turn runtime filter; unknown eligibility is retained."),
+            "transport": ParameterMetadata(required=False, type=ParameterType.STRING, description="Original first-turn host transport filter, e.g. tmux."),
+        },
+        output_type="object",
+        output_description="Read-only initial-attempt worker ACK uptake evidence and cohort conversion.",
+        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Receipt-time cohort, per-dispatch evidence and SLO advisory."),
+    )
+    def managed_dispatch_uptake_rate(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _success_result(data={"slo_status": "UNMEASURABLE", "reads_complete": False, "advisories": ["state_service is not bound on this solet."]})
+        try:
+            result = lifecycle_managed_dispatch_uptake_rate(
+                state_service,
+                since=raw.get("since", ""),
+                as_of=raw.get("as_of"),
+                window_seconds=raw.get("window_seconds", 300),
+                sample_size=raw.get("sample_size", 50),
+                runtime=str(raw.get("runtime") or ""),
+                transport=str(raw.get("transport") or ""),
+            )
+        except DispatchError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="retire_role",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "name": ParameterMetadata(
-                description=(
-                    "The role name to legislate (e.g. 'Coordinator-Main' for a "
-                    "role_class='primary' seat)."
+                description="The role name to retire (e.g. 'Register-Lead').",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "reason": ParameterMetadata(
+                description=("Why the role is retired. Quoted verbatim in every refused send or claim, so write it for the sender who hits it."),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "authority": ParameterMetadata(
+                description=("The ruling, issue or brief that authorizes this retirement (provenance, stored in retired_by with the caller's seat)."),
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "successor": ParameterMetadata(
+                description=("Optional role that now does the retired role's work; named in every refusal. Must not itself be retired."),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=("The appended registry row: role, retired_at, retired_by, reason, successor and the registry_version it was added at."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="retire_role outcome (iss_d9c955a2)",
+            properties={
+                "role": ParameterMetadata(type=ParameterType.STRING),
+                "retired_at": ParameterMetadata(type=ParameterType.STRING),
+                "retired_by": ParameterMetadata(type=ParameterType.STRING),
+                "reason": ParameterMetadata(type=ParameterType.STRING),
+                "successor": ParameterMetadata(type=ParameterType.STRING),
+                "registry_version": ParameterMetadata(type=ParameterType.INTEGER),
+            },
+        ),
+    )
+    def retire_role(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Retire a role in the authoritative registry (iss_d9c955a2).
+
+        Only a caller holding a primary- or principal-class role may retire, and a
+        role a LIVE session holds is refused until that holder releases it.
+        """
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        bridge_manager = self._bridge_manager
+        peer_registry = self._peer_registry
+        if state_service is None or bridge_manager is None or peer_registry is None:
+            return _failure_result(
+                code="bridge.not_running",
+                message="retire_role needs the started bridge and a bound state_service.",
+            )
+        try:
+            retired = retire_role_for_caller(
+                state_service,
+                _retire_role_call(raw, state),
+                functools.partial(
+                    _live_holder_label,
+                    state_service,
+                    bridge_manager,
+                    peer_registry,
                 ),
+            )
+        except RetiredRoleRegistryError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=retired.to_public())
+
+    @platform_process(
+        name="list_retired_roles",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={},
+        output_type="object",
+        output_description=("The whole retired-role registry: registry_version and every retired role. A failed read is an error, never an empty list."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="list_retired_roles outcome (iss_d9c955a2)",
+            properties={
+                "registry_version": ParameterMetadata(type=ParameterType.INTEGER),
+                "roles": ParameterMetadata(type=ParameterType.LIST),
+            },
+        ),
+    )
+    def list_retired_roles(
+        self,
+        params: dict[str, Any],  # noqa: ARG002  # pyright: ignore[reportUnusedParameter]
+        state: dict[str, Any],  # noqa: ARG002  # pyright: ignore[reportUnusedParameter]
+    ) -> dict[str, Any]:
+        """Read the authoritative retired-role registry at its current version."""
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="retired_role_registry_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            registry = read_retired_role_registry(state_service)
+        except RetiredRoleRegistryError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=registry.to_public())
+
+    @platform_process(
+        name="legislate_role",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "unit_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "revision_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "name": ParameterMetadata(
+                description=("The role name to legislate (e.g. 'Coordinator-Main' for a role_class='primary' seat)."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "role_class": ParameterMetadata(
-                description=(
-                    "primary | principal — the ONE two-value taxonomy this "
-                    "governance act may assign; project/ephemeral/chat are "
-                    "minted, never legislated."
-                ),
-                required=True,
-                type=ParameterType.STRING,
-            ),
-            "brief_ref": ParameterMetadata(
-                description=(
-                    "Workbench path, dispatch id, or ruling reference "
-                    "authorizing this act (provenance — mirrors spawn_session's "
-                    "brief_ref)."
-                ),
+                description=("primary | principal — the ONE two-value taxonomy this governance act may assign; project/ephemeral/chat are minted, never legislated."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -4351,7 +4653,8 @@ class AgentMessagingPlugin(
         req = LegislateRoleRequest(
             name=str(raw.get("name") or ""),
             role_class=str(raw.get("role_class") or ""),
-            brief_ref=str(raw.get("brief_ref") or ""),
+            unit_id=str(raw.get("unit_id") or ""),
+            revision_id=str(raw.get("revision_id") or ""),
             directed_by=format_directed_by(state.get("call_context")),
         )
         try:
@@ -4364,32 +4667,21 @@ class AgentMessagingPlugin(
         name="capture_lane_charter",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "unit_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "revision_id": ParameterMetadata(required=True, type=ParameterType.STRING),
             "lane_id": ParameterMetadata(
                 description="The lane this charter founds.",
                 required=True,
                 type=ParameterType.STRING,
             ),
             "charter_text": ParameterMetadata(
-                description=(
-                    "The operator's verbatim founding words, captured byte-exact. "
-                    "Driven unmodified as a spawned worker's literal first turn "
-                    "(spawn_session resolves the LATEST captured row for the "
-                    "worker's lane_id)."
-                ),
+                description=("The operator's verbatim founding words, captured byte-exact. Driven unmodified as a spawned worker's literal first turn (spawn_session resolves the LATEST captured row for the worker's lane_id)."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "captured_at": ParameterMetadata(
-                description=(
-                    "ISO-8601 timestamp of when the operator spoke these words in "
-                    "the seat conversation — NOT the row-write time."
-                ),
+                description=("ISO-8601 timestamp of when the operator spoke these words in the seat conversation — NOT the row-write time."),
                 required=True,
-                type=ParameterType.STRING,
-            ),
-            "brief_ref": ParameterMetadata(
-                description="Workbench path or dispatch id this charter accompanies.",
-                required=False,
                 type=ParameterType.STRING,
             ),
         },
@@ -4401,7 +4693,8 @@ class AgentMessagingPlugin(
             properties={
                 "lane_id": ParameterMetadata(type=ParameterType.STRING),
                 "charter_text": ParameterMetadata(type=ParameterType.STRING),
-                "brief_ref": ParameterMetadata(type=ParameterType.STRING),
+                "unit_id": ParameterMetadata(type=ParameterType.STRING),
+                "revision_id": ParameterMetadata(type=ParameterType.STRING),
                 "captured_at": ParameterMetadata(type=ParameterType.STRING),
                 "directed_by": ParameterMetadata(type=ParameterType.STRING),
             },
@@ -4428,7 +4721,8 @@ class AgentMessagingPlugin(
             lane_id=str(raw.get("lane_id") or ""),
             charter_text=str(raw.get("charter_text") or ""),
             captured_at=str(raw.get("captured_at") or ""),
-            brief_ref=str(raw.get("brief_ref") or ""),
+            unit_id=str(raw.get("unit_id") or ""),
+            revision_id=str(raw.get("revision_id") or ""),
             directed_by=format_directed_by(state.get("call_context")),
         )
         try:
@@ -4442,11 +4736,7 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "waiter_instance_id": ParameterMetadata(
-                description=(
-                    "The waiting session's agent_instance_id. Required — v1 is "
-                    "session-scoped ONLY; lane-scoped arming is unsupported by "
-                    "construction (there is no waiter_lane_id parameter)."
-                ),
+                description=("The waiting session's agent_instance_id. Required — v1 is session-scoped ONLY; lane-scoped arming is unsupported by construction (there is no waiter_lane_id parameter)."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -4456,19 +4746,13 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "condition_ref": ParameterMetadata(
-                description=(
-                    "The condition_kind's referent: a lane_id (lane_closed), "
-                    "an agent_instance_id (session_terminal), or an ISO-8601 "
-                    "timestamp (deadline). Shape-checked per kind."
-                ),
+                description=("The condition_kind's referent: a lane_id (lane_closed), an agent_instance_id (session_terminal), or an ISO-8601 timestamp (deadline). Shape-checked per kind."),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
         output_type="object",
-        output_description=(
-            "arm_session_dependency outcome (drive-on-delivery lane rider) — the armed wake edge."
-        ),
+        output_description=("arm_session_dependency outcome (drive-on-delivery lane rider) — the armed wake edge."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="arm_session_dependency outcome",
@@ -4514,10 +4798,7 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
         output_type="object",
-        output_description=(
-            "T1 usage-capture lane — drains the SessionStart hook's "
-            "file-per-firing spool into session_claude_mapping."
-        ),
+        output_description=("T1 usage-capture lane — drains the SessionStart hook's file-per-firing spool into session_claude_mapping."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="drain_session_claude_mapping_spool outcome",
@@ -4578,27 +4859,17 @@ class AgentMessagingPlugin(
                 type=ParameterType.BOOLEAN,
             ),
             "limit": ParameterMetadata(
-                description=(
-                    f"Page size; defaults to {LIST_SESSIONS_DEFAULT_LIMIT} and may not exceed "
-                    f"{LIST_SESSIONS_MAX_LIMIT}. A full page returns next_cursor; never infer "
-                    "that a full page is the complete roster."
-                ),
+                description=(f"Page size; defaults to {LIST_SESSIONS_DEFAULT_LIMIT} and may not exceed {LIST_SESSIONS_MAX_LIMIT}. A full page returns next_cursor; never infer that a full page is the complete roster."),
                 required=False,
                 type=ParameterType.INTEGER,
             ),
             "after_created_at": ParameterMetadata(
-                description=(
-                    "First cursor component: echo next_cursor.created_at from the prior page "
-                    "with after_id. Omit both on the first page."
-                ),
+                description=("First cursor component: echo next_cursor.created_at from the prior page with after_id. Omit both on the first page."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "after_id": ParameterMetadata(
-                description=(
-                    "Second cursor component: echo next_cursor.id from the prior page with "
-                    "after_created_at. Omit both on the first page."
-                ),
+                description=("Second cursor component: echo next_cursor.id from the prior page with after_created_at. Omit both on the first page."),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -4629,11 +4900,7 @@ class AgentMessagingPlugin(
                 code="state_service_unavailable",
                 message="state_service is not bound on this solet.",
             )
-        filters = {
-            key: str(raw[key])
-            for key in ("lane_id", "work_class", "host", "lifecycle_state")
-            if raw.get(key)
-        }
+        filters = {key: str(raw[key]) for key in ("lane_id", "work_class", "host", "lifecycle_state") if raw.get(key)}
         raw_limit = raw.get("limit", LIST_SESSIONS_DEFAULT_LIMIT)
         try:
             result = lifecycle_list_sessions(
@@ -4659,10 +4926,7 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description=(
-            "Bounded read-only fleet classification over managed sessions, armed "
-            "dependencies, context gauges, and role-message owed records."
-        ),
+        output_description=("Bounded read-only fleet classification over managed sessions, armed dependencies, context gauges, and role-message owed records."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="fleet_status outcome",
@@ -4712,7 +4976,9 @@ class AgentMessagingPlugin(
         ),
     )
     def record_fleet_liveness_run(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
@@ -4722,9 +4988,12 @@ class AgentMessagingPlugin(
             result = lifecycle_record_fleet_liveness_run(
                 state_service,
                 observed_at=raw.get("observed_at") if isinstance(raw.get("observed_at"), str) else "",
-                checked=raw.get("checked"), stuck=raw.get("stuck"), actions=raw.get("actions"),
+                checked=raw.get("checked"),
+                stuck=raw.get("stuck"),
+                actions=raw.get("actions"),
                 outcome=raw.get("outcome") if isinstance(raw.get("outcome"), str) else "",
-                role_inbox_drain=raw.get("role_inbox_drain"), sleep_check=raw.get("sleep_check"),
+                role_inbox_drain=raw.get("role_inbox_drain"),
+                sleep_check=raw.get("sleep_check"),
                 escalations=raw.get("escalations"),
             )
         except VerbError as exc:
@@ -4755,7 +5024,9 @@ class AgentMessagingPlugin(
         ),
     )
     def record_fleet_progress_run(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
@@ -4767,11 +5038,13 @@ class AgentMessagingPlugin(
                 reviewed_at=raw.get("reviewed_at") if isinstance(raw.get("reviewed_at"), str) else "",
                 workstream_id=raw.get("workstream_id") if isinstance(raw.get("workstream_id"), str) else "",
                 objective_citation=raw.get("objective_citation") if isinstance(raw.get("objective_citation"), str) else "",
-                metrics=raw.get("metrics"), delta=raw.get("delta"),
+                metrics=raw.get("metrics"),
+                delta=raw.get("delta"),
                 assessment=raw.get("assessment") if isinstance(raw.get("assessment"), str) else "",
                 recommendation=raw.get("recommendation") if isinstance(raw.get("recommendation"), str) else "",
                 independent_critique=raw.get("independent_critique"),
-                escalations=raw.get("escalations"), phase_a_run_id=_opt_str(raw.get("phase_a_run_id")),
+                escalations=raw.get("escalations"),
+                phase_a_run_id=_opt_str(raw.get("phase_a_run_id")),
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -4790,7 +5063,9 @@ class AgentMessagingPlugin(
         return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="recent_fleet_liveness_runs outcome"),
     )
     def recent_fleet_liveness_runs(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
@@ -4798,8 +5073,10 @@ class AgentMessagingPlugin(
             return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
         try:
             result = lifecycle_recent_fleet_liveness_runs(
-                state_service, limit=raw.get("limit", 64),
-                after_observed_at=_opt_str(raw.get("after_observed_at")), after_id=_opt_str(raw.get("after_id")),
+                state_service,
+                limit=raw.get("limit", 64),
+                after_observed_at=_opt_str(raw.get("after_observed_at")),
+                after_id=_opt_str(raw.get("after_id")),
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -4819,7 +5096,9 @@ class AgentMessagingPlugin(
         return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="recent_fleet_progress_runs outcome"),
     )
     def recent_fleet_progress_runs(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
@@ -4827,8 +5106,11 @@ class AgentMessagingPlugin(
             return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
         try:
             result = lifecycle_recent_fleet_progress_runs(
-                state_service, workstream_id=_opt_str(raw.get("workstream_id")), limit=raw.get("limit", 64),
-                after_reviewed_at=_opt_str(raw.get("after_reviewed_at")), after_id=_opt_str(raw.get("after_id")),
+                state_service,
+                workstream_id=_opt_str(raw.get("workstream_id")),
+                limit=raw.get("limit", 64),
+                after_reviewed_at=_opt_str(raw.get("after_reviewed_at")),
+                after_id=_opt_str(raw.get("after_id")),
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -4850,10 +5132,7 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description=(
-            "T1 S3 -- per-budget_line token-usage rollup, joining managed_session/"
-            "session_claude_mapping against session_ledger's session/event tables."
-        ),
+        output_description=("T1 S3 -- per-budget_line token-usage rollup, joining managed_session/session_claude_mapping against session_ledger's session/event tables."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="budget_report outcome",
@@ -4912,10 +5191,7 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description=(
-            "usage-capture-attribution D2 follow-on -- every live "
-            "session_claude_mapping row observed for one agent_instance_id."
-        ),
+        output_description=("usage-capture-attribution D2 follow-on -- every live session_claude_mapping row observed for one agent_instance_id."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="list_session_claude_mappings outcome",
@@ -4983,7 +5259,7 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description="§4 session_status — the ledger row.",
+        output_description="§4 session_status — ledger row plus read-only prompt observation.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="The live managed_session row.",
@@ -4994,7 +5270,8 @@ class AgentMessagingPlugin(
                 "spawned_by_instance_id": ParameterMetadata(type=ParameterType.STRING),
                 "spawned_by_role": ParameterMetadata(type=ParameterType.STRING),
                 "lane_id": ParameterMetadata(type=ParameterType.STRING),
-                "brief_ref": ParameterMetadata(type=ParameterType.STRING),
+                "unit_id": ParameterMetadata(type=ParameterType.STRING),
+                "revision_id": ParameterMetadata(type=ParameterType.STRING),
                 "model": ParameterMetadata(type=ParameterType.STRING),
                 "effort": ParameterMetadata(type=ParameterType.STRING),
                 "work_class": ParameterMetadata(type=ParameterType.STRING),
@@ -5002,7 +5279,18 @@ class AgentMessagingPlugin(
                 "visibility": ParameterMetadata(type=ParameterType.STRING),
                 "host": ParameterMetadata(type=ParameterType.STRING),
                 "host_ref": ParameterMetadata(type=ParameterType.STRING),
+                "prior_host_outcome": ParameterMetadata(type=ParameterType.OBJECT, description="Latest persisted termination attempt for terminal rows; null means unknown."),
+                "prior_host_reason": ParameterMetadata(type=ParameterType.STRING, description="Raw append-only termination rationale for terminal rows."),
+                "prior_host_advisory": ParameterMetadata(type=ParameterType.STRING, description="Explicit missing, malformed or unreadable prior evidence advisory."),
+                "delivery_pickup": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description="Bounded recent pickup evidence; scan/history continuation is explicit.",
+                ),
                 "capability_report": ParameterMetadata(type=ParameterType.OBJECT),
+                "permission_prompt_state": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Derived Claude tmux observation: blocked, not_detected, unknown, or not_applicable; never a lifecycle transition.",
+                ),
                 "report_by": ParameterMetadata(type=ParameterType.STRING),
                 "lifecycle_state": ParameterMetadata(type=ParameterType.STRING),
                 "last_transition_at": ParameterMetadata(type=ParameterType.STRING),
@@ -5011,9 +5299,11 @@ class AgentMessagingPlugin(
         ),
     )
     def session_status(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
-        """§4 ``session_status`` — the ledger row. (Host-liveness enrichment
-        is deferred to whichever caller has the host driver registry; this
-        verb's contract is the ledger truth, always available.)"""
+        """Read the ledger plus a derived permission prompt observation.
+
+        Claude tmux panes report blocked, not_detected, or unknown when unreadable;
+        other runtimes/hosts report not_applicable. No lifecycle state is written.
+        """
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
@@ -5025,6 +5315,15 @@ class AgentMessagingPlugin(
             row = lifecycle_session_status(state_service, str(raw.get("agent_instance_id", "")))
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
+        try:
+            row["delivery_pickup"] = CodexPickupStore(state_service).readback(
+                str(row["agent_instance_id"]),
+                str(row.get("agent_session_id") or ""),
+            )
+        except Exception:  # noqa: BLE001 -- optional evidence cannot block ledger readback
+            logger.exception("Codex pickup readback unavailable; managed session read succeeded")
+            row["delivery_pickup"] = {"unavailable": True, "reason": "pickup evidence unavailable; mail retained"}
+        row["permission_prompt_state"] = permission_prompt_state(row)
         return _success_result(data=row)
 
     @platform_process(
@@ -5032,21 +5331,14 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "dry_run": ParameterMetadata(
-                description=(
-                    "True = classify and report only; pass false to act. When true, report "
-                    "every operator managed_session classification and proposed transition "
-                    "without writing."
-                ),
+                description=("True = classify and report only; pass false to act. When true, report every operator managed_session classification and proposed transition without writing."),
                 default=True,
                 required=False,
                 type=ParameterType.BOOLEAN,
             ),
         },
         output_type="object",
-        output_description=(
-            "R3-U1 operator presence reconciliation: classifications, proposed "
-            "terminal transitions, and the rows applied when dry_run is false."
-        ),
+        output_description=("R3-U1 operator presence reconciliation: classifications, proposed terminal transitions, and the rows applied when dry_run is false."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="Operator managed_session liveness reconciliation result.",
@@ -5096,6 +5388,30 @@ class AgentMessagingPlugin(
         return _success_result(data=result)
 
     @platform_process(
+        name="reconcile_ledger_tmux",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={},
+        output_type="object",
+        output_description="Read-only timestamped ledger/tmux metadata and coverage; no work or uptake conclusion.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Derived advisory metadata report, recomputed on every call.",
+            properties={
+                "observations": ParameterMetadata(type=ParameterType.LIST),
+                "advisories": ParameterMetadata(type=ParameterType.LIST),
+                "complete": ParameterMetadata(type=ParameterType.BOOLEAN),
+            },
+        ),
+    )
+    def reconcile_ledger_tmux(
+        self,
+        params: dict[str, Any],  # noqa: ARG002
+        state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """Observe metadata only under existing bridge process authorization."""
+        return _success_result(data=collect_ledger_tmux_report(self._get_state_service()))
+
+    @platform_process(
         name="clear_session",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -5105,19 +5421,13 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "park": ParameterMetadata(
-                description=(
-                    "When true, also drives live/idle/overdue -> parked "
-                    "(L3 rule 2, steward direction) after the clear is sent."
-                ),
+                description=("When true, also drives live/idle/overdue -> parked (L3 rule 2, steward direction) after the clear is sent."),
                 required=False,
                 type=ParameterType.BOOLEAN,
             ),
         },
         output_type="object",
-        output_description=(
-            "§4 clear_session (AMEND 5b) — context hygiene via the driver channel, with "
-            "effect verification where the driver can read its target back (GAU-09)."
-        ),
+        output_description=("§4 clear_session (AMEND 5b) — context hygiene via the driver channel, with effect verification where the driver can read its target back (GAU-09)."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="clear_session outcome",
@@ -5129,12 +5439,7 @@ class AgentMessagingPlugin(
                     type=ParameterType.BOOLEAN,
                 ),
                 "cleared": ParameterMetadata(
-                    description=(
-                        "True only on a POSITIVE observation that the target is now "
-                        "clear; null when this driver has no read-back surface. Never "
-                        "false -- a driver that looked and saw nothing raises "
-                        "clear_unverified instead."
-                    ),
+                    description=("True only on a POSITIVE observation that the target is now clear; null when this driver has no read-back surface. Never false -- a driver that looked and saw nothing raises clear_unverified instead."),
                     type=ParameterType.BOOLEAN,
                 ),
                 "clear_verification": ParameterMetadata(
@@ -5180,9 +5485,7 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description=(
-            "§4 compact_session (AMEND 5b) — context hygiene via the driver channel."
-        ),
+        output_description=("§4 compact_session (AMEND 5b) — context hygiene via the driver channel."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="compact_session outcome",
@@ -5220,19 +5523,13 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "text": ParameterMetadata(
-                description=(
-                    "The work turn to send over the driver channel — a "
-                    "self-contained dispatch (brief text or a workbench "
-                    "brief pointer plus instructions). Must be non-empty."
-                ),
+                description=("The work turn to send over the driver channel — a self-contained dispatch (brief text or a workbench brief pointer plus instructions). Must be non-empty."),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
         output_type="object",
-        output_description=(
-            "drive_session (D2-window rider) — work dispatch via the driver channel."
-        ),
+        output_description=("drive_session (D2-window rider) — work dispatch via the driver channel."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="drive_session outcome",
@@ -5283,20 +5580,13 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "grace_seconds": ParameterMetadata(
-                description=(
-                    "Seconds to wait for a graceful host-level stop before SIGKILL. Default 30."
-                ),
+                description=("Seconds to wait for a graceful host-level stop before SIGKILL. Default 30."),
                 required=False,
                 type=ParameterType.INTEGER,
             ),
         },
         output_type="object",
-        output_description=(
-            "§4 terminate_session — graceful stop -> kill after grace -> "
-            "ledger -> terminated. Also fires + best-effort delivers any "
-            "armed session_terminal dependency edges waiting on this "
-            "session, on both the transition and already-terminal paths."
-        ),
+        output_description=("§4 terminate_session — graceful stop -> kill after grace -> ledger -> terminated. Also fires + best-effort delivers any armed session_terminal dependency edges waiting on this session, on both the transition and already-terminal paths."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="terminate_session outcome",
@@ -5305,26 +5595,29 @@ class AgentMessagingPlugin(
                 "lifecycle_state": ParameterMetadata(type=ParameterType.STRING),
                 "session_terminal_edges_fired": ParameterMetadata(type=ParameterType.INTEGER),
                 "host": ParameterMetadata(type=ParameterType.STRING),
+                "host_ref": ParameterMetadata(type=ParameterType.STRING, description="Exact native host reference observed by this call."),
                 "host_action": ParameterMetadata(
                     type=ParameterType.STRING,
-                    description=(
-                        "What this call did to the host process: terminated "
-                        "(the driver ended it), none_available (a degenerate "
-                        "driver such as 'operator' cannot stop a process it did "
-                        "not spawn: only the ledger moved, the process is "
-                        "still running) or not_attempted (the row was already "
-                        "terminal)."
-                    ),
+                    description=("Current invocation: terminated means driver return, none_available means no supported action, not_attempted means no invocation. Observe host_liveness separately."),
                 ),
                 "host_remedy": ParameterMetadata(type=ParameterType.STRING),
+                "prior_host_outcome": ParameterMetadata(type=ParameterType.OBJECT, description="Latest versioned termination attempt with exact identity and transition provenance; null means unknown."),
+                "prior_host_reason": ParameterMetadata(type=ParameterType.STRING, description="Raw immutable transition rationale."),
+                "prior_host_advisory": ParameterMetadata(type=ParameterType.STRING, description="Named missing, malformed or unreadable history advisory."),
+                "host_liveness": ParameterMetadata(type=ParameterType.STRING, description="Fresh native alive/dead/unknown observation, independent of driver invocation."),
+                "host_liveness_detail": ParameterMetadata(type=ParameterType.STRING),
+                "host_liveness_observed_at": ParameterMetadata(type=ParameterType.STRING),
+                "registry_checked": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "peer_registration": ParameterMetadata(type=ParameterType.OBJECT),
+                "teardown_complete": ParameterMetadata(type=ParameterType.BOOLEAN, description="True only for exact host observed dead and peer registry checked absent."),
+                "not_done": ParameterMetadata(type=ParameterType.LIST, description="Unresolved host and registration facts; completed describes the ledger operation."),
             },
         ),
     )
     def terminate_session(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         """§4 ``terminate_session`` — resolves the row's host driver and
-        calls its real ``terminate()`` (driver-level stop, SIGKILL after
-        grace) BEFORE the ledger write, so the ledger never claims
-        ``terminated`` over a process still running. ``host='operator'``
+        calls its existing ``terminate()`` BEFORE the ledger write. Driver
+        return and ledger completion do not prove host death. ``host='operator'``
         rows (degenerate driver, never spawned by us) still land the ledger
         transition — see ``session_lifecycle_verbs.terminate_session``'s
         docstring for why that's not a silent degradation. Idempotent on an
@@ -5346,6 +5639,67 @@ class AgentMessagingPlugin(
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
+        registry = getattr(self, "_peer_registry", None)
+        registration = registry.resolve_by_agent_instance_id(str(raw.get("agent_instance_id", ""))) if registry is not None else None
+        report_teardown(result, registration, registry_checked=registry is not None)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="preserve_lane_evidence",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Managed lane instance."),
+            "unit_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Exact managed Unit."),
+            "repository_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Frozen assignment repository."),
+            "assignment_sha256": ParameterMetadata(type=ParameterType.STRING, required=True, description="Frozen managed assignment digest."),
+            "expected_fingerprint": ParameterMetadata(type=ParameterType.STRING, required=True, description="Fingerprint from snapshot-only read_lane_evidence."),
+            "disposition": ParameterMetadata(type=ParameterType.STRING, required=True, description="preserved or superseded; neither permits deletion."),
+            "rationale": ParameterMetadata(type=ParameterType.STRING, required=True, description="Why the bytes are retained or superseded."),
+            "predecessor_packet_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Verified same-binding predecessor; omission begins no lineage."),
+        },
+        output_type="object",
+        output_description="Verified immutable custody packet, provenance, bounded summary and audit advisories; no termination or removal.",
+    )
+    def preserve_lane_evidence(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Preserve a verified managed lane without any retirement side effect."""
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        try:
+            actor = self._dispatch_actor_from_state(state)
+            try:
+                register = self._register_unit_client()
+            except (RegisterUnitError, KeyError):
+                register = None
+            result = lifecycle_preserve_lane_evidence(state_service, params.get("parameters", params), actor=actor, register=register)
+        except (VerbError, DispatchError) as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="read_lane_evidence",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Managed lane instance."),
+            "unit_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Exact managed Unit."),
+            "repository_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Frozen assignment repository."),
+            "assignment_sha256": ParameterMetadata(type=ParameterType.STRING, required=True, description="Frozen managed assignment digest."),
+            "packet_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Explicit immutable packet; omit for snapshot-only fingerprint and inventory."),
+            "payload_path": ParameterMetadata(type=ParameterType.STRING, required=False, description="One packet-relative payload path; requires packet_id and layer."),
+            "payload_layer": ParameterMetadata(type=ParameterType.STRING, required=False, description="index or worktree for selected payload; requires packet_id and path."),
+        },
+        output_type="object",
+        output_description="Bound snapshot-only fingerprint or verified historical packet, bounded inventory/provenance and one selected payload up to 65536 bytes.",
+    )
+    def read_lane_evidence(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Read the bound lane snapshot or one immutable packet; no latest selector."""
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        try:
+            result = lifecycle_read_lane_evidence(state_service, params.get("parameters", params), actor=self._dispatch_actor_from_state(state))
+        except (VerbError, DispatchError) as exc:
+            return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
 
     @platform_process(
@@ -5357,11 +5711,18 @@ class AgentMessagingPlugin(
                 required=True,
                 type=ParameterType.STRING,
             ),
+            "unit_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Exact managed Unit; required with a pinned custody packet."),
+            "repository_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Frozen assignment repository; required with a pinned custody packet."),
+            "assignment_sha256": ParameterMetadata(type=ParameterType.STRING, required=False, description="Frozen managed assignment digest; required with a pinned custody packet."),
+            "packet_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Existing immutable custody packet pinned for this call only; never with preserve_evidence."),
+            "expected_fingerprint": ParameterMetadata(type=ParameterType.STRING, required=False, description="Snapshot fingerprint the packet and the whole current lane must both equal."),
+            "preserve_evidence": ParameterMetadata(type=ParameterType.BOOLEAN, required=False, description="Preserve and read-verify a packet in this call before retiring; needs disposition, rationale and fingerprint."),
+            "disposition": ParameterMetadata(type=ParameterType.STRING, required=False, description="preserved or superseded, for preserve_evidence; neither permits deletion without verified custody."),
+            "rationale": ParameterMetadata(type=ParameterType.STRING, required=False, description="Why the bytes are preserved or superseded, for preserve_evidence."),
+            "predecessor_packet_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Verified same-binding predecessor for preserve_evidence; omission begins no lineage."),
         },
         output_type="object",
-        output_description=(
-            "§4 retire_session — terminate + release + fire dependency edges + retired."
-        ),
+        output_description=("§4 retire_session — terminate + release + fire dependency edges + retired."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="retire_session outcome",
@@ -5369,32 +5730,31 @@ class AgentMessagingPlugin(
                 "already_retired": ParameterMetadata(type=ParameterType.BOOLEAN),
                 "dependencies_fired": ParameterMetadata(type=ParameterType.INTEGER),
                 "host": ParameterMetadata(type=ParameterType.STRING),
+                "host_ref": ParameterMetadata(type=ParameterType.STRING, description="Exact native host reference observed by this call."),
                 "host_action": ParameterMetadata(
                     type=ParameterType.STRING,
-                    description=(
-                        "terminated | none_available | not_attempted — what "
-                        "this call did to the host process; none_available "
-                        "means the process is still running."
-                    ),
+                    description=("Current invocation only: terminated is driver return, none_available is no supported action, not_attempted is no new invocation."),
                 ),
                 "host_remedy": ParameterMetadata(type=ParameterType.STRING),
+                "prior_host_outcome": ParameterMetadata(type=ParameterType.OBJECT, description="Latest persisted attempt, distinct from the current action; null means unknown."),
+                "prior_host_reason": ParameterMetadata(type=ParameterType.STRING),
+                "prior_host_advisory": ParameterMetadata(type=ParameterType.STRING),
+                "host_liveness": ParameterMetadata(type=ParameterType.STRING, description="Fresh exact native alive/dead/unknown observation."),
+                "host_liveness_detail": ParameterMetadata(type=ParameterType.STRING),
+                "host_liveness_observed_at": ParameterMetadata(type=ParameterType.STRING),
+                "registry_checked": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "teardown_complete": ParameterMetadata(type=ParameterType.BOOLEAN, description="True only for observed dead plus independently checked absent registration."),
                 "peer_registration": ParameterMetadata(
                     type=ParameterType.OBJECT,
-                    description=(
-                        "{bridge_id, parent_pid} of the live peer binding still "
-                        "held by this instance after the retire, else null."
-                    ),
+                    description=("{bridge_id, parent_pid} of the live peer binding still held by this instance after the retire, else null."),
                 ),
                 "not_done": ParameterMetadata(
                     type=ParameterType.LIST,
-                    description=(
-                        "What THIS retire left undone, one sentence each (host "
-                        "process not stopped, peer registration still "
-                        "listed). Empty means it left nothing undone, including "
-                        "a retire of a row an earlier terminate already tore "
-                        "down; 'completed' alone only means the ledger row is "
-                        "retired."
-                    ),
+                    description=("Unresolved host and registration facts, including prior none_available and unknown history. completed alone describes the ledger operation."),
+                ),
+                "custody_packet": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description=("Present only with a pinned packet: {packet_id, fingerprint, captured, worktree_disposition}; retained_not_disposable means the lane changed after consent and was kept."),
                 ),
             },
         ),
@@ -5412,27 +5772,82 @@ class AgentMessagingPlugin(
             )
         agent_instance_id = str(raw.get("agent_instance_id", ""))
         try:
+            selection = lifecycle_retire_packet_selection(raw)
+            packet = None
+            if selection is not None:
+                try:
+                    audit = self._register_unit_client()
+                except (RegisterUnitError, KeyError):
+                    audit = None
+                packet = functools.partial(lifecycle_resolve_retire_packet, state_service, selection, actor=self._dispatch_actor_from_state(state), register=audit)
             result = lifecycle_retire_session(
                 state_service,
                 agent_instance_id=agent_instance_id,
                 directed_by=format_directed_by(state.get("call_context")),
+                register=self._retirement_evidence_reader(),
+                packet=packet,
             )
-        except VerbError as exc:
+        except (VerbError, DispatchError) as exc:
             return _failure_result(code=exc.code, message=exc.message)
         # The ledger says "retired"; the registry says whether the lane is still
         # listed. Read it AFTER the retire so the answer is the post-state.
         registry = getattr(self, "_peer_registry", None)
-        registration = (
-            registry.resolve_by_agent_instance_id(agent_instance_id) if registry is not None else None
-        )
-        result["peer_registration"] = (
-            {"bridge_id": registration.bridge_id, "parent_pid": registration.parent_pid}
-            if registration is not None
-            else None
-        )
-        result["not_done"] = describe_retire_gaps(
-            result, registration, registry_checked=registry is not None,
-        )
+        registration = registry.resolve_by_agent_instance_id(agent_instance_id) if registry is not None else None
+        report_teardown(result, registration, registry_checked=registry is not None)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="retire_completed_lane_sessions",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "agent_instance_ids": ParameterMetadata(
+                type=ParameterType.LIST,
+                required=True,
+                description="The managed_session instances to consider; each is retired only where its own assigned Unit is proved terminal in the register.",
+            ),
+        },
+        output_type="object",
+        output_description=("Which considered lanes reached retired through retire_session, and one advisory for every row left exactly as it was."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="retire_completed_lane_sessions outcome",
+            properties={
+                "considered": ParameterMetadata(type=ParameterType.INTEGER, description="How many of the given rows were read."),
+                "retired": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description=("One {agent_instance_id, unit_id, unit_state, already_retired, lifecycle_state, worktree_disposition} per row driven through retire_session; unit_state is empty when no register read was made."),
+                ),
+                "advisories": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description=("One string per row left untouched, naming the row and the reason: no assignment, an incomplete register read, a Unit still in flight, or a retire_session that declined it. Never a refusal."),
+                ),
+            },
+        ),
+    )
+    def retire_completed_lane_sessions(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Retire each named lane whose assigned Unit is provably finished.
+
+        Transport only: it resolves the named instances to their managed_session
+        rows and hands them to the verb, which composes the existing
+        ``retire_session`` and never retires on unproved data.
+        """
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        requested = params.get("parameters", params).get("agent_instance_ids")
+        if not isinstance(requested, list):
+            return _failure_result(code="agent_instance_ids_required", message="agent_instance_ids must be a list of managed_session instances.")
+        try:
+            result = lifecycle_retire_completed_lane_sessions(
+                state_service,
+                [read_managed_session(state_service, str(instance)) for instance in requested],
+                directed_by=format_directed_by(state.get("call_context")),
+                register=self._retirement_evidence_reader(),
+            )
+        except SessionNotFoundError as exc:
+            return _failure_result(code="session_not_found", message=str(exc))
+        except (VerbError, DispatchError) as exc:
+            return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
 
     @platform_process(
@@ -5522,20 +5937,17 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "agent_instance_id": ParameterMetadata(
-                description="The ledger agent_instance_id to rotate (from list_sessions — "
-                "NEVER a peer_list/role-thread watch id).",
+                description="The ledger agent_instance_id to rotate (from list_sessions — NEVER a peer_list/role-thread watch id).",
                 required=True,
                 type=ParameterType.STRING,
             ),
             "role_name": ParameterMetadata(
-                description="The durable role this ledger row currently holds — used for "
-                "the durable pickup dispatch (peer_send_by_name).",
+                description="The durable role this ledger row currently holds — used for the durable pickup dispatch (peer_send_by_name).",
                 required=True,
                 type=ParameterType.STRING,
             ),
             "pickup_text": ParameterMetadata(
-                description="Pickup pointer driven as the post-clear turn (e.g. pointing "
-                "at the worker's own handoff note + inbox).",
+                description="Pickup pointer driven as the post-clear turn (e.g. pointing at the worker's own handoff note + inbox).",
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -5546,11 +5958,7 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description=(
-            "maintenance-verbs M1, D0.3-ratified deferred-completion shape — dispatches "
-            "a rotate_session choreography job and returns immediately; poll "
-            "check_choreography_job_status for the outcome."
-        ),
+        output_description=("maintenance-verbs M1, D0.3-ratified deferred-completion shape — dispatches a rotate_session choreography job and returns immediately; poll check_choreography_job_status for the outcome."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="rotate_session dispatch outcome",
@@ -5588,33 +5996,28 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "agent_instance_id": ParameterMetadata(
-                description="The dying worker's ledger agent_instance_id.",
+                description="The target ledger agent_instance_id; automatic restart is unavailable.",
                 required=True,
                 type=ParameterType.STRING,
             ),
             "role_name": ParameterMetadata(
-                description="The durable role the fresh spawn must reclaim.",
+                description="Retained request field naming the target role; automatic restart refuses without spawning or reclaiming a successor.",
                 required=True,
                 type=ParameterType.STRING,
             ),
             "role_class": ParameterMetadata(
-                description="The role_class to spawn under (managed_session carries no "
-                "role_class column of its own — required from the caller).",
+                description="Retained request field for the target role class; automatic restart refuses without spawning or reclaiming a successor.",
                 required=True,
                 type=ParameterType.STRING,
             ),
             "grace_seconds": ParameterMetadata(
-                description="Pass through to terminate_session's grace_seconds.",
+                description="Retained request field; refusal occurs before termination.",
                 required=False,
                 type=ParameterType.INTEGER,
             ),
         },
         output_type="object",
-        output_description=(
-            "maintenance-verbs M1, D0.3-ratified deferred-completion shape — dispatches "
-            "a restart_session choreography job and returns immediately; poll "
-            "check_choreography_job_status for the outcome."
-        ),
+        output_description=("maintenance-verbs M1, D0.3-ratified deferred-completion shape — dispatches a restart_session job that refuses before termination and returns immediately; poll check_choreography_job_status for the outcome."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="restart_session dispatch outcome",
@@ -5626,8 +6029,8 @@ class AgentMessagingPlugin(
     )
     def restart_session(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         """§2.2 ``restart_session`` — ms-scale dispatch only (D0.3 mechanic 1);
-        the actual terminate/spawn/role-reclaim/verify choreography runs in
-        the plugin's own single dedicated background worker."""
+        the reserved worker refuses automatic restart before predecessor effects.
+        Poll the queued job for restart_successor_preflight_unavailable."""
         raw = params.get("parameters", params)
         job_manager = self._try_acquire_async_job_manager()
         if job_manager is None:
@@ -5658,12 +6061,7 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description=(
-            "maintenance-verbs M1 — the caller-side polling answer for a "
-            "rotate_session/restart_session job (the check_generation_status "
-            "precedent); these jobs configure no completion_handlers, so this "
-            "poll is the only way a direct caller learns the outcome."
-        ),
+        output_description=("maintenance-verbs M1 — the caller-side polling answer for a rotate_session/restart_session job (the check_generation_status precedent); these jobs configure no completion_handlers, so this poll is the only way a direct caller learns the outcome."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="Choreography job status",
@@ -5706,9 +6104,7 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "head_lines": ParameterMetadata(
-                description="The current curated head's lines, already split by the "
-                "caller (index_render.split_head's output) — this plugin cannot import "
-                "that local-CLI-only module itself.",
+                description="The current curated head's lines, already split by the caller (index_render.split_head's output) — this plugin cannot import that local-CLI-only module itself.",
                 required=True,
                 type=ParameterType.LIST,
             ),
@@ -5718,25 +6114,18 @@ class AgentMessagingPlugin(
                 type=ParameterType.INTEGER,
             ),
             "byte_budget": ParameterMetadata(
-                description="The head's byte budget (index_render.DEFAULT_BYTE_BUDGET, "
-                "17000 as of M2.2 — kept in sync by convention until M2.3's index-"
-                "manifest record removes the need for this duplication).",
+                description="Optional byte limit supplied by the caller for the rendered head.",
                 required=False,
                 type=ParameterType.INTEGER,
             ),
             "line_budget": ParameterMetadata(
-                description="The head's line budget (index_render.DEFAULT_LINE_BUDGET, "
-                "132 as of M2.2 — same sync caveat as byte_budget).",
+                description="Optional line limit supplied by the caller for the rendered head.",
                 required=False,
                 type=ParameterType.INTEGER,
             ),
         },
         output_type="object",
-        output_description=(
-            "maintenance-verbs M2.2, D0.3-ratified deferred-completion shape — dispatches "
-            "an activation-ranked curation-report job and returns immediately; poll "
-            "check_choreography_job_status for the outcome."
-        ),
+        output_description=("maintenance-verbs M2.2, D0.3-ratified deferred-completion shape — dispatches an activation-ranked curation-report job and returns immediately; poll check_choreography_job_status for the outcome."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="generate_curation_report dispatch outcome",
@@ -5763,9 +6152,7 @@ class AgentMessagingPlugin(
                 message="AsyncJobManager is not available on this solet.",
             )
         head_lines_raw = raw.get("head_lines")
-        head_lines = (
-            tuple(str(x) for x in head_lines_raw) if isinstance(head_lines_raw, list) else ()
-        )
+        head_lines = tuple(str(x) for x in head_lines_raw) if isinstance(head_lines_raw, list) else ()
         req = GenerateCurationReportDispatchRequest(
             head_lines=head_lines,
             bottom_n=int(raw.get("bottom_n") or 10),
@@ -5783,21 +6170,13 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "slug": ParameterMetadata(
-                description="The memory fact's slug — its local file name minus '.md' "
-                "(e.g. 'feedback_operator_delegates_routine_operations_end_to_end'). "
-                "Resolved to the canonical memory_id server-side via the fact's own "
-                "slot tag; never pass a memory_id here.",
+                description="The memory fact's slug — its local file name minus '.md' (e.g. 'feedback_operator_delegates_routine_operations_end_to_end'). Resolved to the canonical memory_id server-side via the fact's own slot tag; never pass a memory_id here.",
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
         output_type="object",
-        output_description=(
-            "maintenance-verbs M2.2 — resolve a memory fact's slug to its canonical "
-            "memory_id via the slot tag convention, then reinforce it (ACT-R activation "
-            "boost). Use when a fact is actually applied — cited in an incident, invoked "
-            "in a review — never on a schedule or automatically."
-        ),
+        output_description=("maintenance-verbs M2.2 — resolve a memory fact's slug to its canonical memory_id via the slot tag convention, then reinforce it (ACT-R activation boost). Use when a fact is actually applied — cited in an incident, invoked in a review — never on a schedule or automatically."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="reinforce_by_slug outcome",
@@ -5836,18 +6215,13 @@ class AgentMessagingPlugin(
         if not solet_name:
             return _failure_result(
                 code="solet_name_unset",
-                message="Could not resolve a solet name to resolve a slug's slot tag "
-                "-- SOLET_NAME is unset, root_manifest.yaml is unreadable or still "
-                "carries its unwritten placeholder, and CLAUDE_PROJECT_DIR is unset (the "
-                "final fallback needs it too).",
+                message="Could not resolve a solet name to resolve a slug's slot tag -- SOLET_NAME is unset, root_manifest.yaml is unreadable or still carries its unwritten placeholder, and CLAUDE_PROJECT_DIR is unset (the final fallback needs it too).",
             )
         tag = slug_to_slot_tag(solet_name, slug)
         lookup = self._memory_service.get_memories_by_tag(tag=tag)
         matches = lookup.get("memories") if isinstance(lookup, dict) else None
         try:
-            memory_id = resolve_memory_id_by_slug(
-                matches if isinstance(matches, list) else [], slug
-            )
+            memory_id = resolve_memory_id_by_slug(matches if isinstance(matches, list) else [], slug)
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
         self._memory_service.reinforce(memory_id=memory_id)
@@ -5858,8 +6232,7 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "agent_instance_id": ParameterMetadata(
-                description="The reporting session's own id (ledger id for a worker; "
-                "its own AGENT_INSTANCE_ID for the seat).",
+                description="The reporting session's own id (ledger id for a worker; its own AGENT_INSTANCE_ID for the seat).",
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -5889,19 +6262,12 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "current_tokens": ParameterMetadata(
-                description=(
-                    "Model-visible input tokens for the most recent assistant call, "
-                    "using the reporting runtime's native counter. Cache counters are "
-                    "reported separately and must not be added twice."
-                ),
+                description=("Model-visible input tokens for the most recent assistant call, using the reporting runtime's native counter. Cache counters are reported separately and must not be added twice."),
                 required=True,
                 type=ParameterType.INTEGER,
             ),
             "ceiling": ParameterMetadata(
-                description=(
-                    "Positive effective context capacity reported by the active runtime. "
-                    "This is distinct from a provider API maximum."
-                ),
+                description=("Positive effective context capacity reported by the active runtime. This is distinct from a provider API maximum."),
                 required=True,
                 type=ParameterType.INTEGER,
             ),
@@ -5920,52 +6286,27 @@ class AgentMessagingPlugin(
             # positive finding about that reporter, never a synonym for
             # "same as measured_at".
             "reading_at": ParameterMetadata(
-                description=(
-                    "When the READING was produced — the source transcript "
-                    "line's own timestamp, NOT the reporter's clock. "
-                    "measured_at MINUS reading_at is the observation lag. Omit "
-                    "if the transcript line carried no timestamp; omission "
-                    "records NOT REPORTED, never a fabricated zero lag."
-                ),
+                description=("When the READING was produced — the source transcript line's own timestamp, NOT the reporter's clock. measured_at MINUS reading_at is the observation lag. Omit if the transcript line carried no timestamp; omission records NOT REPORTED, never a fabricated zero lag."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "cache_read_tokens": ParameterMetadata(
-                description=(
-                    "cache_read_input_tokens on THE MOST RECENT ASSISTANT CALL — "
-                    "the same call current_tokens is summed from. 0 means that "
-                    "call read nothing from cache and paid full price. Omit if "
-                    "not measured; omission records NOT REPORTED, never 'warm'."
-                ),
+                description=("cache_read_input_tokens on THE MOST RECENT ASSISTANT CALL — the same call current_tokens is summed from. 0 means that call read nothing from cache and paid full price. Omit if not measured; omission records NOT REPORTED, never 'warm'."),
                 required=False,
                 type=ParameterType.INTEGER,
             ),
             "cache_write_tokens": ParameterMetadata(
-                description=(
-                    "Cache-write tokens on the same measured call. Omit when "
-                    "the runtime does not expose the counter; never derive it "
-                    "from total input."
-                ),
+                description=("Cache-write tokens on the same measured call. Omit when the runtime does not expose the counter; never derive it from total input."),
                 required=False,
                 type=ParameterType.INTEGER,
             ),
             "cache_cold": ParameterMetadata(
-                description=(
-                    "True when the reporter classified the prompt cache as "
-                    "expired. The classification EXCLUDES the first call after "
-                    "a /clear — that call is cold by construction because the "
-                    "clear rewrites the prefix. Omit if not measured."
-                ),
+                description=("True when the reporter classified the prompt cache as expired. The classification EXCLUDES the first call after a /clear — that call is cold by construction because the clear rewrites the prefix. Omit if not measured."),
                 required=False,
                 type=ParameterType.BOOLEAN,
             ),
             "cache_overage_signature": ParameterMetadata(
-                description=(
-                    "True when REPEATED cold calls across sub-TTL gaps show the "
-                    "cache is not surviving its nominal window. A single cold "
-                    "call after a long idle gap is ordinary expiry and must NOT "
-                    "set this. Omit if not measured."
-                ),
+                description=("True when REPEATED cold calls across sub-TTL gaps show the cache is not surviving its nominal window. A single cold call after a long idle gap is ordinary expiry and must NOT set this. Omit if not measured."),
                 required=False,
                 type=ParameterType.BOOLEAN,
             ),
@@ -5985,13 +6326,7 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "reporter_generation": ParameterMetadata(
-                description=(
-                    "The reporting hook's own content-generation constant, "
-                    "bumped in lockstep with its reporting content. NOT a git "
-                    "sha — a hook cannot know the commit it was copied from. "
-                    "Lets a reader tell a current copy from an older one that "
-                    "is still being served. Omit if not carried."
-                ),
+                description=("The reporting hook's own content-generation constant, bumped in lockstep with its reporting content. NOT a git sha — a hook cannot know the commit it was copied from. Lets a reader tell a current copy from an older one that is still being served. Omit if not carried."),
                 required=False,
                 type=ParameterType.INTEGER,
             ),
@@ -6013,13 +6348,7 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description=(
-            "maintenance-verbs M1 — overwrite the caller's own latest "
-            "context-status snapshot (shape (a) cache write), including the "
-            "optional cache-state fields the economic rotation policy's cold "
-            "branch reads and the reporter-attribution fields that say which "
-            "hook copy produced the row."
-        ),
+        output_description=("maintenance-verbs M1 — overwrite the caller's own latest context-status snapshot (shape (a) cache write), including the optional cache-state fields the economic rotation policy's cold branch reads and the reporter-attribution fields that say which hook copy produced the row."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="report_context_status outcome",
@@ -6079,21 +6408,13 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "calculation_request": ParameterMetadata(
-                description=(
-                    "Optional explicit N-aware calculation inputs: required_actions, "
-                    "measured action calibrations, cache multiplier, and versioned "
-                    "capability/economics profile identities. Omit for gauge-only readback."
-                ),
+                description=("Optional explicit N-aware calculation inputs: required_actions, measured action calibrations, cache multiplier, and versioned capability/economics profile identities. Omit for gauge-only readback."),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
         },
         output_type="object",
-        output_description=(
-            "maintenance-verbs M1 — the cached context-window occupancy for "
-            "one session; resolved=False (never a raised error) when no "
-            "report has landed for it yet."
-        ),
+        output_description=("maintenance-verbs M1 — the cached context-window occupancy for one session; resolved=False (never a raised error) when no report has landed for it yet."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="session_context_status outcome",
@@ -6101,10 +6422,7 @@ class AgentMessagingPlugin(
                 "resolved": ParameterMetadata(type=ParameterType.BOOLEAN),
                 "resolution_error": ParameterMetadata(type=ParameterType.STRING),
                 "agent_instance_id": ParameterMetadata(
-                    description=(
-                        "The LEDGER id the returned row is actually keyed on -- not "
-                        "necessarily the id that was queried (GAU-07)."
-                    ),
+                    description=("The LEDGER id the returned row is actually keyed on -- not necessarily the id that was queried (GAU-07)."),
                     type=ParameterType.STRING,
                 ),
                 # Watch-id join (GAU-07, 2026-08-18): a watcher-held session is
@@ -6115,11 +6433,7 @@ class AgentMessagingPlugin(
                     type=ParameterType.STRING,
                 ),
                 "id_resolution": ParameterMetadata(
-                    description=(
-                        "'direct' (the queried id keyed the row), "
-                        "'resolved_via_binding' (reached through the peer binding's "
-                        "stable agent_session_id), or 'unresolved'."
-                    ),
+                    description=("'direct' (the queried id keyed the row), 'resolved_via_binding' (reached through the peer binding's stable agent_session_id), or 'unresolved'."),
                     type=ParameterType.STRING,
                 ),
                 "runtime_session_id": ParameterMetadata(type=ParameterType.STRING),
@@ -6173,11 +6487,7 @@ class AgentMessagingPlugin(
             result = lifecycle_session_context_status(
                 state_service,
                 agent_instance_id=str(raw.get("agent_instance_id", "")),
-                calculation_request=(
-                    dict(raw["calculation_request"])
-                    if isinstance(raw.get("calculation_request"), dict)
-                    else None
-                ),
+                calculation_request=(dict(raw["calculation_request"]) if isinstance(raw.get("calculation_request"), dict) else None),
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -6188,32 +6498,18 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "agent_instance_id": ParameterMetadata(
-                description=(
-                    "The session whose gauge SERIES to read. Accepts either id "
-                    "the session is known by (ledger or watch), same GAU-07 "
-                    "join as session_context_status."
-                ),
+                description=("The session whose gauge SERIES to read. Accepts either id the session is known by (ledger or watch), same GAU-07 join as session_context_status."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "limit": ParameterMetadata(
-                description=(
-                    "How many history rows to return, newest first. Capped at "
-                    "the store's retention (64); the reply says whether the "
-                    "page was truncated rather than leaving it implied."
-                ),
+                description=("How many history rows to return, newest first. Capped at the store's retention (64); the reply says whether the page was truncated rather than leaving it implied."),
                 required=False,
                 type=ParameterType.INTEGER,
             ),
         },
         output_type="object",
-        output_description=(
-            "GAU-15 — one session's bounded gauge series, newest first, with "
-            "the series classified as healthy / stopped / idle / "
-            "never_started / undetermined against the lifecycle's own last "
-            "report_alive. resolved=False (never a raised error) when no "
-            "series is on file."
-        ),
+        output_description=("GAU-15 — one session's bounded gauge series, newest first, with the series classified as healthy / stopped / idle / never_started / undetermined against the lifecycle's own last report_alive. resolved=False (never a raised error) when no series is on file."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="session_context_status_history outcome",
@@ -6233,12 +6529,7 @@ class AgentMessagingPlugin(
                     type=ParameterType.STRING,
                 ),
                 "series_state": ParameterMetadata(
-                    description=(
-                        "healthy | stopped | idle | never_started | "
-                        "undetermined. 'stopped' is the GAU-01 class (the "
-                        "session works and its gauge is dark); 'idle' is a "
-                        "normal fleet state and NOT an incident."
-                    ),
+                    description=("healthy | stopped | idle | never_started | undetermined. 'stopped' is the GAU-01 class (the session works and its gauge is dark); 'idle' is a normal fleet state and NOT an incident."),
                     type=ParameterType.STRING,
                 ),
                 "series_state_reason": ParameterMetadata(
@@ -6246,21 +6537,11 @@ class AgentMessagingPlugin(
                     type=ParameterType.STRING,
                 ),
                 "last_report_alive": ParameterMetadata(
-                    description=(
-                        "When report_alive last landed for this session, "
-                        "derived from report_by minus report_by_seconds. Null "
-                        "when the row carries no window -- absence of the "
-                        "WINDOW is not evidence of absence of a TICK."
-                    ),
+                    description=("When report_alive last landed for this session, derived from report_by minus report_by_seconds. Null when the row carries no window -- absence of the WINDOW is not evidence of absence of a TICK."),
                     type=ParameterType.STRING,
                 ),
                 "entries": ParameterMetadata(
-                    description=(
-                        "The history rows, newest first: recorded_at, "
-                        "measured_at, reading_at, current_tokens, ceiling, "
-                        "model, claude_session_id, agent_session_id, the three "
-                        "cache fields, reporter_surface, reporter_generation."
-                    ),
+                    description=("The history rows, newest first: recorded_at, measured_at, reading_at, current_tokens, ceiling, model, claude_session_id, agent_session_id, the three cache fields, reporter_surface, reporter_generation."),
                     type=ParameterType.LIST,
                 ),
                 "returned": ParameterMetadata(type=ParameterType.INTEGER),
@@ -6273,10 +6554,7 @@ class AgentMessagingPlugin(
                     type=ParameterType.INTEGER,
                 ),
                 "rotation_boundaries": ParameterMetadata(
-                    description=(
-                        "How many /clear boundaries this page spans, counted "
-                        "as changes of claude_session_id under one instance id."
-                    ),
+                    description=("How many /clear boundaries this page spans, counted as changes of claude_session_id under one instance id."),
                     type=ParameterType.INTEGER,
                 ),
             },
@@ -6305,9 +6583,7 @@ class AgentMessagingPlugin(
             result = gauge_session_context_status_history(
                 state_service,
                 agent_instance_id=str(raw.get("agent_instance_id", "")),
-                limit=int(limit)
-                if isinstance(limit, (int, str)) and str(limit).strip()
-                else GAUGE_HISTORY_RETENTION,
+                limit=int(limit) if isinstance(limit, (int, str)) and str(limit).strip() else GAUGE_HISTORY_RETENTION,
                 peer_registry=self._peer_registry,
             )
         except VerbError as exc:
@@ -6329,56 +6605,33 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "checked_at": ParameterMetadata(
-                description=(
-                    "When the consumer hook last actually performed its "
-                    "existence check (ISO timestamp), REGARDLESS of what it "
-                    "found. Stamped on every call — this is the honesty "
-                    "mechanism itself."
-                ),
+                description=("When the consumer hook last actually performed its existence check (ISO timestamp), REGARDLESS of what it found. Stamped on every call — this is the honesty mechanism itself."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "pending_found_at": ParameterMetadata(
-                description=(
-                    "ISO timestamp of the last time this check found a "
-                    "pending delivery and forced a Stop-hook block/continue. "
-                    "Omit when this check found nothing."
-                ),
+                description=("ISO timestamp of the last time this check found a pending delivery and forced a Stop-hook block/continue. Omit when this check found nothing."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "pending_reason": ParameterMetadata(
-                description=(
-                    "The fixed nudge text last delivered via decision:block. "
-                    "Requires pending_found_at to be present alongside it."
-                ),
+                description=("The fixed nudge text last delivered via decision:block. Requires pending_found_at to be present alongside it."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "reporter_surface": ParameterMetadata(
-                description=(
-                    "checkout | plugin_cache | vendored | release | unknown "
-                    "-- which copy of the hook wrote this row, same closed "
-                    "vocabulary as report_context_status's field of the same "
-                    "name. Omit only if the reporter predates attribution."
-                ),
+                description=("checkout | plugin_cache | vendored | release | unknown -- which copy of the hook wrote this row, same closed vocabulary as report_context_status's field of the same name. Omit only if the reporter predates attribution."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "agent_session_id": ParameterMetadata(
-                description=(
-                    "The reporting session's STABLE $AGENT_SESSION_ID, "
-                    "captured for a future routing join. Omit if the "
-                    "reporter has no session id."
-                ),
+                description=("The reporting session's STABLE $AGENT_SESSION_ID, captured for a future routing join. Omit if the reporter has no session id."),
                 required=False,
                 type=ParameterType.STRING,
             ),
         },
         output_type="object",
-        output_description=(
-            "CDX-06 part C — overwrite the caller's own latest inbox-consumption-check snapshot."
-        ),
+        output_description=("CDX-06 part C — overwrite the caller's own latest inbox-consumption-check snapshot."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="report_inbox_consumption outcome",
@@ -6427,11 +6680,7 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description=(
-            "CDX-06 part C — the cached inbox-consumption-check state for "
-            "one session; resolved=False (never a raised error, never a "
-            "defaulted True) when no check has landed for it yet."
-        ),
+        output_description=("CDX-06 part C — the cached inbox-consumption-check state for one session; resolved=False (never a raised error, never a defaulted True) when no check has landed for it yet."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="session_inbox_consumption_status outcome",
@@ -6477,38 +6726,22 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "notice_type": ParameterMetadata(
-                description=(
-                    "Narrow to one detector: 'gauge_stale_notice' (a live "
-                    "session's gauge ARRESTED) or 'gauge_coverage_notice' (a "
-                    "live session produced NO gauge row at all). Omit for "
-                    "both."
-                ),
+                description=("Narrow to one detector: 'gauge_stale_notice' (a live session's gauge ARRESTED) or 'gauge_coverage_notice' (a live session produced NO gauge row at all). Omit for both."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "agent_instance_id": ParameterMetadata(
-                description=(
-                    "Narrow to the SUBJECT session the notices are about (not "
-                    "the steward they were sent to). Accepts either id the "
-                    "session is known by, same GAU-07 join as "
-                    "session_context_status. Omit for all subjects."
-                ),
+                description=("Narrow to the SUBJECT session the notices are about (not the steward they were sent to). Accepts either id the session is known by, same GAU-07 join as session_context_status. Omit for all subjects."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "since": ParameterMetadata(
-                description=(
-                    "ISO-8601 lower bound on emitted_at, inclusive. Omit for everything retained."
-                ),
+                description=("ISO-8601 lower bound on emitted_at, inclusive. Omit for everything retained."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "limit": ParameterMetadata(
-                description=(
-                    "How many records to return, newest first. Capped at the "
-                    "store's read ceiling (64); the reply says whether the "
-                    "page was truncated rather than leaving it implied."
-                ),
+                description=("How many records to return, newest first. Capped at the store's read ceiling (64); the reply says whether the page was truncated rather than leaving it implied."),
                 required=False,
                 type=ParameterType.INTEGER,
             ),
@@ -6528,12 +6761,7 @@ class AgentMessagingPlugin(
             description="gauge_notice_records outcome",
             properties={
                 "entries": ParameterMetadata(
-                    description=(
-                        "The records, newest first: notice_type, "
-                        "agent_instance_id, emitted_at, steward_instance_id, "
-                        "delivery_outcome, release_id, threshold_s, "
-                        "observed_s, last_report_alive_at, gauge_measured_at."
-                    ),
+                    description=("The records, newest first: notice_type, agent_instance_id, emitted_at, steward_instance_id, delivery_outcome, release_id, threshold_s, observed_s, last_report_alive_at, gauge_measured_at."),
                     type=ParameterType.LIST,
                 ),
                 "returned": ParameterMetadata(type=ParameterType.INTEGER),
@@ -6542,24 +6770,15 @@ class AgentMessagingPlugin(
                     type=ParameterType.BOOLEAN,
                 ),
                 "queried_agent_instance_id": ParameterMetadata(
-                    description=(
-                        "The subject id the caller passed, whichever of the "
-                        "two it was. Null when unfiltered."
-                    ),
+                    description=("The subject id the caller passed, whichever of the two it was. Null when unfiltered."),
                     type=ParameterType.STRING,
                 ),
                 "agent_instance_id": ParameterMetadata(
-                    description=(
-                        "The id the records are keyed on after the GAU-07 "
-                        "join. Null when unfiltered."
-                    ),
+                    description=("The id the records are keyed on after the GAU-07 join. Null when unfiltered."),
                     type=ParameterType.STRING,
                 ),
                 "id_resolution": ParameterMetadata(
-                    description=(
-                        "'direct' | 'resolved_via_binding' | 'unresolved'. "
-                        "Null when no subject filter was given."
-                    ),
+                    description=("'direct' | 'resolved_via_binding' | 'unresolved'. Null when no subject filter was given."),
                     type=ParameterType.STRING,
                 ),
                 "notice_type": ParameterMetadata(
@@ -6575,10 +6794,7 @@ class AgentMessagingPlugin(
                     type=ParameterType.INTEGER,
                 ),
                 "delivery_outcomes": ParameterMetadata(
-                    description=(
-                        "The delivery_outcome domain, published so a reader "
-                        "need not guess which values are possible."
-                    ),
+                    description=("The delivery_outcome domain, published so a reader need not guess which values are possible."),
                     type=ParameterType.LIST,
                 ),
                 "notice_types": ParameterMetadata(
@@ -6617,9 +6833,7 @@ class AgentMessagingPlugin(
                 notice_type=str(notice_type) if notice_type else None,
                 agent_instance_id=str(agent_instance_id) if agent_instance_id else None,
                 since=str(since) if since else None,
-                limit=int(limit)
-                if isinstance(limit, (int, str)) and str(limit).strip()
-                else GAUGE_NOTICE_READ_ROWS,
+                limit=int(limit) if isinstance(limit, (int, str)) and str(limit).strip() else GAUGE_NOTICE_READ_ROWS,
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -6635,19 +6849,12 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "purpose": ParameterMetadata(
-                description=(
-                    "Why this canary exists, in words — for whoever finds a "
-                    "synthetic session in a listing and needs to know it is "
-                    "deliberate."
-                ),
+                description=("Why this canary exists, in words — for whoever finds a synthetic session in a listing and needs to know it is deliberate."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "registered_by": ParameterMetadata(
-                description=(
-                    "Who is registering it. A synthetic identity in the fleet "
-                    "is an act someone took, never an ambient fact."
-                ),
+                description=("Who is registering it. A synthetic identity in the fleet is an act someone took, never an ambient fact."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -6705,18 +6912,12 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "agent_instance_id": ParameterMetadata(
-                description=(
-                    "The CANARY to arrest. A tamper may only ever target a "
-                    "registered canary — never a real session."
-                ),
+                description=("The CANARY to arrest. A tamper may only ever target a registered canary — never a real session."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "directed_by": ParameterMetadata(
-                description=(
-                    "Who is ordering the tamper. An unattributable tamper is "
-                    "the failure this verb exists to make impossible."
-                ),
+                description=("Who is ordering the tamper. An unattributable tamper is the failure this verb exists to make impossible."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -6726,22 +6927,12 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "arrest_until": ParameterMetadata(
-                description=(
-                    "End of the arrest window, exclusive, ISO-8601. Always "
-                    "bounded: an arrest that never ends makes its alarms "
-                    "attributable forever, which is the same as not being "
-                    "attributable."
-                ),
+                description=("End of the arrest window, exclusive, ISO-8601. Always bounded: an arrest that never ends makes its alarms attributable forever, which is the same as not being attributable."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "expected_notice_type": ParameterMetadata(
-                description=(
-                    "Which alarm this arrest expects to provoke — "
-                    "gauge_stale_notice or gauge_coverage_notice. Recorded "
-                    "BEFORE the outcome is known, so the verifier cannot grade "
-                    "its own expectations after the fact."
-                ),
+                description=("Which alarm this arrest expects to provoke — gauge_stale_notice or gauge_coverage_notice. Recorded BEFORE the outcome is known, so the verifier cannot grade its own expectations after the fact."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -6809,32 +7000,17 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "agent_instance_id": ParameterMetadata(
-                description=(
-                    "The ALREADY-REGISTERED canary to mint a lifecycle row "
-                    "for. Any other identity is refused: this verb is the "
-                    "inverse of the not_a_canary guard, and without that "
-                    "inversion it would be a way to fabricate a session that "
-                    "looks alive to every fleet surface."
-                ),
+                description=("The ALREADY-REGISTERED canary to mint a lifecycle row for. Any other identity is refused: this verb is the inverse of the not_a_canary guard, and without that inversion it would be a way to fabricate a session that looks alive to every fleet surface."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "lane_id": ParameterMetadata(
-                description=(
-                    "The lane label the row carries. Must be ordinary-looking: "
-                    "the staleness alarm quotes it verbatim, so a lane named "
-                    "for the canary announces it in every alarm."
-                ),
+                description=("The lane label the row carries. Must be ordinary-looking: the staleness alarm quotes it verbatim, so a lane named for the canary announces it in every alarm."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "spawned_by_instance_id": ParameterMetadata(
-                description=(
-                    "The steward to notify. REQUIRED — the staleness leg skips "
-                    "every row without a spawner, so a canary registered "
-                    "without one is invisible to the detector it exists to "
-                    "exercise."
-                ),
+                description=("The steward to notify. REQUIRED — the staleness leg skips every row without a spawner, so a canary registered without one is invisible to the detector it exists to exercise."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -6844,19 +7020,9 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "report_by_seconds": ParameterMetadata(
-                description=(
-                    "The lifecycle reporting window, in seconds. Must be "
-                    "positive: with no window the derived last report_alive is "
-                    "None, which means NO EVIDENCE rather than 'not "
-                    "advancing', and the staleness leg skips the row."
-                ),
+                description=("The lifecycle reporting window, in seconds. Must be positive: with no window the derived last report_alive is None, which means NO EVIDENCE rather than 'not advancing', and the staleness leg skips the row."),
                 required=True,
                 type=ParameterType.INTEGER,
-            ),
-            "brief_ref": ParameterMetadata(
-                description="Optional brief reference recorded on the row.",
-                required=False,
-                type=ParameterType.STRING,
             ),
             "budget_line": ParameterMetadata(
                 description="Optional budget line recorded on the row.",
@@ -6892,18 +7058,11 @@ class AgentMessagingPlugin(
                 "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
                 "lane_id": ParameterMetadata(type=ParameterType.STRING),
                 "host": ParameterMetadata(
-                    description=(
-                        "Always 'synthetic' — a degenerate, no-op host driver "
-                        "(GAU-24): it refuses spawn/terminate loudly rather "
-                        "than touching anything, so retire_gauge_canary can "
-                        "reach this row without a real process behind it."
-                    ),
+                    description=("Always 'synthetic' — a degenerate, no-op host driver (GAU-24): it refuses spawn/terminate loudly rather than touching anything, so retire_gauge_canary can reach this row without a real process behind it."),
                     type=ParameterType.STRING,
                 ),
                 "lifecycle_state": ParameterMetadata(
-                    description=(
-                        "'spawning' — the first canary tick's report_alive promotes it to live."
-                    ),
+                    description=("'spawning' — the first canary tick's report_alive promotes it to live."),
                     type=ParameterType.STRING,
                 ),
                 "spawned_by_instance_id": ParameterMetadata(type=ParameterType.STRING),
@@ -6938,7 +7097,6 @@ class AgentMessagingPlugin(
                 spawned_by_instance_id=str(raw.get("spawned_by_instance_id", "")),
                 directed_by=str(raw.get("directed_by", "")),
                 report_by_seconds=int(window) if str(window).strip().lstrip("-").isdigit() else 0,
-                brief_ref=str(raw.get("brief_ref", "")),
                 budget_line=str(raw.get("budget_line", "")),
                 model=str(raw.get("model", "")),
             )
@@ -6951,12 +7109,7 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "agent_instance_id": ParameterMetadata(
-                description=(
-                    "The registered canary to stand down. If it has a "
-                    "managed_session row, that row is retired first; the "
-                    "registry mark is stamped retired_at only after that "
-                    "succeeds (or there was never a row to retire)."
-                ),
+                description=("The registered canary to stand down. If it has a managed_session row, that row is retired first; the registry mark is stamped retired_at only after that succeeds (or there was never a row to retire)."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -6968,11 +7121,7 @@ class AgentMessagingPlugin(
         },
         output_type="object",
         output_description=(
-            "GAU-24 — stand a canary down all the way: the ledger row (via "
-            "the no-op synthetic host driver, if a row exists) AND the "
-            "registry mark, ledger first. Closes the leak where every canary "
-            "exercise left one active canary mark plus one permanently-live "
-            "managed_session row that nothing could retire."
+            "GAU-24 — stand a canary down all the way: the ledger row (via the no-op synthetic host driver, if a row exists) AND the registry mark, ledger first. Closes the leak where every canary exercise left one active canary mark plus one permanently-live managed_session row that nothing could retire."
         ),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -7025,12 +7174,7 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "detector_deployed": ParameterMetadata(
-                description=(
-                    "Whether the staleness detector is present in the RUNNING "
-                    "release, established out-of-band by the release "
-                    "capability probe. Omit when it is not established: the "
-                    "verifier then ABSTAINS rather than guessing."
-                ),
+                description=("Whether the staleness detector is present in the RUNNING release, established out-of-band by the release capability probe. Omit when it is not established: the verifier then ABSTAINS rather than guessing."),
                 required=False,
                 type=ParameterType.BOOLEAN,
             ),
@@ -7079,10 +7223,7 @@ class AgentMessagingPlugin(
                 "detector_deployed": ParameterMetadata(type=ParameterType.BOOLEAN),
                 "windows_examined": ParameterMetadata(type=ParameterType.INTEGER),
                 "closed_windows": ParameterMetadata(
-                    description=(
-                        "Windows that have ENDED — the only ones whose alarm "
-                        "can be judged. An open window has not had its chance."
-                    ),
+                    description=("Windows that have ENDED — the only ones whose alarm can be judged. An open window has not had its chance."),
                     type=ParameterType.INTEGER,
                 ),
                 "windows_with_expected_alarm": ParameterMetadata(
@@ -7095,9 +7236,7 @@ class AgentMessagingPlugin(
                 "alarms_examined": ParameterMetadata(type=ParameterType.INTEGER),
                 "scheduled_alarms": ParameterMetadata(type=ParameterType.INTEGER),
                 "unattributed_alarms": ParameterMetadata(
-                    description=(
-                        "Alarms outside every logged window. NOT canary noise to dismiss."
-                    ),
+                    description=("Alarms outside every logged window. NOT canary noise to dismiss."),
                     type=ParameterType.INTEGER,
                 ),
                 "truncated": ParameterMetadata(type=ParameterType.BOOLEAN),
@@ -7136,26 +7275,18 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "staleness_window_hours": ParameterMetadata(
-                description=(
-                    "Staleness window stamped on each seeded cell. Default 72 "
-                    "(the accepted cadence design); a consumer refuses a cell "
-                    "measured longer ago than this."
-                ),
+                description=("Explicit positive integer window; absent reads active catalog policy then observed windows, else null with advisory. Age never excludes accepted cells."),
                 required=False,
                 type=ParameterType.INTEGER,
             ),
         },
         output_type="object",
-        output_description=(
-            "iss_48ea8171 -- write the declarative model_capability_seed.v1.json "
-            "into the catalog as pending_crosscheck cells. A seed never accepts "
-            "a cell and never touches one a real refresh run already accepted, "
-            "so it is safe to run at every start-up."
-        ),
+        output_description=("iss_48ea8171 -- write the declarative model_capability_seed.v1.json into the catalog as pending_crosscheck cells. A seed never accepts a cell and never touches one a real refresh run already accepted, so it is safe to run at every start-up."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="seed_model_capability_catalog outcome",
             properties={
+                "freshness_window": ParameterMetadata(type=ParameterType.OBJECT, description="Resolved hours (null when unknown), exact integer cell_hours or null, request/policy/observed_catalog/unknown source, policy_revision_id and advisories; read on each call."),
                 "run_id": ParameterMetadata(type=ParameterType.STRING, description="The model_capability_refresh_run row (trigger=seed)."),
                 "seed_version": ParameterMetadata(type=ParameterType.STRING),
                 "cells_seeded": ParameterMetadata(type=ParameterType.INTEGER, description="Cells written or rewritten as pending_crosscheck."),
@@ -7197,15 +7328,13 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description=(
-            "iss_48ea8171 -- the model x effort capability score and real USD "
-            "cost-per-task table as stored, each cell annotated is_fresh and "
-            "servable. What the hand-typed ticket-header JSON becomes: a read."
-        ),
+        output_description=("iss_48ea8171 -- the model x effort capability score and real USD cost-per-task table as stored, each cell annotated is_fresh and servable. What the hand-typed ticket-header JSON becomes: a read."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="read_model_capability_catalog outcome",
             properties={
+                "warnings": ParameterMetadata(type=ParameterType.LIST, description="Optional policy/freshness and truncation advisories; surface their text."),
+                "freshness_window": ParameterMetadata(type=ParameterType.OBJECT, description="Resolved hours (null when unknown), exact integer cell_hours or null, request/policy/observed_catalog/unknown source, policy_revision_id and advisories; read on each call."),
                 "cells": ParameterMetadata(type=ParameterType.LIST, description="Catalog rows plus is_fresh and servable."),
                 "total_cells": ParameterMetadata(type=ParameterType.INTEGER, description="Rows matching the filters before the acceptance filter."),
                 "servable_cells": ParameterMetadata(type=ParameterType.INTEGER, description="Rows dispatch may use right now."),
@@ -7238,6 +7367,137 @@ class AgentMessagingPlugin(
         return _success_result(data=result)
 
     @platform_process(
+        name="set_model_catalog_policy",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "stable_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Stable configuration identity, retained across all revisions."),
+            "action": ParameterMetadata(type=ParameterType.STRING, required=True, description="set creates; correct patches values; clear nulls optional clear_fields; retire/reopen reverse lifecycle state."),
+            "expected_revision": ParameterMetadata(type=ParameterType.INTEGER, required=True, description="Current readback revision; explicitly null for initial set of an absent record."),
+            "reason": ParameterMetadata(type=ParameterType.STRING, required=True, description="Nonblank reason retained with server-derived current Operator identity."),
+            "values": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Declared configuration fields for set/correct; no secret values. Empty maps clear source aliases or metric_units."),
+            "clear_fields": ParameterMetadata(type=ParameterType.LIST, required=False, description="Optional field names to null on clear; no numerical defaults."),
+        },
+        output_type="object",
+        output_description="New current snapshot with revision, predecessor and derived actor; immutable history commits in the same transaction.",
+    )
+    def set_model_catalog_policy(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        try:
+            actor = self._dispatch_actor_from_state(state)
+            if not holds_role(state_service, "Operator", actor.agent_session_id):
+                return _failure_result(code="operator_required", message="The derived session must currently hold Operator.")
+            raw = params.get("parameters", params)
+            if {"actor", "agent_session_id", "agent_instance_id"}.intersection(raw):
+                return _failure_result(code="operator_identity_spoofed", message="Operator identity is server-derived; do not supply actor identity.")
+            result = set_catalog_configuration(state_service, raw, actor=actor.agent_session_id, source=False)
+        except (CatalogError, DispatchError) as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="set_model_catalog_source",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "stable_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Stable configuration identity, retained across all revisions."),
+            "action": ParameterMetadata(type=ParameterType.STRING, required=True, description="set creates; correct patches values; clear nulls optional clear_fields; retire/reopen reverse lifecycle state."),
+            "expected_revision": ParameterMetadata(type=ParameterType.INTEGER, required=True, description="Current readback revision; explicitly null for initial set of an absent record."),
+            "reason": ParameterMetadata(type=ParameterType.STRING, required=True, description="Nonblank reason retained with server-derived current Operator identity."),
+            "values": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Declared configuration fields for set/correct; no secret values. Empty maps clear source aliases or metric_units."),
+            "clear_fields": ParameterMetadata(type=ParameterType.LIST, required=False, description="Optional field names to null on clear; no numerical defaults."),
+        },
+        output_type="object",
+        output_description="New current snapshot with revision, predecessor and derived actor; immutable history commits in the same transaction.",
+    )
+    def set_model_catalog_source(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        try:
+            actor = self._dispatch_actor_from_state(state)
+            if not holds_role(state_service, "Operator", actor.agent_session_id):
+                return _failure_result(code="operator_required", message="The derived session must currently hold Operator.")
+            raw = params.get("parameters", params)
+            if {"actor", "agent_session_id", "agent_instance_id"}.intersection(raw):
+                return _failure_result(code="operator_identity_spoofed", message="Operator identity is server-derived; do not supply actor identity.")
+            result = set_catalog_configuration(state_service, raw, actor=actor.agent_session_id, source=True)
+        except (CatalogError, DispatchError) as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="read_model_catalog_policy",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "kind": ParameterMetadata(type=ParameterType.STRING, required=True, description="policy or source; ordinary reads require no Operator role."),
+            "stable_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Stable configuration identity."),
+            "history_limit": ParameterMetadata(type=ParameterType.INTEGER, required=False, description="Explicit positive history page size; omit to read current only."),
+            "after": ParameterMetadata(type=ParameterType.LIST, required=False, description="Exact next_after [revision, id] from the previous history page."),
+        },
+        output_type="object",
+        output_description="Current snapshot including retired state; requested immutable history page and next_after frontier, or null history when not requested. Absent configuration is advisory.",
+    )
+    def read_model_catalog_policy(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        try:
+            result = read_catalog_configuration(state_service, params.get("parameters", params))
+        except CatalogError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="set_model_cells_enabled",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "action": ParameterMetadata(type=ParameterType.STRING, required=False, description="set (default), correct, retire or clear; clear without rule_id restores all-on."),
+            "selector": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="AND of provider, runtime, model_family_prefix, model and effort; absent dimensions are wildcards."),
+            "enabled": ParameterMetadata(type=ParameterType.BOOLEAN, required=False, description="Required for set/correct. Independent of catalog acceptance."),
+            "only": ParameterMetadata(type=ParameterType.BOOLEAN, required=False, description="With set/enabled=true, atomically replace policy with default-off and matching-on."),
+            "rule_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Existing identifier for correction, retire or clear."),
+            "expected_updated_at": ParameterMetadata(type=ParameterType.STRING, required=False, description="Policy readback premise; explicitly null only for uninitialized create."),
+            "reason": ParameterMetadata(type=ParameterType.STRING, required=True, description="Operator reason retained with derived identity in immutable history."),
+        },
+        output_type="object",
+        output_description="Current policy, cells, history and allocated rule/run ids. Current Operator binding is checked against the server-derived session.",
+    )
+    def set_model_cells_enabled(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        try:
+            actor = self._dispatch_actor_from_state(state)
+            if not holds_role(state_service, "Operator", actor.agent_session_id):
+                return _failure_result(code="operator_required", message="The derived session must currently hold Operator.")
+            raw = params.get("parameters", params)
+            if "actor" in raw or "agent_session_id" in raw or "agent_instance_id" in raw:
+                return _failure_result(code="operator_identity_spoofed", message="Operator identity is server-derived; do not supply actor identity.")
+            result = set_model_cells_enabled(state_service, raw, actor=actor.agent_session_id)
+        except (CatalogError, DispatchError) as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="read_model_cell_policy",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={"history_limit": ParameterMetadata(type=ParameterType.INTEGER, required=False, description="Latest immutable policy_change runs, 1..100; default 20.")},
+        output_type="object",
+        output_description="Current ordered rule ids, updated_at premise, visible cell flags/provenance and bounded policy history. Uninitialized means explicit default all-on.",
+    )
+    def read_model_cell_policy(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        try:
+            raw = params.get("parameters", params)
+            result = read_model_cell_policy(state_service, history_limit=raw.get("history_limit", 20))
+        except CatalogError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
         name="select_dispatch_tier",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -7252,7 +7512,7 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "scope_tags": ParameterMetadata(
-                description="Caller-declared work scope tags (e.g. [\"state_schema\"]), preserved as provenance. The retired state_schema floor does not restrict candidates; numeric score and fresh catalog acceptance still govern selection. Same vocabulary as spawn_session/dispatch_managed_work.",
+                description='Caller-declared work scope tags (e.g. ["state_schema"]), preserved as provenance. The retired state_schema floor does not restrict candidates; numeric score and catalog acceptance still govern selection. Same vocabulary as spawn_session/dispatch_managed_work.',
                 required=False,
                 type=ParameterType.LIST,
             ),
@@ -7263,7 +7523,12 @@ class AgentMessagingPlugin(
             ),
             "score_margin": ParameterMetadata(description="Headroom added to required_score. Default 0.", required=False, type=ParameterType.FLOAT),
             "cost_tolerance": ParameterMetadata(description="Near-tie band within which the lower effort wins. Default 0.05.", required=False, type=ParameterType.FLOAT),
-            "max_staleness_hours": ParameterMetadata(description="Tightens (never loosens) the stored staleness window.", required=False, type=ParameterType.INTEGER),
+            "max_staleness_hours": ParameterMetadata(description="Explicit positive freshness window takes precedence over active catalog policy and observed cell windows; absent may remain null with advisory. Never excludes a cell.", required=False, type=ParameterType.INTEGER),
+            "pin": ParameterMetadata(description="Optional exact {runtime, model, effort} accepted scored cell; overrides threshold, constraints and floor with advisories; operator-disabled cells are unavailable. Null clears; requires pin_basis.", required=False, type=ParameterType.OBJECT),
+            "pin_basis": ParameterMetadata(description="Nonempty caller provenance required with pin; clear both to null for cheapest selection.", required=False, type=ParameterType.STRING),
+            "effort_ceiling": ParameterMetadata(description="Inclusive maximum effort in EFFORT_ORDER; null clears the ceiling. Filtered before feasibility.", required=False, type=ParameterType.STRING),
+            "exclude_model_prefixes": ParameterMetadata(description="List of non-empty model prefixes excluded before feasibility; empty clears.", required=False, type=ParameterType.LIST),
+            "exclude_runtimes": ParameterMetadata(description="List of non-empty runtime names excluded before feasibility; empty clears.", required=False, type=ParameterType.LIST),
             "runtime": ParameterMetadata(
                 description="Optional runtime (claude_code or codex). Pass it when the coordinator has chosen the runtime, so a cheaper cell of the other runtime cannot dominate it out; cheapest-clearing is then chosen within that runtime only and the selection_receipt carries it as runtime_constraint. Absent: all runtimes compete.",
                 required=False,
@@ -7272,32 +7537,50 @@ class AgentMessagingPlugin(
         },
         output_type="object",
         output_description=(
-            "iss_48ea8171 -- the cheapest fresh, accepted, policy-allowed (model, "
+            "iss_48ea8171 -- the cheapest accepted, policy-allowed (model, "
             "effort) cell clearing the required score, with the evidence: the "
             "selected model's effort ladder (marginal points per cost unit), the "
-            "Pareto frontier, and every dominated pair. Refuses rather than guesses "
-            "when the catalog is stale or nothing clears."
+            "Pareto frontier, and every dominated pair. Refuses only when nothing is "
+            "accepted or nothing clears. A reading past its staleness window is used "
+            "and reported in stale_readings and warnings (rul_becb4bed), and queues a "
+            "catalog refresh. An exact accepted scored pin takes precedence and reports its provenance, cost delta and overrides."
         ),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="select_dispatch_tier outcome",
             properties={
+                "freshness_window": ParameterMetadata(type=ParameterType.OBJECT, description="Resolved hours (null when unknown), exact integer cell_hours or null, request/policy/observed_catalog/unknown source, policy_revision_id and advisories; read on each call."),
                 "selected": ParameterMetadata(type=ParameterType.OBJECT, description="runtime, model, effort, capability_score, cost_per_task_usd, relative_cost_multiplier, measured_at, acceptance; plus plan_weight when the objective is allowance_weighted."),
+                "selection_mode": ParameterMetadata(type=ParameterType.STRING, description="cheapest or pinned."),
+                "pin_basis": ParameterMetadata(type=ParameterType.STRING, description="Caller provenance; null without pin."),
+                "pin_cost_delta": ParameterMetadata(type=ParameterType.FLOAT, description="Pinned objective cost minus cheapest feasible cost; null without pin, price or feasible alternative."),
+                "pin_overrides_constraints": ParameterMetadata(type=ParameterType.BOOLEAN, description="The pin bypassed an effort/runtime/model-prefix constraint."),
+                "pin_below_threshold": ParameterMetadata(type=ParameterType.BOOLEAN, description="Accepted pin is below required_score + score_margin."),
                 "billing_objective": ParameterMetadata(type=ParameterType.STRING),
                 "required_score": ParameterMetadata(type=ParameterType.FLOAT),
                 "effective_required_score": ParameterMetadata(type=ParameterType.FLOAT, description="required_score + score_margin."),
                 "frontier": ParameterMetadata(type=ParameterType.LIST, description="Feasible cells no other beats on both axes, cheapest first."),
                 "dominated": ParameterMetadata(type=ParameterType.LIST, description="{weaker, stronger} pairs where another model's cell wins on both axes."),
                 "ladder": ParameterMetadata(type=ParameterType.LIST, description="The selected model's effort steps with score_gain, cost_delta, points_per_cost_unit."),
-                "excluded": ParameterMetadata(type=ParameterType.OBJECT, description="Counts: not_accepted, stale, capability_floor_disallowed, quota_exhausted, unpriced, below_threshold."),
+                "excluded": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description="Counts: operator_disabled, not_accepted, capability_floor_disallowed, unpriced, below_threshold. Active constraints add constraint_runtime, constraint_model_prefix, constraint_effort_ceiling counts (runtime first, prefix second, ceiling last). Age never excludes; quota telemetry is independent.",
+                ),
+                "advisories": ParameterMetadata(type=ParameterType.OBJECT, description="Count of feasible cells used despite a reading past its window (stale_reading_used)."),
+                "stale_readings": ParameterMetadata(type=ParameterType.LIST, description="Feasible cells and any selected pin read past the staleness window, oldest first: runtime, model, effort, measured_at, age_hours, window_hours, selected. Not part of selection_receipt."),
                 "catalog_run_id": ParameterMetadata(type=ParameterType.STRING, description="Newest refresh run among the accepted cells; null when none."),
                 "policy_version": ParameterMetadata(type=ParameterType.STRING, description="model_dispatch_policy version consulted; null when neither dispatch_kind nor scope_tags was given."),
                 "capability_floors": ParameterMetadata(type=ParameterType.LIST, description="Capability floors applied from scope_tags (tag, source, detail); empty when none."),
                 "unscored_cells": ParameterMetadata(type=ParameterType.INTEGER, description="Stored rows with no capability score, dropped before selection."),
-                "expired_allowance_readings": ParameterMetadata(type=ParameterType.LIST, description="Recorded allowance-pool readings past their expiry; they no longer count, and a pool with no current reading excludes nothing."),
                 "cost_basis": ParameterMetadata(type=ParameterType.OBJECT, description="Present only for allowance_weighted: the plan, its dispatch_weights table (basis, ruling_id or evidence_ref, default and per-prefix weights) and selected_weight."),
-                "warnings": ParameterMetadata(type=ParameterType.LIST, description="Present only when non-empty: a covering flat-rate plan declares no dispatch_weights, so the default ranking equals metered dollars."),
-                "selection_receipt": ParameterMetadata(type=ParameterType.OBJECT, description="Exact input/result receipt required by spawn_session to replay this selection."),
+                "warnings": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Present only when non-empty: operator notices to surface. A covering flat-rate plan declares no dispatch_weights (ranking equals metered dollars); stale readings were used, and whether a refresh was requested or suppressed by a recent refresh run.",
+                ),
+                "selection_receipt": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description="Exact input/result receipt required by spawn_session to replay this selection; always includes pin, pin_basis and effort_ceiling (null defaults), exclude_model_prefixes and exclude_runtimes (empty list defaults). Predeploy receipts replay with absent defaults without mutation.",
+                ),
             },
         ),
     )
@@ -7315,40 +7598,317 @@ class AgentMessagingPlugin(
             result = catalog_select_tier(state_service, dict(raw))
         except (CatalogError, TierSelectionError, DispatchPolicyError) as exc:
             return _failure_result(code=exc.code, message=exc.message)
-        return _success_result(data=result)
+        # A selection made from stale readings carries its own refresh request (rul_becb4bed);
+        # the verb is a pure read, so the request rides out as a returned action (Pattern 6a).
+        refresh_request = result.pop("refresh_request", None)
+        return _success_result(data=result, actions=None if refresh_request is None else [refresh_request])
+
+    @platform_process(
+        name="sweep_fleet_stall",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "trigger": ParameterMetadata(
+                description="manual | cron -- how this run was started.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "window_seconds": ParameterMetadata(
+                description=(f"Positive integer window the produced-work read covers. Default {FLEET_STALL_WINDOW_SECONDS} (30 minutes)."),
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "iss_ebc1ce9c, iss_c4fbe548 -- the runtime-neutral stall sweep. Reports a stall when the "
+            "register holds work that is ready and owned while the actors that own it produced nothing "
+            "in the window. Sessions are enumerated from the managed_session ledger, so a Codex-only "
+            "fleet is covered identically to a Claude one; nothing here keys on a liveness signal, on "
+            "~/.claude/sessions or on a session count. REPORT ONLY: it never drives, clears, compacts, "
+            "terminates or spawns anything. A read that did not complete yields an explicit advisory "
+            "and the verdict 'unmeasured', never a manufactured stall. Every completed run publishes "
+            "itself, so read_fleet_stall_sweep_status can tell when the sweep has stopped running."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="One sweep's verdict and the facts it was computed from.",
+            properties={
+                "verdict": ParameterMetadata(type=ParameterType.STRING, description="stalled | not_stalled | unmeasured (a read did not complete; see advisories)."),
+                "trigger": ParameterMetadata(type=ParameterType.STRING, description="manual | cron, as given."),
+                "completed_at": ParameterMetadata(type=ParameterType.STRING, description="When this run completed (UTC ISO-8601)."),
+                "window_seconds": ParameterMetadata(type=ParameterType.INTEGER, description="The window the produced-work read covered."),
+                "window_since": ParameterMetadata(type=ParameterType.STRING, description="The --since instant used for every produced-work read."),
+                "ready_and_owned_count": ParameterMetadata(type=ParameterType.INTEGER, description="Units whose coverage is active-owned: live, owned and unexpired."),
+                "produced_count": ParameterMetadata(type=ParameterType.INTEGER, description="Register artifacts the owning actors produced inside the window."),
+                "owning_actors": ParameterMetadata(type=ParameterType.LIST, description="Distinct actors that own the ready work; the produced-work read is keyed on exactly these."),
+                "session_count": ParameterMetadata(type=ParameterType.INTEGER, description="Non-terminal managed sessions of every runtime. Reported, never part of the predicate."),
+                "runtime_counts": ParameterMetadata(type=ParameterType.DICT, description="Per agent_runtime session count, so a reader can see which runtimes the fleet is made of."),
+                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Every read that did not complete, named. Non-empty means the verdict is 'unmeasured'."),
+                "ready_and_owned": ParameterMetadata(type=ParameterType.LIST, description="Per Unit: unit_id, unit_key, owning actor and state."),
+                "produced": ParameterMetadata(type=ParameterType.LIST, description="Per artifact: actor, event_kind, event_id, occurred_at and unit_id."),
+                "sessions": ParameterMetadata(type=ParameterType.LIST, description="Per session: agent_instance_id, agent_session_id, agent_runtime, lifecycle_state and local_name."),
+            },
+        ),
+    )
+    def sweep_fleet_stall(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
+    ) -> dict[str, Any]:
+        """iss_ebc1ce9c -- detect a stalled fleet by what it produced, for any runtime."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        try:
+            report = run_fleet_stall_sweep(
+                state_service,
+                self._fleet_stall_register_reader(),
+                now=datetime.now(UTC),
+                trigger=str(raw.get("trigger") or ""),
+                window_seconds=raw.get("window_seconds"),
+            )
+        except FleetStallSweepError as exc:
+            return _failure_result(code="parameter_invalid", message=str(exc))
+        return _success_result(data=report)
+
+    # Literal ``name=``: the whole-tree gate resolves a cron target's
+    # processor_policy_category from the literal decorator name.
+    @platform_process(
+        name="sweep_fleet_stall_cron",
+        is_discoverable=False,
+        context_handling=ContextHandling.NONE,
+        parameters={},
+        output_type="object",
+        output_description="One scheduled fleet-stall sweep fire, reporting its own verdict.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Cron fire outcome: the verdict this fire computed, or the advisory that stopped it.",
+            properties={
+                "verdict": ParameterMetadata(type=ParameterType.STRING, description="stalled | not_stalled | unmeasured."),
+                "ready_and_owned_count": ParameterMetadata(type=ParameterType.INTEGER, description="Units that were ready and owned on this fire."),
+                "produced_count": ParameterMetadata(type=ParameterType.INTEGER, description="Register artifacts produced inside the window."),
+                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Every read that did not complete, named."),
+            },
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
+    )
+    def sweep_fleet_stall_cron(
+        self,
+        params: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
+        state: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
+    ) -> dict[str, Any]:
+        """The scheduled fire. EDGE_SINK so a report-only detector never
+        reaches the inference path on a tick, and so the cron action may omit
+        ``result_processor_kind`` (its canonical shape)."""
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        report = run_fleet_stall_sweep(
+            state_service,
+            self._fleet_stall_register_reader(),
+            now=datetime.now(UTC),
+            trigger="cron",
+        )
+        self.logger.info(
+            "%s fleet stall sweep (cron): verdict=%s ready_and_owned=%s produced=%s advisories=%s",
+            self.name,
+            report["verdict"],
+            report["ready_and_owned_count"],
+            report["produced_count"],
+            report["advisories"],
+        )
+        return _success_result(data={key: report[key] for key in ("verdict", "ready_and_owned_count", "produced_count", "advisories")})
+
+    @platform_process(
+        name="read_fleet_stall_sweep_status",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={},
+        output_type="object",
+        output_description=(
+            "iss_c4fbe548 -- the stall sweep's OWN last completed run, its age, and an explicit "
+            "silence advisory once that age passes three scheduled intervals. This is how a reader "
+            "tells that the sweep has stopped running: the predecessor net was dead for about 25 days "
+            "unnoticed because nothing published its last run. A pure read; it records nothing."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="The sweep's own liveness, read from its published last completed run.",
+            properties={
+                "last_completed_run": ParameterMetadata(type=ParameterType.DICT, description="The whole published run record (verdict, window, counts, advisories), or null when none has ever been recorded."),
+                "seconds_since_last_completed_run": ParameterMetadata(type=ParameterType.FLOAT, description="Age of that run, or null when there is none or its stamp is unreadable."),
+                "silent": ParameterMetadata(type=ParameterType.BOOLEAN, description="True when the age passed the silence threshold: the sweep is not running."),
+                "silence_threshold_seconds": ParameterMetadata(type=ParameterType.INTEGER, description="Three scheduled intervals. One missed fire is a restart; three is the sweep being dead."),
+                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Named notices: never recorded, silent past the threshold, or an unreadable stamp."),
+            },
+        ),
+    )
+    def read_fleet_stall_sweep_status(
+        self,
+        params: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
+        state: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
+    ) -> dict[str, Any]:
+        """iss_c4fbe548 -- make the sweep's own silence readable."""
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        return _success_result(data=read_sweep_status(state_service, now=datetime.now(UTC)))
+
+    @platform_process(
+        name="clear_fleet_stall_sweep_run",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={},
+        output_type="object",
+        output_description=(
+            "Retire the fleet stall sweep's published last-completed-run record, returning what was "
+            "retired. This is that row's terminal action, completing its lifecycle beside the create "
+            "and correct the sweep itself performs and the read read_fleet_stall_sweep_status "
+            "performs. Retention is bounded at one latest-run row, so there is no history to prune "
+            "and no earlier run to lose; the next scheduled fire publishes a fresh record, which is "
+            "the only sense in which this is reversible. Clearing a record that was never there is "
+            "reported as cleared=false with an advisory, not as an error: a terminal action on an "
+            "absent row has already reached the state it was asked for. Touches no session and no "
+            "register row."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="What the clear removed.",
+            properties={
+                "cleared": ParameterMetadata(type=ParameterType.BOOLEAN, description="True when a record was present and has been removed; false when none was recorded."),
+                "cleared_run": ParameterMetadata(type=ParameterType.DICT, description="The whole run record that was removed, or null when none was recorded."),
+                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Named notices; non-empty when there was nothing to clear."),
+            },
+        ),
+    )
+    def clear_fleet_stall_sweep_run(
+        self,
+        params: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
+        state: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
+    ) -> dict[str, Any]:
+        """The published run record's terminal action, completing its lifecycle."""
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        return _success_result(data=clear_fleet_stall_sweep_completed_run(state_service))
+
+    @platform_process(
+        name="ensure_fleet_stall_sweep_schedule",
+        context_handling=ContextHandling.NONE,
+        is_discoverable=False,
+        parameters={
+            "cron_expression": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description=f"Cron expression (UTC). Default '{FLEET_STALL_SWEEP_CRON}' (every 15 minutes).",
+            ),
+            "tag": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description=f"Schedule tag, used for the idempotent lookup. Default '{FLEET_STALL_SWEEP_TAG}'.",
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "Idempotently install the fleet-stall sweep's cron on the platform's own scheduler. Run it "
+            "as a starting action (it is in the shipped local profile) or later; never from a plugin "
+            "lifecycle method, because scheduling_service exists only after startup's "
+            "init_service_manager step. Nothing here refuses: the sweep needs no configured target, so "
+            "there is no configuration under which the installed cron would be inert."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Whether the cron was created or was already present.",
+            properties={
+                "status": ParameterMetadata(type=ParameterType.STRING, description="created | already_present."),
+                "tag": ParameterMetadata(type=ParameterType.STRING, description="Schedule tag the lookup used."),
+                "cron_expression": ParameterMetadata(type=ParameterType.STRING, description="The expression the schedule carries."),
+                "schedule_id": ParameterMetadata(type=ParameterType.STRING, description="The created schedule's id; absent when one was already present."),
+            },
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+    )
+    def ensure_fleet_stall_sweep_schedule(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
+    ) -> dict[str, Any]:
+        """Install the sweep's cron on the platform scheduler, once."""
+        raw = params.get("parameters", params)
+        orchestrator = getattr(self, "orchestrator_ref", None)
+        service = None if orchestrator is None else orchestrator.get_service("scheduling_service")
+        if service is None:
+            return _failure_result(
+                code="scheduling_service_unavailable",
+                message=("scheduling_service is not available yet -- it exists only after startup's init_service_manager step; run ensure_fleet_stall_sweep_schedule as a starting action or later, never from a plugin lifecycle method."),
+            )
+        keywords: dict[str, str] = {}
+        for key in ("cron_expression", "tag"):
+            value = raw.get(key)
+            if isinstance(value, str) and value.strip():
+                keywords[key] = value.strip()
+        try:
+            return _success_result(data=ensure_sweep_schedule(service, **keywords))
+        except FleetStallSweepError as exc:
+            return _failure_result(code="schedule_ensure_failed", message=str(exc))
 
     @platform_process(
         name="refresh_model_capability_catalog",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "trigger": ParameterMetadata(
-                description="manual | cron | policy_change -- how this run was started.",
+                description="manual | cron | policy_change | selector_stale -- how this run was started (selector_stale: requested by a selection made from stale readings).",
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
         output_type="object",
         output_description=(
-            "iss_d136ae29 -- the real crosscheck refresh: fetches live readings "
-            "from two independently-rendered Artificial Analysis pages per "
-            "roster (runtime, model, effort) cell, reconciles them against an "
-            "explicit tolerance, and writes the result. This is the only verb "
-            "that can move a cell to accepted -- seed_model_capability_catalog "
-            "never does. A source that fails to fetch is named in "
-            "sources_failed, never silently dropped."
+            "iss_d136ae29, iss_0e805222 -- the discovery refresh: learns which models exist from "
+            "the harness lists (the launching Codex binary's own listing and Claude Code's own "
+            "cache), takes score and cost from the Artificial Analysis leaderboard row and its "
+            "detail page, reconciles them against an explicit tolerance, and writes the result. "
+            "Before the reconcile it runs the harness pass: a cell whose model a current, readable "
+            "harness list stops listing starts a clock and is withdrawn after one staleness "
+            "window, reversibly and with history; a model listed again clears the clock and "
+            "reinstates the cell; a withdrawal made by a person is never reversed. A refresh "
+            "never changes the acceptance of a withdrawn cell. This is the only verb that can "
+            "move a cell to accepted -- seed_model_capability_catalog never does. A source that "
+            "fails to fetch is named in sources_failed, never silently dropped."
         ),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="refresh_model_capability_catalog outcome",
             properties={
+                "freshness_window": ParameterMetadata(type=ParameterType.OBJECT, description="Resolved hours (null when unknown), exact integer cell_hours or null, request/policy/observed_catalog/unknown source, policy_revision_id and advisories; read on each call."),
                 "run_id": ParameterMetadata(type=ParameterType.STRING, description="The model_capability_refresh_run row this call wrote."),
                 "trigger": ParameterMetadata(type=ParameterType.STRING),
-                "readings_gathered": ParameterMetadata(type=ParameterType.INTEGER, description="Total observation rows written across every source."),
+                "readings_gathered": ParameterMetadata(type=ParameterType.INTEGER, description="Total readings gathered across every source."),
                 "sources_ok": ParameterMetadata(type=ParameterType.LIST, description="source_ids that fetched cleanly."),
                 "sources_failed": ParameterMetadata(type=ParameterType.LIST, description="source_id: reason for every fetch that failed."),
-                "cells_accepted": ParameterMetadata(type=ParameterType.INTEGER, description="Roster cells this run moved to (or kept) accepted."),
-                "cells_conflicted": ParameterMetadata(type=ParameterType.INTEGER, description="Roster cells whose 2 sources disagreed beyond tolerance."),
-                "cells_unchanged": ParameterMetadata(type=ParameterType.INTEGER, description="Roster cells this run had insufficient new evidence for."),
+                "cells_accepted": ParameterMetadata(type=ParameterType.INTEGER, description="Cells this run created or renewed as accepted."),
+                "cells_conflicted": ParameterMetadata(type=ParameterType.INTEGER, description="Cells whose 2 sources disagreed beyond tolerance."),
+                "cells_unchanged": ParameterMetadata(type=ParameterType.INTEGER, description="Cells that had a reading this run and were left as they were (an unconfirmed single source, a held manual value, a withdrawn cell)."),
+                "cells_created": ParameterMetadata(type=ParameterType.INTEGER, description="New cells this run created."),
+                "created": ParameterMetadata(type=ParameterType.LIST, description="runtime/model@effort of each cell created."),
+                "creation_capped": ParameterMetadata(type=ParameterType.BOOLEAN, description="True when the per-run creation cap is what held new cells back."),
+                "creation_suspended": ParameterMetadata(type=ParameterType.BOOLEAN, description="True when the live-row ceiling is what held new cells back."),
+                "deferred": ParameterMetadata(type=ParameterType.LIST, description="New cells waiting for a creation slot; the next run takes them."),
+                "awaiting_second_source": ParameterMetadata(type=ParameterType.LIST, description="New cells whose launch id was derived from a leaderboard name and whose detail page has not agreed yet; each is tried again next run."),
+                "withdrawn_left": ParameterMetadata(type=ParameterType.LIST, description="Withdrawn cells this run recorded readings for and left withdrawn."),
+                "unrenewable_stale": ParameterMetadata(type=ParameterType.LIST, description="Harness-listed models the leaderboard no longer scores: kept accepted with their last score, never withdrawn for that reason."),
+                "alias_candidates": ParameterMetadata(type=ParameterType.LIST, description="Leaderboard names and launch ids that look alike but were not joined."),
+                "harness": ParameterMetadata(type=ParameterType.DICT, description="Per runtime: harness list status, source, detail, client version, fetched_at, models offered and advisories."),
+                "unmapped_creators": ParameterMetadata(type=ParameterType.LIST, description="Leaderboard creators with no runtime, with their row counts."),
+                "efforts_outside_vocabulary": ParameterMetadata(type=ParameterType.DICT, description="Per model, harness efforts outside the effort ladder; none became a cell."),
+                "listed_not_launchable": ParameterMetadata(type=ParameterType.LIST, description="Leaderboard rows no harness model can launch."),
+                "creator_label_unmatched": ParameterMetadata(type=ParameterType.LIST, description="Runtimes whose creator label matched no row of a page that otherwise parsed."),
+                "single_source_unconfirmed": ParameterMetadata(type=ParameterType.LIST, description="Cells whose lone reading moved past tolerance of the prior value; the prior was kept."),
+                "manual_conflicts": ParameterMetadata(type=ParameterType.LIST, description="Manual cells the live pages disagree with; the manual value stays served."),
+                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Every loud notice this run raised, including the harness pass's."),
+                "harness_clock_started": ParameterMetadata(type=ParameterType.LIST, description="Cells whose model a current harness list does not list: the absence clock started or restarted."),
+                "harness_clock_cleared": ParameterMetadata(type=ParameterType.LIST, description="Cells whose model the harness lists again: the absence clock was cleared."),
+                "auto_withdrawn": ParameterMetadata(type=ParameterType.LIST, description="Cells withdrawn because the absence clock ran one staleness window (reversible)."),
+                "auto_reinstated": ParameterMetadata(type=ParameterType.LIST, description="Cells this refresh had withdrawn that were reinstated because the harness lists the model again."),
             },
         ),
     )
@@ -7397,22 +7957,18 @@ class AgentMessagingPlugin(
             ),
             "note": ParameterMetadata(description="Optional free text kept with the evidence.", required=False, type=ParameterType.STRING),
             "staleness_window_hours": ParameterMetadata(
-                description="Hours the cell stays servable before it needs a fresh reading. Default 72.",
+                description="Explicit positive integer freshness window; absent reads active catalog policy then observed windows, else null with advisory. Age never excludes accepted cells.",
                 required=False,
                 type=ParameterType.INTEGER,
             ),
         },
         output_type="object",
-        output_description=(
-            "Operator ruling rul_9e7a67ba -- anyone with better information records "
-            "one (runtime, model, effort) catalog cell directly as accepted, with "
-            "its source kept as observation evidence, so a model released today "
-            "is dispatchable today."
-        ),
+        output_description=("Operator ruling rul_9e7a67ba -- anyone with better information records one (runtime, model, effort) catalog cell directly as accepted, with its source kept as observation evidence, so a model released today is dispatchable today."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="record_model_capability_cell outcome",
             properties={
+                "freshness_window": ParameterMetadata(type=ParameterType.OBJECT, description="Resolved hours (null when unknown), exact integer cell_hours or null, request/policy/observed_catalog/unknown source, policy_revision_id and advisories; read on each call."),
                 "run_id": ParameterMetadata(type=ParameterType.STRING, description="The model_capability_refresh_run row (trigger=manual) this call wrote."),
                 "runtime": ParameterMetadata(type=ParameterType.STRING),
                 "model": ParameterMetadata(type=ParameterType.STRING),
@@ -7442,6 +7998,155 @@ class AgentMessagingPlugin(
         return _success_result(data=result)
 
     @platform_process(
+        name="withdraw_model_capability_cell",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "runtime": ParameterMetadata(description="claude_code | codex.", required=True, type=ParameterType.STRING),
+            "model": ParameterMetadata(description="Canonical model id as the catalog holds it.", required=True, type=ParameterType.STRING),
+            "effort": ParameterMetadata(
+                description="The one effort to withdraw. Omit to withdraw every effort of the model on that runtime.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "reason": ParameterMetadata(description="Why the cell is leaving dispatch, at most 512 characters. Required.", required=True, type=ParameterType.STRING),
+            "expected_acceptance": ParameterMetadata(
+                description="The acceptance you read on the cell (accepted | pending_crosscheck | crosscheck_conflict). The call is refused with stale_cell_state when any target cell no longer holds it.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "actor": ParameterMetadata(description="The session or role making the change, kept as evidence. Required.", required=True, type=ParameterType.STRING),
+        },
+        output_type="object",
+        output_description=("Operator ruling rul_2bff72b8 -- retire one catalog cell, or every effort of one model, from dispatch. The score, cost and measured_at are kept and select_dispatch_tier excludes the cell as not_accepted; reinstate_model_capability_cell reverses it."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="withdraw_model_capability_cell outcome",
+            properties={
+                "run_id": ParameterMetadata(type=ParameterType.STRING, description="The model_capability_refresh_run row (trigger=manual) this call wrote."),
+                "runtime": ParameterMetadata(type=ParameterType.STRING),
+                "model": ParameterMetadata(type=ParameterType.STRING),
+                "acceptance": ParameterMetadata(type=ParameterType.STRING, description="Always withdrawn."),
+                "cells": ParameterMetadata(type=ParameterType.LIST, description="Per cell: effort, from_acceptance, to_acceptance, the retained capability_score, cost_per_task_usd and measured_at, and the acceptance_change observation_id."),
+                "reason": ParameterMetadata(type=ParameterType.STRING),
+                "actor": ParameterMetadata(type=ParameterType.STRING),
+                "reversal": ParameterMetadata(type=ParameterType.STRING, description="The verb that reopens these cells."),
+            },
+        ),
+    )
+    def withdraw_model_capability_cell(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """rul_2bff72b8 -- withdraw a catalog cell from dispatch, keeping its score."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        try:
+            result = catalog_withdraw_cell(state_service, dict(raw))
+        except CatalogError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="reinstate_model_capability_cell",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "runtime": ParameterMetadata(description="claude_code | codex.", required=True, type=ParameterType.STRING),
+            "model": ParameterMetadata(description="Canonical model id as the catalog holds it.", required=True, type=ParameterType.STRING),
+            "effort": ParameterMetadata(
+                description="The one effort to reinstate. Omit to reinstate every effort of the model on that runtime.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "reason": ParameterMetadata(description="Why the cell is returning to dispatch, at most 512 characters. Required.", required=True, type=ParameterType.STRING),
+            "expected_acceptance": ParameterMetadata(
+                description="Must be withdrawn: the acceptance you read on the cell. The call is refused with stale_cell_state when any target cell is no longer withdrawn.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "actor": ParameterMetadata(description="The session or role making the change, kept as evidence. Required.", required=True, type=ParameterType.STRING),
+        },
+        output_type="object",
+        output_description=("Operator ruling rul_2bff72b8 -- reopen a withdrawn catalog cell (or every withdrawn effort of a model) as accepted with the score, cost and measured_at it kept. Refused when a cell kept no score; each cell reports whether the next refresh would withdraw it again."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="reinstate_model_capability_cell outcome",
+            properties={
+                "run_id": ParameterMetadata(type=ParameterType.STRING, description="The model_capability_refresh_run row (trigger=manual) this call wrote."),
+                "runtime": ParameterMetadata(type=ParameterType.STRING),
+                "model": ParameterMetadata(type=ParameterType.STRING),
+                "acceptance": ParameterMetadata(type=ParameterType.STRING, description="Always accepted."),
+                "cells": ParameterMetadata(type=ParameterType.LIST, description="Per cell: effort, from_acceptance, to_acceptance, the retained values, the acceptance_change observation_id and refresh_outlook (undone_by_next_refresh true, false or null when unknown, plus a detail sentence)."),
+                "reason": ParameterMetadata(type=ParameterType.STRING),
+                "actor": ParameterMetadata(type=ParameterType.STRING),
+                "reversal": ParameterMetadata(type=ParameterType.STRING, description="The verb that withdraws these cells again."),
+            },
+        ),
+    )
+    def reinstate_model_capability_cell(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """rul_2bff72b8 -- reopen a withdrawn catalog cell with its retained values."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        try:
+            result = catalog_reinstate_cell(state_service, dict(raw))
+        except CatalogError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="read_model_capability_history",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "runtime": ParameterMetadata(description="claude_code | codex.", required=True, type=ParameterType.STRING),
+            "model": ParameterMetadata(description="Canonical model id as the catalog holds it.", required=True, type=ParameterType.STRING),
+            "effort": ParameterMetadata(description="The effort whose history to read.", required=True, type=ParameterType.STRING),
+            "limit": ParameterMetadata(description="Observations per page, 1 to 100. Default 100.", required=False, type=ParameterType.INTEGER),
+            "after": ParameterMetadata(
+                description="The next_after list of the previous page, to read the page that follows it.",
+                required=False,
+                type=ParameterType.LIST,
+            ),
+        },
+        output_type="object",
+        output_description=("Operator ruling rul_2bff72b8 -- the append-only observation history of one catalog cell, oldest first by fetched_at, a page at a time, together with the cell as it stands now."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="read_model_capability_history outcome",
+            properties={
+                "runtime": ParameterMetadata(type=ParameterType.STRING),
+                "model": ParameterMetadata(type=ParameterType.STRING),
+                "effort": ParameterMetadata(type=ParameterType.STRING),
+                "current": ParameterMetadata(type=ParameterType.OBJECT, description="The cell now: acceptance, capability_score, cost_per_task_usd, measured_at, accepted_at, disagreement_note, staleness_window_hours, last_refresh_run_id, updated_at. Null when no cell exists."),
+                "observations": ParameterMetadata(type=ParameterType.LIST, description="One page of observation rows ordered by fetched_at, then id."),
+                "next_after": ParameterMetadata(type=ParameterType.LIST, description="Pass as after to read the next page; null when the page was short and the history is exhausted."),
+            },
+        ),
+    )
+    def read_model_capability_history(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """rul_2bff72b8 -- read one catalog cell's observation history, paged."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+        try:
+            result = catalog_history(state_service, dict(raw))
+        except CatalogError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
         name="record_allowance_pool_reading",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -7456,13 +8161,7 @@ class AgentMessagingPlugin(
             "recorded_by": ParameterMetadata(description="The actor recording it, e.g. a role name or session label. Required.", required=True, type=ParameterType.STRING),
         },
         output_type="object",
-        output_description=(
-            "iss_c6fbf9ae -- records one explicit current reading of a flat-rate "
-            "allowance pool, replacing any earlier reading of that pool. A "
-            "recorded, unexpired reading that shows the pool exhausted excludes "
-            "its cells; an absent or expired one excludes nothing, and nothing "
-            "infers one."
-        ),
+        output_description=("iss_c6fbf9ae -- records one explicit current reading of a flat-rate allowance pool, replacing any earlier reading of that pool. A recorded, unexpired reading that shows the pool exhausted excludes its cells; an absent or expired one excludes nothing, and nothing infers one."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="record_allowance_pool_reading outcome",
@@ -7489,18 +8188,19 @@ class AgentMessagingPlugin(
         name="read_allowance_pool_readings",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "history": ParameterMetadata(type=ParameterType.BOOLEAN, required=False, description="Read immutable snapshots oldest first; default false."),
+            "after_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Previous history next_cursor."),
+            "limit": ParameterMetadata(type=ParameterType.INTEGER, required=False, description="History page size 1..200, default 50."),
             "profile_id": ParameterMetadata(description="Only readings of this flat-rate profile. Default: all.", required=False, type=ParameterType.STRING),
         },
         output_type="object",
-        output_description=(
-            "iss_c6fbf9ae -- the recorded allowance-pool readings, each marked "
-            "current or expired against now, so a coordinator can see which "
-            "readings the selector will still apply."
-        ),
+        output_description=("iss_c6fbf9ae -- the recorded allowance-pool readings, each marked current or expired against now, so a coordinator can see which readings the selector will still apply."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="read_allowance_pool_readings outcome",
             properties={
+                "history": ParameterMetadata(type=ParameterType.LIST, description="Immutable record/retract snapshots."),
+                "next_cursor": ParameterMetadata(type=ParameterType.STRING, description="Last history id when more rows exist, otherwise null."),
                 "readings": ParameterMetadata(type=ParameterType.LIST, description="Recorded readings, each with state current or expired."),
                 "current_readings": ParameterMetadata(type=ParameterType.INTEGER, description="How many are current right now."),
                 "as_of": ParameterMetadata(type=ParameterType.STRING, description="The instant states were judged, ISO-8601."),
@@ -7531,14 +8231,12 @@ class AgentMessagingPlugin(
             "pool_id": ParameterMetadata(description="The allowance pool whose reading to remove.", required=True, type=ParameterType.STRING),
         },
         output_type="object",
-        output_description=(
-            "iss_c6fbf9ae -- deletes the recorded reading of one allowance pool "
-            "so that pool reads unknown again, which excludes nothing."
-        ),
+        output_description=("iss_c6fbf9ae -- deletes the recorded reading of one allowance pool so that pool reads unknown again, which excludes nothing."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="retract_allowance_pool_reading outcome",
             properties={
+                "history_appended": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the immutable retraction snapshot was appended."),
                 "profile_id": ParameterMetadata(type=ParameterType.STRING),
                 "pool_id": ParameterMetadata(type=ParameterType.STRING),
                 "retracted": ParameterMetadata(type=ParameterType.INTEGER, description="Rows deleted; a missing reading is the reading_not_found error."),
@@ -7562,6 +8260,119 @@ class AgentMessagingPlugin(
         return _success_result(data=result)
 
     @platform_process(
+        name="read_unit_usage",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "unit_id": ParameterMetadata(
+                description="Registered Unit id. Supply this or agent_instance_id, but not both.",
+                type=ParameterType.STRING,
+            ),
+            "agent_instance_id": ParameterMetadata(
+                description="Managed worker instance id. Supply this or unit_id, but not both.",
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "Read-only managed-session usage join. Returns coverage none/partial/full, "
+            "each matching worker's runtime ids and observed provider/runtime/model/effort "
+            "tuples with priced USD and allowance-pool readings, the dispatch-to-observed "
+            "mismatch flag, selector estimate, difficulty score, as_of/lag, and coverage notes."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="read_unit_usage outcome",
+            properties={
+                "coverage": ParameterMetadata(type=ParameterType.STRING, description="none, partial, or full."),
+                "sessions": ParameterMetadata(type=ParameterType.LIST, description="Workers with agent_instance_id, runtime_session_ids, provider, runtime, dispatch_model, dispatch_effort, observed tuples, and executor_mismatch."),
+                "estimate": ParameterMetadata(type=ParameterType.DICT, description="usd, basis (receipt, catalog_lookup, or none), and selected cell."),
+                "difficulty_score": ParameterMetadata(type=ParameterType.FLOAT, description="Selection difficulty score, when present."),
+                "as_of": ParameterMetadata(type=ParameterType.STRING, description="Oldest available last-poll/event observation time."),
+                "lag_seconds": ParameterMetadata(type=ParameterType.FLOAT, description="Seconds between as_of and this read."),
+                "notes": ParameterMetadata(type=ParameterType.DICT, description="Join counts, per-id completeness counts, and advisories."),
+            },
+            error_conditions={"parameter_invalid": "Supply exactly one of unit_id or agent_instance_id."},
+        ),
+    )
+    def read_unit_usage(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """Read managed-session usage without refusing missing runtime data."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        try:
+            ledger_service = self._maybe_get_session_ledger_service()
+        except Exception:  # noqa: BLE001 — an unavailable advisory service is not a refusal
+            ledger_service = None
+        totals_reader = getattr(ledger_service, "session_usage_totals", None)
+        try:
+            result = lifecycle_read_unit_usage(
+                state_service,
+                dict(raw),
+                totals_reader=totals_reader if callable(totals_reader) else None,
+                now=datetime.now(UTC),
+            )
+        except UsageVerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="read_session_usage_window",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "since": ParameterMetadata(description="Inclusive ISO-8601 window start passed unchanged to S1.", type=ParameterType.STRING),
+            "until": ParameterMetadata(description="Inclusive ISO-8601 window end passed unchanged to S1.", type=ParameterType.STRING),
+            "vendor": ParameterMetadata(description="S1 harness vendor; required with since and until when no session ids are supplied.", type=ParameterType.STRING),
+            "priced": ParameterMetadata(description="When true, add S2 pricing_by_model and unpriced token/model totals; defaults to false.", type=ParameterType.BOOLEAN, default=False),
+        },
+        output_type="object",
+        output_description=("Read-only S1 session usage window. Without priced=true, returns the exact S1 dictionary. With priced=true, preserves every S1 field and adds pricing_by_model, unpriced_token_count, and unpriced_models. No session-id argument is accepted."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="read_session_usage_window outcome; raw mode keeps S1 keys unchanged.",
+            properties={
+                "status": ParameterMetadata(type=ParameterType.STRING, description="S1 completeness: complete, partial, or unknown:bounded."),
+                "sessions": ParameterMetadata(type=ParameterType.LIST, description="Windowed per-runtime-session S1 usage and event bounds."),
+                "not_found": ParameterMetadata(type=ParameterType.LIST, description="S1 runtime ids not resolved, when applicable."),
+                "advisories": ParameterMetadata(type=ParameterType.LIST, description="S1 and pricing advisories."),
+                "overflow": ParameterMetadata(type=ParameterType.BOOLEAN, description="S1 bounded-enumeration overflow marker, when present."),
+                "sessions_at_least": ParameterMetadata(type=ParameterType.INTEGER, description="S1 lower bound for overflowed session enumeration, when present."),
+                "pricing_by_model": ParameterMetadata(type=ParameterType.DICT, description="Priced mode only: model to {usd, basis}."),
+                "unpriced_token_count": ParameterMetadata(type=ParameterType.FLOAT, description="Priced mode only: known unpriced token count, with lower-bound advisories when necessary."),
+                "unpriced_models": ParameterMetadata(type=ParameterType.LIST, description="Priced mode only: sorted unique models with unpriced usage."),
+            },
+            error_conditions={"parameter_invalid": "S1 caller errors pass through; runtime_session_ids, unit_id, and agent_instance_id are not accepted."},
+        ),
+    )
+    def read_session_usage_window(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """Read one S1 usage window and optionally price its windowed totals."""
+        raw = params.get("parameters", params)
+        try:
+            ledger_service = self._maybe_get_session_ledger_service()
+        except Exception:  # noqa: BLE001 — an unavailable advisory service is not a refusal
+            ledger_service = None
+        totals_reader = getattr(ledger_service, "session_usage_totals", None)
+        try:
+            result = lifecycle_read_session_usage_window(
+                dict(raw),
+                totals_reader=totals_reader if callable(totals_reader) else None,
+                catalog=None,
+                now=datetime.now(UTC),
+            )
+        except UsageVerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        except ValueError as exc:
+            message = str(exc)
+            return _failure_result(code="parameter_invalid", message=message)
+        return _success_result(data=result)
+
+    @platform_process(
         name="record_held_authorization",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -7571,10 +8382,7 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "owed_by_role": ParameterMetadata(
-                description=(
-                    "The seat/coordinator role expected to send the first-party "
-                    "authorization this refusal is waiting on."
-                ),
+                description=("The seat/coordinator role expected to send the first-party authorization this refusal is waiting on."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -7590,12 +8398,7 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description=(
-            "R1 held-authorization queue — record one open entry. Convention "
-            "(not enforced): Git-Controller calls this at refusal time, never "
-            "the requesting peer, so the entry exists mechanically regardless "
-            "of any seat's memory."
-        ),
+        output_description=("R1 held-authorization queue — record one open entry. Convention (not enforced): Git-Controller calls this at refusal time, never the requesting peer, so the entry exists mechanically regardless of any seat's memory."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="record_held_authorization outcome",
@@ -7648,16 +8451,24 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "include_retired": ParameterMetadata(
-                description="Include already-retired entries. Default false (open only).",
+                description=("Include retired refusals and fired, withdrawn or retired accepted entries. Default false (open refusals and pending accepted entries only)."),
                 required=False,
                 type=ParameterType.BOOLEAN,
+            ),
+            "limit": ParameterMetadata(
+                description="Page size, 1-100 entries. Default 100.",
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+            "cursor": ParameterMetadata(
+                description="The next_cursor of the previous page; omit for the first page.",
+                required=False,
+                type=ParameterType.STRING,
             ),
         },
         output_type="object",
         output_description=(
-            "R1 held-authorization queue — the 'what is blocked on <role>?' "
-            "answer for a freshly-booted session with no memory of a prior "
-            "seat. Open entries only unless include_retired is set. Read-only."
+            "Held-authorization queue — the 'what is blocked on <role>?' answer for a freshly-booted session with no memory of a prior seat: open refusals, then accepted-but-unfired obligations, each marked by entry_kind, one page at a time. Read-only; an entry is an obligation, never landing authority."
         ),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -7665,6 +8476,10 @@ class AgentMessagingPlugin(
             properties={
                 "entries": ParameterMetadata(type=ParameterType.LIST),
                 "count": ParameterMetadata(type=ParameterType.INTEGER),
+                "next_cursor": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Continuation for the next page; null on the last page.",
+                ),
             },
         ),
     )
@@ -7673,7 +8488,7 @@ class AgentMessagingPlugin(
         params: dict[str, Any],
         state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
-        """R1 held-authorization queue — trivial state read, no side effects.
+        """Held-authorization queue — paged state read, no side effects.
         Never filters by staleness itself (no silent TTL in this queue) —
         `created_at` is returned as-is so the caller judges age directly."""
         raw = params.get("parameters", params)
@@ -7689,6 +8504,8 @@ class AgentMessagingPlugin(
                 owed_by_role=_opt_str(raw.get("owed_by_role")),
                 requesting_peer=_opt_str(raw.get("requesting_peer")),
                 include_retired=bool(_opt_bool(raw.get("include_retired")) or False),
+                limit=raw.get("limit"),
+                cursor=raw.get("cursor"),
             )
         except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
@@ -7720,12 +8537,7 @@ class AgentMessagingPlugin(
             ),
         },
         output_type="object",
-        output_description=(
-            "R1 held-authorization queue — retire one entry. Convention (not "
-            "enforced): Git-Controller retires on receiving the matching "
-            "first-party authorization; the owed_by_role holder may also "
-            "retire directly. No silent TTL — every retirement is explicit."
-        ),
+        output_description=("R1 held-authorization queue — retire one entry. Convention (not enforced): Git-Controller retires on receiving the matching first-party authorization; the owed_by_role holder may also retire directly. No silent TTL — every retirement is explicit."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="retire_held_authorization outcome",
@@ -7764,6 +8576,283 @@ class AgentMessagingPlugin(
         return _success_result(data=result)
 
     @platform_process(
+        name="record_accepted_authorization",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "requesting_peer": ParameterMetadata(
+                description="The role or instance the accepted authorization serves.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "owed_by_role": ParameterMetadata(
+                description="The seat responsible to act once the predicate holds.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "branch_or_request_ref": ParameterMetadata(
+                description="Proposed branch name or other stable request identifier.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "authorizing_message_id": ParameterMetadata(
+                description="The message that issued this authorization (e.g. arm-...).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "act": ParameterMetadata(
+                description="What the owed_by_role seat does once the predicate holds (e.g. seed-clone).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "predicate": ParameterMetadata(
+                description="The exact precondition the act waits on; a fire must name it verbatim.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "reason": ParameterMetadata(
+                description="Why this obligation is being recorded.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "actor": ParameterMetadata(
+                description="Role or instance recording it (reported provenance, not a grant).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "notes": ParameterMetadata(
+                description="Optional non-blank notes.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=("Accepted-authorization obligations — record one accepted, not-yet-fired authorization at acceptance time (state accepted, version 1, one record event, one transaction). Bookkeeping only: performs no act and is never landing authority."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="record_accepted_authorization outcome",
+            properties={
+                "entry_id": ParameterMetadata(type=ParameterType.STRING),
+                "status": ParameterMetadata(type=ParameterType.STRING),
+                "state": ParameterMetadata(type=ParameterType.STRING),
+                "version": ParameterMetadata(type=ParameterType.INTEGER),
+                "event_id": ParameterMetadata(type=ParameterType.STRING),
+                "entry": ParameterMetadata(type=ParameterType.DICT, description="The stored projection snapshot."),
+            },
+            error_conditions={
+                "missing_argument": "A required field was empty.",
+                "invalid_argument": "notes was supplied blank.",
+            },
+        ),
+    )
+    def record_accepted_authorization(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """Accepted-authorization obligations — projection insert plus record
+        event in one transaction. Open like the refusal-queue verbs: the
+        accepting seat records at acceptance; ``actor`` is reported data."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            result = lifecycle_record_accepted_authorization(state_service, raw)
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="change_accepted_authorization",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "entry_id": ParameterMetadata(
+                description="The accepted entry (its id from record/list/history).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "expected_version": ParameterMetadata(
+                description="The entry version the caller read; a stale version is refused.",
+                required=True,
+                type=ParameterType.INTEGER,
+            ),
+            "operation": ParameterMetadata(
+                description="correct | fire | withdraw | retire | reopen.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "reason": ParameterMetadata(
+                description="Why this change is made.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "actor": ParameterMetadata(
+                description="Role or instance making the change (reported provenance).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "predicate": ParameterMetadata(
+                description=("correct: the replacement predicate. fire: the current predicate, verbatim. reopen: the fresh predicate."),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "act": ParameterMetadata(
+                description="correct or reopen: the replacement act.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "authorizing_message_id": ParameterMetadata(
+                description=("correct: the message that reissued the act or predicate (required when either changes). reopen: the fresh authorizing message."),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "requesting_peer": ParameterMetadata(
+                description="correct: the corrected requesting peer.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "owed_by_role": ParameterMetadata(
+                description="correct: the corrected owing seat.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "branch_or_request_ref": ParameterMetadata(
+                description="correct: the corrected request reference.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "notes": ParameterMetadata(
+                description="correct: set or correct the notes.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "clear_notes": ParameterMetadata(
+                description="correct: true clears the notes.",
+                required=False,
+                type=ParameterType.BOOLEAN,
+            ),
+            "evidence": ParameterMetadata(
+                description="fire: the action evidence (required). withdraw/retire: optional evidence.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=("Accepted-authorization obligations — one versioned lifecycle change (correct, fire, withdraw, retire, reopen): compare-and-set on the expected version plus an immutable event, committed together. Recording a fire performs no act."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="change_accepted_authorization outcome",
+            properties={
+                "entry_id": ParameterMetadata(type=ParameterType.STRING),
+                "operation": ParameterMetadata(type=ParameterType.STRING),
+                "status": ParameterMetadata(type=ParameterType.STRING),
+                "state": ParameterMetadata(type=ParameterType.STRING),
+                "version": ParameterMetadata(type=ParameterType.INTEGER),
+                "event_id": ParameterMetadata(type=ParameterType.STRING),
+                "entry": ParameterMetadata(type=ParameterType.DICT, description="The projection snapshot after the change."),
+            },
+            error_conditions={
+                "stale_version": "expected_version is not the entry's current version; nothing was written.",
+                "invalid_transition": "The operation is not legal from the entry's state (fired is terminal).",
+                "predicate_mismatch": "fire did not name the current predicate verbatim.",
+                "authorizing_message_required": "An act or predicate correction did not name its authorizing message.",
+                "authorization_not_fresh": "reopen reused the withdrawn or retired authorizing message.",
+                "no_change": "A correction changed nothing.",
+            },
+        ),
+    )
+    def change_accepted_authorization(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """Accepted-authorization obligations — compare-and-set plus event
+        append in one transaction; stale or illegal changes write nothing."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            result = lifecycle_change_accepted_authorization(state_service, raw)
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="get_authorization_history",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "entry_id": ParameterMetadata(
+                description="The accepted entry whose history to read.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "authorizing_message_id": ParameterMetadata(
+                description="A current or superseded authorizing message; reads every entry it authorized.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "limit": ParameterMetadata(
+                description="Events per page, 1-100. Default 100.",
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+            "cursor": ParameterMetadata(
+                description="The next_cursor of the previous page; omit for the first page.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=("Accepted-authorization obligations — the ordered immutable event history of an entry, or of every entry a message authorized, plus each entry's current projection (its predicate is the only one that may fire). Read-only, paged."),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="get_authorization_history outcome",
+            properties={
+                "selector": ParameterMetadata(type=ParameterType.DICT, description="The entry_id or authorizing_message_id read."),
+                "entry_ids": ParameterMetadata(type=ParameterType.LIST),
+                "current": ParameterMetadata(type=ParameterType.LIST, description="Each entry's current projection."),
+                "events": ParameterMetadata(type=ParameterType.LIST, description="This page of events, by entry then revision."),
+                "count": ParameterMetadata(type=ParameterType.INTEGER),
+                "next_cursor": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Continuation for the next page; null on the last page.",
+                ),
+            },
+            error_conditions={
+                "invalid_argument": "Not exactly one of entry_id / authorizing_message_id, or a bad limit.",
+                "entry_not_found": "No accepted entry has that entry_id.",
+                "invalid_cursor": "cursor is not a next_cursor this verb returned.",
+            },
+        ),
+    )
+    def get_authorization_history(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """Accepted-authorization obligations — paged read of the immutable
+        event history and current projections; no side effects."""
+        raw = params.get("parameters", params)
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        try:
+            result = lifecycle_get_authorization_history(state_service, raw)
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
         name="peer_holds_role",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -7773,21 +8862,13 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "agent_instance_id": ParameterMetadata(
-                description=(
-                    "The caller's own agent_instance_id (agi-...). Its STABLE session "
-                    "id is sourced server-side from the peer_binding — a caller-supplied "
-                    "session id is never trusted."
-                ),
+                description=("The caller's own agent_instance_id (agi-...). Its STABLE session id is sourced server-side from the peer_binding — a caller-supplied session id is never trusted."),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
         output_type="object",
-        output_description=(
-            "Act-time role-ownership re-check (§5.0): whether the caller's session "
-            "still holds the role, its resolved stable session id, and whether the "
-            "role's CURRENT holder has a delivery route attached."
-        ),
+        output_description=("Act-time role-ownership re-check (§5.0): whether the caller's session still holds the role, its resolved stable session id, and whether the role's CURRENT holder has a delivery route attached."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="peer_holds_role outcome (§5.0 act-time ownership re-check)",
@@ -7854,22 +8935,13 @@ class AgentMessagingPlugin(
                 type=ParameterType.STRING,
             ),
             "message_id": ParameterMetadata(
-                description=(
-                    "The arm-... message_id of the NEWEST role message this "
-                    "session has processed for 'name'. The server looks this "
-                    "row up and attests ITS OWN (created_at, id) — a caller "
-                    "can only ever name a pair that corresponds to a row "
-                    "that exists (pull-surface boundary design §2)."
-                ),
+                description=("The arm-... message_id of the NEWEST role message this session has processed for 'name'. The server looks this row up and attests ITS OWN (created_at, id) — a caller can only ever name a pair that corresponds to a row that exists (pull-surface boundary design §2)."),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
         output_type="object",
-        output_description=(
-            "The stored role_covered_mark after this attestation — the "
-            "PRE-EXISTING mark unchanged on a monotonic no-op."
-        ),
+        output_description=("The stored role_covered_mark after this attestation — the PRE-EXISTING mark unchanged on a monotonic no-op."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="peer_mark_role_covered outcome (design §2).",
@@ -7924,11 +8996,7 @@ class AgentMessagingPlugin(
         if not caller_instance_id:
             return _failure_result(
                 code="unregistered_route",
-                message=(
-                    "peer_mark_role_covered requires a call dispatched through "
-                    "a registered bridge's process_call; a one-shot solet "
-                    "call carries no registered-route identity to attest with."
-                ),
+                message=("peer_mark_role_covered requires a call dispatched through a registered bridge's process_call; a one-shot solet call carries no registered-route identity to attest with."),
             )
         state_service = self._get_state_service()
         if state_service is None:
@@ -7945,10 +9013,7 @@ class AgentMessagingPlugin(
         if not holds_role(state_service, name, agent_session_id):
             return _failure_result(
                 code="peer_role_not_held",
-                message=(
-                    f"the calling session does not currently hold role {name!r} "
-                    "— re-check ownership before attesting."
-                ),
+                message=(f"the calling session does not currently hold role {name!r} — re-check ownership before attesting."),
             )
         try:
             binding = resolve_role_binding(state_service, name)
@@ -8007,23 +9072,27 @@ class AgentMessagingPlugin(
             ),
             "since": ParameterMetadata(
                 description=(
-                    "Instance-section FORWARD cursor ONLY: an ISO-8601 "
-                    "timestamp. Returns the messages strictly NEWER than it, "
-                    "oldest-first; echo back the page's next_since_created_at "
-                    "to continue and stop when instance_exhausted is true. Use "
-                    "it to poll 'what is new since T'. Cannot be combined "
-                    "with 'after' (the opposite, backward direction)."
+                    "FORWARD first-page time horizon: an ISO-8601 "
+                    "timestamp. The instance section returns the messages "
+                    "strictly NEWER than it, oldest-first; echo the page's "
+                    "next_since_cursor as 'since_cursor' to continue without "
+                    "losing equal-timestamp rows. The role section returns only "
+                    "rows strictly newer than it, still newest-first and paged "
+                    "by 'role_after'; role_since_created_at in the response "
+                    "echoes it (null means the role section did not apply it). "
+                    "Use it to poll 'what is new since T'. Cannot be combined "
+                    "with 'after' or 'since_cursor'."
                 ),
                 required=False,
                 type=ParameterType.STRING,
             ),
+            "since_cursor": ParameterMetadata(
+                description=("Opaque tie-safe continuation returned as next_since_cursor by the previous forward page. Echo it verbatim; it preserves the original role/direct horizon and the last (created_at, id) key. Cannot be combined with 'after' or 'since'."),
+                required=False,
+                type=ParameterType.STRING,
+            ),
             "role_after": ParameterMetadata(
-                description=(
-                    "Role-section cursor ONLY: the opaque token from the "
-                    "previous page's next_role_cursor, echoed back verbatim. "
-                    "Independent of 'after'; the two are never mixed. A "
-                    "malformed token fails the role section closed."
-                ),
+                description=("Role-section cursor ONLY: the opaque token from the previous page's next_role_cursor, echoed back verbatim. Independent of 'after'; the two are never mixed. A malformed token fails the role section closed."),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -8034,23 +9103,13 @@ class AgentMessagingPlugin(
                 default=False,
             ),
             "include_covered": ParameterMetadata(
-                description=(
-                    "Read the role section with no covered-mark floor, so rows a "
-                    "reader attested covered (including the mark's own row) are "
-                    "returned. For a fail-closed consumer that must see every "
-                    "row; requires observer=true. Repeat it on every page."
-                ),
+                description=("Read the role section with no covered-mark floor, so rows a reader attested covered (including the mark's own row) are returned. For a fail-closed consumer that must see every row; requires observer=true. Repeat it on every page."),
                 required=False,
                 type=ParameterType.BOOLEAN,
                 default=False,
             ),
             "limit": ParameterMetadata(
-                description=(
-                    "Maximum entries per section, clamped to 1..100. Default 5 "
-                    "— entries carry full message content (~4KB each measured "
-                    "2026-08-01), so this is a page size, not a backlog size: "
-                    "page with the two cursors instead of raising it."
-                ),
+                description=("Maximum entries per section, clamped to 1..100. Default 5 — entries carry full message content (~4KB each measured 2026-08-01), so this is a page size, not a backlog size: page with the two cursors instead of raising it."),
                 required=False,
                 type=ParameterType.INTEGER,
                 default=PEER_INBOX_DEFAULT_LIMIT,
@@ -8071,11 +9130,7 @@ class AgentMessagingPlugin(
         ),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description=(
-                "peer_inbox page — the exact shape emitted by "
-                "peer_inbox_view.serialize_peer_inbox_page (the same payload the "
-                "localhost /peer/inbox route and the MCP peer_inbox tool return)"
-            ),
+            description=("peer_inbox page — the exact shape emitted by peer_inbox_view.serialize_peer_inbox_page (the same payload the localhost /peer/inbox route and the MCP peer_inbox tool return)"),
             properties={
                 "recipient_agent_id": ParameterMetadata(type=ParameterType.STRING),
                 "recipient_agent_instance_id": ParameterMetadata(
@@ -8087,19 +9142,15 @@ class AgentMessagingPlugin(
                 ),
                 "next_since_created_at": ParameterMetadata(
                     type=ParameterType.STRING,
-                    description=(
-                        "The forward cursor to echo as 'since' on the next "
-                        "call; null unless the request used 'since'."
-                    ),
+                    description=("The last returned forward-row timestamp, retained for compatibility and diagnostics; not a lossless page boundary when timestamps tie."),
+                ),
+                "next_since_cursor": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description=("The opaque tie-safe forward cursor to echo as 'since_cursor'; null unless the request is a forward read with no returned or prior continuation row."),
                 ),
                 "instance_exhausted": ParameterMetadata(
                     type=ParameterType.BOOLEAN,
-                    description=(
-                        "Whether the instance section is exhausted under the "
-                        "cursor the request used: no older row remains for "
-                        "'after' (newest-first), no newer row for 'since' "
-                        "(oldest-first)."
-                    ),
+                    description=("Whether the instance section is exhausted under the cursor the request used: no older row remains for 'after' (newest-first), no newer row for 'since' (oldest-first)."),
                 ),
                 "role_entries": ParameterMetadata(type=ParameterType.LIST),
                 "next_role_cursor": ParameterMetadata(type=ParameterType.STRING),
@@ -8115,6 +9166,30 @@ class AgentMessagingPlugin(
                 "role_history_cursor": ParameterMetadata(type=ParameterType.STRING),
                 "role_read_page_token": ParameterMetadata(type=ParameterType.STRING),
                 "role_read_page_status": ParameterMetadata(type=ParameterType.STRING),
+                "role_since_created_at": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description=("The 'since' horizon the role section applied; null when none was requested or the role section failed."),
+                ),
+                "role_read_coverage": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description=(
+                        "One {role, covered_mark_present, floor_hidden, "
+                        "receipt_hidden} entry per role the role section "
+                        "read. floor_hidden / receipt_hidden count rows the "
+                        "covered-mark floor / a read receipt hid inside the "
+                        "window this call scanned (counts only, a lower "
+                        "bound on the role's whole hidden history). An entry "
+                        "also carries scan_truncated: true when the receipt "
+                        "refill spent its page budget; its rows are every "
+                        "unserved row found and next_role_cursor continues "
+                        "the scan. Empty when no role is held or the role "
+                        "section failed."
+                    ),
+                ),
+                "read_coverage": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description=("JSON-native direct and role section objects: returned-row endpoints/count, requested and effective boundaries, cursor safety and scope; nested role_read_coverage is a list. Outside-query rows, human reading and unread totals are unknown."),
+                ),
             },
         ),
     )
@@ -8156,11 +9231,7 @@ class AgentMessagingPlugin(
         if not self._active or self._peer_registry is None:
             return _failure_result(
                 code="bridge.not_running",
-                message=(
-                    "The agent messaging bridge is not active on this "
-                    "solet, so no inbox can be read. This is NOT an empty "
-                    "inbox — start the interface and retry."
-                ),
+                message=("The agent messaging bridge is not active on this solet, so no inbox can be read. This is NOT an empty inbox — start the interface and retry."),
             )
         raw = params.get("parameters", params)
         try:
@@ -8177,16 +9248,47 @@ class AgentMessagingPlugin(
         name="peer_ack_role_read_page",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "agent_session_id": ParameterMetadata(required=True, type=ParameterType.STRING,
-                description="The acknowledging caller's own stable session id."),
-            "page_token": ParameterMetadata(required=True, type=ParameterType.STRING,
-                description="Opaque token returned by peer_inbox after role rows were output."),
+            "agent_session_id": ParameterMetadata(required=True, type=ParameterType.STRING, description="The acknowledging caller's own stable session id."),
+            "page_token": ParameterMetadata(required=True, type=ParameterType.STRING, description="Opaque token returned by peer_inbox after role rows were output."),
         },
         output_type="object",
         output_description="Acknowledge a successfully rendered role inbox page.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description=("peer_ack_role_read_page ActionResult: successful data contains the receipt status and count; rejected calls return the standard failure envelope."),
+            properties={
+                "status": ParameterMetadata(type=ParameterType.STRING),
+                "receipt_count": ParameterMetadata(type=ParameterType.INTEGER),
+            },
+            examples=[
+                {
+                    "action_status": "completed",
+                    "data": {"status": "acknowledged", "receipt_count": 2},
+                    "actions": [],
+                    "error": None,
+                    "timestamp": "<ISO-8601>",
+                },
+                {
+                    "action_status": "failed",
+                    "data": {},
+                    "actions": [],
+                    "error": {"type": "agent_messaging_error", "code": "role_read_page_rejected", "message": "receipt page rejected", "details": {}, "severity": "error", "timestamp": "<ISO-8601>"},
+                    "timestamp": "<ISO-8601>",
+                },
+            ],
+            error_conditions={
+                "missing_argument": "agent_session_id or page_token is empty",
+                "bridge.not_running": "The peer registry is unavailable",
+                "peer_session_ambiguous": "The session id resolves to multiple live bindings",
+                "identity_not_registered": "No live binding exists for the session id",
+                "role_read_page_rejected": "The service rejected the page receipt",
+            },
+        ),
     )
     def peer_ack_role_read_page(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         raw = params.get("parameters", params)
         session_id = str(raw.get("agent_session_id", "")).strip()
@@ -8203,7 +9305,9 @@ class AgentMessagingPlugin(
             return _failure_result(code="identity_not_registered", message="no live peer binding for agent_session_id.")
         try:
             result = self._require_service().acknowledge_role_read_page(
-                agent_session_id=session_id, agent_instance_id=binding.agent_instance_id, token=token,
+                agent_session_id=session_id,
+                agent_instance_id=binding.agent_instance_id,
+                token=token,
             )
         except AgentMessagingError as exc:
             return _failure_result(code="role_read_page_rejected", message=str(exc))
@@ -8213,16 +9317,48 @@ class AgentMessagingPlugin(
         name="peer_role_read_receipts",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "agent_session_id": ParameterMetadata(required=True, type=ParameterType.STRING,
-                description="The querying caller's own stable session id."),
-            "candidates": ParameterMetadata(required=True, type=ParameterType.LIST,
-                description="Exact recipient_key/role_row_id pairs from a wake spool record."),
+            "agent_session_id": ParameterMetadata(required=True, type=ParameterType.STRING, description="The querying caller's own stable session id."),
+            "candidates": ParameterMetadata(required=True, type=ParameterType.LIST, description="Exact recipient_key/role_row_id pairs from a wake spool record."),
         },
         output_type="object",
         output_description="Read exact acknowledged role display receipts for the caller's held roles.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description=("peer_role_read_receipts ActionResult: successful data contains the caller instance and exact receipt results; rejected calls return the standard failure envelope."),
+            properties={
+                "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "results": ParameterMetadata(type=ParameterType.LIST),
+            },
+            examples=[
+                {
+                    "action_status": "completed",
+                    "data": {"agent_instance_id": "agi-example", "results": [{"recipient_key": "Coordinator-Main", "role_row_id": "arr-example", "served": True}]},
+                    "actions": [],
+                    "error": None,
+                    "timestamp": "<ISO-8601>",
+                },
+                {
+                    "action_status": "failed",
+                    "data": {},
+                    "actions": [],
+                    "error": {"type": "agent_messaging_error", "code": "role_read_receipts_rejected", "message": "receipt lookup rejected", "details": {}, "severity": "error", "timestamp": "<ISO-8601>"},
+                    "timestamp": "<ISO-8601>",
+                },
+            ],
+            error_conditions={
+                "missing_argument": "agent_session_id is empty or candidates is missing or is not a list",
+                "invalid_candidates": "Candidates are not exact recipient_key/role_row_id pairs",
+                "bridge.not_running": "The peer registry is unavailable",
+                "peer_session_ambiguous": "The session id resolves to multiple live bindings",
+                "identity_not_registered": "No live binding exists for the session id",
+                "role_read_receipts_rejected": "The service rejected the receipt lookup",
+            },
+        ),
     )
     def peer_role_read_receipts(
-        self, params: dict[str, Any], state: dict[str, Any],  # noqa: ARG002
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
     ) -> dict[str, Any]:
         raw = params.get("parameters", params)
         session_id = str(raw.get("agent_session_id", "")).strip()
@@ -8243,36 +9379,27 @@ class AgentMessagingPlugin(
             return _failure_result(code="identity_not_registered", message="no live peer binding for agent_session_id.")
         try:
             results = self._require_service().role_read_receipts(
-                agent_instance_id=binding.agent_instance_id, candidates=candidates,
+                agent_instance_id=binding.agent_instance_id,
+                candidates=candidates,
             )
         except AgentMessagingError as exc:
             return _failure_result(code="role_read_receipts_rejected", message=str(exc))
-        return _success_result(data={
-            "agent_instance_id": binding.agent_instance_id,
-            "results": [{"recipient_key": item.recipient_key, "role_row_id": item.role_row_id,
-                         "served": item.served} for item in results],
-        })
+        return _success_result(
+            data={
+                "agent_instance_id": binding.agent_instance_id,
+                "results": [{"recipient_key": item.recipient_key, "role_row_id": item.role_row_id, "served": item.served} for item in results],
+            }
+        )
 
     @platform_process(
         name="peer_list",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
         output_type="object",
-        output_description=(
-            "A snapshot of every live peer registered on this solet: "
-            "the sorted list of distinct agent_ids present, and per agent_id "
-            "the list of its live instances (agent_instance_id, "
-            "session_label, parent_pid, registered_at, created_at, "
-            "updated_at)."
-        ),
+        output_description=("A snapshot of every live peer registered on this solet: the sorted list of distinct agent_ids present, and per agent_id the list of its live instances (agent_instance_id, session_label, parent_pid, registered_at, created_at, updated_at)."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description=(
-                "peer_list snapshot — the exact shape emitted by "
-                "peer_list_view.serialize_peer_list (the same payload the "
-                "localhost /peer/list route and the MCP peer_list tool "
-                "return)"
-            ),
+            description=("peer_list snapshot — the exact shape emitted by peer_list_view.serialize_peer_list (the same payload the localhost /peer/list route and the MCP peer_list tool return)"),
             properties={
                 "agent_ids": ParameterMetadata(type=ParameterType.LIST),
                 "instances": ParameterMetadata(type=ParameterType.DICT),
@@ -8309,11 +9436,7 @@ class AgentMessagingPlugin(
         if not self._active or self._peer_registry is None:
             return _failure_result(
                 code="bridge.not_running",
-                message=(
-                    "The agent messaging bridge is not active on this "
-                    "solet, so no peer registry can be read. This is "
-                    "NOT an empty registry — start the interface and retry."
-                ),
+                message=("The agent messaging bridge is not active on this solet, so no peer registry can be read. This is NOT an empty registry — start the interface and retry."),
             )
         snapshot = self._peer_registry.list_agent_ids()
         return _success_result(data=serialize_peer_list(snapshot))
@@ -8347,9 +9470,7 @@ class AgentMessagingPlugin(
             data={
                 "caller_identity_available": available,
                 "registered_bridge": registered,
-                "bridge_identity": "registered_bridge"
-                if registered
-                else ("one_shot_attributed" if attributed else "unavailable"),
+                "bridge_identity": "registered_bridge" if registered else ("one_shot_attributed" if attributed else "unavailable"),
             }
         )
 
@@ -8392,47 +9513,47 @@ class AgentMessagingPlugin(
 
     @platform_process(
         name="qualify_fleet",
+        is_async=True,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={},
+        parameters={
+            "unit_id": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "expected_revision_id": ParameterMetadata(required=False, type=ParameterType.STRING),
+            "spawned_by_role": ParameterMetadata(required=True, type=ParameterType.STRING),
+            "repository_root": ParameterMetadata(required=False, type=ParameterType.STRING),
+        },
         output_type="object",
-        output_description="Run the bounded no-worktree fleet lifecycle qualification.",
+        output_description="Accept a fleet qualification job; read its terminal outcome by job_id.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Fleet lifecycle qualification outcome.",
+            description="Accepted job receipt.",
             properties={
-                "host": ParameterMetadata(type=ParameterType.STRING),
-                "spawned": ParameterMetadata(type=ParameterType.BOOLEAN),
-                "role_claimed": ParameterMetadata(type=ParameterType.BOOLEAN),
-                "addressed_delivery_confirmed": ParameterMetadata(type=ParameterType.BOOLEAN),
-                "retired": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "job_id": ParameterMetadata(type=ParameterType.STRING),
+                "status": ParameterMetadata(type=ParameterType.STRING),
             },
         ),
     )
+    def qualify_fleet_action(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return submit_launch(self, "qualify_fleet", params, state)
+
     def qualify_fleet(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         """Exercise the entire bounded no-worktree fleet lifecycle."""
-        del params
+        raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
                 message="state service is not bound",
             )
-        request = SpawnSessionRequest(
-            role_class="ephemeral",
-            lane_id="qualify-fleet",
-            brief_ref="internal:qualify_fleet",
-            work_class="read_only",
-            budget_line="qualification",
-            host="qualification",
-            role_name="qualify-fleet-worker",
-            local_name="qualify-fleet-worker",
-            directed_by=format_directed_by(state.get("call_context")),
-            synthetic_qualification_no_worktree=True,
-            dispatch_kind="infrastructure",
-        )
+        request = qualification_request(raw, state)
         try:
-            spawned = lifecycle_spawn_session(state_service, request)
-        except VerbError as exc:
+            request = bind_bare_assignment(self, request, raw, state)
+            spawned = lifecycle_spawn_session(
+                state_service,
+                request,
+                register=self._register_unit_client(),
+                actor=self._native_spawn_actor(state, request.lane_id, request.spawned_by_role),
+            )
+        except (VerbError, DispatchError) as exc:
             return _failure_result(code=exc.code, message=exc.message)
         agent_instance_id = str(spawned.get("agent_instance_id") or "")
         agent_session_id = f"ases-{agent_instance_id}"
@@ -8638,8 +9759,7 @@ class AgentMessagingPlugin(
         state_service = orchestrator.get_service("state_service")
         if state_service is None:
             raise RuntimeError(
-                f"{self.name}: state_service unbound — it is the load-bearing "
-                "authority for the startup backfills; refusing to proceed",
+                f"{self.name}: state_service unbound — it is the load-bearing authority for the startup backfills; refusing to proceed",
             )
         # Control #2 B5: seed agent_role_binding from legacy address-book
         # RETIRED at the §9 cutover (slice-D): the legacy address-book →
@@ -8683,12 +9803,19 @@ class AgentMessagingPlugin(
         role_class_stamped = role_class.get("stamped")
         role_class_violations = role_class.get("cardinality_violations")
         logger.info(
-            "%s: role_class backfill status=%s (%d row(s) stamped, %d "
-            "cardinality violation(s) reported)",
+            "%s: role_class backfill status=%s (%d row(s) stamped, %d cardinality violation(s) reported)",
             self.name,
             role_class.get("status"),
             len(role_class_stamped) if isinstance(role_class_stamped, list) else 0,
             len(role_class_violations) if isinstance(role_class_violations, list) else 0,
+        )
+        # iss_d9c955a2: the retired-role registry's migration seed (Register-Lead).
+        # Idempotent; a failure propagates so the bridge never serves sends with
+        # an unseeded registry.
+        logger.info(
+            "%s: retired-role registry seed status=%s",
+            self.name,
+            seed_retired_role_registry(state_service),
         )
 
     # ------------------------------------------------------------------
@@ -8771,9 +9898,7 @@ class AgentMessagingPlugin(
         except RoleBindingVacantError:
             return None
         logger.info(
-            "sys:autonomic vertex turn: slot held by peer session agi=%s — "
-            "vertex lane DEFERs to the durable queue (peer sessions cannot "
-            "serve raw vertex turns; D2-window ruling 2026-08-04)",
+            "sys:autonomic vertex turn: slot held by peer session agi=%s — vertex lane DEFERs to the durable queue (peer sessions cannot serve raw vertex turns; D2-window ruling 2026-08-04)",
             resolved.agent_instance_id,
         )
         return None
@@ -8801,8 +9926,7 @@ class AgentMessagingPlugin(
         provider = self.get_inference_provider(agent_instance_id)
         if provider is None:
             raise FrameworkError(
-                f"completion forward: instance {agent_instance_id!r} has no "
-                "live inference provider",
+                f"completion forward: instance {agent_instance_id!r} has no live inference provider",
             )
         messages = json.loads(str(row.get(COL_ICR_MESSAGES) or "[]"))
         correlation = json.loads(str(row.get(COL_ICR_CORRELATION) or "{}"))
@@ -8842,15 +9966,9 @@ class AgentMessagingPlugin(
             orchestrator = getattr(self, "orchestrator_ref", None)
             action_factory = getattr(self, "action_factory", None)
             builder = self._compilation_context_builder
-            if (
-                flow_manager is None
-                or orchestrator is None
-                or action_factory is None
-                or builder is None
-            ):
+            if flow_manager is None or orchestrator is None or action_factory is None or builder is None:
                 logger.warning(
-                    "INF-06 RESUBMIT flow=%s (method=%s): collaborators not "
-                    "injected — cannot re-drive; row stays queued.",
+                    "INF-06 RESUBMIT flow=%s (method=%s): collaborators not injected — cannot re-drive; row stays queued.",
                     flow_id,
                     method,
                 )
@@ -8858,8 +9976,7 @@ class AgentMessagingPlugin(
             session_id = flow_manager.get_flow_session_id(flow_id)
             if not session_id:
                 logger.warning(
-                    "INF-06 RESUBMIT flow=%s (method=%s): no owning session "
-                    "(flow unknown) — cannot re-drive; row stays queued.",
+                    "INF-06 RESUBMIT flow=%s (method=%s): no owning session (flow unknown) — cannot re-drive; row stays queued.",
                     flow_id,
                     method,
                 )
@@ -8875,16 +9992,14 @@ class AgentMessagingPlugin(
                 context=context,
             )
             logger.info(
-                "INF-06 RESUBMIT flow=%s session=%s method=%s: fresh vertex "
-                "submitted (fresh decode of current durable state).",
+                "INF-06 RESUBMIT flow=%s session=%s method=%s: fresh vertex submitted (fresh decode of current durable state).",
                 flow_id,
                 session_id,
                 method,
             )
         except Exception:  # noqa: BLE001 — per-row isolation: never abort the sweep/drain
             logger.exception(
-                "INF-06 RESUBMIT flow=%s (method=%s) FAULTED — row stays "
-                "durably queued for the next tick.",
+                "INF-06 RESUBMIT flow=%s (method=%s) FAULTED — row stays durably queued for the next tick.",
                 flow_id,
                 method,
             )
@@ -8896,27 +10011,18 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "request_id": ParameterMetadata(
-                description=(
-                    "The completion request id (icr-...) from the "
-                    "inference_completion_request bridge event this serve "
-                    "answers."
-                ),
+                description=("The completion request id (icr-...) from the inference_completion_request bridge event this serve answers."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "text": ParameterMetadata(
-                description=(
-                    "The completion text the holder produced for the request's messages payload."
-                ),
+                description=("The completion text the holder produced for the request's messages payload."),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
         output_type="object",
-        output_description=(
-            "Serve outcome: the CAS verdict (served / already_served / "
-            "already_failed / unknown_request) and the request id."
-        ),
+        output_description=("Serve outcome: the CAS verdict (served / already_served / already_failed / unknown_request) and the request id."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description=("submit_autonomic_completion outcome (INF-02 serve verb)"),
@@ -8989,19 +10095,13 @@ class AgentMessagingPlugin(
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "agent_instance_id": ParameterMetadata(
-                description=(
-                    "Target session's agent_instance_id (agi-...) to bind as "
-                    "the sys:autonomic holder. Must be live and registered "
-                    "with provides_inference=True."
-                ),
+                description=("Target session's agent_instance_id (agi-...) to bind as the sys:autonomic holder. Must be live and registered with provides_inference=True."),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
         output_type="object",
-        output_description=(
-            "sys:autonomic manual-set outcome: the claim action and the bound agent_instance_id."
-        ),
+        output_description=("sys:autonomic manual-set outcome: the claim action and the bound agent_instance_id."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="set_autonomic_slot outcome (sys:autonomic manual override)",
@@ -9094,8 +10194,7 @@ class AgentMessagingPlugin(
         """
         if self._bridge_manager is None:
             logger.warning(
-                "_register_inference_provider called before start_interface; "
-                "skipping for agent_instance_id=%s",
+                "_register_inference_provider called before start_interface; skipping for agent_instance_id=%s",
                 agent_instance_id,
             )
             return
@@ -9146,11 +10245,7 @@ class AgentMessagingPlugin(
                         # N1 (Rev-C): LOUD eviction — a roleless bound instance
                         # aging out means its stale flows now route DEFAULT.
                         logger.warning(
-                            "inference-provider tombstone evicted roleless bound "
-                            "instance %s (cap=%d): its stale in-flight flows will "
-                            "now route DEFAULT (default model), not DEFER. "
-                            "Role-bound sessions are immune (◆R2 durable path). "
-                            "Claim a role to get durable vertex protection.",
+                            "inference-provider tombstone evicted roleless bound instance %s (cap=%d): its stale in-flight flows will now route DEFAULT (default model), not DEFER. Role-bound sessions are immune (◆R2 durable path). Claim a role to get durable vertex protection.",
                             evicted,
                             _INFERENCE_TOMBSTONE_CAP,
                         )
@@ -9168,11 +10263,7 @@ class AgentMessagingPlugin(
         return run_full_bridge_cleanup(
             bridge_id,
             inference_provider_clear=self._clear_inference_providers_for_bridge,
-            autonomic_on_close=(
-                self._autonomic_assignment.on_bridge_close
-                if self._autonomic_assignment is not None
-                else None
-            ),
+            autonomic_on_close=(self._autonomic_assignment.on_bridge_close if self._autonomic_assignment is not None else None),
             unregister=peer_registry.unregister,
         )
 
@@ -9192,6 +10283,10 @@ class AgentMessagingPlugin(
         (session_sweep.py, D1) is its sole successor, keyed off the recipient's
         own report_by promise instead of a message-level heuristic.
         """
+        try:
+            sweep_codex_pickups(self._get_state_service())
+        except Exception:  # noqa: BLE001 -- one delivery rider must not skip sibling sweeps
+            logger.exception("Codex eventual-pickup sweep FAULTED; mail remains durable")
         autonomic = self._autonomic_assignment
         if autonomic is not None:
             try:
@@ -9318,15 +10413,9 @@ class AgentMessagingPlugin(
                 ),
                 due_counts.actionable,
             )[1],
-            lambda _n: (
-                f"{due_counts.detected} detected"
-                f"({due_counts.delivered} delivered/"
-                f"{due_counts.undelivered} undelivered) session(s) due to rotate"
-            ),
+            lambda _n: f"{due_counts.detected} detected({due_counts.delivered} delivered/{due_counts.undelivered} undelivered) session(s) due to rotate",
             lambda _n: logger.warning(
-                "L4 sweep: %d session(s) due to rotate; %d steward(s) notified, "
-                "%d NOT reached — an undelivered rotation notice is an alarm "
-                "nobody received, not a quiet tick",
+                "L4 sweep: %d session(s) due to rotate; %d steward(s) notified, %d NOT reached — an undelivered rotation notice is an alarm nobody received, not a quiet tick",
                 due_counts.detected,
                 due_counts.delivered,
                 due_counts.undelivered,
@@ -9347,11 +10436,7 @@ class AgentMessagingPlugin(
                 ),
                 dark_counts.actionable,
             )[1],
-            lambda _n: (
-                f"{dark_counts.detected} detected"
-                f"({dark_counts.delivered} delivered/"
-                f"{dark_counts.undelivered} undelivered) session(s) with no gauge row"
-            ),
+            lambda _n: f"{dark_counts.detected} detected({dark_counts.delivered} delivered/{dark_counts.undelivered} undelivered) session(s) with no gauge row",
             # ★ GAU-13(b), the SAME overclaim one level up. This line used
             # to name a "likeliest cause" the sweep never measured, exactly
             # as the per-session notice did. The notice now states what it
@@ -9360,10 +10445,7 @@ class AgentMessagingPlugin(
             # cause would have re-introduced the inference the notice just
             # dropped, on the surface a reader hits FIRST.
             lambda _n: logger.warning(
-                "L4 sweep: %d LIVE session(s) past the startup grace have no "
-                "context-gauge row; %d steward(s) notified, %d NOT reached; "
-                "each notice names what was measured for that session and how "
-                "far the evidence identifies the cause",
+                "L4 sweep: %d LIVE session(s) past the startup grace have no context-gauge row; %d steward(s) notified, %d NOT reached; each notice names what was measured for that session and how far the evidence identifies the cause",
                 dark_counts.detected,
                 dark_counts.delivered,
                 dark_counts.undelivered,
@@ -9395,11 +10477,7 @@ class AgentMessagingPlugin(
             legs.append("L4c=FAULTED")
         else:
             legs.append(
-                f"L4c={counts.appended} appended"
-                f"({counts.watcher_held} watcher-held)/"
-                f"{counts.unroutable} unroutable/"
-                f"{counts.undeliverable} undeliverable/"
-                f"{counts.gauge_silent} gauge-silent",
+                f"L4c={counts.appended} appended({counts.watcher_held} watcher-held)/{counts.unroutable} unroutable/{counts.undeliverable} undeliverable/{counts.gauge_silent} gauge-silent",
             )
             self._log_self_notice_counts(counts)
         # L4d (GAU-01(b)): the gauge row that STOPPED, as distinct from the one
@@ -9429,17 +10507,9 @@ class AgentMessagingPlugin(
                 ),
                 stale_counts.actionable,
             )[1],
-            lambda _n: (
-                f"{stale_counts.detected} detected"
-                f"({stale_counts.delivered} delivered/"
-                f"{stale_counts.undelivered} undelivered) session(s) with an "
-                f"arrested gauge row"
-            ),
+            lambda _n: f"{stale_counts.detected} detected({stale_counts.delivered} delivered/{stale_counts.undelivered} undelivered) session(s) with an arrested gauge row",
             lambda _n: logger.warning(
-                "L4 sweep: %d LIVE session(s) are still reporting while their "
-                "context-gauge row has stopped advancing; %d steward(s) "
-                "notified, %d NOT reached; each notice carries the two "
-                "timestamps it compared and the gap between them",
+                "L4 sweep: %d LIVE session(s) are still reporting while their context-gauge row has stopped advancing; %d steward(s) notified, %d NOT reached; each notice carries the two timestamps it compared and the gap between them",
                 stale_counts.detected,
                 stale_counts.delivered,
                 stale_counts.undelivered,
@@ -9480,9 +10550,7 @@ class AgentMessagingPlugin(
         WARNING with a traceback. Naming only the first, as an earlier draft
         did, would have attributed every delivery fault to the join gap.
         """
-        if not (
-            counts.appended or counts.unroutable or counts.undeliverable or counts.gauge_silent
-        ):
+        if not (counts.appended or counts.unroutable or counts.undeliverable or counts.gauge_silent):
             # ★ GAU-02, the half found first. This used to `return` and log
             # NOTHING, which made a healthy leg that found nobody identical in
             # the log to a leg that never ran. All-zero is not an edge case
@@ -9493,11 +10561,7 @@ class AgentMessagingPlugin(
             # counts — a zero that prints what it counted is the only kind a
             # reader can trust.
             logger.info(
-                "L4c sweep: 0 session(s) appended (0 watcher-held), 0 unroutable, "
-                "0 undeliverable, 0 gauge-silent "
-                "— the leg RAN and had no eligible subject (every gauge row was "
-                "stale, below band, or already latched for this episode); this "
-                "is the expected quiet-fleet result, not a failure",
+                "L4c sweep: 0 session(s) appended (0 watcher-held), 0 unroutable, 0 undeliverable, 0 gauge-silent — the leg RAN and had no eligible subject (every gauge row was stale, below band, or already latched for this episode); this is the expected quiet-fleet result, not a failure",
             )
             return
         logger.info(
@@ -9532,6 +10596,7 @@ class AgentMessagingPlugin(
         # the `if` below) -- sweep_overdue_sessions must still mark overdue
         # rows on an early-boot tick before the bridge service is up; it
         # just skips the notify step internally when either is None.
+        _run_ledger_tmux_rider(state_service)
         overdue = sweep_overdue_sessions(
             state_service,
             peer_registry=self._peer_registry,
@@ -9541,6 +10606,7 @@ class AgentMessagingPlugin(
             logger.info("D1 sweep: marked %d session(s) overdue", overdue)
         managed = sweep_managed_dispatches(
             state_service,
+            register=self._register_unit_client(),
             peer_registry=self._peer_registry,
             bridge_manager=self._bridge_manager,
         )
@@ -9556,9 +10622,7 @@ class AgentMessagingPlugin(
         )
         if unregistered:
             logger.warning(
-                "D1 sweep: marked %d session(s) registration-overdue — a worker "
-                "that has not registered past its bound did not run its "
-                "registration hook",
+                "D1 sweep: marked %d session(s) registration-overdue — a worker that has not registered past its bound did not run its registration hook",
                 unregistered,
             )
         _run_session_claude_mapping_riders(state_service)
@@ -9633,24 +10697,17 @@ class AgentMessagingPlugin(
         orchestrator = getattr(self, "orchestrator_ref", None)
         if orchestrator is None:
             raise RuntimeError(
-                f"{self.name}: orchestrator_ref not injected at start_interface "
-                "— cannot resolve the D11 router-presence predicate",
+                f"{self.name}: orchestrator_ref not injected at start_interface — cannot resolve the D11 router-presence predicate",
             )
         app_home = getattr(orchestrator, "APP_HOME", None)
         if app_home is None:
             raise RuntimeError(
-                f"{self.name}: orchestrator.APP_HOME unavailable at "
-                "start_interface — cannot resolve the D11 router-presence "
-                "predicate",
+                f"{self.name}: orchestrator.APP_HOME unavailable at start_interface — cannot resolve the D11 router-presence predicate",
             )
         declared_plugins = load_manifest_plugin_set(app_home)
         if declared_plugins is None:
             raise RuntimeError(
-                f"{self.name}: {app_home}/config/manifest.yaml is absent — "
-                "the D11 router-presence predicate cannot be determined "
-                "(never guessed). A solet without a manifest must "
-                "still declare its topology before the bridge can decide "
-                "whether it owns its own port-discovery file.",
+                f"{self.name}: {app_home}/config/manifest.yaml is absent — the D11 router-presence predicate cannot be determined (never guessed). A solet without a manifest must still declare its topology before the bridge can decide whether it owns its own port-discovery file.",
             )
         return _ROUTER_PLUGIN_NAME in declared_plugins
 
@@ -9673,8 +10730,7 @@ class AgentMessagingPlugin(
         state_service = orchestrator.get_service("state_service")
         if state_service is None:
             raise RuntimeError(
-                f"{self.name}: state_service unavailable at start_interface — "
-                "PeerRegistry persistence cannot initialize",
+                f"{self.name}: state_service unavailable at start_interface — PeerRegistry persistence cannot initialize",
             )
         peer_registry = PeerRegistry(state_service=state_service)
         peer_registry.register_native_wake_adapter("claude_code", self)
@@ -9732,6 +10788,7 @@ class AgentMessagingPlugin(
             # bridge-construction time (startup ordering); the closure
             # looks them up at session-open time via orchestrator.
             policy_resolver=self._resolve_oauth_session_policy,
+            diagnostics=BridgeDiagnostics(_resolve_solet_name()),
         )
         self._peer_registry = self._build_peer_registry()
         # REL-09 startup reconciliation: at boot ZERO live bridges exist, so
@@ -9776,6 +10833,7 @@ class AgentMessagingPlugin(
         # INF-02 + REL-05 ride the same cadence via _on_sweep_tick: each tick
         # runs the completion serve-timeout sweep AND the deaf-wake escalation,
         # each fault-isolated so one failing does not skip the other.
+        start_delivery_drives()
         sweeper = BridgeLifecycleSweeper(
             bridge_manager=self._bridge_manager,
             cleanup=self._full_bridge_cleanup,
@@ -9818,9 +10876,7 @@ class AgentMessagingPlugin(
             self._shutdown_server()
             return _failure_result(
                 code="bridge.startup_failed",
-                message=(
-                    f"Bridge API server did not signal startup within {_SERVER_START_TIMEOUT_S}s"
-                ),
+                message=(f"Bridge API server did not signal startup within {_SERVER_START_TIMEOUT_S}s"),
             )
         # D11 (workbench/2026-07-13_d11_bridge_port_discovery_routerless_ruling.md):
         # in router-less topology this plugin IS the bridge's front door, so
@@ -9843,19 +10899,13 @@ class AgentMessagingPlugin(
             "started_at": started_at,
         }
         if bridge_config.streamable_enabled:
-            result_data["streamable_url"] = (
-                f"http://{self._streamable_host}:{self._streamable_port}/api/v1/mcp/streamable"
-            )
+            result_data["streamable_url"] = f"http://{self._streamable_host}:{self._streamable_port}/api/v1/mcp/streamable"
         logger.info(
             "%s: bridge API started on %s:%s%s",
             self.name,
             self._host,
             self._port,
-            (
-                f" + streamable HTTP MCP on {self._streamable_host}:{self._streamable_port}"
-                if bridge_config.streamable_enabled
-                else ""
-            ),
+            (f" + streamable HTTP MCP on {self._streamable_host}:{self._streamable_port}" if bridge_config.streamable_enabled else ""),
         )
         return _success_result(data=result_data)
 
@@ -9902,9 +10952,7 @@ class AgentMessagingPlugin(
         keeps the unconditional-200 contract because no streamable
         listener exists to race against.
         """
-        return (
-            self._server_started_event.is_set() and self._streamable_server_started_event.is_set()
-        )
+        return self._server_started_event.is_set() and self._streamable_server_started_event.is_set()
 
     # ------------------------------------------------------------------
     # IO interface — post_message
@@ -9929,10 +10977,7 @@ class AgentMessagingPlugin(
             properties={
                 "status": ParameterMetadata(
                     type=ParameterType.STRING,
-                    description=(
-                        "'queued' when appended, or 'dropped_bridge_gone' "
-                        "when the originating bridge has already closed."
-                    ),
+                    description=("'queued' when appended, or 'dropped_bridge_gone' when the originating bridge has already closed."),
                 ),
             },
         ),
@@ -10015,17 +11060,12 @@ class AgentMessagingPlugin(
             "result_payload": ParameterMetadata(
                 type=ParameterType.DICT,
                 required=True,
-                description=(
-                    "Raw structured result payload to deliver to the originating bridge channel."
-                ),
+                description=("Raw structured result payload to deliver to the originating bridge channel."),
             ),
             "source_process_key": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=(
-                    "Process key of the action whose result is being "
-                    "delivered (informational; surfaced to the MCP caller)."
-                ),
+                description=("Process key of the action whose result is being delivered (informational; surfaced to the MCP caller)."),
             ),
             "bridge_id": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -10041,10 +11081,7 @@ class AgentMessagingPlugin(
             properties={
                 "status": ParameterMetadata(
                     type=ParameterType.STRING,
-                    description=(
-                        "'queued' when appended, or 'dropped_bridge_gone' "
-                        "when the originating bridge has already closed."
-                    ),
+                    description=("'queued' when appended, or 'dropped_bridge_gone' when the originating bridge has already closed."),
                 ),
             },
         ),
@@ -10070,9 +11107,7 @@ class AgentMessagingPlugin(
             "error_payload": ParameterMetadata(
                 type=ParameterType.DICT,
                 required=True,
-                description=(
-                    "Raw structured error payload to deliver to the originating bridge channel."
-                ),
+                description=("Raw structured error payload to deliver to the originating bridge channel."),
             ),
             "source_process_key": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -10150,8 +11185,7 @@ class AgentMessagingPlugin(
             )
         if recipient_parent_pid is None:
             raise RuntimeError(
-                "claude_code wake requires recipient parent_pid; the "
-                "recipient bridge has no parent_pid (older client build)",
+                "claude_code wake requires recipient parent_pid; the recipient bridge has no parent_pid (older client build)",
             )
         bridge = _find_claude_code_bridge_by_parent_pid(
             manager=manager,
@@ -10173,12 +11207,7 @@ class AgentMessagingPlugin(
             # the instance id in this hint has rotated.
             sender_agent_session_id=sender_agent_session_id,
         )
-        envelope = (
-            f"[peer:{sender_agent_id}{label_segment} "
-            f"instance={sender_agent_instance_id}] "
-            f"{delivered_prose}\n\n"
-            f"{reply_hint}"
-        )
+        envelope = f"[peer:{sender_agent_id}{label_segment} instance={sender_agent_instance_id}] {delivered_prose}\n\n{reply_hint}"
         # Synthetic flow_id keeps the bridge subprocess emitting a
         # non-empty meta.flow_id on the resulting channel notification.
         meta: dict[str, object] = {
@@ -10227,7 +11256,7 @@ class AgentMessagingPlugin(
             list(config.allowed_backends),
             config.max_message_bytes,
         )
-        return AgentMessagingService(
+        return PickupTrackingMessagingService(
             repository=repository,
             state_service=state_service,
             config=config,
@@ -10252,9 +11281,7 @@ class AgentMessagingPlugin(
         flow_manager = self._flow_manager or orchestrator.get_service(
             "flow_service",
         )
-        compilation_context_builder = self._compilation_context_builder or getattr(
-            orchestrator, "compilation_context_builder", None
-        )
+        compilation_context_builder = self._compilation_context_builder or getattr(orchestrator, "compilation_context_builder", None)
         process_registry = self._resolve_process_registry(orchestrator)
         export_policy = self._build_export_policy()
         return PlatformSurface(
@@ -10324,8 +11351,7 @@ class AgentMessagingPlugin(
     def _mint_session_id(self, solet_name: str) -> str:  # noqa: ARG002  # pyright: ignore[reportUnusedParameter]
         if self._session_manager is None:
             raise RuntimeError(
-                f"{self.name}: session_manager not injected; "
-                "cannot mint session_id for bridge open",
+                f"{self.name}: session_manager not injected; cannot mint session_id for bridge open",
             )
         session_id = self._session_manager.create_session(
             namespace=PLUGIN_NAME,
@@ -10447,8 +11473,11 @@ class AgentMessagingPlugin(
             agent_messaging_service=self._require_service(),
             config=bridge_config,
             state_service=self._get_state_service(),
-            readiness_probe=(
-                self._is_full_surface_ready if bridge_config.streamable_enabled else None
+            readiness_probe=(self._is_full_surface_ready if bridge_config.streamable_enabled else None),
+            post_registration_status=lambda: getattr(
+                self.orchestrator_ref,
+                "post_registration_work_status",
+                None,
             ),
             # D-IF7 / D-IF8 sidecar wiring (v4 §4-5). Streamable transport
             # paths (mcp_streamable/{session,dispatch}.py) DO NOT receive
@@ -10460,16 +11489,8 @@ class AgentMessagingPlugin(
             # INF-01 sub-slice-2 (seam §b): Trigger-1 vacancy-fill/crash-heal
             # + Trigger-2 grace-delayed succession hook bodies. Streamable
             # paths stay scoped out with the sidecar (D-IF11).
-            autonomic_on_register=(
-                self._autonomic_assignment.on_register
-                if self._autonomic_assignment is not None
-                else None
-            ),
-            autonomic_on_close=(
-                self._autonomic_assignment.on_bridge_close
-                if self._autonomic_assignment is not None
-                else None
-            ),
+            autonomic_on_register=(self._autonomic_assignment.on_register if self._autonomic_assignment is not None else None),
+            autonomic_on_close=(self._autonomic_assignment.on_bridge_close if self._autonomic_assignment is not None else None),
         )
         # M5 §13.6 ONE-TIME EXCEPTION to the no-edits-to-god-file-plugins
         # Boy Scout rule: mount the session-ledger pairing routes umbrella
@@ -10484,16 +11505,14 @@ class AgentMessagingPlugin(
             )
         except ImportError:
             logger.info(
-                "session_shipper_bootstrap_plugin not installed; skipping "
-                "session-ledger pairing route mount (spec §13.6 profile contract)",
+                "session_shipper_bootstrap_plugin not installed; skipping session-ledger pairing route mount (spec §13.6 profile contract)",
             )
             return app
         ledger_service = self._maybe_get_session_ledger_service()
         vault_registry = self._maybe_get_vault_oauth_registry()
         if ledger_service is None or vault_registry is None:
             logger.info(
-                "session_ledger_service or vault_oauth_registry unavailable; "
-                "skipping pairing route mount (will reattach next startup if both land)",
+                "session_ledger_service or vault_oauth_registry unavailable; skipping pairing route mount (will reattach next startup if both land)",
             )
             return app
         facade = make_pairing_ledger_facade(
@@ -10683,16 +11702,13 @@ class AgentMessagingPlugin(
             vault_registry = self._maybe_get_vault_oauth_registry()
             if verifier is None or vault_registry is None:
                 raise PermissionError(
-                    "upload-route auth unavailable: bearer verifier or "
-                    "vault OAuth registry not bound at request time",
+                    "upload-route auth unavailable: bearer verifier or vault OAuth registry not bound at request time",
                 )
             claim = verifier.verify(authorization_header)
             client_id = getattr(claim, "client_id", "")
             if not vault_registry.is_operator_equivalent(client_id):
                 raise PermissionError(
-                    f"client_id {client_id!r} is not operator-equivalent; "
-                    "upload routes require an operator-equivalent bearer "
-                    "per M5 §13.6",
+                    f"client_id {client_id!r} is not operator-equivalent; upload routes require an operator-equivalent bearer per M5 §13.6",
                 )
             return claim
 
@@ -10742,6 +11758,7 @@ class AgentMessagingPlugin(
         if self._bridge_sweeper is not None:
             self._bridge_sweeper.stop()
             self._bridge_sweeper = None
+        stop_delivery_drives()
         # Cancel outstanding sys:autonomic grace timers before the bridge
         # collaborators they close over are torn down.
         if self._autonomic_assignment is not None:
@@ -10960,11 +11977,39 @@ class AgentMessagingPlugin(
             ),
         )
 
+    def _native_spawn_actor(self, state: dict[str, Any], lane: str, role: str) -> RegisterActor:
+        actor = self._dispatch_actor_from_state(state)
+        return RegisterActor(actor.agent_instance_id, actor.agent_session_id, role, lane)
+
     def _register_unit_client(self) -> PsoletRegisterUnitClient:
-        """The register client the managed-dispatch Unit mint calls (unt_57725090)."""
+        """Read the existing registered Unit and its exact brief revision."""
         return PsoletRegisterUnitClient(
             resolve_psolet_cli(_provider_get(self._resolve_config_provider(), CONFIG_PSOLET_CLI)),
             solet_name=os.environ["SOLET_NAME"].strip(),
+        )
+
+    def _fleet_stall_register_reader(self) -> PsoletFleetStallReader:
+        """The same configured register CLI as :meth:`_register_unit_client`,
+        read-only, with the two fleet-wide reads the stall sweep keys on.
+
+        Built the same way and from the same config key, so a deployment that
+        points the register CLI somewhere else moves this read with it. The
+        Solet name labels register writes only; these reads send none.
+        """
+        return PsoletFleetStallReader(
+            resolve_psolet_cli(_provider_get(self._resolve_config_provider(), CONFIG_PSOLET_CLI)),
+            solet_name=os.environ.get("SOLET_NAME", "").strip(),
+        )
+
+    def _retirement_evidence_reader(self) -> RetirementEvidenceReader:
+        """The configured register CLI, read-only, for a retirement's custody evidence.
+
+        The Solet name labels register writes only; these reads send none, so a
+        missing ``SOLET_NAME`` cannot affect them.
+        """
+        return PsoletRetirementEvidenceReader(
+            resolve_psolet_cli(_provider_get(self._resolve_config_provider(), CONFIG_PSOLET_CLI)),
+            solet_name=os.environ.get("SOLET_NAME", "").strip(),
         )
 
     def _build_session_lifecycle_policy_config(self) -> _SessionLifecyclePolicyConfig:
@@ -10984,6 +12029,7 @@ class AgentMessagingPlugin(
                 _provider_get(provider, "default_fleet_transport"),
                 "watch",
             ),
+            historical_cancel_role=_as_str(_provider_get(provider, "historical_cancel_role"), ""),
         )
 
     # ------------------------------------------------------------------
@@ -11048,9 +12094,7 @@ class AgentMessagingPlugin(
         vault = self._resolve_vault_plugin(
             require_refresh_token_methods=require_refresh,
         )
-        oauth_endpoints, resource_metadata_url, accepted_audiences = self._build_oauth_surface(
-            bridge_config
-        )
+        oauth_endpoints, resource_metadata_url, accepted_audiences = self._build_oauth_surface(bridge_config)
         bearer_verifier, hmac_key = self._build_streamable_bearer_verifier(
             bridge_config=bridge_config,
             vault=vault,
@@ -11101,9 +12145,7 @@ class AgentMessagingPlugin(
             accepted_audiences=accepted_audiences,
         )
         logger.info(
-            "%s: Streamable HTTP MCP transport mounted at "
-            "/api/v1/mcp/streamable (bearer max-age=%ds, dns-rebinding-origins=%s, "
-            "cors-origins=%s, oauth=%s)",
+            "%s: Streamable HTTP MCP transport mounted at /api/v1/mcp/streamable (bearer max-age=%ds, dns-rebinding-origins=%s, cors-origins=%s, oauth=%s)",
             self.name,
             bridge_config.streamable_bearer_max_age_seconds,
             list(bridge_config.streamable_allowed_origins) or "any",
@@ -11127,11 +12169,7 @@ class AgentMessagingPlugin(
         hmac_key = _load_or_create_bearer_hmac_key(vault)
         if bridge_config.streamable_no_auth:
             logger.warning(
-                "streamable_no_auth=true: MCP streamable endpoint relies on "
-                "an outer security boundary (tunnel-client + runtime API "
-                "key, mTLS, or network isolation) for auth; per-request "
-                "bearer enforcement is DISABLED. Ensure your outer boundary "
-                "is active.",
+                "streamable_no_auth=true: MCP streamable endpoint relies on an outer security boundary (tunnel-client + runtime API key, mTLS, or network isolation) for auth; per-request bearer enforcement is DISABLED. Ensure your outer boundary is active.",
             )
             return PermissiveBearerVerifier(), hmac_key
         verifier = BearerVerifier(
@@ -11186,8 +12224,7 @@ class AgentMessagingPlugin(
             )
             app.include_router(oauth_router)
             logger.info(
-                "%s: OAuth 2.1 surface mounted (issuer=%s, "
-                "token_ttl=%ds, auth_code_ttl=%ds, accepted_audiences=%s)",
+                "%s: OAuth 2.1 surface mounted (issuer=%s, token_ttl=%ds, auth_code_ttl=%ds, accepted_audiences=%s)",
                 self.name,
                 oauth_endpoints.issuer,
                 bridge_config.oauth_token_ttl_seconds,
@@ -11207,8 +12244,7 @@ class AgentMessagingPlugin(
         )
         app.include_router(oauth_router)
         logger.info(
-            "%s: dynamic (origin-following) OAuth 2.1 login surface mounted "
-            "(bearer_enforcement=%s)",
+            "%s: dynamic (origin-following) OAuth 2.1 login surface mounted (bearer_enforcement=%s)",
             self.name,
             "off" if bridge_config.streamable_no_auth else "on",
         )
@@ -11250,10 +12286,7 @@ class AgentMessagingPlugin(
         vault = self._vault_service
         if vault is None:
             raise RuntimeError(
-                f"{self.name}: no plugin is bound to vault_service in "
-                "the active profile's service_bindings; Streamable HTTP "
-                "MCP transport requires a vault for bearer-token "
-                "decryption + OAuth client lookup",
+                f"{self.name}: no plugin is bound to vault_service in the active profile's service_bindings; Streamable HTTP MCP transport requires a vault for bearer-token decryption + OAuth client lookup",
             )
         required_methods: list[str] = [
             "retrieve",
@@ -11275,9 +12308,7 @@ class AgentMessagingPlugin(
                 f"{self.name}: vault_service binding {plugin_name!r} is "
                 f"missing required structural methods: {missing}. "
                 "Streamable HTTP MCP transport requires HMAC key "
-                "storage (retrieve/store) + OAuth client lookup"
-                + (" + refresh-token rotation" if require_refresh_token_methods else "")
-                + ". Bind a different plugin via service_bindings or "
+                "storage (retrieve/store) + OAuth client lookup" + (" + refresh-token rotation" if require_refresh_token_methods else "") + ". Bind a different plugin via service_bindings or "
                 "extend the current one with the missing methods.",
             )
         return vault
@@ -11331,10 +12362,7 @@ class AgentMessagingPlugin(
         ):
             return _failure_result(
                 code="bridge.streamable_startup_failed",
-                message=(
-                    f"Streamable HTTP server did not signal startup "
-                    f"within {_SERVER_START_TIMEOUT_S}s"
-                ),
+                message=(f"Streamable HTTP server did not signal startup within {_SERVER_START_TIMEOUT_S}s"),
             )
         return None
 
@@ -11404,8 +12432,7 @@ def _log_managed_dispatch_sweep(result: Mapping[str, Any]) -> None:
     if not (result["dead"] or result["unknown"] or result["conditions"]):
         return
     logger.warning(
-        "managed-dispatch sweep: attempts=%d alive=%d dead=%d unknown=%d "
-        "dispatches=%d conditions=%d notices=%d",
+        "managed-dispatch sweep: attempts=%d alive=%d dead=%d unknown=%d dispatches=%d conditions=%d notices=%d",
         result["attempts_evaluated"],
         result["alive"],
         result["dead"],
@@ -11414,6 +12441,23 @@ def _log_managed_dispatch_sweep(result: Mapping[str, Any]) -> None:
         len(result["conditions"]),
         result["notices_emitted"],
     )
+
+
+def _run_ledger_tmux_rider(state_service: Any) -> None:
+    """Fault-isolated metadata observer on the existing 300-second default tick."""
+    try:
+        report = collect_ledger_tmux_report(state_service)
+        reasons = sorted({row["reason"] for row in report["observations"]} | set(report["advisories"]))
+        logger.warning(
+            "Ledger/tmux metadata observation: %s",
+            report,
+            extra={"advisory_reasons": reasons, "ledger_tmux_report": report},
+        )
+    except Exception:  # noqa: BLE001 -- observer faults must not suppress existing riders
+        logger.exception(
+            "Ledger/tmux reconciliation advisory: collector failed; existing riders continue",
+            extra={"advisory_reasons": ["probe_unknown"]},
+        )
 
 
 def _run_session_claude_mapping_riders(state_service: Any) -> None:
@@ -11430,8 +12474,7 @@ def _run_session_claude_mapping_riders(state_service: Any) -> None:
     drain_result = lifecycle_drain_session_claude_mapping_spool(state_service)
     if drain_result["upserted"] or drain_result["skipped_malformed"]:
         logger.info(
-            "D1 sweep: session_claude_mapping spool drain -- files_seen=%d "
-            "upserted=%d skipped_malformed=%d",
+            "D1 sweep: session_claude_mapping spool drain -- files_seen=%d upserted=%d skipped_malformed=%d",
             drain_result["files_seen"],
             drain_result["upserted"],
             drain_result["skipped_malformed"],
@@ -11475,7 +12518,6 @@ def _spawn_session_identity_params(raw: dict[str, Any]) -> dict[str, Any]:
     return {
         "role_class": _param_text(raw, "role_class"),
         "lane_id": _param_text(raw, "lane_id"),
-        "brief_ref": _param_text(raw, "brief_ref"),
         "unit_id": _param_text(raw, "unit_id"),
         "repository_root": _param_text(raw, "repository_root"),
         "work_class": _param_text(raw, "work_class"),
@@ -11491,6 +12533,7 @@ def _spawn_session_lifecycle_params(raw: dict[str, Any], directed_by: str) -> di
         "report_by_seconds": _param_positive_int(raw, "report_by_seconds"),
         "spawned_by_instance_id": _param_text(raw, "spawned_by_instance_id"),
         "spawned_by_role": _param_text(raw, "spawned_by_role"),
+        "first_go": _param_text(raw, "first_go"),
         "directed_by": directed_by,
         "local_name": _param_text(raw, "local_name"),
         "degraded_hooks_acknowledged": bool(raw.get("degraded_hooks_acknowledged")),
@@ -11511,11 +12554,30 @@ def _spawn_session_request_from_params(
     """Build the ``spawn_session`` verb's typed request from raw transport
     params. Split out of the ``spawn_session`` method so the transport shim
     stays a thin dispatch (radon cc)."""
+    reject_retired_launch_fields(raw)
     return SpawnSessionRequest(
         **_spawn_session_identity_params(raw),
         **_spawn_session_lifecycle_params(raw, directed_by),
         **_spawn_dispatch_overrides_from_params(raw),
+        provider_env=_spawn_provider_env_from_params(raw),
     )
+
+
+def _spawn_provider_env_from_params(raw: dict[str, Any]) -> dict[str, str]:
+    """Parse the optional per-spawn ``provider_env`` overlay into a fresh dict.
+
+    A new dict per call keeps two requests from sharing one mutable overlay.
+    Values are never echoed in the error text: they may be credentials.
+    """
+    overlay = raw.get("provider_env")
+    if overlay is None:
+        return {}
+    if not isinstance(overlay, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in overlay.items()):
+        raise VerbError(
+            "provider_env_invalid",
+            "provider_env must be an object whose keys and values are strings.",
+        )
+    return dict(overlay)
 
 
 def _dispatch_spec_from_params(
@@ -11525,16 +12587,15 @@ def _dispatch_spec_from_params(
 ) -> DispatchSpec:
     """Build the immutable contract from policy-resolved spawn inputs."""
     return DispatchSpec(
-        dispatch_id=mint_dispatch_id(),
+        dispatch_id=_param_text(raw, "dispatch_id"),
         lane_id=req.lane_id,
         role_name=req.role_name,
         role_class=req.role_class,
         work_class=req.work_class,
         budget_line=req.budget_line,
-        brief_ref=req.brief_ref,
         unit_id=req.unit_id,
         repository_root=req.repository_root,
-        brief_sha256=str(raw.get("brief_sha256") or ""),
+        expected_revision_id=_param_text(raw, "expected_revision_id"),
         expected_path=str(raw.get("expected_path") or ""),
         completion_contract=_as_object(raw.get("completion_contract")),
         model=req.model,
@@ -11564,11 +12625,6 @@ def _dispatch_spec_from_params(
         selection_receipt=req.selection_receipt or {},
         selection_receipt_enforced=req.enforce_selection_receipt,
         repository_id=_param_text(raw, "repository_id"),
-        unit_key=_param_text(raw, "unit_key"),
-        addresses=_as_str_tuple(raw.get("addresses"), default=()),
-        reference_basis=_param_text(raw, "reference_basis"),
-        reference_basis_reason=_param_text(raw, "reference_basis_reason"),
-        brief_repository_root=_param_text(raw, "brief_repository_root"),
     )
 
 
@@ -11700,18 +12756,13 @@ def _build_resume_action(row: dict[str, object]) -> dict[str, Any]:
     segments = resume_key.split("::")
     if len(segments) != 3 or not all(segments):
         raise FrameworkError(
-            f"completion request {row.get(COL_ICR_REQUEST_ID)!r} carries a "
-            f"malformed resume_process_key {resume_key!r} "
-            "(expected provider_type::provider::function_name)",
+            f"completion request {row.get(COL_ICR_REQUEST_ID)!r} carries a malformed resume_process_key {resume_key!r} (expected provider_type::provider::function_name)",
         )
     provider_type, provider, function_name = segments
     request_id = str(row.get(COL_ICR_REQUEST_ID) or "")
     action_def: dict[str, Any] = {
         "name": f"resume_completion_{function_name}",
-        "description": (
-            f"Resume {provider}::{function_name} with the served completion "
-            f"for request {request_id}"
-        ),
+        "description": (f"Resume {provider}::{function_name} with the served completion for request {request_id}"),
         "process": {
             "provider_type": provider_type,
             "provider": provider,
@@ -11802,8 +12853,7 @@ def _heartbeat_failure_first_at(*, status: str, raw: object) -> str | None:
         return raw
     raise VerbError(
         "invalid_heartbeat_failure_first_at",
-        "heartbeat_failure_first_at must be omitted for a healthy heartbeat or be a "
-        "non-empty failure timestamp; empty strings are not timestamps.",
+        "heartbeat_failure_first_at must be omitted for a healthy heartbeat or be a non-empty failure timestamp; empty strings are not timestamps.",
     )
 
 
@@ -11830,6 +12880,56 @@ def _failure_result(
         "error": error,
         "timestamp": timestamp,
     }
+
+
+def _retire_role_call(raw: Mapping[str, Any], state: Mapping[str, Any]) -> RetireRoleCall:
+    """``retire_role`` arguments plus the SERVER-derived caller instance (never ``raw``)."""
+
+    def text(source: Mapping[str, Any], key: str) -> str:
+        value = source.get(key)
+        return str(value) if value else ""
+
+    return RetireRoleCall(
+        caller_instance_id=(text(state, "inference_vertex_session_id") or text(state, "caller_attribution_instance_id")),
+        name=text(raw, "name"),
+        reason=text(raw, "reason"),
+        authority=text(raw, "authority"),
+        successor=text(raw, "successor"),
+        retired_at=_now_iso(),
+    )
+
+
+def _live_holder_label(
+    state_service: Any,
+    bridge_manager: BridgeSessionManager,
+    peer_registry: PeerRegistry,
+    name: str,
+) -> str | None:
+    """The live holder of ``name`` as a display label, or ``None`` (claim-gate liveness)."""
+    holder = live_holder_of(
+        state_service=state_service,
+        bridge_manager=bridge_manager,
+        peer_registry=peer_registry,
+        name=name,
+    )
+    if holder is None:
+        return None
+    return f"{holder.session_label!r} ({holder.agent_instance_id})"
+
+
+def _retired_role_refusal(state_service: Any, name: str) -> dict[str, Any] | None:
+    """The failed result for a send naming a retired role, else ``None`` (iss_d9c955a2).
+
+    A registry that cannot answer refuses the send too: the send would need the
+    same state service to persist, and "unknown" is never read as "not retired".
+    """
+    try:
+        refuse_if_retired(state_service, name)
+    except RoleRetiredError as exc:
+        return _failure_result(code=exc.code, message=str(exc), data=exc.to_public())
+    except RetiredRoleRegistryError as exc:
+        return _failure_result(code=exc.code, message=exc.message)
+    return None
 
 
 def _extract_message(params: dict[str, Any]) -> str:
@@ -11976,23 +13076,13 @@ def _format_job_completion_message(
     origin = provider_name or "unknown provider"
     header = f"Job {job_id} finished with status '{status or 'unknown'}' (from {origin})."
     if not payload:
-        body = (
-            "No payload was attached. "
-            f"Full job row: service_interface::job_service::get_job "
-            f'{{"job_id": "{job_id}"}}'
-        )
+        body = f'No payload was attached. Full job row: service_interface::job_service::get_job {{"job_id": "{job_id}"}}'
         return f"{header}\n{body}"
     rendered = json.dumps(payload, indent=2, default=str, sort_keys=True)
     label = "Result" if status == "completed" else "Error"
     if len(rendered) > JOB_COMPLETION_PAYLOAD_CHAR_BUDGET:
         head = rendered[:JOB_COMPLETION_PAYLOAD_CHAR_BUDGET]
-        return (
-            f"{header}\n{label} payload (TRUNCATED at "
-            f"{JOB_COMPLETION_PAYLOAD_CHAR_BUDGET} of {len(rendered)} chars — "
-            f"retrieve the whole payload with "
-            f'service_interface::job_service::get_job {{"job_id": "{job_id}"}}'
-            f"):\n{head}"
-        )
+        return f'{header}\n{label} payload (TRUNCATED at {JOB_COMPLETION_PAYLOAD_CHAR_BUDGET} of {len(rendered)} chars — retrieve the whole payload with service_interface::job_service::get_job {{"job_id": "{job_id}"}}):\n{head}'
     return f"{header}\n{label} payload:\n{rendered}"
 
 
@@ -12043,8 +13133,7 @@ def _stamp_role_inbox_delivered(state_service: Any, job_id: str) -> bool:
         metadata = _read_job_metadata(state_service, job_id)
         if metadata is None:
             logger.warning(
-                "job %s not readable after delivery; completion_reach left "
-                "unreached (it will be listed by the drain again)",
+                "job %s not readable after delivery; completion_reach left unreached (it will be listed by the drain again)",
                 job_id,
             )
             return False
@@ -12057,8 +13146,7 @@ def _stamp_role_inbox_delivered(state_service: Any, job_id: str) -> bool:
         )
     except Exception:  # noqa: BLE001 — a failed stamp must never undo a delivery
         logger.error(
-            "failed to stamp %s for job %s after a successful delivery; the "
-            "unreached stamp stands and the drain will list it again",
+            "failed to stamp %s for job %s after a successful delivery; the unreached stamp stands and the drain will list it again",
             REACH_ROLE_INBOX_DELIVERED,
             job_id,
             exc_info=True,

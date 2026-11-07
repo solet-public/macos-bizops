@@ -70,6 +70,11 @@ def classify_zuora_response(response: httpx.Response, *, is_query: bool) -> tupl
     return ERROR_API_ERROR, f"Zuora API error (status {status})."
 
 
+def vendor_detail(response: httpx.Response) -> str:
+    """The caller-input messages from a Zuora error body, joined; empty when none."""
+    return _clean_reasons(response)
+
+
 def _detail(prefix: str, response: httpx.Response) -> str:
     """Build a detail message from the response body's ``reasons`` list ONLY."""
     text = _clean_reasons(response)
@@ -77,19 +82,34 @@ def _detail(prefix: str, response: httpx.Response) -> str:
 
 
 def _clean_reasons(response: httpx.Response) -> str:
+    """Join the caller-input messages Zuora's error envelopes carry.
+
+    Billing APIs use ``reasons[].message``; the Workflow APIs use ``errors`` or
+    ``Errors`` (strings or objects with ``message``); Data Query uses a
+    top-level ``message``. Nothing else in the body is echoed.
+    """
     try:
         payload: Any = response.json()
     except ValueError:
         return ""
     if not isinstance(payload, dict):
         return ""
-    reasons = payload.get("reasons")
-    if not isinstance(reasons, list):
-        return ""
     parts: list[str] = []
-    for reason in reasons:
-        if isinstance(reason, dict):
-            message = reason.get("message")
-            if isinstance(message, str) and message:
-                parts.append(message)
-    return "; ".join(parts)
+    for key in ("reasons", "errors", "Errors"):
+        entries = payload.get(key)
+        if isinstance(entries, list):
+            parts.extend(_entry_message(entry) for entry in entries)
+    top_level = payload.get("message")
+    if isinstance(top_level, str):
+        parts.append(top_level)
+    return "; ".join(part for part in parts if part)
+
+
+def _entry_message(entry: Any) -> str:
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        message = entry.get("message")
+        if isinstance(message, str):
+            return message
+    return ""

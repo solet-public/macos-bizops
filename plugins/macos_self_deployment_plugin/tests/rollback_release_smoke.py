@@ -46,6 +46,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -196,10 +198,14 @@ class _RollbackReleaseManager:
     def build_candidate(
         self, *, manifest_etag: str = "",
         manifest_plugins: tuple[str, ...] | None = None,
-        schema_snapshot_fn: object = None,
+        schema_snapshot_fn: Callable[[Path], dict[str, object]] | None = None,
+        reconciliation_provenance: dict[str, str] | None = None,
     ) -> CandidatePaths:
-        del manifest_etag, manifest_plugins, schema_snapshot_fn
+        del manifest_etag, manifest_plugins, schema_snapshot_fn, reconciliation_provenance
         raise NotImplementedError("rollback smoke: build_candidate unused")
+
+    def current_schema_snapshot(self) -> dict[str, object] | None:
+        return None
 
     def cutover(self, candidate: CandidatePaths) -> SwapResult:
         del candidate
@@ -261,6 +267,8 @@ def _run_case(
     action_factory = _RecordingActionFactory()
     spawn_calls: list[str] = []
     children: list[subprocess.Popen[bytes]] = []
+    runtime_tmp = tempfile.TemporaryDirectory(prefix="rollback-release-smoke-runtime-")
+    runtime_dir = Path(runtime_tmp.name)
 
     def fake_spawn(
         app_home: Path, next_color: str, next_instance_id: str,
@@ -295,9 +303,15 @@ def _run_case(
             preflight_probe=_smoke_green_probe,
             set_color_active=lambda _active: None,
             spawn_fn=fake_spawn,
+            runtime_dir=runtime_dir,
             ready_timeout_seconds=2,
             ready_poll_interval_seconds=0.01,
         )
+        pending_finisher_path = orch._executor._pending_finisher_path  # noqa: SLF001
+        if pending_finisher_path.resolve().parent != runtime_dir.resolve():
+            raise AssertionError(
+                "rollback smoke pending-finisher path escaped its temporary runtime"
+            )
         result = orch.rollback_release(
             reason="rollback-smoke",
             expected_etag="etag-x",
@@ -309,12 +323,6 @@ def _run_case(
         )
     finally:
         green_candidate._probe_port_reachable = original_probe  # noqa: SLF001
-        # B2: the rollback drives the shared executor spine, which writes a
-        # pending-finisher record under the runtime dir (solet "smoke", not
-        # the live solet's real name). Clear the smoke-scoped record so nothing lingers in ~/.ananta.
-        (Path.home() / ".ananta" / "runtime" / "smoke.pending_finisher.json").unlink(
-            missing_ok=True,
-        )
 
     candidate_alive = False
     for proc in children:
@@ -324,6 +332,7 @@ def _run_case(
             candidate_alive = True
             proc.kill()
             proc.wait()
+    runtime_tmp.cleanup()
     return {
         "status": result.status.value,
         "reason_code": result.reason_code,

@@ -46,11 +46,13 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "macos_self_deployment_plugin" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 
+from ananta.core.runtime import drain_sentinel as core_drain_sentinel  # noqa: E402
 from ananta.interfaces.lifecycle_result_types import RestartStatus  # noqa: E402
 from macos_self_deployment_plugin import (  # noqa: E402
     green_candidate,
@@ -78,7 +80,7 @@ from macos_self_deployment_plugin.pending_finisher import (  # noqa: E402
     read_pending_finisher,
     write_pending_finisher,
 )
-from macos_self_deployment_plugin.plugin import MacosSelfDeploymentPlugin, _runtime_dir  # noqa: E402
+from macos_self_deployment_plugin.plugin import MacosSelfDeploymentPlugin  # noqa: E402
 from macos_self_deployment_plugin.release_manager import (  # noqa: E402
     CandidatePaths,
     ReleaseManagerError,
@@ -407,10 +409,15 @@ def _record(pid: int, token: str | None, escalation: str) -> PendingFinisher:
 
 
 def _run_complete_swap(
-    *, spawn_child: Callable[[], subprocess.Popen[bytes]], escalation: str,
+    *,
+    runtime_dir: Path,
+    spawn_child: Callable[[], subprocess.Popen[bytes]],
+    escalation: str,
 ) -> dict[str, Any]:
     solet = "nosigkillfinisher"
-    path = pending_finisher_path(_runtime_dir(), solet)
+    path = pending_finisher_path(runtime_dir, solet)
+    if path.resolve().parent != runtime_dir.resolve():
+        raise AssertionError("no-sigkill smoke record escaped its temporary runtime")
     plugin = MacosSelfDeploymentPlugin()
     plugin._solet_name = solet  # noqa: SLF001
     plugin._router_client = None  # noqa: SLF001 — unregister becomes a skip; the signal is the focus
@@ -420,9 +427,15 @@ def _run_complete_swap(
     try:
         token = process_identity.start_token(child.pid)
         write_pending_finisher(path, _record(child.pid, token, escalation))
-        data = plugin.complete_swap(
-            prior_pid=child.pid, prior_instance_id=_PRIOR_IID, prior_color=COLOR_BLUE,
-        )
+        with (
+            patch.object(core_drain_sentinel, "get_runtime_dir", return_value=runtime_dir),
+            patch.object(plugin_module, "_runtime_dir", return_value=runtime_dir),
+        ):
+            if plugin_module._runtime_dir().resolve() != runtime_dir.resolve():
+                raise AssertionError("complete_swap resolved outside its temporary runtime")
+            data = plugin.complete_swap(
+                prior_pid=child.pid, prior_instance_id=_PRIOR_IID, prior_color=COLOR_BLUE,
+            )
         child_alive = _settled_alive(child.pid)
         record_kept = read_pending_finisher(path) is not None
     finally:
@@ -436,9 +449,10 @@ def _run_complete_swap(
     }
 
 
-def test_finisher_escalation() -> None:
+def test_finisher_escalation(runtime_dir: Path) -> None:
     print("scenario 3: K2 — complete_swap on a needs_intervention record never SIGKILLs the prior")
     obs = _run_complete_swap(
+        runtime_dir=runtime_dir,
         spawn_child=_spawn_sigterm_ignoring_child,
         escalation=FINISHER_ESCALATION_NEEDS_INTERVENTION,
     )
@@ -454,6 +468,7 @@ def test_finisher_escalation() -> None:
     )
 
     obs = _run_complete_swap(
+        runtime_dir=runtime_dir,
         spawn_child=_spawn_sigterm_honouring_child,
         escalation=FINISHER_ESCALATION_NEEDS_INTERVENTION,
     )
@@ -464,6 +479,7 @@ def test_finisher_escalation() -> None:
     )
 
     obs = _run_complete_swap(
+        runtime_dir=runtime_dir,
         spawn_child=_spawn_sigterm_ignoring_child,
         escalation=FINISHER_ESCALATION_SIGKILL_AFTER_GRACE,
     )
@@ -570,7 +586,7 @@ def main() -> int:
     try:
         test_executor_legs_never_sigkill(tmp)
         test_executor_legs_control(tmp)
-        test_finisher_escalation()
+        test_finisher_escalation(tmp)
         test_backstop_verifies_exit(tmp)
     finally:
         for entry in tmp.iterdir():

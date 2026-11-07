@@ -25,6 +25,11 @@ Cases:
   6. registry writes all four fields and truncates the User-Agent
   7. registry returns False for an unknown client and does not raise
   8. list_clients projects the three evidence fields
+  9. a programming error in recording is NOT swallowed
+ 10. authorization_code through a real VaultServiceProxy returns 200,
+     records the use, and carries the proxy's bound call_context
+ 11. VaultServiceProxy forwards every OAuthClientStore and
+     RefreshTokenStore method and lists each in _LAYER_3_HELPERS
 
 Each case prints PASS/FAIL and the script exits non-zero on any
 failure. No external network, no real DB.
@@ -37,6 +42,7 @@ import base64
 import hashlib
 import logging
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -49,13 +55,20 @@ for _src in (
     if str(_src) not in sys.path:
         sys.path.insert(0, str(_src))
 
+from ananta.core.services.call_context import CallContext
 from ananta.services.store.errors import StoreError
+from ananta.services.vault_service.vault_service_proxy import (
+    _LAYER_3_HELPERS,
+    VaultServiceProxy,
+)
 from ananta.vault_core.oauth_registry import VaultOAuthRegistry
 from ananta.vault_core.records import MAX_LAST_USE_USER_AGENT_LEN
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from agent_messaging_plugin.mcp_streamable.oauth import (
+    OAuthClientStore,
+    RefreshTokenStore,
     build_endpoints,
     build_oauth_router,
 )
@@ -120,6 +133,7 @@ class _FakeRefreshStore:
         token = f"refresh-{client_id}-{self._n}"
         self.tokens[token] = {
             "client_id": client_id, "scopes": scopes, "audience": audience,
+            "ttl_seconds": ttl_seconds,
         }
         return token
 
@@ -144,7 +158,7 @@ class _FakeStorage:
     def delete_client(self, client_id: str) -> int:
         return 1 if self.rows.pop(client_id, None) is not None else 0
 
-    def list_clients(self) -> list[dict[str, Any]]:
+    def list_clients(self) -> list[Mapping[str, Any]]:
         return list(self.rows.values())
 
     def update_client_redirect_uris(
@@ -166,6 +180,19 @@ class _FakeStorage:
         return True
 
 
+class _FakeTokenStorage:
+    """In-memory RefreshTokenStorage for the registry-level cases."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, dict[str, Any]] = {}
+
+    def insert_token(self, row: dict[str, Any]) -> None:
+        self.rows[row["token_hash"]] = dict(row)
+
+    def consume_token(self, token_hash: str) -> Mapping[str, Any] | None:
+        return self.rows.pop(token_hash, None)
+
+
 def _approved(grant_types: list[str]) -> dict[str, Any]:
     return {
         "client_id": "client-approved",
@@ -178,9 +205,71 @@ def _approved(grant_types: list[str]) -> dict[str, Any]:
     }
 
 
+class _ContextRecordingVault:
+    """Vault stub behind a real ``VaultServiceProxy``.
+
+    Mirrors the concrete vault plugins' Layer 3 signatures (each takes a
+    ``call_context`` kwarg) and records the context every call arrived
+    with, delegating the behaviour to the in-memory fakes above.
+    """
+
+    def __init__(
+        self, store: _FakeClientStore, refresh_store: _FakeRefreshStore,
+    ) -> None:
+        self.store = store
+        self.refresh_store = refresh_store
+        self.contexts: dict[str, CallContext | None] = {}
+
+    def lookup_oauth_client(
+        self, client_id: str, *, call_context: CallContext | None = None,
+    ) -> dict[str, Any] | None:
+        self.contexts["lookup_oauth_client"] = call_context
+        return self.store.lookup_oauth_client(client_id)
+
+    def verify_oauth_client_credentials(
+        self, client_id: str, client_secret: str, *,
+        call_context: CallContext | None = None,
+    ) -> dict[str, Any] | None:
+        self.contexts["verify_oauth_client_credentials"] = call_context
+        return self.store.verify_oauth_client_credentials(client_id, client_secret)
+
+    def record_oauth_client_token_use(
+        self,
+        client_id: str,
+        *,
+        client_ip: str = "",
+        user_agent: str = "",
+        transport: str = "",
+        call_context: CallContext | None = None,
+    ) -> bool:
+        self.contexts["record_oauth_client_token_use"] = call_context
+        return self.store.record_oauth_client_token_use(
+            client_id,
+            client_ip=client_ip,
+            user_agent=user_agent,
+            transport=transport,
+        )
+
+    def issue_oauth_refresh_token(
+        self, *, client_id: str, scopes: list[str], audience: str,
+        ttl_seconds: int, call_context: CallContext | None = None,
+    ) -> str:
+        self.contexts["issue_oauth_refresh_token"] = call_context
+        return self.refresh_store.issue_oauth_refresh_token(
+            client_id=client_id, scopes=scopes, audience=audience,
+            ttl_seconds=ttl_seconds,
+        )
+
+    def consume_oauth_refresh_token(
+        self, cleartext: str, *, call_context: CallContext | None = None,
+    ) -> dict[str, Any] | None:
+        self.contexts["consume_oauth_refresh_token"] = call_context
+        return self.refresh_store.consume_oauth_refresh_token(cleartext)
+
+
 def _build_app(
-    store: _FakeClientStore,
-    refresh_store: _FakeRefreshStore | None = None,
+    store: OAuthClientStore,
+    refresh_store: RefreshTokenStore | None = None,
 ) -> FastAPI:
     endpoints = build_endpoints(
         issuer="https://test.example.com",
@@ -356,7 +445,7 @@ def case_5_recording_failure_does_not_break_issuance() -> None:
 def _registry(storage: _FakeStorage) -> VaultOAuthRegistry:
     return VaultOAuthRegistry(
         client_storage=storage,
-        refresh_store=None,
+        refresh_store=_FakeTokenStorage(),
         b64_encode=lambda b: base64.b64encode(b).decode("ascii"),
         b64_decode=lambda s: base64.b64decode(s.encode("ascii")),
         logger=logging.getLogger("oauth_token_use_recording_smoke"),
@@ -431,6 +520,72 @@ def case_9_programming_error_is_not_swallowed() -> None:
     )
 
 
+def case_10_authorization_code_through_real_vault_proxy() -> None:
+    """The production wiring: the router's stores are a VaultServiceProxy.
+
+    Cases 1-9 hand the router in-memory fakes, which satisfy the
+    protocols by construction. Production hands it a VaultServiceProxy,
+    which forwards only the methods it enumerates; a protocol method
+    missing from the proxy surfaced as a 500 on every live ChatGPT
+    authorization_code exchange.
+    """
+    store = _FakeClientStore()
+    rs = _FakeRefreshStore()
+    rec = _approved(["authorization_code", "refresh_token"])
+    store.records[rec["client_id"]] = rec
+    vault = _ContextRecordingVault(store, rs)
+    proxy = VaultServiceProxy(
+        vault,  # type: ignore[arg-type]  # Layer 3 stub, not a full VaultServiceInterface
+        caller_plugin="agent_messaging_plugin",
+    )
+    client = TestClient(_build_app(proxy, proxy), raise_server_exceptions=False)
+    verifier, challenge = _pkce()
+    code = _auth_code(client, rec, challenge)
+    r = client.post(
+        "/oauth/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": rec["client_id"],
+            "redirect_uri": "https://test.example.com/cb",
+            "code_verifier": verifier,
+        },
+        headers={"User-Agent": _UA},
+    )
+    assert r.status_code == 200, f"{r.status_code}: {r.text}"
+    assert "refresh_token" in r.json(), r.json()
+    assert len(store.use_calls) == 1, store.use_calls
+    assert store.use_calls[0]["transport"] == "authorization_code", store.use_calls
+    bound = vault.contexts.get("record_oauth_client_token_use")
+    assert bound is proxy.call_context, (
+        "token-use record did not carry the proxy's bound call_context: "
+        f"{bound!r}"
+    )
+
+
+def case_11_vault_proxy_satisfies_oauth_store_protocols() -> None:
+    """Every OAuth store protocol method has an enumerated proxy forwarder."""
+    for protocol in (OAuthClientStore, RefreshTokenStore):
+        names = {
+            name for name, value in vars(protocol).items()
+            if callable(value) and not name.startswith("_")
+        }
+        assert names, f"{protocol.__name__} declares no methods"
+        missing_on_proxy = sorted(
+            name for name in names
+            if not callable(vars(VaultServiceProxy).get(name))
+        )
+        assert not missing_on_proxy, (
+            f"VaultServiceProxy lacks {protocol.__name__} methods "
+            f"{missing_on_proxy}"
+        )
+        missing_in_layer_3 = sorted(names - _LAYER_3_HELPERS)
+        assert not missing_in_layer_3, (
+            f"{protocol.__name__} methods absent from _LAYER_3_HELPERS: "
+            f"{missing_in_layer_3}"
+        )
+
+
 CASES = [
     ("client_credentials records all fields", case_1_client_credentials_records_all_fields),
     ("authorization_code records transport", case_2_authorization_code_records_transport),
@@ -443,6 +598,10 @@ CASES = [
      case_7_registry_unknown_client_returns_false_without_raising),
     ("list_clients projects evidence fields", case_8_list_clients_projects_evidence_fields),
     ("programming error is NOT swallowed", case_9_programming_error_is_not_swallowed),
+    ("authorization_code through real VaultServiceProxy",
+     case_10_authorization_code_through_real_vault_proxy),
+    ("VaultServiceProxy satisfies OAuth store protocols",
+     case_11_vault_proxy_satisfies_oauth_store_protocols),
 ]
 
 

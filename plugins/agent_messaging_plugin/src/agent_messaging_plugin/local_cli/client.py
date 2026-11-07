@@ -26,6 +26,8 @@ from ananta.core.config.environment_config import EnvironmentConfig
 from ananta.core.root_manifest import MANIFEST_FILENAME, load_manifest
 from ananta.core.runtime.port_manager import read_port_file
 
+from agent_messaging_plugin.peer_inbox_view import parse_since_continuation_cursor
+
 BRIDGE_SERVICE_NAME: Final[str] = "bridge"
 API_PREFIX: Final[str] = "/api/v1/bridge"
 
@@ -91,11 +93,7 @@ def queued_job_id(payload: dict[str, Any]) -> str | None:
     """
     for section in _envelope_data_sections(payload):
         job_id = section.get("job_id")
-        if (
-            isinstance(job_id, str)
-            and job_id
-            and str(section.get("status", "")) == "queued"
-        ):
+        if isinstance(job_id, str) and job_id and str(section.get("status", "")) == "queued":
             return job_id
     return None
 
@@ -122,6 +120,10 @@ class SoletIdentityError(RuntimeError):
 
 class BridgeCallError(RuntimeError):
     """A bridge HTTP call returned an error status or an unusable body."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class RoleClaimRejectedError(RuntimeError):
@@ -160,6 +162,24 @@ def _clone_root() -> Path | None:
     return None
 
 
+def resolve_clone_root() -> Path:
+    """The owning Solet clone root, as a stable public query for clone-relative
+    skills. It is derived from where this CLI is installed, never from the
+    caller's cwd, so a client repository cannot retarget it.
+
+    Raises :class:`SoletIdentityError` (refuses) when the CLI is not installed
+    inside a clone (no ``root_manifest.yaml`` ancestor: the identity is missing)
+    or when that manifest is present but unreadable (the identity is ambiguous).
+    """
+    root = _clone_root()
+    if root is None:
+        raise SoletIdentityError("no root_manifest.yaml ancestor of the installed agent_messaging_plugin CLI — refusing to guess the clone root from the client cwd")
+    _manifest, error = load_manifest(root / MANIFEST_FILENAME)
+    if _manifest is None:
+        raise SoletIdentityError(f"root_manifest at {root / MANIFEST_FILENAME} is unreadable ({error}) — refusing an ambiguous solet clone root")
+    return root
+
+
 def resolve_solet_name() -> str:
     """The solet this CLI is installed under — derived from the CLI's OWN
     resolved install location, never a caller flag or ambient env, so a bare
@@ -184,10 +204,7 @@ def resolve_solet_name() -> str:
             return manifest.solet_name
         return root.name
     if manifest_path.is_file():
-        raise SoletIdentityError(
-            f"root_manifest at {manifest_path} is present but unreadable ({error}) "
-            "— refusing to guess the solet identity by clone-dir basename."
-        )
+        raise SoletIdentityError(f"root_manifest at {manifest_path} is present but unreadable ({error}) — refusing to guess the solet identity by clone-dir basename.")
     # ABSENT root_manifest -> the clone-dir basename is the name.
     return root.name
 
@@ -211,9 +228,7 @@ def resolve_base_url(solet_name: str | None = None) -> str:
     port = read_port_file(BRIDGE_SERVICE_NAME, name)
     if port is None:
         raise SoletNotRunningError(
-            f"no bridge port file for solet '{name}' "
-            f"(~/.ananta/runtime/{name}.{BRIDGE_SERVICE_NAME}.port). "
-            "Is the solet running?",
+            f"no bridge port file for solet '{name}' (~/.ananta/runtime/{name}.{BRIDGE_SERVICE_NAME}.port). Is the solet running?",
         )
     return f"http://127.0.0.1:{port}"
 
@@ -238,7 +253,10 @@ class _QueueFreePeerReads:
     """
 
     def peer_holds_role(
-        self: _BridgeHttp, *, name: str, agent_instance_id: str,
+        self: _BridgeHttp,
+        *,
+        name: str,
+        agent_instance_id: str,
     ) -> dict[str, Any]:
         """Act-time role-ownership re-check over the DIRECT bridge route.
 
@@ -263,6 +281,8 @@ class _QueueFreePeerReads:
         role_after: str | None = None,
         observer: bool = False,
         include_covered: bool = False,
+        since: str | None = None,
+        since_cursor: str | None = None,
     ) -> dict[str, Any]:
         """One ``peer_inbox`` page for the caller's own session, over the DIRECT route.
 
@@ -272,8 +292,13 @@ class _QueueFreePeerReads:
         registry row. The page is byte-for-byte what the ``peer_inbox`` process
         returns; the cursors keep their meaning (see :meth:`peer_inbox`).
         ``include_covered`` (observer-only) reads the role section with no covered-mark
-        floor and is the only request field that crosses besides the cursors. A
-        refusal raises ``BridgeCallError`` — never an empty page.
+        floor. ``since`` is the role section's horizon (echoed back as
+        ``role_since_created_at``); it must ride only a page with no ``after``,
+        because ``since`` and ``after`` are opposite instance cursors and naming
+        both is refused. A forward direct continuation sends the opaque
+        ``since_cursor`` instead of repeating a timestamp. Explicit empty or
+        whitespace continuation values fail locally through the shared parser.
+        A server refusal raises ``BridgeCallError`` — never an empty page.
         """
         bridge_id = self._require_bridge()
         params: dict[str, str | int] = {"agent_session_id": agent_session_id, "limit": limit}
@@ -285,6 +310,13 @@ class _QueueFreePeerReads:
             params["observer"] = "true"
         if include_covered:
             params["include_covered"] = "true"
+        if since:
+            params["since"] = since
+        if since_cursor is not None:
+            validated_since_cursor = parse_since_continuation_cursor(since_cursor)
+            if validated_since_cursor is None:
+                raise AssertionError("a present since_cursor cannot validate as absent")
+            params["since_cursor"] = validated_since_cursor
         return self._get(
             f"{API_PREFIX}/{bridge_id}/peer/inbox_for_session?{urlencode(params)}",
         )
@@ -393,18 +425,12 @@ class BridgeClient(_QueueFreePeerReads):
         while True:
             payload = self.process_result(action_id)
             status = str(payload.get("status", ""))
-            completed_result_pending = (
-                status == "completed" and "result" not in payload
-            )
-            if (
-                status not in NON_TERMINAL_STATUSES
-                and not completed_result_pending
-            ):
+            completed_result_pending = status == "completed" and "result" not in payload
+            if status not in NON_TERMINAL_STATUSES and not completed_result_pending:
                 return payload
             if time.monotonic() >= deadline:
                 raise BridgeResultTimeoutError(
-                    f"action {action_id} still '{status}' "
-                    f"after {poll_timeout_s:.0f}s",
+                    f"action {action_id} still '{status}' after {poll_timeout_s:.0f}s",
                 )
             time.sleep(POLL_INTERVAL_S)
 
@@ -542,12 +568,12 @@ class BridgeClient(_QueueFreePeerReads):
         if operator_tmux_host:
             qualified = response.get("operator_codex_host")
             expected = {
-                "host": "tmux", "host_ref": operator_tmux_host,
-                "agent_runtime": "codex", "qualification": "verified_local_watcher",
+                "host": "tmux",
+                "host_ref": operator_tmux_host,
+                "agent_runtime": "codex",
+                "qualification": "verified_local_watcher",
             }
-            if not isinstance(qualified, dict) or any(
-                qualified.get(key) != value for key, value in expected.items()
-            ):
+            if not isinstance(qualified, dict) or any(qualified.get(key) != value for key, value in expected.items()):
                 raise BridgeCallError("service did not qualify the requested operator Codex host")
         return response
 
@@ -652,6 +678,21 @@ class BridgeClient(_QueueFreePeerReads):
             raise BridgeCallError(f"{path} returned a non-object body: {parsed!r}")
         return parsed
 
+    def peer_send_by_name(self, *, name: str, content: str) -> dict[str, Any]:
+        """Send directly under this one-shot bridge's attributed session identity."""
+        if not name.strip() or not content.strip():
+            raise BridgeCallError("Remedy: supply a recipient role and a nonempty report.")
+        bridge_id = self._require_bridge()
+        try:
+            return self._post(
+                f"{API_PREFIX}/{bridge_id}/peer/send_by_name",
+                {"name": name, "content": content},
+            )
+        except (BridgeCallError, httpx.HTTPError) as error:
+            raise BridgeCallError(
+                f"Direct role send failed: {error}. Remedy: check the named role and your launcher session's registration; for a landing report use the documented explicit queued fallback and retain this error.",
+            ) from error
+
     def _require_bridge(self) -> str:
         if self._bridge_id is None:
             raise BridgeCallError("bridge not open; call open() first")
@@ -666,8 +707,14 @@ class BridgeClient(_QueueFreePeerReads):
     @staticmethod
     def _unwrap(response: httpx.Response, path: str) -> dict[str, Any]:
         if response.status_code >= httpx.codes.BAD_REQUEST:
+            try:
+                refusal = response.json()
+            except ValueError:
+                refusal = None
+            code = refusal.get("code") if isinstance(refusal, dict) else None
             raise BridgeCallError(
                 f"{path} failed ({response.status_code}): {response.text}",
+                code=code if isinstance(code, str) else None,
             )
         body = response.json()
         if not isinstance(body, dict):

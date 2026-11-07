@@ -16,7 +16,6 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Literal, Never, Protocol, cast
 
-from .maintenance_inventory import parse_maintenance_inventory_bytes
 from .models import CommandResult, ExitCode, JsonValue
 from .paths import ManagerPaths
 from .release_lock import SeedLock
@@ -335,12 +334,8 @@ class ExistingInstallFacts:
     #: Step 7 section 6.3: the ``CACHED_DIFF`` path list (staged tracked paths) and the
     #: ``RAW_DIFF`` rows (per-path mode/status), both additive and both read from probes
     #: the inspection already ran.
-    staged_paths: ObservedPaths = field(
-        default_factory=lambda: ObservedPaths(ObservationAvailability.UNKNOWN, ())
-    )
-    tracked_entries: ObservedRawRows = field(
-        default_factory=lambda: ObservedRawRows(ObservationAvailability.UNKNOWN, ())
-    )
+    staged_paths: ObservedPaths = field(default_factory=lambda: ObservedPaths(ObservationAvailability.UNKNOWN, ()))
+    tracked_entries: ObservedRawRows = field(default_factory=lambda: ObservedRawRows(ObservationAvailability.UNKNOWN, ()))
 
     def __post_init__(self) -> None:
         if any(_existing_install_fact_inconsistencies(self)):
@@ -361,30 +356,16 @@ def _existing_install_fact_inconsistencies(
 
 
 def _verified_anchor_has_invalid_provenance(facts: ExistingInstallFacts) -> bool:
-    required_condition = (
-        ProvenanceCondition.MISSING
-        if facts.anchor_kind is InspectionAnchorKind.LEGACY_PROVENANCE
-        else ProvenanceCondition.STRICT
-    )
-    return (
-        facts.identity_status is InspectionStatus.VERIFIED
-        and facts.provenance_condition is not required_condition
-    )
+    required_condition = ProvenanceCondition.MISSING if facts.anchor_kind is InspectionAnchorKind.LEGACY_PROVENANCE else ProvenanceCondition.STRICT
+    return facts.identity_status is InspectionStatus.VERIFIED and facts.provenance_condition is not required_condition
 
 
 def _current_anchor_is_inconsistent(facts: ExistingInstallFacts) -> bool:
-    return facts.anchor_kind is InspectionAnchorKind.CURRENT_CHANNEL and (
-        facts.provenance_condition is not ProvenanceCondition.STRICT
-        or facts.channel_relation is not ChannelRelation.CURRENT
-    )
+    return facts.anchor_kind is InspectionAnchorKind.CURRENT_CHANNEL and (facts.provenance_condition is not ProvenanceCondition.STRICT or facts.channel_relation is not ChannelRelation.CURRENT)
 
 
 def _legacy_anchor_is_inconsistent(facts: ExistingInstallFacts) -> bool:
-    return facts.anchor_kind is InspectionAnchorKind.LEGACY_PROVENANCE and (
-        facts.provenance_condition is not ProvenanceCondition.MISSING
-        or facts.channel_relation is not ChannelRelation.LEGACY_BRIDGE_REQUIRED
-        or facts.anchor_id is None
-    )
+    return facts.anchor_kind is InspectionAnchorKind.LEGACY_PROVENANCE and (facts.provenance_condition is not ProvenanceCondition.MISSING or facts.channel_relation is not ChannelRelation.LEGACY_BRIDGE_REQUIRED or facts.anchor_id is None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -392,9 +373,7 @@ class ExistingInstallClassification:
     installation_class: ExistingInstallClass
     reason_codes: tuple[str, ...]
     import_disposition: Literal["allow", "diagnostic_only", "refuse"]
-    update_disposition: Literal[
-        "allowed_after_import", "legacy_bridge_required", "blocked", "refuse"
-    ]
+    update_disposition: Literal["allowed_after_import", "legacy_bridge_required", "blocked", "refuse"]
     attention_required: bool
 
 
@@ -416,10 +395,7 @@ class ExistingInstallInspectionResult:
 
     def to_command_result(self) -> CommandResult:
         exit_code, status, error_kind = _reduce_exit(self.checks, self.classification)
-        required_counts = {
-            item.value: sum(check.required and check.status is item for check in self.checks)
-            for item in InspectionStatus
-        }
+        required_counts = {item.value: sum(check.required and check.status is item for check in self.checks) for item in InspectionStatus}
         required_counts["total"] = sum(required_counts.values())
         data = cast(
             dict[str, JsonValue],
@@ -447,11 +423,7 @@ class ExistingInstallInspectionResult:
                 },
                 "identity": {
                     "status": self.facts.identity_status.value,
-                    "conjuncts": [
-                        check.check_id
-                        for check in self.checks
-                        if check.required and check.status is InspectionStatus.VERIFIED
-                    ],
+                    "conjuncts": [check.check_id for check in self.checks if check.required and check.status is InspectionStatus.VERIFIED],
                 },
                 "source": _source_dict(self.facts),
                 "checks": [check.to_dict() for check in self.checks],
@@ -505,18 +477,14 @@ class InspectionEffectTracker(Protocol):
 
 
 class InstalledInspectionMetadataLoader(Protocol):
-    def __call__(
-        self, channel: str, tracker: InspectionEffectTracker
-    ) -> InstalledInspectionMetadata: ...
+    def __call__(self, channel: str, tracker: InspectionEffectTracker) -> InstalledInspectionMetadata: ...
 
 
 @dataclass
 class _ProductionInspectionEffectTracker:
     resources: list[str] = field(default_factory=lambda: [])
     vectors: list[tuple[str, ...]] = field(default_factory=lambda: [])
-    forbidden: dict[PreservationEffect, int] = field(
-        default_factory=lambda: dict.fromkeys(PreservationEffect, 0)
-    )
+    forbidden: dict[PreservationEffect, int] = field(default_factory=lambda: dict.fromkeys(PreservationEffect, 0))
 
     def record_resource_read(self, resource_id: str) -> None:
         self.resources.append(resource_id)
@@ -578,16 +546,10 @@ class _PinnedDirectory:
         except OSError:
             return False
         pinned = os.fstat(self._descriptor)
-        return (
-            observed.st_dev == pinned.st_dev
-            and observed.st_ino == pinned.st_ino
-            and stat.S_ISDIR(observed.st_mode)
-        )
+        return observed.st_dev == pinned.st_dev and observed.st_ino == pinned.st_ino and stat.S_ISDIR(observed.st_mode)
 
 
-def _pin_target_directory(
-    requested: Path, tracker: InspectionEffectTracker
-) -> tuple[_PinnedDirectory, TargetFilesystemIdentity]:
+def _pin_target_directory(requested: Path, tracker: InspectionEffectTracker) -> tuple[_PinnedDirectory, TargetFilesystemIdentity]:
     tracker.record_resource_read("target_directory")
     path = requested.expanduser()
     if not path.is_absolute():
@@ -630,9 +592,7 @@ _GIT_ARGS: dict[InspectionProbe, tuple[str, ...]] = {
 }
 
 
-def subprocess_read_only_inspection_runner(
-    probe: InspectionProbe, target: PinnedInspectionDirectory, *, other_commit: str | None = None
-) -> InspectionProbeOutput:
+def subprocess_read_only_inspection_runner(probe: InspectionProbe, target: PinnedInspectionDirectory, *, other_commit: str | None = None) -> InspectionProbeOutput:
     args = _GIT_ARGS.get(probe)
     if probe is InspectionProbe.ANCESTRY:
         if other_commit is None:
@@ -676,7 +636,7 @@ def _inspect_existing_install_with_metadata(
     target, identity = _pin_target_directory(request.target, tracker)
     try:
         checks, values = _target_checks(target, metadata, runner, tracker)
-        checks += (_inventory_check(request.manager_paths, tracker),)
+        checks += (_inventory_check(request.manager_paths, tracker, identity),)
         facts = _facts_from_values(values, metadata)
         classification = classify_existing_install(facts)
         if not target.namespace_matches():
@@ -716,11 +676,7 @@ def _probe(
     tracker: InspectionEffectTracker,
     other_commit: str | None = None,
 ) -> InspectionProbeOutput:
-    args = (
-        _GIT_ARGS.get(probe)
-        if probe is not InspectionProbe.ANCESTRY
-        else ("merge-base", "--is-ancestor", other_commit or "", "HEAD")
-    )
+    args = _GIT_ARGS.get(probe) if probe is not InspectionProbe.ANCESTRY else ("merge-base", "--is-ancestor", other_commit or "", "HEAD")
     tracker.record_probe(probe, ("git", *cast(tuple[str, ...], args)))
     return runner(probe, target, other_commit=other_commit)
 
@@ -736,9 +692,7 @@ def _target_checks(
     return target_checks(target, metadata, runner, tracker, _probe)
 
 
-def _facts_from_values(
-    values: dict[str, object], metadata: InstalledInspectionMetadata
-) -> ExistingInstallFacts:
+def _facts_from_values(values: dict[str, object], metadata: InstalledInspectionMetadata) -> ExistingInstallFacts:
     from ._existing_install_inspection_target import facts_from_values
 
     return facts_from_values(values, metadata)
@@ -758,87 +712,18 @@ def classify_existing_install(facts: ExistingInstallFacts) -> ExistingInstallCla
     return _classify(facts)
 
 
-def _inventory_check(paths: ManagerPaths, tracker: InspectionEffectTracker) -> InspectionCheck:
-    tracker.record_resource_read("manager_inventory")
-    path = paths.registry_path
-    try:
-        raw = _read_regular_bytes(path)
-    except FileNotFoundError:
-        return _check(
-            "manager_inventory",
-            "inventory",
-            False,
-            InspectionStatus.MISSING,
-            "inventory_absent",
-            "No Manager inventory exists.",
-            None,
-            None,
-            "manager_inventory",
-        )
-    except OSError:
-        return _check(
-            "manager_inventory",
-            "inventory",
-            False,
-            InspectionStatus.UNKNOWN,
-            "inventory_unavailable",
-            "Manager inventory cannot be read.",
-            None,
-            None,
-            "manager_inventory",
-        )
-    try:
-        records = parse_maintenance_inventory_bytes(raw)
-    except Exception:
-        return _check(
-            "manager_inventory",
-            "inventory",
-            False,
-            InspectionStatus.FAILED,
-            "inventory_malformed",
-            "Manager inventory is malformed.",
-            None,
-            None,
-            "manager_inventory",
-        )
-    return _check(
-        "manager_inventory",
-        "inventory",
-        False,
-        InspectionStatus.VERIFIED,
-        None,
-        "Manager inventory read as informational context.",
-        {"records": len(records)},
-        None,
-        "manager_inventory",
-    )
+def _inventory_check(paths: ManagerPaths, tracker: InspectionEffectTracker, target: TargetFilesystemIdentity | None = None) -> InspectionCheck:
+    from .inventory_inspection import inventory_check  # noqa: PLC0415
+
+    return inventory_check(paths, tracker, target)
 
 
-def load_installed_inspection_metadata(
-    channel: str, tracker: InspectionEffectTracker
-) -> InstalledInspectionMetadata:
+def load_installed_inspection_metadata(channel: str, tracker: InspectionEffectTracker) -> InstalledInspectionMetadata:
     from ._existing_install_inspection_metadata import (
         load_installed_inspection_metadata as _load_metadata,
     )
 
     return _load_metadata(channel, tracker)
-
-
-def _read_regular_bytes(path: Path) -> bytes:
-    """Read an existing regular file once without following a final symlink."""
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise ValueError("inspection resource is not a regular file")
-        chunks: list[bytes] = []
-        while True:
-            chunk = os.read(descriptor, 1_048_576)
-            if not chunk:
-                return b"".join(chunks)
-            chunks.append(chunk)
-    finally:
-        os.close(descriptor)
 
 
 def _check(
@@ -852,9 +737,7 @@ def _check(
     expected: JsonValue,
     source: str,
 ) -> InspectionCheck:
-    return InspectionCheck(
-        check_id, section, required, status, reason, summary, observed, expected, source
-    )
+    return InspectionCheck(check_id, section, required, status, reason, summary, observed, expected, source)
 
 
 def _decode_line(value: bytes) -> str | None:  # pyright: ignore[reportUnusedFunction]
@@ -879,20 +762,12 @@ def _status_paths(  # pyright: ignore[reportUnusedFunction]
     return tuple(sorted(tracked)), tuple(sorted(untracked))
 
 
-def _reduce_exit(
-    checks: tuple[InspectionCheck, ...], classification: ExistingInstallClassification
-) -> tuple[ExitCode, str, str | None]:
+def _reduce_exit(checks: tuple[InspectionCheck, ...], classification: ExistingInstallClassification) -> tuple[ExitCode, str, str | None]:
     if any(check.reason_code == "target_identity_invalid" for check in checks):
         return ExitCode.INVALID, "invalid", "target_identity_invalid"
     if any(check.required and check.status is InspectionStatus.FAILED for check in checks):
         return ExitCode.FAILED, "failed", "inspection_failed"
-    if (
-        any(
-            check.required and check.status in {InspectionStatus.MISSING, InspectionStatus.UNKNOWN}
-            for check in checks
-        )
-        or classification.attention_required
-    ):
+    if any(check.required and check.status in {InspectionStatus.MISSING, InspectionStatus.UNKNOWN} for check in checks) or classification.attention_required:
         return ExitCode.HUMAN_ACTION, "attention_required", "inspection_incomplete"
     return ExitCode.OK, "verified", None
 

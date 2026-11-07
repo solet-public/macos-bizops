@@ -63,7 +63,9 @@ EMBEDDING_DESCRIPTION: Run the slower, judgment-heavy fleet progress review. Rea
         RESULT_PROCESSOR_KIND: deterministic_continuation
         Call: plugin::agent_messaging_plugin::spawn_session
         Arguments:
-        {"role_class": "ephemeral", "lane_id": "<<BIND:lane_id>>", "brief_ref": "<<BIND:brief_ref>>", "work_class": "analysis_deliverable", "budget_line": "<<BIND:budget_line>>", "dispatch_kind": "review", "reviewed_report_vendor": "<<BIND:reviewed_report_vendor>>"}
+        {"role_class": "ephemeral", "lane_id": "<<BIND:lane_id>>", "unit_id": "<<BIND:unit_id>>", "work_class": "analysis_deliverable", "budget_line": "<<BIND:budget_line>>", "dispatch_kind": "review", "reviewed_report_vendor": "<<BIND:reviewed_report_vendor>>"}
+
+    b) Retain `data.job_id` and schedule `service_interface::job_service::get_job` with that exact id. While queued/processing, schedule another read and leave this step pending. After terminal success, bind the new `agent_instance_id` from `job.result.data`; on error/cancelled, handle the stored outcome before any dependent step. A receipt never proves a worker exists and never authorizes a second launch.
 
 [ ] 8. Report or stay quiet
     a) Surface to the operator only what needs a decision or can't wait — a delta or critique finding that should change what the fleet is doing, or anything Phase A already flagged this cycle. Otherwise: it's logged, say nothing.

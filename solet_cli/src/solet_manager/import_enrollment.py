@@ -15,7 +15,8 @@ from .create_origin_enrollment import (
     require_create_origin_target,
     require_update_eligible_create_origin,
 )
-from .errors import ImportNotAllowedError, ManagedIdentityDriftError
+from .enrolled_target import enrollment_summary, identity_mismatches, identity_repair
+from .errors import ImportNotAllowedError, ManagedIdentityDriftError, RegistryUniquenessError, StateError
 from .existing_install_inspection import (
     ChannelInspectionIdentity,
     ExistingInstallInspectionRequest,
@@ -50,13 +51,14 @@ from .models import (
 )
 from .paths import ManagerPaths
 from .registry import (
+    CombinedRegistrySnapshot,
     InstanceRegistry,
     MaintenanceInventoryRegistry,
     build_combined_registry_snapshot,
     require_unique_identity,
 )
 from .release_identity_gate import require_manager_seed_pairing
-from .state_io import instance_lock, write_content_addressed_json
+from .state_io import instance_lock, load_json_object, write_content_addressed_json
 from .transaction import (
     append_maintenance_attempt,
     create_import_maintenance_operation,
@@ -196,9 +198,7 @@ def _import_fingerprint(bundle_digest: str, instance_id: str, operation_id: str)
     return canonical_sha256([bundle_digest, instance_id, operation_id, list(_NON_TOUCH)])
 
 
-def _current_import_operation(
-    paths: ManagerPaths, instance_id: str, import_key: str, bundle_digest: str
-) -> tuple[str, tuple[str, ...], str | None]:
+def _current_import_operation(paths: ManagerPaths, instance_id: str, import_key: str, bundle_digest: str) -> tuple[str, tuple[str, ...], str | None]:
     """The operation this preview enrolls under, its predecessors, and the stale one it must abandon.
 
     An unfinished journal approved under different Manager-side facts is stale: the same instance proves
@@ -214,9 +214,7 @@ def _current_import_operation(
         journal = read_maintenance_operation(path)
         status = journal["status"]
         approval = cast(dict[str, JsonValue], journal["approval"])
-        stale = status in _UNFINISHED_IMPORT_STATUSES and approval["fingerprint"] != _import_fingerprint(
-            bundle_digest, instance_id, operation_id
-        )
+        stale = status in _UNFINISHED_IMPORT_STATUSES and approval["fingerprint"] != _import_fingerprint(bundle_digest, instance_id, operation_id)
         if status != "abandoned" and not stale:
             return operation_id, tuple(predecessors), None
         predecessors.append(operation_id)
@@ -260,7 +258,9 @@ def build_inspection_bundle(request: ImportRequest, inspection: object) -> dict[
         "channel_identity": result.data["channel"],
         "facts": result.data["source"],
         "classification": result.data["classification"],
-        "checks": result.data["checks"],
+        # Inventory is informational and changes as this very import enrolls. It cannot
+        # be an approval premise or invalidate the idempotent readback of enrollment.
+        "checks": [check.to_dict() for check in inspection.checks if check.check_id != "manager_inventory"],
         "service_identity": observe_service_identity(request),
         "preservation": result.data["preservation"],
     }
@@ -275,20 +275,18 @@ class ImportInspection:
     channel_release_commit: str | None
 
 
-def preview_import(
-    request: ImportRequest, *, installed_loader: InstalledInspectionMetadataLoader | None = None
-) -> ImportPreview:
+def preview_import(request: ImportRequest, *, installed_loader: InstalledInspectionMetadataLoader | None = None) -> ImportPreview:
     inspected = inspect_for_import(request, installed_loader=installed_loader)
     repair = import_refusal_repair(inspected.result)
     if repair is not None:
         kind = inspected.result.classification.installation_class.value
         raise ImportNotAllowedError(f"Import refused: the target is classified {kind}.", repair=repair)
-    return preview_from_inspection(request, inspected)
+    preview = preview_from_inspection(request, inspected)
+    _require_unclaimed_import_identity(preview)
+    return preview
 
 
-def inspect_for_import(
-    request: ImportRequest, *, installed_loader: InstalledInspectionMetadataLoader | None = None
-) -> ImportInspection:
+def inspect_for_import(request: ImportRequest, *, installed_loader: InstalledInspectionMetadataLoader | None = None) -> ImportInspection:
     """Inspect ``request.target``; a Manager-created name is proven against its create record (iss_836499b3)."""
     if not request.name.islower() or not request.name.replace("-", "").isalnum():
         raise ValueError("invalid_import_name")
@@ -304,9 +302,7 @@ def inspect_for_import(
     result = _inspect(replace(request, target=recorded.path), proof)
     recorded.require_inspected(result.target_identity)
     installed = proof.installed
-    return ImportInspection(
-        result, ManagementOrigin.CREATE, None if installed is None else installed.channel_identity.commit
-    )
+    return ImportInspection(result, ManagementOrigin.CREATE, None if installed is None else installed.channel_identity.commit)
 
 
 def _inspect(request: ImportRequest, loader: InstalledInspectionMetadataLoader) -> ExistingInstallInspectionResult:
@@ -335,9 +331,7 @@ def preview_from_inspection(request: ImportRequest, inspected: ImportInspection)
     )
     instance_id = "ins_" + key.removeprefix("sha256:")[:32]
     bundle_digest = canonical_sha256(bundle)
-    operation_id, predecessors, superseded = _current_import_operation(
-        request.manager_paths, instance_id, key, bundle_digest
-    )
+    operation_id, predecessors, superseded = _current_import_operation(request.manager_paths, instance_id, key, bundle_digest)
     fingerprint = _import_fingerprint(bundle_digest, instance_id, operation_id)
     return ImportPreview(
         request,
@@ -372,10 +366,7 @@ def enroll_import(request: ImportRequest, approved_fingerprint: str) -> ImportEn
 
 def import_resume_repair(name: str, target: str, channel: str) -> str:
     """The exact command that finishes an interrupted enrollment (review B3); every import stage is idempotent."""
-    return (
-        f"Finish the interrupted enrollment with `solet-manager import {name} --target {target} --channel {channel} "
-        "--dry-run`, then rerun it with --yes --approval-fingerprint <the fingerprint it prints>."
-    )
+    return f"Finish the interrupted enrollment with `solet-manager import {name} --target {target} --channel {channel} --dry-run`, then rerun it with --yes --approval-fingerprint <the fingerprint it prints>."
 
 
 def enroll_import_holding_instance_lock(preview: ImportPreview) -> ImportEnrollmentResult:
@@ -401,24 +392,16 @@ def _enroll_import_locked(preview: ImportPreview) -> ImportEnrollmentResult:
         return _enrollment_result(preview, "already_managed", v1_match)
     bundle_digest = canonical_sha256(preview.bundle)
     already_managed = _write_prepared_import_journal(preview, bundle_digest)
-    write_content_addressed_json(
-        preview.request.manager_paths.contract_cache_path(bundle_digest), preview.bundle, bundle_digest
-    )
+    write_content_addressed_json(preview.request.manager_paths.contract_cache_path(bundle_digest), preview.bundle, bundle_digest)
     _advance_journal(preview, "inspection_bundle_cached", "bundle_cached", "bundle_cached")
     _publish_inventory(preview, bundle_digest)
     _advance_journal(preview, "inventory_published", "inventory_published", "inventory_published")
     _finalize_import(preview)
-    return _enrollment_result(
-        preview, "already_managed" if already_managed or v1_match else "imported", v1_match
-    )
+    return _enrollment_result(preview, "already_managed" if already_managed or v1_match else "imported", v1_match)
 
 
-def _enrollment_result(
-    preview: ImportPreview, status: str, v1_match: InstanceRecord | None
-) -> ImportEnrollmentResult:
-    return ImportEnrollmentResult(
-        preview, status, preview.management_origin, None if v1_match is None else v1_match.name
-    )
+def _enrollment_result(preview: ImportPreview, status: str, v1_match: InstanceRecord | None) -> ImportEnrollmentResult:
+    return ImportEnrollmentResult(preview, status, preview.management_origin, None if v1_match is None else v1_match.name)
 
 
 def _matching_v1_managed_import(preview: ImportPreview) -> InstanceRecord | None:
@@ -436,12 +419,7 @@ def _matching_v1_managed_import(preview: ImportPreview) -> InstanceRecord | None
 
 def _v1_record_matches_inspection(record: InstanceRecord, inspection: ExistingInstallInspectionResult) -> bool:
     facts = inspection.facts
-    return (
-        _v1_target_matches(record, inspection)
-        and facts.head_commit == record.seed_commit
-        and facts.head_tree == record.seed_tree_hash
-        and _v1_seed_id(record, inspection) == inspection.channel_identity.seed_id
-    )
+    return _v1_target_matches(record, inspection) and facts.head_commit == record.seed_commit and facts.head_tree == record.seed_tree_hash and _v1_seed_id(record, inspection) == inspection.channel_identity.seed_id
 
 
 def _v1_target_matches(record: InstanceRecord, inspection: ExistingInstallInspectionResult) -> bool:
@@ -458,12 +436,7 @@ def _v1_seed_id(record: InstanceRecord, inspection: ExistingInstallInspectionRes
     """Derive the v1 seed identity from its immutable seed fields and channel."""
     channel = inspection.channel_identity
     facts = inspection.facts
-    if (
-        record.seed_repository != channel.repository
-        or record.seed_commit != channel.commit
-        or record.seed_tree_hash != channel.tree_hash
-        or facts.provenance_condition.value != "strict"
-    ):
+    if record.seed_repository != channel.repository or record.seed_commit != channel.commit or record.seed_tree_hash != channel.tree_hash or facts.provenance_condition.value != "strict":
         return None
     return channel.seed_id
 
@@ -481,34 +454,51 @@ def _require_unclaimed_import_identity(preview: ImportPreview) -> None:
         None,
     )
     if incumbent is not None:
-        if not _same_import_identity(incumbent, record) and not _superseded_incumbent(preview, incumbent, record):
+        if not _matching_import_identity(preview, incumbent, record) and not _superseded_incumbent(preview, incumbent, record):
             raise ValueError("managed_identity_drift")
         return
     if preview.management_origin is ManagementOrigin.CREATE:
         build_combined_registry_snapshot(snapshot.v1_records, (*snapshot.v2_records, record))
         return
-    require_unique_identity(
-        snapshot.indexes,
-        requested={
-            "name": record.name,
-            "target": record.target.canonical_path,
-            "filesystem_identity": (
-                record.target.filesystem_identity.device,
+    _require_new_import_identity(snapshot, record)
+
+
+def _require_new_import_identity(snapshot: CombinedRegistrySnapshot, record: InstanceInventoryRecordV2) -> None:
+    """Retain collision identity and explain an existing enrollment at either boundary."""
+    try:
+        require_unique_identity(
+            snapshot.indexes,
+            requested={
+                "name": record.name,
+                "target": record.target.canonical_path,
+                "filesystem_identity": (
+                    record.target.filesystem_identity.device,
+                    record.target.filesystem_identity.inode,
+                ),
+                "launchagent_label": record.service_identity.launchagent_label,
+                "named_launcher_path": record.service_identity.named_launcher_path,
+            },
+        )
+    except RegistryUniquenessError as exc:
+        held = next((item for item in snapshot.v2_records if item.instance_id == exc.incumbent_identity), None)
+        if held is not None:
+            reasons = identity_mismatches(
+                held,
+                Path(record.target.canonical_path),
                 record.target.filesystem_identity.inode,
-            ),
-            "launchagent_label": record.service_identity.launchagent_label,
-            "named_launcher_path": record.service_identity.named_launcher_path,
-        },
-    )
+                record.target.parent_filesystem_identity.inode,
+            )
+            detail = f"target identity differs ({', '.join(reasons)})" if reasons else "target identity matches; this is already an enrolled instance"
+            exc.args = (f"{exc}; {enrollment_summary(held)}; {detail}.",)
+            exc.repair = identity_repair(held) if reasons else f"Use `solet-manager update {held.name} --dry-run` for this enrolled instance."
+        raise
 
 
 def _write_prepared_import_journal(preview: ImportPreview, bundle_digest: str) -> bool:
     """Durably establish the deterministic Manager-only import recovery point."""
     inspection = preview.inspection
     target = inspection.target_identity
-    operation_path = preview.request.manager_paths.operation_path(
-        preview.instance_id, preview.operation_id
-    )
+    operation_path = preview.request.manager_paths.operation_path(preview.instance_id, preview.operation_id)
     inspection = cast(ExistingInstallInspectionResult, preview.inspection)
     facts = inspection.facts
     if facts.head_commit is None or facts.head_tree is None:
@@ -596,9 +586,7 @@ def _finalize_import(preview: ImportPreview) -> None:
     write_maintenance_inventory_v2(preview.request.manager_paths.maintenance_inventory_path, finalized)
 
 
-def _advance_journal(
-    preview: ImportPreview, stage_id: str, operation_status: str, evidence_code: str
-) -> None:
+def _advance_journal(preview: ImportPreview, stage_id: str, operation_status: str, evidence_code: str) -> None:
     """Record one verified import stage and its matching operation transition."""
     path = preview.request.manager_paths.operation_path(preview.instance_id, preview.operation_id)
     previous = read_maintenance_operation(path)
@@ -623,11 +611,7 @@ def _advance_journal(
             ),
         ),
     )
-    result: dict[str, JsonValue] | None = (
-        {"kind": "imported", "inventory_instance_id": preview.instance_id}
-        if operation_status == "verified"
-        else None
-    )
+    result: dict[str, JsonValue] | None = {"kind": "imported", "inventory_instance_id": preview.instance_id} if operation_status == "verified" else None
     next_value = transition_maintenance_operation(
         next_value,
         status=operation_status,
@@ -645,9 +629,7 @@ def pending_inventory_record(preview: ImportPreview) -> InstanceInventoryRecordV
     return replace(_inventory_record(preview, canonical_sha256(preview.bundle), utc_now()), active_operation=None)
 
 
-def _inventory_record(
-    preview: ImportPreview, bundle_digest: str, timestamp: str
-) -> InstanceInventoryRecordV2:
+def _inventory_record(preview: ImportPreview, bundle_digest: str, timestamp: str) -> InstanceInventoryRecordV2:
     """Build the field-complete v2 import record from the Step-2 result."""
     inspection = cast(ExistingInstallInspectionResult, preview.inspection)
     target = inspection.target_identity
@@ -741,7 +723,7 @@ def _is_finalized_matching_import(preview: ImportPreview) -> bool:
     expected = _inventory_record(preview, canonical_sha256(preview.bundle), record.created_at)
     if _superseded_incumbent(preview, record, expected):
         return False
-    if not _same_import_identity(record, expected):
+    if not _matching_import_identity(preview, record, expected):
         raise ValueError("managed_identity_drift")
     if record.active_operation is not None:
         return False
@@ -769,9 +751,7 @@ def _abandon_superseded_import(preview: ImportPreview, superseded: str) -> None:
     write_maintenance_operation(path, previous, transition_maintenance_operation(previous, status="abandoned", result=result))
 
 
-def _superseded_incumbent(
-    preview: ImportPreview, incumbent: InstanceInventoryRecordV2, expected: InstanceInventoryRecordV2
-) -> bool:
+def _superseded_incumbent(preview: ImportPreview, incumbent: InstanceInventoryRecordV2, expected: InstanceInventoryRecordV2) -> bool:
     """The row an abandoned predecessor of this preview published: the same instance, stale Manager-side facts."""
     active = incumbent.active_operation
     return (
@@ -787,9 +767,7 @@ def _superseded_incumbent(
     )
 
 
-def _same_import_identity(
-    actual: InstanceInventoryRecordV2, expected: InstanceInventoryRecordV2
-) -> bool:
+def _same_import_identity(actual: InstanceInventoryRecordV2, expected: InstanceInventoryRecordV2) -> bool:
     return (
         actual.instance_id == expected.instance_id
         and actual.name == expected.name
@@ -803,7 +781,24 @@ def _same_import_identity(
     )
 
 
-def reconcile_import_operation(
-    request: ImportRequest, approved_fingerprint: str
-) -> ImportEnrollmentResult:
+def _matching_import_identity(preview: ImportPreview, actual: InstanceInventoryRecordV2, expected: InstanceInventoryRecordV2) -> bool:
+    """Compare immutable inspection evidence, excluding informational inventory context.
+
+    Previously cached bundles included that context. Verify their stored hash before
+    comparing the same approval premises; do not rewrite the historical bundle or row.
+    """
+    if _same_import_identity(actual, expected):
+        return True
+    if not _same_import_identity(replace(actual, inspection_bundle_digest=expected.inspection_bundle_digest), expected):
+        return False
+    cached = load_json_object(preview.request.manager_paths.contract_cache_path(actual.inspection_bundle_digest))
+    if cached is None or canonical_sha256(cached) != actual.inspection_bundle_digest:
+        raise StateError("stored import inspection bundle does not match its recorded digest")
+    checks = cast(list[dict[str, JsonValue]], cached["checks"])
+    comparable = dict(cached)
+    comparable["checks"] = [cast(JsonValue, check) for check in checks if check.get("check_id") != "manager_inventory"]
+    return canonical_sha256(comparable) == canonical_sha256(preview.bundle)
+
+
+def reconcile_import_operation(request: ImportRequest, approved_fingerprint: str) -> ImportEnrollmentResult:
     return enroll_import(request, approved_fingerprint)

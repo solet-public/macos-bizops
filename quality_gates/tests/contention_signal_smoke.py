@@ -60,15 +60,9 @@ def _assert_receipt_counting_excludes_dead_finished_and_self() -> int:
     must all be excluded — only a genuinely live OTHER battery counts."""
     with tempfile.TemporaryDirectory() as temp_dir:
         directory = Path(temp_dir)
-        (directory / "live.json").write_text(
-            json.dumps({"result": "running", "pid": os.getpid()}), encoding="utf-8"
-        )
-        (directory / "dead.json").write_text(
-            json.dumps({"result": "running", "pid": _dead_pid()}), encoding="utf-8"
-        )
-        (directory / "finished.json").write_text(
-            json.dumps({"result": "passed", "pid": os.getpid()}), encoding="utf-8"
-        )
+        (directory / "live.json").write_text(json.dumps({"result": "running", "pid": os.getpid()}), encoding="utf-8")
+        (directory / "dead.json").write_text(json.dumps({"result": "running", "pid": _dead_pid()}), encoding="utf-8")
+        (directory / "finished.json").write_text(json.dumps({"result": "passed", "pid": os.getpid()}), encoding="utf-8")
         self_path = directory / "self.json"
         self_path.write_text(json.dumps({"result": "running", "pid": os.getpid()}), encoding="utf-8")
 
@@ -122,11 +116,17 @@ def _assert_battery_receipt_carries_contention() -> int:
             "concurrent_live_batteries_peak",
             "host_lock_wait_seconds",
             "host_lock_contended",
+            "host_load",
         ):
             _require(key in contention, f"receipt contention block missing {key!r}: {contention}")
         _require(contention["concurrent_live_batteries_start"] == 0, contention)
         _require(contention["host_lock_contended"] is False, contention)
-    return 7
+        load = contention["host_load"]
+        _require(isinstance(load, dict) and bool(load), contention)
+        _require(load["sample_count"] >= 2 and load["logical_cpu_count"] > 0, str(load))
+        _require(load["max_sampled_1m"] >= max(load["start_1m"], load["finish_1m"]), str(load))
+        _require("overall host load1m" in result.stdout, result.stdout)
+    return 12
 
 
 _CONCURRENT_BATTERY_RUNNER_SCRIPT = (
@@ -146,12 +146,8 @@ _CONCURRENT_BATTERY_RUNNER_SCRIPT = (
 )
 
 
-def _launch_candidate_battery(
-    *, repo_root: Path, root: Path, register: Path, campaign: str, receipts: Path
-) -> subprocess.Popen[str]:
-    script = _CONCURRENT_BATTERY_RUNNER_SCRIPT.format(
-        repo_root=str(repo_root), root=str(root), register=str(register), campaign=campaign
-    )
+def _launch_candidate_battery(*, repo_root: Path, root: Path, register: Path, campaign: str, receipts: Path) -> subprocess.Popen[str]:
+    script = _CONCURRENT_BATTERY_RUNNER_SCRIPT.format(repo_root=str(repo_root), root=str(root), register=str(register), campaign=campaign)
     environment = {
         **os.environ,
         "SOLET_NAME": f"contention-signal-{campaign}",
@@ -206,31 +202,22 @@ def _assert_concurrent_subprocess_batteries_are_detected() -> int:
         fast_register = fast_root / "register.txt"
         fast_register.write_text("fixture.py\n", encoding="utf-8")
 
-        slow = _launch_candidate_battery(
-            repo_root=_REPO_ROOT, root=slow_root, register=slow_register, campaign="slow", receipts=receipts
-        )
+        slow = _launch_candidate_battery(repo_root=_REPO_ROOT, root=slow_root, register=slow_register, campaign="slow", receipts=receipts)
         try:
             _wait_for_running_receipt(receipts, exclude=set())
-            fast = _launch_candidate_battery(
-                repo_root=_REPO_ROOT, root=fast_root, register=fast_register, campaign="fast", receipts=receipts
-            )
+            fast = _launch_candidate_battery(repo_root=_REPO_ROOT, root=fast_root, register=fast_register, campaign="fast", receipts=receipts)
             fast_stdout, fast_stderr = fast.communicate(timeout=30)
             _require(fast.returncode == 0, f"fast battery did not pass: {fast_stdout}{fast_stderr}")
         finally:
             slow_stdout, slow_stderr = slow.communicate(timeout=30)
             _require(slow.returncode == 0, f"slow battery did not pass: {slow_stdout}{slow_stderr}")
 
-        fast_receipt_path = next(
-            candidate
-            for candidate in receipts.glob("*.json")
-            if json.loads(candidate.read_text(encoding="utf-8")).get("campaign") == "fast"
-        )
+        fast_receipt_path = next(candidate for candidate in receipts.glob("*.json") if json.loads(candidate.read_text(encoding="utf-8")).get("campaign") == "fast")
         fast_receipt = json.loads(fast_receipt_path.read_text(encoding="utf-8"))
         contention = fast_receipt["contention"]
         _require(
             contention["concurrent_live_batteries_start"] >= 1,
-            f"the fast battery did not observe the still-sleeping slow battery as live "
-            f"contention: {contention}",
+            f"the fast battery did not observe the still-sleeping slow battery as live contention: {contention}",
         )
     return 1
 

@@ -31,34 +31,64 @@ standing default on hydrated machines).
 
 ## Watcher path (transport `watch`, the default)
 
-**Detect the incumbent watcher FIRST — it decides which of the two branches
-below you take.** A fleet-spawned worker is launched with its presence
-watcher already armed by the spawn adapter (`--no-claim`: it registered
-presence and deliberately claimed no role); an operator-launched session has
-no sidecar and must arm its own. Arming a second watcher for the same session
-is REFUSED, never merged — `{{SOLET_NAME}} watch` takes a per-session flock
-and exits with `another watcher already holds this session's lock ... one
-watch per session; stop the incumbent first` — so branch 1b run blindly just
-errors out on every spawned worker.
+**Resolve the identity and check for an incumbent before arming a watcher.**
+`local_cli/spool.py::resolve_watch_instance_id` uses a non-empty managed
+`$AGENT_INSTANCE_ID` first. Only a bare watcher without that id uses the
+derived `agi-watch-` id made from the first 24 hex chars of
+`sha256($AGENT_SESSION_ID)`. Use the same precedence here:
 
-A watcher does NOT register under `$AGENT_INSTANCE_ID`. It registers under a
-derived, stable id: `agi-watch-` + the first 24 hex chars of
-`sha256($AGENT_SESSION_ID)`. Compute it and look for it in the registry:
+Run this complete check before claiming or arming. The named instance launcher
+is used consistently for lookup, claim, and arm:
 
 ```bash
-WATCH_ID="agi-watch-$(printf %s "$AGENT_SESSION_ID" | shasum -a 256 | cut -c1-24)"
-echo "$WATCH_ID"
-{{SOLET_NAME}} call plugin::agent_messaging_plugin::peer_list '{}' | grep -c "$WATCH_ID"
+set -euo pipefail
+WATCH_CLI="{{SOLET_NAME}}"
+WATCH_ID="${AGENT_INSTANCE_ID:-}"
+if [[ -z "$WATCH_ID" ]]; then
+  WATCH_ID="agi-watch-$(printf %s "$AGENT_SESSION_ID" | shasum -a 256 | cut -c1-24)"
+fi
+PEER_LIST="$("$WATCH_CLI" call plugin::agent_messaging_plugin::peer_list '{}')"
+PARENT_PID="$(printf '%s\n' "$PEER_LIST" | python3 -c '
+import json, sys
+instances = json.load(sys.stdin)["result"]["data"]["instances"]
+rows = [row for group in instances.values() for row in group
+        if row["agent_instance_id"] == sys.argv[1]]
+if len(rows) > 1:
+    raise SystemExit("duplicate peer registration")
+if rows:
+    print(rows[0]["parent_pid"])
+' "$WATCH_ID")"
+if [[ -n "$PARENT_PID" ]]; then
+  PROCESS_COMMAND="$(ps -p "$PARENT_PID" -o command=)"
+  case "$PROCESS_COMMAND" in
+    *"$WATCH_CLI watch"*) BRANCH=1a ;;
+    *) BRANCH=1c ;;
+  esac
+else
+  BRANCH=1b
+fi
+printf 'WATCH_BRANCH=%s WATCH_ID=%s\n' "$BRANCH" "$WATCH_ID"
+if [[ "$BRANCH" == 1a || "$BRANCH" == 1c ]]; then
+  "$WATCH_CLI" call plugin::agent_messaging_plugin::peer_claim_role \
+    "{\"name\": \"$ROLE\", \"agent_id\": \"$AGENT_IDENTITY\", \"agent_instance_id\": \"$WATCH_ID\", \"agent_session_id\": \"$AGENT_SESSION_ID\", \"session_label\": \"$ROLE\"}"
+else
+  "$WATCH_CLI" watch --role "$ROLE"
+fi
 ```
 
-- **`$WATCH_ID` present in `peer_list`** (count ≥ 1) → branch 1a.
-- **Absent** (count 0) → branch 1b.
+- Branch 1a reuses an incumbent watcher and claims through its identity.
+- Branch 1c reuses an existing session/MCP bridge; it must never arm another
+  watcher for that live registration.
+- Branch 1b arms only when no registration matches. The watch command's
+  per-session flock remains the final guard against a watcher racing this check.
+
+Do not classify a registration from its id prefix: managed watchers now use
+`$AGENT_INSTANCE_ID`, the same identity their session bridge uses.
 
 ### 1a. Incumbent sidecar → claim the role through it (do NOT arm a second)
 
 Presence already exists; only the durable role binding is missing. Claim it
-with the verb, against the identity the WATCHER actually registered — never
-`$AGENT_INSTANCE_ID`, which is the launcher's id and holds no binding:
+with the verb, against the identity the watcher actually registered:
 
 ```bash
 {{SOLET_NAME}} call plugin::agent_messaging_plugin::peer_claim_role \
@@ -69,6 +99,20 @@ Confirm `action` is `registered` (first claim) or `updated` (refresh). If the
 call reports `role_held_live`, another live session holds the name — report
 that and stop; do not pass `takeover` without operator confirmation. Then go
 to step 4, using `$WATCH_ID` wherever it asks for the instance id.
+
+### 1c. Existing session bridge → claim through its managed identity
+
+The bridge already occupies the session's managed identity. Claim the role
+against that identity and keep using the bridge; starting `{{SOLET_NAME}} watch`
+would create a second bridge for the same registry row:
+
+```bash
+{{SOLET_NAME}} call plugin::agent_messaging_plugin::peer_claim_role \
+  "{\"name\": \"$ROLE\", \"agent_id\": \"$AGENT_IDENTITY\", \"agent_instance_id\": \"$WATCH_ID\", \"agent_session_id\": \"$AGENT_SESSION_ID\", \"session_label\": \"$ROLE\"}"
+```
+
+Confirm `action` is `registered` or `updated`, then go to step 4 using
+`$WATCH_ID` wherever it asks for the instance id.
 
 ### 1b. No incumbent → arm the watcher with the role, as before
 
@@ -134,7 +178,7 @@ report it.
    step 1; watcher path: the ancestor `claude` process pid, e.g. walk up
    from `$$` with `ps -o ppid= -p`). Use jq with an atomic rename:
    ```bash
-   jq --arg name "$ROLE" '.name = $name' ~/.claude/sessions/<parent_pid>.json > /tmp/rename.$$.json && mv /tmp/rename.$$.json ~/.claude/sessions/<parent_pid>.json
+   jq --arg name "$ROLE" '.name = $name' ~/.claude/sessions/<parent_pid>.json > ~/.claude/sessions/.rename.$$.json && mv ~/.claude/sessions/.rename.$$.json ~/.claude/sessions/<parent_pid>.json
    ```
    Skip this step when the role equals the launch label (the SessionStart
    re-claim case) — the file already says the right thing.

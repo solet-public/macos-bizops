@@ -1,6 +1,6 @@
-import asyncio
 import logging
 
+from ananta.core.actions._measured_action_lane import run_blocking
 from ananta.core.plugins.plugin_contracts import ErrorCode, ErrorSeverity
 from ananta.core.plugins.plugin_manager import PluginManager
 from ananta.core.process_registry.builder import build_process_registry
@@ -45,17 +45,13 @@ class ProcessRegistryManager(IProcessRegistryManager):
         if self._process_registry is not None:
             registry_processes = self._process_registry.get("processes")
             if isinstance(registry_processes, dict) and len(registry_processes) > 0:
-                logger.debug(
-                    f"ProcessRegistryManager: Populating discovery_service with {len(registry_processes)} existing processes"
-                )
+                logger.debug(f"ProcessRegistryManager: Populating discovery_service with {len(registry_processes)} existing processes")
                 for process_key, process_data in registry_processes.items():
                     if isinstance(process_data, dict):
                         try:
                             discovery_service.store_process(process_key, process_data)
                         except Exception as e:
-                            logger.error(
-                                f"ProcessRegistryManager: Failed to store process {process_key} in discovery: {e}"
-                            )
+                            logger.error(f"ProcessRegistryManager: Failed to store process {process_key} in discovery: {e}")
 
     def set_schema_manager(self, schema_manager: SchemaManager) -> None:
         self.schema_manager = schema_manager
@@ -73,23 +69,16 @@ class ProcessRegistryManager(IProcessRegistryManager):
 
     def _log_registry_stats(self, registry_processes: dict[str, object]) -> None:
         """Log statistics about the built registry."""
-        service_interface_count = sum(
-            1 for k in registry_processes.keys() if k.startswith("service_interface::")
-        )
+        service_interface_count = sum(1 for k in registry_processes.keys() if k.startswith("service_interface::"))
         plugin_processes = len(registry_processes) - service_interface_count
         total_processes = len(registry_processes)
 
-        logger.debug(
-            f"ProcessRegistryManager: Built registry with {total_processes} total processes "
-            f"({plugin_processes} plugin, {service_interface_count} service interface)"
-        )
+        logger.debug(f"ProcessRegistryManager: Built registry with {total_processes} total processes ({plugin_processes} plugin, {service_interface_count} service interface)")
 
     def _populate_discovery_service(self, registry_processes: dict[str, object]) -> None:
         """Populate discovery service with process definitions."""
         if self.discovery_service is None:
-            logger.error(
-                "ProcessRegistryManager: No discovery service available - processes will not be searchable"
-            )
+            logger.error("ProcessRegistryManager: No discovery service available - processes will not be searchable")
             return
 
         # Clear existing process vectors before loading new ones
@@ -116,9 +105,7 @@ class ProcessRegistryManager(IProcessRegistryManager):
             raw_registry = build_process_registry(self.plugin_manager)
             processes_obj = self._validate_and_extract_processes(raw_registry)
 
-            logger.debug(
-                f"ProcessRegistryManager: build_process_registry returned registry with {len(processes_obj)} processes"
-            )
+            logger.debug(f"ProcessRegistryManager: build_process_registry returned registry with {len(processes_obj)} processes")
 
             self._process_registry = {"processes": processes_obj}
             self._log_registry_stats(processes_obj)
@@ -271,54 +258,30 @@ class ProcessRegistryManager(IProcessRegistryManager):
         import json
 
         if not isinstance(schema_data, dict):
-            raise TypeError(
-                f"parameter_schema must be a dict (JSON-ready), got {type(schema_data)} for {process_key}"
-            )
+            raise TypeError(f"parameter_schema must be a dict (JSON-ready), got {type(schema_data)} for {process_key}")
         return json.dumps(schema_data, ensure_ascii=False)
 
     def _build_json_fields(self, process_data: dict[str, object]) -> dict[str, str]:
         """Build all JSON-serialized fields for the record."""
         return {
             "input_contract": self._serialize_json_field(process_data.get("input_contract", {})),
-            "action_blueprint": self._serialize_json_field(
-                process_data.get("action_blueprint", {})
-            ),
+            "action_blueprint": self._serialize_json_field(process_data.get("action_blueprint", {})),
             "planning_docs": self._serialize_json_field(process_data.get("planning_docs", {})),
-            "error_handling_docs": self._serialize_json_field(
-                process_data.get("error_handling_docs", {})
-            ),
-            "response_handling_docs": self._serialize_json_field(
-                process_data.get("response_handling_docs", {})
-            ),
-            "chaining_guidance": self._serialize_json_field(
-                process_data.get("chaining_guidance", []), "[]"
-            ),
-            "invocation_schema": self._serialize_json_field(
-                process_data.get("invocation_schema", {})
-            ),
-            "action_definition_template": self._serialize_json_field(
-                process_data.get("action_definition_template", {})
-            ),
-            "result_processor_customizations": self._serialize_json_field(
-                process_data.get("result_processor_customizations", {})
-            ),
-            "error_processor_customizations": self._serialize_json_field(
-                process_data.get("error_processor_customizations", {})
-            ),
+            "error_handling_docs": self._serialize_json_field(process_data.get("error_handling_docs", {})),
+            "response_handling_docs": self._serialize_json_field(process_data.get("response_handling_docs", {})),
+            "chaining_guidance": self._serialize_json_field(process_data.get("chaining_guidance", []), "[]"),
+            "invocation_schema": self._serialize_json_field(process_data.get("invocation_schema", {})),
+            "action_definition_template": self._serialize_json_field(process_data.get("action_definition_template", {})),
+            "result_processor_customizations": self._serialize_json_field(process_data.get("result_processor_customizations", {})),
+            "error_processor_customizations": self._serialize_json_field(process_data.get("error_processor_customizations", {})),
         }
 
-    def _build_record_data(
-        self, process_key: str, process_data: dict[str, object], record_namespace: str
-    ) -> dict[str, object]:
+    def _build_record_data(self, process_key: str, process_data: dict[str, object], record_namespace: str) -> dict[str, object]:
         """Build the record data structure for persistence with dual-write support."""
-        is_inference_capable_int = self._convert_inference_capable_to_int(
-            process_data.get("is_inference_capable", False)
-        )
+        is_inference_capable_int = self._convert_inference_capable_to_int(process_data.get("is_inference_capable", False))
 
         json_fields = self._build_json_fields(process_data)
-        parameter_schema_json = self._serialize_parameter_schema(
-            process_data.get("parameter_schema"), process_key
-        )
+        parameter_schema_json = self._serialize_parameter_schema(process_data.get("parameter_schema"), process_key)
         external_id = f"proc_{process_key.replace('::', '_')}"
 
         record_data: dict[str, object] = {
@@ -421,35 +384,7 @@ class ProcessRegistryManager(IProcessRegistryManager):
 
         try:
             await self._initialize_discovery_service_tables()
-
-            # Clear existing process vectors before loading new ones
-            # This ensures embedding_description changes take effect on restart
-            # (vectors have unique constraint on external_id that prevents updates)
-            if hasattr(self.discovery_service, "clear_process_vectors"):
-                self.discovery_service.clear_process_vectors()
-
-            plugin_registry = await asyncio.get_event_loop().run_in_executor(
-                None, build_process_registry, self.plugin_manager
-            )
-
-            plugin_processes_obj = plugin_registry.get("processes", {})
-            if not isinstance(plugin_processes_obj, dict):
-                raise TypeError("Registry must contain a 'processes' dict")
-
-            for process_key, process_data in plugin_processes_obj.items():
-                if not isinstance(process_data, dict):
-                    logger.error(f"Skipping non-dict process data for {process_key}")
-                    continue
-                self.discovery_service.store_process(process_key, process_data)
-
-            # Service interface processes are already included in plugin_processes_obj
-            # from build_process_registry() - no need to add them separately
-            self.discovery_service.get_process_count()
-            len(plugin_processes_obj)
-
-            await asyncio.get_event_loop().run_in_executor(
-                None, self.discovery_service.rebuild_index
-            )
+            await run_blocking(self._load_discovery_processes)
 
         except Exception as e:
             raise FrameworkError(
@@ -458,6 +393,23 @@ class ProcessRegistryManager(IProcessRegistryManager):
                 details={"error": str(e)},
                 severity=ErrorSeverity.CRITICAL,
             ) from e
+
+    def _load_discovery_processes(self) -> None:
+        """Clear, rebuild and populate in the original order on the F2 worker."""
+        assert self.discovery_service is not None
+        if hasattr(self.discovery_service, "clear_process_vectors"):
+            self.discovery_service.clear_process_vectors()
+        plugin_registry = build_process_registry(self.plugin_manager)
+        plugin_processes_obj = plugin_registry.get("processes", {})
+        if not isinstance(plugin_processes_obj, dict):
+            raise TypeError("Registry must contain a 'processes' dict")
+        for process_key, process_data in plugin_processes_obj.items():
+            if not isinstance(process_data, dict):
+                logger.error(f"Skipping non-dict process data for {process_key}")
+                continue
+            self.discovery_service.store_process(process_key, process_data)
+        self.discovery_service.get_process_count()
+        self.discovery_service.rebuild_index()
 
     async def _initialize_discovery_service_tables(self) -> None:
         if not self.schema_manager:
@@ -492,7 +444,7 @@ class ProcessRegistryManager(IProcessRegistryManager):
             },
         )
 
-        self.schema_manager.initialize_schemas([discovery_schema])
+        await run_blocking(self.schema_manager.initialize_schemas, [discovery_schema])
 
     async def save_registry_to_state(self, state: dict[str, object]) -> None:
         """Save the process registry to state. Fails if registry not initialized."""
@@ -502,7 +454,8 @@ class ProcessRegistryManager(IProcessRegistryManager):
         await self.state_manager.save(state)
 
     def apply_knowledge_base_updates(
-        self, updates: dict[str, dict[str, object]],
+        self,
+        updates: dict[str, dict[str, object]],
     ) -> dict[str, object]:
         """Apply knowledge base text field updates to live registry entries.
 

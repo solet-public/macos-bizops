@@ -46,6 +46,7 @@ from agent_messaging_plugin.peer_dispatch import (  # noqa: E402
     build_peer_message_meta,
     build_wake_reply_hint,
 )
+from agent_messaging_plugin.peer_list_view import serialize_peer_list  # noqa: E402
 from agent_messaging_plugin.peer_registry import PeerRegistry  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
     PEER_BINDING_NAMESPACE,
@@ -125,12 +126,15 @@ class _Harness:
             ),
         )
 
-    def add_target(self, *, instance_id: str, session_id: str, label: str) -> None:
+    def add_target(
+        self, *, instance_id: str, session_id: str, label: str,
+        agent_id: str = "claude_code",
+    ) -> None:
         bridge = self.manager.open("")
         self.registry.register(
             _binding(
                 bridge_id=bridge.bridge_id,
-                agent_id="claude_code",
+                agent_id=agent_id,
                 instance_id=instance_id,
                 session_id=session_id,
                 label=label,
@@ -205,6 +209,36 @@ def test_l4c_unknown_session_key_preserves_the_original_error() -> None:
     )
 
 
+def test_session_fallback_refuses_a_different_agent_kind() -> None:
+    h = _Harness()
+    h.add_target(
+        instance_id="agi-wrong-kind", session_id="ases-cross-kind",
+        label="Wrong kind", agent_id="codex",
+    )
+    status, payload = h.send(
+        instance_id="agi-rotated-away", session_id="ases-cross-kind",
+    )
+    _check(
+        status == 404 and payload.get("code") == "peer_unreachable"
+        and not h.service.requests,
+        "session fallback refuses a binding whose agent kind differs from peer_id",
+    )
+
+
+def test_peer_list_does_not_expose_session_fallback_key() -> None:
+    h = _Harness()
+    h.add_target(
+        instance_id="agi-listed", session_id="ases-private", label="Listed",
+    )
+    listed = serialize_peer_list(h.registry.list_agent_ids())
+    instances = listed["instances"]["claude_code"]
+    selected = next(row for row in instances if row["agent_instance_id"] == "agi-listed")
+    _check(
+        "agent_session_id" not in selected
+        and "peer_agent_session_id" not in selected
+        and selected.get("agent_instance_id") == "agi-listed",
+        "peer_list exposes the live instance but not the reply-hint session fallback key",
+    )
 def test_l5_ambiguous_session_key_fails_with_candidate_ids() -> None:
     h = _Harness()
     h.add_target(instance_id="agi-dup-a", session_id="ases-dup", label="A")

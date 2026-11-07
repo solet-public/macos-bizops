@@ -1,0 +1,10 @@
+# Exactly nine live consumers; infrastructure smokes use a separate register.
+ananta/tests/llm/agent_messaging/list_threads_live_smoke.py
+ananta/tests/llm/agent_messaging/repository_write_migration_live_smoke.py
+ananta/tests/llm/session_ledger/ingest_migration_live_smoke.py
+ananta/tests/llm/session_ledger/polling_driver_migration_live_smoke.py
+ananta/tests/llm/session_ledger/summarize_migration_live_smoke.py
+ananta/tests/llm/session_ledger/reset_ingest_state_live_db_smoke.py
+plugins/external_postgres_plugin/tests/smoke_readonly.py
+plugins/external_postgres_plugin/tests/smoke_multistatement.py
+plugins/external_postgres_plugin/tests/smoke_write.py

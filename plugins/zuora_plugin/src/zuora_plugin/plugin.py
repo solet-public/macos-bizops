@@ -1,16 +1,54 @@
-"""Zuora plugin entry point — Data Query + object CRUD + billing reads + bulk export.
+"""Zuora plugin entry point — typed Workflow, SQL Data Query, Files, Orders, Subscriptions, Accounts, Payment Methods, Payments, Custom Objects, Object Query, Billing Documents, Invoices, Credit and Debit Memos, Bill Runs, Usage, ZOQL, object and billing verbs.
 
 Headless OAuth 2.0 client-credentials auth (chain-consumed from the
 ``zuora_tenant`` address-book entry) against a Zuora tenant — no browser
 flow, no callback server, the simplest of the platform's connector auth
-models. No delete verb (billing records are voided/cancelled through Zuora's
-own workflow, not deleted through this tool).
+models. Vendor RBAC on the registered OAuth client is the only operation
+boundary: reads, writes and deletes are equally first-class.
 
-Verbs (all EDGE):
-  - data_query                                              — read
-  - get_object / list_subscriptions / get_invoice / list_invoices — read
-  - create_object / update_object                           — write
-  - bulk_export                                              — read (exports to file)
+Verbs (all EDGE, all deferred-completion):
+  - request                                                  — any relative tenant path (long tail)
+  - Workflows (workflow_processes.py): list/get/update/delete, export/import,
+    versions list/import/delete, run/get run/stop run, tasks list/get/rerun/
+    batch update, usage metrics, callout auth providers create/update/delete
+  - SQL Data Query and Files (data_query_processes.py): submit/list/get/cancel
+    jobs, download result, download file, file status, restore file
+  - Orders (order_processes.py): preview/create (sync and async), list (tenant,
+    subscription owner, invoice owner, subscription, pending), get, update,
+    activate, cancel, delete (sync and async), custom fields, trigger dates,
+    delta metrics, async job status, commitment association rescan
+  - Subscriptions (subscription_processes.py): preview new/existing, create,
+    get current/version, update, renew, cancel, suspend, resume, delete,
+    version custom fields, metrics
+  - Accounts (account_processes.py): create/get/update/delete, summary,
+    payment methods, default payment method, payment-method cascading
+  - Payment Methods and Payments (payment_processes.py): payment-method
+    create/decrypt/get/update/verify/scrub/delete, balance, stored credential
+    profiles create/list/cancel/expire/profile data, wallet domains, payment
+    sessions; payments list/create/get/update/apply/unapply/transfer/refund/
+    cancel/delete, parts and item parts
+  - Custom Objects and Object Query (custom_object_processes.py): definitions
+    create/list/get/update/delete, records create/list/get/replace/patch/
+    delete/batch, bulk jobs submit/upload/list/get/errors/cancel; Object
+    Query list and get for every standard and custom object
+  - Billing Documents and Invoices (invoice_processes.py): billing-document
+    list, generate, file-deletion jobs; standalone invoice create (single and
+    batch), update (single and batch), bulk post, unpost, cancel, delete,
+    reverse, split, write off (sync and async job), email, PDF status, files
+    list/upload, items, item taxation items, taxation item create,
+    application parts
+  - Credit Memos (credit_memo_processes.py) and Debit Memos
+    (debit_memo_processes.py): create (from charges, from an invoice, bulk),
+    list/get, update (single and bulk), post/unpost, cancel, delete, email,
+    PDF generate/status, files list/upload, items, parts, taxation items;
+    credit memos apply/unapply (sync and async job), refund, reverse, write
+    off; debit memos collect, write off, application parts, due dates
+  - Bill Runs and Usage (bill_run_usage_processes.py): bill run create/get/
+    post/cancel/delete/email documents; usage import (file), create/get/
+    update/delete records, usage rate detail of an invoice item
+  - data_query / bulk_export                                 — ZOQL to TSV
+  - get_object / list_subscriptions / get_invoice / list_invoices — reads
+  - create_object / update_object                            — writes
   - test_connection                                          — diagnostic
 
 Security posture (umbrella design §2, applied to this pre-wave-2 design;
@@ -19,9 +57,10 @@ workbench/2026-07-15_result_error_processing_architecture_deep_dive.md): every
 verb is directly process_call-able like any other process; auth/rate-limit error
 messages are GENERIC fixed strings — never the raw response, which could
 leak tenant-specific diagnostic detail (§1.6); the plugin reaches ONLY the
-address-book-resolved tenant (no base_url param on any verb). No SQL-shaped
-strings anywhere (pure REST), so the SQL-lockdown gate is silent for this
-plugin — no allowlist entry needed.
+address-book-resolved tenant (no base_url param on any verb) plus, for a
+completed SQL Data Query job, the pre-signed dataFile URL Zuora itself issued,
+fetched without the bearer token. Vendor queries are not platform persistence;
+the SQL-access gate's connector-root declaration covers this plugin.
 """
 
 from __future__ import annotations
@@ -49,9 +88,13 @@ from ananta.interfaces.edge_process_provider import (
     EdgeProcessProvider,
 )
 
-from . import async_jobs, export_containment
+from . import async_jobs, export_containment, request_actions, typed_verbs
+from .account_processes import AccountProcesses
 from .app_config import AppConfigError, AppConfigLoader
-from .billing_actions import ZuoraResponseError
+from .bill_run_usage_processes import BillRunUsageProcesses
+from .billing_actions import ZuoraResponseError, v1_headers
+from .commerce_fields import subscription_read_options
+from .commerce_params import SEGMENT_PARAMS, V1_HEADER_PARAMS
 from .constants import (
     BULK_EXPORT_ROW_CAP,
     CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
@@ -74,13 +117,24 @@ from .constants import (
     RESULT_TYPE_GET_OBJECT,
     RESULT_TYPE_LIST_INVOICES,
     RESULT_TYPE_LIST_SUBSCRIPTIONS,
+    RESULT_TYPE_REQUEST,
     RESULT_TYPE_TEST_CONNECTION,
     RESULT_TYPE_UPDATE_OBJECT,
+    TSV_SUFFIX,
     ZUORA_LIST_PAGE_SIZE_MAX,
     ZUORA_QUERY_PAGE_ROW_CAP,
 )
+from .credit_memo_processes import CreditMemoProcesses
+from .custom_object_processes import CustomObjectProcesses
+from .data_query_processes import DataQueryFileProcesses
+from .debit_memo_processes import DebitMemoProcesses
 from .errors import ZuoraServiceError, classify_zuora_response
 from .http_client import ZuoraAuthError, ZuoraClient
+from .invoice_processes import InvoiceProcesses
+from .order_processes import OrderProcesses
+from .payment_processes import PaymentProcesses
+from .subscription_processes import SubscriptionProcesses
+from .workflow_processes import WorkflowProcesses
 
 # Field sensitivities: Zuora carries real billing/financial PII (invoices,
 # payments, subscriptions) — treated at the DB-connector floor (0.5) rather
@@ -88,8 +142,22 @@ from .http_client import ZuoraAuthError, ZuoraClient
 # more consequential than a leaked CRM contact row. Metadata/ids stay low.
 
 
-class ZuoraPlugin(PluginBase, EdgeProcessProvider):
-    """Zuora subscription-billing connector (Data Query / object CRUD / billing reads) plugin."""
+class ZuoraPlugin(
+    WorkflowProcesses,
+    DataQueryFileProcesses,
+    OrderProcesses,
+    SubscriptionProcesses,
+    AccountProcesses,
+    PaymentProcesses,
+    CustomObjectProcesses,
+    InvoiceProcesses,
+    CreditMemoProcesses,
+    DebitMemoProcesses,
+    BillRunUsageProcesses,
+    PluginBase,
+    EdgeProcessProvider,
+):
+    """Zuora subscription-billing connector: typed Workflow, Data Query, Files, Orders, Subscriptions, Accounts, Payment Methods, Payments, Custom Objects, Object Query, Billing Document, Memo, Bill Run and Usage verbs, ZOQL, objects."""
 
     name: str = PLUGIN_NAME
 
@@ -147,10 +215,7 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
         self.logger = logging.getLogger(self.name)
         self._address_book_service = self.orchestrator_ref.get_service("address_book_service")
         if self._address_book_service is None:
-            raise RuntimeError(
-                f"{ERROR_ADDRESS_BOOK_NOT_AVAILABLE}: {self.name} requires "
-                "address_book_service to resolve the zuora_tenant credentials"
-            )
+            raise RuntimeError(f"{ERROR_ADDRESS_BOOK_NOT_AVAILABLE}: {self.name} requires address_book_service to resolve the zuora_tenant credentials")
         self._app_config_loader = AppConfigLoader(self._address_book_service)
         self.set_ready()
 
@@ -190,7 +255,13 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
             "timestamp": datetime.now(UTC).isoformat(),
         }
 
-    def _export_path_gate(self, output_tsv_path: str) -> str:
+    def _export_path_gate(
+        self,
+        output_tsv_path: str,
+        *,
+        param_name: str = "output_tsv_path",
+        suffix: str | None = TSV_SUFFIX,
+    ) -> str:
         """Admit an export path via workspace-root containment; return the realpath.
 
         Binds the operator's ``export_allowed_roots`` config (yaml default
@@ -202,13 +273,10 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
         raw_roots = config.get(CONFIG_KEY_EXPORT_ALLOWED_ROOTS)
         roots: list[str] = []
         if raw_roots is not None:
-            if not isinstance(raw_roots, list) or not all(
-                isinstance(entry, str) for entry in raw_roots
-            ):
+            if not isinstance(raw_roots, list) or not all(isinstance(entry, str) for entry in raw_roots):
                 raise ZuoraServiceError(
                     ERROR_NOT_CONFIGURED,
-                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory "
-                    "path strings",
+                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory path strings",
                 )
             roots = list(raw_roots)
         return export_containment.assert_export_path_allowed(
@@ -216,6 +284,8 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
             roots,
             config_key=CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
             plugin_name=self.name,
+            param_name=param_name,
+            suffix=suffix,
         )
 
     def _run(self, produce: Callable[[ZuoraClient], dict[str, Any]], endpoint_name: str) -> dict[str, Any]:
@@ -243,13 +313,19 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
         return self._success(data)
 
     def _dispatch_async(
-        self, action_name: str, params: dict[str, Any], state: dict[str, Any],
+        self,
+        action_name: str,
+        params: dict[str, Any],
+        state: dict[str, Any],
     ) -> dict[str, Any]:
         """D0.3 ms-scale dispatch: create the job, return immediately — no Zuora REST
         call happens here."""
         try:
             create_result = async_jobs.create_job(
-                self, action_name=action_name, params=params, state=state,
+                self,
+                action_name=action_name,
+                params=params,
+                state=state,
             )
         except ValueError as exc:
             return self._error(ERROR_INVALID_PARAMS, str(exc))
@@ -261,37 +337,40 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
             return self._error(ERROR_API_ERROR, message)
         return self._success(create_result["data"])
 
+    def _dispatch_typed(
+        self,
+        action_name: str,
+        params: dict[str, Any],
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Validate a typed verb (every family in ``typed_verbs``), then queue it."""
+        try:
+            typed_verbs.validate_typed(action_name, params)
+        except ValueError as exc:
+            return self._error(ERROR_INVALID_PARAMS, str(exc))
+        return self._dispatch_async(action_name, params, state)
+
     # ------------------------------------------------------------------
     # EdgeProcessProvider
     # ------------------------------------------------------------------
 
     def get_edge_process_definitions(self) -> dict[str, EdgeProcessDefinition]:
         return {
+            "request": _edge("request", RESULT_TYPE_REQUEST, retryable=False),
             "data_query": _edge("data_query", RESULT_TYPE_DATA_QUERY, retryable=True),
             "get_object": _edge("get_object", RESULT_TYPE_GET_OBJECT, retryable=True),
-            "create_object": _edge(
-                "create_object", RESULT_TYPE_CREATE_OBJECT, retryable=False
-            ),
-            "update_object": _edge(
-                "update_object", RESULT_TYPE_UPDATE_OBJECT, retryable=False
-            ),
+            "create_object": _edge("create_object", RESULT_TYPE_CREATE_OBJECT, retryable=False),
+            "update_object": _edge("update_object", RESULT_TYPE_UPDATE_OBJECT, retryable=False),
             "list_subscriptions": _edge(
                 "list_subscriptions",
                 RESULT_TYPE_LIST_SUBSCRIPTIONS,
                 retryable=True,
             ),
-            "get_invoice": _edge(
-                "get_invoice", RESULT_TYPE_GET_INVOICE, retryable=True
-            ),
-            "list_invoices": _edge(
-                "list_invoices", RESULT_TYPE_LIST_INVOICES, retryable=True
-            ),
-            "bulk_export": _edge(
-                "bulk_export", RESULT_TYPE_BULK_EXPORT, retryable=True
-            ),
-            "test_connection": _edge(
-                "test_connection", RESULT_TYPE_TEST_CONNECTION, retryable=True
-            ),
+            "get_invoice": _edge("get_invoice", RESULT_TYPE_GET_INVOICE, retryable=True),
+            "list_invoices": _edge("list_invoices", RESULT_TYPE_LIST_INVOICES, retryable=True),
+            "bulk_export": _edge("bulk_export", RESULT_TYPE_BULK_EXPORT, retryable=True),
+            "test_connection": _edge("test_connection", RESULT_TYPE_TEST_CONNECTION, retryable=True),
+            **{name: _edge(name, typed_verbs.result_type(name), retryable=retryable) for name, retryable in typed_verbs.TYPED_RETRYABLE.items()},
         }
 
     # ------------------------------------------------------------------
@@ -299,10 +378,46 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
     # ------------------------------------------------------------------
 
     @platform_process(
+        name="request",
+        display_name="Zuora: Request",
+        description=(
+            "Send one authenticated REST request (GET/POST/PUT/PATCH/DELETE) to a relative "
+            "path on the registered Zuora tenant. Vendor RBAC controls all operations. "
+            "Returns job_id/status queued immediately; status, redacted headers/body and "
+            "pagination arrive on completion. Calls may change vendor state; report the "
+            "HTTP status and body faithfully. Never automatically replay a write."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "method": ParameterMetadata(type=ParameterType.STRING, required=True, description="HTTP method, including GET, POST, PUT, PATCH and DELETE."),
+            "path": ParameterMetadata(type=ParameterType.STRING, required=True, description="Relative tenant REST path, e.g. /workflows. No absolute URL."),
+            "query": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Query parameters forwarded to Zuora."),
+            "headers": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Non-Authorization HTTP headers without CR/LF; OAuth is injected by the plugin."),
+            "body": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Optional JSON request body, forwarded unchanged."),
+        },
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Queued job envelope; vendor status/headers/body/pagination arrive on completion.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="queued"),
+            },
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def request(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        try:
+            request_actions.validate_request(params)
+        except ValueError as exc:
+            return self._error(ERROR_INVALID_PARAMS, str(exc))
+        return self._dispatch_async("request", params, state)
+
+    @platform_process(
         name="data_query",
         display_name="Zuora: Data Query",
         description=(
-            "Run a ZOQL query (e.g. \"SELECT Id, Name FROM Account\") against the configured Zuora "
+            'Run a ZOQL query (e.g. "SELECT Id, Name FROM Account") against the configured Zuora '
             "tenant. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion "
             "shape) -- the dispatch returning is NOT the same as the job finishing. When the job "
             "completes, the result is ALWAYS written to the caller-supplied output_tsv_path, never "
@@ -327,28 +442,19 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=(
-                    "ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."
-                ),
+                description=("ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."),
             ),
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
                 description=(
-                    "Must be exactly true, together with row_limit, to fetch more than the "
-                    f"default {DEFAULT_ROW_LIMIT} records. Requires understanding why the default "
-                    "exists: avoiding exhausted API request limits/disk, and pulling all records "
-                    "to filter client-side instead of writing a narrower ZOQL WHERE clause."
+                    f"Must be exactly true, together with row_limit, to fetch more than the default {DEFAULT_ROW_LIMIT} records. Requires understanding why the default exists: avoiding exhausted API request limits/disk, and pulling all records to filter client-side instead of writing a narrower ZOQL WHERE clause."
                 ),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Explicit record ceiling, up to {DATA_QUERY_MAX_ROWS_CAP}. Only honored "
-                    f"together with acknowledge_default_limit_override=true; refused (not clamped) "
-                    f"above {DATA_QUERY_MAX_ROWS_CAP}."
-                ),
+                description=(f"Explicit record ceiling, up to {DATA_QUERY_MAX_ROWS_CAP}. Only honored together with acknowledge_default_limit_override=true; refused (not clamped) above {DATA_QUERY_MAX_ROWS_CAP}."),
             ),
         },
         return_value_schema=ReturnValueSchema(
@@ -369,16 +475,11 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
         name="get_object",
         display_name="Zuora: Get Object",
         description=(
-            "Fetch one Account/Subscription/Invoice/Payment/Product object by type + id. "
-            "Requires type and id. Returns immediately with a job_id and status 'queued' (D0.3 "
-            "deferred-completion shape) -- the dispatch returning is NOT the same as the job "
-            "finishing; the object's fields are delivered when the job completes."
+            "Fetch one Account/Subscription/Invoice/Payment/Product object by type + id. Requires type and id. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the job finishing; the object's fields are delivered when the job completes."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "type": ParameterMetadata(
-                type=ParameterType.STRING, required=True, description="Object type: Account, Subscription, Invoice, Payment, or Product."
-            ),
+            "type": ParameterMetadata(type=ParameterType.STRING, required=True, description="Object type: Account, Subscription, Invoice, Payment, or Product."),
             "id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The object id."),
         },
         return_value_schema=ReturnValueSchema(
@@ -406,9 +507,7 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "type": ParameterMetadata(
-                type=ParameterType.STRING, required=True, description="Object type: Account, Subscription, Invoice, Payment, or Product."
-            ),
+            "type": ParameterMetadata(type=ParameterType.STRING, required=True, description="Object type: Account, Subscription, Invoice, Payment, or Product."),
             "fields": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="Non-empty object of field values."),
         },
         return_value_schema=ReturnValueSchema(
@@ -428,17 +527,10 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="update_object",
         display_name="Zuora: Update Object",
-        description=(
-            "Apply a non-empty fields object to an existing object by type + id. Write action. "
-            "Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion "
-            "shape) -- the dispatch returning is NOT the same as the update finishing; the "
-            "confirmation is delivered when the job completes."
-        ),
+        description=("Apply a non-empty fields object to an existing object by type + id. Write action. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the update finishing; the confirmation is delivered when the job completes."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "type": ParameterMetadata(
-                type=ParameterType.STRING, required=True, description="Object type: Account, Subscription, Invoice, Payment, or Product."
-            ),
+            "type": ParameterMetadata(type=ParameterType.STRING, required=True, description="Object type: Account, Subscription, Invoice, Payment, or Product."),
             "id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The object id."),
             "fields": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="Non-empty object of field values to set."),
         },
@@ -485,20 +577,15 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
-                description=(
-                    "Must be exactly true, together with row_limit, to fetch more than the "
-                    f"default {DEFAULT_ROW_LIMIT} subscriptions."
-                ),
+                description=(f"Must be exactly true, together with row_limit, to fetch more than the default {DEFAULT_ROW_LIMIT} subscriptions."),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Explicit record ceiling, up to {LIST_ROW_LIMIT_CAP}. Only honored together "
-                    f"with acknowledge_default_limit_override=true; refused (not clamped) above "
-                    f"{LIST_ROW_LIMIT_CAP}."
-                ),
+                description=(f"Explicit record ceiling, up to {LIST_ROW_LIMIT_CAP}. Only honored together with acknowledge_default_limit_override=true; refused (not clamped) above {LIST_ROW_LIMIT_CAP}."),
             ),
+            **SEGMENT_PARAMS,
+            **V1_HEADER_PARAMS,
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -512,19 +599,23 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
         context_handling=ContextHandling.NONE,
     )
     def list_subscriptions(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        try:
+            subscription_read_options(params)
+            v1_headers(params)
+        except ValueError as exc:
+            return self._error(ERROR_INVALID_PARAMS, str(exc))
         return self._dispatch_async("list_subscriptions", params, state)
 
     @platform_process(
         name="get_invoice",
         display_name="Zuora: Get Invoice",
         description=(
-            "Fetch one invoice by id. Returns immediately with a job_id and status 'queued' "
-            "(D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the "
-            "job finishing; the invoice's fields are delivered when the job completes."
+            "Fetch one invoice by id or number (GET /v1/invoices/{invoiceKey}), optionally with the documented Zuora-Version, Zuora-Entity-Ids, Zuora-Org-Ids and Zuora-Track-Id headers. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the job finishing; the invoice's fields are delivered when the job completes."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The invoice id."),
+            "id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The invoice id or invoice number."),
+            **V1_HEADER_PARAMS,
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -538,6 +629,10 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
         context_handling=ContextHandling.NONE,
     )
     def get_invoice(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        try:
+            v1_headers(params)
+        except ValueError as exc:
+            return self._error(ERROR_INVALID_PARAMS, str(exc))
         return self._dispatch_async("get_invoice", params, state)
 
     @platform_process(
@@ -571,19 +666,12 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
-                description=(
-                    "Must be exactly true, together with row_limit, to write more than the "
-                    f"default {DEFAULT_ROW_LIMIT} invoices."
-                ),
+                description=(f"Must be exactly true, together with row_limit, to write more than the default {DEFAULT_ROW_LIMIT} invoices."),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Explicit record ceiling, up to {LIST_ROW_LIMIT_CAP}. Only honored together "
-                    f"with acknowledge_default_limit_override=true; refused (not clamped) above "
-                    f"{LIST_ROW_LIMIT_CAP}."
-                ),
+                description=(f"Explicit record ceiling, up to {LIST_ROW_LIMIT_CAP}. Only honored together with acknowledge_default_limit_override=true; refused (not clamped) above {LIST_ROW_LIMIT_CAP}."),
             ),
         },
         return_value_schema=ReturnValueSchema(
@@ -634,19 +722,12 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
-                description=(
-                    "Must be exactly true, together with row_limit, to fetch more than the "
-                    f"default {DEFAULT_ROW_LIMIT} records."
-                ),
+                description=(f"Must be exactly true, together with row_limit, to fetch more than the default {DEFAULT_ROW_LIMIT} records."),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Explicit record ceiling, up to {BULK_EXPORT_ROW_CAP}. Only honored together "
-                    f"with acknowledge_default_limit_override=true; refused (not clamped) above "
-                    f"{BULK_EXPORT_ROW_CAP}."
-                ),
+                description=(f"Explicit record ceiling, up to {BULK_EXPORT_ROW_CAP}. Only honored together with acknowledge_default_limit_override=true; refused (not clamped) above {BULK_EXPORT_ROW_CAP}."),
             ),
         },
         return_value_schema=ReturnValueSchema(
@@ -666,12 +747,7 @@ class ZuoraPlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="test_connection",
         display_name="Zuora: Test Connection",
-        description=(
-            "Verify the configured Zuora credentials by minting a bearer token. Returns "
-            "immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- "
-            "the dispatch returning is NOT the same as the job finishing; ok/base_url/client_id "
-            "are delivered when the job completes."
-        ),
+        description=("Verify the configured Zuora credentials by minting a bearer token. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the job finishing; ok/base_url/client_id are delivered when the job completes."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
         return_value_schema=ReturnValueSchema(

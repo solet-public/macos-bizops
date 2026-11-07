@@ -147,7 +147,10 @@ def test_edge_parity() -> None:
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 9 verbs discovered", len(actions) == 9)
+    from zuora_plugin.typed_verbs import TYPED_HANDLERS
+
+    expected = 10 + len(TYPED_HANDLERS)  # original verbs + generic request, plus typed build-2 verbs
+    _assert(f"all {expected} verbs discovered", len(actions) == expected, str(len(actions)))
 
 
 def main() -> int:

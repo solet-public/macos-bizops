@@ -262,7 +262,8 @@ def main() -> int:
             "  SKIP  set LEDGER_READ_LIVE_SMOKE=1 to run "
             "(needs the live solet DB)"
         )
-        return 0
+        print('BORN_CLONE_SKIP_WITNESS={"reason":"opt_in_toggle_not_enabled","toggle":"LEDGER_READ_LIVE_SMOKE"}')
+        return 77
 
     print("=== quiescent_migration_live_smoke ===")
     provider = PostgresProvider(_load_pg_config())

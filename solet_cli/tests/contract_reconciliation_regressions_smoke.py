@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import ModuleType
+from typing import cast
 
 from contract_reconciliation_smoke import (
     _ACTIVE_ANSWER_MIGRATION_IDS,
@@ -64,88 +65,90 @@ from contract_reconciliation_smoke import (
     write_transaction,
 )
 
+# Published stable releases r43 and r48 (iss_3e524749): flow_source_revision is the seed commit, the
+# digest is the setup contract the seed carried, and the commit is this repository's commit whose five digested
+# contract blobs hash to it, so the source bundle is reproduced from bytes this repository holds.
+_STABLE_SOURCE_BRIDGES = (
+    (
+        "r43",
+        "961af9290",
+        "8207c151255d5b969221886767c0d6d26684f253",
+        "sha256:5a46321f248b5a0dbeda2b2ff233e032c5ee1145a658b446254274cade7e2603",
+    ),
+    (
+        "r48",
+        "b6a7bd43d",
+        "ea6ee0cbfd1d3715a3aa588d4c45bafd96fc1421",
+        "sha256:e42e751583ad12e446f67bf73b131a0dfdbdc3c0a08e3737c92756acad022656",
+    ),
+)
+_STABLE_SOURCE_DIGESTS = frozenset(digest for *_, digest in _STABLE_SOURCE_BRIDGES)
+_GIT_CONTROL_SOURCE_DIGEST = "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+_CODEX_OPTIONAL_SOURCE_DIGEST = "sha256:ca8c9b246b4aed63c5d39582e14fbe87b899d29ccd172cb3bf384839cdaceb5d"
+
+
+def run_stable_r43_r48_source_bridges(base: ModuleType) -> None:
+    globals().update({name: value for name, value in vars(base).items() if not name.startswith("__")})
+    _run_stable_r43_r48_source_bridges()
+
 
 def run_legacy_loader_regressions(base: ModuleType) -> None:
-    globals().update(
-        {name: value for name, value in vars(base).items() if not name.startswith("__")}
-    )
+    globals().update({name: value for name, value in vars(base).items() if not name.startswith("__")})
     _run_legacy_loader_regressions()
 
 
 def run_destination_answer_validation_regression(base: ModuleType) -> None:
-    globals().update(
-        {name: value for name, value in vars(base).items() if not name.startswith("__")}
-    )
+    globals().update({name: value for name, value in vars(base).items() if not name.startswith("__")})
     _run_destination_answer_validation_regression()
 
 
 def run_answer_value_migration_regression(base: ModuleType) -> None:
-    globals().update(
-        {name: value for name, value in vars(base).items() if not name.startswith("__")}
-    )
+    globals().update({name: value for name, value in vars(base).items() if not name.startswith("__")})
     _run_answer_value_migration_regression()
 
 
 def run_unconditional_recovery_lock_regression(base: ModuleType) -> None:
-    globals().update(
-        {name: value for name, value in vars(base).items() if not name.startswith("__")}
-    )
+    globals().update({name: value for name, value in vars(base).items() if not name.startswith("__")})
     _run_unconditional_recovery_lock_regression()
 
 
 def run_destination_resolution_disclosure_regression(base: ModuleType) -> None:
-    globals().update(
-        {name: value for name, value in vars(base).items() if not name.startswith("__")}
-    )
+    globals().update({name: value for name, value in vars(base).items() if not name.startswith("__")})
     _run_destination_resolution_disclosure_regression()
 
 
 def run_destination_selection_regressions(base: ModuleType) -> None:
-    globals().update(
-        {name: value for name, value in vars(base).items() if not name.startswith("__")}
-    )
+    globals().update({name: value for name, value in vars(base).items() if not name.startswith("__")})
     _run_destination_selection_regressions()
 
 
 def run_first_use_supersession_regression(base: ModuleType) -> None:
-    globals().update(
-        {name: value for name, value in vars(base).items() if not name.startswith("__")}
-    )
+    globals().update({name: value for name, value in vars(base).items() if not name.startswith("__")})
     _run_first_use_supersession_regression()
 
 
 def run_historical_v2_per_probe_receipt_regression(base: ModuleType) -> None:
-    globals().update(
-        {name: value for name, value in vars(base).items() if not name.startswith("__")}
-    )
+    globals().update({name: value for name, value in vars(base).items() if not name.startswith("__")})
     _run_historical_v2_per_probe_receipt_regression()
 
 
 def run_recovery_control(base: ModuleType) -> None:
-    globals().update(
-        {name: value for name, value in vars(base).items() if not name.startswith("__")}
-    )
+    globals().update({name: value for name, value in vars(base).items() if not name.startswith("__")})
     _run_recovery_control()
 
 
 def run_reconciliation_chain_regressions(base: ModuleType) -> None:
-    globals().update(
-        {name: value for name, value in vars(base).items() if not name.startswith("__")}
-    )
+    globals().update({name: value for name, value in vars(base).items() if not name.startswith("__")})
     _run_reconciliation_chain_regressions()
 
 
 def run_lm_studio_source_pins(base: ModuleType) -> None:
-    globals().update(
-        {name: value for name, value in vars(base).items() if not name.startswith("__")}
-    )
+    globals().update({name: value for name, value in vars(base).items() if not name.startswith("__")})
     _run_lm_studio_source_pins()
 
 
 def run_ram_preflight_reconciliation_regression(base: ModuleType) -> None:
-    globals().update(
-        {name: value for name, value in vars(base).items() if not name.startswith("__")}
-    )
+    globals().update({name: value for name, value in vars(base).items() if not name.startswith("__")})
     _run_ram_preflight_reconciliation_regression()
 
 
@@ -226,35 +229,42 @@ def _run_destination_answer_validation_regression() -> None:
 def _answer_migration_bridges() -> tuple[ContractReconciliation, ...]:
     """Split the active contract's bridges and return the ones that must rewrite claude_local."""
 
-    bridges = tuple(
-        item
-        for item in load_contract_reconciliations(manifest_path=_RECONCILIATION_MANIFEST)
-        if item.destination_digest == _RAM_PREFLIGHT_DESTINATION_DIGEST
-    )
+    bridges = tuple(item for item in load_contract_reconciliations(manifest_path=_RECONCILIATION_MANIFEST) if item.destination_digest == _RAM_PREFLIGHT_DESTINATION_DIGEST)
     # r64 bridges start from 19350a8d, whose contract no longer offers claude_local,
     # so they carry no answer rewrite; every older active bridge must.
-    r64 = tuple(item for item in bridges if item.source_digest == _R64_BRIDGE_SOURCE_DIGEST)
-    active = tuple(item for item in bridges if item.source_digest != _R64_BRIDGE_SOURCE_DIGEST)
+    # The r43 and r48 stable sources (5a46321f, e42e7515) are newer than the claude_local retirement
+    # too: their contracts already offer only claude_code_local, so they carry no answer rewrite either.
+    # The later Git-control wording sources also already use claude_code_local.
+    no_rewrite = {_R64_BRIDGE_SOURCE_DIGEST, _GIT_CONTROL_SOURCE_DIGEST, _CODEX_OPTIONAL_SOURCE_DIGEST, *_STABLE_SOURCE_DIGESTS}
+    active = tuple(item for item in bridges if item.source_digest not in no_rewrite)
     _check(
-        {item.migration_id for item in active} == _ACTIVE_ANSWER_MIGRATION_IDS,
+        cast("set[str] | frozenset[str]", {item.migration_id for item in active}) == _ACTIVE_ANSWER_MIGRATION_IDS,
         "all five active pre-19350a8d bridges declare the retired Claude source migration",
     )
-    _check(
-        len(r64) == 8 and all(item.answer_value_migrations == () for item in r64),
-        "the eight r64 bridges from 19350a8d declare no answer rewrite",
-    )
+    _check_no_rewrite_sources(bridges)
     return active
+
+
+def _check_no_rewrite_sources(bridges: tuple[ContractReconciliation, ...]) -> None:
+    """Released wording-only sources retain the canonical Claude source answer.
+
+    Pin both released cohorts so a missing bridge or an unintended answer
+    rewrite fails separately from the five older sources that need migration.
+    """
+    for digest, count, label in (
+        (_R64_BRIDGE_SOURCE_DIGEST, 8, "the eight r64 bridges from 19350a8d declare no answer rewrite"),
+        (_GIT_CONTROL_SOURCE_DIGEST, 4, "the four Git-control wording bridges from ce20096b declare no answer rewrite"),
+        (_CODEX_OPTIONAL_SOURCE_DIGEST, 4, "the four Codex-optional bridges from ca8c9b24 preserve recorded answers"),
+    ):
+        cohort = tuple(item for item in bridges if item.source_digest == digest)
+        _check(len(cohort) == count and all(item.answer_value_migrations == () for item in cohort), label)
 
 
 def _check_answer_value_migration(migration: ContractReconciliation) -> None:
     """One active bridge declares, previews and persists the canonical Claude source rewrite."""
 
     _check(
-        tuple(
-            (item.decision_id, item.from_value, item.to_value)
-            for item in migration.answer_value_migrations
-        )
-        == (("session_sources", "claude_local", "claude_code_local"),),
+        tuple((item.decision_id, item.from_value, item.to_value) for item in migration.answer_value_migrations) == (("session_sources", "claude_local", "claude_code_local"),),
         f"{migration.migration_id} declares one canonical Claude source rewrite",
     )
     with tempfile.TemporaryDirectory() as raw:
@@ -400,7 +410,7 @@ def _run_destination_selection_regressions() -> None:
         else:
             _check(False, "source match without an installed-destination match is refused")
     with tempfile.TemporaryDirectory() as raw:
-        manager, paths, _, _, _ = _environment(Path(raw))
+        _manager, paths, _, _, _ = _environment(Path(raw))
         r18_bundle = _pinned_r18_contract(Path(raw) / "r18-contracts")
         manifest = Path(raw) / "b15-shape.json"
         _write_manifest_migrations(manifest, [r15_entry, r18_entry])
@@ -419,7 +429,7 @@ def _run_destination_selection_regressions() -> None:
             "b15-shape regression leaves the r15 declaration untouched",
         )
     with tempfile.TemporaryDirectory() as raw:
-        manager, paths, _, _, _ = _environment(Path(raw))
+        _manager, paths, _, _, _ = _environment(Path(raw))
         r18_bundle = _pinned_r18_contract(Path(raw) / "r18-contracts")
         duplicate_r18 = dict(r18_entry)
         duplicate_r18["migration_id"] = "fixture-duplicate-r18-destination-v1"
@@ -792,9 +802,7 @@ def _run_lm_studio_source_pins() -> None:
             (transaction.flow_id, transaction.flow_source_revision, transaction.flow_contract_digest),
             declarations,
         )
-        matches = reconciliation_chain_module.destination_reconciliation_candidates(
-            candidates, active_destination
-        )
+        matches = reconciliation_chain_module.destination_reconciliation_candidates(candidates, active_destination)
         _check(len(matches) == 1, "one exact persisted LM Studio source tuple reaches the active candidate contract")
         _check(matches[0].stage_probe_mappings == () and matches[0].first_use_inactive_probe_migrations == (), "new LM Studio probes cannot inherit verified old evidence")
         changed = replace(transaction, flow_source_revision="f" * 40)
@@ -807,6 +815,94 @@ def _run_lm_studio_source_pins() -> None:
         )
 
 
+def _status_slots(statuses: dict[str, dict[str, dict[str, object]]]) -> set[tuple[str, str, str]]:
+    return {(stage, boundary, probe) for stage, boundaries in statuses.items() for boundary, probes in boundaries.items() for probe in probes}
+
+
+def _stable_source_transaction(root: Path, label: str, commit: str, revision: str, digest: str) -> Transaction:
+    """Journal a setup-incomplete solet from one stable release, on that release's own contract bytes."""
+
+    source_path = root / "source-contracts"
+    source_path.mkdir()
+    for filename in contract_filenames():
+        (source_path / filename).write_bytes(_fixture_file_bytes(commit, filename))
+    source = ContractBundle.load(source_revision=revision, directory=source_path, expected_digest=digest)
+    answers = _r20_answers(root / "target", session_sources=[])
+    answers["flow_source_revision"] = revision
+    return Transaction.create(
+        name=f"stable-{label}",
+        target=root / "target",
+        input_fingerprint="sha256:" + "8" * 64,
+        answers=answers,  # type: ignore[arg-type]
+        seed=_seed(),
+        flow_id=source.flow_id,
+        flow_source_revision=revision,
+        flow_contract_digest=source.contract_digest,
+        stage_ids=tuple(source.stages),
+        stage_probe_statuses=initial_stage_probe_statuses(source, answers),  # type: ignore[arg-type]
+        completion_probe_ids=source.completion_probe_ids,
+    )
+
+
+def _check_stable_source_bridge(
+    label: str,
+    transaction: Transaction,
+    bridge: ContractReconciliation,
+    destination: ContractBundle,
+) -> None:
+    source_slots = _status_slots(transaction.stage_probe_statuses)  # type: ignore[arg-type]
+    destination_slots = _status_slots(initial_stage_probe_statuses(destination, transaction.answers))  # type: ignore[arg-type]
+    moved = source_slots - destination_slots
+    _check(
+        not moved and not bridge.stage_probe_mappings,
+        f"stable {label} stage-probe mappings are the measured set: every one of its {len(source_slots)} source slots survives unchanged at the active contract, so none is declared",
+    )
+    _check(
+        not (bridge.operation_statuses_to_reset or bridge.answer_value_migrations) and not bridge.first_use_inactive_probe_migrations,
+        f"stable {label} bridge resets no operation, rewrites no answer and migrates no first-use probe",
+    )
+    reconciled = reconcile_contract_stage_probe_state(destination, transaction, bridge)
+    _check(
+        reconciled.flow_contract_digest == destination.contract_digest,
+        f"stable {label} journal reconciles onto the active contract digest",
+    )
+    kept = _status_slots(reconciled.stage_probe_statuses)  # type: ignore[arg-type]
+    _check(
+        source_slots <= kept and all(reconciled.stage_probe_statuses[s][b][p] is transaction.stage_probe_statuses[s][b][p] for s, b, p in source_slots),
+        f"stable {label} reconciliation keeps every source slot's status where it was",
+    )
+
+
+def _run_stable_r43_r48_source_bridges() -> None:
+    """Setup-incomplete solets from stable r43 and r48 reconcile to the active contract (iss_3e524749)."""
+
+    declarations = load_contract_reconciliations(manifest_path=_RECONCILIATION_MANIFEST)
+    destination = ContractBundle.load(
+        source_revision=_RAM_PREFLIGHT_SOURCE_COMMIT,
+        directory=_ROOT / _CONTRACT_PATH,
+        expected_digest=_RAM_PREFLIGHT_DESTINATION_DIGEST,
+    )
+    for label, commit, revision, digest in _STABLE_SOURCE_BRIDGES:
+        with tempfile.TemporaryDirectory() as raw:
+            transaction = _stable_source_transaction(Path(raw), label, commit, revision, digest)
+            identity = (transaction.flow_id, revision, digest)
+            candidates = reconciliation_chain_module.identity_reconciliation_candidates(identity, declarations)
+            matches = reconciliation_chain_module.destination_reconciliation_candidates(candidates, destination.contract_digest)
+            _check(
+                len(matches) == 1,
+                f"stable {label} source {digest[:15]} has one declared bridge to the active contract",
+            )
+            _check_stable_source_bridge(label, transaction, matches[0], destination)
+            changed = replace(transaction, flow_source_revision="f" * 40)
+            _check(
+                not reconciliation_chain_module.identity_reconciliation_candidates(
+                    (changed.flow_id, changed.flow_source_revision, changed.flow_contract_digest),
+                    declarations,
+                ),
+                f"stable {label} digest with an unknown source revision is still refused",
+            )
+
+
 def _run_ram_preflight_reconciliation_regression() -> None:
     """A new active preflight probe never inherits an earlier host verdict."""
 
@@ -815,9 +911,7 @@ def _run_ram_preflight_reconciliation_regression() -> None:
         source_path = root / "source-contracts"
         source_path.mkdir()
         for filename in contract_filenames():
-            (source_path / filename).write_bytes(
-                _fixture_file_bytes(_RAM_PREFLIGHT_SOURCE_COMMIT, filename)
-            )
+            (source_path / filename).write_bytes(_fixture_file_bytes(_RAM_PREFLIGHT_SOURCE_COMMIT, filename))
         source = ContractBundle.load(
             source_revision=_RAM_PREFLIGHT_SOURCE_COMMIT,
             directory=source_path,
@@ -858,15 +952,10 @@ def _run_ram_preflight_reconciliation_regression() -> None:
         _check(len(matches) == 1, "RAM preflight source tuple has one declared migration")
         reconciled = reconcile_contract_stage_probe_state(destination, transaction, matches[0])
         _check(
-            reconciled.stage_probe_statuses["preflight"]["entry"][
-                "minimum_physical_memory_valid"
-            ]
-            is CheckpointStatus.PENDING,
+            reconciled.stage_probe_statuses["preflight"]["entry"]["minimum_physical_memory_valid"] is CheckpointStatus.PENDING,
             "a pending historical preflight receives the new RAM probe as pending",
         )
-        verified = transaction.with_statuses(
-            stages={**transaction.stages, "preflight": CheckpointStatus.VERIFIED}
-        )
+        verified = transaction.with_statuses(stages={**transaction.stages, "preflight": CheckpointStatus.VERIFIED})
         _raises(
             StateError,
             lambda: reconcile_contract_stage_probe_state(destination, verified, matches[0]),

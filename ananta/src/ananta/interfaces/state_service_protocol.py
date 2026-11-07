@@ -8,9 +8,11 @@ IMPORTANT: This is the SINGLE SOURCE OF TRUTH for StateService's interface.
 Do NOT define local StateServiceProtocol classes in other modules.
 """
 
+from contextlib import AbstractContextManager
 from typing import Protocol, runtime_checkable
 
 from ananta.core.domain.types import ActionResult
+from ananta.interfaces.state_management_interface import StateTransaction
 
 
 @runtime_checkable
@@ -32,6 +34,16 @@ class StateServiceProtocol(Protocol):
     """
 
     # Core database operations
+    def transactional(self) -> AbstractContextManager[StateTransaction]:
+        """Typed state operations on one connection; failure rolls back all writes."""
+        ...
+
+    def prepare_record(
+        self, namespace: str, table_name: str, record: dict[str, object],
+    ) -> dict[str, object]:
+        """Copy and populate standard fields before a transactional record insert."""
+        ...
+
     def create_schema(self, namespace: str, schema: dict[str, object]) -> ActionResult:
         """Create schema for namespace."""
         ...

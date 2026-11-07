@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::managed_dispatch_uptake_rate",
+  "display_name": "Measure initial managed-dispatch uptake",
+  "description": "Read-only causal uptake measurement over consecutive dispatch contracts. since and as_of are inclusive aware timestamps; window_seconds defaults to 300 (1..86400) and sample_size to 50 (1..500). Optional runtime and transport filters use initial first-turn:1 payload agent_runtime and host. Unknown eligibility and failed submissions remain visible in the selected denominator. Only accepted assignment-bound worker ACKs for the exact dispatch and initial attempt can convert; retries cannot repair the original outcome.",
+  "embedding_description": "Measure managed-dispatch uptake from initial submission and accepted assignment-bound worker ACK receipts. Return consecutive contract IDs, causal event evidence, receipt-time latency, maturity, conversion by original host transport/runtime/vendor, and an honest 48-of-50 tmux Codex SLO advisory.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Managed-dispatch uptake evidence measured",
+    "result_type": "managed_dispatch_uptake_rate_result",
+    "result_description": "Echoed input cutoffs, consecutive selected IDs, per-dispatch causal evidence and unknown reasons, counts, breakdowns, read completeness and SLO status.",
+    "presentation_guidance": "State cutoffs, selected denominator and exclusions. Preserve unknown and failed members, pending windows, raw receipt IDs and label provenance. PASS requires 50 mature measurable tmux Codex members, window 300 seconds and at least 48 timely initial-attempt ACKs. PARTIAL/UNMEASURABLE is advisory. Receipt timing is not first model token timing or an atomic snapshot; synthetic proof does not establish live reliability."
+  },
+  "error_processor_customizations": {
+    "action_context": "Stateless recomputation through bounded StateManagementInterface ordered reads; no dispatch, event or lifecycle record is changed.",
+    "error_interpretation": "uptake_time_invalid, uptake_integer_invalid and uptake_range_invalid report invalid caller syntax. Missing state service, telemetry, original eligibility or exhausted reads are returned as explicit measurement advisories.",
+    "recovery_guidance": "Correct caller syntax normally. For incomplete telemetry retain selected IDs and evidence, disclose uncertainty and leave live qualification open. Do not infer uptake from submission, heartbeat, inbox selection, retries or current active state; do not block unrelated dispatch work."
+  }
+}

@@ -37,7 +37,8 @@ class LedgerAuthorizationError(Exception):
 
 
 def assert_operator_principal(
-    call_context: CallContext | None, method_name: str,
+    call_context: CallContext | None,
+    method_name: str,
 ) -> None:
     """Authorize an operator-only ledger verb (e.g. the blob-identity backfill).
 
@@ -83,8 +84,7 @@ def assert_register_source_authorized(
         return
     if call_context is None or not call_context.is_operator_principal:
         raise LedgerAuthorizationError(
-            f"{method_name} of a filesystem root_uri requires an "
-            "operator/operator-equivalent principal",
+            f"{method_name} of a filesystem root_uri requires an operator/operator-equivalent principal",
         )
     try:
         candidate = os.path.realpath(str(root_uri_to_path(root_uri)))
@@ -94,13 +94,33 @@ def assert_register_source_authorized(
         raise LedgerAuthorizationError(
             f"{method_name}: malformed filesystem root_uri {root_uri!r}: {exc}",
         ) from exc
+    if _contained_in_allowed_roots(candidate, allowed_roots):
+        return
+    raise LedgerAuthorizationError(
+        f"{method_name}: filesystem root_uri {root_uri!r} is not contained in any operator-configured ledger_allowed_roots",
+    )
+
+
+def filesystem_root_uri_is_allowed(root_uri: str, allowed_roots: list[str]) -> bool:
+    """True iff a filesystem ``root_uri`` is contained in one allowed root.
+
+    The containment half of :func:`assert_register_source_authorized`, with no
+    principal check, for the boot auto-register path: a plugin-declared default
+    filesystem root is registered at boot only when the operator approved it in
+    ``ledger_allowed_roots``. A malformed filesystem URI is not allowed.
+    """
+    try:
+        candidate = os.path.realpath(str(root_uri_to_path(root_uri)))
+    except ValueError:
+        return False
+    return _contained_in_allowed_roots(candidate, allowed_roots)
+
+
+def _contained_in_allowed_roots(candidate: str, allowed_roots: list[str]) -> bool:
     for allowed in allowed_roots:
         allowed_real = os.path.realpath(
             os.path.expanduser(os.path.expandvars(allowed)),
         )
         if os.path.commonpath([allowed_real, candidate]) == allowed_real:
-            return
-    raise LedgerAuthorizationError(
-        f"{method_name}: filesystem root_uri {root_uri!r} is not contained in "
-        "any operator-configured ledger_allowed_roots",
-    )
+            return True
+    return False

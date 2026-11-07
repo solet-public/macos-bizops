@@ -47,19 +47,58 @@ class ZuoraClient:
         timeout_seconds: float,
     ) -> None:
         self._config = config
+        self._timeout_seconds = timeout_seconds
         self._http = httpx.Client(base_url=config.base_url, timeout=timeout_seconds)
+        # Vendor-issued pre-signed result URLs (Data Query ``dataFile``) live off
+        # the tenant host. They get their own client that never carries the bearer.
+        self._presigned_http: httpx.Client | None = None
         self._token: str | None = None
         self._expires_at_monotonic: float = 0.0
 
     def close(self) -> None:
         self._http.close()
+        if self._presigned_http is not None:
+            self._presigned_http.close()
+
+    def send(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: Any = None,
+        headers: dict[str, str] | None = None,
+        content: bytes | None = None,
+    ) -> httpx.Response:
+        """Typed-verb transport: tenant-relative path, one 401 re-mint like the other typed verbs.
+
+        A 401 means Zuora rejected the bearer before running the operation, so
+        the single re-mint retry cannot replay a processed write. ``content``
+        sends raw bytes (a file upload) in place of a JSON body.
+        """
+        return self._request(method, path, params=params, json=json, headers=headers, content=content)
+
+    def fetch_presigned(self, url: str) -> httpx.Response:
+        """GET a vendor-issued pre-signed URL with NO Authorization header and no redirects."""
+        if self._presigned_http is None:
+            self._presigned_http = httpx.Client(timeout=self._timeout_seconds, follow_redirects=False)
+        return self._presigned_http.get(url)
+
+    def credential_values(self) -> list[str]:
+        """The registered client id and secret plus the cached bearer ('' before the first mint).
+
+        Redaction input only: every typed verb and the generic request scrub
+        these values (raw, percent/form-encoded and base64) from results,
+        errors, audit lines and downloaded bytes.
+        """
+        return [self._config.client_id, self._config.client_secret, self._token or ""]
 
     def ensure_authenticated(self) -> None:
         """Mint (or reuse the cached) bearer token — used by test_connection to prove reachability."""
         self._bearer()
 
-    def get(self, path: str, *, params: dict[str, Any] | None = None) -> httpx.Response:
-        return self._request("GET", path, params=params)
+    def get(self, path: str, *, params: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> httpx.Response:
+        return self._request("GET", path, params=params, headers=headers)
 
     def post(self, path: str, *, json: dict[str, Any] | None = None) -> httpx.Response:
         return self._request("POST", path, json=json)
@@ -67,20 +106,39 @@ class ZuoraClient:
     def put(self, path: str, *, json: dict[str, Any] | None = None) -> httpx.Response:
         return self._request("PUT", path, json=json)
 
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        json: Any = None,
+    ) -> httpx.Response:
+        """Generic transport; never replay an operation after a vendor response.
+
+        Validation belongs to request_actions. Existing typed verbs retain their
+        original 401 refresh/retry behavior. OAuth acquisition is shared.
+        """
+        return self._request(method, path, params=params, json=json, headers=headers, retry_unauthorized=False)
+
     def _request(
         self,
         method: str,
         path: str,
         *,
         params: dict[str, Any] | None = None,
-        json: dict[str, Any] | None = None,
+        json: Any = None,
+        headers: dict[str, str] | None = None,
+        retry_unauthorized: bool = True,
+        content: bytes | None = None,
     ) -> httpx.Response:
-        response = self._do_request(method, path, params=params, json=json)
-        if response.status_code == _HTTP_UNAUTHORIZED:
+        response = self._do_request(method, path, params=params, json=json, headers=headers, content=content)
+        if retry_unauthorized and response.status_code == _HTTP_UNAUTHORIZED:
             # Force exactly one re-fetch, then retry once — mirrors the
             # re-mint-on-expiry pattern used by salesforce_plugin's session.
             self._token = None
-            response = self._do_request(method, path, params=params, json=json)
+            response = self._do_request(method, path, params=params, json=json, headers=headers, content=content)
         return response
 
     def _do_request(
@@ -89,10 +147,12 @@ class ZuoraClient:
         path: str,
         *,
         params: dict[str, Any] | None,
-        json: dict[str, Any] | None,
+        json: Any,
+        headers: dict[str, str] | None = None,
+        content: bytes | None = None,
     ) -> httpx.Response:
-        headers = {"Authorization": f"Bearer {self._bearer()}"}
-        return self._http.request(method, path, params=params, json=json, headers=headers)
+        request_headers = {**(headers or {}), "Authorization": f"Bearer {self._bearer()}"}
+        return self._http.request(method, path, params=params, json=json, content=content, headers=request_headers)
 
     def _bearer(self) -> str:
         if self._token is not None and time.monotonic() < self._expires_at_monotonic:

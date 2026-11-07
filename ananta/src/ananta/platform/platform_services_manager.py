@@ -1,6 +1,8 @@
 import logging
 import os
+import re
 from pathlib import Path
+from urllib.parse import unquote
 
 from ananta.core.orchestration.feature_flags import OrchestrationFeatureFlags
 
@@ -12,6 +14,44 @@ from .unified_metadata_registry import UnifiedMetadataRegistry
 logger = logging.getLogger(__name__)
 
 
+def _safe_initialization_error(error: Exception) -> RuntimeError:
+    """Snapshot the cause without retaining a credential-bearing exception chain."""
+    message = str(error)
+    secret_names = re.compile(r"password|passwd|pwd|secret|token|credential|api[_-]?key", re.I)
+    secrets = sorted(
+        {value for key, value in os.environ.items() if value and secret_names.search(key)},
+        key=len,
+        reverse=True,
+    )
+    for secret in secrets:
+        message = message.replace(secret, "[REDACTED]")
+    # Match URL authority as a unit: userinfo can be a token, username with
+    # an empty password, or percent-encoded credentials without a literal colon.
+    message = re.sub(r"(://)[^\s/?#@]*@", r"\1[REDACTED]@", message)
+
+    def redact_query_parameter(match: re.Match[str]) -> str:
+        separator, key, value = match.groups()
+        if secret_names.search(unquote(key)):
+            value = "[REDACTED]"
+        return f"{separator}{key}={value}"
+
+    message = re.sub(r"([?&])([^=\s&#]+)=([^&#\s]*)", redact_query_parameter, message)
+    message = re.sub(
+        r"(?i)(\b(?:[\w-]+[_-])?(?:password|passwd|pwd|secret|token|credential|api[_-]?key|client_secret)"
+        r"[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;&#]+)",
+        r"\1[REDACTED]",
+        message,
+    )
+    message = re.sub(r"(?i)(\bBearer\s+)\S+", r"\1[REDACTED]", message)
+    return RuntimeError(f"{type(error).__name__}: {message}")
+
+
+def metadata_registry_startup_detail(error: Exception | None = None) -> str:
+    """Describe registry availability and the effective configuration flags."""
+    cause = str(error) if error is not None else "initialization cause unavailable"
+    return f"Unified metadata registry not available: {cause}. Fallback to legacy TemplateEngine is prohibited. ANANTA_USE_METADATA_REGISTRY={OrchestrationFeatureFlags.use_metadata_registry()}, ANANTA_USE_NEW_TEMPLATE_ENGINE={OrchestrationFeatureFlags.use_new_template_engine()}"
+
+
 class PlatformServicesManager:
     def __init__(self, metadata_folder: str | None = None, output_folder: str | None = None):
         self.metadata_folder = metadata_folder
@@ -21,6 +61,7 @@ class PlatformServicesManager:
         self._json_validator: JSONSchemaValidator | None = None
         self._code_generator: CodeGenerator | None = None
         self._initialized = False
+        self.initialization_error: RuntimeError | None = None
 
         # Step 3: Create UnifiedMetadataRegistry object but don't call initialize()
         self._unified_metadata_registry: UnifiedMetadataRegistry | None = None
@@ -31,16 +72,20 @@ class PlatformServicesManager:
         }
 
     def initialize(self) -> bool:
+        self.initialization_error = None
+        self._initialized = False
         try:
             self._initialize_unified_metadata_registry()
             self._initialize_optional_services()
             self._initialized = True
             return True
-        except Exception:
-            # Surface the REAL cause with its stack. Swallowing it here left
-            # callers raising a misleading feature-flag error while the actual
-            # failure (e.g. a missing profile/app dir) was invisible.
-            logger.exception("PlatformServicesManager.initialize() failed")
+        except Exception as error:
+            # Never retain/log the raw cause: startup logs the eventual chain.
+            self.initialization_error = _safe_initialization_error(error)
+            logger.error(
+                "PlatformServicesManager.initialize() failed: %s",
+                metadata_registry_startup_detail(self.initialization_error),
+            )
             return False
 
     def _initialize_unified_metadata_registry(self) -> None:
@@ -99,10 +144,7 @@ class PlatformServicesManager:
             if candidate_path.exists():
                 return str(candidate_path)
 
-        raise RuntimeError(
-            f"Plugins directory not found. Set ANANTA_PLUGINS_PATH or ensure "
-            f"'plugins' or 'ananta_plugins' exists at {ananta_package_dir}"
-        )
+        raise RuntimeError(f"Plugins directory not found. Set ANANTA_PLUGINS_PATH or ensure 'plugins' or 'ananta_plugins' exists at {ananta_package_dir}")
 
     def _get_app_path(self, app_home_path: Path) -> str:
         """Get and validate app path."""

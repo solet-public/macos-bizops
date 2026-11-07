@@ -33,13 +33,13 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from collections.abc import Callable
 
-# Use the caller-supplied solet name before importing modules that resolve
-# SOLET_NAME. Every sentinel created by this smoke is removed on the way out.
-NAME = os.environ["SOLET_NAME"]
+# Never let this standalone test create the live solet's drain sentinel.
+NAME = "drain-sigterm-exit-smoke"
 
 from pathlib import Path
 
@@ -189,15 +189,19 @@ def _check_real_sigterm_stray_exits_nonzero() -> None:
 
 def main() -> int:
     failures: list[str] = []
-    # Start from a clean slate.
-    draining_sentinel_path(NAME).unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory(prefix="drain-sigterm-runtime-", dir="/tmp") as runtime_root:
+        os.environ["XDG_RUNTIME_DIR"] = runtime_root
+        os.environ["SOLET_NAME"] = NAME
+        # Start from a clean slate in the isolated parent runtime; child
+        # subprocesses inherit the same XDG_RUNTIME_DIR and non-live name.
+        draining_sentinel_path(NAME).unlink(missing_ok=True)
 
-    print("Drain SIGTERM → exit-0 respawn-suppression smoke:")
-    _check("path-match (plugin write ↔ core read)", _check_path_match, failures)
-    _check("held() context window", _check_held_context, failures)
-    _check("real sigterm_exit_code property", _check_real_exit_code_property, failures)
-    _check("real-SIGTERM drain → exit 0 within grace", _check_real_sigterm_draining_exits_zero, failures)
-    _check("real-SIGTERM stray → exit non-zero", _check_real_sigterm_stray_exits_nonzero, failures)
+        print("Drain SIGTERM → exit-0 respawn-suppression smoke:")
+        _check("path-match (plugin write ↔ core read)", _check_path_match, failures)
+        _check("held() context window", _check_held_context, failures)
+        _check("real sigterm_exit_code property", _check_real_exit_code_property, failures)
+        _check("real-SIGTERM drain → exit 0 within grace", _check_real_sigterm_draining_exits_zero, failures)
+        _check("real-SIGTERM stray → exit non-zero", _check_real_sigterm_stray_exits_nonzero, failures)
 
     if failures:
         print(f"\nFAIL — {len(failures)} case(s): {', '.join(failures)}")

@@ -63,26 +63,27 @@ def _check_fresh_install(root: Path) -> tuple[Path, Path, Path, Path]:
     target = clone / ".venv" / "bin" / CONSOLE_SCRIPT_NAME
 
     installed = install_command_launcher_at_birth(
-        name="testhum", clone_root=clone, bin_dir=bin_dir, codex_config_path=config_path,
+        name="testhum",
+        clone_root=clone,
+        bin_dir=bin_dir,
+        codex_config_path=config_path,
     )
     launcher = bin_dir / "testhum"
     _check(
         "fresh install creates the symlink and reports installed",
-        installed.status == "installed"
-        and launcher.is_symlink()
-        and launcher.readlink() == target,
+        installed.status == "installed" and launcher.is_symlink() and launcher.readlink() == target,
         f"{installed} link={launcher}",
     )
     parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
     server = parsed.get("mcp_servers", {}).get("testhum", {})
     _check(
+        "fresh install appends the newborn's own Codex MCP bridge configuration",
         server.get("command") == str(clone / ".venv" / "bin" / "python3")
         and server.get("args") == ["-m", "agent_messaging_plugin.mcp_bridge"]
         and server.get("env_vars") == ["CODEX_THREAD_ID"]
         and server.get("env", {}).get("SOLET_NAME") == "testhum"
         and server.get("env", {}).get("AGENT_IDENTITY") == "codex"
         and server.get("env", {}).get("AGENT_SESSION_LABEL") == "Codex-Ambient",
-        "fresh install appends the newborn's own Codex MCP bridge configuration",
         repr(server),
     )
 
@@ -97,15 +98,14 @@ def _check_self_generated_config_is_idempotent(
 ) -> None:
     generated = config_path.read_text(encoding="utf-8")
     duplicate = install_command_launcher_at_birth(
-        name="testhum", clone_root=clone, bin_dir=bin_dir, codex_config_path=config_path,
+        name="testhum",
+        clone_root=clone,
+        bin_dir=bin_dir,
+        codex_config_path=config_path,
     )
     _check(
         "an exact self-generated Codex MCP table is idempotent rather than refused",
-        duplicate.status == "already_installed"
-        and duplicate.mcp_status == "already_installed"
-        and "already installed" in duplicate.mcp_reason
-        and (bin_dir / "testhum").readlink() == target
-        and config_path.read_text(encoding="utf-8") == generated,
+        duplicate.status == "already_installed" and duplicate.mcp_status == "already_installed" and "already installed" in duplicate.mcp_reason and (bin_dir / "testhum").readlink() == target and config_path.read_text(encoding="utf-8") == generated,
         repr(duplicate),
     )
 
@@ -114,17 +114,16 @@ def _check_equivalent_mcp_table_format_is_idempotent(root: Path, clone: Path) ->
     config_path = root / "equivalent-config.toml"
     generated = _mcp_block("testhum", clone)
     equivalent = generated.replace(
-        'command = "' + str(clone / ".venv" / "bin" / "python3") + '"\n'
-        'args = ["-m", "agent_messaging_plugin.mcp_bridge"]\n'
-        'env_vars = ["CODEX_THREAD_ID"]\n',
-        'env_vars = ["CODEX_THREAD_ID"]\n'
-        'args = ["-m", "agent_messaging_plugin.mcp_bridge"]\n'
-        'command = "' + str(clone / ".venv" / "bin" / "python3") + '"\n',
+        'command = "' + str(clone / ".venv" / "bin" / "python3") + '"\nargs = ["-m", "agent_messaging_plugin.mcp_bridge"]\nenv_vars = ["CODEX_THREAD_ID"]\n',
+        'env_vars = ["CODEX_THREAD_ID"]\nargs = ["-m", "agent_messaging_plugin.mcp_bridge"]\ncommand = "' + str(clone / ".venv" / "bin" / "python3") + '"\n',
     )
     _check("the equivalent MCP fixture differs textually", equivalent != generated)
     config_path.write_text(equivalent, encoding="utf-8")
     result = install_command_launcher_at_birth(
-        name="testhum", clone_root=clone, bin_dir=root / "equivalent-bin", codex_config_path=config_path,
+        name="testhum",
+        clone_root=clone,
+        bin_dir=root / "equivalent-bin",
+        codex_config_path=config_path,
     )
     _check(
         "a semantically equivalent differently formatted MCP table is already installed",
@@ -137,14 +136,15 @@ def _check_quote_path_is_valid_toml(root: Path) -> None:
     clone = _make_clone(root, name='quote"clone')
     config_path = root / "quote-config.toml"
     result = install_command_launcher_at_birth(
-        name="quotehum", clone_root=clone, bin_dir=root / "quote-bin", codex_config_path=config_path,
+        name="quotehum",
+        clone_root=clone,
+        bin_dir=root / "quote-bin",
+        codex_config_path=config_path,
     )
     parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
     _check(
         "a quote-containing clone path is escaped into valid Codex TOML",
-        result.mcp_status == "installed"
-        and parsed["mcp_servers"]["quotehum"]["command"]
-        == str(clone / ".venv" / "bin" / "python3"),
+        result.mcp_status == "installed" and parsed["mcp_servers"]["quotehum"]["command"] == str(clone / ".venv" / "bin" / "python3"),
         repr(result),
     )
 
@@ -164,7 +164,9 @@ def _check_atomic_config_failures_preserve_existing_bytes(root: Path) -> None:
         with patch.object(patch_target, patch_attribute, replacement):
             try:
                 install_command_launcher_at_birth(
-                    name="atomichum", clone_root=clone, bin_dir=root / f"{label}-bin",
+                    name="atomichum",
+                    clone_root=clone,
+                    bin_dir=root / f"{label}-bin",
                     codex_config_path=config_path,
                 )
                 raise SmokeFailureError(f"{label} did not raise")
@@ -186,9 +188,7 @@ def _check_atomic_config_failures_preserve_existing_bytes(root: Path) -> None:
             return original_os_write(descriptor, content[:17])
         raise OSError("injected ENOSPC after partial temporary write")
 
-    assert_failure_preserves(
-        "partial write failure", partial_config, command_launcher.os, "write", write_partial_then_fail
-    )
+    assert_failure_preserves("partial write failure", partial_config, command_launcher.os, "write", write_partial_then_fail)
 
     fsync_config = root / "fsync-config.toml"
 
@@ -200,10 +200,10 @@ def _check_atomic_config_failures_preserve_existing_bytes(root: Path) -> None:
     parse_config = root / "parse-config.toml"
     original_read_text = Path.read_text
 
-    def read_corrupt_temporary(path: Path, *args: object, **kwargs: object) -> str:
+    def read_corrupt_temporary(path: Path, encoding: str | None = None, errors: str | None = None, newline: str | None = None) -> str:
         if path.parent == parse_config.parent and path.name.startswith(f".{parse_config.name}."):
             return "not valid = [toml"
-        return original_read_text(path, *args, **kwargs)
+        return original_read_text(path, encoding=encoding, errors=errors, newline=newline)
 
     assert_failure_preserves("temporary parse failure", parse_config, Path, "read_text", read_corrupt_temporary)
 
@@ -221,15 +221,15 @@ def _check_atomic_config_success_preserves_mode_and_non_bmp(root: Path) -> None:
     config_path.write_text('[existing]\nvalue = "preserve-me"\n', encoding="utf-8")
     config_path.chmod(0o640)
     result = install_command_launcher_at_birth(
-        name="atomichum", clone_root=clone, bin_dir=root / "atomic-success-bin", codex_config_path=config_path,
+        name="atomichum",
+        clone_root=clone,
+        bin_dir=root / "atomic-success-bin",
+        codex_config_path=config_path,
     )
     parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
     _check(
         "atomic replacement preserves unrelated config, target mode, and parses a non-BMP path",
-        result.mcp_status == "installed"
-        and parsed["existing"]["value"] == "preserve-me"
-        and parsed["mcp_servers"]["atomichum"]["command"] == str(clone / ".venv" / "bin" / "python3")
-        and config_path.stat().st_mode & 0o777 == 0o640,
+        result.mcp_status == "installed" and parsed["existing"]["value"] == "preserve-me" and parsed["mcp_servers"]["atomichum"]["command"] == str(clone / ".venv" / "bin" / "python3") and config_path.stat().st_mode & 0o777 == 0o640,
         repr(result),
     )
 
@@ -242,15 +242,16 @@ def _check_symlinked_config_is_refused(root: Path) -> None:
     config_path.symlink_to(target)
     try:
         install_command_launcher_at_birth(
-            name="symlinkhum", clone_root=clone, bin_dir=root / "symlink-bin", codex_config_path=config_path,
+            name="symlinkhum",
+            clone_root=clone,
+            bin_dir=root / "symlink-bin",
+            codex_config_path=config_path,
         )
         raise SmokeFailureError("symlinked config did not raise")
     except CommandLauncherError as exc:
         _check(
             "a symlinked config is refused without replacing the operator target",
-            "symlinked" in str(exc)
-            and config_path.is_symlink()
-            and target.read_text(encoding="utf-8") == '[existing]\nvalue = "preserve-me"\n',
+            "symlinked" in str(exc) and config_path.is_symlink() and target.read_text(encoding="utf-8") == '[existing]\nvalue = "preserve-me"\n',
             str(exc),
         )
 
@@ -261,7 +262,9 @@ def _check_stale_symlink_repoint(root: Path, clone: Path, bin_dir: Path, target:
     launcher.unlink()
     launcher.symlink_to(other_clone / ".venv" / "bin" / CONSOLE_SCRIPT_NAME)
     repointed = install_command_launcher_at_birth(
-        name="testhum", clone_root=clone, bin_dir=bin_dir,
+        name="testhum",
+        clone_root=clone,
+        bin_dir=bin_dir,
         codex_config_path=root / "codex-repoint" / "config.toml",
     )
     _check(
@@ -279,7 +282,9 @@ def _check_failure_modes(root: Path) -> None:
     (bin_dir / "occupied").write_text("an operator's real file\n")
     try:
         install_command_launcher_at_birth(
-            name="occupied", clone_root=clone, bin_dir=bin_dir,
+            name="occupied",
+            clone_root=clone,
+            bin_dir=bin_dir,
             codex_config_path=root / "occupied-config.toml",
         )
         raise SmokeFailureError("non-symlink collision did not raise")
@@ -298,7 +303,9 @@ def _check_failure_modes(root: Path) -> None:
     (bare_clone / ".venv" / "bin").mkdir(parents=True)
     try:
         install_command_launcher_at_birth(
-            name="testhum", clone_root=bare_clone, bin_dir=bin_dir,
+            name="testhum",
+            clone_root=bare_clone,
+            bin_dir=bin_dir,
             codex_config_path=root / "missing-config.toml",
         )
         raise SmokeFailureError("missing console script did not raise")
@@ -311,7 +318,9 @@ def _check_failure_modes(root: Path) -> None:
 
     try:
         install_command_launcher_at_birth(
-            name="../escape", clone_root=clone, bin_dir=bin_dir,
+            name="../escape",
+            clone_root=clone,
+            bin_dir=bin_dir,
             codex_config_path=root / "escape-config.toml",
         )
         raise SmokeFailureError("invalid name did not raise")
@@ -328,11 +337,14 @@ def _check_failure_modes(root: Path) -> None:
 
     different_config = root / "different-config.toml"
     different_config.write_text(
-        '[mcp_servers.testhum]\ncommand = "/operator/python"\n', encoding="utf-8",
+        '[mcp_servers.testhum]\ncommand = "/operator/python"\n',
+        encoding="utf-8",
     )
     try:
         install_command_launcher_at_birth(
-            name="testhum", clone_root=clone, bin_dir=root / "different-bin",
+            name="testhum",
+            clone_root=clone,
+            bin_dir=root / "different-bin",
             codex_config_path=different_config,
         )
         raise SmokeFailureError("different MCP table did not raise")
@@ -342,6 +354,16 @@ def _check_failure_modes(root: Path) -> None:
             "refusing to overwrite" in str(exc) and "keys: " in str(exc) and "command" in str(exc),
             str(exc),
         )
+
+
+def _check_without_codex(root: Path) -> None:
+    clone = _make_clone(root, "claude-only-clone")
+    with patch.object(command_launcher, "_read_mcp_config", side_effect=AssertionError("unselected Codex config read")):
+        installed = install_command_launcher_at_birth(name="claude-only", clone_root=clone, bin_dir=root / "claude-only-bin")
+        repeated = install_command_launcher_at_birth(name="claude-only", clone_root=clone, bin_dir=root / "claude-only-bin")
+    _check("Claude-only birth installs its generic launcher", Path(installed.launcher_path).is_symlink())
+    _check("Claude-only birth never reads or writes Codex config", installed.mcp_config_path == installed.mcp_status == "")
+    _check("Claude-only launcher remains idempotent", repeated.status == "already_installed")
 
 
 def main() -> int:
@@ -357,6 +379,7 @@ def main() -> int:
             _check_symlinked_config_is_refused(root)
             _check_stale_symlink_repoint(root, clone, bin_dir, target)
             _check_failure_modes(root)
+            _check_without_codex(root)
     except SmokeFailureError as exc:
         print(f"command_launcher_smoke FAILED: {exc}", file=sys.stderr)
         print(f"  ({len(_CHECKS_RUN)} checks attempted before failure)", file=sys.stderr)

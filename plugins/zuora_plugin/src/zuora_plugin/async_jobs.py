@@ -49,9 +49,10 @@ from typing import TYPE_CHECKING, Any
 
 from ananta.constants import CONTEXT_KEY_FLOW_ID, CONTEXT_KEY_SESSION_ID
 
-from . import billing_actions, completion_templates
+from . import billing_actions, completion_templates, request_actions
 from .constants import ERROR_API_ERROR, PLUGIN_NAME
 from .http_client import ZuoraClient
+from .typed_verbs import TYPED_HANDLERS
 
 if TYPE_CHECKING:
     from .plugin import ZuoraPlugin
@@ -77,6 +78,7 @@ def _test_connection_action(client: ZuoraClient, _params: dict[str, Any]) -> dic
 # action_name -> (action callable, needs_export_path_gate)
 ActionHandler = tuple[Callable[..., dict[str, Any]], bool]
 ACTION_HANDLERS: dict[str, ActionHandler] = {
+    "request": (request_actions.request, False),
     "data_query": (billing_actions.data_query, True),
     "get_object": (billing_actions.get_object, False),
     "create_object": (billing_actions.create_object, False),
@@ -86,6 +88,9 @@ ACTION_HANDLERS: dict[str, ActionHandler] = {
     "list_invoices": (billing_actions.list_invoices, True),
     "bulk_export": (billing_actions.bulk_export, True),
     "test_connection": (_test_connection_action, False),
+    # Typed Workflow / SQL Data Query / Files verbs receive the containment gate
+    # for their optional backup, restore-source and download paths.
+    **{name: (handler, True) for name, handler in TYPED_HANDLERS.items()},
 }
 
 
@@ -119,7 +124,10 @@ def ensure_worker_started(plugin: ZuoraPlugin) -> None:
         if plugin._worker_thread is not None and plugin._worker_thread.is_alive():  # noqa: SLF001
             return
         thread = threading.Thread(
-            target=_worker_loop, args=(plugin,), name=f"{PLUGIN_NAME}-async-worker", daemon=True,
+            target=_worker_loop,
+            args=(plugin,),
+            name=f"{PLUGIN_NAME}-async-worker",
+            daemon=True,
         )
         plugin._worker_thread = thread  # noqa: SLF001
         thread.start()
@@ -182,7 +190,10 @@ def _drain_queued_jobs(plugin: ZuoraPlugin) -> None:
 
 
 def _process_job(
-    plugin: ZuoraPlugin, async_job_manager: Any, job_id: str, action_name: str,
+    plugin: ZuoraPlugin,
+    async_job_manager: Any,
+    job_id: str,
+    action_name: str,
 ) -> None:
     """Run one job's real Zuora REST I/O and complete it. Runs on the ONE worker thread only."""
     async_job_manager.update_job(job_id, {"status": "processing"})
@@ -203,7 +214,8 @@ def _process_job(
     action_fn, needs_export_gate = ACTION_HANDLERS[action_name]
     if needs_export_gate:
         outcome = plugin._run(
-            lambda client: action_fn(client, params, plugin._export_path_gate), action_name,
+            lambda client: action_fn(client, params, plugin._export_path_gate),
+            action_name,
         )
     else:
         outcome = plugin._run(lambda client: action_fn(client, params), action_name)

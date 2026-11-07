@@ -184,6 +184,189 @@ def _envelope(records: list[dict[str, Any]]) -> ActionResult:
     )
 
 
+def _check_peer_forward_reads() -> None:
+    """Pin the forward horizon, continuation and validation legs of R3b."""
+    horizon = datetime.fromisoformat("2026-06-20T12:00:01")
+    forward_rows: list[dict[str, Any]] = [
+        _peer_thread("agt-1", "agi-r"),
+        _peer_thread("agt-2", "agi-r"),
+        _msg("agt-1", 1, "1" * 8, created_at="2026-06-20T12:00:01"),
+        _msg("agt-2", 2, "2" * 8, created_at="2026-06-20T12:00:02"),
+        _msg("agt-1", 3, "3" * 8, created_at="2026-06-20T12:00:03"),
+        _msg("agt-1", 4, "4" * 8, created_at="2026-06-20T12:00:04"),
+        _msg("agt-1", 5, "5" * 8, created_at="2026-06-20T12:00:05"),
+    ]
+    forward_spy = _SpyState(forward_rows)
+    forward_repo = AgentMessagingRepository(
+        cast("StateManagementInterface", forward_spy)
+    )
+
+    forward_page, forward_exhausted = forward_repo.list_peer_messages_for(
+        recipient_agent_id="claude_code",
+        recipient_agent_instance_id="agi-r",
+        after_created_at=None,
+        since_created_at=horizon,
+        limit=50,
+    )
+    forward_cursors = [message.cursor for message in forward_page]
+    _check(
+        (forward_cursors, forward_exhausted) == ([2, 3, 4, 5], True),
+        "R3b forward since_created_at merges both threads oldest-first "
+        f"(cursors={forward_cursors!r}, exhausted={forward_exhausted!r})",
+    )
+    _check(
+        1 not in forward_cursors,
+        "R3b forward since_created_at excludes the row exactly at the horizon "
+        f"(cursors={forward_cursors!r})",
+    )
+
+    expected_forward_queries = [
+        (
+            "core",
+            {
+                "table": "agent_message",
+                "filters": {
+                    "thread_id": "agt-1",
+                    "role": "originator",
+                    "important": False,
+                    "created_at": {"op": "gt", "value": horizon},
+                },
+                "order_by": [["created_at", "asc"], ["id", "asc"]],
+                "limit": 51,
+                "unbounded": True,
+            },
+        ),
+        (
+            "core",
+            {
+                "table": "agent_message",
+                "filters": {
+                    "thread_id": "agt-2",
+                    "role": "originator",
+                    "important": False,
+                    "created_at": {"op": "gt", "value": horizon},
+                },
+                "order_by": [["created_at", "asc"], ["id", "asc"]],
+                "limit": 51,
+                "unbounded": True,
+            },
+        ),
+    ]
+    _check(
+        forward_spy.ordered_calls == expected_forward_queries,
+        "R3b forward query uses strict gt, ascending composite order, capped+1 "
+        "lookahead and unbounded=True without after "
+        f"(calls={forward_spy.ordered_calls!r})",
+    )
+
+    capped_page, capped_exhausted = forward_repo.list_peer_messages_for(
+        recipient_agent_id="claude_code",
+        recipient_agent_instance_id="agi-r",
+        after_created_at=None,
+        since_created_at=horizon,
+        limit=2,
+    )
+    capped_cursors = [message.cursor for message in capped_page]
+    _check(
+        (capped_cursors, capped_exhausted) == ([2, 3], False),
+        "R3b forward limit=2 returns the oldest two of four matches and is not "
+        f"exhausted (cursors={capped_cursors!r}, exhausted={capped_exhausted!r})",
+    )
+
+    tied_at = datetime.fromisoformat("2026-06-20T12:00:02")
+    continuation_id = f"{ID_PREFIX_MESSAGE}_{'2' * 8}"
+    tied_rows: list[dict[str, Any]] = [
+        _peer_thread("agt-1", "agi-r"),
+        _peer_thread("agt-2", "agi-r"),
+        _msg("agt-1", 10, "1" * 8, created_at="2026-06-20T12:00:02"),
+        _msg("agt-1", 11, "2" * 8, created_at="2026-06-20T12:00:02"),
+        _msg("agt-2", 12, "3" * 8, created_at="2026-06-20T12:00:02"),
+        _msg("agt-2", 13, "4" * 8, created_at="2026-06-20T12:00:03"),
+    ]
+    tied_spy = _SpyState(tied_rows)
+    tied_repo = AgentMessagingRepository(cast("StateManagementInterface", tied_spy))
+    continued_page, continued_exhausted = tied_repo.list_peer_messages_for(
+        recipient_agent_id="claude_code",
+        recipient_agent_instance_id="agi-r",
+        after_created_at=None,
+        since_created_at=horizon,
+        since_after=(tied_at, continuation_id),
+        limit=50,
+    )
+    continued_cursors = [message.cursor for message in continued_page]
+    expected_continuation_queries = [
+        (
+            "core",
+            {
+                "table": "agent_message",
+                "filters": {
+                    "thread_id": "agt-1",
+                    "role": "originator",
+                    "important": False,
+                    "created_at": {"op": "gt", "value": horizon},
+                },
+                "order_by": [["created_at", "asc"], ["id", "asc"]],
+                "limit": 51,
+                "unbounded": True,
+                "after": [tied_at, continuation_id],
+            },
+        ),
+        (
+            "core",
+            {
+                "table": "agent_message",
+                "filters": {
+                    "thread_id": "agt-2",
+                    "role": "originator",
+                    "important": False,
+                    "created_at": {"op": "gt", "value": horizon},
+                },
+                "order_by": [["created_at", "asc"], ["id", "asc"]],
+                "limit": 51,
+                "unbounded": True,
+                "after": [tied_at, continuation_id],
+            },
+        ),
+    ]
+    _check(
+        (tied_spy.ordered_calls, continued_cursors, continued_exhausted)
+        == (expected_continuation_queries, [12, 13], True),
+        "R3b forward since_after reaches every per-thread after key and resumes "
+        f"past the tied id (cursors={continued_cursors!r}, "
+        f"exhausted={continued_exhausted!r}, calls={tied_spy.ordered_calls!r})",
+    )
+
+    errors: list[str] = []
+    try:
+        forward_repo.list_peer_messages_for(
+            recipient_agent_id="claude_code",
+            recipient_agent_instance_id="agi-r",
+            after_created_at=horizon,
+            since_created_at=horizon,
+            limit=50,
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
+    try:
+        forward_repo.list_peer_messages_for(
+            recipient_agent_id="claude_code",
+            recipient_agent_instance_id="agi-r",
+            after_created_at=None,
+            since_after=(horizon, f"{ID_PREFIX_MESSAGE}_{'1' * 8}"),
+            limit=50,
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
+    _check(
+        errors
+        == [
+            "after_created_at and since_created_at are opposite directions",
+            "since_after requires since_created_at",
+        ],
+        f"R3b forward caller-bug inputs raise both ValueErrors (errors={errors!r})",
+    )
+
+
 def main() -> int:
     spy = _SpyState([_THREAD_RECORD])
     repo = AgentMessagingRepository(cast("StateManagementInterface", spy))
@@ -436,18 +619,18 @@ def main() -> int:
         sample is not None
         and sample["filters"]
         == {"thread_id": "agt-1", "role": "originator", "important": False}
-        and sample["order_by"] == [["created_at", "asc"], ["id", "asc"]]
+        and sample["order_by"] == [["created_at", "desc"], ["id", "desc"]]
         and "after" not in sample
         and sample["limit"] == 51
         and sample["unbounded"] is True,
         f"R3b: per-thread query_ordered uses SCALAR filters "
-        f"{{thread_id, role:'originator', important:False}} (NOT =ANY), composite "
-        f"order, explicit capped+1 lookahead (sample={sample!r})",
+        f"{{thread_id, role:'originator', important:False}} (NOT =ANY), newest-first "
+        f"composite order, explicit capped+1 lookahead (sample={sample!r})",
     )
     _check(
-        [m.cursor for m in silent] == [0, 1, 2, 4, 5],
+        [m.cursor for m in silent] == [5, 4, 2, 1, 0],
         f"R3b silent_only: important=True (cursor 3) EXCLUDED, role!=originator "
-        f"(cursor 6) EXCLUDED, MERGED across agt-1/agt-2 by created_at asc "
+        f"(cursor 6) EXCLUDED, MERGED across agt-1/agt-2 by created_at desc "
         f"(cursors={[m.cursor for m in silent]!r})",
     )
 
@@ -459,7 +642,7 @@ def main() -> int:
         silent_only=False,
     )
     _check(
-        [m.cursor for m in full] == [0, 1, 2, 3, 4, 5],
+        [m.cursor for m in full] == [5, 4, 3, 2, 1, 0],
         f"R3b silent_only=False (audit): IMPORTANT cursor 3 INCLUDED; role "
         f"filter still excludes cursor 6 (cursors={[m.cursor for m in full]!r})",
     )
@@ -479,23 +662,23 @@ def main() -> int:
         limit=50,
     )
     _check(
-        [m.cursor for m in after_page] == [4, 5],
-        f"R3b after_created_at=...02: STRICT boundary excludes created_at<=02 "
-        f"(cursors 0,1,2) via the hex-aware sentinel "
+        [m.cursor for m in after_page] == [1, 0],
+        f"R3b after_created_at=...02: backward cursor, STRICT boundary keeps only "
+        f"created_at<02 (cursors 1,0 newest-first; 02 itself excluded) via the sentinel "
         f"(cursors={[m.cursor for m in after_page]!r})",
     )
 
     capped_page, _ = p_repo.list_peer_messages_for(
         recipient_agent_id="claude_code",
         recipient_agent_instance_id="agi-r",
-        after_created_at=None,
+        after_created_at=datetime.fromisoformat("2026-06-20T12:00:02"),
         limit=2,
     )
     _check(
-        [m.cursor for m in capped_page] == [0, 1],
-        f"R3b limit=2: global top-2 by created_at = [0,1] (BOTH from agt-1) — "
-        f"proves per-thread limit=capped + merge (a per-thread limit=1 would "
-        f"WRONGLY drop cursor 1) (cursors={[m.cursor for m in capped_page]!r})",
+        [m.cursor for m in capped_page] == [1, 0],
+        f"R3b limit=2 older than 02: global newest-first top-2 = [1,0] (BOTH from "
+        f"agt-1) — proves per-thread limit=capped + merge (a per-thread limit=1 "
+        f"would WRONGLY drop cursor 0) (cursors={[m.cursor for m in capped_page]!r})",
     )
 
     empty, empty_exhausted = p_repo.list_peer_messages_for(
@@ -509,6 +692,8 @@ def main() -> int:
         "R3b no matching peer threads -> [] (R3a empty -> short-circuit, no "
         "message query)",
     )
+
+    _check_peer_forward_reads()
 
     print()
     print(f"PASSED: {_passed}")

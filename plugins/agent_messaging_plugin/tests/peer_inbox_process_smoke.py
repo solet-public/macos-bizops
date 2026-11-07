@@ -38,6 +38,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -164,9 +165,7 @@ def _page(
     status: RoleSectionStatus = RoleSectionStatus.OK,
     role_limit: int = 5,
     role_page_truncated: bool = True,
-    role_truncation_reason: RoleTruncationReason | None = (
-        RoleTruncationReason.ROW_LIMIT
-    ),
+    role_truncation_reason: RoleTruncationReason | None = (RoleTruncationReason.ROW_LIMIT),
     role_byte_ceiling: int | None = None,
 ) -> PeerInbox:
     return PeerInbox(
@@ -243,16 +242,15 @@ def test_identity_comes_from_the_binding_not_the_caller() -> None:
     registry.register(_binding())
     service = _RecordingService(_page())
     result = _call(
-        _plugin(service, registry=registry), agent_session_id=_SESSION_ID,
+        _plugin(service, registry=registry),
+        agent_session_id=_SESSION_ID,
     )
     _check(result["action_status"] == "completed", "resolved identity succeeds")
     seen = service.seen
     _check(seen is not None, "the service was actually called")
     assert seen is not None
     _check(
-        seen.recipient_agent_id == _AGENT_ID
-        and seen.recipient_agent_instance_id == _INSTANCE_ID
-        and seen.recipient_agent_session_id == _SESSION_ID,
+        seen.recipient_agent_id == _AGENT_ID and seen.recipient_agent_instance_id == _INSTANCE_ID and seen.recipient_agent_session_id == _SESSION_ID,
         "recipient triple is read off the binding row",
     )
     _check(
@@ -264,7 +262,8 @@ def test_identity_comes_from_the_binding_not_the_caller() -> None:
 def test_unregistered_session_fails_loud() -> None:
     service = _RecordingService(_page())
     result = _call(
-        _plugin(service, registry=_registry()), agent_session_id=_SESSION_ID,
+        _plugin(service, registry=_registry()),
+        agent_session_id=_SESSION_ID,
     )
     _check(result["action_status"] == "failed", "unknown session id fails")
     _check(
@@ -275,6 +274,25 @@ def test_unregistered_session_fails_loud() -> None:
         service.seen is None,
         "no inbox read is attempted for an unresolvable identity",
     )
+
+
+def test_instance_id_in_session_slot_refused() -> None:
+    registry = _registry()
+    registry.register(_binding())
+    service = _RecordingService(_page())
+    result = _call(
+        _plugin(service, registry=registry),
+        agent_session_id=_INSTANCE_ID,
+    )
+    _check(
+        "agent_instance_id" in result["error"]["message"] and "agent_session_id" in result["error"]["message"] and _SESSION_ID in result["error"]["message"],
+        "instance id in session-id slot is identified precisely",
+    )
+    _check(
+        result["error"]["code"] == "identity_not_registered",
+        "wrong-slot instance id remains identity_not_registered",
+    )
+    _check(service.seen is None, "no inbox read is attempted for a wrong-slot id")
 
 
 def test_duplicate_binding_for_one_session_fails_loud() -> None:
@@ -293,8 +311,7 @@ def test_duplicate_binding_for_one_session_fails_loud() -> None:
         agent_session_id=_SESSION_ID,
     )
     _check(
-        result["action_status"] == "failed"
-        and result["error"]["code"] == "peer_session_ambiguous",
+        result["action_status"] == "failed" and result["error"]["code"] == "peer_session_ambiguous",
         "two live bindings for one session id is a loud data fault",
     )
 
@@ -304,8 +321,7 @@ def test_missing_session_id_fails_loud() -> None:
     registry.register(_binding())
     result = _call(_plugin(_RecordingService(_page()), registry=registry))
     _check(
-        result["action_status"] == "failed"
-        and result["error"]["code"] == "missing_argument",
+        result["action_status"] == "failed" and result["error"]["code"] == "missing_argument",
         "an absent agent_session_id is missing_argument",
     )
 
@@ -347,8 +363,7 @@ def test_inactive_plugin_errors_rather_than_reporting_an_empty_inbox() -> None:
     )
     _check(
         swallowed.entries == (),
-        "the typed delegation DOES return an empty page when inactive "
-        "(the reason this process must not route through it)",
+        "the typed delegation DOES return an empty page when inactive (the reason this process must not route through it)",
     )
 
 
@@ -402,8 +417,7 @@ def test_malformed_after_fails_loud() -> None:
         after="last tuesday",
     )
     _check(
-        result["action_status"] == "failed"
-        and result["error"]["code"] == "invalid_after",
+        result["action_status"] == "failed" and result["error"]["code"] == "invalid_after",
         "a malformed 'after' fails rather than silently re-reading page one",
     )
     _check(service.seen is None, "no read is attempted on a broken cursor")
@@ -424,15 +438,15 @@ def test_a_service_level_rejection_surfaces_as_an_error() -> None:
     registry = _registry()
     registry.register(_binding())
     service = _RecordingService(
-        _page(), raises=AgentRequestInvalidError("service-level rejection"),
+        _page(),
+        raises=AgentRequestInvalidError("service-level rejection"),
     )
     result = _call(
         _plugin(service, registry=registry),
         agent_session_id=_SESSION_ID,
     )
     _check(
-        result["action_status"] == "failed"
-        and result["error"]["code"] == "peer_inbox_rejected",
+        result["action_status"] == "failed" and result["error"]["code"] == "peer_inbox_rejected",
         "a service rejection surfaces as peer_inbox_rejected, not as a page",
     )
 
@@ -456,7 +470,7 @@ def test_a_failed_role_section_still_serves_instance_mail() -> None:
         role_entries=(),
         next_role_cursor=None,
         role_section_status=RoleSectionStatus.ERROR,
-        role_section_error="AgentRequestInvalidError(\"role cursor is not valid base64\")",
+        role_section_error='AgentRequestInvalidError("role cursor is not valid base64")',
     )
     data = _call(
         _plugin(_RecordingService(failed), registry=registry),
@@ -533,8 +547,7 @@ def test_include_important_is_always_true_now() -> None:
         ({}, "omitted include_important -> the catch-up view (unchanged)"),
         (
             {"include_important": False},
-            "A4: a caller-supplied include_important=False is now IGNORED "
-            "(never read) — the request still carries True",
+            "A4: a caller-supplied include_important=False is now IGNORED (never read) — the request still carries True",
         ),
     ):
         service = _RecordingService(_page())
@@ -559,6 +572,7 @@ _EXPECTED_KEYS = {
     "entries",
     "next_after_created_at",
     "next_since_created_at",
+    "next_since_cursor",
     "instance_exhausted",
     "role_entries",
     "next_role_cursor",
@@ -574,6 +588,9 @@ _EXPECTED_KEYS = {
     "role_history_cursor",
     "role_read_page_token",
     "role_read_page_status",
+    "role_since_created_at",
+    "role_read_coverage",
+    "read_coverage",
 }
 
 
@@ -591,6 +608,17 @@ def test_serialized_page_matches_the_declared_schema() -> None:
     _check(
         schema_keys == _EXPECTED_KEYS,
         "return_value_schema declares exactly the keys the code returns",
+    )
+    process_doc = json.loads(
+        (REPO_ROOT / "plugins/agent_messaging_plugin/knowledge_base/processes/peer_inbox.json").read_text(),
+    )
+    _check(
+        set(process_doc.get("return_value_schema", {}).get("properties", {})) == _EXPECTED_KEYS,
+        "process JSON return_value_schema declares every page key",
+    )
+    _check(
+        process_doc.get("return_value_schema") == declared.return_value_schema.to_dict(),
+        "process JSON and decorator return_value_schema agree exactly",
     )
     _check(
         declared.name == "peer_inbox",
@@ -611,12 +639,12 @@ def test_role_section_status_serializes_to_its_lowercase_value() -> None:
     )
     _check(
         data["next_role_cursor"] == "rc-2",
-        "a non-null next_role_cursor means the role section is NOT drained "
-        "even though status is 'ok'",
+        "a non-null next_role_cursor means the role section is NOT drained even though status is 'ok'",
     )
     drained = _call(
         _plugin(
-            _RecordingService(_page(next_role_cursor=None)), registry=registry,
+            _RecordingService(_page(next_role_cursor=None)),
+            registry=registry,
         ),
         agent_session_id=_SESSION_ID,
     )["data"]
@@ -626,8 +654,7 @@ def test_role_section_status_serializes_to_its_lowercase_value() -> None:
     )
     _check(
         drained["role_section_status"] == "ok",
-        "the SAME 'ok' status covers both drained and undrained — proving "
-        "status cannot be read as progress",
+        "the SAME 'ok' status covers both drained and undrained — proving status cannot be read as progress",
     )
 
 
@@ -639,10 +666,7 @@ def test_role_page_truncation_metadata_serializes() -> None:
         agent_session_id=_SESSION_ID,
     )["data"]
     _check(
-        row_limited["role_limit"] == 5
-        and row_limited["role_page_truncated"] is True
-        and row_limited["role_truncation_reason"] == "row_limit"
-        and row_limited["role_byte_ceiling"] is None,
+        row_limited["role_limit"] == 5 and row_limited["role_page_truncated"] is True and row_limited["role_truncation_reason"] == "row_limit" and row_limited["role_byte_ceiling"] is None,
         "a row-limited role page carries its effective limit and reason",
     )
     byte_limited = _call(
@@ -658,8 +682,7 @@ def test_role_page_truncation_metadata_serializes() -> None:
         agent_session_id=_SESSION_ID,
     )["data"]
     _check(
-        byte_limited["role_truncation_reason"] == "byte_ceiling"
-        and byte_limited["role_byte_ceiling"] == 200_000,
+        byte_limited["role_truncation_reason"] == "byte_ceiling" and byte_limited["role_byte_ceiling"] == 200_000,
         "a byte-limited role page carries the applicable ceiling",
     )
 
@@ -765,10 +788,13 @@ def test_delivery_route_attached_reports_the_holders_route() -> None:
     registry.register(_binding())
 
     live = _holds_role_plugin(
-        state, registry, {"agc-1": _FakeBridge(closed=False)},
+        state,
+        registry,
+        {"agc-1": _FakeBridge(closed=False)},
     )
     result = live.peer_holds_role(
-        {"name": _ROLE, "agent_instance_id": _INSTANCE_ID}, {},
+        {"name": _ROLE, "agent_instance_id": _INSTANCE_ID},
+        {},
     )
     _check(
         result["data"]["delivery_route_attached"] is True,
@@ -777,11 +803,14 @@ def test_delivery_route_attached_reports_the_holders_route() -> None:
     _check(result["data"]["holds"] is True, "the holder still holds the role")
 
     closed = _holds_role_plugin(
-        state, registry, {"agc-1": _FakeBridge(closed=True)},
+        state,
+        registry,
+        {"agc-1": _FakeBridge(closed=True)},
     )
     _check(
         closed.peer_holds_role(
-            {"name": _ROLE, "agent_instance_id": _INSTANCE_ID}, {},
+            {"name": _ROLE, "agent_instance_id": _INSTANCE_ID},
+            {},
         )["data"]["delivery_route_attached"]
         is False,
         "a closed bridge is NOT a delivery route (the claim outlived it)",
@@ -789,7 +818,8 @@ def test_delivery_route_attached_reports_the_holders_route() -> None:
 
     gone = _holds_role_plugin(state, registry, {})
     outcome = gone.peer_holds_role(
-        {"name": _ROLE, "agent_instance_id": _INSTANCE_ID}, {},
+        {"name": _ROLE, "agent_instance_id": _INSTANCE_ID},
+        {},
     )
     _check(
         outcome["data"]["delivery_route_attached"] is False,
@@ -797,8 +827,7 @@ def test_delivery_route_attached_reports_the_holders_route() -> None:
     )
     _check(
         outcome["data"]["holds"] is True,
-        "holds=True with delivery_route_attached=False is the 24.3 case — "
-        "the two are reported independently",
+        "holds=True with delivery_route_attached=False is the 24.3 case — the two are reported independently",
     )
 
 
@@ -829,10 +858,13 @@ def test_holds_survives_every_fault_the_route_lookup_can_raise() -> None:
         _binding(bridge_id="agc-3", agent_instance_id="agi-b", session_label="B"),
     )
     plugin = _holds_role_plugin(
-        state, registry, {"agc-1": _FakeBridge(closed=False)},
+        state,
+        registry,
+        {"agc-1": _FakeBridge(closed=False)},
     )
     result = plugin.peer_holds_role(
-        {"name": _ROLE, "agent_instance_id": _INSTANCE_ID}, {},
+        {"name": _ROLE, "agent_instance_id": _INSTANCE_ID},
+        {},
     )
     _check(
         result["action_status"] == "completed",
@@ -853,10 +885,13 @@ def test_delivery_route_attached_is_false_for_a_vacant_role() -> None:
     registry = _registry()
     registry.register(_binding())
     plugin = _holds_role_plugin(
-        state, registry, {"agc-1": _FakeBridge(closed=False)},
+        state,
+        registry,
+        {"agc-1": _FakeBridge(closed=False)},
     )
     result = plugin.peer_holds_role(
-        {"name": "never-claimed", "agent_instance_id": _INSTANCE_ID}, {},
+        {"name": "never-claimed", "agent_instance_id": _INSTANCE_ID},
+        {},
     )
     _check(
         result["data"]["delivery_route_attached"] is False,
@@ -946,7 +981,8 @@ def test_handover_notice_is_the_pinned_backlog_dependency() -> None:
     # the branch whose broadening would silence (a) without touching any prose.
     quiet: list[dict[str, object]] = []
     with patch.object(
-        role_claim, "send_handover_notice",
+        role_claim,
+        "send_handover_notice",
         lambda **kw: quiet.append(kw) or True,  # type: ignore[func-returns-value]
     ):
         role_claim.settle_role_handover(
@@ -978,14 +1014,11 @@ def test_handover_notice_is_the_pinned_backlog_dependency() -> None:
     declared = AgentMessagingPlugin.peer_inbox_action._platform_process_metadata  # noqa: SLF001
     key = f"plugin::agent_messaging_plugin::{declared.name}"
     _check(key in prose, f"the notice names the verb's own registered key ({key})")
-    required = sorted(
-        name for name, meta in declared.parameters.items() if meta.required
-    )
+    required = sorted(name for name, meta in declared.parameters.items() if meta.required)
     missing = [name for name in required if name not in prose]
     _check(
         not missing,
-        "the notice names every REQUIRED parameter of the verb it advertises "
-        f"(required={required}, missing={missing})",
+        f"the notice names every REQUIRED parameter of the verb it advertises (required={required}, missing={missing})",
     )
 
 
@@ -1031,19 +1064,18 @@ def test_wake_footer_advertises_a_runnable_command() -> None:
     parsed = json.loads(expanded)
     _check(
         parsed.get("agent_session_id") == _SESSION_ID,
-        "a shell expands the advertised argument to the caller's real session "
-        f"id (got {parsed.get('agent_session_id')!r})",
+        f"a shell expands the advertised argument to the caller's real session id (got {parsed.get('agent_session_id')!r})",
     )
     _check(
         "include_important" not in parsed,
-        "A4: the footer no longer advertises the retired include_important "
-        "argument — the catch-up view is the only one peer_inbox serves now",
+        "A4: the footer no longer advertises the retired include_important argument — the catch-up view is the only one peer_inbox serves now",
     )
     # And the process accepts exactly that payload.
     registry = _registry()
     registry.register(_binding())
     result = _call(
-        _plugin(_RecordingService(_page()), registry=registry), **parsed,
+        _plugin(_RecordingService(_page()), registry=registry),
+        **parsed,
     )
     _check(
         result["action_status"] == "completed",
@@ -1071,6 +1103,7 @@ def main() -> int:
     for test in (
         test_identity_comes_from_the_binding_not_the_caller,
         test_unregistered_session_fails_loud,
+        test_instance_id_in_session_slot_refused,
         test_duplicate_binding_for_one_session_fails_loud,
         test_missing_session_id_fails_loud,
         test_inactive_plugin_errors_rather_than_reporting_an_empty_inbox,

@@ -2,6 +2,7 @@ import logging
 import secrets
 import time
 from collections import defaultdict
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from typing import Protocol, TypedDict, cast, runtime_checkable
 
@@ -12,7 +13,7 @@ from ananta.error_handling import FrameworkError
 from ananta.interfaces.bootstrappable_service_interface import (
     BootstrappableServiceInterface,
 )
-from ananta.interfaces.state_management_interface import StateManagementInterface
+from ananta.interfaces.state_management_interface import StateManagementInterface, StateTransaction
 from ananta.services.async_job_operations import (
     AsyncJobOperationService,
 )
@@ -584,6 +585,12 @@ class StateService(BootstrappableServiceInterface):
         id_prefix = getattr(table_schema, "id_prefix", None)
         return id_prefix if isinstance(id_prefix, str) else None
 
+    def prepare_record(
+        self, namespace: str, table_name: str, record: dict[str, object],
+    ) -> dict[str, object]:
+        """Copy and populate standard fields before a transactional record insert."""
+        return self._populate_standard_fields_in_record(record, namespace, table_name)
+
     def _generate_table_id(self, namespace: str, table_name: str) -> str:
         """Generate ID using id_prefix from schema.
 
@@ -994,7 +1001,7 @@ class StateService(BootstrappableServiceInterface):
         """
         return self._validate_state_plugin().min_value(namespace, data)
 
-    def transactional(self) -> object:
+    def transactional(self) -> AbstractContextManager[StateTransaction]:
         """Open an atomic multi-statement transaction.
 
         Delegates to the underlying state-management plugin's
@@ -1025,7 +1032,7 @@ class StateService(BootstrappableServiceInterface):
                 details={"plugin": type(self._state_plugin).__name__},
                 severity=ErrorSeverity.ERROR,
             )
-        return fn()
+        return cast(AbstractContextManager[StateTransaction], fn())
 
     def execute_sql(
         self,

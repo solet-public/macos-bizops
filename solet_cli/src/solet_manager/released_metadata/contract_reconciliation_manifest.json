@@ -338,7 +338,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": [],
@@ -362,7 +362,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": [],
@@ -389,7 +389,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": [],
@@ -413,7 +413,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": [],
@@ -437,7 +437,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": [],
@@ -474,7 +474,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": []
@@ -489,7 +489,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": []
@@ -504,7 +504,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": []
@@ -519,7 +519,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": []
@@ -534,7 +534,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": []
@@ -549,7 +549,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": []
@@ -564,7 +564,7 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": []
@@ -579,10 +579,168 @@
       },
       "destination": {
         "flow_id": "macos.repository_setup",
-        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
       },
       "stage_probe_mappings": [],
       "first_use_inactive_probe_migrations": []
+    },
+    {
+      "migration_id": "macos-repository-setup-stable-r43-from-8207c151-v1",
+      "operation_statuses_to_reset": [],
+      "source": {
+        "flow_id": "macos.repository_setup",
+        "flow_source_revision": "8207c151255d5b969221886767c0d6d26684f253",
+        "flow_contract_digest": "sha256:5a46321f248b5a0dbeda2b2ff233e032c5ee1145a658b446254274cade7e2603"
+      },
+      "destination": {
+        "flow_id": "macos.repository_setup",
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
+      },
+      "stage_probe_mappings": [],
+      "first_use_inactive_probe_migrations": []
+    },
+    {
+      "migration_id": "macos-repository-setup-stable-r48-from-ea6ee0cb-v1",
+      "operation_statuses_to_reset": [],
+      "source": {
+        "flow_id": "macos.repository_setup",
+        "flow_source_revision": "ea6ee0cbfd1d3715a3aa588d4c45bafd96fc1421",
+        "flow_contract_digest": "sha256:e42e751583ad12e446f67bf73b131a0dfdbdc3c0a08e3737c92756acad022656"
+      },
+      "destination": {
+        "flow_id": "macos.repository_setup",
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
+      },
+      "stage_probe_mappings": [],
+      "first_use_inactive_probe_migrations": []
+    },
+    {
+      "migration_id": "macos-repository-setup-git-control-wording-from-92321d42-v1",
+      "source": {
+        "flow_id": "macos.repository_setup",
+        "flow_source_revision": "92321d4272f3016e5cbacbdd1fa88e86ac9375ec",
+        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+      },
+      "destination": {
+        "flow_id": "macos.repository_setup",
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
+      },
+      "stage_probe_mappings": [],
+      "first_use_inactive_probe_migrations": [],
+      "answer_value_migrations": [],
+      "operation_statuses_to_reset": []
+    },
+    {
+      "migration_id": "macos-repository-setup-git-control-wording-from-a6cfa885-v1",
+      "source": {
+        "flow_id": "macos.repository_setup",
+        "flow_source_revision": "a6cfa8854624ef6c9d5a55a487d1932caebb0c25",
+        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+      },
+      "destination": {
+        "flow_id": "macos.repository_setup",
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
+      },
+      "stage_probe_mappings": [],
+      "first_use_inactive_probe_migrations": [],
+      "answer_value_migrations": [],
+      "operation_statuses_to_reset": []
+    },
+    {
+      "migration_id": "macos-repository-setup-git-control-wording-from-3bfd5670-v1",
+      "source": {
+        "flow_id": "macos.repository_setup",
+        "flow_source_revision": "3bfd5670ced31eeb1e801516c3b0fd7bb30c0f40",
+        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+      },
+      "destination": {
+        "flow_id": "macos.repository_setup",
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
+      },
+      "stage_probe_mappings": [],
+      "first_use_inactive_probe_migrations": [],
+      "answer_value_migrations": [],
+      "operation_statuses_to_reset": []
+    },
+    {
+      "migration_id": "macos-repository-setup-git-control-wording-from-50383f0b-v1",
+      "source": {
+        "flow_id": "macos.repository_setup",
+        "flow_source_revision": "50383f0be56e771183be362300144c975c586ddf",
+        "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+      },
+      "destination": {
+        "flow_id": "macos.repository_setup",
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
+      },
+      "stage_probe_mappings": [],
+      "first_use_inactive_probe_migrations": [],
+      "answer_value_migrations": [],
+      "operation_statuses_to_reset": []
+    },
+    {
+      "migration_id": "macos-repository-setup-codex-optional-from-ebb5a8a2-v1",
+      "operation_statuses_to_reset": [],
+      "source": {
+        "flow_id": "macos.repository_setup",
+        "flow_source_revision": "ebb5a8a2c7e8403e8bbd91d61b1da9f3a7b72044",
+        "flow_contract_digest": "sha256:ca8c9b246b4aed63c5d39582e14fbe87b899d29ccd172cb3bf384839cdaceb5d"
+      },
+      "destination": {
+        "flow_id": "macos.repository_setup",
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
+      },
+      "stage_probe_mappings": [],
+      "first_use_inactive_probe_migrations": [],
+      "answer_value_migrations": []
+    },
+    {
+      "migration_id": "macos-repository-setup-codex-optional-from-20afa263-v1",
+      "operation_statuses_to_reset": [],
+      "source": {
+        "flow_id": "macos.repository_setup",
+        "flow_source_revision": "20afa263280c31f11958df0f9c89d4250460d665",
+        "flow_contract_digest": "sha256:ca8c9b246b4aed63c5d39582e14fbe87b899d29ccd172cb3bf384839cdaceb5d"
+      },
+      "destination": {
+        "flow_id": "macos.repository_setup",
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
+      },
+      "stage_probe_mappings": [],
+      "first_use_inactive_probe_migrations": [],
+      "answer_value_migrations": []
+    },
+    {
+      "migration_id": "macos-repository-setup-codex-optional-from-ece0927b-v1",
+      "operation_statuses_to_reset": [],
+      "source": {
+        "flow_id": "macos.repository_setup",
+        "flow_source_revision": "ece0927b9d6cbebfff3cd03afa3282af8e141f01",
+        "flow_contract_digest": "sha256:ca8c9b246b4aed63c5d39582e14fbe87b899d29ccd172cb3bf384839cdaceb5d"
+      },
+      "destination": {
+        "flow_id": "macos.repository_setup",
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
+      },
+      "stage_probe_mappings": [],
+      "first_use_inactive_probe_migrations": [],
+      "answer_value_migrations": []
+    },
+    {
+      "migration_id": "macos-repository-setup-codex-optional-from-81b725eb-v1",
+      "operation_statuses_to_reset": [],
+      "source": {
+        "flow_id": "macos.repository_setup",
+        "flow_source_revision": "81b725eb649552024fee35dab1bbb5e06a9cc9a8",
+        "flow_contract_digest": "sha256:ca8c9b246b4aed63c5d39582e14fbe87b899d29ccd172cb3bf384839cdaceb5d"
+      },
+      "destination": {
+        "flow_id": "macos.repository_setup",
+        "flow_contract_digest": "sha256:3bb6857b4fee5a2c36cfe4f2f90d8313bb800b45eea2021e999dcd13d2b62563"
+      },
+      "stage_probe_mappings": [],
+      "first_use_inactive_probe_migrations": [],
+      "answer_value_migrations": []
     }
   ]
 }

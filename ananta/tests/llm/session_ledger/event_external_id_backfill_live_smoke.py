@@ -45,10 +45,12 @@ from typing import Any, LiteralString, cast
 REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(
-    0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
+    0,
+    str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 sys.path.insert(
-    0, str(REPO_ROOT / "plugins" / "default_blob_storage_plugin" / "src"),
+    0,
+    str(REPO_ROOT / "plugins" / "default_blob_storage_plugin" / "src"),
 )
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -110,7 +112,7 @@ class _IdGeneratingStateAdapter(_LiveStateAdapter):
     inject both when absent.
     """
 
-    def write_state(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:
+    def write_state(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:  # pyright: ignore[reportIncompatibleMethodOverride]
         record = dict(cast("dict[str, Any]", data.get("record") or {}))
         if record.get("id") is None:
             # blob_id format: ``bmd-<12 base36 chars>`` (what the real state
@@ -119,12 +121,12 @@ class _IdGeneratingStateAdapter(_LiveStateAdapter):
             record["id"] = f"bmd-{suffix}"
         if record.get("namespace") is None:
             record["namespace"] = namespace
-        return super().write_state(namespace, {**data, "record": record})
+        return super().write_state(namespace, {**data, "record": record})  # pyright: ignore[reportReturnType]
 
-    def read_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
+    def read_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:  # pyright: ignore[reportIncompatibleMethodOverride]
         # The blob plugin's metadata lookup uses read_state (single-namespace
         # equality read) — same ``{records: [...]}`` envelope as query_state.
-        return self.query_state(namespace, query)
+        return self.query_state(namespace, query)  # pyright: ignore[reportReturnType]
 
 
 def _check(condition: object, label: str) -> None:
@@ -147,11 +149,7 @@ def _create_schema_tables(provider: PostgresProvider) -> None:
             (get_blob_storage_schema(), _BLOB_NS),
         ):
             std = SchemaStandardizer().standardize_schema(schema_def)
-            ops = [
-                op
-                for table in std.tables.values()
-                for op in emit_create_table_ops(ns, table, schema_name)
-            ]
+            ops = [op for table in std.tables.values() for op in emit_create_table_ops(ns, table, schema_name)]
             provider.apply_schema_change_ops(cur, std, ops)
 
 
@@ -161,8 +159,7 @@ def _null_external_ids(provider: PostgresProvider, schema_name: str, session_id:
         cur.execute(
             cast(
                 LiteralString,
-                f'UPDATE "{schema_name}"."{_EVENT_TABLE}" SET external_id = NULL '
-                "WHERE session_id = %s",
+                f'UPDATE "{schema_name}"."{_EVENT_TABLE}" SET external_id = NULL WHERE session_id = %s',
             ),
             (session_id,),
         )
@@ -239,7 +236,12 @@ def test_backfill_reproduces_live_derivation(provider: PostgresProvider, schema_
     live_ids["C1"] = _append_live(repo, session_id, batch_id, _ev("same"), ordinals)
     live_ids["C2"] = _append_live(repo, session_id, batch_id, _ev("same"), ordinals)
     live_ids["D"] = _append_live(
-        repo, session_id, batch_id, _ev(oversized), ordinals, content_blob_id="bmd_bf_D",
+        repo,
+        session_id,
+        batch_id,
+        _ev(oversized),
+        ordinals,
+        content_blob_id="bmd_bf_D",
     )
     live_ids["E"] = _append_live(repo, session_id, batch_id, _ev("ev", vendor_event_id="vev-E"), ordinals)
 
@@ -283,9 +285,13 @@ def test_window_dup_skip_and_count(provider: PostgresProvider, schema_name: str)
     # from the rows in sequence order ([F, G]).
     f_eid = _append_live(repo, session_id, batch_id, _ev("windowed"), {})
     repo.append_event(
-        session_id=session_id, external_id="placeholder_G", normalized=_ev("windowed"),
-        batch_id=batch_id, content_blob_id=None,
-        session_vendor=SourceVendor.CLAUDE_CODE, source_kind=IngestSourceKind.CODEX_PUSHED,
+        session_id=session_id,
+        external_id="placeholder_G",
+        normalized=_ev("windowed"),
+        batch_id=batch_id,
+        content_blob_id=None,
+        session_vendor=SourceVendor.CLAUDE_CODE,
+        source_kind=IngestSourceKind.CODEX_PUSHED,
     )
     rows = repo._read_session_events(session_id)  # noqa: SLF001 — ordered by sequence: [F, G]
     f_id, g_id = str(rows[0]["id"]), str(rows[1]["id"])
@@ -335,19 +341,16 @@ def test_real_blob_fetch_round_trip(provider: PostgresProvider) -> None:
         got = adapter.fetch_event_text(blob_id)
         _check(
             got == payload,
-            f"REAL store_event_text → fetch_event_text round-trips byte-exact via "
-            f"the local FilesystemProvider (len {len(got)}, real retrieve_blob envelope)",
+            f"REAL store_event_text → fetch_event_text round-trips byte-exact via the local FilesystemProvider (len {len(got)}, real retrieve_blob envelope)",
         )
 
 
 def main() -> int:
     if os.environ.get("LEDGER_BACKFILL_LIVE_SMOKE") != "1":
         print("=== event_external_id_backfill_live_smoke ===")
-        print(
-            "  SKIP  set LEDGER_BACKFILL_LIVE_SMOKE=1 to run; "
-            "needs the live solet DB."
-        )
-        return 0
+        print("  SKIP  set LEDGER_BACKFILL_LIVE_SMOKE=1 to run; needs the live solet DB.")
+        print('BORN_CLONE_SKIP_WITNESS={"reason":"opt_in_toggle_not_enabled","toggle":"LEDGER_BACKFILL_LIVE_SMOKE"}')
+        return 77
     print("=== event_external_id_backfill_live_smoke ===")
     schema_name = f"example_test_bf_{secrets.token_hex(3)}"
     config = _load_pg_config()

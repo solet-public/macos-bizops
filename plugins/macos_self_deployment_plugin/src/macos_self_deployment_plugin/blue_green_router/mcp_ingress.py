@@ -17,6 +17,8 @@ import sys
 from collections.abc import Iterable
 from pathlib import Path
 
+from ananta.core.runtime.port_manager import ClientIOExecutor
+
 from .service_install import RUNTIME_DIR, validate_solet_name
 
 logger = logging.getLogger("local_blue_green.mcp_ingress")
@@ -25,6 +27,8 @@ DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 0
 BUFFER_SIZE = 65536
 UPSTREAM_CONNECT_TIMEOUT_SECONDS = 3.0
+
+ROUTER_IO = ClientIOExecutor("router-helper-io")
 
 
 def router_port_file_path(solet: str, runtime_dir: Path = RUNTIME_DIR) -> Path:
@@ -76,13 +80,7 @@ async def _write_unavailable(
     message: str,
 ) -> None:
     body = (message + "\n").encode("utf-8", errors="replace")
-    writer.write(
-        b"HTTP/1.1 503 Service Unavailable\r\n"
-        b"content-type: text/plain; charset=utf-8\r\n"
-        + f"content-length: {len(body)}\r\n".encode("ascii")
-        + b"connection: close\r\n\r\n"
-        + body
-    )
+    writer.write(b"HTTP/1.1 503 Service Unavailable\r\ncontent-type: text/plain; charset=utf-8\r\n" + f"content-length: {len(body)}\r\n".encode("ascii") + b"connection: close\r\n\r\n" + body)
     with contextlib.suppress(Exception):
         await writer.drain()
     writer.close()
@@ -97,7 +95,7 @@ async def handle_connection(
     router_port_file: Path,
 ) -> None:
     try:
-        router_port = read_router_port(router_port_file)
+        router_port = await ROUTER_IO.run(read_router_port, router_port_file)
         upstream_reader, upstream_writer = await asyncio.wait_for(
             asyncio.open_connection("127.0.0.1", router_port),
             timeout=UPSTREAM_CONNECT_TIMEOUT_SECONDS,
@@ -135,7 +133,12 @@ async def start_ingress_server(
     sockets = server.sockets or ()
     if ingress_port_file is not None and sockets:
         bound_port = int(sockets[0].getsockname()[1])
-        _write_port_file(ingress_port_file, bound_port)
+        try:
+            await ROUTER_IO.run(_write_port_file, ingress_port_file, bound_port)
+        except BaseException:
+            server.close()
+            await server.wait_closed()
+            raise
     return server
 
 
@@ -197,10 +200,7 @@ async def _amain(args: argparse.Namespace) -> int:
 def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="mcp_ingress",
-        description=(
-            "Bind a stable loopback MCP ingress and forward each connection "
-            "to the current <solet>.router.port."
-        ),
+        description=("Bind a stable loopback MCP ingress and forward each connection to the current <solet>.router.port."),
     )
     parser.add_argument("--solet", required=True, help="Solet name, e.g. iris.")
     parser.add_argument(
@@ -212,10 +212,7 @@ def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
         "--listen-port",
         type=int,
         default=DEFAULT_LISTEN_PORT,
-        help=(
-            "Ingress port to bind. Use 0 for dynamic allocation "
-            f"(default: {DEFAULT_LISTEN_PORT})."
-        ),
+        help=(f"Ingress port to bind. Use 0 for dynamic allocation (default: {DEFAULT_LISTEN_PORT})."),
     )
     parser.add_argument(
         "--router-port-file",
@@ -227,10 +224,7 @@ def _parse_args(argv: Iterable[str]) -> argparse.Namespace:
         "--ingress-port-file",
         type=Path,
         default=None,
-        help=(
-            "Where to publish the bound ingress port "
-            "(default: ~/.ananta/runtime/<solet>.mcp_ingress.port)."
-        ),
+        help=("Where to publish the bound ingress port (default: ~/.ananta/runtime/<solet>.mcp_ingress.port)."),
     )
     return parser.parse_args(list(argv))
 

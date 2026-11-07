@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::salesforce_plugin::dashboards",
+  "display_name": "Salesforce: Dashboards",
+  "description": "Use the Salesforce Dashboards REST API under /services/data/v{version}/analytics on the registered org. Operations: list (GET /analytics/dashboards; the vendor's recently used dashboards), clone (POST /analytics/dashboards with query cloneId; optional body such as folderId or name), describe (GET /analytics/dashboards/{dashboard_id}/describe; query loadComponentProperties), results (GET /analytics/dashboards/{dashboard_id}; query runningUser, filter1, filter2, filter3), refresh (PUT /analytics/dashboards/{dashboard_id}; query runningUser, filter1, filter2, filter3; optional body filters), status (GET /analytics/dashboards/{dashboard_id}/status; query runningUser, filter1, filter2, filter3), update (PATCH /analytics/dashboards/{dashboard_id}; query isStickyFilterSave; body dashboard metadata) and delete (DELETE /analytics/dashboards/{dashboard_id}). Salesforce permissions alone decide each operation, including saves and deletes. Returns job_id/status queued.",
+  "embedding_description": "Work with Salesforce dashboards: list recently used dashboards, describe a dashboard's layout and components, read its component results with optional filters, trigger a refresh and check refresh status, clone it into a folder, save changes, or delete it. Use for CRM dashboard data and maintenance; org permissions decide.",
+  "result_processor_customizations": {
+    "action_label": "Salesforce dashboard operation queued",
+    "result_type": "salesforce_dashboards_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: family, operation, method, status (HTTP), selected headers, body (dashboard list entries with id, name and statusUrl; describe with components, layout and filters; results with componentData, each component's reportResult and status; a refresh with statusUrl; refresh status per component with refreshDate and refreshStatus IDLE or RUNNING), correlation_id and error_code for a 4xx/5xx or unknown status.",
+    "presentation_guidance": "Relay each component's header and aggregates; a component whose refreshStatus is RUNNING has not finished refreshing, so call status before reading results again. Clone, update, refresh and delete change the org; queued means only that the job was accepted."
+  },
+  "error_processor_customizations": {
+    "action_context": "Call the Salesforce Dashboards REST API with the registered user's permissions.",
+    "error_interpretation": "sf.invalid_params is raised before any vendor call when the operation, dashboard_id or cloneId (15- or 18-character ids), a documented query parameter (runningUser and cloneId as 15- or 18-character ids, filter1, filter2, filter3, and the booleans loadComponentProperties and isStickyFilterSave) or a required body does not match the vendor shape. Vendor HTTP errors are completion data with error_code: sf.bad_request (400), sf.session_expired or sf.auth_failed (401), sf.permission_denied (403, for example a refresh limit or folder access), sf.rate_limited, sf.not_found (404), sf.api_error otherwise.",
+    "recovery_guidance": "Read the status and the vendor message before retrying. Salesforce limits how often a dashboard can be refreshed; wait for status to report IDLE instead of refreshing again. A permission error means the registered user lacks access to the dashboard or its folder in Salesforce."
+  }
+}

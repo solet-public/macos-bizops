@@ -35,11 +35,12 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from ananta.constants import CONTEXT_KEY_FLOW_ID, CONTEXT_KEY_SESSION_ID
 
-from . import completion_templates, query_actions
+from . import completion_templates, query_actions, rest_client, rest_families
 from .constants import ERROR_API_ERROR, PLUGIN_NAME
 
 if TYPE_CHECKING:
@@ -53,8 +54,8 @@ _JOB_LIST_LIMIT = 10
 # action_name -> (query_actions callable, needs_export_path_gate)
 #
 # Unlike external_postgres_plugin's ActionHandler, this stays a 2-tuple even
-# after run_statement (the write verb) joins it: Snowflake has no
-# connection-level read/write characteristic to select at connect time (no
+# after run_statement joins it: Snowflake has no connection-level authorization
+# characteristic to select at connect time (no
 # ``conn.read_only`` equivalent — see connection.py), so every verb here opens
 # an IDENTICAL connection. run_statement manages its own explicit transaction
 # (autocommit disabled, then commit/rollback) entirely inside query_actions.py
@@ -69,7 +70,11 @@ ACTION_HANDLERS: dict[str, ActionHandler] = {
     "run_query": (query_actions.run_query, True),
     "export_query": (query_actions.export_query, True),
     "run_statement": (query_actions.run_statement, True),
+    "request": (rest_client.run_request, False),
+    **{family: (partial(rest_families.run_family, family), False) for family in rest_families.FAMILIES},
 }
+# REST verbs resolve the account themselves and never open a SQL connection.
+REST_ACTIONS: frozenset[str] = frozenset({"request", *rest_families.FAMILIES})
 
 
 def _validate_state_context(state: dict[str, Any]) -> tuple[str, str]:
@@ -102,7 +107,10 @@ def ensure_worker_started(plugin: SnowflakePlugin) -> None:
         if plugin._worker_thread is not None and plugin._worker_thread.is_alive():
             return
         thread = threading.Thread(
-            target=_worker_loop, args=(plugin,), name=f"{PLUGIN_NAME}-async-worker", daemon=True,
+            target=_worker_loop,
+            args=(plugin,),
+            name=f"{PLUGIN_NAME}-async-worker",
+            daemon=True,
         )
         plugin._worker_thread = thread
         thread.start()
@@ -162,7 +170,10 @@ def _drain_queued_jobs(plugin: SnowflakePlugin) -> None:
 
 
 def _process_job(
-    plugin: SnowflakePlugin, async_job_manager: Any, job_id: str, action_name: str,
+    plugin: SnowflakePlugin,
+    async_job_manager: Any,
+    job_id: str,
+    action_name: str,
 ) -> None:
     """Run one job's real I/O and complete it. Runs on the ONE worker thread only."""
     async_job_manager.update_job(job_id, {"status": "processing"})
@@ -181,9 +192,12 @@ def _process_job(
         return
     params = payload_result.get("data", {}).get("payload", {})
     action_fn, needs_export_gate = ACTION_HANDLERS[action_name]
-    if needs_export_gate:
+    if action_name in REST_ACTIONS:
+        outcome = action_fn(plugin, params)
+    elif needs_export_gate:
         outcome = plugin._run_on_connection(
-            lambda conn: action_fn(conn, params, plugin._export_path_gate), action_name,
+            lambda conn: action_fn(conn, params, plugin._export_path_gate),
+            action_name,
         )
     else:
         outcome = plugin._run_on_connection(lambda conn: action_fn(conn, params), action_name)

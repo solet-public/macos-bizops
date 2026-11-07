@@ -25,10 +25,12 @@ state + blob wrappers exist and the source plugins have been started.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+import threading
+from concurrent.futures import Future
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from ananta.llm.session_ledger.blob_adapter import SessionLedgerBlobAdapter
 from ananta.llm.session_ledger.event_embeddings import (
@@ -36,6 +38,7 @@ from ananta.llm.session_ledger.event_embeddings import (
     EventEmbeddingWriter,
 )
 from ananta.llm.session_ledger.importer import SessionLedgerImporter
+from ananta.llm.session_ledger.read import SessionUsageReader, count_live_event_rows
 from ananta.llm.session_ledger.registry import SessionSourceRegistry
 from ananta.llm.session_ledger.repository import (
     LedgerRepositoryError,
@@ -120,6 +123,66 @@ if TYPE_CHECKING:
     from ananta.interfaces.vector_service_interface import VectorServiceInterface
 
 logger = logging.getLogger(__name__)
+_PollResult = TypeVar("_PollResult")
+
+
+class _LedgerPollExecutor:
+    """One ledger-poll slot shared by heartbeat and synchronous targeted callers.
+
+    A direct caller waits for admission; no work is refused or buffered in an
+    unbounded executor queue. Heartbeats retain their already-running no-op.
+    """
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._busy = False
+        self._owner: int | None = None
+
+    def _launch(self, work: Callable[[], object]) -> None:
+        self._busy = True
+        try:
+            threading.Thread(target=self._run, args=(work,), name="ledger-poll", daemon=True).start()
+        except RuntimeError:
+            self._busy = False
+            self._condition.notify_all()
+            raise
+
+    def submit(self, work: Callable[[], object]) -> bool:
+        with self._condition:
+            if self._busy:
+                return False
+            self._launch(work)
+            return True
+
+    def call(self, work: Callable[[], _PollResult]) -> _PollResult:
+        result: Future[_PollResult] = Future()
+
+        def capture() -> None:
+            try:
+                result.set_result(work())
+            except BaseException as exc:  # noqa: BLE001 — preserve the synchronous caller's failure channel
+                result.set_exception(exc)
+
+        with self._condition:
+            if self._owner == threading.get_ident():
+                return work()
+            self._condition.wait_for(lambda: not self._busy)
+            self._launch(capture)
+        return result.result()
+
+    def _run(self, work: Callable[[], object]) -> None:
+        with self._condition:
+            self._owner = threading.get_ident()
+        try:
+            work()
+        except Exception:  # noqa: BLE001 — heartbeat boundary; targeted calls transport their own exceptions
+            logger.exception("background ledger-poll failed; slot released for the next call")
+        finally:
+            with self._condition:
+                self._owner = None
+                self._busy = False
+                self._condition.notify_all()
+
 
 # GAP-5 slice 3 — ``reset_ingest_state`` is now a NON-DESTRUCTIVE cursor reset.
 # It clears every source's ``__source_cursor`` rows so the next poll replays
@@ -148,13 +211,7 @@ def _registered_source_kinds(source_rows: object) -> set[str]:
 
     if not isinstance(source_rows, list):
         return set()
-    return {
-        source_kind
-        for row in source_rows
-        if isinstance(row, dict)
-        and isinstance(row.get("source_id"), str)
-        and isinstance((source_kind := row.get("source_kind")), str)
-    }
+    return {source_kind for row in source_rows if isinstance(row, dict) and isinstance(row.get("source_id"), str) and isinstance((source_kind := row.get("source_kind")), str)}
 
 
 def _backfill_counts(census_rows: object) -> dict[str, int]:
@@ -162,13 +219,7 @@ def _backfill_counts(census_rows: object) -> dict[str, int]:
 
     if not isinstance(census_rows, list):
         return {}
-    return {
-        source_kind: session_count
-        for row in census_rows
-        if isinstance(row, dict)
-        and isinstance((source_kind := row.get("source_kind")), str)
-        and isinstance((session_count := row.get("session_count")), int)
-    }
+    return {source_kind: session_count for row in census_rows if isinstance(row, dict) and isinstance((source_kind := row.get("source_kind")), str) and isinstance((session_count := row.get("session_count")), int)}
 
 
 def _retrieval_by_selected_kind(
@@ -178,15 +229,9 @@ def _retrieval_by_selected_kind(
 ) -> dict[str, bool]:
     """Probe one bounded event window only for trusted, registered selections."""
 
-    return {
-        source_kind: bool(
-            service.list_events_by_source_window(source_kind=source_kind, limit=1).get(
-                "events"
-            )
-        )
-        for source_kind in selected_and_consented_source_kinds(record)
-        if source_kind in registered_source_kinds
-    }
+    return {source_kind: bool(service.list_events_by_source_window(source_kind=source_kind, limit=1).get("events")) for source_kind in selected_and_consented_source_kinds(record) if source_kind in registered_source_kinds}
+
+
 _PRESERVED_CONTENT_TABLES = (
     "session_ledger__session",
     "session_ledger__event",
@@ -297,7 +342,7 @@ class SessionLedgerService(
         # ``summarize_quiescent_sessions``: one background drainer across
         # overlapping cron fires (second ``submit`` no-ops); injectable for
         # tests. Phase 5 will route drain inference through the resolver.
-        self._summary_executor, self._embedding_executor, self._poll_executor = _build_drain_executors(summary_executor)
+        self._summary_executor, self._embedding_executor, self._poll_executor, self._oversized_executor = _build_drain_executors(summary_executor)
         logger.debug(
             "session_ledger_service constructed: %d source plugin(s) registered",
             len(self._registry.list_sources()),
@@ -340,9 +385,7 @@ class SessionLedgerService(
             return _selected_source_failure(str(exc))
         registered_source_kinds = _registered_source_kinds(self.list_sources().get("sources"))
         backfill_counts = _backfill_counts(self.census().get("sources"))
-        retrieval_by_kind = _retrieval_by_selected_kind(
-            self, record, registered_source_kinds
-        )
+        retrieval_by_kind = _retrieval_by_selected_kind(self, record, registered_source_kinds)
         return build_selected_sources_qualification(
             target=target_path,
             name=name,
@@ -408,36 +451,37 @@ class SessionLedgerService(
         sources: list[dict[str, Any]] = []
         group_counts: dict[tuple[str, str], int] = {}
         totals = {
-            "sessions": 0, "events": 0, "tool_calls": 0,
-            "owned_running_batches": 0, "unclaimed_route_batches": 0,
+            "sessions": 0,
+            "events": 0,
+            "tool_calls": 0,
+            "owned_running_batches": 0,
+            "unclaimed_route_batches": 0,
         }
         for row in rows:
             normalized = normalize_root_uri(str(row["root_uri"]))
             fingerprint_a = row.get("fingerprint_a")
             fingerprint_b = row.get("fingerprint_b")
-            fingerprint = (
-                f"{fingerprint_a}:{fingerprint_b}"
-                if fingerprint_a is not None
-                else None
-            )
+            fingerprint = f"{fingerprint_a}:{fingerprint_b}" if fingerprint_a is not None else None
             age_raw = row.get("oldest_running_batch_age_seconds")
-            sources.append({
-                "source_id": row["source_id"],
-                "source_kind": row["source_kind"],
-                "root_uri": row["root_uri"],
-                "normalized_root_uri": normalized,
-                "session_count": int(row["session_count"]),  # type: ignore[arg-type]
-                "canonical_count": int(row["canonical_count"]),  # type: ignore[arg-type]
-                "sibling_count": int(row["sibling_count"]),  # type: ignore[arg-type]
-                "event_count": int(row["event_count"]),  # type: ignore[arg-type]
-                "tool_call_count": int(row["tool_call_count"]),  # type: ignore[arg-type]
-                "row_identity_fingerprint": fingerprint,
-                "owned_running_batches": int(row["owned_running_batches"]),  # type: ignore[arg-type]
-                "unclaimed_route_batches": int(row["unclaimed_route_batches"]),  # type: ignore[arg-type]
-                "oldest_running_batch_age_seconds": (
-                    int(age_raw) if age_raw is not None else None  # type: ignore[arg-type]
-                ),
-            })
+            sources.append(
+                {
+                    "source_id": row["source_id"],
+                    "source_kind": row["source_kind"],
+                    "root_uri": row["root_uri"],
+                    "normalized_root_uri": normalized,
+                    "session_count": int(row["session_count"]),  # type: ignore[arg-type]
+                    "canonical_count": int(row["canonical_count"]),  # type: ignore[arg-type]
+                    "sibling_count": int(row["sibling_count"]),  # type: ignore[arg-type]
+                    "event_count": int(row["event_count"]),  # type: ignore[arg-type]
+                    "tool_call_count": int(row["tool_call_count"]),  # type: ignore[arg-type]
+                    "row_identity_fingerprint": fingerprint,
+                    "owned_running_batches": int(row["owned_running_batches"]),  # type: ignore[arg-type]
+                    "unclaimed_route_batches": int(row["unclaimed_route_batches"]),  # type: ignore[arg-type]
+                    "oldest_running_batch_age_seconds": (
+                        int(age_raw) if age_raw is not None else None  # type: ignore[arg-type]
+                    ),
+                }
+            )
             key = (str(row["source_kind"]), normalized)
             group_counts[key] = group_counts.get(key, 0) + 1
             totals["sessions"] += int(row["session_count"])  # type: ignore[arg-type]
@@ -455,6 +499,34 @@ class SessionLedgerService(
             "total_owned_running_batches": totals["owned_running_batches"],
             "total_unclaimed_route_batches": totals["unclaimed_route_batches"],
         }
+
+    def corpus_counts(self) -> dict[str, Any]:
+        """Return one bounded scalar count over nondeleted ledger events."""
+        observed_from = datetime.now(UTC).isoformat()
+        count, advisory = count_live_event_rows(self._state_service)
+        observed_until = datetime.now(UTC).isoformat()
+        return {
+            "schema_version": 1,
+            "scope": "session_ledger__event where is_deleted = 0; all sources and canonical/sibling sessions",
+            "observed_from": observed_from,
+            "observed_until": observed_until,
+            "count": count,
+            "complete": count is not None,
+            "advisories": [advisory] if advisory is not None else [],
+        }
+
+    def session_usage_totals(
+        self,
+        runtime_session_ids: list[str] | None = None,
+        since: datetime | str | None = None,
+        until: datetime | str | None = None,
+        vendor: str | None = None,
+    ) -> dict[str, Any]:
+        """Read windowed, deduped usage through the injected ledger repository."""
+        from ananta.llm.session_ledger.read import SessionUsageReader
+        from ananta.llm.session_ledger.usage_totals import session_usage_totals
+
+        return session_usage_totals(SessionUsageReader(self._repository), runtime_session_ids, since, until, vendor)
 
     def list_sessions(
         self,
@@ -485,8 +557,7 @@ class SessionLedgerService(
             project_path=project_path,
             vendor=_coerce_enum(vendor, SourceVendor),
             source_kind=_coerce_enum(source_kind, IngestSourceKind),
-            order_by=_coerce_enum(order_by, SessionsOrderBy)
-            or SessionsOrderBy.LAST_EVENT_AT_DESC,
+            order_by=_coerce_enum(order_by, SessionsOrderBy) or SessionsOrderBy.LAST_EVENT_AT_DESC,
             include_siblings=include_siblings,
         )
         return {"sessions": rows}
@@ -637,7 +708,8 @@ class SessionLedgerService(
         kind = IngestSourceKind(source_kind)
         canonical_root_uri = canonicalize_root_uri_for_storage(root_uri)
         existing_id = self._repository.find_source_id_by_kind_and_root_uri(
-            source_kind=kind, root_uri=canonical_root_uri,
+            source_kind=kind,
+            root_uri=canonical_root_uri,
         )
         if existing_id is not None:
             return {"source_id": existing_id, "outcome": "existed"}
@@ -658,7 +730,9 @@ class SessionLedgerService(
     ) -> dict[str, Any]:
         kind = IngestSourceKind(source_kind)
         result = self._importer.dispatch_pushed(
-            source_kind=kind, chunk_text=chunk_text, source_id=source_id,
+            source_kind=kind,
+            chunk_text=chunk_text,
+            source_id=source_id,
         )
         return {
             "events_persisted": result.events_persisted,
@@ -675,7 +749,7 @@ class SessionLedgerService(
         re-interpreted silent zero. Raises
         :class:`~ananta.llm.session_ledger.importer.LedgerPollError`.
         """
-        report = self._importer.poll_source(source_id)
+        report = self._poll_executor.call(lambda: self._importer.poll_source(source_id))
         return {
             "sources_polled": report.sources_polled,
             "sessions_seen": report.sessions_seen,
@@ -685,7 +759,7 @@ class SessionLedgerService(
 
     def trigger_poll(self) -> dict[str, Any]:
         """Cron heartbeat: (re)start the singleton importer-poll drainer (full contract on the ABC)."""
-        return start_importer_poll_drain(self._poll_executor, self._importer)
+        return start_importer_poll_drain(self._poll_executor, self._importer, self._oversized_executor)
 
     def ensure_periodic_poll_schedule(
         self,
@@ -703,8 +777,7 @@ class SessionLedgerService(
         """
         if self._scheduling_service is None:
             raise RuntimeError(
-                "ensure_periodic_poll_schedule requires scheduling_service "
-                "to be bound at session_ledger_service construction",
+                "ensure_periodic_poll_schedule requires scheduling_service to be bound at session_ledger_service construction",
             )
         if not 1 <= int(cadence_minutes) <= 59:
             raise ValueError(
@@ -715,9 +788,7 @@ class SessionLedgerService(
         clear_result = self._scheduling_service.clear_scheduled_actions_by_tag(
             tag=tag,
         )
-        cleared_count = int(
-            (clear_result or {}).get("data", {}).get("cleared_count", 0)
-        ) if isinstance(clear_result, dict) else 0
+        cleared_count = int((clear_result or {}).get("data", {}).get("cleared_count", 0)) if isinstance(clear_result, dict) else 0
 
         # The cron-fired action is TERMINAL/HEADLESS per the canonical
         # scheduler cron-action contract enforced at ``create_cron_schedule``
@@ -737,10 +808,12 @@ class SessionLedgerService(
         # terminal-skip action.
         create_result = self._scheduling_service.create_cron_schedule(
             cron_expression=cron_expression,
-            actions=[{
-                "process_key": "service_interface::session_ledger_service::trigger_poll",
-                "arguments": {},
-            }],
+            actions=[
+                {
+                    "process_key": "service_interface::session_ledger_service::trigger_poll",
+                    "arguments": {},
+                }
+            ],
             label="Ledger periodic poll",
             tags=[tag],
             # Schedule-level flow_id/session_id are propagated into the
@@ -763,7 +836,10 @@ class SessionLedgerService(
         outcome = "normalized" if cleared_count > 0 else "created"
         logger.info(
             "session_ledger periodic poll schedule %s: schedule_id=%s tag=%s cadence=%dm",
-            outcome, schedule_id, tag, cadence_minutes,
+            outcome,
+            schedule_id,
+            tag,
+            cadence_minutes,
         )
         # NOTE: field name is ``outcome`` not ``status`` because the platform's
         # result-status invariant treats a top-level ``status`` key as the
@@ -830,11 +906,7 @@ class SessionLedgerService(
         active_before = 0
         cleared_total = 0
         for source in sources:
-            before = (
-                self._repository.reset_source_cursor(source.id)
-                if confirm
-                else self._repository.count_active_source_cursors(source.id)
-            )
+            before = self._repository.reset_source_cursor(source.id) if confirm else self._repository.count_active_source_cursors(source.id)
             cleared = before if confirm else 0
             active_before += before
             cleared_total += cleared
@@ -856,18 +928,13 @@ class SessionLedgerService(
         }
         if confirm:
             logger.warning(
-                "session_ledger reset_ingest_state confirmed (NON-DESTRUCTIVE "
-                "cursor reset): cleared %d cursor row(s) across %d source(s); "
-                "content preserved — next poll replays + the "
-                "(session_id, external_id) upsert reconverges",
-                cleared_total, len(sources),
+                "session_ledger reset_ingest_state confirmed (NON-DESTRUCTIVE cursor reset): cleared %d cursor row(s) across %d source(s); content preserved — next poll replays + the (session_id, external_id) upsert reconverges",
+                cleared_total,
+                len(sources),
             )
         else:
             counts = self._repository.count_rows_per_table(_PRESERVED_CONTENT_TABLES)
-            result["preserved_content"] = [
-                {"table": table, "rows_preserved": counts.get(table, 0)}
-                for table in _PRESERVED_CONTENT_TABLES
-            ]
+            result["preserved_content"] = [{"table": table, "rows_preserved": counts.get(table, 0)} for table in _PRESERVED_CONTENT_TABLES]
             result["null_external_id_count"] = null_external_id_count
             result["precondition_met"] = null_external_id_count == 0
         return result
@@ -901,22 +968,17 @@ class SessionLedgerService(
             }
         if self._scheduling_service is None:
             raise RuntimeError(
-                "lift_canonical_pointer_for_duplicate_sessions requires "
-                "scheduling_service to be bound at "
-                "session_ledger_service construction (to pause+resume "
-                "the importer-poll cron around the repair)",
+                "lift_canonical_pointer_for_duplicate_sessions requires scheduling_service to be bound at session_ledger_service construction (to pause+resume the importer-poll cron around the repair)",
             )
         demoted_count = 0
         resume_outcome = "skipped"
         try:
             self._scheduling_service.clear_scheduled_actions_by_tag(tag=tag)
-            demoted_count = (
-                self._repository.lift_canonical_pointer_for_duplicate_sessions()
-            )
+            demoted_count = self._repository.lift_canonical_pointer_for_duplicate_sessions()
             logger.info(
-                "lift_canonical_pointer_for_duplicate_sessions: "
-                "duplicate_group_count=%d demoted_count=%d",
-                duplicate_group_count, demoted_count,
+                "lift_canonical_pointer_for_duplicate_sessions: duplicate_group_count=%d demoted_count=%d",
+                duplicate_group_count,
+                demoted_count,
             )
         finally:
             resume_result = self.ensure_periodic_poll_schedule(
@@ -962,10 +1024,7 @@ class SessionLedgerService(
             }
         if self._scheduling_service is None:
             raise RuntimeError(
-                "backfill_first_last_event_at_repair requires "
-                "scheduling_service to be bound at "
-                "session_ledger_service construction (to pause+resume "
-                "the importer-poll cron around the repair)",
+                "backfill_first_last_event_at_repair requires scheduling_service to be bound at session_ledger_service construction (to pause+resume the importer-poll cron around the repair)",
             )
         repaired_count = 0
         resume_outcome = "skipped"
@@ -973,9 +1032,9 @@ class SessionLedgerService(
             self._scheduling_service.clear_scheduled_actions_by_tag(tag=tag)
             repaired_count = self._repository.repair_inverted_first_last_event_at()
             logger.info(
-                "backfill_first_last_event_at_repair: "
-                "inverted_count=%d repaired_count=%d",
-                inverted_count, repaired_count,
+                "backfill_first_last_event_at_repair: inverted_count=%d repaired_count=%d",
+                inverted_count,
+                repaired_count,
             )
         finally:
             # MUST run even on exception so the importer-poll cron resumes.
@@ -1013,9 +1072,7 @@ class SessionLedgerService(
         pointers that don't carry the internal ``emb-`` prefix, so any
         concurrent M6 cron firing is invisible to the repair.
         """
-        broken_count = (
-            self._repository.count_summary_rows_with_pgvector_internal_id_pointer()
-        )
+        broken_count = self._repository.count_summary_rows_with_pgvector_internal_id_pointer()
         if not confirm:
             return {
                 "confirmed": False,
@@ -1025,9 +1082,7 @@ class SessionLedgerService(
             }
         result = self._repository.repair_summary_embedding_vector_ids()
         logger.info(
-            "backfill_summary_embedding_vector_ids: "
-            "broken_count=%d updated_count=%d skipped_count=%d "
-            "total_rows_now_correct=%d",
+            "backfill_summary_embedding_vector_ids: broken_count=%d updated_count=%d skipped_count=%d total_rows_now_correct=%d",
             broken_count,
             int(result.get("updated_count", 0)),
             int(result.get("skipped_count", 0)),
@@ -1078,10 +1133,9 @@ class SessionLedgerService(
             stale_threshold_seconds=int(stale_threshold_seconds),
         )
         logger.info(
-            "backfill_orphan_running_batches_for_source: "
-            "source_id=%s source_kind=%s "
-            "total_orphan_count_before=%d repaired_count=%d untouched_count=%d",
-            source_id, source_kind,
+            "backfill_orphan_running_batches_for_source: source_id=%s source_kind=%s total_orphan_count_before=%d repaired_count=%d untouched_count=%d",
+            source_id,
+            source_kind,
             int(result.get("total_orphan_count_before", 0)),
             int(result.get("repaired_count", 0)),
             int(result.get("untouched_count", 0)),
@@ -1090,9 +1144,7 @@ class SessionLedgerService(
             "confirmed": True,
             "repaired_count": int(result.get("repaired_count", 0)),
             "untouched_count": int(result.get("untouched_count", 0)),
-            "total_orphan_count_before": int(
-                result.get("total_orphan_count_before", 0)
-            ),
+            "total_orphan_count_before": int(result.get("total_orphan_count_before", 0)),
             "source_id": source_id,
         }
 
@@ -1152,7 +1204,8 @@ class SessionLedgerService(
         deleted_count = self._repository.reset_source_cursor(source_id)
         logger.info(
             "reset_source_cursor: source_id=%s deleted_count=%d",
-            source_id, deleted_count,
+            source_id,
+            deleted_count,
         )
         return {
             "confirmed": True,
@@ -1176,7 +1229,9 @@ class SessionLedgerService(
         concrete implementation lean.
         """
         _winner, loser = resolve_duplicate_source_pair(
-            self._repository, winner_source_id, loser_source_id,
+            self._repository,
+            winner_source_id,
+            loser_source_id,
         )
         children_before = self._repository.count_source_children(loser_source_id)
         if not confirm:
@@ -1188,22 +1243,26 @@ class SessionLedgerService(
                 "loser_enabled": loser.enabled,
             }
         check_duplicate_source_quiesced(
-            self._repository, loser, loser_source_id,
+            self._repository,
+            loser,
+            loser_source_id,
         )
         moved = self._repository.repoint_source_children(
-            loser_source_id=loser_source_id, winner_source_id=winner_source_id,
+            loser_source_id=loser_source_id,
+            winner_source_id=winner_source_id,
         )
         remaining = self._repository.count_source_children(loser_source_id)
         if any(remaining.values()):
             raise LedgerRepositoryError(
-                f"retire_duplicate_source: {remaining} child row(s) still "
-                f"reference {loser_source_id!r} after re-point — refusing to "
-                "soft-delete a non-orphaned source row",
+                f"retire_duplicate_source: {remaining} child row(s) still reference {loser_source_id!r} after re-point — refusing to soft-delete a non-orphaned source row",
             )
         retired = self._repository.retire_source_row(loser_source_id)
         logger.info(
             "retire_duplicate_source: winner=%s loser=%s moved=%r retired=%d",
-            winner_source_id, loser_source_id, moved, retired,
+            winner_source_id,
+            loser_source_id,
+            moved,
+            retired,
         )
         return {
             "confirmed": True,
@@ -1270,12 +1329,7 @@ class SessionLedgerService(
         upper bound.
         """
         if source_kind is None and vendor is None:
-            raise ValueError(
-                "list_events_by_source_window: at least one of "
-                "source_kind / vendor must be supplied (the verb's "
-                "scope is intentional; unbounded ledger scans are not "
-                "supported here)."
-            )
+            raise ValueError("list_events_by_source_window: at least one of source_kind / vendor must be supplied (the verb's scope is intentional; unbounded ledger scans are not supported here).")
         since_dt = _parse_iso(since) if since else None
         until_dt = _parse_iso(until) if until else datetime.now(UTC)
         rows = self._repository.list_events_by_source_window(
@@ -1358,10 +1412,7 @@ class SessionLedgerService(
         installer-package render path is M5 follow-on.
         """
         if state is None:
-            raise PermissionError(
-                "generate_ingest_setup requires server-injected state with "
-                "authenticated_principal — refusing to act on caller-supplied identity"
-            )
+            raise PermissionError("generate_ingest_setup requires server-injected state with authenticated_principal — refusing to act on caller-supplied identity")
         principal = extract_authenticated_principal(state)
         # Validate sources up front so the deployment row carries only
         # IngestSourceKind values. Codex item 10: each is bound to the
@@ -1383,9 +1434,10 @@ class SessionLedgerService(
             authorized_source_kinds=validated,
         )
         logger.info(
-            "ledger pairing: deployment created deployment_id=%s "
-            "initiating_client_id=%s sources=%s",
-            deployment_id, principal.client_id, validated,
+            "ledger pairing: deployment created deployment_id=%s initiating_client_id=%s sources=%s",
+            deployment_id,
+            principal.client_id,
+            validated,
         )
         return {
             "deployment_id": deployment_id,
@@ -1401,40 +1453,25 @@ class SessionLedgerService(
     ) -> dict[str, Any]:
         """Ownership-bound transition pending→approved (spec §13.3)."""
         if state is None:
-            raise PermissionError(
-                "approve_pairing requires server-injected state with "
-                "authenticated_principal — refusing to act on caller-supplied identity"
-            )
+            raise PermissionError("approve_pairing requires server-injected state with authenticated_principal — refusing to act on caller-supplied identity")
         principal = extract_authenticated_principal(state)
         row = self._repository.get_deployment(deployment_id)
         if row is None:
-            raise LedgerRepositoryError(
-                f"no deployment with id {deployment_id!r}"
-            )
+            raise LedgerRepositoryError(f"no deployment with id {deployment_id!r}")
         if row.get("pairing_status") != "pending":
-            raise LedgerRepositoryError(
-                f"deployment {deployment_id!r} is not in pending state "
-                f"(got {row.get('pairing_status')!r})"
-            )
+            raise LedgerRepositoryError(f"deployment {deployment_id!r} is not in pending state (got {row.get('pairing_status')!r})")
         stored_user_code = row.get("user_code")
         if not isinstance(stored_user_code, str) or stored_user_code != user_code:
-            raise PermissionError(
-                f"approve_pairing: user_code mismatch for deployment {deployment_id!r}"
-            )
+            raise PermissionError(f"approve_pairing: user_code mismatch for deployment {deployment_id!r}")
         initiating = row.get("initiating_client_id")
         is_operator_eq = self._is_caller_operator_equivalent(principal.client_id)
         if principal.client_id != initiating and not is_operator_eq:
-            raise PermissionError(
-                f"approve_pairing forbidden: caller client_id {principal.client_id!r} "
-                f"does not match deployment.initiating_client_id and is not "
-                "operator_equivalent (§13.3)"
-            )
-        self._repository.transition_deployment_to_approved(
-            deployment_id=deployment_id
-        )
+            raise PermissionError(f"approve_pairing forbidden: caller client_id {principal.client_id!r} does not match deployment.initiating_client_id and is not operator_equivalent (§13.3)")
+        self._repository.transition_deployment_to_approved(deployment_id=deployment_id)
         logger.info(
             "ledger pairing: deployment approved deployment_id=%s by client_id=%s",
-            deployment_id, principal.client_id,
+            deployment_id,
+            principal.client_id,
         )
         return {"status": "approved", "deployment_id": deployment_id}
 
@@ -1448,27 +1485,17 @@ class SessionLedgerService(
         client_id — the handler accepts NO caller-supplied deployment_id.
         """
         if state is None:
-            raise PermissionError(
-                "shipper_self_revoke requires server-injected state with "
-                "authenticated_principal — refusing to act on caller-supplied identity"
-            )
+            raise PermissionError("shipper_self_revoke requires server-injected state with authenticated_principal — refusing to act on caller-supplied identity")
         principal = extract_authenticated_principal(state)
-        row = self._repository.get_deployment_by_oauth_client_id(
-            principal.client_id
-        )
+        row = self._repository.get_deployment_by_oauth_client_id(principal.client_id)
         if row is None:
-            raise PermissionError(
-                f"shipper_self_revoke: no paired deployment for caller "
-                f"client_id {principal.client_id!r}"
-            )
+            raise PermissionError(f"shipper_self_revoke: no paired deployment for caller client_id {principal.client_id!r}")
         deployment_id = str(row["id"])
-        self._repository.transition_deployment_to_revoked(
-            deployment_id=deployment_id
-        )
+        self._repository.transition_deployment_to_revoked(deployment_id=deployment_id)
         logger.info(
-            "ledger pairing: deployment revoked deployment_id=%s by self "
-            "(client_id=%s)",
-            deployment_id, principal.client_id,
+            "ledger pairing: deployment revoked deployment_id=%s by self (client_id=%s)",
+            deployment_id,
+            principal.client_id,
         )
         return {"status": "revoked", "deployment_id": deployment_id}
 
@@ -1491,8 +1518,7 @@ class SessionLedgerService(
         """
         if state is None:
             raise PermissionError(
-                "push_session_summary_chunk requires server-injected state with "
-                "authenticated_principal — refusing to act on caller-supplied identity",
+                "push_session_summary_chunk requires server-injected state with authenticated_principal — refusing to act on caller-supplied identity",
             )
         principal = extract_authenticated_principal(state)
         try:
@@ -1536,7 +1562,8 @@ class SessionLedgerService(
         since_typed = _coerce_datetime(since)
         try:
             envelopes = self._summary_writer.search(
-                query=query, limit=bounded_limit,
+                query=query,
+                limit=bounded_limit,
             )
         except SummaryServicesUnavailableError as exc:
             raise RuntimeError(
@@ -1549,18 +1576,26 @@ class SessionLedgerService(
                 source_kind=source_kind_typed,
                 since=since_typed,
             )
-        return {
-            "results": [
+        now = datetime.now(UTC)
+        ingested_at_by_source: dict[str, datetime | None] = {}
+        results: list[dict[str, Any]] = []
+        for env in envelopes:
+            source_id = _session_source_id(env.session)
+            if source_id is not None and source_id not in ingested_at_by_source:
+                ingested_at_by_source[source_id] = _last_ingested_at(self._repository, source_id)
+            ingested_at = ingested_at_by_source.get(source_id) if source_id is not None else None
+            results.append(
                 {
                     "session_id": env.session_id,
                     "chunk_index": env.chunk_index,
                     "summary_text": env.summary_text,
                     "score": env.score,
                     "session": env.session,
+                    "last_ingested_at": ingested_at.isoformat() if ingested_at is not None else None,
+                    "ingestion_freshness": _ingestion_freshness(ingested_at, now),
                 }
-                for env in envelopes
-            ],
-        }
+            )
+        return {"results": results}
 
     def search_event_content(
         self,
@@ -1579,12 +1614,12 @@ class SessionLedgerService(
         bounded_limit = max(1, min(int(limit), 50))
         try:
             hits = self._event_embedding_writer.search(
-                query=query, limit=bounded_limit,
+                query=query,
+                limit=bounded_limit,
             )
         except EventEmbeddingServicesUnavailableError as exc:
             raise RuntimeError(
-                "search_event_content: embedding/vector services "
-                "unavailable in this profile",
+                "search_event_content: embedding/vector services unavailable in this profile",
             ) from exc
         return {
             "results": [
@@ -1616,8 +1651,7 @@ class SessionLedgerService(
             )
         except EventEmbeddingServicesUnavailableError as exc:
             raise RuntimeError(
-                "embed_missing_event_content: embedding/vector services "
-                "unavailable in this profile",
+                "embed_missing_event_content: embedding/vector services unavailable in this profile",
             ) from exc
 
     def event_embedding_coverage(self) -> dict[str, Any]:
@@ -1644,7 +1678,8 @@ class SessionLedgerService(
         return bool(self._operator_equivalent_check(client_id))
 
     def set_operator_equivalent_check(
-        self, callback: Callable[[str], bool],
+        self,
+        callback: Callable[[str], bool],
     ) -> None:
         """Production wiring hook for the vault is_operator_equivalent lookup."""
         self._operator_equivalent_check = callback
@@ -1653,9 +1688,7 @@ class SessionLedgerService(
     # M4 — ChatGPT export (kept here from M4)
     # ------------------------------------------------------------------
 
-    def register_chatgpt_export_source(
-        self, *, blob_id: str, account_label: str | None
-    ) -> dict[str, str]:
+    def register_chatgpt_export_source(self, *, blob_id: str, account_label: str | None) -> dict[str, str]:
         """Register an uploaded export blob and start its running batch.
 
         Spec §10.10.1 step 5. Idempotent on the blob id (A1): routes through
@@ -1678,9 +1711,7 @@ class SessionLedgerService(
         batch_id = self._repository.ensure_open_route_batch_for_source(source_id)
         return {"source_id": source_id, "batch_id": batch_id}
 
-    def register_claude_ai_export_source(
-        self, *, blob_id: str, account_label: str | None
-    ) -> dict[str, str]:
+    def register_claude_ai_export_source(self, *, blob_id: str, account_label: str | None) -> dict[str, str]:
         """Register an uploaded Claude.ai export blob (M9; A2 asymmetric).
 
         Spec §10.10.1 step 5. ``claude_ai_export`` is a **PUSHED** source, so —
@@ -1699,8 +1730,41 @@ class SessionLedgerService(
         )
         return {"source_id": registered["source_id"]}
 
+    def clear_session_label(
+        self,
+        session_id: str,
+        expected_updated_at: datetime | str | None = None,
+        confirm: bool = False,
+        *,
+        call_context: CallContext | None = None,
+    ) -> dict[str, Any]:
+        """Operator preview/clear of one exact live session label."""
+        from ananta.llm.session_ledger.session_label import SessionLabelMaintenance
+
+        assert_operator_principal(call_context, "clear_session_label")
+        assert call_context is not None
+        return SessionLabelMaintenance(self._repository).clear(session_id, expected_updated_at, confirm, call_context)
+
+    def list_session_label_clears(
+        self,
+        session_id: str,
+        limit: int = 100,
+        after_cleared_at: datetime | str | None = None,
+        after_id: str | None = None,
+        *,
+        call_context: CallContext | None = None,
+    ) -> dict[str, Any]:
+        """Operator bounded history, independent of current source eligibility."""
+        from ananta.llm.session_ledger.session_label import SessionLabelMaintenance
+
+        assert_operator_principal(call_context, "list_session_label_clears")
+        return SessionLabelMaintenance(self._repository).history(session_id, limit, after_cleared_at, after_id)
+
     def backfill_export_blob_identity(
-        self, confirm: bool = False, *, call_context: CallContext | None = None,
+        self,
+        confirm: bool = False,
+        *,
+        call_context: CallContext | None = None,
     ) -> dict[str, Any]:
         """Converge export blobs onto content-digest identity (A3; operator-only).
 
@@ -1729,6 +1793,7 @@ class SessionLedgerService(
         )
         return backfill.run(confirm=confirm)
 
+
 def _coerce_datetime(value: datetime | str | None) -> datetime | None:
     """M17 §2.2 / W5.E cycle-4 C3: coerce str/datetime payload at the entry.
 
@@ -1742,6 +1807,44 @@ def _coerce_datetime(value: datetime | str | None) -> datetime | None:
     if value is None:
         return None
     return _normalize_event_at(value)
+
+
+# Documented ingestion cadence (the session-ledger import runs on a */5 schedule).
+# A source last ingested longer ago than this makes its search results lag.
+_INGESTION_CADENCE = timedelta(minutes=5)
+
+
+def _session_source_id(session: dict[str, Any] | None) -> str | None:
+    """The source id on an envelope's session row; None when the row is absent."""
+    if session is None:
+        return None
+    source_id = session.get("source_id")
+    return source_id if isinstance(source_id, str) else None
+
+
+def _last_ingested_at(repository: SessionLedgerRepository, source_id: str) -> datetime | None:
+    """Finish time of the source's newest completed import; None when no import has completed.
+
+    Reads the import batch, never a session timestamp, so a currently open
+    session does not masquerade as ingested.
+    """
+    value = SessionUsageReader(repository).usage_last_poll_at(source_id)
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if not isinstance(value, datetime):
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _ingestion_freshness(last_ingested_at: datetime | None, now: datetime) -> str:
+    """``fresh`` within the ingestion cadence, ``lagging`` beyond it, ``unknown`` with no completed import.
+
+    A classification value, never a refusal: the caller decides what a
+    lagging result means for it.
+    """
+    if last_ingested_at is None:
+        return "unknown"
+    return "fresh" if now - last_ingested_at <= _INGESTION_CADENCE else "lagging"
 
 
 def _coerce_enum[E: StrEnum](value: E | str | None, enum_cls: type[E]) -> E | None:
@@ -1810,13 +1913,7 @@ def _filter_envelopes(
     requested but the envelope lacks the relevant field, the envelope is
     dropped (conservative — prevents leaking unfiltered results).
     """
-    return [
-        env
-        for env in envelopes
-        if _envelope_matches_filters(
-            env, vendor=vendor, source_kind=source_kind, since=since
-        )
-    ]
+    return [env for env in envelopes if _envelope_matches_filters(env, vendor=vendor, source_kind=source_kind, since=since)]
 
 
 def _build_semantic_writers(
@@ -1860,11 +1957,7 @@ def _public_event_envelope(row: dict[str, Any]) -> dict[str, Any]:
         "event_id": row.get("event_id"),
         "session_id": row.get("session_id"),
         "sequence": row.get("sequence"),
-        "event_at": (
-            row["event_at"].isoformat()
-            if isinstance(row.get("event_at"), datetime)
-            else row.get("event_at")
-        ),
+        "event_at": (row["event_at"].isoformat() if isinstance(row.get("event_at"), datetime) else row.get("event_at")),
         "role": row.get("role"),
         "content_text": row.get("content_text"),
         "vendor": row.get("session_vendor"),
@@ -1909,8 +2002,7 @@ def _parse_iso(s: str) -> datetime:
     parsed = datetime.fromisoformat(s)
     if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
         raise ValueError(
-            f"_parse_iso: naïve datetime not accepted; require an explicit "
-            f"timezone offset (e.g. 'Z' or '+00:00'). Got: {s!r}",
+            f"_parse_iso: naïve datetime not accepted; require an explicit timezone offset (e.g. 'Z' or '+00:00'). Got: {s!r}",
         )
     return parsed.astimezone(UTC)
 
@@ -1984,31 +2076,29 @@ def _normalize_event_at(value: object) -> datetime:
     if isinstance(value, datetime):
         if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
             raise ValueError(
-                f"_normalize_event_at: naïve or pseudo-aware typed "
-                f"datetime not accepted; require explicit timezone "
-                f"offset. Got: {value!r}",
+                f"_normalize_event_at: naïve or pseudo-aware typed datetime not accepted; require explicit timezone offset. Got: {value!r}",
             )
         return value.astimezone(UTC)
     raise ValueError(
-        f"_normalize_event_at: expected str or datetime, got "
-        f"{type(value).__name__}={value!r}",
+        f"_normalize_event_at: expected str or datetime, got {type(value).__name__}={value!r}",
     )
 
 
 def _build_drain_executors(
     summary_executor: SummaryExecutor | None,
-) -> tuple[SummaryExecutor, SummaryExecutor, SummaryExecutor]:
-    """Three independent single-slot drain guards (summarize + event-embedding + importer poll).
+) -> tuple[SummaryExecutor, SummaryExecutor, _LedgerPollExecutor, SummaryExecutor]:
+    """Four independent single-slot guards, including low-priority whole-session work.
 
-    Each is a singleton across overlapping cron fires (a second ``submit`` no-ops); the three are
-    SEPARATE slots so the auto-summarize, LED-01 event-embedding, and importer-poll heartbeats run
+    Each is a singleton across overlapping cron fires (a second ``submit`` no-ops); the four are
+    SEPARATE slots so the auto-summarize, LED-01 event-embedding, importer-poll and oversized-session heartbeats run
     concurrently over their different corpora — none blocks another. ``summary_executor`` is
     injectable for tests.
     """
     return (
         summary_executor or BoundedSummaryExecutor(),
         BoundedSummaryExecutor(name="ledger-embedding"),
-        BoundedSummaryExecutor(name="ledger-poll"),
+        _LedgerPollExecutor(),
+        BoundedSummaryExecutor(name="ledger-oversized"),
     )
 
 

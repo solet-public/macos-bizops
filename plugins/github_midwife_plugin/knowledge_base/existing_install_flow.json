@@ -141,6 +141,16 @@
       "origin_id": "31bfa93c-fe20-4988-b019-f8186684e88e",
       "manifest_sha256": "d33a0911e1a5daa3ad94c141f76dd10028844e1edcf0622dc5c2801448fef322",
       "legacy_anchor_id": null
+    },
+    {
+      "repository": "https://github.com/solet-public/macos-bizops.git",
+      "commit": "50383f0be56e771183be362300144c975c586ddf",
+      "tree": "0d20524cb9df761f1a47ba9a35cf5cbff8730b3c",
+      "provenance_sha256": "b64158233288218eb518b44afb26991ca27b636f4ee4a1b941afea5b4cb7f351",
+      "seed_id": "ce27ec0f-c2e6-5de5-a2f3-52fa3805f3b4",
+      "origin_id": "31bfa93c-fe20-4988-b019-f8186684e88e",
+      "manifest_sha256": "f41b9cafa9f87913fa401ebc8fd199aa65e19037c1192c39fa10eaa9e8166f4f",
+      "legacy_anchor_id": null
     }
   ],
   "source_operation": {
@@ -313,7 +323,7 @@
       "marker": null,
       "stamp": "<!-- rendered-from: {TEMPLATE_REF}@{TEMPLATE_DIGEST} -->",
       "template_ref": "plugins/github_midwife_plugin/knowledge_base/hydration_templates/feedback_skill_SKILL.md.template",
-      "template_digest": "sha256:dbe3ca27f4b9e7ba99ee9f3bf98c3bf2b8834642b0ec4760160cd600bf31a7d0",
+      "template_digest": "sha256:b21fd2ab5df8bf622483bfe9423486cef7108056b8d962607acd65e913e75fef",
       "previous_template_digests": [
         "sha256:cf5c4aa4e76627a3f2868fd33f58b0533e96a2d4c9de3a09175ec3c9269f3d11"
       ]
@@ -341,9 +351,10 @@
       "stamp": "# rendered-from: {TEMPLATE_REF}@{TEMPLATE_DIGEST}",
       "section_end": "# One function per role the operator chose in Step 4a.",
       "template_ref": "plugins/github_midwife_plugin/knowledge_base/hydration_templates/fleet_functions.zsh.template",
-      "template_digest": "sha256:29dd71b6a903dae327725f027018863be7cac65d5bb3950179cd678b8dfa2b50",
+      "template_digest": "sha256:a3e0c0c0661e1e0e32f65f615f01235736e2558ba2d5965c35379098fea2bf16",
       "previous_template_digests": [
-        "sha256:fc0c8a250da87222f50d07a28003332073a76d495d5a70fe93dc33ea80655157"
+        "sha256:fc0c8a250da87222f50d07a28003332073a76d495d5a70fe93dc33ea80655157",
+        "sha256:29dd71b6a903dae327725f027018863be7cac65d5bb3950179cd678b8dfa2b50"
       ]
     }
   ],

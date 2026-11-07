@@ -103,6 +103,7 @@ from .state_io import ensure_private_directory, instance_lock
 from .target_git import GitLayout, run_target_git
 from .transaction import utc_now
 from .update_candidate import TRANSITION_BUNDLE_DIRECTORY, UpdateCandidate, acquire_pinned_candidate, acquire_update_candidate
+from .update_hook_pin_carry import PinCarry, finish_pin_carry, pin_disclosure, put_pins_back, set_pins_aside, with_pins
 from .update_hydration_carry import CarryPlan, carry_into_journal, put_back, set_aside, with_carry
 from .update_journal import (
     DOCTOR_STATUSES,
@@ -244,6 +245,7 @@ class UpdateProbe:
     installer_pins: tuple[str, ...] = ()
     #: iss_f89ab692: the overlapped files whose only local change is the create's hydration block.
     hydration: CarryPlan = field(default_factory=CarryPlan)
+    hook_pins: tuple[PinCarry, ...] = ()
 
     @property
     def fingerprint(self) -> str | None:
@@ -251,7 +253,7 @@ class UpdateProbe:
 
     @property
     def planned_actions(self) -> tuple[str, ...]:
-        return VERIFY_PLANNED_ACTIONS if self.source_mode == "verify" else with_carry(PLANNED_ACTIONS, self.hydration)
+        return VERIFY_PLANNED_ACTIONS if self.source_mode == "verify" else with_pins(with_carry(PLANNED_ACTIONS, self.hydration), self.hook_pins)
 
 
 def preview_update_instance(request: UpdateRequest) -> CommandResult:
@@ -378,17 +380,17 @@ def probe_update(
     reduction = reduce_update(paths, record, candidate, baseline, entries, source_mode, git=_git, run_git=_run_git, cache_git=_cache_git, cache_run_git=_cache_run_git)
     operation_id = compute_update_operation_id(record.instance_id, record.source_release.commit, candidate, recovers=recovers)
     journal_path = paths.operation_path(record.instance_id, operation_id)
-    planned = VERIFY_PLANNED_ACTIONS if source_mode == "verify" else with_carry(PLANNED_ACTIONS, reduction.hydration)
+    planned = VERIFY_PLANNED_ACTIONS if source_mode == "verify" else with_pins(with_carry(PLANNED_ACTIONS, reduction.hydration), reduction.hook_pins)
     actionable = actionable_reasons(reduction.reasons, source_mode)
     preview = preview_update(
         candidate,
         UpdateTopology(reduction.reasons, actionable, None if reduction.local_state is None else reduction.local_state.state),
         baseline_commit=record.source_release.commit,
-        bound_identity=_bound_identity(record, candidate, baseline, reduction.collisions, paths, journal_path, planned, recovers, reduction.local_state, binding) | reduction.hydration.bound(NON_TOUCH_SURFACES),
+        bound_identity=_bound_identity(record, candidate, baseline, reduction.collisions, paths, journal_path, planned, recovers, reduction.local_state, binding) | reduction.hydration.bound(NON_TOUCH_SURFACES) | pin_disclosure(reduction.hook_pins, reduction.hydration.untouched(NON_TOUCH_SURFACES)),
         planned_actions=planned,
         source_mode=source_mode,
     )
-    return UpdateProbe(record, descriptor, candidate, baseline, reduction.reasons, reduction.collisions, preview, operation_id, journal_path, source_mode, recovers, reduction.local_state, reduction.blocked_paths, host, reduction.installer_pins, reduction.hydration)
+    return UpdateProbe(record, descriptor, candidate, baseline, reduction.reasons, reduction.collisions, preview, operation_id, journal_path, source_mode, recovers, reduction.local_state, reduction.blocked_paths, host, reduction.installer_pins, reduction.hydration, reduction.hook_pins)
 
 
 def enrollment_binding(operation_id: str, approval_fingerprint: str) -> dict[str, JsonValue]:
@@ -415,9 +417,7 @@ def recorded_enrollment_binding(paths: ManagerPaths, record: InstanceInventoryRe
     return enrollment_binding(operation_id, cast(str, approval["fingerprint"]))
 
 
-def _require_candidate_identity(
-    record: InstanceInventoryRecordV2, descriptor: InstalledUpdateDescriptor, candidate: UpdateCandidate
-) -> None:
+def _require_candidate_identity(record: InstanceInventoryRecordV2, descriptor: InstalledUpdateDescriptor, candidate: UpdateCandidate) -> None:
     identity = descriptor.metadata.channel_identity
     fields = candidate.fields
     checks = (
@@ -434,9 +434,7 @@ def _require_candidate_identity(
         )
 
 
-def _inspect_baseline(
-    request: UpdateRequest, record: InstanceInventoryRecordV2, candidate: UpdateCandidate
-) -> ExistingInstallInspectionResult:
+def _inspect_baseline(request: UpdateRequest, record: InstanceInventoryRecordV2, candidate: UpdateCandidate) -> ExistingInstallInspectionResult:
     """Re-prove the enrolled baseline with the Step-2 identity conjunction."""
     return _inspect(request, record, enrolled_metadata(record, candidate.fields))
 
@@ -479,16 +477,12 @@ def enrolled_metadata(record: InstanceInventoryRecordV2, fields: SeedLockFields)
     return InstalledInspectionMetadata(identity, seed_lock_from_fields(fields), ())
 
 
-def inspect_with_metadata(
-    request: UpdateRequest, record: InstanceInventoryRecordV2, metadata: InstalledInspectionMetadata
-) -> ExistingInstallInspectionResult:
+def inspect_with_metadata(request: UpdateRequest, record: InstanceInventoryRecordV2, metadata: InstalledInspectionMetadata) -> ExistingInstallInspectionResult:
     """Public Step-2 inspection against a chosen contract, with the target identity re-proved."""
     return _inspect(request, record, metadata)
 
 
-def _inspect(
-    request: UpdateRequest, record: InstanceInventoryRecordV2, metadata: InstalledInspectionMetadata
-) -> ExistingInstallInspectionResult:
+def _inspect(request: UpdateRequest, record: InstanceInventoryRecordV2, metadata: InstalledInspectionMetadata) -> ExistingInstallInspectionResult:
     result = inspect_existing_install(
         ExistingInstallInspectionRequest(_target_path(record), record.channel.channel_id, request.manager_paths),
         metadata_loader=lambda channel, tracker: metadata,
@@ -498,19 +492,16 @@ def _inspect(
 
 
 def _require_target_identity(result: ExistingInstallInspectionResult, record: InstanceInventoryRecordV2) -> None:
+    from .enrolled_target import identity_drift_message, identity_mismatches, identity_repair  # noqa: PLC0415
+
     observed = result.target_identity
-    target = record.target
     # The enrolled ``device`` is not compared: macOS renumbers a volume's st_dev across boots, and the canonical path
     # plus the target's and its parent's inode already refuse a different directory (iss_2ea57f17).
-    matches = (
-        str(observed.canonical_display) == target.canonical_path
-        and observed.target_inode == target.filesystem_identity.inode
-        and observed.parent_inode == target.parent_filesystem_identity.inode
-    )
-    if not matches:
+    reasons = identity_mismatches(record, observed.canonical_display, observed.target_inode, observed.parent_inode)
+    if reasons:
         raise ManagedIdentityDriftError(
-            "target filesystem identity differs from the enrolled record",
-            repair="Re-inspect the target; the enrolled path no longer names the same directory.",
+            identity_drift_message(record, reasons),
+            repair=identity_repair(record),
         )
 
 
@@ -707,8 +698,9 @@ def _resume_source(request: UpdateRequest, record: InstanceInventoryRecordV2, jo
     head = _head(target)
     status = cast(str, journal["status"])
     if head == cast(dict[str, JsonValue], journal["baseline"])["commit"]:
-        put_back(request.manager_paths, record, journal)
         _refuse_interrupted_merge(record, status, target, journal)
+        put_back(request.manager_paths, record, journal)
+        put_pins_back(request.manager_paths, record, journal)
         probe = probe_update(request, record)
         if probe.fingerprint != approved or probe.operation_id != journal["operation_id"]:
             raise ProbeDriftError("the target no longer reproduces the approved preview", repair="Inspect the target; do not reset it.")
@@ -947,16 +939,19 @@ class _Execution:
             self._advance("source_applying", "fast-forward started after lock-time revalidation")
         target = _target_path(self.record)
         set_aside(self.request.manager_paths, self.record, self.operation_id, fresh.hydration.carries)
+        set_pins_aside(self.request.manager_paths, self.record, self.operation_id, fresh.hook_pins)
         completed = _run_git(target, ("merge", "--ff-only", "--no-edit", self.candidate.fields.commit), hooks_dir=self._hooks_dir())
         self.executed.append("target.fast_forward_exact_candidate")
         if completed.returncode:
             put_back(self.request.manager_paths, self.record, self.journal)
+            put_pins_back(self.request.manager_paths, self.record, self.journal)
             raise UpdateBlockedError("fast_forward_refused", f"git refused the fast-forward: {completed.stderr.decode('utf-8', 'replace').strip()}", repair="Inspect the target; no destructive recovery is attempted.")
 
     def _finish(self) -> CommandResult:
         if self.status == "source_applying":
             # iss_f89ab692: merge each set-aside hydration block back onto the candidate, with one journaled revision.
             self.journal = carry_into_journal(self.request.manager_paths, self.record, self.journal_path, self.journal, self.executed)
+        self.journal = finish_pin_carry(self.request.manager_paths, self.record, self.journal_path, self.journal, self.executed)
         verified = self._verify_advanced()
         if self.status == "source_applying":
             self._advance("source_advanced", "exact candidate release identity verified after fast-forward")
@@ -989,7 +984,7 @@ class _Execution:
             self.last_observed = report.observed
         return report
 
-    def rebaseline_local_state(self, journal: dict[str, JsonValue], operation_id: str, declared: frozenset[str]) -> tuple[tuple[dict[str, JsonValue], ...], dict[str, JsonValue]] | None:
+    def rebaseline_local_state(self, journal: dict[str, JsonValue], operation_id: str, declared: frozenset[str]) -> tuple[tuple[dict[str, JsonValue], dict[str, JsonValue]], ...] | None:
         """Section 6.6, the per-operation carve-out (see :func:`rebaseline_revision`); re-inspects the target first."""
         result = _inspect(self.request, self.record, self.descriptor.metadata)
         observed = observe_local_state(_target_path(self.record), result.facts)

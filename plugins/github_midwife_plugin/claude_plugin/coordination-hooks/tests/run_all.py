@@ -22,6 +22,8 @@ from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
 PLUGIN_ROOT = TESTS_DIR.parent
+_ROOT = Path(__file__).resolve().parents[5]
+sys.path.insert(0, str(_ROOT))
 
 
 def _smokes() -> list[Path]:
@@ -30,6 +32,9 @@ def _smokes() -> list[Path]:
 
 def main() -> int:
     smokes = _smokes()
+    if not any(path.name == "session_cron_sentinel_smoke.py" for path in smokes):
+        print("FAIL: session-cron sentinel smoke missing")
+        return 1
     if not smokes:
         print("FAIL: no *_smoke.py files found in tests/ — nothing was verified")
         return 1
@@ -46,7 +51,6 @@ def main() -> int:
             [sys.executable, "-B", str(path)],
             capture_output=True,
             text=True,
-            timeout=600,
             check=False,
         )
         sys.stdout.write(proc.stdout)

@@ -281,7 +281,6 @@ def register_synthetic_session(
     spawned_by_instance_id: str,
     directed_by: str,
     report_by_seconds: int,
-    brief_ref: str = "",
     budget_line: str = "",
     model: str = "",
     work_class: str = WORK_CLASS_READ_ONLY,
@@ -377,7 +376,8 @@ def register_synthetic_session(
         ManagedSessionSpec(
             agent_instance_id=agent_instance_id,
             lane_id=lane_id,
-            brief_ref=brief_ref,
+            assignment=None,
+            provisioning_mode="synthetic_no_process",
             work_class=work_class,
             budget_line=budget_line,
             host=SYNTHETIC_HOST,

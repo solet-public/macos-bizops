@@ -50,16 +50,23 @@ from bootstrap_adapter.routes import execute_adapter_request  # noqa: E402
 
 _KB = _PLUGIN_ROOT / "knowledge_base"
 _TEMPLATES = _KB / "hydration_templates"
-_CHECKS = 0
-_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+_CHECKS_RUN: list[str] = []
 _NAME = "iris"
 
 
 def _check(condition: object, label: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    _CHECKS_RUN.append(label)
     if not condition:
         raise AssertionError(label)
+
+
+def _fixture_git_env(extra_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Build a fresh Git subprocess environment without inherited selectors."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    if extra_env:
+        env.update(extra_env)
+    env.update({"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"})
+    return env
 
 
 class FakeRuntime:
@@ -74,7 +81,7 @@ class FakeRuntime:
         del timeout_seconds, input_text
         self.commands.append(argv)
         if argv[0] == "git":
-            completed = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, env={**_ENV, **(extra_env or {})}, check=False)
+            completed = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, env=_fixture_git_env(extra_env), check=False)
             return bounded_command_outcome(returncode=completed.returncode, timed_out=False, duration_ms=1, stdout=completed.stdout, stderr=completed.stderr, output_limit=output_limit)
         if argv[0] == "/bin/launchctl":
             return self._launchctl(argv)
@@ -112,7 +119,7 @@ class FakeRuntime:
 
 
 def _git(repo: Path, *args: str) -> str:
-    return subprocess.run(("git", "-C", str(repo), *args), check=True, capture_output=True, text=True, env=_ENV).stdout.strip()
+    return subprocess.run(("git", "-C", str(repo), *args), check=True, capture_output=True, text=True, env=_fixture_git_env()).stdout.strip()
 
 
 def _digest(name: str) -> str:
@@ -135,9 +142,39 @@ def _bundle(predecessor: str, *, artifacts: list[dict[str, Any]] | None = None) 
 
 def _default_artifacts() -> list[dict[str, Any]]:
     return [
-        {"artifact_id": "instance_launchagent_plist", "kind": "launchd_plist", "logical_destination": "{HOME}/Library/LaunchAgents/local.solet.{NAME}.plist", "preservation_class": "manager_generated_whole", "marker": None, "stamp": "<!-- rendered-from: {TEMPLATE_REF}@{TEMPLATE_DIGEST} -->", "template_ref": "plugins/github_midwife_plugin/knowledge_base/hydration_templates/launchagent.plist.template", "template_digest": _digest("launchagent.plist.template"), "previous_template_digests": [_digest("launchagent.plist.template")]},
-        {"artifact_id": "shell_startup_block", "kind": "managed_block", "logical_destination": "{HOME}/.zshrc", "preservation_class": "operator_owned_with_managed_block", "marker": {"begin": "# BEGIN SOLET {NAME} v{TEMPLATE_DIGEST8}", "end": "# END SOLET {NAME}"}, "stamp": None, "template_ref": "plugins/github_midwife_plugin/knowledge_base/hydration_templates/zshrc_block.template", "template_digest": _digest("zshrc_block.template"), "previous_template_digests": [_digest("zshrc_block.template")]},
-        {"artifact_id": "user_claude_md_section", "kind": "managed_block", "logical_destination": "{HOME}/.claude/CLAUDE.md", "preservation_class": "operator_owned_with_managed_block", "marker": {"begin": "<!-- BEGIN SOLET {NAME} v{TEMPLATE_DIGEST8} -->", "end": "<!-- END SOLET {NAME} -->"}, "stamp": None, "template_ref": "plugins/github_midwife_plugin/knowledge_base/hydration_templates/user_claude_md_section.template", "template_digest": _digest("user_claude_md_section.template"), "previous_template_digests": [_digest("user_claude_md_section.template")]},
+        {
+            "artifact_id": "instance_launchagent_plist",
+            "kind": "launchd_plist",
+            "logical_destination": "{HOME}/Library/LaunchAgents/local.solet.{NAME}.plist",
+            "preservation_class": "manager_generated_whole",
+            "marker": None,
+            "stamp": "<!-- rendered-from: {TEMPLATE_REF}@{TEMPLATE_DIGEST} -->",
+            "template_ref": "plugins/github_midwife_plugin/knowledge_base/hydration_templates/launchagent.plist.template",
+            "template_digest": _digest("launchagent.plist.template"),
+            "previous_template_digests": [_digest("launchagent.plist.template")],
+        },
+        {
+            "artifact_id": "shell_startup_block",
+            "kind": "managed_block",
+            "logical_destination": "{HOME}/.zshrc",
+            "preservation_class": "operator_owned_with_managed_block",
+            "marker": {"begin": "# BEGIN SOLET {NAME} v{TEMPLATE_DIGEST8}", "end": "# END SOLET {NAME}"},
+            "stamp": None,
+            "template_ref": "plugins/github_midwife_plugin/knowledge_base/hydration_templates/zshrc_block.template",
+            "template_digest": _digest("zshrc_block.template"),
+            "previous_template_digests": [_digest("zshrc_block.template")],
+        },
+        {
+            "artifact_id": "user_claude_md_section",
+            "kind": "managed_block",
+            "logical_destination": "{HOME}/.claude/CLAUDE.md",
+            "preservation_class": "operator_owned_with_managed_block",
+            "marker": {"begin": "<!-- BEGIN SOLET {NAME} v{TEMPLATE_DIGEST8} -->", "end": "<!-- END SOLET {NAME} -->"},
+            "stamp": None,
+            "template_ref": "plugins/github_midwife_plugin/knowledge_base/hydration_templates/user_claude_md_section.template",
+            "template_digest": _digest("user_claude_md_section.template"),
+            "previous_template_digests": [_digest("user_claude_md_section.template")],
+        },
     ]
 
 
@@ -349,7 +386,17 @@ _R56_SKILL = _PLUGIN_ROOT / "tests" / "fixtures" / "hydration_predecessors" / "f
 
 def _skill_artifact(previous: list[str]) -> dict[str, Any]:
     """The record the shipped bundle must declare for the feedback skill (whole file, user scope, refresh-only)."""
-    return {"artifact_id": "feedback_skill", "kind": "rendered_whole", "logical_destination": "{HOME}/.claude/skills/feedback/SKILL.md", "preservation_class": "manager_generated_whole", "marker": None, "stamp": _SKILL_STAMP, "template_ref": _SKILL_REF, "template_digest": _digest(_SKILL_TEMPLATE), "previous_template_digests": previous}
+    return {
+        "artifact_id": "feedback_skill",
+        "kind": "rendered_whole",
+        "logical_destination": "{HOME}/.claude/skills/feedback/SKILL.md",
+        "preservation_class": "manager_generated_whole",
+        "marker": None,
+        "stamp": _SKILL_STAMP,
+        "template_ref": _SKILL_REF,
+        "template_digest": _digest(_SKILL_TEMPLATE),
+        "previous_template_digests": previous,
+    }
 
 
 def _skill_render(template: bytes, digest: str | None) -> str:
@@ -456,18 +503,40 @@ _FLEET_REF = f"plugins/github_midwife_plugin/knowledge_base/hydration_templates/
 _FLEET_STAMP = "# rendered-from: {TEMPLATE_REF}@{TEMPLATE_DIGEST}"
 _FLEET_MARKER = "# One function per role the operator chose in Step 4a."
 _R56_FLEET = _PLUGIN_ROOT / "tests" / "fixtures" / "hydration_predecessors" / "fleet_functions_r56.fixture"
+_R58_FLEET = _R56_FLEET.with_name("fleet_functions_r58.fixture")
 _EXCLUDE_TEMPLATE = "clone_exclude_block.template"
 _ROLE_FUNCTIONS = "\nclaude-iris-lead() { _claude_for_iris Lead }\nclaude-iris-restart-lead() {\n  tmux kill-session -t =Lead 2>/dev/null\n  _claude_for_iris Lead\n}\n"
 
 
 def _fleet_artifact(previous: list[str]) -> dict[str, Any]:
     """The record the shipped bundle must declare for the fleet launcher: refreshed above the role-function line only."""
-    return {"artifact_id": "fleet_launcher", "kind": "rendered_whole", "logical_destination": "{TARGET}/client/{NAME}-fleet.zsh", "preservation_class": "operator_owned_with_managed_block", "marker": None, "stamp": _FLEET_STAMP, "section_end": _FLEET_MARKER, "template_ref": _FLEET_REF, "template_digest": _digest(_FLEET_TEMPLATE), "previous_template_digests": previous}
+    return {
+        "artifact_id": "fleet_launcher",
+        "kind": "rendered_whole",
+        "logical_destination": "{TARGET}/client/{NAME}-fleet.zsh",
+        "preservation_class": "operator_owned_with_managed_block",
+        "marker": None,
+        "stamp": _FLEET_STAMP,
+        "section_end": _FLEET_MARKER,
+        "template_ref": _FLEET_REF,
+        "template_digest": _digest(_FLEET_TEMPLATE),
+        "previous_template_digests": previous,
+    }
 
 
 def _exclude_artifact() -> dict[str, Any]:
     """The record the shipped bundle must declare for the clone's local ignore file."""
-    return {"artifact_id": "clone_exclude_block", "kind": "managed_block", "logical_destination": "{TARGET}/.git/info/exclude", "preservation_class": "operator_owned_with_managed_block", "marker": {"begin": "# BEGIN SOLET {NAME} v{TEMPLATE_DIGEST8}", "end": "# END SOLET {NAME}"}, "stamp": None, "template_ref": f"plugins/github_midwife_plugin/knowledge_base/hydration_templates/{_EXCLUDE_TEMPLATE}", "template_digest": _digest(_EXCLUDE_TEMPLATE), "previous_template_digests": []}
+    return {
+        "artifact_id": "clone_exclude_block",
+        "kind": "managed_block",
+        "logical_destination": "{TARGET}/.git/info/exclude",
+        "preservation_class": "operator_owned_with_managed_block",
+        "marker": {"begin": "# BEGIN SOLET {NAME} v{TEMPLATE_DIGEST8}", "end": "# END SOLET {NAME}"},
+        "stamp": None,
+        "template_ref": f"plugins/github_midwife_plugin/knowledge_base/hydration_templates/{_EXCLUDE_TEMPLATE}",
+        "template_digest": _digest(_EXCLUDE_TEMPLATE),
+        "previous_template_digests": [],
+    }
 
 
 def _fleet_render(template: bytes, digest: str | None, controller: str) -> str:
@@ -484,7 +553,12 @@ def _refreshed(candidate: str, original: str) -> str:
 
 
 def _fleet_target(root: Path) -> Path:
-    """A Git target whose predecessor commit carries the real r56 fleet template and whose candidate declares both shipped in-clone artifacts."""
+    """Build the real template history that installer refresh reads by digest.
+
+    Keep both released generations in predecessor commits: r56 predates tmux
+    hosting, and r58 predates the Git-control wording correction. The candidate
+    declares both digests so refresh can recognize either installed generation.
+    """
     target = root / "target"
     templates = target / "plugins/github_midwife_plugin/knowledge_base/hydration_templates"
     templates.mkdir(parents=True)
@@ -495,9 +569,14 @@ def _fleet_target(root: Path) -> Path:
     _git(target, "add", "-A")
     _git(target, "commit", "--quiet", "-m", "predecessor")
     predecessor = _git(target, "rev-parse", "HEAD")
+    (templates / _FLEET_TEMPLATE).write_bytes(_R58_FLEET.read_bytes())
+    _git(target, "add", "-A")
+    _git(target, "commit", "--quiet", "-m", "r58 predecessor")
+    r58 = _git(target, "rev-parse", "HEAD")
     for name in (_FLEET_TEMPLATE, _EXCLUDE_TEMPLATE):
         (templates / name).write_bytes((_TEMPLATES / name).read_bytes())
-    bundle = _bundle(predecessor, artifacts=[_exclude_artifact(), _fleet_artifact([sha256_bytes(_R56_FLEET.read_bytes())])])
+    bundle = _bundle(predecessor, artifacts=[_exclude_artifact(), _fleet_artifact([sha256_bytes(path.read_bytes()) for path in (_R56_FLEET, _R58_FLEET)])])
+    bundle["supported_predecessors"].append({**bundle["supported_predecessors"][0], "commit": r58})
     (target / "plugins/github_midwife_plugin/knowledge_base/existing_install_flow.json").write_text(json.dumps(bundle, indent=2))
     _git(target, "add", "-A")
     _git(target, "commit", "--quiet", "-m", "candidate")
@@ -509,13 +588,18 @@ def _check_fleet_declared() -> None:
     rows = json.loads((_KB / "existing_install_flow.json").read_text())["managed_artifacts"]
     shipped = {row["artifact_id"]: row for row in rows}
     _check(shipped.get("clone_exclude_block") == _exclude_artifact(), "declared record: the clone's local ignore file as a managed block")
-    _check(shipped.get("fleet_launcher") == _fleet_artifact([sha256_bytes(_R56_FLEET.read_bytes())]), "declared record: the fleet launcher, refreshed above the role-function line, r56 digest as previous")
+    _check(shipped.get("fleet_launcher") == _fleet_artifact([sha256_bytes(path.read_bytes()) for path in (_R56_FLEET, _R58_FLEET)]), "declared record: the fleet launcher, refreshed above the role-function line, r56 and r58 digests as previous")
     _check([row["artifact_id"] for row in rows].index("clone_exclude_block") < [row["artifact_id"] for row in rows].index("fleet_launcher"), "the exclude block is written before the file it ignores")
     _check(b"_tmux_host_for_" not in _R56_FLEET.read_bytes() and b"_tmux_host_for_" in (_TEMPLATES / _FLEET_TEMPLATE).read_bytes(), "the r56 fixture is the launcher without tmux hosting and the shipped template is not")
     _check((_R56_FLEET.read_bytes().count(_FLEET_MARKER.encode()), (_TEMPLATES / _FLEET_TEMPLATE).read_bytes().count(_FLEET_MARKER.encode())) == (1, 1), "the section marker occurs once in the r56 and the shipped template")
 
 
 def _check_fleet_refresh(root: Path) -> None:
+    """Exercise absent, released and edited launchers through the installer.
+
+    Both released stamps must refresh to the candidate template. Operator role
+    functions and controller choices survive; edited launcher sections stay put.
+    """
     target = _fleet_target(root)
     runtime = FakeRuntime(root / "home")
     fleet = target / "client" / f"{_NAME}-fleet.zsh"
@@ -528,7 +612,8 @@ def _check_fleet_refresh(root: Path) -> None:
     _apply(target, runtime, ref, "fleet_launcher")
     _check((fleet.exists(), len(runtime.writes)) == (False, writes), "no fleet file: apply creates nothing")
     _check_fleet_legacy_replaced(target, runtime, fleet, ref, current, previous)
-    _check_fleet_stamped_previous(target, runtime, fleet, ref, current, previous)
+    for source in (_R56_FLEET, _R58_FLEET):
+        _check_fleet_stamped_previous(target, runtime, fleet, ref, current, source.read_bytes())
     _check_fleet_edited_is_left(target, runtime, fleet, ref, current, previous)
 
 
@@ -547,6 +632,7 @@ def _check_fleet_legacy_replaced(target: Path, runtime: FakeRuntime, fleet: Path
     _check(_apply(target, runtime, ref, "fleet_launcher")["checkpoint_status"] == "applied", "apply succeeds")
     refreshed = fleet.read_text()
     _check(refreshed == _refreshed(_fleet_render(current, _digest(_FLEET_TEMPLATE), "Lead-Git"), original), "the launcher section is the stamped candidate render, the operator's tail is unchanged")
+    _check("this variable does not enforce Git permissions" in refreshed and "arming boundary" not in refreshed, "the real installer renders the revised Git-control explanation")
     _check(refreshed.count(_FLEET_MARKER) == 1 and refreshed.partition(_FLEET_MARKER)[2] == original.partition(_FLEET_MARKER)[2], "role functions and everything below the marker are byte-identical")
     _check(controller_line in refreshed.splitlines() and "_tmux_host_for_iris" in refreshed, "the operator's GIT_CONTROLLER_NAME line is unchanged and the launcher now hosts each role in tmux")
     _check(fleet.stat().st_mode & 0o777 == 0o640, "the file mode survives the refresh")
@@ -555,14 +641,33 @@ def _check_fleet_legacy_replaced(target: Path, runtime: FakeRuntime, fleet: Path
     writes = len(runtime.writes)
     _apply(target, runtime, ref, "fleet_launcher")
     _check((fleet.read_text(), len(runtime.writes)) == (refreshed, writes), "a second update rewrites nothing")
+    crlf = original.replace("\n", "\r\n")
+    _check("\r\n" in crlf and "\n" not in crlf.replace("\r\n", ""), "fixture: r56 launcher and operator tail use CRLF without bare LF")
+    fleet.write_bytes(crlf.encode())
+    _check(_apply(target, runtime, ref, "fleet_launcher")["checkpoint_status"] == "applied", "CRLF legacy rendered_whole refresh applies")
+    expected = _refreshed(_fleet_render(current, _digest(_FLEET_TEMPLATE), "Lead-Git").replace("\n", "\r\n"), crlf).encode()
+    observed = fleet.read_bytes()
+    _check(observed == expected, f"CRLF rendered_whole refresh: operator tail remains byte-exact; expected_sha256={sha256_bytes(expected)} observed_sha256={sha256_bytes(observed)}")
+    current_crlf = _refreshed(_fleet_render(current, _digest(_FLEET_TEMPLATE), "Lead-Git").replace("\n", "\r\n"), crlf).encode()
+    fleet.write_bytes(current_crlf)
+    probe = _probe(target, runtime, ref, "fleet_launcher", purpose="post_apply")
+    _check((probe["checkpoint_status"], _state(probe, "fleet_launcher")["state"], _state(probe, "fleet_launcher")["action"]) == ("verified", "stamped_current", "none"), "current CRLF section probes stamped_current with no action")
+    writes = len(runtime.writes)
+    _apply(target, runtime, ref, "fleet_launcher")
+    _check((fleet.read_bytes(), len(runtime.writes)) == (current_crlf, writes), "applying current CRLF leaves every byte unchanged")
 
 
 def _check_fleet_stamped_previous(target: Path, runtime: FakeRuntime, fleet: Path, ref: str, current: bytes, previous: bytes) -> None:
+    """Refresh a declared predecessor stamp without changing operator content.
+
+    The same production path handles both released generations. A blank
+    controller choice remains a recognizable legacy render after refresh.
+    """
     previous_digest = sha256_bytes(previous)
     original = _fleet_render(previous, previous_digest, "Git-Controller") + _ROLE_FUNCTIONS
     fleet.write_text(original)
     row = _state(_probe(target, runtime, ref, "fleet_launcher"), "fleet_launcher")
-    _check((row["state"], row["action"], row["stamped_digest"]) == ("stamped_previous", "render_whole", previous_digest), "a launcher stamped with the r56 digest is a previous render")
+    _check((row["state"], row["action"], row["stamped_digest"]) == ("stamped_previous", "render_whole", previous_digest), "a launcher stamped with a declared predecessor digest is a previous render")
     _apply(target, runtime, ref, "fleet_launcher")
     _check(fleet.read_text() == _refreshed(_fleet_render(current, _digest(_FLEET_TEMPLATE), "Git-Controller"), original), "a stamped previous launcher is replaced above the marker only")
     solo = _fleet_render(previous, None, "") + _ROLE_FUNCTIONS
@@ -605,7 +710,7 @@ def _check_clone_exclude(root: Path) -> None:
     ref = "existing::hydration.reconcile"
     exclude = target / ".git" / "info" / "exclude"
     original = exclude.read_text()
-    _check(subprocess.run(("git", "-C", str(target), "check-ignore", "-q", "--no-index", "--", f"client/{_NAME}-fleet.zsh"), env=_ENV, check=False).returncode == 1, "fixture: the clone does not ignore client/")
+    _check(subprocess.run(("git", "-C", str(target), "check-ignore", "-q", "--no-index", "--", f"client/{_NAME}-fleet.zsh"), env=_fixture_git_env(), check=False).returncode == 1, "fixture: the clone does not ignore client/")
     probe = _probe(target, runtime, ref, "clone_exclude_block")
     row = _state(probe, "clone_exclude_block")
     _check((probe["checkpoint_status"], row["state"], row["action"]) == ("pending", "absent", "append_block"), "no block: the plan appends one")
@@ -615,7 +720,7 @@ def _check_clone_exclude(root: Path) -> None:
     written = exclude.read_text()
     begin, end = marker_lines("# BEGIN SOLET {NAME} v{TEMPLATE_DIGEST8}", "# END SOLET {NAME}", _NAME, _digest(_EXCLUDE_TEMPLATE))
     _check(written.startswith(original) and f"{begin}\n" in written and "\nclient/\n" in written and written.rstrip("\n").endswith(end), "the block is appended under the versioned marker and the existing lines are untouched")
-    _check(subprocess.run(("git", "-C", str(target), "check-ignore", "-q", "--no-index", "--", f"client/{_NAME}-fleet.zsh"), env=_ENV, check=False).returncode == 0, "the clone now ignores the fleet file")
+    _check(subprocess.run(("git", "-C", str(target), "check-ignore", "-q", "--no-index", "--", f"client/{_NAME}-fleet.zsh"), env=_fixture_git_env(), check=False).returncode == 0, "the clone now ignores the fleet file")
     again = _probe(target, runtime, ref, "clone_exclude_block", purpose="post_apply")
     _check((again["checkpoint_status"], _state(again, "clone_exclude_block")["state"]) == ("verified", "stamped_current"), "post-apply the block reads back as stamped current")
     writes = len(runtime.writes)
@@ -734,7 +839,10 @@ def _check_dependency_route(root: Path) -> None:
     (target / ".venv/bin").mkdir(parents=True)
     (target / ".venv/bin/python3").write_text("fixture")
     (target / ".venv/bin/solet-bridge").write_text("fixture")
-    closure = [f"{name}={rel}" for name, rel in (("solet-setup-contracts", "solet_setup_contracts"), ("ananta", "ananta"), ("macos-vault-plugin", "plugins/macos_vault_plugin"), ("github_midwife_plugin", "plugins/github_midwife_plugin"), ("agent_messaging_plugin", "plugins/agent_messaging_plugin"), ("extra_plugin", "plugins/extra_plugin"))]
+    closure = [
+        f"{name}={rel}"
+        for name, rel in (("solet-setup-contracts", "solet_setup_contracts"), ("ananta", "ananta"), ("macos-vault-plugin", "plugins/macos_vault_plugin"), ("github_midwife_plugin", "plugins/github_midwife_plugin"), ("agent_messaging_plugin", "plugins/agent_messaging_plugin"), ("extra_plugin", "plugins/extra_plugin"))
+    ]
     pip_calls: list[list[str]] = []
     present = {"solet-setup-contracts", "ananta", "macos-vault-plugin", "github_midwife_plugin", "agent_messaging_plugin"}
 
@@ -753,7 +861,25 @@ def _check_dependency_route(root: Path) -> None:
         return subprocess.CompletedProcess(command, 0, "", "")
 
     def raw(phase: str, purpose: str | None, inputs: dict[str, Any]) -> dict[str, Any]:
-        return {"protocol_version": 1, "kind": "operation_request", "request_id": str(uuid.uuid4()), "operation_id": "dependencies_reconcile", "operation_ref": "existing::dependencies.reconcile", "phase": phase, "probe_purpose": purpose, "attempt": 1, "name": _NAME, "target": str(target), "flow_id": "existing-install", "flow_source_revision": "a" * 40, "answers_fingerprint": "sha256:" + "b" * 64, "approval_fingerprint": None if phase == "probe" else "sha256:" + "c" * 64, "dry_run": phase == "probe", "timeout_seconds": 30, "public_inputs": inputs}
+        return {
+            "protocol_version": 1,
+            "kind": "operation_request",
+            "request_id": str(uuid.uuid4()),
+            "operation_id": "dependencies_reconcile",
+            "operation_ref": "existing::dependencies.reconcile",
+            "phase": phase,
+            "probe_purpose": purpose,
+            "attempt": 1,
+            "name": _NAME,
+            "target": str(target),
+            "flow_id": "existing-install",
+            "flow_source_revision": "a" * 40,
+            "answers_fingerprint": "sha256:" + "b" * 64,
+            "approval_fingerprint": None if phase == "probe" else "sha256:" + "c" * 64,
+            "dry_run": phase == "probe",
+            "timeout_seconds": 30,
+            "public_inputs": inputs,
+        }
 
     probe = execute_adapter_request(raw("probe", "pre_apply", {"declared_closure": closure}), runner=runner, which=lambda _name: None, base_python=sys.executable)
     _check(probe["checkpoint_status"] == "pending" and [action["id"] for action in probe["planned_actions"]] == ["pip.install_editable.plugins.extra_plugin"], f"one missing declared plugin plans exactly that editable install: {probe['planned_actions']}")
@@ -805,7 +931,7 @@ def main() -> int:
         _check_dependency_route(root / "route")
     _check_seed_validator()
     _check(set(ops.operation_handlers()) == set(ops.EXISTING_ALLOWED_PUBLIC_INPUTS), "handler table and allowed inputs agree")
-    print(f"existing_install_operations_smoke OK: {_CHECKS} checks passed")
+    print(f"existing_install_operations_smoke OK: {len(_CHECKS_RUN)} checks passed")
     return 0
 
 

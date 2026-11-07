@@ -1,0 +1,1 @@
+# Landing-derived RELEASE_NOTES.md draft, the email rule and the publish_release preflight notes check.

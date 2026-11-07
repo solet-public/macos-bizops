@@ -73,6 +73,9 @@ _PEER_SEND_DESCRIPTION: Final[str] = "\n".join(
         "  notifications/homunculus/peer_message. A leading 'IMPORTANT:' in",
         "  the prose is stripped as input hygiene only; it no longer gates",
         "  delivery.",
+        "  A result with send_status=stored_no_wake includes a durable",
+        "  message_id but no recipient wake: do NOT resend it; wake by",
+        "  another route. The sender_notice field explains this state.",
         "",
         "Fails (HTTP 400) if the peer is not currently registered, the",
         "peer_id is ambiguous without an instance hint (peer_ambiguous),",
@@ -99,6 +102,9 @@ _PEER_SEND_BY_NAME_DESCRIPTION: Final[str] = "\n".join(
         "  wake is a transport property, not something the sender opts into.",
         "  A leading 'IMPORTANT:' in the content is stripped as input",
         "  hygiene only; it no longer gates delivery.",
+        "  If send_status=stored_no_wake, the message_id is already stored",
+        "  and the recipient was not woken: do NOT resend; wake by another",
+        "  route. Read sender_notice for the instruction.",
         "",
         "This is the preferred task-assignment tool. Use peer_send only for",
         "direct replies or an operator-requested exact live instance.",
@@ -118,12 +124,18 @@ _PEER_INBOX_DESCRIPTION: Final[str] = "\n".join(
         "directions and cannot be combined. With no cursor it returns the",
         "NEWEST messages, newest-first. `after` walks BACKWARD: messages OLDER",
         "than the timestamp, newest-first; echo the page's next_after_created_at",
-        "and stop when instance_exhausted is true. `since` reads FORWARD:",
+        "and stop when instance_exhausted is true. `since` starts a FORWARD read:",
         "messages strictly NEWER than the timestamp, oldest-first; echo the",
-        "page's next_since_created_at and stop when instance_exhausted is true.",
-        "To poll for what is new since a time, use `since`, never `after`. Both",
-        "are timestamp-only cursors, so instance_exhausted does not claim",
-        "duplicate-timestamp rows are globally lossless.",
+        "page's next_since_cursor as `since_cursor` to continue tie-safely.",
+        "To poll for what is new since a time, use `since`, never `after`;",
+        "`since` also bounds role_entries to rows newer than it, and",
+        "role_since_created_at echoes it (null means not applied). Both",
+        "The opaque continuation is a (created_at, id) key, so page boundaries",
+        "inside duplicate timestamps remain lossless.",
+        "",
+        "role_read_coverage names each role the role section read and counts",
+        "the rows its covered-mark floor (floor_hidden) and display receipts",
+        "(receipt_hidden) hid, so an empty role_entries can be explained.",
         "",
         "Reading the inbox does NOT obligate you to reply.",
     ],
@@ -389,9 +401,18 @@ TOOLS: Final[list[dict[str, Any]]] = [
                 "since": {
                     "type": "string",
                     "description": (
-                        "ISO-8601 FORWARD cursor: returns messages strictly "
-                        "NEWER than it, oldest-first. Echo "
-                        "next_since_created_at. Excludes `after`."
+                        "ISO-8601 FORWARD first-page horizon: returns messages "
+                        "strictly NEWER than it, oldest-first. Continue with "
+                        "next_since_cursor as `since_cursor`. Also the horizon of "
+                        "role_entries (rows newer than it only, still "
+                        "paged by role_after). Excludes `after` and `since_cursor`."
+                    ),
+                },
+                "since_cursor": {
+                    "type": "string",
+                    "description": (
+                        "Opaque tie-safe continuation from next_since_cursor. "
+                        "Echo verbatim; excludes `after` and `since`."
                     ),
                 },
                 "limit": {

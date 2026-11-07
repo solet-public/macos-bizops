@@ -21,18 +21,20 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import secrets
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
-from ananta.core.runtime.port_manager import read_port_file
+from ananta.core.runtime.port_manager import get_runtime_dir, read_port_file
 from mcp.server.lowlevel import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from ..bridge_diagnostics import BridgeDiagnostics, ClientReason
 from ..env_contract import (
     AGENT_IDENTITY_ENV,
     AGENT_INSTANCE_ID_ENV,
@@ -40,11 +42,15 @@ from ..env_contract import (
     AGENT_SESSION_ID_ENV,
     AGENT_SESSION_LABEL_ENV,
     enforce_no_legacy_agent_env,
+    resolve_session_identity,
 )
-from .forwarder import Forwarder
+from ..platform_surface import log_mcp_failure, mcp_failure_scope
+from .forwarder import CLIENT_IO, Forwarder
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+logger = logging.getLogger(__name__)
 
 SERVER_NAME: Final[str] = "solet"
 SERVER_VERSION: Final[str] = "1.0.0"
@@ -75,9 +81,7 @@ SESSION_ID_ENV_VARS_BY_AGENT: Final[dict[str, tuple[str, ...]]] = {
         AGENT_SESSION_ID_ENV,
     ),
 }
-DEFAULT_SESSION_ID_ENV_VARS: Final[tuple[str, ...]] = (
-    AGENT_SESSION_ID_ENV,
-)
+DEFAULT_SESSION_ID_ENV_VARS: Final[tuple[str, ...]] = (AGENT_SESSION_ID_ENV,)
 
 SERVER_INSTRUCTIONS: Final[str] = "\n".join(
     [
@@ -163,10 +167,7 @@ TOOLS: Final[list[Tool]] = [
     ),
     Tool(
         name="process_search",
-        description=(
-            "Search the solet process registry for processes matching a "
-            "natural-language query."
-        ),
+        description=("Search the solet process registry for processes matching a natural-language query."),
         inputSchema={
             "type": "object",
             "properties": {
@@ -179,10 +180,7 @@ TOOLS: Final[list[Tool]] = [
     ),
     Tool(
         name="process_schema",
-        description=(
-            "Retrieve the invocation schema for a single solet process by "
-            "its process_key."
-        ),
+        description=("Retrieve the invocation schema for a single solet process by its process_key."),
         inputSchema={
             "type": "object",
             "properties": {
@@ -222,12 +220,7 @@ TOOLS: Final[list[Tool]] = [
     ),
     Tool(
         name="process_result",
-        description=(
-            "Snapshot read of an action_id's current observable state "
-            "(status, error_message, latest stored raw result row if "
-            "any). This is for diagnostics -- completion is delivered "
-            "via channel notifications, not by polling here."
-        ),
+        description=("Snapshot read of an action_id's current observable state (status, error_message, latest stored raw result row if any). This is for diagnostics -- completion is delivered via channel notifications, not by polling here."),
         inputSchema={
             "type": "object",
             "properties": {
@@ -261,17 +254,11 @@ TOOLS: Final[list[Tool]] = [
             "properties": {
                 "agent_id": {
                     "type": "string",
-                    "description": (
-                        'Stable handle (e.g. "claude_code", "codex"); regex '
-                        "[A-Za-z0-9._-]{1,64}."
-                    ),
+                    "description": ('Stable handle (e.g. "claude_code", "codex"); regex [A-Za-z0-9._-]{1,64}.'),
                 },
                 "session_label": {
                     "type": "string",
-                    "description": (
-                        'Optional human label for this session ("codex on '
-                        'baroque-suite"). Defaults to the auto-inferred label.'
-                    ),
+                    "description": ('Optional human label for this session ("codex on baroque-suite"). Defaults to the auto-inferred label.'),
                 },
             },
             "required": ["agent_id"],
@@ -359,19 +346,11 @@ TOOLS: Final[list[Tool]] = [
                 },
                 "peer_agent_instance_id": {
                     "type": "string",
-                    "description": (
-                        "Specific instance to address when multiple instances "
-                        "of peer_id are registered. Omit when only one "
-                        "instance exists."
-                    ),
+                    "description": ("Specific instance to address when multiple instances of peer_id are registered. Omit when only one instance exists."),
                 },
                 "peer_agent_session_id": {
                     "type": "string",
-                    "description": (
-                        "Stable logical-session fallback from a reply hint. "
-                        "Used only after peer_agent_instance_id is unreachable; "
-                        "never overrides a live instance."
-                    ),
+                    "description": ("Stable logical-session fallback from a reply hint. Used only after peer_agent_instance_id is unreachable; never overrides a live instance."),
                 },
                 "content": {
                     "type": "array",
@@ -421,18 +400,11 @@ TOOLS: Final[list[Tool]] = [
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": (
-                        "Durable role name registered in the solet role binding "
-                        "table, such as Coordinator-Dusk or Architect."
-                    ),
+                    "description": ("Durable role name registered in the solet role binding table, such as Coordinator-Dusk or Architect."),
                 },
                 "content": {
                     "type": "string",
-                    "description": (
-                        "Message text. Delivery is a transport property, not a "
-                        "sender-declared one: every send is delivery-attempted "
-                        "against the resolved recipient's live binding."
-                    ),
+                    "description": ("Message text. Delivery is a transport property, not a sender-declared one: every send is delivery-attempted against the resolved recipient's live binding."),
                 },
             },
             "required": ["name", "content"],
@@ -454,12 +426,18 @@ TOOLS: Final[list[Tool]] = [
                 "directions and cannot be combined. With no cursor it returns the",
                 "NEWEST messages, newest-first. `after` walks BACKWARD: messages OLDER",
                 "than the timestamp, newest-first; echo the page's next_after_created_at",
-                "and stop when instance_exhausted is true. `since` reads FORWARD:",
+                "and stop when instance_exhausted is true. `since` starts a FORWARD read:",
                 "messages strictly NEWER than the timestamp, oldest-first; echo the",
-                "page's next_since_created_at and stop when instance_exhausted is true.",
-                "To poll for what is new since a time, use `since`, never `after`. Both",
-                "are timestamp-only cursors, so instance_exhausted does not claim",
-                "duplicate-timestamp rows are globally lossless.",
+                "page's next_since_cursor as `since_cursor` to continue tie-safely.",
+                "To poll for what is new since a time, use `since`, never `after`;",
+                "`since` also bounds role_entries to rows newer than it, and",
+                "role_since_created_at echoes it (null means not applied). Both",
+                "The opaque continuation is a (created_at, id) key, so page boundaries",
+                "inside duplicate timestamps remain lossless.",
+                "",
+                "role_read_coverage names each role the role section read and counts",
+                "the rows its covered-mark floor (floor_hidden) and display receipts",
+                "(receipt_hidden) hid, so an empty role_entries can be explained.",
                 "",
                 "Reading the inbox does NOT obligate you to reply.",
             ],
@@ -469,19 +447,15 @@ TOOLS: Final[list[Tool]] = [
             "properties": {
                 "after": {
                     "type": "string",
-                    "description": (
-                        "ISO-8601 BACKWARD cursor: returns messages OLDER than "
-                        "it, newest-first. Echo next_after_created_at. Not "
-                        "'since T' -- use `since` for that. Excludes `since`."
-                    ),
+                    "description": ("ISO-8601 BACKWARD cursor: returns messages OLDER than it, newest-first. Echo next_after_created_at. Not 'since T' -- use `since` for that. Excludes `since`."),
                 },
                 "since": {
                     "type": "string",
-                    "description": (
-                        "ISO-8601 FORWARD cursor: returns messages strictly "
-                        "NEWER than it, oldest-first. Echo "
-                        "next_since_created_at. Excludes `after`."
-                    ),
+                    "description": ("ISO-8601 FORWARD first-page horizon: returns messages strictly NEWER than it, oldest-first. Continue with next_since_cursor as `since_cursor`. Also the horizon of role_entries (rows newer than it only, still paged by role_after). Excludes `after` and `since_cursor`."),
+                },
+                "since_cursor": {
+                    "type": "string",
+                    "description": ("Opaque tie-safe continuation from next_since_cursor. Echo verbatim; excludes `after` and `since`."),
                 },
                 "limit": {
                     "type": "integer",
@@ -491,19 +465,11 @@ TOOLS: Final[list[Tool]] = [
                 },
                 "role_after": {
                     "type": "string",
-                    "description": (
-                        "Opaque cursor for the role_entries section (messages "
-                        "addressed to a role you hold). Echo back the previous "
-                        "page's next_role_cursor verbatim; omit for the first "
-                        "page. Distinct from 'after' (the instance section)."
-                    ),
+                    "description": ("Opaque cursor for the role_entries section (messages addressed to a role you hold). Echo back the previous page's next_role_cursor verbatim; omit for the first page. Distinct from 'after' (the instance section)."),
                 },
                 "observer": {
                     "type": "boolean",
-                    "description": (
-                        "Read-only observation: preserve pending rows and do not issue "
-                        "display acknowledgements."
-                    ),
+                    "description": ("Read-only observation: preserve pending rows and do not issue display acknowledgements."),
                 },
             },
             "additionalProperties": False,
@@ -550,10 +516,7 @@ def _compute_session_role(session_label: str) -> str:
     explicit_role = os.environ.get(AGENT_ROLE_ENV)
     if autobind == "0":
         if explicit_role is not None:
-            msg = (
-                f"{AGENT_ROLE_AUTOBIND_ENV}=0 conflicts with explicit "
-                f"{AGENT_ROLE_ENV}; omit one"
-            )
+            msg = f"{AGENT_ROLE_AUTOBIND_ENV}=0 conflicts with explicit {AGENT_ROLE_ENV}; omit one"
             raise RuntimeError(msg)
         return ""
     if explicit_role is not None:
@@ -593,7 +556,9 @@ def _resolve_agent_session_id(agent_id: str) -> str:
 
 
 def _enforce_session_id_for_managed_registration(
-    *, agent_instance_id_injected: bool, agent_session_id: str,
+    *,
+    agent_instance_id_injected: bool,
+    agent_session_id: str,
 ) -> None:
     """Fail loud rather than register a managed spawn with an empty session id.
 
@@ -630,22 +595,87 @@ def _enforce_session_id_for_managed_registration(
         raise RuntimeError(msg)
 
 
+class BridgeIdentity(NamedTuple):
+    """What this bridge registers as: resolved once, before the port is known."""
+
+    agent_instance_id: str
+    agent_session_id: str
+    session_label: str
+    session_role: str
+
+
+def _resolve_bridge_identity(agent_id: str, solet_name: str) -> BridgeIdentity:
+    """Env first; an env-less Claude Code session then uses its persisted record.
+
+    Only the ``claude_code`` kind reads the record: a Codex bridge started inside
+    a Claude session inherits CLAUDE_CODE_SESSION_ID, and adopting it would be
+    the cross-agent session adoption the carrier chain above refuses.
+    """
+    # v10 Control #2.D: honor an injected AGENT_INSTANCE_ID so a managed
+    # spawner (macos bridge_tracker sets it per session) keeps a STABLE
+    # agent_instance_id across bridge reconnects — the registry replaces in
+    # place instead of accreting a fresh id every reconnect. Absent (operator
+    # .mcp.json path) → mint a durable id as before. Recorded here (rather
+    # than re-derived) because it is also the discriminator the R2 guard below
+    # uses to tell a managed spawn from a genuinely interactive one.
+    agent_instance_id_injected = bool(os.environ.get(AGENT_INSTANCE_ID_ENV))
+    # Env-less session (desktop app / hand-started): the persisted record keyed
+    # by CLAUDE_CODE_SESSION_ID supplies the identity the hooks and the CLI also
+    # read, instead of a throwaway id per bridge start. None whenever a launcher
+    # identity is exported, so launcher spawns take exactly the lines below.
+    file_identity = (
+        resolve_session_identity(
+            os.environ,
+            runtime_dir=get_runtime_dir(solet_name),
+            solet_name=solet_name,
+            created_by="mcp_bridge",
+            warn=_log,
+        )
+        if agent_id == DEFAULT_AGENT_ID
+        else None
+    )
+    agent_instance_id = os.environ.get(AGENT_INSTANCE_ID_ENV) or (file_identity.agent_instance_id if file_identity else _generate_agent_instance_id())
+    # v10 Control #2.D (read-defensively): the stable logical-session key the
+    # role-binding CAS self-refresh keys on to re-point a rotated
+    # agent_instance_id without an explicit re-claim. Resolved through this
+    # bridge's PER-AGENT-KIND carrier chain (keyed on agent_id): a codex bridge
+    # prefers its own CODEX_THREAD_ID then AGENT_SESSION_ID; every other kind
+    # uses AGENT_SESSION_ID only and never adopts CODEX_THREAD_ID (the CAS
+    # filters on agent_session_id alone, so cross-agent adoption would re-point
+    # the wrong session's roles). Any carrier MUST be a per-logical-session id
+    # (a launcher-minted UUID, or Codex's own thread id) — NEVER derived from
+    # parent_pid (shared across app-hosted siblings). Absent all, for a
+    # genuinely interactive/un-managed bridge → "" → the CAS fails closed to
+    # explicit re-claim (server logs S1.5); for a MANAGED spawn (injected
+    # instance id) the same emptiness is no longer tolerated — see the R2
+    # guard immediately below, which fails loud instead (2026-08-18: this
+    # combination measurably persisted a peer_binding row that
+    # peer_holds_role/peer_claim_role can never confirm).
+    agent_session_id = _resolve_agent_session_id(agent_id) or (file_identity.agent_session_id if file_identity else "")
+    _enforce_session_id_for_managed_registration(
+        agent_instance_id_injected=agent_instance_id_injected,
+        agent_session_id=agent_session_id,
+    )
+    session_label = file_identity.session_label if file_identity else _compute_session_label(agent_id)
+    # Role stays env-only: a file label is display metadata and never autobinds.
+    session_role = _compute_session_role(session_label)
+    return BridgeIdentity(agent_instance_id, agent_session_id, session_label, session_role)
+
+
 async def _discover_port(solet_name: str) -> int:
     """Poll the runtime port file until the solet has written it."""
     attempt = 0
     while True:
         attempt += 1
-        port = read_port_file(BRIDGE_SERVICE_NAME, solet_name)
+        port = await CLIENT_IO.run(read_port_file, BRIDGE_SERVICE_NAME, solet_name)
         if port is not None:
             _log(
-                f"discovered bridge port {port} for solet "
-                f"{solet_name!r} after {attempt} attempt(s)",
+                f"discovered bridge port {port} for solet {solet_name!r} after {attempt} attempt(s)",
             )
             return port
         if attempt == 1 or attempt % 10 == 0:
             _log(
-                f"waiting for {solet_name}.{BRIDGE_SERVICE_NAME}.port "
-                f"(attempt {attempt})",
+                f"waiting for {solet_name}.{BRIDGE_SERVICE_NAME}.port (attempt {attempt})",
             )
         await asyncio.sleep(PORT_DISCOVERY_RETRY_S)
 
@@ -661,7 +691,7 @@ def _build_server(forwarder: Forwarder) -> Server[Any, Any]:
     @server.call_tool()  # type: ignore[misc]
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         result = await _dispatch_tool(forwarder, name, arguments or {})
-        return [TextContent(type="text", text=_json_dumps(result))]
+        return [TextContent(type="text", text=await CLIENT_IO.run(_json_dumps, result))]
 
     return server
 
@@ -726,7 +756,8 @@ async def _tool_peer_send(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _tool_peer_send_by_name(
-    fw: Forwarder, a: dict[str, Any],
+    fw: Forwarder,
+    a: dict[str, Any],
 ) -> dict[str, Any]:
     return await fw.peer_send_by_name(
         name=str(a["name"]),
@@ -741,6 +772,7 @@ async def _tool_peer_inbox(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
     return await fw.peer_inbox(
         after=a.get("after"),
         since=a.get("since"),
+        since_cursor=a.get("since_cursor"),
         limit=a.get("limit"),
         include_important=True,
         role_after=a.get("role_after"),
@@ -750,9 +782,7 @@ async def _tool_peer_inbox(fw: Forwarder, a: dict[str, Any]) -> dict[str, Any]:
 
 # Single-pass tool dispatch; new tools register here and stay out of any
 # god-function.
-_TOOL_DISPATCH: Final[
-    dict[str, Callable[[Forwarder, dict[str, Any]], Awaitable[dict[str, Any]]]]
-] = {
+_TOOL_DISPATCH: Final[dict[str, Callable[[Forwarder, dict[str, Any]], Awaitable[dict[str, Any]]]]] = {
     "current_identity": _tool_current_identity,
     "download": _tool_download,
     "process_search": _tool_process_search,
@@ -773,11 +803,24 @@ async def _dispatch_tool(
     args: dict[str, Any],
 ) -> dict[str, Any]:
     """Route an MCP tool call to the matching Forwarder method."""
-    handler = _TOOL_DISPATCH.get(name)
-    if handler is None:
-        msg = f"Unknown tool: {name}"
-        raise ValueError(msg)
-    return await handler(forwarder, args)
+    with mcp_failure_scope("stdio"):
+        try:
+            handler = _TOOL_DISPATCH.get(name)
+            if handler is None:
+                msg = f"Unknown tool: {name}"
+                raise ValueError(msg)
+            return await handler(forwarder, args)
+        except Exception as exc:
+            log_mcp_failure(
+                logger,
+                tool=name,
+                arguments=args,
+                recognized_tools=tuple(_TOOL_DISPATCH),
+                stage="forwarder_dispatch",
+                error=exc,
+                bridge_id=getattr(forwarder, "bridge_id", None),
+            )
+            raise
 
 
 async def _run() -> None:
@@ -788,48 +831,17 @@ async def _run() -> None:
         msg = "SOLET_NAME env var is required to discover the bridge port"
         raise RuntimeError(msg)
     agent_id = os.environ.get(AGENT_IDENTITY_ENV) or DEFAULT_AGENT_ID
-    # v10 Control #2.D: honor an injected AGENT_INSTANCE_ID so a managed
-    # spawner (macos bridge_tracker sets it per session) keeps a STABLE
-    # agent_instance_id across bridge reconnects — the registry replaces in
-    # place instead of accreting a fresh id every reconnect. Absent (operator
-    # .mcp.json path) → mint a durable id as before. Recorded here (rather
-    # than re-derived) because it is also the discriminator the R2 guard below
-    # uses to tell a managed spawn from a genuinely interactive one.
-    agent_instance_id_injected = bool(os.environ.get(AGENT_INSTANCE_ID_ENV))
-    agent_instance_id = (
-        os.environ.get(AGENT_INSTANCE_ID_ENV)
-        or _generate_agent_instance_id()
-    )
-    # v10 Control #2.D (read-defensively): the stable logical-session key the
-    # role-binding CAS self-refresh keys on to re-point a rotated
-    # agent_instance_id without an explicit re-claim. Resolved through this
-    # bridge's PER-AGENT-KIND carrier chain (keyed on agent_id): a codex bridge
-    # prefers its own CODEX_THREAD_ID then AGENT_SESSION_ID; every other kind
-    # uses AGENT_SESSION_ID only and never adopts CODEX_THREAD_ID (the CAS
-    # filters on agent_session_id alone, so cross-agent adoption would re-point
-    # the wrong session's roles). Any carrier MUST be a per-logical-session id
-    # (a launcher-minted UUID, or Codex's own thread id) — NEVER derived from
-    # parent_pid (shared across app-hosted siblings). Absent all, for a
-    # genuinely interactive/un-managed bridge → "" → the CAS fails closed to
-    # explicit re-claim (server logs S1.5); for a MANAGED spawn (injected
-    # instance id) the same emptiness is no longer tolerated — see the R2
-    # guard immediately below, which fails loud instead (2026-08-18: this
-    # combination measurably persisted a peer_binding row that
-    # peer_holds_role/peer_claim_role can never confirm).
-    agent_session_id = _resolve_agent_session_id(agent_id)
-    _enforce_session_id_for_managed_registration(
-        agent_instance_id_injected=agent_instance_id_injected,
-        agent_session_id=agent_session_id,
-    )
-    session_label = _compute_session_label(agent_id)
-    session_role = _compute_session_role(session_label)
+    identity = _resolve_bridge_identity(agent_id, solet_name)
+    agent_instance_id = identity.agent_instance_id
+    agent_session_id = identity.agent_session_id
+    session_label = identity.session_label
+    session_role = identity.session_role
     parent_pid = os.getppid()
 
     port = await _discover_port(solet_name)
     base_url = f"http://127.0.0.1:{port}"
     _log(
-        f"starting MCP bridge: agent_id={agent_id} "
-        f"agent_instance_id={agent_instance_id} parent_pid={parent_pid}",
+        f"starting MCP bridge: agent_id={agent_id} agent_instance_id={agent_instance_id} parent_pid={parent_pid}",
     )
 
     # INF-01 §D.9: a coding-agent session serves the sys:autonomic lane
@@ -865,6 +877,7 @@ async def _run() -> None:
         provides_inference=provides_inference,
         wake_capable=wake_capable,
         session_role=session_role,
+        diagnostics=BridgeDiagnostics(solet_name),
     )
     server = _build_server(forwarder)
 
@@ -877,6 +890,7 @@ async def _run() -> None:
         # on the initialize handshake, so we cannot block on the solet being
         # reachable before returning to the client.
         opener = asyncio.create_task(_open_bridge_safely(forwarder))
+        close_reason: ClientReason = "client_shutdown"
         try:
             await server.run(
                 read_stream,
@@ -891,11 +905,15 @@ async def _run() -> None:
                     instructions=SERVER_INSTRUCTIONS,
                 ),
             )
+            close_reason = "stdio_eof"
+        except Exception:
+            close_reason = "stdio_error"
+            raise
         finally:
             opener.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await opener
-            await forwarder.close()
+            await forwarder.close(client_reported_reason=close_reason)
 
 
 async def _open_bridge_safely(forwarder: Forwarder) -> None:

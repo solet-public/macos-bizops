@@ -17,6 +17,9 @@ class FakeKeychain:
     def __init__(self) -> None:
         self._store: dict[tuple[str, str], bytes] = {}
 
+    def is_available(self) -> bool:
+        return True
+
     def _key(self, plugin_name: str, credential: str) -> tuple[str, str]:
         return (plugin_name, credential)
 

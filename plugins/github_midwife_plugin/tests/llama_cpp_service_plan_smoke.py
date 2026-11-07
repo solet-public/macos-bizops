@@ -62,6 +62,16 @@ def _status(value: JsonObject) -> str:
     return cast(str, value["checkpoint_status"])
 
 
+def _never_touches_lm_studio(helper: str) -> bool:
+    references = (
+        "http://127.0.0.1:1234/v1",
+        "http://localhost:1234/v1",
+        "--port 1234",
+        ".lmstudio",
+    )
+    return not any(reference in helper for reference in references)
+
+
 def _check_pins(registry: llama.LlamaRegistry) -> None:
     for role in registry.roles.values():
         _check(f"{role.name} is pinned by revision, size and SHA-256",
@@ -148,7 +158,20 @@ def _check_rendering(registry: llama.LlamaRegistry, home: Path) -> None:
         _check(f"{role.name}: verifies size and SHA-256 before serving",
                helper.index(role.model.sha256) < helper.index("exec ") and f"!= {role.model.size_bytes} ]" in helper)
         _check(f"{role.name}: resumes the pinned download", "--continue-at -" in helper and role.model.url in helper)
-        _check(f"{role.name}: never touches LM Studio", "1234" not in helper and ".lmstudio" not in helper)
+        _check(f"{role.name}: never touches LM Studio", _never_touches_lm_studio(helper))
+        for reference in (
+            "http://127.0.0.1:1234/v1",
+            "http://localhost:1234/v1",
+            "--port 1234",
+            ".lmstudio",
+        ):
+            _check(f"{role.name}: LM Studio guard rejects {reference}",
+                   _never_touches_lm_studio(helper) and not _never_touches_lm_studio(helper + reference))
+
+    role = registry.roles["summaries"]
+    _plist_text, incidental_digits_helper = llama.render_service(home / "fixture1234", registry, role, SERVER)
+    _check("summaries: never touches LM Studio with incidental 1234 in its home path",
+           _never_touches_lm_studio(incidental_digits_helper))
 
 
 def _check_service_operation(registry: llama.LlamaRegistry, root: Path) -> None:

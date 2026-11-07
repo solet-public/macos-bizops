@@ -51,8 +51,10 @@ def build_role_section(
     *,
     scope: RoleCursorScope,
     limit: int,
+    history_read: bool = False,
     any_floor_truncated: bool = False,
     resume_seed: tuple[str, str] | None = None,
+    truncated_scans: tuple[tuple[object, ...] | None, ...] = (),
 ) -> tuple[tuple[PeerInboxEntry, ...], str | None, bool, str | None]:
     """Merge per-role pages into the global top-``limit`` + the next cursor.
 
@@ -61,7 +63,8 @@ def build_role_section(
     truthful global exhaustion, and —
     per the caller's own floor step — already excludes any row at/below that
     role's ``role_covered_mark`` unless the caller echoed back a history
-    cursor). Returns ``(entries, next_role_cursor, role_floor_applied,
+    cursor). ``history_read`` preserves that decoded mode when a bounded
+    continuation is minted. Returns ``(entries, next_role_cursor, role_floor_applied,
     role_history_cursor)``.
 
     Three DISTINCT mint outcomes (design §3/§4, R2/R4), checked in this
@@ -87,6 +90,12 @@ def build_role_section(
        mark's own row — that row was already delivered to whichever session
        set the mark (attestation only ever follows processing).
 
+    ``truncated_scans`` holds, per role read, the ``(created_at, id)`` its receipt
+    refill stopped after when it spent its page budget, else ``None``. A truncated scan is never
+    exhaustion: the cursor continues from the NEWEST such key (or the last
+    emitted row, whichever is newer), so no unscanned row is skipped and an
+    already-emitted row may be re-read. It outranks the floor-stop outcome.
+
     Otherwise (genuine exhaustion, no floor involvement): ``next_role_cursor
     =None``, ``role_floor_applied=False``, no history cursor — unchanged from
     today.
@@ -97,26 +106,40 @@ def build_role_section(
     entries = tuple(project_role_entry(record) for record in merged)
 
     has_more = len(flat) > len(merged)
+    resume = _truncated_scan_key(truncated_scans)
     if byte_truncated or has_more:
-        last = merged[-1]
-        next_cursor = encode_role_cursor(
-            scope,
-            created_at_iso=normalize_sort_value(last.get(_COL_CREATED_AT)),
-            row_id=str(last.get(_COL_ID, "")),
-        )
+        key = _newest_key(_merge_sort_key(merged[-1]), resume)
+        next_cursor = _encode_continuation_cursor(scope, key, history_read)
+        return entries, next_cursor, any_floor_truncated, None
+
+    if resume is not None:
+        next_cursor = _encode_continuation_cursor(scope, resume, history_read)
         return entries, next_cursor, any_floor_truncated, None
 
     if any_floor_truncated and resume_seed is not None:
         history_cursor = encode_role_history_cursor(
-            scope, created_at_iso=resume_seed[0], row_id=resume_seed[1],
+            scope,
+            created_at_iso=resume_seed[0],
+            row_id=resume_seed[1],
         )
         return entries, None, True, history_cursor
 
     return entries, None, any_floor_truncated, None
 
 
+def _encode_continuation_cursor(
+    scope: RoleCursorScope,
+    key: tuple[str, str],
+    history_read: bool,
+) -> str:
+    """Mint a bounded continuation without dropping an active history mode."""
+    encode = encode_role_history_cursor if history_read else encode_role_cursor
+    return encode(scope, created_at_iso=key[0], row_id=key[1])
+
+
 def _take_within_byte_ceiling(
-    flat: list[dict[str, object]], limit: int,
+    flat: list[dict[str, object]],
+    limit: int,
 ) -> tuple[list[dict[str, object]], bool]:
     """Row-limit cap, THEN a page-level byte ceiling (design §4/R4).
 
@@ -139,6 +162,20 @@ def _take_within_byte_ceiling(
     return kept, False
 
 
+def _truncated_scan_key(
+    truncated_scans: tuple[tuple[object, ...] | None, ...],
+) -> tuple[str, str] | None:
+    """Newest normalized ``(created_at, id)`` among the roles whose scan was truncated."""
+    return max(
+        ((normalize_sort_value(scan[0]), normalize_sort_value(scan[1])) for scan in truncated_scans if scan is not None),
+        default=None,
+    )
+
+
+def _newest_key(key: tuple[str, str], resume: tuple[str, str] | None) -> tuple[str, str]:
+    return key if resume is None else max(key, resume)
+
+
 def _merge_sort_key(record: dict[str, object]) -> tuple[str, str]:
     return (
         normalize_sort_value(record.get(_COL_CREATED_AT)),
@@ -147,7 +184,8 @@ def _merge_sort_key(record: dict[str, object]) -> tuple[str, str]:
 
 
 def merge_undelivered_oldest_first(
-    per_role_records: list[list[dict[str, object]]], limit: int,
+    per_role_records: list[list[dict[str, object]]],
+    limit: int,
 ) -> list[dict[str, object]]:
     """Global OLDEST-first ``(created_at, id)`` merge of per-role undelivered
     pages, capped at ``limit`` — the repair-drain page (Control #5).
@@ -242,8 +280,7 @@ def _coerce_datetime(value: object) -> datetime:
                 f"agent_role_message.created_at is not ISO-8601: {value!r}",
             ) from exc
     raise ValueError(
-        f"agent_role_message.created_at has unexpected type "
-        f"{type(value).__name__}: {value!r}",
+        f"agent_role_message.created_at has unexpected type {type(value).__name__}: {value!r}",
     )
 
 

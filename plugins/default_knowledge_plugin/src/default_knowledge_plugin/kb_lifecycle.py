@@ -10,9 +10,10 @@ import json
 import logging
 import os
 import shutil
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from .constants import (
     PLUGIN_NAME,
@@ -29,10 +30,12 @@ from .kb_git import (
     resolve_git_token,
 )
 from .kb_indexing import (
+    IncrementalIndexResult,
     classify_source_type,
     collect_files,
     delete_kb_chunks,
     delete_kb_chunks_for_file,
+    index_changed_files,
     index_files,
     is_source_stale,
     now_iso,
@@ -40,6 +43,7 @@ from .kb_indexing import (
     resolve_manifest,
     resolve_source,
 )
+from .kb_install_control import InstallCancelledError, InstallControl
 
 if TYPE_CHECKING:
     from ananta.interfaces.embedding_service_interface import TokenBudget
@@ -50,6 +54,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # State helpers
 # ---------------------------------------------------------------------------
+
 
 def get_install_record(name: str, state_service: Any) -> dict[str, Any] | None:
     """Get install record by name. Returns None if not found."""
@@ -63,17 +68,26 @@ def get_install_record(name: str, state_service: Any) -> dict[str, Any] | None:
     return rows[0]
 
 
-def has_valid_install(
+InstallStatus = Literal["valid", "stale", "missing"]
+
+
+def kb_install_status(
     name: str,
     state_service: Any,
     memory_service: Any,
     kb_root: Path | None,
-) -> bool:
-    """Check if a KB is installed, embeddings exist, and content is current."""
+) -> InstallStatus:
+    """Classify a KB install: ``valid`` (skip), ``stale`` (refresh changed files) or ``missing`` (full install).
+
+    ``stale`` means the record and its embeddings exist but a source file is
+    newer than the install, so only changed files need embedding
+    (prb_f6964132). No record, no memory ids, or purged embeddings are
+    ``missing``: nothing stored can be trusted to reuse.
+    """
     record = get_install_record(name, state_service)
     if record is None:
         logger.info("%s: has_valid_install('%s'): no install record", PLUGIN_NAME, name)
-        return False
+        return "missing"
 
     chunk_count = int(record.get("chunk_count") or 0)
     memory_ids = parse_memory_ids(record.get("memory_ids", []))
@@ -85,36 +99,50 @@ def has_valid_install(
     # newly-added source content has appeared since indexed_at.
     if chunk_count == 0 and not memory_ids:
         if is_source_stale(name, record, kb_root):
-            return False
+            return "stale"
         logger.info(
             "%s: has_valid_install('%s'): valid (empty install, content current)",
-            PLUGIN_NAME, name,
+            PLUGIN_NAME,
+            name,
         )
-        return True
+        return "valid"
 
     if not memory_ids:
         logger.info("%s: has_valid_install('%s'): no memory_ids", PLUGIN_NAME, name)
-        return False
+        return "missing"
 
     tag = kb_id_tag(name)
     result = memory_service.recall(query=name, top_k=1, tags=[tag])
     memories = result.get("memories", [])
     if not memories:
         logger.info("%s: has_valid_install('%s'): embeddings purged", PLUGIN_NAME, name)
-        return False
+        return "missing"
 
     if is_source_stale(name, record, kb_root):
-        return False
+        return "stale"
 
     logger.info(
         "%s: has_valid_install('%s'): valid (%d chunks, embeddings present, content current)",
-        PLUGIN_NAME, name, len(memory_ids),
+        PLUGIN_NAME,
+        name,
+        len(memory_ids),
     )
-    return True
+    return "valid"
+
+
+def has_valid_install(
+    name: str,
+    state_service: Any,
+    memory_service: Any,
+    kb_root: Path | None,
+) -> bool:
+    """Check if a KB is installed, embeddings exist, and content is current."""
+    return kb_install_status(name, state_service, memory_service, kb_root) == "valid"
 
 
 def _find_orphan_chunk_ids(
-    state_service: Any, memory_service: Any,
+    state_service: Any,
+    memory_service: Any,
 ) -> tuple[list[str], int, int]:
     """Return (orphan_ids, active_count, total_kb_chunk_count).
 
@@ -154,14 +182,11 @@ def _find_orphan_chunk_ids(
     if not active_ids:
         return [], 0, 0
     tag_result = memory_service.get_memories_by_tag(
-        tag=TAG_DOMAIN_OFFICIAL, include_archived=True,
+        tag=TAG_DOMAIN_OFFICIAL,
+        include_archived=True,
     )
     memories = tag_result.get("memories", [])
-    all_kb_ids: list[str] = [
-        str(memory["id"])
-        for memory in memories
-        if isinstance(memory, dict) and memory.get("id")
-    ]
+    all_kb_ids: list[str] = [str(memory["id"]) for memory in memories if isinstance(memory, dict) and memory.get("id")]
     orphan_ids = [mid for mid in all_kb_ids if mid not in active_ids]
     return orphan_ids, len(active_ids), len(all_kb_ids)
 
@@ -192,7 +217,9 @@ def purge_orphaned_chunks(
     if not orphan_ids:
         logger.info(
             "%s: no orphaned chunks (active=%d, total=%d)",
-            PLUGIN_NAME, active_count, total,
+            PLUGIN_NAME,
+            active_count,
+            total,
         )
         return {
             "status": "completed",
@@ -210,7 +237,11 @@ def purge_orphaned_chunks(
         }
     logger.info(
         "%s: purging %d orphaned chunks (active=%d, total=%d, batch_size=%d)",
-        PLUGIN_NAME, len(orphan_ids), active_count, total, batch_size,
+        PLUGIN_NAME,
+        len(orphan_ids),
+        active_count,
+        total,
+        batch_size,
     )
     deleted = 0
     batch_count = 0
@@ -223,7 +254,10 @@ def purge_orphaned_chunks(
         batch_count += 1
         logger.info(
             "%s: purge batch %d (deleted=%d of %d total orphans)",
-            PLUGIN_NAME, batch_count, deleted, len(orphan_ids),
+            PLUGIN_NAME,
+            batch_count,
+            deleted,
+            len(orphan_ids),
         )
     return {
         "status": "completed",
@@ -237,6 +271,7 @@ def purge_orphaned_chunks(
 # ---------------------------------------------------------------------------
 # Auto-install
 # ---------------------------------------------------------------------------
+
 
 def materialize_missing_plugin_kb_symlinks(
     kb_root: Path,
@@ -313,15 +348,17 @@ def _existing_kb_targets(kb_root: Path) -> set[Path]:
             targets.add(entry.resolve())
         except OSError:
             logger.warning(
-                "%s: kb_root entry %s could not be resolved; ignoring it as a "
-                "target (a stale link must not suppress a real candidate)",
-                PLUGIN_NAME, entry.name,
+                "%s: kb_root entry %s could not be resolved; ignoring it as a target (a stale link must not suppress a real candidate)",
+                PLUGIN_NAME,
+                entry.name,
             )
     return targets
 
 
 def _unlinked_plugin_kb(
-    plugins_dir: Path, plugin_name: str, existing_targets: set[Path],
+    plugins_dir: Path,
+    plugin_name: str,
+    existing_targets: set[Path],
 ) -> Path | None:
     """The plugin's ``knowledge_base/`` iff it ships content nothing links to."""
     kb_dir = plugins_dir / plugin_name / "knowledge_base"
@@ -344,9 +381,10 @@ def _create_kb_symlink(kb_root: Path, plugin_name: str, kb_dir: Path) -> bool:
     link = kb_root / plugin_name
     if link.exists() or link.is_symlink():
         logger.warning(
-            "%s: %s ships KB content with no resolving entry, but the name %s "
-            "is already taken by a DIFFERENT target — skipping rather than "
-            "replacing it", PLUGIN_NAME, plugin_name, link.name,
+            "%s: %s ships KB content with no resolving entry, but the name %s is already taken by a DIFFERENT target — skipping rather than replacing it",
+            PLUGIN_NAME,
+            plugin_name,
+            link.name,
         )
         return False
     relative = os.path.relpath(kb_dir, kb_root)
@@ -355,14 +393,18 @@ def _create_kb_symlink(kb_root: Path, plugin_name: str, kb_dir: Path) -> bool:
     except OSError as exc:
         logger.error(
             "%s: could not materialise KB symlink for %s: %s",
-            PLUGIN_NAME, plugin_name, exc,
+            PLUGIN_NAME,
+            plugin_name,
+            exc,
         )
         return False
     # Logged at INFO with the plugin name so the working-tree change this makes
     # in a git checkout is attributable the moment it appears.
     logger.info(
         "%s: materialised missing KB symlink: %s -> %s",
-        PLUGIN_NAME, plugin_name, relative,
+        PLUGIN_NAME,
+        plugin_name,
+        relative,
     )
     return True
 
@@ -388,8 +430,24 @@ def auto_install_knowledge_bases(
     manifest_plugin_set: set[str] | None = None,
     *,
     budget: TokenBudget | None,
+    control: InstallControl | None = None,
+    control_factory: Callable[[bool], InstallControl] | None = None,
 ) -> None:
     """Scan knowledge_base_root for directories with manifests and install if needed.
+
+    A KB that is ``stale`` or ``missing`` installs through the resumable,
+    per-file path (prb_2e7713d4): a KB without an install record keeps every
+    chunk an earlier, interrupted install already embedded and embeds only the
+    remainder. The record is written only when every manifest file is indexed,
+    so a KB is ``valid`` only then. ``control`` (the startup thread's pacing
+    and shutdown check) is applied between chunks; once it reports shutdown the
+    pass stops with one log line and the progress already made stays stored.
+
+    Before mutating records, snapshot whether ANY install record exists
+    (including inactive or partial records). Only a record-free pass orders
+    candidates by file count, then name; later passes keep alphabetical order.
+    Startup's ``control_factory`` receives that same snapshot to choose its
+    duty once for the entire pass. An explicitly supplied ``control`` wins.
 
     When ``manifest_plugin_set`` is supplied, this also runs a
     complementary auto-uninstall pass beforehand: any existing install
@@ -422,9 +480,19 @@ def auto_install_knowledge_bases(
         logger.info("%s: auto-install skipped (kb_root=%s)", PLUGIN_NAME, kb_root)
         return
 
+    result = state_service.read_state(
+        namespace=PLUGIN_NAME,
+        query={"table": TABLE_KNOWLEDGE_INSTALL, "limit": 1},
+    )
+    first_install = not result["data"]["records"]
+    if control is None and control_factory is not None:
+        control = control_factory(first_install)
+
     if manifest_plugin_set is not None:
         _uninstall_orphaned_plugin_kbs(
-            manifest_plugin_set, state_service, memory_service,
+            manifest_plugin_set,
+            state_service,
+            memory_service,
         )
 
     # Repair the addition side's source of truth BEFORE building candidates:
@@ -432,31 +500,72 @@ def auto_install_knowledge_bases(
     # takes the existing manifest-gate / staleness / install_kb path unchanged.
     materialize_missing_plugin_kb_symlinks(kb_root, manifest_plugin_set)
 
-    candidates = [
-        entry.name
-        for entry in sorted(kb_root.iterdir())
-        if entry.is_dir() and not entry.name.startswith(".")
-    ]
-
-    for name in candidates:
+    for name in _auto_install_candidates(kb_root, first_install=first_install):
         try:
-            if _is_orphaned_plugin_candidate(kb_root / name, name, manifest_plugin_set):
-                logger.info(
-                    "%s: auto-install skipped (plugin not in manifest): %s",
-                    PLUGIN_NAME, name,
-                )
-                continue
-            if has_valid_install(name, state_service, memory_service, kb_root):
-                logger.info("%s: auto-install skipped (valid): %s", PLUGIN_NAME, name)
-                continue
-            logger.info("%s: auto-installing: %s", PLUGIN_NAME, name)
-            install_kb(
-                name, None, kb_root,
-                state_service, memory_service, address_book_service,
+            _auto_install_candidate(
+                name,
+                kb_root,
+                state_service,
+                memory_service,
+                address_book_service,
+                manifest_plugin_set,
                 budget=budget,
+                control=control,
             )
+        except InstallCancelledError:
+            _log_install_stopped(name)
+            return
         except Exception as exc:
+            if control is not None and control.should_stop():
+                _log_install_stopped(name)
+                return
             logger.error("%s: auto-install failed for %s: %s", PLUGIN_NAME, name, exc)
+
+
+def _auto_install_candidate(
+    name: str,
+    kb_root: Path,
+    state_service: Any,
+    memory_service: Any,
+    address_book_service: Any,
+    manifest_plugin_set: set[str] | None,
+    *,
+    budget: TokenBudget | None,
+    control: InstallControl | None,
+) -> None:
+    """Skip one KB directory that is orphaned or valid; otherwise install it through the resumable per-file path."""
+    if _is_orphaned_plugin_candidate(kb_root / name, name, manifest_plugin_set):
+        logger.info(
+            "%s: auto-install skipped (plugin not in manifest): %s",
+            PLUGIN_NAME,
+            name,
+        )
+        return
+    status = kb_install_status(name, state_service, memory_service, kb_root)
+    if status == "valid":
+        logger.info("%s: auto-install skipped (valid): %s", PLUGIN_NAME, name)
+        return
+    logger.info("%s: auto-installing (%s): %s", PLUGIN_NAME, status, name)
+    install_kb(
+        name,
+        None,
+        kb_root,
+        state_service,
+        memory_service,
+        address_book_service,
+        budget=budget,
+        incremental=True,
+        control=control,
+    )
+
+
+def _log_install_stopped(name: str) -> None:
+    """One line for an auto-install pass stopped by shutdown; the next start resumes it."""
+    logger.info(
+        "%s: auto-install stopped at shutdown during %s; chunks already embedded are kept and the next start resumes from them",
+        PLUGIN_NAME,
+        name,
+    )
 
 
 _INGEST_ALL: Final = "all"
@@ -502,7 +611,13 @@ def _ingest_one_kb(
     if has_valid_install(name, state_service, memory_service, kb_root):
         return _ingest_result("single", [], [name], [], 0)
     result = install_kb(
-        name, None, kb_root, state_service, memory_service, address_book_service, budget=budget,
+        name,
+        None,
+        kb_root,
+        state_service,
+        memory_service,
+        address_book_service,
+        budget=budget,
     )
     return _ingest_result("single", [name], [], [], int(result.get("chunk_count") or 0))
 
@@ -526,7 +641,13 @@ def _ingest_all_kbs(
                 unchanged.append(name)
                 continue
             result = install_kb(
-                name, None, kb_root, state_service, memory_service, address_book_service, budget=budget,
+                name,
+                None,
+                kb_root,
+                state_service,
+                memory_service,
+                address_book_service,
+                budget=budget,
             )
             ingested.append(name)
             total_chunks += int(result.get("chunk_count") or 0)
@@ -537,14 +658,18 @@ def _ingest_all_kbs(
 
 
 def _scan_kb_candidates(kb_root: Path) -> list[str]:
-    """Directory names under kb_root eligible for ingest (mirrors auto_install)."""
+    """Directory names under kb_root eligible for auto-install and ingest."""
     if not kb_root.is_dir():
         return []
-    return [
-        entry.name
-        for entry in sorted(kb_root.iterdir())
-        if entry.is_dir() and not entry.name.startswith(".")
-    ]
+    return [entry.name for entry in sorted(kb_root.iterdir()) if entry.is_dir() and not entry.name.startswith(".")]
+
+
+def _auto_install_candidates(kb_root: Path, *, first_install: bool) -> list[str]:
+    """Only a record-free startup pass prioritizes small corpora; ingest keeps its order."""
+    candidates = _scan_kb_candidates(kb_root)
+    if first_install:
+        candidates.sort(key=lambda name: (sum(path.is_file() for path in (kb_root / name).rglob("*")), name))
+    return candidates
 
 
 def _ingest_result(
@@ -566,7 +691,9 @@ def _ingest_result(
 
 
 def _is_orphaned_plugin_candidate(
-    kb_dir: Path, kb_name: str, manifest_plugin_set: set[str] | None,
+    kb_dir: Path,
+    kb_name: str,
+    manifest_plugin_set: set[str] | None,
 ) -> bool:
     """True iff ``kb_dir`` is plugin-owned and its plugin left the manifest."""
     if manifest_plugin_set is None:
@@ -643,16 +770,21 @@ def _uninstall_orphaned_plugin_kbs(
             uninstalled += 1
             logger.info(
                 "%s: auto-uninstalled orphaned plugin KB %s (plugin not in manifest)",
-                PLUGIN_NAME, kb_name,
+                PLUGIN_NAME,
+                kb_name,
             )
         except Exception as exc:
             logger.error(
-                "%s: auto-uninstall failed for %s: %s", PLUGIN_NAME, kb_name, exc,
+                "%s: auto-uninstall failed for %s: %s",
+                PLUGIN_NAME,
+                kb_name,
+                exc,
             )
     if uninstalled:
         logger.info(
             "%s: auto-uninstall pass removed %d orphaned plugin KB(s)",
-            PLUGIN_NAME, uninstalled,
+            PLUGIN_NAME,
+            uninstalled,
         )
     return uninstalled
 
@@ -660,6 +792,7 @@ def _uninstall_orphaned_plugin_kbs(
 # ---------------------------------------------------------------------------
 # Install / uninstall / update
 # ---------------------------------------------------------------------------
+
 
 def install_kb(
     name: str,
@@ -670,8 +803,17 @@ def install_kb(
     address_book_service: Any,
     *,
     budget: TokenBudget | None,
+    incremental: bool = False,
+    control: InstallControl | None = None,
 ) -> dict[str, Any]:
     """Index a knowledge base directory.
+
+    ``incremental=True`` (the auto-install path, prb_f6964132 and prb_2e7713d4)
+    keeps the chunks of unchanged files and embeds only changed or new files
+    through :func:`index_changed_files`; the install record is then replaced in
+    one transaction. With no record yet, it resumes an interrupted first
+    install from the chunks already stored. ``control`` paces it and stops it
+    at shutdown. The default re-indexes the whole KB as described below.
 
     Per D4 (operator-locked 2026-06-21): old-chunk cleanup routes through the
     owning service — ``memory_service.delete_memories_by_tag('knowledge:<kb>')``
@@ -702,63 +844,123 @@ def install_kb(
     manifest = resolve_manifest(kb_dir, name, indexing_config)
 
     existing = get_install_record(name, state_service)
-    if existing:
-        memory_service.delete_memories_by_tag(kb_id_tag(name))
-        with state_service.transactional() as txn:
-            txn.delete_records(
-                namespace=PLUGIN_NAME,
-                query={
-                    "table": TABLE_KNOWLEDGE_INSTALL,
-                    "filters": {"name": name},
-                    "soft_delete": False,
-                },
-            )
+    refresh = _refresh_changed_files(kb_dir, name, manifest, memory_service, budget=budget, control=control) if incremental else None
+    if refresh is None:
+        memory_ids, chunk_count = _reindex_whole_kb(kb_dir, name, manifest, existing, state_service, memory_service, budget=budget)
+        existing = None
+    else:
+        memory_ids, chunk_count = refresh.memory_ids, refresh.chunk_count
 
-    # On partial-index failure the new chunks (tagged knowledge:official, with no
-    # active install record yet — the old record was already deleted above and the
-    # new one is not inserted until below) are orphans swept by the operator-fired
-    # purge_orphaned_chunks verb: the relinquished-atomicity window this slice
-    # already relies on (D4). The exception propagates loud; no inline cleanup.
-    memory_ids, chunk_count = index_files(kb_dir, name, manifest, memory_service, budget=budget)
-
-    resolved_path = str(kb_dir.resolve())
-    clean_source = url if source_type == "git" else None
-    last_commit = git_head_sha(kb_dir) if source_type == "git" else None
-    now = now_iso()
-    record_id = state_service.generate_id(prefix="kin-")
-
+    is_git = source_type == "git"
+    record = {
+        "id": state_service.generate_id(prefix="kin-"),
+        "namespace": PLUGIN_NAME,
+        "name": name,
+        "source": url if is_git else None,
+        "source_type": source_type,
+        "resolved_path": str(kb_dir.resolve()),
+        "manifest_name": manifest.name,
+        "manifest_tags": manifest.tags,
+        "process_keys": manifest.process_keys,
+        "chunk_count": chunk_count,
+        "memory_ids": memory_ids,
+        "branch": branch,
+        "last_indexed_commit": git_head_sha(kb_dir) if is_git else None,
+        "is_active": 1,
+        "indexed_at": now_iso(),
+    }
+    # An incremental refresh keeps the old record until here, so the record is
+    # replaced in one transaction.
     with state_service.transactional() as txn:
+        if existing:
+            _delete_install_record(name, txn)
         txn.write_state(
             namespace=PLUGIN_NAME,
             data={
                 "table": TABLE_KNOWLEDGE_INSTALL,
-                "record": {
-                    "id": record_id,
-                    "namespace": PLUGIN_NAME,
-                    "name": name,
-                    "source": clean_source,
-                    "source_type": source_type,
-                    "resolved_path": resolved_path,
-                    "manifest_name": manifest.name,
-                    "manifest_tags": manifest.tags,
-                    "process_keys": manifest.process_keys,
-                    "chunk_count": chunk_count,
-                    "memory_ids": memory_ids,
-                    "branch": branch,
-                    "last_indexed_commit": last_commit,
-                    "is_active": 1,
-                    "indexed_at": now,
-                },
+                "record": state_service.prepare_record(PLUGIN_NAME, TABLE_KNOWLEDGE_INSTALL, record),
             },
         )
 
-    return {
+    result: dict[str, Any] = {
         "status": "success",
         "name": name,
         "chunk_count": chunk_count,
         "source_type": source_type,
         "manifest_name": manifest.name,
     }
+    return result | _refresh_summary(refresh)
+
+
+def _reindex_whole_kb(
+    kb_dir: Path,
+    name: str,
+    manifest: Any,
+    existing: dict[str, Any] | None,
+    state_service: Any,
+    memory_service: Any,
+    *,
+    budget: TokenBudget | None,
+) -> tuple[list[str], int]:
+    """Drop the KB's chunks and install record, then index every file (the full install)."""
+    if existing:
+        memory_service.delete_memories_by_tag(kb_id_tag(name))
+        with state_service.transactional() as txn:
+            _delete_install_record(name, txn)
+    # On partial-index failure the new chunks (tagged knowledge:official, with no
+    # active install record yet — the old record was already deleted above and the
+    # new one is not inserted until install_kb writes it) are orphans swept by the
+    # operator-fired purge_orphaned_chunks verb: the relinquished-atomicity window
+    # this slice already relies on (D4). The exception propagates loud; no inline
+    # cleanup.
+    return index_files(kb_dir, name, manifest, memory_service, budget=budget)
+
+
+def _refresh_changed_files(
+    kb_dir: Path,
+    name: str,
+    manifest: Any,
+    memory_service: Any,
+    *,
+    budget: TokenBudget | None,
+    control: InstallControl | None = None,
+) -> IncrementalIndexResult:
+    """Embed only the KB's changed or new files and log what the refresh did."""
+    refresh = index_changed_files(kb_dir, name, manifest, memory_service, budget=budget, control=control)
+    logger.info(
+        "%s: %s refreshed: %d file(s) re-embedded (%d chunks), %d unchanged, %d stale chunk(s) deleted",
+        PLUGIN_NAME,
+        name,
+        refresh.files_indexed,
+        refresh.chunks_embedded,
+        refresh.files_unchanged,
+        refresh.chunks_deleted,
+    )
+    return refresh
+
+
+def _refresh_summary(refresh: IncrementalIndexResult | None) -> dict[str, int]:
+    """The incremental counts install_kb adds to its result; empty for a full install."""
+    if refresh is None:
+        return {}
+    return {
+        "files_reindexed": refresh.files_indexed,
+        "files_unchanged": refresh.files_unchanged,
+        "chunks_embedded": refresh.chunks_embedded,
+        "chunks_deleted": refresh.chunks_deleted,
+    }
+
+
+def _delete_install_record(name: str, txn: Any) -> None:
+    """Hard-delete one KB's install record inside the open state transaction ``txn``."""
+    txn.delete_records(
+        namespace=PLUGIN_NAME,
+        query={
+            "table": TABLE_KNOWLEDGE_INSTALL,
+            "filters": {"name": name},
+            "soft_delete": False,
+        },
+    )
 
 
 def uninstall_kb(
@@ -913,7 +1115,8 @@ def update_kb(
 
 
 def list_installed_kbs(
-    active_only: bool, state_service: Any,
+    active_only: bool,
+    state_service: Any,
 ) -> dict[str, Any]:
     """List indexed knowledge bases with metadata."""
     filters: dict[str, Any] = {}
@@ -932,26 +1135,20 @@ def list_installed_kbs(
             continue
         manifest_tags_raw = row.get("manifest_tags", "[]")
         process_keys_raw = row.get("process_keys", "[]")
-        installs.append({
-            "name": row.get("name"),
-            "source": row.get("source"),
-            "source_type": row.get("source_type"),
-            "manifest_name": row.get("manifest_name"),
-            "chunk_count": row.get("chunk_count", 0),
-            "is_active": bool(row.get("is_active", 1)),
-            "indexed_at": row.get("indexed_at"),
-            "branch": row.get("branch"),
-            "manifest_tags": (
-                json.loads(manifest_tags_raw)
-                if isinstance(manifest_tags_raw, str)
-                else manifest_tags_raw
-            ),
-            "process_keys": (
-                json.loads(process_keys_raw)
-                if isinstance(process_keys_raw, str)
-                else process_keys_raw
-            ),
-        })
+        installs.append(
+            {
+                "name": row.get("name"),
+                "source": row.get("source"),
+                "source_type": row.get("source_type"),
+                "manifest_name": row.get("manifest_name"),
+                "chunk_count": row.get("chunk_count", 0),
+                "is_active": bool(row.get("is_active", 1)),
+                "indexed_at": row.get("indexed_at"),
+                "branch": row.get("branch"),
+                "manifest_tags": (json.loads(manifest_tags_raw) if isinstance(manifest_tags_raw, str) else manifest_tags_raw),
+                "process_keys": (json.loads(process_keys_raw) if isinstance(process_keys_raw, str) else process_keys_raw),
+            }
+        )
 
     return {"status": "success", "installs": installs, "count": len(installs)}
 

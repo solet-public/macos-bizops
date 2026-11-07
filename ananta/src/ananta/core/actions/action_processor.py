@@ -17,6 +17,7 @@ from ananta.core.domain.enums import ActionStatus
 from ananta.core.domain.status import is_status_match
 from ananta.core.orchestration import placeholder_utils
 from ananta.core.plugins.plugin_manager import PluginManager
+from ananta.core.runtime.loop_invariant import record_handler_entry
 from ananta.core.services.call_context import CallContext
 from ananta.core.state.execution_token_context import action_execution_context
 from ananta.core.templates.template_functions import TemplateFunctionRegistry
@@ -35,6 +36,7 @@ class IOInterfaceRegistryProtocol(Protocol):
     def is_registered(self, namespace: str) -> bool:
         """Check if namespace is a registered IO interface plugin."""
         ...
+
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +101,6 @@ class InferenceServiceProtocol(Protocol):
     Note: process_inference_request was removed per no-back-compat policy.
     Use process_error or process_results instead.
     """
-
 
 
 # Protocol for action parameter type to avoid circular imports
@@ -210,10 +211,7 @@ class ActionProcessor:
         if self.orchestrator:
             return self.orchestrator.APP_HOME
 
-        raise RuntimeError(
-            "APP_HOME not available - ActionProcessor requires app_home injection or "
-            "orchestrator with APP_HOME attribute"
-        )
+        raise RuntimeError("APP_HOME not available - ActionProcessor requires app_home injection or orchestrator with APP_HOME attribute")
 
     def _ensure_context_initialized(self) -> None:
         """Lazily initialize context management components.
@@ -267,9 +265,7 @@ class ActionProcessor:
 
         return arguments
 
-    def _resolve_placeholders(
-        self, arguments: dict[str, object], action: QueuedActionProtocol
-    ) -> dict[str, object]:
+    def _resolve_placeholders(self, arguments: dict[str, object], action: QueuedActionProtocol) -> dict[str, object]:
         """Resolve placeholders from ExecutionContext.
 
         FAIL-FAST: Raises on missing context or resolution failure.
@@ -302,9 +298,7 @@ class ActionProcessor:
                 details={"action_id": action.id, "flow_id": action.flow_id},
             )
 
-        resolved = placeholder_utils.replace_placeholders_recursive(
-            arguments, context, stop_at_action_boundary=True
-        )
+        resolved = placeholder_utils.replace_placeholders_recursive(arguments, context, stop_at_action_boundary=True)
         # FAIL-FAST: Require valid dict result
         if not isinstance(resolved, dict):
             raise FrameworkError(
@@ -314,9 +308,7 @@ class ActionProcessor:
             )
         return resolved
 
-    def _store_result_in_context(
-        self, action: QueuedActionProtocol, result: dict[str, object]
-    ) -> None:
+    def _store_result_in_context(self, action: QueuedActionProtocol, result: dict[str, object]) -> None:
         """Store result in ExecutionContext.
 
         FAIL-FAST: Raises on missing context or storage failure.
@@ -379,9 +371,7 @@ class ActionProcessor:
                 return {"success": False, "error": resolved}
             arguments = resolved
 
-            result = self._execute_by_provider_type(
-                provider_type, provider, method_name, arguments, action
-            )
+            result = self._execute_by_provider_type(provider_type, provider, method_name, arguments, action)
 
             error_value = result.get("error")
             if error_value:
@@ -419,9 +409,7 @@ class ActionProcessor:
             logger.error(f"Invalid JSON parameters: {e}")
             return {"error": f"Invalid JSON parameters: {e}"}
 
-    def _apply_templates_if_needed(
-        self, arguments: dict[str, object], action: QueuedActionProtocol
-    ) -> dict[str, object]:
+    def _apply_templates_if_needed(self, arguments: dict[str, object], action: QueuedActionProtocol) -> dict[str, object]:
         """Apply template resolution if template patterns are present.
 
         FAIL-FAST: Raises on template resolution failure (no silent fallback).
@@ -476,32 +464,20 @@ class ActionProcessor:
         # ENFORCE PLUGIN CONTRACT: Plugins MUST return ActionResult structure
         # Required fields: action_status, data, actions, error, timestamp
         if not isinstance(result, dict):
-            raise RuntimeError(
-                f"PLUGIN CONTRACT VIOLATION: Plugin '{provider}.{method_name}' must return dict, "
-                f"got {type(result).__name__}"
-            )
+            raise RuntimeError(f"PLUGIN CONTRACT VIOLATION: Plugin '{provider}.{method_name}' must return dict, got {type(result).__name__}")
 
         required_fields = ["action_status", "data", "actions", "error", "timestamp"]
         missing_fields = [f for f in required_fields if f not in result]
 
         if missing_fields:
-            raise RuntimeError(
-                f"PLUGIN CONTRACT VIOLATION: Plugin '{provider}.{method_name}' missing required fields: "
-                f"{missing_fields}. Required: {required_fields}"
-            )
+            raise RuntimeError(f"PLUGIN CONTRACT VIOLATION: Plugin '{provider}.{method_name}' missing required fields: {missing_fields}. Required: {required_fields}")
 
         # Validate field types
         if not isinstance(result["data"], dict):
-            raise RuntimeError(
-                f"PLUGIN CONTRACT VIOLATION: Plugin '{provider}.{method_name}' field 'data' must be dict, "
-                f"got {type(result['data']).__name__}"
-            )
+            raise RuntimeError(f"PLUGIN CONTRACT VIOLATION: Plugin '{provider}.{method_name}' field 'data' must be dict, got {type(result['data']).__name__}")
 
         if not isinstance(result["actions"], list):
-            raise RuntimeError(
-                f"PLUGIN CONTRACT VIOLATION: Plugin '{provider}.{method_name}' field 'actions' must be list, "
-                f"got {type(result['actions']).__name__}"
-            )
+            raise RuntimeError(f"PLUGIN CONTRACT VIOLATION: Plugin '{provider}.{method_name}' field 'actions' must be list, got {type(result['actions']).__name__}")
 
         # Store OUTPUT event for IO plugin post_message (conversation history)
         self._handle_plugin_post_message_output(provider, method_name, result, action)
@@ -553,11 +529,7 @@ class ActionProcessor:
         """
         # Unwrap "params" wrapper from async completion handlers
         params_candidate = arguments.get("params")
-        if (
-            isinstance(params_candidate, dict)
-            and "model" in params_candidate
-            and "prompt" in params_candidate
-        ):
+        if isinstance(params_candidate, dict) and "model" in params_candidate and "prompt" in params_candidate:
             args = params_candidate
         else:
             args = arguments
@@ -578,12 +550,11 @@ class ActionProcessor:
             args["action_name"] = method_name
 
         # All VERTEX methods use standardized params signature
+        record_handler_entry(action.process_key, "handler")
         result = method(params=args, state=state_dict)
 
         if not isinstance(result, dict):
-            raise FrameworkError(
-                f"Service method 'inference_service.{method_name}' must return dict"
-            )
+            raise FrameworkError(f"Service method 'inference_service.{method_name}' must return dict")
         return dict(result)
 
     def _needs_injection(
@@ -784,9 +755,7 @@ class ActionProcessor:
             )
 
         # Delegate to context management service (fail-fast on error)
-        compacted = self._context_management_service.check_and_trigger_compaction(
-            context_id, config
-        )
+        compacted = self._context_management_service.check_and_trigger_compaction(context_id, config)
         if compacted:
             logger.info(f"Compaction triggered for context {context_id}")
 
@@ -809,9 +778,7 @@ class ActionProcessor:
             return self._dispatch_inference_action(service, method_name, arguments, action)
 
         # Standard service method execution
-        return self._execute_standard_service_method(
-            service, provider, method_name, process_def, arguments, action
-        )
+        return self._execute_standard_service_method(service, provider, method_name, process_def, arguments, action)
 
     def _validate_process_registration(self, process_key: str) -> dict[str, object]:
         """Validate process_key is registered and return its definition."""
@@ -820,9 +787,7 @@ class ActionProcessor:
             raise FrameworkError("Invalid process registry structure")
 
         if process_key not in processes:
-            raise FrameworkError(
-                f"Service method '{process_key}' not registered in process registry."
-            )
+            raise FrameworkError(f"Service method '{process_key}' not registered in process registry.")
 
         process_def = processes[process_key]
         if not isinstance(process_def, dict):
@@ -854,9 +819,7 @@ class ActionProcessor:
         # Fall through to standard execution for other inference methods
         process_key = f"service_interface::inference_service::{method_name}"
         process_def = self._validate_process_registration(process_key)
-        return self._execute_standard_service_method(
-            service, "inference_service", method_name, process_def, arguments, action
-        )
+        return self._execute_standard_service_method(service, "inference_service", method_name, process_def, arguments, action)
 
     def _execute_standard_service_method(
         self,
@@ -872,10 +835,20 @@ class ActionProcessor:
         parameters_schema = parameters_schema_raw if isinstance(parameters_schema_raw, dict) else {}
 
         filtered_args = self._filter_and_inject_arguments(
-            arguments, parameters_schema, action, process_def=process_def,
+            arguments,
+            parameters_schema,
+            action,
+            process_def=process_def,
         )
-        method = getattr(service, method_name)
-        result = method(**filtered_args)
+        function_name = process_def.get("function_name")
+        if not isinstance(function_name, str) or not function_name:
+            raise FrameworkError(f"Service process '{provider}.{method_name}' has no function_name")
+        method = getattr(service, function_name, None)
+        if not callable(method):
+            raise FrameworkError(f"Registered service target '{provider}.{function_name}' is not callable")
+        with action_execution_context(action.flow_token_id):
+            record_handler_entry(action.process_key, "handler")
+            result = method(**filtered_args)
 
         # Matrix lifecycle plugins (aws_midwife / aws_undertaker / aws_account_admin)
         # return frozen-dataclass DTOs (BirthResult / TeardownResult / AdminResult) per
@@ -995,17 +968,13 @@ class ActionProcessor:
         """
         parts = process_key.split("::")
         if len(parts) != 3:
-            raise ValueError(
-                f"Invalid process_key format: {process_key} - expected 'provider_type::provider::method_name'"
-            )
+            raise ValueError(f"Invalid process_key format: {process_key} - expected 'provider_type::provider::method_name'")
 
         provider_type, provider, method_name = parts
 
         # Validate provider_type is supported
         if provider_type not in ["plugin", "service_interface"]:
-            raise ValueError(
-                f"Invalid provider_type '{provider_type}' in process_key: {process_key} - must be 'plugin' or 'service_interface'"
-            )
+            raise ValueError(f"Invalid provider_type '{provider_type}' in process_key: {process_key} - must be 'plugin' or 'service_interface'")
 
         return provider_type, provider, method_name
 
@@ -1072,9 +1041,7 @@ class ActionProcessor:
         # undertaker service-interface retirement.
         action_wrapper_name = f"{method_name}_action"
         wrapper_candidate = getattr(plugin, action_wrapper_name, None)
-        if wrapper_candidate is not None and hasattr(
-            wrapper_candidate, "_platform_process_metadata"
-        ):
+        if wrapper_candidate is not None and hasattr(wrapper_candidate, "_platform_process_metadata"):
             method_name = action_wrapper_name
 
         # Get method directly - fail fast if it doesn't exist
@@ -1119,6 +1086,7 @@ class ActionProcessor:
         # Any AsyncJobManager.create_job() calls within this scope will
         # automatically capture the flow_token_id for job-token linking
         with action_execution_context(flow_token_id):
+            record_handler_entry(action.process_key, "handler")
             result = method(params=params, state=state)
 
         # Template processing removed from ActionProcessor - processes call ActionFactory.submit_result_with_template() themselves
@@ -1154,9 +1122,7 @@ class ActionProcessor:
 
         return ActionProcessorStateService(outer_service)
 
-    def _inject_service_if_supported(
-        self, plugin: object, method_name: str, service: object | None, service_name: str
-    ) -> None:
+    def _inject_service_if_supported(self, plugin: object, method_name: str, service: object | None, service_name: str) -> None:
         """Inject a service into plugin if it supports the setter method."""
         if not hasattr(plugin, method_name) or not service:
             return
@@ -1170,17 +1136,11 @@ class ActionProcessor:
         # Inject state_service with context wrapper
         if hasattr(plugin, "set_state_service") and self.state_service:
             wrapped_service = self._create_state_service_wrapper()
-            self._inject_service_if_supported(
-                plugin, "set_state_service", wrapped_service, "state_service"
-            )
+            self._inject_service_if_supported(plugin, "set_state_service", wrapped_service, "state_service")
 
         # Inject other services
-        self._inject_service_if_supported(
-            plugin, "set_action_factory", self.action_factory, "action_factory"
-        )
-        self._inject_service_if_supported(
-            plugin, "set_discovery_service", self.discovery_service, "discovery_service"
-        )
+        self._inject_service_if_supported(plugin, "set_action_factory", self.action_factory, "action_factory")
+        self._inject_service_if_supported(plugin, "set_discovery_service", self.discovery_service, "discovery_service")
 
         # Set session context if supported
         setter = getattr(plugin, "set_session_context", None)
@@ -1216,9 +1176,7 @@ class ActionProcessor:
         try:
             state: dict[str, object] = {
                 "local_variables": self._resolve_local_variables(action) if action else {},
-                "global_variables": (
-                    self._get_template_variables(action.template_namespace) if action else {}
-                ),
+                "global_variables": (self._get_template_variables(action.template_namespace) if action else {}),
                 "APP_HOME": self.app_home,  # Use injected value, not os.environ
             }
 
@@ -1258,9 +1216,7 @@ class ActionProcessor:
 
         return {}
 
-    def _parse_template_variable_records(
-        self, result: dict[str, object], action_namespace: str
-    ) -> dict[str, object]:
+    def _parse_template_variable_records(self, result: dict[str, object], action_namespace: str) -> dict[str, object]:
         """Parse template variables from a list_key_values result.
 
         The key-value verb returns the rows under ``data.values`` as dicts
@@ -1273,38 +1229,23 @@ class ActionProcessor:
         an empty dict.
         """
         if result.get("action_status") != ActionStatus.COMPLETED.value:
-            raise RuntimeError(
-                f"list_key_values did not complete for namespace "
-                f"{action_namespace!r}: {result.get('error')!r}"
-            )
+            raise RuntimeError(f"list_key_values did not complete for namespace {action_namespace!r}: {result.get('error')!r}")
 
         data = result.get("data")
         if not isinstance(data, dict):
-            raise RuntimeError(
-                f"list_key_values returned malformed data for namespace "
-                f"{action_namespace!r}: {data!r}"
-            )
+            raise RuntimeError(f"list_key_values returned malformed data for namespace {action_namespace!r}: {data!r}")
 
         values = data.get("values")
         if not isinstance(values, list):
-            raise RuntimeError(
-                f"list_key_values returned malformed values for namespace "
-                f"{action_namespace!r}: {values!r}"
-            )
+            raise RuntimeError(f"list_key_values returned malformed values for namespace {action_namespace!r}: {values!r}")
 
         variables: dict[str, object] = {}
         for record in values:
             if not isinstance(record, dict):
-                raise RuntimeError(
-                    f"list_key_values returned a non-dict record for namespace "
-                    f"{action_namespace!r}: {record!r}"
-                )
+                raise RuntimeError(f"list_key_values returned a non-dict record for namespace {action_namespace!r}: {record!r}")
             key = record.get("key")
             if not isinstance(key, str):
-                raise RuntimeError(
-                    f"list_key_values returned a record without a string key for "
-                    f"namespace {action_namespace!r}: {record!r}"
-                )
+                raise RuntimeError(f"list_key_values returned a record without a string key for namespace {action_namespace!r}: {record!r}")
             variables[key] = record.get("value")
 
         return variables
@@ -1350,18 +1291,14 @@ class ActionProcessor:
         else:
             return data
 
-    def _resolve_dict_templates(
-        self, data: dict[str, object], action: QueuedActionProtocol
-    ) -> dict[str, object]:
+    def _resolve_dict_templates(self, data: dict[str, object], action: QueuedActionProtocol) -> dict[str, object]:
         """Resolve templates in dictionary values."""
         dict_result: dict[str, object] = {}
         for key, value in data.items():
             dict_result[key] = self._resolve_all_templates(value, action)
         return dict_result
 
-    def _resolve_list_templates(
-        self, data: list[object], action: QueuedActionProtocol
-    ) -> list[object]:
+    def _resolve_list_templates(self, data: list[object], action: QueuedActionProtocol) -> list[object]:
         """Resolve templates in list items."""
         list_result: list[object] = []
         for item in data:
@@ -1527,11 +1464,7 @@ class ActionProcessor:
         # context_id is REQUIRED for OUTPUT events to appear in conversation history
         is_platform_mode = self._context_management_service is not None
         if is_platform_mode and not context_id:
-            raise ValueError(
-                f"Platform mode requires context_id for OUTPUT events. "
-                f"Action {action.id} (post_message) has no context_id - "
-                f"this breaks conversation history."
-            )
+            raise ValueError(f"Platform mode requires context_id for OUTPUT events. Action {action.id} (post_message) has no context_id - this breaks conversation history.")
 
         if context_id:
             io_metadata = self._get_flow_io_metadata(action)
@@ -1568,13 +1501,9 @@ class ActionProcessor:
         # Fail-fast: this function is only called when context_id exists (platform mode),
         # so missing services/storage is a configuration error
         if not self._context_management_service:
-            raise ValueError(
-                "Platform mode requires context_management_service but it was not injected"
-            )
+            raise ValueError("Platform mode requires context_management_service but it was not injected")
         if not self._content_storage:
-            raise ValueError(
-                "Platform mode requires shared content_storage but it was not initialized"
-            )
+            raise ValueError("Platform mode requires shared content_storage but it was not initialized")
 
         # Store content to file and get path + char count (fail-fast on error)
         content_path, char_count = self._content_storage.store_event(context_id, content)
@@ -1665,11 +1594,7 @@ class ActionProcessor:
             return None
 
         trigger_data_str = flow_record.get("trigger_data", "{}")
-        trigger_data = (
-            json.loads(trigger_data_str)
-            if isinstance(trigger_data_str, str)
-            else trigger_data_str
-        )
+        trigger_data = json.loads(trigger_data_str) if isinstance(trigger_data_str, str) else trigger_data_str
         if not isinstance(trigger_data, dict):
             return None
 

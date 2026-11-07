@@ -2,7 +2,7 @@
 
 macOS-native FSEvents via the pyobjc ``FSEvents`` framework. Watches
 the runtime directory the bridge port file lives in and, on every
-event whose path matches the canonical ``<solet>.bridge.port``,
+event for ``<solet>.bridge.port`` or its coalesced watched directory,
 calls into the supplied tracker to restart every tracked bridge.
 
 The watcher runs on a dedicated thread spawned by the plugin's
@@ -18,6 +18,8 @@ fidelity beats third-party abstractions on macOS editor-write quirks.
 from __future__ import annotations
 
 import logging
+import math
+import os
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -39,7 +41,8 @@ def _read_bridge_port_content(port_file: Path) -> str | None:
 
 
 def bridge_port_changed(
-    port_file: Path, last_seen: str | None,
+    port_file: Path,
+    last_seen: str | None,
 ) -> tuple[bool, str | None]:
     """Decide whether a bridge-port filesystem event reflects a real value change.
 
@@ -71,6 +74,15 @@ def bridge_port_changed(
     return (True, current)
 
 
+def _relevant_event(path: object, target_name: str, directory: str) -> bool:
+    if isinstance(path, bytes | bytearray):
+        path = os.fsdecode(bytes(path))
+    # Native delivery can coalesce a fresh file write into its watched root.
+    # Re-read the target on that directory hint; content gating still suppresses
+    # same-value writes and unrelated filesystem churn.
+    return isinstance(path, str) and (path.endswith(target_name) or path.rstrip("/") == directory)
+
+
 class FSEventsWatcher:
     """Single-threaded FSEventStream watcher around the bridge port file."""
 
@@ -90,6 +102,10 @@ class FSEventsWatcher:
         self._latency_seconds = latency_seconds
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._startup_event = threading.Event()
+        self._ready = False
+        self._stream_lock = threading.Lock()
+        self._stream_ref: object | None = None
         self._runloop_ref: object | None = None  # CFRunLoopRef proxy
 
     # ------------------------------------------------------------------
@@ -101,6 +117,8 @@ class FSEventsWatcher:
         if self._thread is not None:
             return
         self._stop_event.clear()
+        self._startup_event.clear()
+        self._ready = False
         self._thread = threading.Thread(
             target=self._run,
             name="macos-coding-agent-session-fsevents",
@@ -108,9 +126,31 @@ class FSEventsWatcher:
         )
         self._thread.start()
 
+    def wait_until_ready(self, *, timeout_seconds: float = 30.0) -> bool:
+        """Wait for the native stream to start; failure/stop returns false."""
+        if not math.isfinite(timeout_seconds) or timeout_seconds < 0:
+            raise ValueError("readiness wait must be finite and nonnegative")
+        return self._startup_event.wait(timeout_seconds) and self._ready and not self._stop_event.is_set()
+
+    def flush_pending_events(self) -> None:
+        """Request native delivery of queued events without blocking for callbacks.
+
+        Useful when a caller needs to observe a completed write promptly. The
+        event still travels through the real native stream and content gate.
+        Startup must have succeeded; a stopped/failed stream refuses.
+        """
+        from FSEvents import FSEventStreamFlushAsync  # noqa: PLC0415
+
+        with self._stream_lock:
+            if not self._ready or self._stop_event.is_set() or self._stream_ref is None:
+                raise RuntimeError("cannot flush an unarmed FSEvents stream")
+            FSEventStreamFlushAsync(self._stream_ref)
+
     def stop(self, *, join_timeout_seconds: float = 2.0) -> None:
         """Signal the runloop to exit and join the watcher thread."""
         self._stop_event.set()
+        self._ready = False
+        self._startup_event.set()
         runloop = self._runloop_ref
         if runloop is not None:
             try:  # pragma: no cover — exercised only when pyobjc is present
@@ -134,6 +174,9 @@ class FSEventsWatcher:
             self._run_inner()
         except Exception:  # noqa: BLE001 — watcher thread must never crash silent
             self._logger.exception("FSEvents watcher thread crashed")
+        finally:
+            self._ready = False
+            self._startup_event.set()
 
     def _run_inner(self) -> None:
         try:
@@ -143,6 +186,7 @@ class FSEventsWatcher:
                 kCFRunLoopDefaultMode,
             )
             from FSEvents import (  # noqa: PLC0415
+                FSEventsGetCurrentEventId,
                 FSEventStreamCreate,
                 FSEventStreamInvalidate,
                 FSEventStreamRelease,
@@ -151,43 +195,61 @@ class FSEventsWatcher:
                 FSEventStreamStop,
                 kFSEventStreamCreateFlagFileEvents,
                 kFSEventStreamCreateFlagNoDefer,
-                kFSEventStreamEventIdSinceNow,
             )
         except ImportError:
             self._logger.error(
-                "FSEvents watcher disabled: pyobjc-framework-FSEvents missing. "
-                "MCP bridges will NOT auto-reconnect on router blue-green swap.",
+                "FSEvents watcher disabled: pyobjc-framework-FSEvents missing. MCP bridges will NOT auto-reconnect on router blue-green swap.",
             )
             return
         target = str(self._watch_path)
+        # Capture a concrete native cursor before the content baseline. SinceNow
+        # lost an immediate post-start mutation in measured fresh-directory
+        # runs; replay from this cursor retains that startup window.
+        since = FSEventsGetCurrentEventId()
         callback = self._build_callback()
         stream = FSEventStreamCreate(
             None,
             callback,
             None,
             [target],
-            kFSEventStreamEventIdSinceNow,
+            since,
             self._latency_seconds,
             kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagFileEvents,
         )
         if stream is None:
             self._logger.error(
-                "FSEventStreamCreate returned None for path=%s", target,
+                "FSEventStreamCreate returned None for path=%s",
+                target,
             )
             return
         runloop = CFRunLoopGetCurrent()
         self._runloop_ref = runloop
-        FSEventStreamScheduleWithRunLoop(stream, runloop, kCFRunLoopDefaultMode)
-        FSEventStreamStart(stream)
-        self._logger.info(
-            "FSEvents watcher armed on %s (target=%s)", target, self._target_filename,
-        )
+        started = False
         try:
+            FSEventStreamScheduleWithRunLoop(stream, runloop, kCFRunLoopDefaultMode)
+            started = bool(FSEventStreamStart(stream))
+            if not started:
+                raise RuntimeError(f"FSEventStreamStart failed for path={target}")
+            if self._stop_event.is_set():
+                return
+            with self._stream_lock:
+                self._stream_ref = stream
+                self._ready = True
+            self._startup_event.set()
+            self._logger.info(
+                "FSEvents watcher armed on %s (target=%s)",
+                target,
+                self._target_filename,
+            )
             CFRunLoopRun()
         finally:
-            FSEventStreamStop(stream)
-            FSEventStreamInvalidate(stream)
-            FSEventStreamRelease(stream)
+            with self._stream_lock:
+                self._ready = False
+                self._stream_ref = None
+                if started:
+                    FSEventStreamStop(stream)
+                FSEventStreamInvalidate(stream)
+                FSEventStreamRelease(stream)
 
     def _build_callback(self) -> Callable[..., None]:
         target_name = self._target_filename
@@ -195,6 +257,7 @@ class FSEventsWatcher:
         stop_event = self._stop_event
         logger = self._logger
         port_file = self._watch_path / self._target_filename
+        watched_directory = str(self._watch_path.resolve())
         # Baseline read at arm time so the first same-value rewrite after the
         # stream starts is correctly a no-op.
         state: dict[str, str | None] = {"last": _read_bridge_port_content(port_file)}
@@ -215,15 +278,11 @@ class FSEventsWatcher:
             except TypeError:
                 paths = []
             logger.debug(
-                "FSEvents callback fired n=%d paths=%r", num_events, paths,
+                "FSEvents callback fired n=%d paths=%r",
+                num_events,
+                paths,
             )
-            target_str = target_name
-            target_bytes = target_name.encode("utf-8")
-            relevant = any(
-                (isinstance(p, str) and p.endswith(target_str))
-                or (isinstance(p, bytes | bytearray) and bytes(p).endswith(target_bytes))
-                for p in paths
-            )
+            relevant = any(_relevant_event(path, target_name, watched_directory) for path in paths)
             if not relevant:
                 return
             changed, current = bridge_port_changed(port_file, state["last"])
@@ -233,13 +292,16 @@ class FSEventsWatcher:
                 # restarting on these is the reconnect-storm amplification.
                 logger.debug(
                     "FSEvents touch on %s with unchanged content (%r) — skipping restart",
-                    target_name, current,
+                    target_name,
+                    current,
                 )
                 return
             logger.info(
-                "FSEvents detected bridge-port change on %s (%r -> %r, n=%d) — "
-                "restarting tracked bridges",
-                target_name, state["last"], current, num_events,
+                "FSEvents detected bridge-port change on %s (%r -> %r, n=%d) — restarting tracked bridges",
+                target_name,
+                state["last"],
+                current,
+                num_events,
             )
             state["last"] = current
             try:

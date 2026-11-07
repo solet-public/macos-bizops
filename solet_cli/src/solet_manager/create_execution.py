@@ -45,7 +45,7 @@ from .resume_rules import (
     read_only_auto_advance_is_pure,
     static_decision_selections,
 )
-from .source_acquisition import materialize_locked_seed
+from .source_acquisition import SealedSeedBundle, materialize_locked_seed
 from .stage_boundaries import run_stage_boundaries, stage_stop_result
 from .state_io import instance_lock
 from .transaction import (
@@ -72,6 +72,7 @@ def execute_create(
     decision_source: str = "flag",
     decision_sources: dict[str, str] | None = None,
     stage_limit: str | None = None,
+    sealed_seed_bundle: SealedSeedBundle | None = None,
 ) -> CommandResult:
     """Start or resume only after the current exact preview was approved."""
 
@@ -122,6 +123,7 @@ def execute_create(
             decision_source=decision_source,
             sources=sources,
             stage_limit=stage_limit,
+            sealed_seed_bundle=sealed_seed_bundle,
         )
 
 
@@ -149,6 +151,7 @@ def _execute_locked_create(
     decision_source: str,
     sources: dict[str, str],
     stage_limit: str | None,
+    sealed_seed_bundle: SealedSeedBundle | None,
 ) -> CommandResult:
     transaction = _load_or_create_transaction(
         paths=paths,
@@ -163,7 +166,7 @@ def _execute_locked_create(
         allow_operation_attempt_mismatch=True,
     )
     if not config.target.exists():
-        return _materialize_target(paths, config, transaction)
+        return _materialize_target(paths, config, transaction, sealed_seed_bundle)
     bundle = ContractBundle.load(
         source_revision=transaction.flow_source_revision,
         directory=target_contract_directory(config.target),
@@ -190,9 +193,7 @@ def _execute_locked_create(
         )
     approved_frontier = _approved_frontier(locked_preview)
     if stage_limit is not None and approved_frontier != (stage_limit,):
-        raise StateConflictError(
-            "--resume-stage no longer matches the preview's sole executable frontier"
-        )
+        raise StateConflictError("--resume-stage no longer matches the preview's sole executable frontier")
     answers = _approved_answers(locked_preview, bundle)
     assert_decision_revision_allowed(transaction, answers, bundle)
     transaction = reconcile_stage_probe_activation(
@@ -204,6 +205,7 @@ def _execute_locked_create(
         target=config.target,
         base_python=resolve_long_lived_python(),
     )
+
     def refresh_preview() -> CommandResult:
         return setup_preview(
             paths=paths,
@@ -214,6 +216,7 @@ def _execute_locked_create(
             decision_source="config",
             decision_sources=config.decision_sources,
         )
+
     transaction, stopped = _advance_to_approved_frontier(
         bundle=bundle,
         transaction=transaction,
@@ -247,9 +250,7 @@ def _execute_locked_create(
         bundle=bundle,
         plan=plan,
         transaction=transaction,
-        approved_actions=actions_by_operation(
-            locked_preview.data.get("planned_actions")
-        ),
+        approved_actions=actions_by_operation(locked_preview.data.get("planned_actions")),
         config=config,
         paths=paths,
         instance_registry=registry,
@@ -273,9 +274,7 @@ def _load_or_create_transaction(
 ) -> Transaction:
     input_fingerprint = canonical_sha256(config.to_identity_dict())
     if allow_operation_attempt_mismatch:
-        transaction, _mismatch = load_transaction_for_operation_reconciliation(
-            paths.transaction_path(config.name)
-        )
+        transaction, _mismatch = load_transaction_for_operation_reconciliation(paths.transaction_path(config.name))
     else:
         transaction = load_transaction(paths.transaction_path(config.name))
     if transaction is not None:
@@ -288,13 +287,8 @@ def _load_or_create_transaction(
         installed_seed = load_seed_lock(seed_lock_path)
         if transaction.seed.identity_dict() != installed_seed.identity_dict():
             raise StateConflictError(
-                "retained transaction seed does not match the installed seed lock: "
-                f"transaction={_seed_label(transaction.seed)}; "
-                f"installed={_seed_label(installed_seed)}",
-                repair=(
-                    "Resume using the manager seed recorded by this transaction. "
-                    "A different installed seed cannot reuse this transaction."
-                ),
+                f"retained transaction seed does not match the installed seed lock: {_seed_identity_differences(transaction.seed, installed_seed)}",
+                repair=("Resume using the manager seed recorded by this transaction. A different installed seed cannot reuse this transaction."),
             )
         return transaction
     seed = load_seed_lock(seed_lock_path)
@@ -334,10 +328,11 @@ def _load_or_create_transaction(
     return created
 
 
-def _seed_label(seed: SeedLock) -> str:
-    """Return an actionable immutable seed identifier for a resume conflict."""
+def _seed_identity_differences(retained: SeedLock, installed: SeedLock) -> str:
+    """Name every changed journal identity field and both observed values."""
 
-    return f"{seed.repository}@{seed.source_ref()} ({seed.commit})"
+    installed_identity = installed.identity_dict()
+    return "; ".join(f"{field}: transaction={value!r}, installed={installed_identity[field]!r}" for field, value in retained.identity_dict().items() if value != installed_identity[field])
 
 
 def _ordered_stage_ids(bundle: ContractBundle) -> tuple[str, ...]:
@@ -388,12 +383,19 @@ def _materialize_target(
     paths: ManagerPaths,
     config: CreateConfig,
     transaction: Transaction,
+    sealed_seed_bundle: SealedSeedBundle | None,
 ) -> CommandResult:
-    materialize_locked_seed(
-        transaction.seed,
-        config.target,
-        cache_dir=paths.acquisition_dir,
-    )
+    if sealed_seed_bundle is None:
+        # Every normal create: exactly the call it always made.
+        materialize_locked_seed(transaction.seed, config.target, cache_dir=paths.acquisition_dir)
+    else:
+        # Only a release's guest-validation ladder carries a sealed seed bundle.
+        materialize_locked_seed(
+            transaction.seed,
+            config.target,
+            cache_dir=paths.acquisition_dir,
+            sealed_seed_bundle=sealed_seed_bundle,
+        )
     ContractBundle.load(
         source_revision=transaction.flow_source_revision,
         directory=target_contract_directory(config.target),
@@ -405,9 +407,7 @@ def _materialize_target(
         message="Locked seed materialized; target-local probes now require a fresh preview.",
         exit_code=ExitCode.HUMAN_ACTION,
         error_kind="probe_drift",
-        repair=(
-            "Run the same create command again, review the target-local preview, and approve it."
-        ),
+        repair=("Run the same create command again, review the target-local preview, and approve it."),
         data={
             "name": config.name,
             "target": str(config.target),
@@ -469,9 +469,7 @@ def _advance_to_approved_frontier(
             sources=sources,
         )
         if not read_only_auto_advance_is_pure(current_transaction.answers, plan):
-            raise ProbeDriftError(
-                "approved frontier differs from the durable read-only frontier"
-            )
+            raise ProbeDriftError("approved frontier differs from the durable read-only frontier")
         current_transaction = rebind_completion_probes(
             bundle,
             current_transaction.with_answers(plan.answers),
@@ -633,16 +631,8 @@ def _approve_frontier(
                     operation_ids=failures[0].remediation_operation_ids,
                     plan=plan,
                 )
-    operation_stages = {
-        operation.operation_id: operation.stage_id
-        for operation in whole_plan.operations
-    }
-    operation_stages.update(
-        {
-            operation.operation_id: operation.stage_id
-            for operation in plan.operations
-        }
-    )
+    operation_stages = {operation.operation_id: operation.stage_id for operation in whole_plan.operations}
+    operation_stages.update({operation.operation_id: operation.stage_id for operation in plan.operations})
     updated = updated.bind_operations(operation_stages)
     write_transaction(paths.transaction_path(config.name), updated)
     return plan, updated, None
@@ -657,11 +647,4 @@ def _failed_exit_stage_ids(
         CheckpointStatus.BLOCKED,
         CheckpointStatus.FAILED,
     }
-    return tuple(
-        stage_id
-        for stage_id in stage_ids
-        if any(
-            status in incomplete
-            for status in transaction.stage_probe_statuses[stage_id]["exit"].values()
-        )
-    )
+    return tuple(stage_id for stage_id in stage_ids if any(status in incomplete for status in transaction.stage_probe_statuses[stage_id]["exit"].values()))

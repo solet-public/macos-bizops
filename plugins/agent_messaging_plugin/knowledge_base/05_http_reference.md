@@ -83,6 +83,115 @@ request whose URL `bridge_id` does not match the resource's
 recorded owner returns an analogous 403/404 code for peer and
 platform-call paths.
 
+## Loop lag on health
+
+`GET /api/v1/bridge/health` also includes `violations`:
+`{count, last_process_key, last_stack, recent}`. These are actual handler-entry
+observations, independent of elapsed time. Entry on a registered asyncio loop
+thread is a violation unless the exact handler is declared dispatch-only with
+a reason. `LOOP_INVARIANT_VIOLATION` logs its process key, kind, thread id and
+entry stack. The invocation continues; telemetry never refuses or throttles it.
+
+`handler_entries` exposes `{invocations, capacity, recent_entries, violations}`.
+Each entry includes sequence, process key, kind (`handler` or `route`), executing
+thread id, `on_loop`, recording time (Unix seconds), dispatch-only reason or
+`null`, and a stack for violations. Worker invocations are retained too, with
+`on_loop: false`. By default, the last 128 entries and last 128 violations are separate
+bounded rings; counters cover the process lifetime. No observations yields
+count zero, null last fields and empty history. Snapshot reads do no database
+or filesystem I/O. Stopping a loop removes its thread registration; histories
+retire at process exit, while log history remains. A new process starts empty.
+
+The recorder has no dispatch-only exceptions by default. The bridge declares
+20 specific telemetry or offload-only endpoint bodies in
+`ananta.core.runtime.loop_invariant.DISPATCH_ONLY_ROUTES`, each with its reason.
+The `open_bridge` body is declared because its loop body only dispatches the
+bridge open and sender attribution to the bridge workers and builds the response.
+Declarations are reviewed source: add or
+correct an exact key and reason, or remove it to clear the exception. There is
+no prefix exemption, dynamic authorization change, or live reset verb. The
+synthetic smoke proves both a loop violation and zero violations for the same
+registered handler in a worker. This instrumentation covers the action
+processor, service/plugin execution boundaries and this HTTP route layer;
+the attached static async census is a worklist, not proof that every arbitrary
+callback, external client or helper process has been instrumented.
+
+`LOOP_LAG_SUMMARY` includes violation count, last process key and last stack.
+Stacks retain at most 12 frames and 8192 characters by default. Retention and
+stack limits use the startup settings documented in **Event Loop Lag Monitor
+Configuration**. A zero count is evidence
+only for observed invocations since process start, not a completed 24-hour run.
+
+`GET /api/v1/bridge/health` includes `loop_lag`, a map from loop name to
+`{p50_ms, p99_ms, max_ms, over_budget_count, window_s, samples, budget_ms,
+interval_ms, sample_capacity, threads, thread_cpu_status, thread_cpu_window_s,
+py_switch_interval_ms}`. Percentiles use nearest rank; measurements
+are wakeup lateness in milliseconds over the rolling window. The count is
+the number of over-budget samples in that same window. Before the first
+sample, and after a window has emptied, the three lag values are `null`.
+Each loop retains at most 10,000 samples; a window longer than that capacity
+can cover fewer seconds than `window_s` at the configured sampling rate.
+
+`threads` repeats the cached process-wide top eight live threads by CPU delta:
+each row is `{name, id, cpu_s}` (user plus system seconds). On macOS, `id`
+is the native thread ID matching Python `Thread.native_id`; names come from Python
+or the OS, with `native` for unnamed native threads. `thread_cpu_window_s`
+is the actual sampled span; its boundary can precede the requested window
+by one census interval. `thread_cpu_status` is `pending`, `ok`, `truncated`
+(4096-thread cap), or an `unavailable` diagnostic. Unavailable counters
+produce an empty ranking and a warning, without affecting health readiness.
+The daemon watchdog samples macOS `libproc` counters outside every event
+loop, at a cadence of `max(1, window_s / 60)` seconds, retaining at most 62
+samples. New threads contribute CPU since creation; exited threads leave
+the next census. `py_switch_interval_ms` is the effective Python thread
+switch interval. The platform article **Event Loop Lag Monitor Configuration**
+documents its optional startup setting; unset or invalid input preserves the
+current interpreter setting. These fields also appear in `LOOP_LAG_SUMMARY`.
+
+The monitor starts before infrastructure/plugin initialization. Its stdlib
+loop run hook covers `asyncio.run`, `asyncio.Runner`, explicit
+`asyncio.new_event_loop` and implicit `get_event_loop` creation: the platform
+action-poller loop, bridge HTTP and streamable listeners, optional Discord,
+Google/Schwab OAuth and Vault bridge loops, and temporary bootstrap/backfill
+loops. Names combine the running thread name and a unique sequence;
+`platform/loop-N` denotes the main thread, and
+`agent_messaging_plugin-server/loop-N` and
+`agent_messaging_plugin-streamable-server/loop-N` name the listeners. Loops
+created on one thread and run on another are named for the running thread.
+Stopping a loop cancels its sampler and removes its window; restarting it
+creates a fresh window. Separate client bridge, router, ingress and seat-tool
+processes have their own lifecycles and are outside this process's map.
+
+Monitoring is enabled by default. The process-wide startup settings, their
+defaults and set/correct/clear lifecycle are documented in the platform article
+**Event Loop Lag Monitor Configuration**. They apply to every loop in the
+process, independently of which plugin provides the health endpoint.
+
+One daemon watchdog inspects overdue heartbeats and emits a `LOOP_LAG`
+warning with `phase=stalled`, including loop, lag, executing task, process
+key and up to eight Python stack frames. The action poller publishes the
+process key in the executing task's context and clears it after success or
+failure; unrelated tasks are not attributed to an awaiting executor action.
+An unavailable owner is `unknown`. Native code holding the GIL can prevent
+the watchdog from running; wakeup lateness is still recorded after recovery,
+with an explicit unavailable-stack warning when no live capture was possible.
+The watchdog retains the captured stack and attribution for the scheduled
+wake; `phase=recovered` attaches those same details with `capture=during_stall`
+and final lateness. These two log phases describe one episode. Without a
+during-stall capture, recovery uses `capture=unavailable_gil_or_scheduling_delay`
+and `stack=unavailable_after_recovery`; missing capture cannot by itself
+distinguish GIL retention from scheduler starvation. Earlier episodes' stacks
+are never attached to a later wake.
+`LOOP_LAG_SUMMARY` logs the current windows and handler-entry violation
+counters at the summary cadence. These logs
+provide historical evidence; the health map contains only running windows.
+
+This telemetry has no database access. Ring/registry locks cover only bounded
+in-memory copies; percentile sorting and logging happen outside those locks.
+Over-budget lag never refuses, throttles, changes handler/executor placement,
+or changes the endpoint's readiness/status decision. Existing `503 starting`
+readiness responses retain their startup contract.
+
 ## Bridge lifecycle
 
 ```
@@ -110,6 +219,35 @@ Each bridge owns a platform session id
 `agent_messaging_plugin` namespace). The session id appears on
 every thread row's `originator_session_id` and in every
 bridge-delivery `trigger_data["session_id"]`.
+
+Blocking bridge request bodies, including `/open` session creation and the
+streamable OAuth authorize/token bodies, use `run_bridge_work`, backed by each
+serving loop's named `solet-bridge-<loop>` pool: four workers and at most 32
+additional queued calls by default. The streamable MCP dispatch, authorization
+and close bodies use a separate `solet-streamable-<loop>` pool. Configure and
+retire these pools as described under **Worker isolation** in
+`08_mcp_bridge_troubleshooting.md`. Full admission waits asynchronously;
+it neither blocks the serving loop nor refuses the request. The long-poll wait
+and `/health` remain on the loop. Diagnostic writes serialize separately from
+the registry lock, so slow diagnostic storage cannot hold up registry readers.
+
+After a model-initiated handler returns, its authoritative in-memory activity
+timestamp is captured before sending the response. The durable binding mirror
+runs in the background on the bounded request executor, in order per identity,
+using that captured timestamp. Mirror or executor failures are logged and keep
+the response and in-memory stamp. Forwarder/infra classification is unchanged.
+Calls queued for a loop worker are removable on cancellation; submitted calls
+keep their slot until the native worker finishes. Authentication, route bodies
+and response envelopes are unchanged.
+
+Pairing, Google OAuth and Schwab OAuth each own an independent single-worker
+executor with at most 32 queued jobs. Pairing bodies remain serialized through
+verification, mint and any orphan compensation. Vendor nonces are consumed on
+the request loop before queuing config load, exchange and token persistence.
+Vendor callback mutations remain serialized while asynchronous admission waits.
+Admission propagates request context; caller cancellation retains an admitted
+mutation and its slot until the worker actually completes. These pools do not
+share asyncio's default executor or the delivery-drive executor.
 
 Idle bridges are reaped by the bridge-lifecycle sweeper (REL-09): a
 plugin-owned daemon thread runs `BridgeSessionManager.sweep_idle` every
@@ -205,22 +343,38 @@ POST /api/v1/bridge/{bridge_id}/peer/send_by_name
   # queued_for_replay: the role's current holder has no live, polling
   # binding — the envelope is durable and replays on that holder's next
   # attach via the surviving role-replay path.
+  # The registered sender takes precedence. A local one-shot CLI bridge may
+  # instead resolve its launcher-provided caller_agent_session_id to exactly
+  # one existing peer binding. This does not register the caller bridge or
+  # replace the receiving binding. Resolution runs again on every send.
+  # Unregistered OAuth bridges, missing/unknown attribution and ambiguous
+  # session bindings are refused with a remedy; no sender identity is guessed.
+  # CLI: solet-bridge send-by-name Project-Solet-Main --content-file report.txt
+  # Run inside the controller launcher, preserving AGENT_SESSION_ID. No
+  # receiving bridge id is needed. The CLI prints the complete direct receipt
+  # and exits nonzero on refusal; it never silently uses /process/call.
+  # The Git-Controller landing_report.py wrapper explicitly tries the queued
+  # peer_send_by_name process after a direct failure, and discloses that failure
+  # in both the report and output. A timeout may follow persistence: reconcile
+  # duplicate reports by their landing identity before manually resending.
 
 GET  /api/v1/bridge/{bridge_id}/peer/inbox?since=<recent-ISO-time>
-  # Two instance cursors, opposite directions, never both: since=T returns
-  # messages strictly newer than T, oldest-first (echo next_since_created_at);
-  # after=T walks backward, messages older than T, newest-first (echo
-  # next_after_created_at). No cursor returns the newest page, newest-first.
+  # Two instance directions, never both: since=T starts with messages strictly
+  # newer than T, oldest-first (continue with next_since_cursor as
+  # since_cursor); after=T walks backward, messages older than T, newest-first
+  # (echo next_after_created_at). No cursor returns the newest page,
+  # newest-first.
   resp: { "entries": [ {sender_agent_id, sender_agent_instance_id,
                         sender_session_label, message, ...}, ... ],
           "role_entries": [ {sender_agent_id, sender_agent_instance_id,
                               sender_session_label, message, ...}, ... ],
           "next_after_created_at": null,   # set only on a non-since page
-          "next_since_created_at": "...",  # set only on a since page
+          "next_since_created_at": "...",  # compatibility timestamp
+          "next_since_cursor": "...",      # opaque tie-safe continuation
           "instance_exhausted": false,
           "next_role_cursor": "..." }
   # Instance mail is exhausted only when instance_exhausted is true under the
-  # timestamp cursor the request used; equal-timestamp tie safety is not implied.
+  # requested direction; the opaque forward cursor is tie-safe by message id.
 ```
 
 See `03_inter_agent_messaging.md` for the delivery
@@ -261,13 +415,21 @@ GET /api/v1/bridge/{bridge_id}/peer/holds_role?name=N&agent_instance_id=I
   # peer_binding row (the same row that supplied agent_session_id).
 
 GET /api/v1/bridge/{bridge_id}/peer/inbox_for_session
-      ?agent_session_id=S&observer=true&limit=100&after=T&role_after=C&include_covered=true
+      ?agent_session_id=S&observer=true&limit=100&after=T&since=T&role_after=C&include_covered=true
   resp: the page the peer_inbox process returns for S (entries, role_entries,
         both cursors, role_section_status, ...)
   # include_covered (observer-only, default false) reads the role section with
   # no covered-mark floor; it is the only request field besides the cursors
-  # that crosses to the server. The route does not take the instance
-  # section's forward `since` cursor. A page that comes back with
+  # that crosses to the server besides the cursors. `since` (ISO-8601, forward
+  # horizon) bounds BOTH sections and is echoed as role_since_created_at (null =
+  # the role section did not apply it); it excludes `after` (the opposite,
+  # backward direction), so `solet-bridge inbox --since` sends it on its
+  # role-section pages only and fails the command (role_since_not_applied) when
+  # a page does not echo it. The page also carries role_read_coverage, one
+  # {role, covered_mark_present, floor_hidden, receipt_hidden} entry per role the
+  # role section read: counts of rows the covered-mark floor and a display
+  # receipt hid inside the scanned window, never their content. A page that
+  # comes back with
   # role_floor_applied=true for an include_covered request means the server or
   # the route dropped the field, and `solet-bridge inbox --include-covered`
   # treats that as a loud fault.
@@ -277,7 +439,7 @@ Each route and its process call ONE shared function
 (`peer_direct_reads.read_holds_role` and `read_peer_inbox_for_session`), so the
 answer cannot drift between the two doors; every refusal of the process is the
 same refusal on the route (`missing_argument`, `identity_not_registered`,
-`peer_session_ambiguous` as 409, `invalid_after`, `peer_inbox_rejected`), and a
+`peer_session_ambiguous` as 409, `invalid_after`, `invalid_since`, `peer_inbox_rejected`), and a
 refusal is never an empty page. A malformed `role_after` is not a refusal of the
 read: the page carries `role_section_status: "error"` at both doors. Nothing is
 cached and no table is added. The caller needs no `peer/register`: the instance

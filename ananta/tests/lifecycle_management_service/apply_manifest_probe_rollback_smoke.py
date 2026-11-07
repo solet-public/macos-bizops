@@ -95,8 +95,12 @@ class _FakeDeploymentPlugin:
         self.calls = 0
 
     def restart_with_manifest(
-        self, *, new_manifest: dict[str, Any], expected_etag: str,
-        reason: str, dry_run: bool,
+        self,
+        *,
+        new_manifest: dict[str, Any],
+        expected_etag: str,
+        reason: str,
+        dry_run: bool,
     ) -> RestartResult:
         del new_manifest, expected_etag, reason, dry_run
         self.calls += 1
@@ -124,12 +128,8 @@ def _seed_app_home(app_home: Path) -> tuple[bytes, bytes]:
     """
     config = app_home / "config"
     config.mkdir(parents=True, exist_ok=True)
-    manifest_bytes = (
-        f"profile_name: local\nplugins:\n- {FIXTURE_PLUGIN_NAME}\n"
-    ).encode()
-    bindings_bytes = (
-        '{"self_deployment_service": "' + FIXTURE_PLUGIN_NAME + '"}\n'
-    ).encode("utf-8")
+    manifest_bytes = (f"profile_name: local\nplugins:\n- {FIXTURE_PLUGIN_NAME}\n").encode()
+    bindings_bytes = ('{"self_deployment_service": "' + FIXTURE_PLUGIN_NAME + '"}\n').encode("utf-8")
     (config / "manifest.yaml").write_bytes(manifest_bytes)
     (config / "service_bindings.json").write_bytes(bindings_bytes)
     return manifest_bytes, bindings_bytes
@@ -185,8 +185,7 @@ def _case_rolled_back(app_home: Path) -> None:
     reasons = " ".join(data.get("rejection_reasons") or [])
     _check(
         data.get("probe") == _PROBE_PAYLOAD and "L1.1_import" in reasons,
-        "[3] probe payload rides the envelope (delegate copies RestartResult.probe) "
-        "+ rejection_reasons carry the failing step",
+        "[3] probe payload rides the envelope (delegate copies RestartResult.probe) + rejection_reasons carry the failing step",
     )
 
 
@@ -204,15 +203,12 @@ def _case_concurrent_commit(app_home: Path) -> None:
     data = envelope["data"]
     _check(
         data.get("status") == "probe_failed_manifest_changed_during_probe",
-        f"[4] A1: concurrent commit during the probe window → loud no-restore "
-        f"envelope (got {data.get('status')!r})",
+        f"[4] A1: concurrent commit during the probe window → loud no-restore envelope (got {data.get('status')!r})",
     )
     on_disk = (app_home / "config" / "manifest.yaml").read_bytes()
     _check(
-        on_disk == concurrent_bytes
-        and data.get("written_etag") != data.get("on_disk_etag"),
-        "[5] A1: the concurrent commit's bytes were NOT stomped (no restore ran; "
-        "written_etag != on_disk_etag surfaced)",
+        on_disk == concurrent_bytes and data.get("written_etag") != data.get("on_disk_etag"),
+        "[5] A1: the concurrent commit's bytes were NOT stomped (no restore ran; written_etag != on_disk_etag surfaced)",
     )
 
 
@@ -248,8 +244,7 @@ def _case_restart_failed_rolled_back(app_home: Path) -> None:
         f"[7] FAILED restart stays an honest failure envelope (got {data.get('status')!r})",
     )
     _check(
-        (app_home / "config" / "manifest.yaml").read_bytes() == manifest_bytes
-        and (app_home / "config" / "service_bindings.json").read_bytes() == bindings_bytes,
+        (app_home / "config" / "manifest.yaml").read_bytes() == manifest_bytes and (app_home / "config" / "service_bindings.json").read_bytes() == bindings_bytes,
         "[8] FAILED restart restores manifest + bindings BYTE-IDENTICAL to pre-write state",
     )
     _check(
@@ -261,24 +256,27 @@ def _case_restart_failed_rolled_back(app_home: Path) -> None:
 def _case_q5_success_evidence(app_home: Path) -> None:
     _seed_app_home(app_home)
     evidence: dict[str, object] = {
-        "ok": True, "duration_ms": 42, "release_id": "rel-smoke",
+        "ok": True,
+        "duration_ms": 42,
+        "release_id": "rel-smoke",
     }
-    plugin = _FakeDeploymentPlugin(RestartResult(
-        status=RestartStatus.QUEUED,
-        restart_action_id="ae-smoke",
-        message="queued (smoke)",
-        reason="smoke",
-        expected_etag="",
-        dry_run=False,
-        probe=evidence,
-    ))
+    plugin = _FakeDeploymentPlugin(
+        RestartResult(
+            status=RestartStatus.QUEUED,
+            restart_action_id="ae-smoke",
+            message="queued (smoke)",
+            reason="smoke",
+            expected_etag="",
+            dry_run=False,
+            probe=evidence,
+        )
+    )
     service = LifecycleManagementService(_FakeOrchestratorRef(app_home, plugin))
     envelope = _apply(service)
     data = envelope["data"]
     _check(
         data.get("status") == "applied" and data.get("probe") == evidence,
-        f"[7] Q5: QUEUED + probe evidence → applied envelope carries data.probe "
-        f"(got status={data.get('status')!r}, probe={data.get('probe')!r})",
+        f"[7] Q5: QUEUED + probe evidence → applied envelope carries data.probe (got status={data.get('status')!r}, probe={data.get('probe')!r})",
     )
     _check(
         data.get("preflight_deferred") == [],
@@ -289,6 +287,9 @@ def _case_q5_success_evidence(app_home: Path) -> None:
 def run_smoke() -> int:
     print("=== apply_manifest_probe_rollback_smoke (S3: core probe_failed plumbing) ===")
     with tempfile.TemporaryDirectory() as tmp:
+        # The commit admits through the per-solet owned-deploy lock under the
+        # runtime root; keep it private so this smoke never touches a live one.
+        os.environ["XDG_RUNTIME_DIR"] = str(Path(tmp) / "xdg")
         fixture_dir = Path(tmp) / "fixture"
         write_fixture(fixture_dir, GOOD_SOURCE)
         sys.path.insert(0, str(fixture_dir))

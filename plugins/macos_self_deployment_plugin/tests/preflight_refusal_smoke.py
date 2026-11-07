@@ -26,6 +26,7 @@ Run:
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, cast
 
@@ -57,6 +58,11 @@ def _smoke_green_probe(*, candidate: CandidatePaths, app_home: Path) -> ProbeOut
         ok=True,
         payload={"ok": True, "duration_ms": 0, "release_id": candidate.release_id},
     )
+
+
+# Private runtime root for the orchestrator's owned-deploy lock and pending-finisher
+# record, so this smoke never touches a live solet's runtime directory.
+_RUNTIME = tempfile.TemporaryDirectory(prefix="preflight_refusal_runtime_")
 
 _passed = 0
 _failed: list[str] = []
@@ -97,7 +103,9 @@ class _RecordingReleaseManager:
         return GcResult(deleted=(), retained=())
 
     def build_candidate(
-        self, *, manifest_etag: str = "",
+        self,
+        *,
+        manifest_etag: str = "",
         manifest_plugins: tuple[str, ...] | None = None,
         schema_snapshot_fn: object = None,
     ) -> CandidatePaths:
@@ -139,7 +147,8 @@ class _RecordingReleaseManager:
 
 
 def _non_additive_preflight(
-    candidate: CandidatePaths, *,
+    candidate: CandidatePaths,
+    *,
     current_snapshot: dict[str, object] | None,
     current_release_exists: bool,
 ) -> PreflightVerdict:
@@ -149,8 +158,11 @@ def _non_additive_preflight(
         is_additive=False,
         breaking_changes=(
             SchemaChange(
-                kind="column_removed", namespace="plugin", table="thing",
-                column="gone", detail="column dropped",
+                kind="column_removed",
+                namespace="plugin",
+                table="thing",
+                column="gone",
+                detail="column dropped",
             ),
         ),
     )
@@ -162,8 +174,11 @@ def run_smoke() -> int:
     spawn_calls: list[str] = []
 
     def fake_spawn(
-        app_home: Path, next_color: str, next_instance_id: str,
-        solet_name: str, candidate: CandidatePaths,
+        app_home: Path,
+        next_color: str,
+        next_instance_id: str,
+        solet_name: str,
+        candidate: CandidatePaths,
     ) -> int:
         del app_home, next_color, solet_name, candidate
         spawn_calls.append(next_instance_id)
@@ -190,6 +205,7 @@ def run_smoke() -> int:
         spawn_fn=fake_spawn,
         ready_timeout_seconds=2,
         ready_poll_interval_seconds=0.01,
+        runtime_dir=Path(_RUNTIME.name),
     )
     result = orch.restart(
         reason="refusal-smoke",

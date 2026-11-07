@@ -16,6 +16,7 @@ from typing import Any, cast
 
 import yaml
 
+from ananta.core.actions.owned_deploy_admission import run_admitted
 from ananta.core.config.config_manager import ConfigManager
 from ananta.core.domain.enums import ActionStatus
 from ananta.core.plugins.capabilities import is_lifecycle_managed
@@ -105,10 +106,12 @@ logger = logging.getLogger(__name__)
 # this is a deny-list (anything not present = "did NOT apply the manifest"),
 # NOT an exhaustive match, so a new member surfaces as a non-applied failure
 # automatically — no branch here needs to enumerate it.
-_RESTART_STATUSES_THAT_APPLIED_THE_MANIFEST: frozenset[str] = frozenset({
-    "queued",       # cloud: blue-green cutover scheduled, finisher action enqueued
-    "completed",    # synchronous restart finished — rare, only future in-process impls
-})
+_RESTART_STATUSES_THAT_APPLIED_THE_MANIFEST: frozenset[str] = frozenset(
+    {
+        "queued",  # cloud: blue-green cutover scheduled, finisher action enqueued
+        "completed",  # synchronous restart finished — rare, only future in-process impls
+    }
+)
 
 # Sentinel returned by the bound ``self_deployment_service`` plugin
 # (currently ``macos_self_deployment_plugin``) when its L2 probe
@@ -131,9 +134,7 @@ _RESTART_STATUS_PROBE_FAILED = "probe_failed"
 # longer lists the old provider. Caller-supplied bindings are atomically
 # written alongside the manifest and validated against the new plugin
 # list by the existing binding-validator pre-flight.
-_V1_FORBIDDEN_MANIFEST_KEYS: tuple[str, ...] = (
-    "plugin_config_overrides",
-)
+_V1_FORBIDDEN_MANIFEST_KEYS: tuple[str, ...] = ("plugin_config_overrides",)
 
 
 def _diff_to_dict(diff: ManifestDiff) -> dict[str, list[str]]:
@@ -147,17 +148,10 @@ def _diff_to_dict(diff: ManifestDiff) -> dict[str, list[str]]:
 
 def _probe_rejection_reasons(restart: dict[str, Any]) -> list[str]:
     """Render the ``rejection_reasons`` list for a probe-failed envelope."""
-    reasons = [
-        f"probe_failed: deployment plugin's L2 probe rejected the "
-        f"manifest before any restart fired: {restart['message']}"
-    ]
+    reasons = [f"probe_failed: deployment plugin's L2 probe rejected the manifest before any restart fired: {restart['message']}"]
     probe_payload = restart.get("probe")
     if isinstance(probe_payload, dict):
-        reasons.append(
-            f"probe.failing_step={probe_payload.get('failing_step')!r}; "
-            f"probe.error_class={probe_payload.get('error_class')!r}; "
-            f"probe.detail={probe_payload.get('detail')!r}"
-        )
+        reasons.append(f"probe.failing_step={probe_payload.get('failing_step')!r}; probe.error_class={probe_payload.get('error_class')!r}; probe.detail={probe_payload.get('detail')!r}")
     return reasons
 
 
@@ -166,17 +160,9 @@ def _format_binding_reasons(result: ValidationResult) -> list[str]:
     reasons: list[str] = []
     for miss in result.missing_bindings:
         if miss.replacement is None:
-            reasons.append(
-                f"required_service_unbound: '{miss.service}' is not present "
-                f"in new_manifest['service_bindings'] "
-                f"(current provider: {miss.current_provider or 'none'})"
-            )
+            reasons.append(f"required_service_unbound: '{miss.service}' is not present in new_manifest['service_bindings'] (current provider: {miss.current_provider or 'none'})")
         else:
-            reasons.append(
-                f"binding_provider_missing: '{miss.service}' is bound to "
-                f"'{miss.replacement}' but that plugin is not in "
-                f"new_manifest['plugins']"
-            )
+            reasons.append(f"binding_provider_missing: '{miss.service}' is bound to '{miss.replacement}' but that plugin is not in new_manifest['plugins']")
     return reasons
 
 
@@ -214,9 +200,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
             extracted_name = self._extract_service_name(service)
 
             if not extracted_name:
-                return self._error_result(
-                    "service name is required (provide string or dict with 'name' key)"
-                )
+                return self._error_result("service name is required (provide string or dict with 'name' key)")
 
             plugin = self._get_service_plugin(extracted_name)
             if isinstance(plugin, dict):
@@ -373,17 +357,10 @@ class LifecycleManagementService(LifecycleManagementAPI):
 
             module = sys.modules.get(module_name)
             if module is None:
-                return self._error_result(
-                    f"Module '{module_name}' is not currently loaded; "
-                    "only modules already imported into sys.modules can be reloaded"
-                )
+                return self._error_result(f"Module '{module_name}' is not currently loaded; only modules already imported into sys.modules can be reloaded")
 
             if not getattr(module, _RELOAD_SAFE_ATTR, False):
-                return self._error_result(
-                    f"Module '{module_name}' is not marked RELOAD_SAFE; "
-                    "add `RELOAD_SAFE = True` at module top level before reloading. "
-                    "Stateful modules MUST NOT be marked safe."
-                )
+                return self._error_result(f"Module '{module_name}' is not marked RELOAD_SAFE; add `RELOAD_SAFE = True` at module top level before reloading. Stateful modules MUST NOT be marked safe.")
 
             importlib.reload(module)
             logger.info(f"Reloaded module: {module_name}")
@@ -399,12 +376,8 @@ class LifecycleManagementService(LifecycleManagementAPI):
             }
 
         except Exception as e:
-            logger.error(
-                f"Error reloading module {module_name}: {e}", exc_info=True
-            )
-            return self._error_result(
-                f"Failed to reload module '{module_name}': {e}"
-            )
+            logger.error(f"Error reloading module {module_name}: {e}", exc_info=True)
+            return self._error_result(f"Failed to reload module '{module_name}': {e}")
 
     # ------------------------------------------------------------------
     # Plugin lifecycle introspection / reregistration (D1, D2)
@@ -414,19 +387,13 @@ class LifecycleManagementService(LifecycleManagementAPI):
         """Return the live plugin roster with status / config metadata."""
         try:
             if filter is not None and filter not in LIST_PLUGINS_FILTER_VALUES:
-                return self._error_result(
-                    f"filter must be one of {list(LIST_PLUGINS_FILTER_VALUES)} or omitted; "
-                    f"got {filter!r}"
-                )
+                return self._error_result(f"filter must be one of {list(LIST_PLUGINS_FILTER_VALUES)} or omitted; got {filter!r}")
 
             plugin_manager = self._require_plugin_manager()
             if isinstance(plugin_manager, dict):
                 return plugin_manager  # Error result
 
-            rows: list[dict[str, Any]] = [
-                self._build_plugin_row(name, plugin)
-                for name, plugin in plugin_manager.plugins.items()
-            ]
+            rows: list[dict[str, Any]] = [self._build_plugin_row(name, plugin) for name, plugin in plugin_manager.plugins.items()]
             filtered_rows = self._apply_list_filter(rows, filter)
 
             return {
@@ -541,9 +508,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
             return {}
         return dict(config_manager.get_plugin_config(plugin_name))
 
-    def _apply_list_filter(
-        self, rows: list[dict[str, Any]], filter_value: str | None
-    ) -> list[dict[str, Any]]:
+    def _apply_list_filter(self, rows: list[dict[str, Any]], filter_value: str | None) -> list[dict[str, Any]]:
         """Filter the materialised roster after every row exists."""
         if filter_value is None:
             return rows
@@ -552,9 +517,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
             return rows
         return [row for row in rows if predicate(row)]
 
-    def _stop_lifecycle_plugin_if_running(
-        self, plugin: PluginBase, plugin_name: str
-    ) -> None:
+    def _stop_lifecycle_plugin_if_running(self, plugin: PluginBase, plugin_name: str) -> None:
         """Stop services on a LifecycleManaged plugin that is currently ready."""
         if not is_lifecycle_managed(plugin):
             return
@@ -565,9 +528,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
         logger.debug(f"Stopping services for '{plugin_name}' before reregistration")
         plugin.stop_services()
 
-    def _start_lifecycle_plugin_if_managed(
-        self, plugin: PluginBase, plugin_name: str
-    ) -> None:
+    def _start_lifecycle_plugin_if_managed(self, plugin: PluginBase, plugin_name: str) -> None:
         """Run the lifecycle start sequence on a freshly re-instantiated plugin."""
         plugin.prepare_for_readiness()
         if is_lifecycle_managed(plugin):
@@ -577,7 +538,10 @@ class LifecycleManagementService(LifecycleManagementAPI):
             plugin.set_ready()
 
     def _refresh_registry_for_plugin(
-        self, plugin_name: str, *, strict: bool = False,
+        self,
+        plugin_name: str,
+        *,
+        strict: bool = False,
     ) -> None:
         """Delegate to ``knowledge_service::refresh_plugin_processes`` if available.
 
@@ -600,19 +564,13 @@ class LifecycleManagementService(LifecycleManagementAPI):
         the enable/disable callers, which refresh EXISTING entries.
         """
         knowledge_service = self._orchestrator.get_service("knowledge_service")
-        if knowledge_service is None or not hasattr(
-            knowledge_service, "refresh_plugin_processes"
-        ):
+        if knowledge_service is None or not hasattr(knowledge_service, "refresh_plugin_processes"):
             if strict:
                 # A degraded / miswired orchestrator with no usable
                 # knowledge_service cannot register the new plugin's process
                 # keys. Fail closed rather than fall through to a success
                 # envelope that claims a registration that never happened.
-                raise RuntimeError(
-                    f"knowledge_service is unavailable; cannot register the "
-                    f"process keys for {plugin_name!r} — runtime install fails "
-                    f"closed rather than report an unregistered success"
-                )
+                raise RuntimeError(f"knowledge_service is unavailable; cannot register the process keys for {plugin_name!r} — runtime install fails closed rather than report an unregistered success")
             logger.warning(
                 "knowledge_service unavailable; plugin '%s' registry was not refreshed",
                 plugin_name,
@@ -620,18 +578,13 @@ class LifecycleManagementService(LifecycleManagementAPI):
             return
         result = knowledge_service.refresh_plugin_processes(plugin_name=plugin_name)
         if strict and isinstance(result, dict) and result.get("errors"):
-            raise RuntimeError(
-                f"process registry refresh for {plugin_name!r} reported "
-                f"error(s): {result['errors']}"
-            )
+            raise RuntimeError(f"process registry refresh for {plugin_name!r} reported error(s): {result['errors']}")
 
     # ------------------------------------------------------------------
     # Plugin enable/disable, priority, config (D3, D4, D5)
     # ------------------------------------------------------------------
 
-    def set_plugin_enabled(
-        self, plugin_name: str, enabled: bool
-    ) -> dict[str, Any]:
+    def set_plugin_enabled(self, plugin_name: str, enabled: bool) -> dict[str, Any]:
         """Toggle a plugin's enabled state, persisting and applying live."""
         try:
             if not plugin_name:
@@ -645,7 +598,10 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 return config_manager
 
             self._persist_plugin_config_field(
-                config_manager, plugin_name, "enabled", enabled,
+                config_manager,
+                plugin_name,
+                "enabled",
+                enabled,
             )
 
             if enabled:
@@ -657,13 +613,9 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 f"Error toggling plugin '{plugin_name}' enabled={enabled}: {e}",
                 exc_info=True,
             )
-            return self._error_result(
-                f"Failed to set plugin '{plugin_name}' enabled={enabled}: {e}"
-            )
+            return self._error_result(f"Failed to set plugin '{plugin_name}' enabled={enabled}: {e}")
 
-    def set_plugin_priority(
-        self, plugin_name: str, priority: int
-    ) -> dict[str, Any]:
+    def set_plugin_priority(self, plugin_name: str, priority: int) -> dict[str, Any]:
         """Persist a plugin's load priority; takes effect on the next start."""
         try:
             if not plugin_name:
@@ -674,7 +626,10 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 return config_manager
 
             self._persist_plugin_config_field(
-                config_manager, plugin_name, "priority", priority,
+                config_manager,
+                plugin_name,
+                "priority",
+                priority,
             )
 
             return {
@@ -683,10 +638,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                     "applied": True,
                     "takes_effect": PLATFORM_CONFIG_TAKES_EFFECT_NEXT_RESTART,
                     "plugin_name": plugin_name,
-                    "message": (
-                        f"Plugin '{plugin_name}' priority set to {priority}; "
-                        "takes effect on the next solet restart"
-                    ),
+                    "message": (f"Plugin '{plugin_name}' priority set to {priority}; takes effect on the next solet restart"),
                 },
                 "actions": [],
             }
@@ -696,9 +648,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 f"Error setting plugin '{plugin_name}' priority={priority}: {e}",
                 exc_info=True,
             )
-            return self._error_result(
-                f"Failed to set plugin '{plugin_name}' priority={priority}: {e}"
-            )
+            return self._error_result(f"Failed to set plugin '{plugin_name}' priority={priority}: {e}")
 
     def reload_plugin_config(self, plugin_name: str) -> dict[str, Any]:
         """Re-read a plugin's config and push the new view into the plugin."""
@@ -715,13 +665,9 @@ class LifecycleManagementService(LifecycleManagementAPI):
 
             plugin = plugin_manager.plugins.get(plugin_name)
             if plugin is None:
-                return self._error_result(
-                    f"Plugin '{plugin_name}' is not loaded; nothing to reload"
-                )
+                return self._error_result(f"Plugin '{plugin_name}' is not loaded; nothing to reload")
 
-            previous_config = dict(
-                config_manager._plugin_configs.get(plugin_name, {})
-            )
+            previous_config = dict(config_manager._plugin_configs.get(plugin_name, {}))
             new_config = read_plugin_config_file(config_manager, plugin_name)
             config_manager._plugin_configs[plugin_name] = dict(new_config)
             dirty_keys = diff_config_keys(previous_config, new_config)
@@ -735,10 +681,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                     "success": True,
                     "plugin_name": plugin_name,
                     "dirty_keys": dirty_keys,
-                    "message": (
-                        f"Plugin '{plugin_name}' config reloaded "
-                        f"({len(dirty_keys)} key(s) changed)"
-                    ),
+                    "message": (f"Plugin '{plugin_name}' config reloaded ({len(dirty_keys)} key(s) changed)"),
                 },
                 "actions": [],
             }
@@ -748,17 +691,13 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 f"Error reloading config for plugin '{plugin_name}': {e}",
                 exc_info=True,
             )
-            return self._error_result(
-                f"Failed to reload plugin '{plugin_name}' config: {e}"
-            )
+            return self._error_result(f"Failed to reload plugin '{plugin_name}' config: {e}")
 
     # ------------------------------------------------------------------
     # Platform config + plugin installation (D6, D7)
     # ------------------------------------------------------------------
 
-    def update_platform_config(
-        self, scope: str, key: str, value: Any
-    ) -> dict[str, Any]:
+    def update_platform_config(self, scope: str, key: str, value: Any) -> dict[str, Any]:
         """Persist a single platform-level config entry and apply it live where possible."""
         try:
             if not scope:
@@ -766,10 +705,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
             if not key:
                 return self._error_result("key is required")
             if not is_scope_key_allowlisted(scope, key):
-                return self._error_result(
-                    f"(scope={scope!r}, key={key!r}) is not in the platform-config "
-                    f"allowlist; permitted entries: {PLATFORM_CONFIG_ALLOWLIST}"
-                )
+                return self._error_result(f"(scope={scope!r}, key={key!r}) is not in the platform-config allowlist; permitted entries: {PLATFORM_CONFIG_ALLOWLIST}")
 
             config_manager = self._require_config_manager()
             if isinstance(config_manager, dict):
@@ -782,17 +718,22 @@ class LifecycleManagementService(LifecycleManagementAPI):
             applier_name = _PLATFORM_CONFIG_IMMEDIATE_APPLIERS.get((scope, key))
             if applier_name is None:
                 return self._platform_update_result(
-                    scope=scope, key=key, previous_value=previous_value,
+                    scope=scope,
+                    key=key,
+                    previous_value=previous_value,
                     restart_required=True,
                     detail="persisted; takes effect on next solet restart",
                 )
 
             applier = cast(
-                Callable[[Any], None], getattr(self, applier_name),
+                Callable[[Any], None],
+                getattr(self, applier_name),
             )
             applier(value)
             return self._platform_update_result(
-                scope=scope, key=key, previous_value=previous_value,
+                scope=scope,
+                key=key,
+                previous_value=previous_value,
                 restart_required=False,
                 detail="persisted and applied live",
             )
@@ -802,9 +743,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 f"Error updating platform config {scope}.{key}={value!r}: {e}",
                 exc_info=True,
             )
-            return self._error_result(
-                f"Failed to update platform config {scope}.{key}: {e}"
-            )
+            return self._error_result(f"Failed to update platform config {scope}.{key}: {e}")
 
     def install_plugin_from_path(self, path: str) -> dict[str, Any]:
         """Install a plugin from a local source directory at runtime.
@@ -846,18 +785,9 @@ class LifecycleManagementService(LifecycleManagementAPI):
             # apply_manifest without touching pip. (Full Q1 deprecation —
             # dead-branch deletion + KB rewrite — is C1b.)
             if new_plugin_name in plugin_manager.plugins:
-                return self._error_result(
-                    f"plugin {new_plugin_name!r} is already loaded; runtime "
-                    f"re-install cannot replace a live instance — use "
-                    f"apply_manifest (blue-green) for code pickup"
-                )
+                return self._error_result(f"plugin {new_plugin_name!r} is already loaded; runtime re-install cannot replace a live instance — use apply_manifest (blue-green) for code pickup")
             if new_plugin_name in self._installed_plugin_entry_point_names():
-                return self._error_result(
-                    f"plugin {new_plugin_name!r} is already installed in this "
-                    f"environment (entry-point present) but not loaded; runtime "
-                    f"install cannot safely replace an existing distribution — "
-                    f"use apply_manifest (blue-green) to activate it"
-                )
+                return self._error_result(f"plugin {new_plugin_name!r} is already installed in this environment (entry-point present) but not loaded; runtime install cannot safely replace an existing distribution — use apply_manifest (blue-green) to activate it")
 
             try:
                 self._run_pip_install_editable(source)
@@ -869,25 +799,28 @@ class LifecycleManagementService(LifecycleManagementAPI):
                     f"pip install for plugin from path {path!r} failed: {exc}",
                     exc_info=True,
                 )
-                return self._error_result(
-                    f"Failed to install plugin from path {path!r}: "
-                    f"pip install failed: {exc}"
-                )
+                return self._error_result(f"Failed to install plugin from path {path!r}: pip install failed: {exc}")
 
             return self._stage_commit_or_rollback(
-                plugin_manager, source, new_plugin_name, path,
+                plugin_manager,
+                source,
+                new_plugin_name,
+                path,
             )
 
         except Exception as e:
             logger.error(
-                f"Error installing plugin from path {path!r}: {e}", exc_info=True,
+                f"Error installing plugin from path {path!r}: {e}",
+                exc_info=True,
             )
-            return self._error_result(
-                f"Failed to install plugin from path {path!r}: {e}"
-            )
+            return self._error_result(f"Failed to install plugin from path {path!r}: {e}")
 
     def _stage_commit_or_rollback(
-        self, plugin_manager: Any, source: Path, new_plugin_name: str, path: str,
+        self,
+        plugin_manager: Any,
+        source: Path,
+        new_plugin_name: str,
+        path: str,
     ) -> dict[str, Any]:
         """Post-pip: cache-invalidate → staged atomic install → registry refresh.
 
@@ -905,18 +838,12 @@ class LifecycleManagementService(LifecycleManagementAPI):
             )
         except PluginInstallError as exc:
             self._pip_uninstall_safe(new_plugin_name)
-            return self._error_result(
-                f"Failed to install plugin from path {path!r} at phase "
-                f"{exc.phase}: {exc}; pip artifact rolled back"
-            )
+            return self._error_result(f"Failed to install plugin from path {path!r} at phase {exc.phase}: {exc}; pip artifact rolled back")
         except Exception as exc:
             # cache-invalidation (or any other post-pip failure): roll the pip
             # artifact back so a later launch does not pick up a half-install.
             self._pip_uninstall_safe(new_plugin_name)
-            return self._error_result(
-                f"Failed to install plugin from path {path!r}: {exc}; "
-                f"pip artifact rolled back"
-            )
+            return self._error_result(f"Failed to install plugin from path {path!r}: {exc}; pip artifact rolled back")
 
         try:
             # Collect keys INSIDE the try (RIDER-2): a get_available_actions
@@ -926,22 +853,18 @@ class LifecycleManagementService(LifecycleManagementAPI):
             self._refresh_registry_for_plugin(new_plugin_name, strict=True)
         except Exception as exc:
             teardown_detail = self._unwind_committed_install(
-                plugin_manager, new_plugin_name,
+                plugin_manager,
+                new_plugin_name,
             )
             if teardown_detail is None:
-                return self._error_result(
-                    f"install of {new_plugin_name!r} rolled back: "
-                    f"registry refresh failed: {exc}"
-                )
+                return self._error_result(f"install of {new_plugin_name!r} rolled back: registry refresh failed: {exc}")
             # Roster + allowlist ARE clean (robust remove), but stop/de-register
             # was partial — report honestly instead of a definitive rollback.
-            return self._error_result(
-                f"install of {new_plugin_name!r} FAILED (registry refresh failed: "
-                f"{exc}) and rollback was PARTIAL: {teardown_detail}; a restart is "
-                f"recommended to clear residual state"
-            )
+            return self._error_result(f"install of {new_plugin_name!r} FAILED (registry refresh failed: {exc}) and rollback was PARTIAL: {teardown_detail}; a restart is recommended to clear residual state")
         return self._install_success_envelope(
-            new_plugin_name, source, new_process_keys,
+            new_plugin_name,
+            source,
+            new_process_keys,
         )
 
     def _installed_plugin_entry_point_names(self) -> set[str]:
@@ -954,13 +877,11 @@ class LifecycleManagementService(LifecycleManagementAPI):
         pre-existing distribution.
         """
         importlib.metadata.MetadataPathFinder.invalidate_caches()
-        return {
-            ep.name
-            for ep in importlib.metadata.entry_points().select(group="ananta.plugins")
-        }
+        return {ep.name for ep in importlib.metadata.entry_points().select(group="ananta.plugins")}
 
     def _validate_install_source(
-        self, path: str,
+        self,
+        path: str,
     ) -> tuple[Path, str] | dict[str, Any]:
         """Validate the install path + resolve the new plugin's name.
 
@@ -972,25 +893,19 @@ class LifecycleManagementService(LifecycleManagementAPI):
             return self._error_result("path is required")
         source = Path(path).expanduser().resolve()
         if not source.exists() or not source.is_dir():
-            return self._error_result(
-                f"path {source} does not exist or is not a directory"
-            )
+            return self._error_result(f"path {source} does not exist or is not a directory")
         if not any((source / marker).exists() for marker in _PLUGIN_INSTALL_MARKERS):
-            return self._error_result(
-                f"path {source} does not contain any of {_PLUGIN_INSTALL_MARKERS}; "
-                "refusing to install"
-            )
+            return self._error_result(f"path {source} does not contain any of {_PLUGIN_INSTALL_MARKERS}; refusing to install")
         new_plugin_name = self._resolve_plugin_name_from_source(source)
         if not new_plugin_name:
-            return self._error_result(
-                f"could not resolve plugin entry-point name from "
-                f"pyproject.toml [project.entry-points.\"ananta.plugins\"] "
-                f"or plugin.yaml at {source}"
-            )
+            return self._error_result(f'could not resolve plugin entry-point name from pyproject.toml [project.entry-points."ananta.plugins"] or plugin.yaml at {source}')
         return source, new_plugin_name
 
     def _install_success_envelope(
-        self, plugin_name: str, source: Path, process_keys: list[str],
+        self,
+        plugin_name: str,
+        source: Path,
+        process_keys: list[str],
     ) -> dict[str, Any]:
         """Build the canonical ``install_plugin_from_path`` success envelope."""
         return {
@@ -999,10 +914,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 "installed": True,
                 "plugin_name": plugin_name,
                 "new_process_keys": process_keys,
-                "message": (
-                    f"Installed plugin '{plugin_name}' from {source}; "
-                    f"{len(process_keys)} process key(s) registered"
-                ),
+                "message": (f"Installed plugin '{plugin_name}' from {source}; {len(process_keys)} process key(s) registered"),
             },
             "actions": [],
         }
@@ -1033,7 +945,8 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 return synthesized["rejection_envelope"]
             effective_manifest = synthesized["effective_manifest"]
             rejection, deferred_findings = self._preflight_apply_manifest(
-                effective_manifest, current,
+                effective_manifest,
+                current,
             )
             if rejection is not None:
                 return rejection
@@ -1049,7 +962,9 @@ class LifecycleManagementService(LifecycleManagementAPI):
 
             if dry_run:
                 return self._dry_run_apply_manifest(
-                    current=current, diff=diff, deferred_findings=deferred_findings,
+                    current=current,
+                    diff=diff,
+                    deferred_findings=deferred_findings,
                 )
 
             return self._commit_apply_manifest(
@@ -1076,10 +991,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
         """Return ``Path(orchestrator.APP_HOME)`` or an error dict."""
         app_home_str = getattr(self._orchestrator, "APP_HOME", None)
         if app_home_str is None:
-            return self._error_result(
-                "orchestrator.APP_HOME is not set; "
-                "apply_manifest cannot locate the runtime config directory"
-            )
+            return self._error_result("orchestrator.APP_HOME is not set; apply_manifest cannot locate the runtime config directory")
         return Path(app_home_str)
 
     def _v1_synthesize_manifest(
@@ -1105,20 +1017,12 @@ class LifecycleManagementService(LifecycleManagementAPI):
         - ``{"rejection_envelope": <dict>}`` — the canonical reject envelope
           when ``plugin_config_overrides`` is present (still v2 territory).
         """
-        forbidden = tuple(
-            key for key in _V1_FORBIDDEN_MANIFEST_KEYS if key in new_manifest
-        )
+        forbidden = tuple(key for key in _V1_FORBIDDEN_MANIFEST_KEYS if key in new_manifest)
         if forbidden:
             return {
                 "rejection_envelope": self._reject_apply_manifest(
                     current_etag=current.etag,
-                    reasons=[
-                        f"forbidden_v1_keys_present: "
-                        f"new_manifest contains {sorted(forbidden)!r}; v1 "
-                        "apply_manifest accepts {plugins, profile_name?, "
-                        "service_bindings?} only. plugin_config_overrides "
-                        "is deferred to v2."
-                    ],
+                    reasons=[f"forbidden_v1_keys_present: new_manifest contains {sorted(forbidden)!r}; v1 apply_manifest accepts {{plugins, profile_name?, service_bindings?}} only. plugin_config_overrides is deferred to v2."],
                     message=(
                         "Pre-flight rejection: v1.1 apply_manifest accepts "
                         "{plugins, profile_name?, service_bindings?}; "
@@ -1136,15 +1040,8 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 return {
                     "rejection_envelope": self._reject_apply_manifest(
                         current_etag=current.etag,
-                        reasons=[
-                            "service_bindings_shape_invalid: "
-                            f"new_manifest['service_bindings'] must be a dict; "
-                            f"got {type(caller_bindings).__name__}"
-                        ],
-                        message=(
-                            "Pre-flight rejection: service_bindings must be a "
-                            "mapping of service_name -> provider_plugin_name."
-                        ),
+                        reasons=[f"service_bindings_shape_invalid: new_manifest['service_bindings'] must be a dict; got {type(caller_bindings).__name__}"],
+                        message=("Pre-flight rejection: service_bindings must be a mapping of service_name -> provider_plugin_name."),
                     ),
                 }
             effective_bindings = {**current.service_bindings, **caller_bindings}
@@ -1201,29 +1098,18 @@ class LifecycleManagementService(LifecycleManagementAPI):
             return self._reject_apply_manifest(
                 current_etag=current.etag,
                 reasons=_format_binding_reasons(result),
-                message=(
-                    "Pre-flight validation rejected the manifest; see "
-                    "rejection_reasons for details."
-                ),
+                message=("Pre-flight validation rejected the manifest; see rejection_reasons for details."),
             ), []
 
         preflight = run_manifest_preflight(new_manifest)
-        deferred = [
-            failure for failure in preflight.failures
-            if failure.error_class == ENTRY_POINT_MISSING_ERROR_CLASS
-        ]
-        rejecting = [
-            failure for failure in preflight.failures
-            if failure.error_class != ENTRY_POINT_MISSING_ERROR_CLASS
-        ]
+        deferred = [failure for failure in preflight.failures if failure.error_class == ENTRY_POINT_MISSING_ERROR_CLASS]
+        rejecting = [failure for failure in preflight.failures if failure.error_class != ENTRY_POINT_MISSING_ERROR_CLASS]
         deferred_reasons = format_failure_reasons(
             PreflightResult(failures=deferred),
         )
         if deferred_reasons:
             logger.warning(
-                "L1 preflight deferred %d EntryPointMissingError finding(s) "
-                "to the L2 fresh-source probe (live-process importlib.metadata "
-                "can be stale for post-boot installs): %s",
+                "L1 preflight deferred %d EntryPointMissingError finding(s) to the L2 fresh-source probe (live-process importlib.metadata can be stale for post-boot installs): %s",
                 len(deferred_reasons),
                 "; ".join(deferred_reasons),
             )
@@ -1232,10 +1118,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
         return self._reject_apply_manifest(
             current_etag=current.etag,
             reasons=format_failure_reasons(PreflightResult(failures=rejecting)),
-            message=(
-                "Pre-flight import/decorator/kb-overlay checks rejected the "
-                "manifest; see rejection_reasons for the per-plugin failures."
-            ),
+            message=("Pre-flight import/decorator/kb-overlay checks rejected the manifest; see rejection_reasons for the per-plugin failures."),
         ), deferred_reasons
 
     def _dry_run_apply_manifest(
@@ -1253,11 +1136,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 "diff": _diff_to_dict(diff),
                 "current_etag": current.etag,
                 "preflight_deferred": list(deferred_findings),
-                "message": (
-                    "Dry run: manifest validated and diff computed; no "
-                    "writes performed. Pass current_etag back as "
-                    "expected_etag on a follow-up call to commit."
-                ),
+                "message": ("Dry run: manifest validated and diff computed; no writes performed. Pass current_etag back as expected_etag on a follow-up call to commit."),
             },
             "actions": [],
         }
@@ -1273,7 +1152,48 @@ class LifecycleManagementService(LifecycleManagementAPI):
         reason: str,
         deferred_findings: list[str],
     ) -> dict[str, Any]:
-        """Atomic write + delegate restart; return the applied envelope.
+        """Admit as this solet's owned deploy, then write + delegate restart.
+
+        Admission is taken BEFORE ``write_new_manifest`` and held across the
+        delegate and every applied/rollback/error envelope, so a competing
+        deploy, rollback or ``stop_self`` can never interleave with this
+        commit. The bound deployment plugin's own restart admits again on
+        this thread and joins this attempt rather than re-locking. A held
+        lock returns the canonical rejected envelope with
+        ``owned_deploy_in_progress`` and writes nothing; an admission that
+        cannot be established at all is refused the same way with
+        ``owned_deploy_exclusion_unavailable``.
+        """
+        return run_admitted(
+            "apply_manifest",
+            lambda _lease: self._commit_apply_manifest_owned(
+                app_home=app_home,
+                current=current,
+                new_manifest=new_manifest,
+                diff=diff,
+                expected_etag=expected_etag,
+                reason=reason,
+                deferred_findings=deferred_findings,
+            ),
+            refused=lambda refusal: self._reject_apply_manifest(
+                current_etag=current.etag,
+                reasons=[refusal.reason_text],
+                message=("apply_manifest refused before any write: another owned deploy, rollback or stop holds this solet's admission, or admission could not be established. Nothing was written or delegated; retry once the owner finishes."),
+            ),
+        )
+
+    def _commit_apply_manifest_owned(
+        self,
+        *,
+        app_home: Path,
+        current: CurrentManifestState,
+        new_manifest: dict[str, Any],
+        diff: ManifestDiff,
+        expected_etag: str | None,
+        reason: str,
+        deferred_findings: list[str],
+    ) -> dict[str, Any]:
+        """Atomic write + delegate restart under admission; return the applied envelope.
 
         Tier 3 §1.1 rollback contract: ``write_new_manifest`` writes
         ``service_bindings.json`` first then ``manifest.yaml``. If the
@@ -1300,15 +1220,8 @@ class LifecycleManagementService(LifecycleManagementAPI):
         except ManifestPreconditionFailedError as cas_fail:
             return self._reject_apply_manifest(
                 current_etag=cas_fail.current_etag,
-                reasons=[
-                    "precondition_failed: "
-                    f"expected etag {cas_fail.expected_etag!r} but on-disk "
-                    f"etag is {cas_fail.current_etag!r}"
-                ],
-                message=(
-                    "CAS check failed; re-read current state via "
-                    "dry_run=true and re-submit with the fresh etag."
-                ),
+                reasons=[f"precondition_failed: expected etag {cas_fail.expected_etag!r} but on-disk etag is {cas_fail.current_etag!r}"],
+                message=("CAS check failed; re-read current state via dry_run=true and re-submit with the fresh etag."),
             )
         except ValueError as exc:
             return self._reject_apply_manifest(
@@ -1318,7 +1231,9 @@ class LifecycleManagementService(LifecycleManagementAPI):
             )
         except ManifestPartialWriteError as exc:
             return self._partial_write_rollback_envelope(
-                app_home=app_home, current=current, exc=exc,
+                app_home=app_home,
+                current=current,
+                exc=exc,
             )
 
         restart = self._delegate_restart(new_manifest=new_manifest, reason=reason)
@@ -1379,8 +1294,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
             )
         except OSError as restore_exc:
             logger.error(
-                "apply_manifest partial-write rollback FAILED: %s; "
-                "manifest + bindings may be divergent on disk",
+                "apply_manifest partial-write rollback FAILED: %s; manifest + bindings may be divergent on disk",
                 restore_exc,
                 exc_info=True,
             )
@@ -1393,22 +1307,12 @@ class LifecycleManagementService(LifecycleManagementAPI):
                     "operator must inspect both files and restore by hand from a "
                     "known-good source (e.g. profile/config/ in the source repo)."
                 ],
-                message=(
-                    "apply_manifest partial-write rollback FAILED; on-disk "
-                    "state may be inconsistent. See rejection_reasons."
-                ),
+                message=("apply_manifest partial-write rollback FAILED; on-disk state may be inconsistent. See rejection_reasons."),
             )
         return self._reject_apply_manifest(
             current_etag=current.etag,
-            reasons=[
-                "partial_write_failed: "
-                f"write_new_manifest raised {exc.original!r}; previous manifest + "
-                "bindings have been restored from the CAS-time pre-write snapshot."
-            ],
-            message=(
-                "apply_manifest write failed mid-flight; on-disk state "
-                "was restored to the CAS-time pre-write snapshot."
-            ),
+            reasons=[f"partial_write_failed: write_new_manifest raised {exc.original!r}; previous manifest + bindings have been restored from the CAS-time pre-write snapshot."],
+            message=("apply_manifest write failed mid-flight; on-disk state was restored to the CAS-time pre-write snapshot."),
         )
 
     def _restart_failed_after_manifest_commit_envelope(
@@ -1445,16 +1349,10 @@ class LifecycleManagementService(LifecycleManagementAPI):
                     "restart_action_id": restart["restart_action_id"],
                     "restart_status": restart["status"],
                     "rejection_reasons": [
-                        "restart_failed_after_manifest_commit: deployment plugin "
-                        f"returned status={restart['status']!r}: {restart['message']}",
-                        "manifest_rollback_skipped: on-disk manifest changed after "
-                        "this flow wrote it; refusing to overwrite a concurrent commit",
+                        f"restart_failed_after_manifest_commit: deployment plugin returned status={restart['status']!r}: {restart['message']}",
+                        "manifest_rollback_skipped: on-disk manifest changed after this flow wrote it; refusing to overwrite a concurrent commit",
                     ],
-                    "message": (
-                        "Deployment restart failed after this flow wrote the manifest, "
-                        "but the on-disk manifest changed before rollback. It was not "
-                        "overwritten; inspect the current commit before retrying."
-                    ),
+                    "message": ("Deployment restart failed after this flow wrote the manifest, but the on-disk manifest changed before rollback. It was not overwritten; inspect the current commit before retrying."),
                 },
                 "actions": [],
             }
@@ -1478,16 +1376,10 @@ class LifecycleManagementService(LifecycleManagementAPI):
                     "restart_action_id": restart["restart_action_id"],
                     "restart_status": restart["status"],
                     "rejection_reasons": [
-                        "restart_failed_after_manifest_commit: deployment plugin "
-                        f"returned status={restart['status']!r}: {restart['message']}",
-                        "manifest_rollback_failed: "
-                        f"{type(restore_exc).__name__}: {restore_exc}",
+                        f"restart_failed_after_manifest_commit: deployment plugin returned status={restart['status']!r}: {restart['message']}",
+                        f"manifest_rollback_failed: {type(restore_exc).__name__}: {restore_exc}",
                     ],
-                    "message": (
-                        "Deployment restart failed and restoration of the pre-swap "
-                        "manifest also failed. The running color remains unchanged; "
-                        "operator intervention is required before a future boot."
-                    ),
+                    "message": ("Deployment restart failed and restoration of the pre-swap manifest also failed. The running color remains unchanged; operator intervention is required before a future boot."),
                 },
                 "actions": [],
             }
@@ -1505,16 +1397,10 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 "restart_action_id": restart["restart_action_id"],
                 "restart_status": restart["status"],
                 "rejection_reasons": [
-                    f"restart_failed_after_manifest_commit: deployment plugin "
-                    f"returned status={restart['status']!r}: {restart['message']}",
+                    f"restart_failed_after_manifest_commit: deployment plugin returned status={restart['status']!r}: {restart['message']}",
                     "manifest_rolled_back: restored the CAS-time pre-write snapshot",
                 ],
-                "message": (
-                    "Deployment restart failed after the manifest write. The running "
-                    "color remains on the old config and the on-disk profile manifest "
-                    "was restored to its CAS-time pre-write snapshot. Resolve the "
-                    "underlying deploy failure and re-invoke apply_manifest."
-                ),
+                "message": ("Deployment restart failed after the manifest write. The running color remains on the old config and the on-disk profile manifest was restored to its CAS-time pre-write snapshot. Resolve the underlying deploy failure and re-invoke apply_manifest."),
             },
             "actions": [],
         }
@@ -1571,20 +1457,12 @@ class LifecycleManagementService(LifecycleManagementAPI):
             bindings_path = app_home / Path("config") / "service_bindings.json"
             manifest_path = app_home / Path("config") / "manifest.yaml"
             rollback_succeeded = False
-            rollback_detail = (
-                f"PROBE-FAILED ROLLBACK ALSO FAILED ({type(exc).__name__}: "
-                f"{exc}); the on-disk manifest at {manifest_path} now reflects "
-                "the unvalidated proposal. Operator MUST manually restore."
-            )
+            rollback_detail = f"PROBE-FAILED ROLLBACK ALSO FAILED ({type(exc).__name__}: {exc}); the on-disk manifest at {manifest_path} now reflects the unvalidated proposal. Operator MUST manually restore."
         probe_payload = restart.get("probe")
         return {
             "action_status": ActionStatus.COMPLETED.value,
             "data": {
-                "status": (
-                    "probe_failed_manifest_rolled_back"
-                    if rollback_succeeded
-                    else "probe_failed_rollback_failed"
-                ),
+                "status": ("probe_failed_manifest_rolled_back" if rollback_succeeded else "probe_failed_rollback_failed"),
                 "diff": _diff_to_dict(diff),
                 "current_etag": current.etag,
                 "manifest_path": str(manifest_path),
@@ -1593,11 +1471,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 "restart_status": str(restart.get("status") or ""),
                 "probe": probe_payload if isinstance(probe_payload, dict) else {},
                 "rejection_reasons": _probe_rejection_reasons(restart),
-                "message": (
-                    f"L2 probe rejected the manifest BEFORE any restart fired; "
-                    f"{rollback_detail} The live the solet is untouched. See "
-                    "rejection_reasons + probe for the failing-step detail."
-                ),
+                "message": (f"L2 probe rejected the manifest BEFORE any restart fired; {rollback_detail} The live the solet is untouched. See rejection_reasons + probe for the failing-step detail."),
             },
             "actions": [],
         }
@@ -1620,9 +1494,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
         """
         probe_payload = restart.get("probe")
         logger.error(
-            "L2 probe rejected the manifest, but the on-disk manifest changed "
-            "during the probe window (wrote etag %s, on-disk etag %s) — NOT "
-            "rolling back over a concurrent commit.",
+            "L2 probe rejected the manifest, but the on-disk manifest changed during the probe window (wrote etag %s, on-disk etag %s) — NOT rolling back over a concurrent commit.",
             outcome.new_etag,
             on_disk_etag,
         )
@@ -1638,13 +1510,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 "restart_status": str(restart.get("status") or ""),
                 "probe": probe_payload if isinstance(probe_payload, dict) else {},
                 "rejection_reasons": _probe_rejection_reasons(restart),
-                "message": (
-                    "L2 probe rejected this flow's manifest, but the on-disk "
-                    "manifest changed during the probe window (a concurrent "
-                    "apply_manifest committed). NOT rolling back — the on-disk "
-                    "bytes are someone else's acknowledged commit. This flow's "
-                    "proposal was NOT deployed; the live the solet is untouched."
-                ),
+                "message": ("L2 probe rejected this flow's manifest, but the on-disk manifest changed during the probe window (a concurrent apply_manifest committed). NOT rolling back — the on-disk bytes are someone else's acknowledged commit. This flow's proposal was NOT deployed; the live the solet is untouched."),
             },
             "actions": [],
         }
@@ -1693,12 +1559,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
             return {
                 "status": "unbound",
                 "restart_action_id": "",
-                "message": (
-                    "Manifest written but no plugin is bound to "
-                    "self_deployment_service on this solet; restart "
-                    "manually via ./launch.py to pick up the new "
-                    f"manifest. Reason: {reason}"
-                ),
+                "message": (f"Manifest written but no plugin is bound to self_deployment_service on this solet; restart manually via ./launch.py to pick up the new manifest. Reason: {reason}"),
             }
         try:
             result = plugin.restart_with_manifest(
@@ -1714,12 +1575,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
             return {
                 "status": "plugin_raised",
                 "restart_action_id": "",
-                "message": (
-                    f"self-deployment plugin raised during restart_with_manifest: "
-                    f"{type(exc).__name__}: {exc}. Manifest written locally; "
-                    "the running color is unchanged. Resolve the underlying "
-                    "plugin error and re-invoke apply_manifest."
-                ),
+                "message": (f"self-deployment plugin raised during restart_with_manifest: {type(exc).__name__}: {exc}. Manifest written locally; the running color is unchanged. Resolve the underlying plugin error and re-invoke apply_manifest."),
             }
         # The plugin contract returns a RestartResult dataclass. We
         # destructure into the legacy dict envelope the caller already
@@ -1731,10 +1587,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
             delegated: dict[str, Any] = {
                 "status": result.status.value,
                 "restart_action_id": result.restart_action_id,
-                "message": (
-                    result.message
-                    or f"self-deployment plugin scheduled restart (reason: {reason})"
-                ),
+                "message": (result.message or f"self-deployment plugin scheduled restart (reason: {reason})"),
             }
             if result.probe is not None:
                 # GTE-06: carry the L2 probe payload — the PROBE_FAILED
@@ -1744,10 +1597,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
             return {
                 "status": "plugin_protocol_error",
                 "restart_action_id": "",
-                "message": (
-                    "self-deployment plugin returned a non-RestartResult from "
-                    f"restart_with_manifest: {type(result).__name__}"
-                ),
+                "message": (f"self-deployment plugin returned a non-RestartResult from restart_with_manifest: {type(result).__name__}"),
             }
         return delegated
 
@@ -1780,10 +1630,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
         if config_manager is None:
             return self._error_result("config manager not available on orchestrator")
         if not isinstance(config_manager, ConfigManager):
-            return self._error_result(
-                f"orchestrator.config is not a ConfigManager "
-                f"(got {type(config_manager).__name__})"
-            )
+            return self._error_result(f"orchestrator.config is not a ConfigManager (got {type(config_manager).__name__})")
         return config_manager
 
     def _persist_plugin_config_field(
@@ -1798,9 +1645,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
         document[field] = value
         write_plugin_config_file(config_manager, plugin_name, document)
 
-    def _apply_plugin_enable(
-        self, plugin_manager: Any, plugin_name: str
-    ) -> dict[str, Any]:
+    def _apply_plugin_enable(self, plugin_manager: Any, plugin_name: str) -> dict[str, Any]:
         """Enable a plugin live: load if absent; start if LifecycleManaged."""
         plugin = plugin_manager.plugins.get(plugin_name)
         if plugin is None:
@@ -1809,13 +1654,13 @@ class LifecycleManagementService(LifecycleManagementAPI):
         self._start_lifecycle_plugin_if_managed(plugin, plugin_name)
         self._refresh_registry_for_plugin(plugin_name)
         return self._enable_result(
-            plugin_name, applied=True, restart_required=False,
+            plugin_name,
+            applied=True,
+            restart_required=False,
             detail="enabled and active in the live roster",
         )
 
-    def _install_plugin_for_enable(
-        self, plugin_manager: Any, plugin_name: str
-    ) -> dict[str, Any]:
+    def _install_plugin_for_enable(self, plugin_manager: Any, plugin_name: str) -> dict[str, Any]:
         """Load a not-yet-loaded plugin via the atomic installer (C1b).
 
         Stages, wires (``_wire_plugin_instance`` — the same boot-order replay
@@ -1854,35 +1699,33 @@ class LifecycleManagementService(LifecycleManagementAPI):
         except PluginInstallError as exc:
             if exc.phase == "staging_discovery":
                 return self._entry_point_not_found_result(plugin_name)
-            return self._error_result(
-                f"Failed to enable plugin {plugin_name!r} at phase {exc.phase}: "
-                f"{exc}; live roster unchanged"
-            )
+            return self._error_result(f"Failed to enable plugin {plugin_name!r} at phase {exc.phase}: {exc}; live roster unchanged")
 
         self._refresh_registry_for_plugin(plugin_name)
         return self._enable_result(
-            plugin_name, applied=True, restart_required=False,
+            plugin_name,
+            applied=True,
+            restart_required=False,
             detail="enabled and active in the live roster",
         )
 
     def _entry_point_not_found_result(self, plugin_name: str) -> dict[str, Any]:
         """The one ``restart_required=True`` envelope for a not-yet-loadable enable."""
         return self._enable_result(
-            plugin_name, applied=False, restart_required=True,
-            detail=(
-                "enabled=true persisted but the plugin's entry-point was not "
-                "found via discovery; install or restart to load it"
-            ),
+            plugin_name,
+            applied=False,
+            restart_required=True,
+            detail=("enabled=true persisted but the plugin's entry-point was not found via discovery; install or restart to load it"),
         )
 
-    def _apply_plugin_disable(
-        self, plugin_manager: Any, plugin_name: str
-    ) -> dict[str, Any]:
+    def _apply_plugin_disable(self, plugin_manager: Any, plugin_name: str) -> dict[str, Any]:
         """Disable a plugin live: stop services, drop from roster, refresh registry."""
         plugin = plugin_manager.plugins.get(plugin_name)
         if plugin is None:
             return self._enable_result(
-                plugin_name, applied=True, restart_required=False,
+                plugin_name,
+                applied=True,
+                restart_required=False,
                 detail="enabled=false persisted; plugin was not in the live roster",
             )
 
@@ -1890,7 +1733,9 @@ class LifecycleManagementService(LifecycleManagementAPI):
         plugin_manager.plugins.pop(plugin_name, None)
         self._refresh_registry_for_plugin(plugin_name)
         return self._enable_result(
-            plugin_name, applied=True, restart_required=False,
+            plugin_name,
+            applied=True,
+            restart_required=False,
             detail="disabled and removed from the live roster",
         )
 
@@ -1940,15 +1785,11 @@ class LifecycleManagementService(LifecycleManagementAPI):
     def _apply_log_level(self, value: Any) -> None:
         """Apply ``logging.log_level`` to the root logger in-process."""
         if not isinstance(value, str):
-            raise TypeError(
-                f"logging.log_level must be a string; got {type(value).__name__}"
-            )
+            raise TypeError(f"logging.log_level must be a string; got {type(value).__name__}")
         level_name = value.upper()
         level_map = logging.getLevelNamesMapping()
         if level_name not in level_map:
-            raise ValueError(
-                f"logging.log_level={value!r} does not resolve to a numeric level"
-            )
+            raise ValueError(f"logging.log_level={value!r} does not resolve to a numeric level")
         logging.getLogger().setLevel(level_map[level_name])
         logger.info("Root logger level set to %s via update_platform_config", level_name)
 
@@ -1956,13 +1797,12 @@ class LifecycleManagementService(LifecycleManagementAPI):
         """Run ``pip install -e <source>`` against the active interpreter."""
         completed = subprocess.run(
             [sys.executable, "-m", "pip", "install", "-e", str(source)],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if completed.returncode != 0:
-            raise RuntimeError(
-                f"pip install -e {source} failed (exit {completed.returncode}): "
-                f"{completed.stderr.strip() or completed.stdout.strip()}"
-            )
+            raise RuntimeError(f"pip install -e {source} failed (exit {completed.returncode}): {completed.stderr.strip() or completed.stdout.strip()}")
         logger.info("Installed plugin source %s via pip install -e", source)
 
     def _invalidate_importlib_caches(self) -> None:
@@ -2021,11 +1861,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
         if pyproject.is_file():
             with pyproject.open("rb") as fh:
                 data = tomllib.load(fh)
-            entry_points = (
-                (data.get("project") or {})
-                .get("entry-points", {})
-                .get("ananta.plugins", {})
-            )
+            entry_points = (data.get("project") or {}).get("entry-points", {}).get("ananta.plugins", {})
             if isinstance(entry_points, dict) and entry_points:
                 return next(iter(entry_points))
 
@@ -2039,7 +1875,9 @@ class LifecycleManagementService(LifecycleManagementAPI):
         return ""
 
     def _wire_plugin_instance(
-        self, plugin_manager: Any, plugin: PluginBase,
+        self,
+        plugin_manager: Any,
+        plugin: PluginBase,
     ) -> None:
         """Wire a freshly-staged plugin instance: refs + lifecycle init.
 
@@ -2079,7 +1917,9 @@ class LifecycleManagementService(LifecycleManagementAPI):
             plugin.set_ready()
 
     def _unwind_committed_install(
-        self, plugin_manager: Any, plugin_name: str,
+        self,
+        plugin_manager: Any,
+        plugin_name: str,
     ) -> str | None:
         """Roll back a committed install; return None if fully clean, else a detail.
 
@@ -2103,14 +1943,17 @@ class LifecycleManagementService(LifecycleManagementAPI):
             plugin_manager.installer.remove(
                 plugin_name,
                 stop=lambda p: self._stop_lifecycle_plugin_if_running(
-                    p, plugin_name,
+                    p,
+                    plugin_name,
                 ),
                 deregister=self._deregister_process_keys,
             )
         except Exception as exc:
             teardown_detail = str(exc)
             logger.warning(
-                "partial unwind of committed install %r: %s", plugin_name, exc,
+                "partial unwind of committed install %r: %s",
+                plugin_name,
+                exc,
             )
         self._pip_uninstall_safe(plugin_name)
         return teardown_detail
@@ -2153,18 +1996,22 @@ class LifecycleManagementService(LifecycleManagementAPI):
         try:
             completed = subprocess.run(
                 [sys.executable, "-m", "pip", "uninstall", "--yes", plugin_name],
-                capture_output=True, text=True, check=False,
+                capture_output=True,
+                text=True,
+                check=False,
             )
         except OSError as exc:
             logger.warning(
                 "pip uninstall %s rollback failed to launch: %s",
-                plugin_name, exc,
+                plugin_name,
+                exc,
             )
             return
         if completed.returncode != 0:
             logger.warning(
                 "pip uninstall %s rollback exited %d: %s",
-                plugin_name, completed.returncode,
+                plugin_name,
+                completed.returncode,
                 completed.stderr.strip() or completed.stdout.strip(),
             )
         self._invalidate_importlib_caches()

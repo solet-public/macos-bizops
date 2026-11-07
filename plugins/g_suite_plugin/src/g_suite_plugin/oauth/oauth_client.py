@@ -24,6 +24,7 @@ from google_auth_oauthlib.flow import Flow
 from ..constants import (
     DEFAULT_ACCESS_TTL_SECONDS,
     GOOGLE_AUTH_URI,
+    GOOGLE_REVOKE_URI,
     GOOGLE_TOKEN_URI,
     OAUTH_SCOPES,
 )
@@ -43,6 +44,7 @@ class GoogleTokens:
     access_token: str
     refresh_token: str | None
     expires_in: int
+    granted_scopes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -65,7 +67,10 @@ def _client_config(app: OAuthAppConfig) -> dict[str, dict[str, str]]:
     }
 
 
-def build_authorization_request(app: OAuthAppConfig) -> AuthorizationRequest:
+def build_authorization_request(
+    app: OAuthAppConfig,
+    scopes: tuple[str, ...] = OAUTH_SCOPES,
+) -> AuthorizationRequest:
     """Build the consent URL (PKCE S256) and return the verifier to persist.
 
     ``access_type=offline`` + ``prompt=consent`` guarantee Google issues a
@@ -74,7 +79,7 @@ def build_authorization_request(app: OAuthAppConfig) -> AuthorizationRequest:
     """
     flow = Flow.from_client_config(
         _client_config(app),
-        scopes=list(OAUTH_SCOPES),
+        scopes=list(scopes),
         autogenerate_code_verifier=True,
     )
     flow.redirect_uri = app.redirect_uri
@@ -96,11 +101,16 @@ def exchange_code(
     code: str,
     state: str,
     code_verifier: str,
+    scopes: tuple[str, ...] = OAUTH_SCOPES,
 ) -> GoogleTokens:
-    """Exchange a one-time authorization code for an access+refresh pair."""
+    """Exchange a one-time authorization code for an access+refresh pair.
+
+    ``scopes`` must equal the list the consent URL requested: oauthlib refuses
+    a token whose scope differs from the session's ("Scope has changed").
+    """
     flow = Flow.from_client_config(
         _client_config(app),
-        scopes=list(OAUTH_SCOPES),
+        scopes=list(scopes),
         state=state,
     )
     flow.redirect_uri = app.redirect_uri
@@ -110,14 +120,20 @@ def exchange_code(
 
 
 def refresh_access_token(app: OAuthAppConfig, *, refresh_token: str) -> GoogleTokens:
-    """Obtain a fresh access token using the durable refresh token."""
+    """Obtain a fresh access token using the durable refresh token.
+
+    No ``scopes`` are passed: google-auth would send them as the refresh
+    grant's ``scope`` parameter, and Google answers ``invalid_scope`` when that
+    list names a scope the original consent did not grant. Without it Google
+    returns a token for exactly the original grant, so adding a scope to
+    ``OAUTH_SCOPES`` never breaks an account connected before the change.
+    """
     credentials = Credentials(
         token=None,
         refresh_token=refresh_token,
         token_uri=GOOGLE_TOKEN_URI,
         client_id=app.client_id,
         client_secret=app.client_secret,
-        scopes=list(OAUTH_SCOPES),
     )
     credentials.refresh(Request())
     return _tokens_from_credentials(credentials)
@@ -131,10 +147,15 @@ def _tokens_from_credentials(credentials: Any) -> GoogleTokens:
     access_token = credentials.token
     if not isinstance(access_token, str) or not access_token:
         raise RuntimeError("Google credentials missing access token after exchange")
+    granted: Any = getattr(credentials, "granted_scopes", None)
+    granted_scopes = tuple(str(scope) for scope in granted) if isinstance(granted, (list, tuple)) else ()  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+    if isinstance(granted, str):
+        granted_scopes = tuple(granted.split())
     return GoogleTokens(
         access_token=access_token,
         refresh_token=credentials.refresh_token,
         expires_in=_seconds_until(credentials.expiry),
+        granted_scopes=granted_scopes,
     )
 
 
@@ -149,3 +170,25 @@ def _seconds_until(expiry: datetime | None) -> int:
         return DEFAULT_ACCESS_TTL_SECONDS
     now_naive = datetime.now(UTC).replace(tzinfo=None)
     return max(0, int((expiry - now_naive).total_seconds()))
+
+
+def revoke_token(token: str) -> str:
+    """Revoke a Google token (refresh tokens revoke the whole grant); return a status word.
+
+    Google answers 200 on success and 400 invalid_token when the token is
+    already revoked or expired; both leave the grant gone. Any other outcome is
+    reported, never raised: disconnect still deletes the local credentials.
+    """
+    from urllib.parse import urlencode
+
+    response = Request()(
+        url=GOOGLE_REVOKE_URI,
+        method="POST",
+        body=urlencode({"token": token}).encode(),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    if response.status == 200:
+        return "revoked"
+    if response.status == 400:
+        return "already_invalid"
+    return f"revoke_failed_http_{response.status}"

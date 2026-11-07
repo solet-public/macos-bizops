@@ -1,0 +1,20 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::reconcile_ledger_tmux",
+  "display_name": "Observe ledger and tmux metadata divergences",
+  "description": "Read-only timestamped reconciliation using exact unambiguous host_ref to session id/name joins. Includes terminal ledger rows, every observed pane, source status, bounded coverage and continuation cursors. Native process presence never proves productive work or recipient uptake. No lifecycle write, identity repair, pane text read or session action.",
+  "embedding_description": "Advisory ledger/tmux metadata report: exact joins, dead-pane flags, unresolved operator references, unknown probes, partial coverage and foreign scope. Recomputed on demand and on the existing bridge sweep, default 300 seconds.",
+  "processor_policy_category": "edge",
+  "parameters": {},
+  "result_processor_customizations": {
+    "action_label": "Ledger/tmux metadata observation completed",
+    "result_type": "ledger_tmux_reconciliation_report",
+    "result_description": "observations retain reason, ledger row and pane metadata. ledger_sources and native_source retain timestamps, completeness, status and cursor evidence. advisories disclose probe_unknown and partial_coverage. complete means bounded source enumeration completed, never active work or an atomic snapshot.",
+    "presentation_guidance": "Preserve uncertain rows and source coverage. matched_process_present requires a pane_dead=0 observation; all-dead joined panes produce matched_native_pane_dead. ledger_tmux_missing requires complete valid source coverage. unbound_tmux has scope_unknown and never implies solet ownership. Presence and absence establish no lifecycle, activity or uptake verdict.",
+    "output_action_guidance": "A fresh call recomputes the report without modifying prior logs or source state. Keep historical observations. Route any identity repair or session action separately; this process has no actuation capability. Ongoing recipient uptake is outside its scope."
+  },
+  "error_processor_customizations": {
+    "action_context": "Reads StateManagementInterface through existing bounded host-filtered ledger pages and one metadata-only tmux list-panes census. Existing bridge authorization applies, with no new capability or write premise.",
+    "error_interpretation": "probe_unknown preserves timeout, nonzero exit, malformed metadata or unavailable ledger evidence. partial_coverage preserves the bounded frontier. Neither means missing/dead or a green work verdict. A collector exception is separately guarded in the sweep and cannot suppress sibling riders.",
+    "recovery_guidance": "Retain the timestamped report and retry to obtain a new observation. Never adopt a host, terminate a session or infer productive work from these metadata observations."
+  }
+}

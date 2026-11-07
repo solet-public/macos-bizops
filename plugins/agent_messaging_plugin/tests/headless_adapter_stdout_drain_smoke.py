@@ -40,6 +40,8 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src")
 
 import subprocess  # noqa: E402
 
+from _register_unit_double import fixture_assignment_record  # noqa: E402
+
 from agent_messaging_plugin import headless_adapter  # noqa: E402
 from agent_messaging_plugin.headless_adapter import HeadlessHostDriver  # noqa: E402
 
@@ -146,7 +148,7 @@ def test_red_undrained_stdout_hangs_the_chatty_child() -> None:
     try:
         with tempfile.TemporaryDirectory() as tmp:
             driver = _configured_driver(Path(tmp), popen_fn=_real_chatty_popen_fn)
-            host_ref = driver.spawn({"agent_instance_id": "agi-red-chatty-1"})
+            host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-red-chatty-1"})
             time.sleep(2.0)
             _check(
                 driver.alive(host_ref),
@@ -166,7 +168,7 @@ def test_green_real_drain_lets_the_chatty_child_exit() -> None:
     generous bound -- the fix actually resolves the RED case above."""
     with tempfile.TemporaryDirectory() as tmp:
         driver = _configured_driver(Path(tmp), popen_fn=_real_chatty_popen_fn)
-        host_ref = driver.spawn({"agent_instance_id": "agi-green-chatty-1"})
+        host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-green-chatty-1"})
         deadline = time.monotonic() + 10.0
         exited = False
         while time.monotonic() < deadline:
@@ -199,7 +201,7 @@ def test_child_death_mid_write_does_not_propagate() -> None:
     try:
         with tempfile.TemporaryDirectory() as tmp:
             driver = _configured_driver(Path(tmp), popen_fn=_real_chatty_popen_fn)
-            host_ref = driver.spawn({"agent_instance_id": "agi-killed-midwrite-1"})
+            host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-killed-midwrite-1"})
             time.sleep(0.3)  # let it get partway into writing
             os.kill(int(host_ref), signal.SIGKILL)
             deadline = time.monotonic() + 5.0

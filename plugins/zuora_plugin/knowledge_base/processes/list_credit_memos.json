@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::list_credit_memos",
+  "display_name": "Zuora: List Credit Memos",
+  "description": "List credit memos (GET /v1/credit-memos) one page per call, filtered by account, amounts, dates, number, status, source invoice or accounting state and sorted; next_page is the page to pass back, null at the end. Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "Browse credit memos issued to customers page by page, filtered by account, amount, unapplied or refunded balance, memo date, status, the invoice they came from or accounting-transfer state. Use for finding open credits to apply, refund review, or month-end credit reporting.",
+  "result_processor_customizations": {
+    "action_label": "Zuora credit memos listed",
+    "result_type": "zuora_list_credit_memos_result",
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted) and pagination {page, next_page, vendor}; next_page is the page number to pass back and null on the last page.",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+  },
+  "error_processor_customizations": {
+    "action_context": "List credit memos (GET /v1/credit-memos) one page per call, filtered by account, amounts, dates, number, status, source invoice or accounting state and sorted; next_page is the page to pass back, null at the end.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape: a bad identifier, header value or query pairing, a body missing a required field, or an unreadable or wrongly typed upload file. zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.validation_failed is a vendor 4xx or an HTTP 200 carrying success false, with Zuora's reasons. zuora.object_not_found, zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the Billing permission the reason names, or enable the vendor feature it names (for example Invoice Settlement or billing document file generation). Read current vendor state with the matching get or list verb before retrying a write; pass an idempotency_key where offered. Back off on rate limits."
+  }
+}

@@ -1,5 +1,12 @@
+import asyncio
 import datetime
 import logging
+import threading
+from collections import deque
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import copy_context
+from copy import deepcopy
 from datetime import UTC
 from typing import Any, TypedDict, cast
 
@@ -24,6 +31,7 @@ from ananta.core.plugins.decorators import service_lifecycle
 from ananta.core.plugins.plugin_base import ServicePlugin
 from ananta.core.plugins.plugin_contracts import ActionStatus
 from ananta.error_handling import PluginError
+from ananta.interfaces.agent_messaging_service_interface import AgentMessagingServiceInterface, ScheduleTarget
 from ananta.interfaces.edge_process_provider import (
     EdgeProcessDefinition,
     EdgeProcessProvider,
@@ -38,6 +46,8 @@ from ananta.types.schema_types import (
     TableSchema,
 )
 
+from .action_target import ScheduleConflictError, action_definitions, rebind_target, targets_for
+from .binding_history import actor_from
 from .constants import (
     DEFAULT_HEARTBEAT_CADENCE_MINUTES,
     HEARTBEAT_FLOW_ID,
@@ -77,6 +87,86 @@ RELOAD_SAFE = True
 
 
 # TypedDicts for structured parameters
+# A single running operation and FIFO async turn reservations preserve ordering.
+# Waiting callers never occupy an executor worker or its submission queue.
+# The process owns this pool across plugin stop/restart; Python retires it at exit.
+_F5_WORKERS = 1
+_F5_PENDING_BOUND = 1
+_F5_EXECUTOR = ThreadPoolExecutor(max_workers=_F5_WORKERS, thread_name_prefix="default_scheduling-f5")
+_F5_SUBMISSION_LOCK = threading.RLock()
+_f5_in_flight: Future[object] | None = None
+_f5_turn: Future[None] | None = None
+_f5_waiters: deque[Future[None]] = deque()
+logging.getLogger(__name__).info("F5 executor default_scheduling-f5: workers=%s pending=%s", _F5_WORKERS, _F5_PENDING_BOUND)
+
+
+def _release_f5_turn(turn: Future[None]) -> None:
+    global _f5_turn
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is not turn:
+            return
+        if _f5_waiters:
+            next_turn = _f5_waiters.popleft()
+            _f5_turn = next_turn
+            next_turn.set_result(None)
+        else:
+            _f5_turn = None
+
+
+def _cancel_f5_waiter(turn: Future[None]) -> None:
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is turn:
+            _release_f5_turn(turn)
+        elif turn in _f5_waiters:
+            _f5_waiters.remove(turn)
+            turn.cancel()
+
+
+def _complete_f5_operation(turn: Future[None], done: Future[object]) -> None:
+    global _f5_in_flight
+    with _F5_SUBMISSION_LOCK:
+        if _f5_in_flight is done:
+            _f5_in_flight = None
+        _release_f5_turn(turn)
+
+
+def _report_f5_late_failure(done: Future[object]) -> None:
+    error = done.exception()
+    if error is not None:
+        logging.getLogger(__name__).error("F5 operation failed after its waiter cancelled: %s", error)
+
+
+async def _run_f5_blocking[T](operation: Callable[[], T]) -> T:
+    """Reserve FIFO order before waiting; cancellation retains active ownership."""
+    global _f5_in_flight, _f5_turn
+    turn = Future[None]()
+    with _F5_SUBMISSION_LOCK:
+        if _f5_turn is None:
+            _f5_turn = turn
+            turn.set_result(None)
+        else:
+            _f5_waiters.append(turn)
+    try:
+        await asyncio.shield(asyncio.gather(asyncio.wrap_future(turn), return_exceptions=True))
+    except asyncio.CancelledError:
+        _cancel_f5_waiter(turn)
+        raise
+    try:
+        with _F5_SUBMISSION_LOCK:
+            future = _F5_EXECUTOR.submit(copy_context().run, operation)
+            _f5_in_flight = cast(Future[object], future)
+    except BaseException:
+        _release_f5_turn(turn)
+        raise
+    future.add_done_callback(lambda done: _complete_f5_operation(turn, cast(Future[object], done)))
+    try:
+        await asyncio.shield(asyncio.gather(asyncio.wrap_future(future), return_exceptions=True))
+    except asyncio.CancelledError:
+        future.add_done_callback(lambda done: _report_f5_late_failure(cast(Future[object], done)))
+        raise
+    return future.result()
+
+
 class StateContext(TypedDict, total=False):
     """Context information passed to all actions."""
 
@@ -112,8 +202,8 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
         self._scheduler_manager: SchedulerManager | None = None
         self._job_tracker: UniversalJobTracker | None = None
         self._memory_service: Any | None = None
-        self._memory_schedules: dict[str, ScheduleData] = {}
-        self._memory_next_id = 1000
+        self._memory_repository = ScheduleRepository(None, self.name, self.logger, in_memory=True)
+        self._memory_store_enabled = False
 
     def get_default_config(self) -> dict[str, Any]:
         return {}
@@ -142,6 +232,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                 "error_message": ColumnDefinition(type=ColumnType.TEXT),
                 "session_id": ColumnDefinition(type=ColumnType.TEXT),
                 "flow_id": ColumnDefinition(type=ColumnType.TEXT),
+                "revision": ColumnDefinition(type=ColumnType.INTEGER, default=0, not_null=True),
             },
             id_prefix="sch",
         )
@@ -151,6 +242,19 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                 namespace="default_scheduling_plugin",
                 tables={
                     "schedules": schedules_table,
+                    "binding_history": TableSchema(
+                        table_name="binding_history",
+                        id_prefix="sbh",
+                        columns={
+                            **{key: ColumnDefinition(type=ColumnType.TEXT) for key in ("schedule_id", "operation", "before_target", "after_target", "before_status", "after_status", "snapshot", "actor", "reason")},
+                            "revision": ColumnDefinition(type=ColumnType.INTEGER, not_null=True),
+                        },
+                    ),
+                    "registry_metadata": TableSchema(
+                        table_name="registry_metadata",
+                        id_prefix="srm",
+                        columns={"key": ColumnDefinition(type=ColumnType.TEXT, unique=True, not_null=True), "epoch": ColumnDefinition(type=ColumnType.INTEGER, default=0, not_null=True)},
+                    ),
                 },
             )
         ]
@@ -206,6 +310,12 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
         # Initialize the scheduler
         self._scheduler_manager.initialize()
 
+        if self._repository:
+            try:
+                self._repository.initialize_registry()
+            except Exception as exc:
+                self.logger.warning("Scheduling registry initialization unavailable: %s", exc)
+
         # Load persisted schedules from database
         # state_service is guaranteed available (fail-fast in prepare_for_readiness)
         self._load_persisted_schedules()
@@ -245,66 +355,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
         Returns:
             ActionResult with status and optional error details
         """
-        # Idempotency guard
-        if self._services_started:
-            self._start_scheduler_when_ready()
-            return {
-                "action_status": "completed",
-                "data": {"message": "Service already running"},
-                "actions": [],
-                "error": None,
-                "timestamp": datetime.datetime.now(UTC).isoformat(),
-            }
-
-        self.logger.debug(f"Starting {self.name} service")
-        try:
-            # Configure scheduler and load persisted schedules
-            self._configure_scheduler()
-
-            # Register event listeners for monitoring
-            self._register_scheduler_listeners()
-
-            # Mark the service ready after it has configured and restored its
-            # schedules.  Startup's readiness check runs before init_actions;
-            # SchedulerManager records separately whether callbacks may run.
-            self._services_started = True
-            self._service_started_at = datetime.datetime.now(UTC).isoformat()
-            self._service_error = None
-
-            # APScheduler itself waits until init_actions supplies an
-            # ActionFactory. The same helper is also called by
-            # set_action_factory, covering either ordering.
-            self._start_scheduler_when_ready()
-
-            return {
-                "action_status": "completed",
-                "data": {
-                    "message": "Service started successfully",
-                    "started_at": self._service_started_at,
-                },
-                "actions": [],
-                "error": None,
-                "timestamp": datetime.datetime.now(UTC).isoformat(),
-            }
-
-        except Exception as e:
-            self._services_started = False
-            self._service_started_at = None
-            self.logger.critical(f"Failed to start scheduling service: {e}", exc_info=True)
-            return {
-                "action_status": "error",
-                "data": {},
-                "actions": [],
-                "error": {
-                    "type": "PluginError",
-                    "code": f"{PLUGIN_NAME}.service_start_failed",
-                    "message": f"Failed to start scheduling service: {e}",
-                    "details": {"exception": str(e)},
-                    "severity": "CRITICAL",
-                    "timestamp": datetime.datetime.now(UTC).isoformat(),
-                },
-                "timestamp": datetime.datetime.now(UTC).isoformat(),
-            }
+        return await _run_f5_blocking(lambda: _f5_start_services(self))
 
     @service_lifecycle(operation="stop")
     async def stop_services(self) -> ActionResult:
@@ -313,49 +364,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
         Returns:
             ActionResult with status and optional error details
         """
-        # Idempotency guard
-        if not self._services_started:
-            return {
-                "action_status": "completed",
-                "data": {"message": "Service already stopped"},
-                "actions": [],
-                "error": None,
-                "timestamp": datetime.datetime.now(UTC).isoformat(),
-            }
-
-        self.logger.debug(f"Stopping {self.name} service")
-        try:
-            if self._scheduler_manager:
-                self._scheduler_manager.stop(wait=True)  # Wait for running jobs to complete
-
-            # Mark as stopped
-            self._services_started = False
-            self._service_started_at = None
-
-            return {
-                "action_status": "completed",
-                "data": {"message": "Service stopped successfully"},
-                "actions": [],
-                "error": None,
-                "timestamp": datetime.datetime.now(UTC).isoformat(),
-            }
-
-        except Exception as e:
-            self.logger.error(f"Error stopping scheduling service: {e}", exc_info=True)
-            return {
-                "action_status": "error",
-                "data": {},
-                "actions": [],
-                "error": {
-                    "type": "PluginError",
-                    "code": f"{PLUGIN_NAME}.service_stop_failed",
-                    "message": f"Error stopping scheduling service: {e}",
-                    "details": {"exception": str(e)},
-                    "severity": "ERROR",
-                    "timestamp": datetime.datetime.now(UTC).isoformat(),
-                },
-                "timestamp": datetime.datetime.now(UTC).isoformat(),
-            }
+        return await _run_f5_blocking(lambda: _f5_stop_services(self))
 
     def set_active(self, active: bool) -> None:
         """Pause/resume APScheduler when color-active state flips (L3 Slice D).
@@ -384,219 +393,177 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             return False
         return self._job_tracker.update_job(schedule_id, updates)
 
-    # Helper methods for state management (Session 4 refactoring)
-    def _load_schedules(self) -> dict[str, Any]:
-        """Load schedules from repository.
+    def configure_memory_store(self) -> None:
+        """Explicit test/ephemeral storage; never selected after a persistent error."""
+        self._memory_store_enabled = True
 
-        Returns:
-            Dict with 'next_id' and 'scheduled_actions' keys.
-            Note: scheduled_actions values are dicts (converted from ScheduleData models)
-        """
-        scheduled_actions: dict[str, Any] = {}
-
+    def _schedule_snapshot(self) -> tuple[dict[str, Any], list[str], dict[str, int | None]]:
+        """Observe both owner stores once; completeness is decided by the caller."""
+        memory_before = self._memory_repository.epoch()
+        entries: dict[str, Any] = {}
+        advisories: list[str] = []
+        persistent_before: int | None = None
+        persistent_after: int | None = None
         if self._repository:
-            schedule_models = self._repository.load_all_schedules()
-            for schedule_id, schedule in schedule_models.items():
-                scheduled_actions[schedule_id] = schedule.model_dump()
-
-        # Include in-memory schedules (used for test harness or DB fallback)
-        for schedule_id, schedule in self._memory_schedules.items():
-            if schedule_id not in scheduled_actions:
-                scheduled_actions[schedule_id] = schedule.model_dump()
-
-        if not scheduled_actions:
-            return {"next_id": self._memory_next_id, "scheduled_actions": {}}
-
-        next_id = 1000
-        for schedule_id_str in scheduled_actions.keys():
+            snapshot = self._repository.load_all_schedules()
+            entries = {sid: row.model_dump() for sid, row in snapshot.schedules.items()}
+            persistent_before = snapshot.epoch_before
+            advisories.extend(snapshot.advisories)
+        elif not self._memory_store_enabled:
+            advisories.append("schedule_store_unavailable")
+        memory = self._memory_repository.load_all_schedules()
+        for sid, row in memory.schedules.items():
+            entries.setdefault(sid, row.model_dump())
+        if self._repository:
             try:
-                schedule_num = int(schedule_id_str)
-                if schedule_num >= next_id:
-                    next_id = schedule_num + 1
-            except (ValueError, TypeError):
-                continue
+                persistent_after = self._repository.epoch()
+            except Exception as exc:
+                advisories.append(f"epoch_after_merge_unavailable:{exc}")
+        epochs = {"persistent_before": persistent_before, "persistent_after": persistent_after, "memory_before": memory_before, "memory_after": self._memory_repository.epoch()}
+        return entries, advisories, epochs
 
-        self._memory_next_id = max(self._memory_next_id, next_id)
-        return {"next_id": next_id, "scheduled_actions": scheduled_actions}
+    def _load_schedules(self) -> dict[str, Any]:
+        """Merge owner stores at stable epochs, retrying a changing observation once."""
+        known: dict[str, Any] = {}
+        for attempt in range(2):
+            entries, advisories, epochs = self._schedule_snapshot()
+            changed = epochs["memory_before"] != epochs["memory_after"] or epochs["persistent_before"] != epochs["persistent_after"]
+            known.update(entries)
+            if changed:
+                advisories.append("concurrent_change")
+                if attempt == 0:
+                    continue
+            complete = not advisories
+            return {"next_id": 1000, "scheduled_actions": entries if complete else known, "complete": complete, "advisories": advisories, "checked_epochs": epochs, "observation_token": datetime.datetime.now(UTC).isoformat()}
+        raise AssertionError("unreachable")
 
     def _save_schedule_in_memory(self, schedule_data: ScheduleData) -> str:
-        """Persist schedule in local memory store (used for tests/fallback)."""
-        schedule_id = schedule_data.id
-        if schedule_id and schedule_id.isdigit():
-            self._memory_next_id = max(self._memory_next_id, int(schedule_id) + 1)
-        else:
-            schedule_id = str(self._memory_next_id)
-            self._memory_next_id += 1
+        """Explicit memory-only creation shares history and locks with dispatch."""
+        if not self._memory_store_enabled:
+            raise RuntimeError("memory_store_not_configured")
+        return self._memory_repository.save_schedule(schedule_data)
 
-        schedule_copy = schedule_data.model_copy(deep=True)
-        schedule_copy.id = schedule_id
-        self._memory_schedules[schedule_id] = schedule_copy
-        return schedule_id
-
-    def _save_schedule(self, schedule_data: ScheduleData) -> str | None:
-        """Save schedule and return generated ID.
-
-        Args:
-            schedule_data: ScheduleData model to persist
-
-        Returns:
-            Generated ID if successful, None otherwise
-        """
-        schedule_id: str | None = None
-
+    def _save_schedule(self, schedule_data: ScheduleData, *, actor: str = "component:default_scheduling_plugin") -> str:
         if self._repository:
-            schedule_id = self._repository.save_schedule(schedule_data)
-            if not schedule_id:
-                self.logger.error("Failed to persist schedule via repository; falling back to in-memory store")
+            return self._repository.save_schedule(schedule_data, actor=actor)
+        if not self._memory_store_enabled:
+            raise RuntimeError("schedule_store_unavailable")
+        return self._memory_repository.save_schedule(schedule_data, actor=actor)
 
-        if schedule_id:
-            return schedule_id
-
-        return self._save_schedule_in_memory(schedule_data)
-
-    def _delete_schedule(self, schedule_id: str) -> bool:
-        """Delete schedule using repository.
-
-        Args:
-            schedule_id: ID of the schedule to delete
-        """
-        deleted = False
+    def _store_for(self, schedule_id: str) -> ScheduleRepository:
+        if self._repository and self._repository.load_schedule(schedule_id) is not None:
+            return self._repository
+        if self._memory_store_enabled and self._memory_repository.load_schedule(schedule_id) is not None:
+            return self._memory_repository
         if self._repository:
-            deleted = self._repository.delete_schedule(schedule_id)
-            if deleted:
-                self._memory_schedules.pop(schedule_id, None)
-                return True
+            return self._repository
+        if self._memory_store_enabled:
+            return self._memory_repository
+        raise RuntimeError("schedule_store_unavailable")
 
-        if schedule_id in self._memory_schedules:
-            del self._memory_schedules[schedule_id]
-            return True
+    def _delete_schedule(self, schedule_id: str, *, actor: str = "component:default_scheduling_plugin") -> bool:
+        return self._store_for(schedule_id).delete_schedule(schedule_id, actor=actor)
 
-        return deleted
-
-    def _update_schedule_status(self, schedule_id: str, status: str, error_message: str | None = None) -> None:
-        """Update schedule status using repository.
-
-        Args:
-            schedule_id: ID of the schedule to update
-            status: New status value
-            error_message: Optional error message if status is ERROR
-        """
-        updated = False
-        if self._repository:
-            updated = self._repository.update_schedule_status(schedule_id, status, error_message)
-
-        if not updated and schedule_id in self._memory_schedules:
-            schedule = self._memory_schedules[schedule_id].model_copy(deep=True)
-            schedule.status = status
-            schedule.error_message = error_message
-            self._memory_schedules[schedule_id] = schedule
+    def _update_schedule_status(self, schedule_id: str, status: str, error_message: str | None = None, *, expected_revision: int | None = None) -> None:
+        self._store_for(schedule_id).update_schedule_status(schedule_id, status, error_message, expected_revision=expected_revision)
 
     def _mark_schedule_failed(self, schedule_id: str, error_message: str) -> None:
-        """Mark schedule as failed with error details."""
         self._update_schedule_status(schedule_id, SchedulerJobStatus.ERROR, error_message)
-        self.logger.error(f"Schedule {schedule_id} marked as error: {error_message}")
+        self.logger.error("Schedule %s marked as error: %s", schedule_id, error_message)
 
     def _execute_action(self, schedule_id: str, data: dict[str, Any]) -> None:  # type: ignore[override]
-        """Execute scheduled action using ActionExecutor."""
-        # Update universal job status to processing
-        self._update_universal_schedule_job(schedule_id, {"status": "processing"})
-
-        # Convert dict data to ScheduleData model for ActionExecutor
-        try:
-            # Convert actions from dict format to ActionData models
-            actions = []
-            if "actions" in data and data["actions"]:
-                actions = [ActionData(**action) for action in data["actions"]]
-
-            schedule = ScheduleData(
-                id=schedule_id,  # Changed from schedule_id to id
-                label=data.get("label", ""),
-                tags=data.get("tags", []),
-                type=data.get("type", "one_time"),
-                actions=actions,
-                action_name=data.get("action_name", ""),
-                action_parameters=data.get("action_parameters", {}),
-                run_at=data.get("run_at"),
-                cron_expression=data.get("cron_expression"),
-                status=data.get("status", "scheduled"),
-                session_id=data.get("session_id"),
-                flow_id=data.get("flow_id"),
-                error_message=data.get("error_message"),
-            )
-        except Exception as e:
-            error_msg = f"Failed to parse schedule data: {e}"
-            self.logger.error(f"SCHEDULER-CALLBACK-ERROR: {error_msg}")
-            self._mark_schedule_failed(schedule_id, error_msg)
-            self._update_universal_schedule_job(schedule_id, {"status": "failed"})
-            return
-
-        # Execute via ActionExecutor
+        """Read the current row under lock; captured callback data is never dispatched."""
         if not self._action_executor:
-            error_msg = "ActionExecutor not initialized"
-            # Deliberately NOT _mark_schedule_failed: that persists
-            # schedules.status=error, which SchedulerManager.restore_schedules
-            # reads to SKIP the schedule on the next process restart — turning
-            # one fire landing in the set_action_factory injection gap (open
-            # during every blue-green swap's startup window) into a
-            # permanently dead schedule. Measured 2026-08-16 from
-            # profile/data/logs/2026-08-15_profile.log: sch-2n0h8hh6jp9te
-            # never fired again after exactly this write. Leaving
-            # schedules.status untouched lets the schedule survive restore;
-            # for a recurring schedule its own next cron tick is the retry
-            # (sub-minute for high-frequency crons, up to one period for
-            # low-frequency ones — a disclosed, bounded miss, not a silent
-            # drop). "pending" (not "failed") on the universal job tracker
-            # keeps the row inside asynchronous_jobs.status's allowed set
-            # (core_schemas.py CHECK) without a schema change.
-            self.logger.error(f"SCHEDULER-CALLBACK-DEFERRED: {error_msg} — schedule {schedule_id} left at its current status; retried on its own next scheduled fire instead of being dropped by a future restore")
+            self.logger.error("SCHEDULER-CALLBACK-DEFERRED: ActionExecutor not initialized; %s retains its status until its next scheduled fire", schedule_id)
             self._update_universal_schedule_job(schedule_id, {"status": "pending"})
             return
-
-        success, error = self._action_executor.execute_scheduled_actions(schedule)
-
-        if not success:
-            self._mark_schedule_failed(schedule_id, error or "Unknown error")
-            self._update_universal_schedule_job(schedule_id, {"status": "failed"})
-            return
-
-        # Handle completion based on schedule type
-        if data["type"] == "one_time":
-            self._update_schedule_status(schedule_id, SchedulerJobStatus.COMPLETED)
-            self._cleanup_completed_one_time_schedules()
-            self._update_universal_schedule_job(schedule_id, {"status": "completed"})
-        else:
-            # For recurring schedules, mark as completed for this execution
-            self._update_universal_schedule_job(schedule_id, {"status": "completed"})
+        repository = self._store_for(schedule_id)
+        try:
+            with repository.dispatch_row(schedule_id) as (schedule, transaction):
+                if schedule is None:
+                    self.logger.info("SCHEDULER-CALLBACK-SKIPPED: %s absent or not scheduled", schedule_id)
+                    return
+                self._update_universal_schedule_job(schedule_id, {"status": "processing"})
+                self.logger.info("SCHEDULER-SUBMISSION: schedule=%s observed_revision=%s; previously queued work is unchanged", schedule_id, schedule.revision)
+                success, error = self._action_executor.execute_scheduled_actions(schedule)
+                repository.finish_dispatch(schedule, transaction, success, error)
+                self._update_universal_schedule_job(schedule_id, {"status": "completed" if success else "failed"})
+                if not success:
+                    self.logger.error("SCHEDULER-SUBMISSION-PARTIAL: schedule=%s observed_revision=%s error=%s; earlier queue submissions are not retracted", schedule_id, schedule.revision, error)
+        except Exception:
+            self.logger.exception("SCHEDULER-SUBMISSION-UNRESOLVED: %s; queue submission and schedule history are not one transaction", schedule_id)
+            raise
 
     def _load_persisted_schedules(self) -> None:
-        """Load and restore persisted schedules from database."""
         if not self._scheduler_manager:
             return
-
-        # Load schedules from database
         schedules = self._load_schedules()
-        scheduled_actions = schedules.get("scheduled_actions", {})
-
-        # Delegate restoration to SchedulerManager
-        self._scheduler_manager.restore_schedules(
-            scheduled_actions,
-            self._execute_action,
-            SchedulerJobStatus.SCHEDULED,
-        )
+        if not schedules.get("complete", False):
+            self.logger.warning("SCHEDULER-RESTORE-INCOMPLETE: retaining registered jobs; deferred rows/advisories=%s", schedules.get("advisories", []))
+        self._scheduler_manager.restore_schedules(schedules["scheduled_actions"], self._execute_action, SchedulerJobStatus.SCHEDULED)
 
     def _cleanup_completed_one_time_schedules(self) -> None:
-        """Clean up completed one-time schedules using repository."""
-        removed_count = 0
         if self._repository:
-            removed_count = self._repository.cleanup_completed_one_time_schedules()
-        else:
-            for schedule_id, schedule in list(self._memory_schedules.items()):
-                if schedule.type == "one_time" and schedule.status == SchedulerJobStatus.COMPLETED:
-                    del self._memory_schedules[schedule_id]
-                    removed_count += 1
+            self._repository.cleanup_completed_one_time_schedules()
+        if self._memory_store_enabled:
+            self._memory_repository.cleanup_completed_one_time_schedules()
 
-        if removed_count > 0:
-            self.logger.debug(f"Cleaned up {removed_count} completed one-time schedules")
+    def _target_observations(self, targets: list[ScheduleTarget]) -> dict[tuple[str, str], dict[str, Any]]:
+        if not targets:
+            return {}
+        try:
+            if self.orchestrator_ref is None:
+                raise RuntimeError("messaging_owner_unavailable")
+            owner = self.orchestrator_ref.plugin_manager.plugins.get("agent_messaging_plugin")
+            if not isinstance(owner, AgentMessagingServiceInterface):
+                raise RuntimeError("messaging_owner_unavailable")
+            observations = owner.get_schedule_target_status(targets)
+            return {(item["kind"], item["value"]): dict(item) for item in observations}
+        except Exception as exc:
+            return {(target["kind"], target["value"]): {"status": "unavailable", "observed_at": datetime.datetime.now(UTC).isoformat(), "resolved_instance": None, "lifecycle_state": None, "delivery_route": "unavailable", "advisory": str(exc)} for target in targets}
+
+    def _project_schedule(self, sid: str, values: dict[str, Any]) -> dict[str, Any]:
+        row = ScheduleData.model_validate({**values, "id": sid, "actions": values.get("actions", [])})
+        job = self._scheduler_manager.get_job(sid) if self._scheduler_manager else None
+        return {
+            **{key: deepcopy(values.get(key)) for key in ("type", "status", "label", "cron_expression", "run_at", "session_id", "flow_id")},
+            "schedule_id": sid,
+            "tags": deepcopy(values.get("tags", [])),
+            "revision": row.revision,
+            "error_message": row.error_message,
+            "action_definitions": action_definitions(row),
+            "targets": targets_for(row),
+            "runtime_job_present": job is not None,
+            "runtime_job_revision": self._scheduler_manager.job_revision(sid) if self._scheduler_manager else None,
+        }
+
+    def _observe_projected_targets(self, projected: list[dict[str, Any]]) -> None:
+        lookups: dict[tuple[str, str], ScheduleTarget] = {}
+        for entry in projected:
+            for target in entry["targets"]:
+                if target["supported"]:
+                    lookups[(target["kind"], target["value"])] = {"kind": target["kind"], "value": target["value"]}
+        observations = self._target_observations(list(lookups.values()))
+        for entry in projected:
+            for target in entry["targets"]:
+                target["observation"] = observations.get((target["kind"], target["value"]), {"status": "not_applicable" if target["kind"] == "process" else "unavailable"})
+
+    def _project_schedules(self, schedules: dict[str, Any], *, status: str | None = None, tag: str | None = None) -> list[dict[str, Any]]:
+        projected: list[dict[str, Any]] = []
+        for sid, values in schedules["scheduled_actions"].items():
+            if (status is not None and values.get("status") != status) or (tag is not None and tag not in values.get("tags", [])):
+                continue
+            projected.append(self._project_schedule(sid, values))
+        self._observe_projected_targets(projected)
+        return projected
+
+    @staticmethod
+    def _completeness(schedules: dict[str, Any]) -> dict[str, Any]:
+        return {"complete": schedules.get("complete", False), "advisories": schedules.get("advisories", []), "observation_token": schedules.get("observation_token"), "checked_epochs": schedules.get("checked_epochs", {})}
+
+    @staticmethod
+    def _mutation_error(exc: Exception) -> dict[str, Any]:
+        return build_response(ActionStatus.ERROR.value, {}, {"type": "scheduling_error", "code": "scheduling." + (exc.code if isinstance(exc, ScheduleConflictError) else "mutation_failed"), "message": str(exc), "plugin_name": PLUGIN_NAME})
 
     # Text fields (display_name, description, embedding_description) are defined in
     # knowledge_base/processes/create_cron_schedule.json — the builder merges them at startup,
@@ -929,7 +896,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             )
 
             # Save and get generated ID
-            schedule_id = self._save_schedule(schedule_data)
+            schedule_id = self._save_schedule(schedule_data, actor=actor_from(state))
             if not schedule_id:
                 raise PluginError(
                     "Failed to save schedule",
@@ -1357,7 +1324,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             )
 
             # Save and get generated ID
-            schedule_id = self._save_schedule(schedule_data)
+            schedule_id = self._save_schedule(schedule_data, actor=actor_from(state))
             if not schedule_id:
                 raise PluginError(
                     "Failed to save schedule",
@@ -1645,10 +1612,6 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                     plugin_name=PLUGIN_NAME,
                 )
 
-            schedules = self._load_schedules()
-            scheduled_actions = schedules.get("scheduled_actions", {})
-            schedule_exists = schedule_id in scheduled_actions
-
             # Always attempt to remove the live APScheduler job, even when the
             # DB/metadata row is already gone. Otherwise an orphaned job (row
             # hard-deleted but the in-memory job still firing) is unkillable by
@@ -1660,7 +1623,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                 job_removed = self._scheduler_manager.get_job(schedule_id) is not None
                 self._scheduler_manager.remove_job(schedule_id)
 
-            db_deleted = self._delete_schedule(schedule_id) if schedule_exists else False
+            db_deleted = self._delete_schedule(schedule_id, actor=actor_from(state))
             cancelled = db_deleted or job_removed
 
             message = f"Cleared {schedule_id}" if cancelled else f"Schedule {schedule_id} not found; nothing to clear"
@@ -1954,7 +1917,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                     if self._scheduler_manager:
                         self._scheduler_manager.remove_job(schedule_id)
 
-                    if self._delete_schedule(schedule_id):
+                    if self._delete_schedule(schedule_id, actor=actor_from(state)):
                         cleared_count += 1
                         cleared_ids.append(schedule_id)
                         self.logger.debug(f"Cleared schedule {schedule_id} with tag {tag}")
@@ -1963,6 +1926,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                 ActionStatus.COMPLETED.value,
                 {
                     "cleared_count": cleared_count,
+                    **self._completeness(schedules),
                     "cleared_ids": cleared_ids,
                     "tag": tag,
                 },
@@ -2001,6 +1965,10 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             type=ParameterType.OBJECT,
             description="Schedules matching the tag",
             properties={
+                "complete": ParameterMetadata(type=ParameterType.BOOLEAN, description="Stable exhausted owner enumeration."),
+                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Incomplete enumeration or unavailable evidence."),
+                "checked_epochs": ParameterMetadata(type=ParameterType.OBJECT, description="Owner epochs checked before and after enumeration."),
+                "observation_token": ParameterMetadata(type=ParameterType.STRING, description="Identity of this observation."),
                 "tag": ParameterMetadata(
                     type=ParameterType.STRING,
                     description="Tag used for filtering",
@@ -2034,31 +2002,14 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                 )
 
             schedules = self._load_schedules()
-            scheduled_actions = schedules.get("scheduled_actions", {})
 
-            matching: list[dict[str, Any]] = []
-            for schedule_id, schedule_data in scheduled_actions.items():
-                if tag in schedule_data.get("tags", []):
-                    matching.append(
-                        {
-                            "schedule_id": schedule_id,
-                            "type": schedule_data.get("type"),
-                            "status": schedule_data.get("status"),
-                            "label": schedule_data.get("label"),
-                            "cron_expression": schedule_data.get("cron_expression"),
-                            "run_at": schedule_data.get("run_at"),
-                            "tags": schedule_data.get("tags", []),
-                            # Useful for debugging heartbeat scope: global schedules should not
-                            # inherit a user session_id.
-                            "session_id": schedule_data.get("session_id"),
-                            "flow_id": schedule_data.get("flow_id"),
-                        }
-                    )
+            matching = self._project_schedules(schedules, tag=tag)
 
             return build_response(
                 ActionStatus.COMPLETED.value,
                 {
                     "schedules": matching,
+                    **self._completeness(schedules),
                     "count": len(matching),
                     "tag": tag,
                 },
@@ -2094,6 +2045,10 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             type=ParameterType.OBJECT,
             description="Every scheduled job, optionally filtered by status",
             properties={
+                "complete": ParameterMetadata(type=ParameterType.BOOLEAN, description="Stable exhausted owner enumeration."),
+                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Incomplete enumeration or unavailable evidence."),
+                "checked_epochs": ParameterMetadata(type=ParameterType.OBJECT, description="Owner epochs checked before and after enumeration."),
+                "observation_token": ParameterMetadata(type=ParameterType.STRING, description="Identity of this observation."),
                 "count": ParameterMetadata(
                     type=ParameterType.INTEGER,
                     description="Number of schedules returned",
@@ -2126,32 +2081,14 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             status_filter = p.get("status") or None
 
             schedules = self._load_schedules()
-            scheduled_actions = schedules.get("scheduled_actions", {})
 
-            entries: list[dict[str, Any]] = []
-            for schedule_id, schedule_data in scheduled_actions.items():
-                if status_filter is not None and schedule_data.get("status") != status_filter:
-                    continue
-                entries.append(
-                    {
-                        "schedule_id": schedule_id,
-                        "type": schedule_data.get("type"),
-                        "status": schedule_data.get("status"),
-                        "label": schedule_data.get("label"),
-                        "cron_expression": schedule_data.get("cron_expression"),
-                        "run_at": schedule_data.get("run_at"),
-                        "tags": schedule_data.get("tags", []),
-                        # Useful for debugging heartbeat scope: global schedules
-                        # should not inherit a user session_id.
-                        "session_id": schedule_data.get("session_id"),
-                        "flow_id": schedule_data.get("flow_id"),
-                    }
-                )
+            entries = self._project_schedules(schedules, status=status_filter)
 
             return build_response(
                 ActionStatus.COMPLETED.value,
                 {
                     "schedules": entries,
+                    **self._completeness(schedules),
                     "count": len(entries),
                     "status_filter": status_filter,
                 },
@@ -2169,6 +2106,118 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                     "plugin_name": PLUGIN_NAME,
                 },
             )
+
+    @platform_process(
+        name="rebind_scheduled_action",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "schedule_id": ParameterMetadata(type=ParameterType.STRING, required=True),
+            "action_index": ParameterMetadata(type=ParameterType.INTEGER, required=True),
+            "target_kind": ParameterMetadata(type=ParameterType.STRING, required=True),
+            "target_value": ParameterMetadata(type=ParameterType.STRING, required=True),
+            "expected_revision": ParameterMetadata(type=ParameterType.INTEGER, required=True),
+            "reason": ParameterMetadata(type=ParameterType.STRING, required=True),
+        },
+    )
+    def rebind_scheduled_action(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Revise only one existing destination, with optimistic concurrency."""
+        try:
+            p = ScheduleFactory.extract_params(params)
+            if not isinstance(p.get("reason"), str) or not p["reason"].strip():
+                raise ScheduleConflictError("reason_required")
+            if type(p.get("action_index")) is not int or not isinstance(p.get("target_value"), str):
+                raise ScheduleConflictError("invalid_destination")
+
+            def change(row: ScheduleData) -> ScheduleData:
+                if row.status in ("completed", "cancelled"):
+                    raise ScheduleConflictError("terminal_schedule")
+                return rebind_target(row, p["action_index"], p["target_kind"], p["target_value"])
+
+            updated = self._store_for(p["schedule_id"]).mutate(p["schedule_id"], p["expected_revision"], change, operation="rebind", actor=actor_from(state), reason=p["reason"])
+            if updated is None:
+                raise RuntimeError("rebind_lost_schedule")
+            target: ScheduleTarget = {"kind": p["target_kind"], "value": p["target_value"]}
+            observation = self._target_observations([target]).get((target["kind"], target["value"]), {})
+            return build_response(
+                ActionStatus.COMPLETED.value,
+                {"schedule_id": updated.id, "revision": updated.revision, "effective_revision": updated.revision, "status": updated.status, "target_observation": observation, "previously_submitted_work": "unchanged", "message": "Destination changed; work submitted before this revision is unchanged."},
+            )
+        except Exception as exc:
+            return self._mutation_error(exc)
+
+    @platform_process(
+        name="get_schedule_binding_history",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "schedule_id": ParameterMetadata(type=ParameterType.STRING, required=True),
+            "limit": ParameterMetadata(type=ParameterType.INTEGER, required=False, default=100),
+            "after": ParameterMetadata(type=ParameterType.LIST, required=False),
+        },
+    )
+    def get_schedule_binding_history(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Read immutable events even after their active schedule was cleared."""
+        try:
+            p = ScheduleFactory.extract_params(params)
+            memory = self._memory_repository.history(p["schedule_id"], p.get("limit", 100), p.get("after"))
+            result = self._repository.history(p["schedule_id"], p.get("limit", 100), p.get("after")) if self._repository and not memory["events"] else memory
+            return build_response(ActionStatus.COMPLETED.value, result)
+        except Exception as exc:
+            return self._mutation_error(exc)
+
+    @platform_process(
+        name="recover_scheduled_action",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "schedule_id": ParameterMetadata(type=ParameterType.STRING, required=True),
+            "expected_revision": ParameterMetadata(type=ParameterType.INTEGER, required=True),
+            "reason": ParameterMetadata(type=ParameterType.STRING, required=True),
+        },
+    )
+    def recover_scheduled_action(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Explicit error recovery; activation failure remains visible and retryable."""
+        try:
+            p = ScheduleFactory.extract_params(params)
+            if not isinstance(p.get("reason"), str) or not p["reason"].strip():
+                raise ScheduleConflictError("reason_required")
+            repository = self._store_for(p["schedule_id"])
+
+            def recover(row: ScheduleData) -> ScheduleData:
+                if row.type != "recurring":
+                    raise ScheduleConflictError("recovery_requires_recurring_error")
+                if row.status == "scheduled":
+                    raise ScheduleConflictError("already_scheduled")
+                if row.status != "error":
+                    raise ScheduleConflictError("recovery_requires_recurring_error")
+                row.status, row.error_message = "scheduled", None
+                return row
+
+            outcome = "recovered"
+            try:
+                updated = repository.mutate(p["schedule_id"], p["expected_revision"], recover, operation="recover", actor=actor_from(state), reason=p["reason"])
+            except ScheduleConflictError as exc:
+                if exc.code != "already_scheduled":
+                    raise
+                outcome = "already_scheduled"
+                updated = repository.load_schedule(p["schedule_id"])
+            if updated is None:
+                raise ScheduleConflictError("schedule_not_found")
+            activation, advisory = self._activate_recovered(updated)
+            return build_response(ActionStatus.COMPLETED.value, {"schedule_id": updated.id, "revision": updated.revision, "effective_revision": updated.revision, "outcome": outcome, "status": updated.status, "activation_status": activation, "effective": activation == "active", "advisory": advisory})
+        except Exception as exc:
+            return self._mutation_error(exc)
+
+    def _activate_recovered(self, schedule: ScheduleData) -> tuple[str, str | None]:
+        try:
+            if self._scheduler_manager is None or not schedule.id:
+                raise RuntimeError("scheduler_activation_unavailable")
+            sid = schedule.id
+            with self._store_for(sid).dispatch_row(sid) as (current, _transaction):
+                if current is None or not current.cron_expression:
+                    raise RuntimeError("schedule_no_longer_activatable")
+                self._scheduler_manager.ensure_cron_job(lambda: self._execute_action(sid, {}), current.cron_expression, sid, current.revision)
+            return "active", None
+        except Exception as exc:
+            return "pending", str(exc)
 
     # Text fields (display_name, description, embedding_description) are defined in
     # knowledge_base/processes/ensure_global_heartbeat.json — the builder merges them at startup,
@@ -2283,7 +2332,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                 flow_id=HEARTBEAT_FLOW_ID,
             )
 
-            schedule_id = self._save_schedule(schedule_data)
+            schedule_id = self._save_schedule(schedule_data, actor=actor_from(state))
             if not schedule_id:
                 raise PluginError(
                     "Failed to save heartbeat schedule",
@@ -2350,16 +2399,20 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             description="Resolution of one queued or processing action_events row",
             properties={
                 "action_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="The failed action's id",
+                    type=ParameterType.STRING,
+                    description="The failed action's id",
                 ),
                 "process_key": ParameterMetadata(
-                    type=ParameterType.STRING, description="The failed action's process key",
+                    type=ParameterType.STRING,
+                    description="The failed action's process key",
                 ),
                 "previous_status": ParameterMetadata(
-                    type=ParameterType.STRING, description="queued or processing",
+                    type=ParameterType.STRING,
+                    description="queued or processing",
                 ),
                 "status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Always failed",
+                    type=ParameterType.STRING,
+                    description="Always failed",
                 ),
                 "error_message": ParameterMetadata(
                     type=ParameterType.STRING,
@@ -2547,7 +2600,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                 flow_id=KB_RETRIEVAL_AUDIT_FLOW_ID,
             )
 
-            schedule_id = self._save_schedule(schedule_data)
+            schedule_id = self._save_schedule(schedule_data, actor=actor_from(state))
             if not schedule_id:
                 raise PluginError(
                     "Failed to save KB retrieval-audit schedule",
@@ -2665,6 +2718,9 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
+            "rebind_scheduled_action": EdgeProcessDefinition(name="rebind_scheduled_action", result_processor_template_customizations=MergeResultProcessorCustomizations(), error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=False)),
+            "get_schedule_binding_history": EdgeProcessDefinition(name="get_schedule_binding_history", result_processor_template_customizations=MergeResultProcessorCustomizations(), error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=False)),
+            "recover_scheduled_action": EdgeProcessDefinition(name="recover_scheduled_action", result_processor_template_customizations=MergeResultProcessorCustomizations(), error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=False)),
             "list_schedules": EdgeProcessDefinition(
                 name="list_schedules",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
@@ -2688,4 +2744,123 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
+        }
+
+
+def _f5_start_services(self: "SchedulingPlugin") -> ActionResult:
+    """Start scheduling service - called by platform after Phase 3.
+
+    Returns:
+        ActionResult with status and optional error details
+    """
+    # Idempotency guard
+    if self._services_started:
+        self._start_scheduler_when_ready()
+        return {
+            "action_status": "completed",
+            "data": {"message": "Service already running"},
+            "actions": [],
+            "error": None,
+            "timestamp": datetime.datetime.now(UTC).isoformat(),
+        }
+
+    self.logger.debug(f"Starting {self.name} service")
+    try:
+        # Configure scheduler and load persisted schedules
+        self._configure_scheduler()
+
+        # Register event listeners for monitoring
+        self._register_scheduler_listeners()
+
+        # Mark the service ready after it has configured and restored its
+        # schedules.  Startup's readiness check runs before init_actions;
+        # SchedulerManager records separately whether callbacks may run.
+        self._services_started = True
+        self._service_started_at = datetime.datetime.now(UTC).isoformat()
+        self._service_error = None
+
+        # APScheduler itself waits until init_actions supplies an
+        # ActionFactory. The same helper is also called by
+        # set_action_factory, covering either ordering.
+        self._start_scheduler_when_ready()
+
+        return {
+            "action_status": "completed",
+            "data": {
+                "message": "Service started successfully",
+                "started_at": self._service_started_at,
+            },
+            "actions": [],
+            "error": None,
+            "timestamp": datetime.datetime.now(UTC).isoformat(),
+        }
+
+    except Exception as e:
+        self._services_started = False
+        self._service_started_at = None
+        self.logger.critical(f"Failed to start scheduling service: {e}", exc_info=True)
+        return {
+            "action_status": "error",
+            "data": {},
+            "actions": [],
+            "error": {
+                "type": "PluginError",
+                "code": f"{PLUGIN_NAME}.service_start_failed",
+                "message": f"Failed to start scheduling service: {e}",
+                "details": {"exception": str(e)},
+                "severity": "CRITICAL",
+                "timestamp": datetime.datetime.now(UTC).isoformat(),
+            },
+            "timestamp": datetime.datetime.now(UTC).isoformat(),
+        }
+
+
+def _f5_stop_services(self: "SchedulingPlugin") -> ActionResult:
+    """Stop scheduling service gracefully.
+
+    Returns:
+        ActionResult with status and optional error details
+    """
+    # Idempotency guard
+    if not self._services_started:
+        return {
+            "action_status": "completed",
+            "data": {"message": "Service already stopped"},
+            "actions": [],
+            "error": None,
+            "timestamp": datetime.datetime.now(UTC).isoformat(),
+        }
+
+    self.logger.debug(f"Stopping {self.name} service")
+    try:
+        if self._scheduler_manager:
+            self._scheduler_manager.stop(wait=True)  # Wait for running jobs to complete
+
+        # Mark as stopped
+        self._services_started = False
+        self._service_started_at = None
+
+        return {
+            "action_status": "completed",
+            "data": {"message": "Service stopped successfully"},
+            "actions": [],
+            "error": None,
+            "timestamp": datetime.datetime.now(UTC).isoformat(),
+        }
+
+    except Exception as e:
+        self.logger.error(f"Error stopping scheduling service: {e}", exc_info=True)
+        return {
+            "action_status": "error",
+            "data": {},
+            "actions": [],
+            "error": {
+                "type": "PluginError",
+                "code": f"{PLUGIN_NAME}.service_stop_failed",
+                "message": f"Error stopping scheduling service: {e}",
+                "details": {"exception": str(e)},
+                "severity": "ERROR",
+                "timestamp": datetime.datetime.now(UTC).isoformat(),
+            },
+            "timestamp": datetime.datetime.now(UTC).isoformat(),
         }

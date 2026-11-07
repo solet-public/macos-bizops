@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -50,6 +50,7 @@ from ananta.interfaces.llm_session_source_interface import (  # noqa: E402
     PushedSourceMixin,
 )
 from ananta.llm.session_ledger.schema import TABLE_EVENT, TABLE_SOURCE  # noqa: E402
+from ananta.llm.session_ledger.summarization import SearchResultEnvelope  # noqa: E402
 from ananta.llm.session_ledger.types import (  # noqa: E402
     EventType,
     IngestMode,
@@ -150,9 +151,7 @@ def _build_service(
             ],
         )
     blob = StubBlobStorageService()
-    plugin_manager = _StubPluginManager(
-        {"codex_pushed_session_source_plugin_stub": _StubPushedSource()}
-    )
+    plugin_manager = _StubPluginManager({"codex_pushed_session_source_plugin_stub": _StubPushedSource()})
     service = SessionLedgerService(
         state_service=state,  # type: ignore[arg-type]
         blob_storage_service=blob,  # type: ignore[arg-type]
@@ -170,14 +169,12 @@ def test_service_constructs_with_registry_and_blob() -> None:
     service, _, blob = _build_service()
     descriptors = service.list_sources()["sources"]
     _check(
-        len(descriptors) == 1
-        and descriptors[0]["source_kind"] == IngestSourceKind.CODEX_PUSHED.value,
+        len(descriptors) == 1 and descriptors[0]["source_kind"] == IngestSourceKind.CODEX_PUSHED.value,
         "Registry discovered the one stub source plugin",
     )
     _check(
         service.blob_storage_service is blob,
-        "service.blob_storage_service is the same wrapper passed at construction "
-        "(startup smoke identity invariant)",
+        "service.blob_storage_service is the same wrapper passed at construction (startup smoke identity invariant)",
     )
 
 
@@ -268,6 +265,48 @@ def test_list_sessions_returns_envelope() -> None:
     )
 
 
+class _StubSummaryWriter:
+    """Stands in for SummaryWriter.search so search_sessions runs its real envelope path."""
+
+    def __init__(self, envelopes: list[SearchResultEnvelope]) -> None:
+        self._envelopes = envelopes
+
+    def search(self, *, query: str, limit: int) -> list[SearchResultEnvelope]:
+        return self._envelopes
+
+
+def _one_match() -> list[SearchResultEnvelope]:
+    session = {"id": "les_a", "source_id": "src_x"}
+    return [SearchResultEnvelope(session_id="les_a", chunk_index=0, summary_text="s", score=0.9, session=session)]
+
+
+def test_search_sessions_reports_ingestion_freshness() -> None:
+    service, state, _ = _build_service()
+    service._summary_writer = _StubSummaryWriter(_one_match())  # type: ignore[assignment]
+    now = datetime.now(UTC)
+
+    state.set_max_value_result(now - timedelta(minutes=1))
+    fresh = service.search_sessions("query")["results"][0]
+    _check(
+        fresh["ingestion_freshness"] == "fresh" and fresh["last_ingested_at"] is not None,
+        "search result marks a source ingested 1 minute ago as fresh and carries last_ingested_at",
+    )
+
+    state.set_max_value_result(now - timedelta(minutes=30))
+    lagging = service.search_sessions("query")["results"][0]
+    _check(
+        lagging["ingestion_freshness"] == "lagging",
+        "search result marks a source ingested 30 minutes ago as lagging",
+    )
+
+    state.set_max_value_result(None)
+    unknown = service.search_sessions("query")["results"][0]
+    _check(
+        unknown["ingestion_freshness"] == "unknown" and unknown["last_ingested_at"] is None,
+        "search result reports unknown freshness and null last_ingested_at with no completed import",
+    )
+
+
 def test_service_is_concrete_for_all_m1_methods() -> None:
     """ABC compliance: SessionLedgerService implements every abstract method."""
     abstract = getattr(SessionLedgerService, "__abstractmethods__", None)
@@ -284,6 +323,7 @@ def main() -> int:
     test_register_source_existing_returns_existed_no_insert()
     test_ingest_raw_chunk_clean_path_persists_one_event()
     test_list_sessions_returns_envelope()
+    test_search_sessions_reports_ingestion_freshness()
     test_service_is_concrete_for_all_m1_methods()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:

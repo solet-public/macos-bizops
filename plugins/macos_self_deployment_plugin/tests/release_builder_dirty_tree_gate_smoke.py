@@ -21,7 +21,9 @@ non-shipped dirt builds          unscope the porcelain call (the FALSE-POSITIVE
                                  direction — the expensive one on a 13-writer tree)
 positive attestation             omit the field when clean
 override is disclosed            stamp ``clean`` under ``allow_dirty``
-gate follows the clone           split the shared constant in two
+declared package copied+scoped   restore the fixed four-root tuple
+late new-root dirt, one scope    re-read the old roots after the clone
+stale declaration refuses        skip the pre-finalize root re-derivation
 untracked ships too              gate on modified-only
 unattestable is not clean        report a non-repo tree as ``clean``
 ===============================  ===================================================
@@ -66,10 +68,16 @@ from macos_self_deployment_plugin.schema_snapshot_producer import (  # noqa: E40
     build_schema_snapshot_fn,
 )
 
+# The four distribution roots the fake source carries, and that the real
+# root_manifest.yaml selects: what every ordinary build must ship and attest.
+_DECLARED_ROOTS = ("ananta", "plugins", "solet_cli", "solet_setup_contracts")
 _GIT_IDENTITY = (
-    "-c", "user.name=smoke",
-    "-c", "user.email=smoke@example.invalid",
-    "-c", "commit.gpgsign=false",
+    "-c",
+    "user.name=smoke",
+    "-c",
+    "user.email=smoke@example.invalid",
+    "-c",
+    "commit.gpgsign=false",
 )
 
 
@@ -77,7 +85,10 @@ def _git(source: Path, *args: str) -> None:
     """Run a git command inside the SYNTHETIC scratch repo (never the checkout)."""
     result = subprocess.run(
         ["git", "-C", str(source), *args],
-        capture_output=True, text=True, check=False, timeout=30,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
     )
     if result.returncode != 0:
         raise RuntimeError(f"git {args!r} failed: {result.stderr.strip()}")
@@ -114,9 +125,7 @@ def _capture(fn: object) -> BaseException | None:
     return None
 
 
-def _build_or_fail(
-    rec: support.SmokeRecorder, tag: str, mgr: object, **kwargs: object
-) -> object | None:
+def _build_or_fail(rec: support.SmokeRecorder, tag: str, mgr: object, **kwargs: object) -> object | None:
     """Build, converting an UNEXPECTED refusal into a labelled FAIL row.
 
     Legs that assert a build SUCCEEDS must not let a refusal escape as an
@@ -166,6 +175,7 @@ class _CapturingHandler(logging.Handler):
 # Leg 1 — dirt the artifact SHIPS refuses, and leaves no staging dir behind
 # ---------------------------------------------------------------------------
 
+
 def _case_ships_dirty_refuses(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "ships-dirty"
     source = _make_repo_source(root)
@@ -178,14 +188,11 @@ def _case_ships_dirty_refuses(rec: support.SmokeRecorder, root: Path) -> None:
     exc = _capture(mgr.build_candidate)
     rec.check(
         isinstance(exc, ReleaseManagerError),
-        f"[{tag}] modified file under plugins/ ⇒ build_candidate raises "
-        f"ReleaseManagerError (got {type(exc).__name__ if exc else 'no raise'})",
+        f"[{tag}] modified file under plugins/ ⇒ build_candidate raises ReleaseManagerError (got {type(exc).__name__ if exc else 'no raise'})",
     )
     rec.check(
         _is_pre_clone_refusal(exc),
-        f"[{tag}] and it is the PRE-CLONE gate that refuses, not the post-clone "
-        f"re-check catching it late — nothing should be copied at all "
-        f"(got {str(exc)[:80]!r})",
+        f"[{tag}] and it is the PRE-CLONE gate that refuses, not the post-clone re-check catching it late — nothing should be copied at all (got {str(exc)[:80]!r})",
     )
     rec.check(
         exc is not None and "foo_plugin" in str(exc),
@@ -196,8 +203,7 @@ def _case_ships_dirty_refuses(rec: support.SmokeRecorder, root: Path) -> None:
         f"[{tag}] no staging dir left behind: {[p.name for p in _staging_dirs(releases)]}",
     )
     rec.check(
-        not any(p.name.startswith("rel-") and not p.name.endswith(STAGING_SUFFIX)
-                for p in (releases.iterdir() if releases.is_dir() else [])),
+        not any(p.name.startswith("rel-") and not p.name.endswith(STAGING_SUFFIX) for p in (releases.iterdir() if releases.is_dir() else [])),
         f"[{tag}] no finalized release materialized either",
     )
 
@@ -206,6 +212,7 @@ def _case_ships_dirty_refuses(rec: support.SmokeRecorder, root: Path) -> None:
 # Leg 2 — dirt OUTSIDE the shipped subtrees must NOT refuse (false-positive
 # direction: the expensive one; an unscoped gate bricks every deploy)
 # ---------------------------------------------------------------------------
+
 
 def _case_non_shipped_dirt_builds(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "non-shipped-dirt"
@@ -218,14 +225,20 @@ def _case_non_shipped_dirt_builds(rec: support.SmokeRecorder, root: Path) -> Non
     (workbench / "2026-08-01_lane_journal.md").write_text("permanently dirty by design\n")
     (source / "README.md").write_text("a dirty root doc\n")
 
-    unscoped = subprocess.run(
-        ["git", "-C", str(source), "status", "--porcelain"],
-        capture_output=True, text=True, check=True, timeout=30,
-    ).stdout.strip().splitlines()
+    unscoped = (
+        subprocess.run(
+            ["git", "-C", str(source), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        .stdout.strip()
+        .splitlines()
+    )
     rec.check(
         len(unscoped) >= 2,
-        f"[{tag}] PRECONDITION: the tree really is dirty unscoped ({len(unscoped)} paths) "
-        "— otherwise this leg would pass vacuously",
+        f"[{tag}] PRECONDITION: the tree really is dirty unscoped ({len(unscoped)} paths) — otherwise this leg would pass vacuously",
     )
 
     candidate = _build_or_fail(rec, tag, mgr)
@@ -234,8 +247,7 @@ def _case_non_shipped_dirt_builds(rec: support.SmokeRecorder, root: Path) -> Non
     payload = _read_version(releases, candidate.release_id)  # type: ignore[attr-defined]
     rec.check(
         payload.get("tree_state") == TREE_STATE_CLEAN,
-        f"[{tag}] workbench/ + root-doc dirt ⇒ tree_state == clean "
-        f"(got {payload.get('tree_state')!r})",
+        f"[{tag}] workbench/ + root-doc dirt ⇒ tree_state == clean (got {payload.get('tree_state')!r})",
     )
     rec.check(
         payload.get("dirty_paths") == [],
@@ -246,6 +258,7 @@ def _case_non_shipped_dirt_builds(rec: support.SmokeRecorder, root: Path) -> Non
 # ---------------------------------------------------------------------------
 # Leg 3 — positive attestation: the field is PRESENT on a clean build
 # ---------------------------------------------------------------------------
+
 
 def _case_positive_attestation(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "positive-attestation"
@@ -259,26 +272,22 @@ def _case_positive_attestation(rec: support.SmokeRecorder, root: Path) -> None:
     payload = _read_version(releases, candidate.release_id)  # type: ignore[attr-defined]
     rec.check(
         "tree_state" in payload,
-        f"[{tag}] a CLEAN build still writes tree_state — absence must never be "
-        "readable as clean (it means only 'predates the gate')",
+        f"[{tag}] a CLEAN build still writes tree_state — absence must never be readable as clean (it means only 'predates the gate')",
     )
     rec.check(
-        payload.get("tree_state") == TREE_STATE_CLEAN
-        and payload.get("dirty_paths") == [],
-        f"[{tag}] clean ⇒ tree_state=clean + empty dirty_paths "
-        f"({payload.get('tree_state')!r}, {payload.get('dirty_paths')!r})",
+        payload.get("tree_state") == TREE_STATE_CLEAN and payload.get("dirty_paths") == [],
+        f"[{tag}] clean ⇒ tree_state=clean + empty dirty_paths ({payload.get('tree_state')!r}, {payload.get('dirty_paths')!r})",
     )
     rec.check(
-        payload.get("tree_state_scope") == list(rm_module.CODE_SUBTREES),
-        f"[{tag}] VERSION discloses WHICH subtrees the attestation covers "
-        f"(got {payload.get('tree_state_scope')!r}) — so 'clean' is not read as "
-        "'artifact fully attested'; .venv is gitignored and out of scope",
+        payload.get("tree_state_scope") == list(_DECLARED_ROOTS),
+        f"[{tag}] VERSION discloses WHICH subtrees the attestation covers (got {payload.get('tree_state_scope')!r}) — so 'clean' is not read as 'artifact fully attested'; .venv is gitignored and out of scope",
     )
 
 
 # ---------------------------------------------------------------------------
 # Leg 4 — the override builds, but is DISCLOSED in VERSION and logged loudly
 # ---------------------------------------------------------------------------
+
 
 def _case_override_is_disclosed(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "override-disclosed"
@@ -300,8 +309,7 @@ def _case_override_is_disclosed(rec: support.SmokeRecorder, root: Path) -> None:
     payload = _read_version(releases, candidate.release_id)  # type: ignore[attr-defined]
     rec.check(
         payload.get("tree_state") == TREE_STATE_DIRTY,
-        f"[{tag}] allow_dirty stamps tree_state=dirty, NOT clean "
-        f"(got {payload.get('tree_state')!r})",
+        f"[{tag}] allow_dirty stamps tree_state=dirty, NOT clean (got {payload.get('tree_state')!r})",
     )
     listed = payload.get("dirty_paths")
     rec.check(
@@ -311,57 +319,198 @@ def _case_override_is_disclosed(rec: support.SmokeRecorder, root: Path) -> None:
     warnings = [r for r in handler.records if r.levelno >= logging.WARNING]
     rec.check(
         any("ananta" in r.getMessage() for r in warnings),
-        f"[{tag}] logs at WARNING with the dirty list INLINE "
-        f"({[r.getMessage() for r in warnings]})",
+        f"[{tag}] logs at WARNING with the dirty list INLINE ({[r.getMessage() for r in warnings]})",
     )
     logger.removeHandler(handler)
 
 
 # ---------------------------------------------------------------------------
-# Leg 5 — the gate's scope is the CLONE's scope: one constant, not two lists
+# Leg 5 — the gate's scope is the CLONE's scope: one DECLARED root snapshot
+# (iss_b2922e16). A package added to root_manifest.yaml enters the clone, the
+# pre-clone gate, VERSION and the post-clone re-read without touching Python.
 # ---------------------------------------------------------------------------
 
-def _case_gate_follows_the_clone(rec: support.SmokeRecorder, root: Path) -> None:
-    tag = "gate-follows-clone"
-    source = support.build_fake_source(root)
-    extra = source / "extra_subtree"
-    extra.mkdir()
-    (extra / "shipped.py").write_text("# a third cloned subtree\n")
-    (source / ".gitignore").write_text(".venv/\n")
-    _init_repo(source)
-    releases = root / "releases"
+_NEW_PACKAGE = "extra_pkg"
+_NEW_PACKAGE_MODULE = f"{_NEW_PACKAGE}/src/{_NEW_PACKAGE}/__init__.py"
 
-    original = rm_module.CODE_SUBTREES
-    rm_module.CODE_SUBTREES = (*original, "extra_subtree")  # type: ignore[misc]
-    try:
-        # (a) the widened constant reaches the CLONE.
-        candidate = _build_or_fail(rec, tag, support.make_manager(source, releases))
+
+def _write_manifest(source: Path, directories: tuple[str, ...]) -> None:
+    """A schema-valid root_manifest.yaml declaring ``directories`` as universal."""
+    listed = "".join(f"    - {name}\n" for name in directories)
+    (source / "root_manifest.yaml").write_text(f"schema_version: 1\nsolet_name: smoke\nuniversal:\n  files: []\n  directories:\n{listed}platform_managed:\n  directories:\n    - .git\n    - .venv\nsanctioned: []\noverrides: []\ndiagnostic:\n  report_categories:\n    - unknown_root_entries\n  ignore_patterns: []\n")
+
+
+def _declared_package_source(root: Path, *, git: bool, package: str = _NEW_PACKAGE) -> Path:
+    """Fake source + a declared new package + a declared DATA tree that must not ship."""
+    source = support.build_fake_source(root)
+    module = source / package / "src" / package / "__init__.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("# a newly declared top-level package\n")
+    (source / "knowledge_bases").mkdir()
+    (source / "knowledge_bases" / "article.md").write_text("declared data, never code\n")
+    _write_manifest(source, (*_DECLARED_ROOTS, package, "knowledge_bases"))
+    if git:
+        (source / ".gitignore").write_text(".venv/\n")
+        _init_repo(source)
+    return source
+
+
+def _shipped_roots(releases: Path, candidate: object) -> list[str]:
+    code_root = releases / candidate.release_id / "code"  # type: ignore[attr-defined]
+    return sorted(child.name for child in code_root.iterdir())
+
+
+def _case_declared_package_is_copied_and_scoped(rec: support.SmokeRecorder, root: Path) -> None:
+    tag = "declared_package_is_copied_and_scoped"
+    source = _declared_package_source(root, git=True)
+    releases = root / "releases"
+    candidate = _build_or_fail(rec, tag, support.make_manager(source, releases))
+    rec.check(
+        candidate is not None and (releases / candidate.release_id / "code" / _NEW_PACKAGE_MODULE).is_file(),  # type: ignore[attr-defined]
+        f"[{tag}] the clone ships the manifest-declared package with no Python edit",
+    )
+    rec.check(
+        candidate is not None and "knowledge_bases" not in _shipped_roots(releases, candidate),
+        f"[{tag}] a declared DATA tree is not selected as code",
+    )
+    payload = _read_version(releases, candidate.release_id) if candidate is not None else {}  # type: ignore[attr-defined]
+    selection = payload.get("code_root_selection")
+    rec.check(
+        payload.get("tree_state_scope") == sorted((*_DECLARED_ROOTS, _NEW_PACKAGE)) and isinstance(selection, dict) and selection.get("basis") == "root_manifest" and selection.get("manifest_sha256") is not None,
+        f"[{tag}] VERSION scope and basis name the declared snapshot (got {payload.get('tree_state_scope')!r}, {selection!r})",
+    )
+    (source / _NEW_PACKAGE_MODULE).write_text("# edited after the baseline commit\n")
+    exc = _capture(support.make_manager(source, releases / "second").build_candidate)
+    rec.check(
+        _is_pre_clone_refusal(exc) and _NEW_PACKAGE in str(exc),
+        f"[{tag}] dirt in the declared package REFUSES AT THE PRE-CLONE GATE — the gate reads the same snapshot the clone does (got {str(exc)[:120]!r})",
+    )
+
+
+def _scoped_racing_resolver(calls: list[tuple[str, ...]], late_dirt: str) -> object:
+    """Clean at gate time; later dirty, but only as git would scope it by pathspec."""
+
+    def resolver(_root: Path, subtrees: tuple[str, ...]) -> tuple[str, ...]:
+        calls.append(subtrees)
+        if len(calls) == 1 or late_dirt.split("/", 1)[0] not in subtrees:
+            return ()
+        return (f" M {late_dirt}",)
+
+    return resolver
+
+
+def _injected_manager(source: Path, releases: Path, resolver: object) -> rm_module.ReleaseManager:
+    return rm_module.ReleaseManager(
+        solet_name="smoke",
+        source_root=source,
+        releases_root=releases,
+        clock=lambda: datetime(2026, 10, 18, 12, 0, tzinfo=UTC),
+        git_sha_resolver=support.make_counting_sha(),
+        dirty_paths_resolver=resolver,  # type: ignore[arg-type]
+    )
+
+
+def _case_late_new_root_dirt_uses_one_scope(rec: support.SmokeRecorder, root: Path) -> None:
+    tag = "late-new-root-dirt"
+    source = _declared_package_source(root, git=True)
+    releases = root / "releases"
+    calls: list[tuple[str, ...]] = []
+    resolver = _scoped_racing_resolver(calls, _NEW_PACKAGE_MODULE)
+    exc = _capture(_injected_manager(source, releases, resolver).build_candidate)
+    rec.check(
+        len(calls) == 2 and calls[0] == calls[1] and _NEW_PACKAGE in calls[0],
+        f"[{tag}] the pre-clone and post-clone dirty reads use ONE scope that includes the declared package (got {calls})",
+    )
+    rec.check(
+        isinstance(exc, ReleaseManagerError) and _MID_CLONE_REFUSAL in str(exc),
+        f"[{tag}] dirt that appears in the declared package mid-clone REFUSES via the post-clone re-read (got {str(exc)[:100]!r})",
+    )
+    rec.check(_staging_dirs(releases) == [], f"[{tag}] the torn staging dir is removed")
+
+
+def _case_stale_declaration_refuses(rec: support.SmokeRecorder, root: Path) -> None:
+    tag = "stale-declaration"
+    source = _declared_package_source(root, git=True)
+    releases = root / "releases"
+    calls: list[tuple[str, ...]] = []
+
+    def resolver(_root: Path, subtrees: tuple[str, ...]) -> tuple[str, ...]:
+        calls.append(subtrees)
+        if len(calls) == 2:
+            _write_manifest(source, _DECLARED_ROOTS)  # the declaration moves mid-build
+        return ()
+
+    exc = _capture(_injected_manager(source, releases, resolver).build_candidate)
+    rec.check(
+        isinstance(exc, ReleaseManagerError) and "code root declaration changed during the build" in str(exc),
+        f"[{tag}] a declaration that changes during the build refuses instead of attesting a stale scope (got {str(exc)[:120]!r})",
+    )
+    rec.check(_staging_dirs(releases) == [], f"[{tag}] no staging dir survives the refusal")
+
+
+def _case_membership_lifecycle(rec: support.SmokeRecorder, root: Path) -> None:
+    """Add, correct, remove and reverse a declared package; each build follows."""
+    tag = "membership-lifecycle"
+    source = _declared_package_source(root, git=False)
+    releases = root / "releases"
+    manager = support.make_manager(source, releases)
+    renamed = "renamed_pkg"
+    steps = (
+        ("add", (*_DECLARED_ROOTS, _NEW_PACKAGE), _NEW_PACKAGE, True),
+        ("correct", (*_DECLARED_ROOTS, renamed), renamed, True),
+        ("remove", _DECLARED_ROOTS, renamed, False),
+        ("reverse", (*_DECLARED_ROOTS, renamed), renamed, True),
+    )
+    for step, declared, package, expected in steps:
+        if step == "correct":
+            (source / _NEW_PACKAGE).rename(source / renamed)
+            (source / renamed / "src" / _NEW_PACKAGE).rename(source / renamed / "src" / renamed)
+        _write_manifest(source, declared)
+        candidate = _build_or_fail(rec, f"{tag}:{step}", manager)
+        shipped = _shipped_roots(releases, candidate) if candidate is not None else []
+        scope = _read_version(releases, candidate.release_id).get("tree_state_scope") if candidate is not None else None  # type: ignore[attr-defined]
         rec.check(
-            candidate is not None
-            and (
-                releases / candidate.release_id  # type: ignore[attr-defined]
-                / "code" / "extra_subtree" / "shipped.py"
-            ).is_file(),
-            f"[{tag}] the clone loop ships the added subtree",
+            (package in shipped) == expected and scope == shipped,
+            f"[{tag}:{step}] {package} shipped={expected} and VERSION scope equals the clone (got {shipped}, {scope})",
         )
-        # (b) the SAME constant reaches the GATE — dirt in the added subtree refuses.
-        (extra / "shipped.py").write_text("# edited after the baseline commit\n")
-        exc = _capture(support.make_manager(source, releases / "second").build_candidate)
-        rec.check(
-            _is_pre_clone_refusal(exc),
-            f"[{tag}] dirt in the added subtree REFUSES AT THE PRE-CLONE GATE — "
-            f"that gate reads the same constant the clone does, not a second "
-            f"literal list. (A post-clone refusal here would mean the pre-clone "
-            f"scope had drifted and the re-check was covering for it.) "
-            f"(got {str(exc)[:90]!r})",
-        )
-    finally:
-        rm_module.CODE_SUBTREES = original  # type: ignore[misc]
+
+
+def _case_manifest_unavailable_discovers_structurally(rec: support.SmokeRecorder, root: Path) -> None:
+    tag = "manifest-unavailable"
+    source = support.build_fake_source(root)
+    (source / "root_manifest.yaml").write_text("schema_version: 2\n")
+    releases = root / "releases"
+    handler = _CapturingHandler()
+    logger = logging.getLogger(f"dirty-gate-smoke.{tag}")
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    candidate = _build_or_fail(rec, tag, support.make_manager(source, releases, logger=logger))
+    logger.removeHandler(handler)
+    payload = _read_version(releases, candidate.release_id) if candidate is not None else {}  # type: ignore[attr-defined]
+    selection = payload.get("code_root_selection")
+    rec.check(
+        isinstance(selection, dict) and selection.get("basis") == "structural_discovery" and selection.get("manifest_sha256") is None and payload.get("tree_state_scope") == list(_DECLARED_ROOTS),
+        f"[{tag}] an invalid manifest builds from structurally discovered roots and never claims manifest authority (got {selection!r})",
+    )
+    warned = [r.getMessage() for r in handler.records if r.levelno >= logging.WARNING]
+    rec.check(
+        any("discovered from package layout, not declared" in message for message in warned),
+        f"[{tag}] the structural fallback is an explicit WARNING advisory (got {warned})",
+    )
+
+
+def _case_real_tree_roots_are_covered(rec: support.SmokeRecorder) -> None:
+    selection = rm_module.select_code_roots(support.REPO_ROOT)
+    rec.check(
+        selection.basis == "root_manifest" and selection.roots == _DECLARED_ROOTS,
+        f"[real-tree] the real manifest selects exactly the four roots the release needs (got {selection.roots}, {selection.basis})",
+    )
 
 
 # ---------------------------------------------------------------------------
 # Leg 5a — the release carries setup contracts and their editable target
 # ---------------------------------------------------------------------------
+
 
 def _case_setup_contracts_ship(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "setup-contracts-carry"
@@ -371,7 +520,10 @@ def _case_setup_contracts_ship(rec: support.SmokeRecorder, root: Path) -> None:
         candidate is not None
         and (
             candidate.code_root  # type: ignore[attr-defined]
-            / "solet_setup_contracts" / "src" / "solet_setup_contracts" / "__init__.py"
+            / "solet_setup_contracts"
+            / "src"
+            / "solet_setup_contracts"
+            / "__init__.py"
         ).is_file(),
         f"[{tag}] release code/ carries solet_setup_contracts for ananta imports",
     )
@@ -385,6 +537,7 @@ def _case_setup_contracts_ship(rec: support.SmokeRecorder, root: Path) -> None:
 # Leg 6 — untracked files ship too, so untracked dirt must refuse
 # ---------------------------------------------------------------------------
 
+
 def _case_untracked_refuses(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "untracked"
     source = _make_repo_source(root)
@@ -397,9 +550,7 @@ def _case_untracked_refuses(rec: support.SmokeRecorder, root: Path) -> None:
     exc = _capture(mgr.build_candidate)
     rec.check(
         _is_pre_clone_refusal(exc),
-        f"[{tag}] a NEW untracked .py under plugins/ refuses at the PRE-CLONE "
-        f"gate — the clone is cp -cR, which ships untracked files (got "
-        f"{str(exc)[:80]!r})",
+        f"[{tag}] a NEW untracked .py under plugins/ refuses at the PRE-CLONE gate — the clone is cp -cR, which ships untracked files (got {str(exc)[:80]!r})",
     )
     rec.check(
         exc is not None and "brand_new.py" in str(exc),
@@ -411,6 +562,7 @@ def _case_untracked_refuses(rec: support.SmokeRecorder, root: Path) -> None:
 # Leg 7 (not in the ruling table; the ruling assumed a git repo) — a tree git
 # cannot attest is UNKNOWN, never clean, and does not refuse.
 # ---------------------------------------------------------------------------
+
 
 def _case_unattestable_is_not_clean(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "unattestable"
@@ -429,17 +581,12 @@ def _case_unattestable_is_not_clean(rec: support.SmokeRecorder, root: Path) -> N
     payload = _read_version(releases, candidate.release_id)  # type: ignore[attr-defined]
     rec.check(
         payload.get("tree_state") == TREE_STATE_UNKNOWN,
-        f"[{tag}] a non-repo source tree attests UNKNOWN, never clean "
-        f"(got {payload.get('tree_state')!r}) — the one inference the field must "
-        "never support is 'could not measure' ⇒ 'clean'",
+        f"[{tag}] a non-repo source tree attests UNKNOWN, never clean (got {payload.get('tree_state')!r}) — the one inference the field must never support is 'could not measure' ⇒ 'clean'",
     )
     warned = [r.getMessage() for r in handler.records if r.levelno >= logging.WARNING]
     rec.check(
         any("UNATTESTABLE for" in m for m in warned),
-        f"[{tag}] the PRE-clone attestation is what reports it unmeasurable — "
-        f"not the post-clone re-check downgrading a bogus 'clean' after the "
-        f"fact, which would mean the gate itself had stopped detecting it "
-        f"(got {warned})",
+        f"[{tag}] the PRE-clone attestation is what reports it unmeasurable — not the post-clone re-check downgrading a bogus 'clean' after the fact, which would mean the gate itself had stopped detecting it (got {warned})",
     )
     logger.removeHandler(handler)
 
@@ -455,6 +602,7 @@ def _case_unattestable_is_not_clean(rec: support.SmokeRecorder, root: Path) -> N
 # an executable reproduction of the real sequence.
 # ---------------------------------------------------------------------------
 
+
 def _case_torn_snapshot_refuses(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "torn-snapshot"
     source = _make_repo_source(root)
@@ -468,8 +616,7 @@ def _case_torn_snapshot_refuses(rec: support.SmokeRecorder, root: Path) -> None:
     exc = _capture(mgr.build_candidate)
     rec.check(
         _is_pre_clone_refusal(exc),
-        f"[{tag}] the build that WOULD have torn the file is refused at PRE-CLONE "
-        f"gate time — before anything is copied (got {str(exc)[:80]!r})",
+        f"[{tag}] the build that WOULD have torn the file is refused at PRE-CLONE gate time — before anything is copied (got {str(exc)[:80]!r})",
     )
 
     # The lane keeps editing after the build attempt — the second half of the
@@ -477,15 +624,12 @@ def _case_torn_snapshot_refuses(rec: support.SmokeRecorder, root: Path) -> None:
     torn.write_text("# edit v2 — the lane kept going after the build\n")
     rec.check(
         torn.read_text() != committed,
-        f"[{tag}] PRECONDITION: the file now matches neither HEAD nor the "
-        "build-time content — the torn state the incident produced",
+        f"[{tag}] PRECONDITION: the file now matches neither HEAD nor the build-time content — the torn state the incident produced",
     )
     exc_again = _capture(mgr.build_candidate)
     rec.check(
         isinstance(exc_again, ReleaseManagerError),
-        f"[{tag}] still refused after the follow-up edit — 'torn' is not a state "
-        f"that escapes a gate keyed on dirty-vs-HEAD "
-        f"(got {type(exc_again).__name__ if exc_again else 'no raise'})",
+        f"[{tag}] still refused after the follow-up edit — 'torn' is not a state that escapes a gate keyed on dirty-vs-HEAD (got {type(exc_again).__name__ if exc_again else 'no raise'})",
     )
     rec.check(
         _staging_dirs(releases) == [],
@@ -500,6 +644,7 @@ def _case_torn_snapshot_refuses(rec: support.SmokeRecorder, root: Path) -> None:
 # the builder re-measures after the clone and compares, not what git reports.
 # A real mid-clone edit is a race no fixture can schedule reliably.
 # ---------------------------------------------------------------------------
+
 
 def _case_mid_clone_edit_refuses(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "mid-clone"
@@ -525,18 +670,15 @@ def _case_mid_clone_edit_refuses(rec: support.SmokeRecorder, root: Path) -> None
     exc = _capture(mgr.build_candidate)
     rec.check(
         len(calls) >= 2,
-        f"[{tag}] the builder measures the tree AGAIN after the clone "
-        f"(resolver called {len(calls)}x — a single call cannot detect the race)",
+        f"[{tag}] the builder measures the tree AGAIN after the clone (resolver called {len(calls)}x — a single call cannot detect the race)",
     )
     rec.check(
         isinstance(exc, ReleaseManagerError) and _MID_CLONE_REFUSAL in str(exc),
-        f"[{tag}] a tree that moves mid-clone REFUSES via the POST-clone re-check "
-        f"rather than shipping a torn artifact (got {str(exc)[:90]!r})",
+        f"[{tag}] a tree that moves mid-clone REFUSES via the POST-clone re-check rather than shipping a torn artifact (got {str(exc)[:90]!r})",
     )
     rec.check(
         _staging_dirs(releases) == [],
-        f"[{tag}] the half-built staging dir is cleaned up: "
-        f"{[p.name for p in _staging_dirs(releases)]}",
+        f"[{tag}] the half-built staging dir is cleaned up: {[p.name for p in _staging_dirs(releases)]}",
     )
 
 
@@ -549,9 +691,8 @@ def _case_mid_clone_edit_refuses(rec: support.SmokeRecorder, root: Path) -> None
 # pre-clone measurement.
 # ---------------------------------------------------------------------------
 
-def _case_override_attests_the_post_clone_truth(
-    rec: support.SmokeRecorder, root: Path
-) -> None:
+
+def _case_override_attests_the_post_clone_truth(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "override-post-clone"
     source = _make_repo_source(root)
     releases = root / "releases"
@@ -577,14 +718,11 @@ def _case_override_attests_the_post_clone_truth(
     payload = _read_version(releases, candidate.release_id)  # type: ignore[attr-defined]
     rec.check(
         payload.get("tree_state") == TREE_STATE_DIRTY,
-        f"[{tag}] clean-at-gate-time + changed-mid-clone + allow_dirty ⇒ VERSION "
-        f"says DIRTY, not clean (got {payload.get('tree_state')!r}) — the "
-        "override must not launder a torn artifact into a clean attestation",
+        f"[{tag}] clean-at-gate-time + changed-mid-clone + allow_dirty ⇒ VERSION says DIRTY, not clean (got {payload.get('tree_state')!r}) — the override must not launder a torn artifact into a clean attestation",
     )
     rec.check(
         payload.get("dirty_paths") == [appeared_line],
-        f"[{tag}] and it records the POST-clone population, not the empty "
-        f"pre-clone one (got {payload.get('dirty_paths')!r})",
+        f"[{tag}] and it records the POST-clone population, not the empty pre-clone one (got {payload.get('dirty_paths')!r})",
     )
 
 
@@ -593,9 +731,8 @@ def _case_override_attests_the_post_clone_truth(
 # clone captured a clean tree, so we must not claim it did.
 # ---------------------------------------------------------------------------
 
-def _case_post_clone_unmeasurable_downgrades(
-    rec: support.SmokeRecorder, root: Path
-) -> None:
+
+def _case_post_clone_unmeasurable_downgrades(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "post-clone-unmeasurable"
     source = _make_repo_source(root)
     releases = root / "releases"
@@ -620,9 +757,7 @@ def _case_post_clone_unmeasurable_downgrades(
     payload = _read_version(releases, candidate.release_id)  # type: ignore[attr-defined]
     rec.check(
         payload.get("tree_state") == TREE_STATE_UNKNOWN,
-        f"[{tag}] clean at gate time but unmeasurable after the clone ⇒ "
-        f"tree_state downgrades to unknown, it does NOT keep the stale clean "
-        f"(got {payload.get('tree_state')!r})",
+        f"[{tag}] clean at gate time but unmeasurable after the clone ⇒ tree_state downgrades to unknown, it does NOT keep the stale clean (got {payload.get('tree_state')!r})",
     )
 
 
@@ -635,9 +770,8 @@ def _case_post_clone_unmeasurable_downgrades(
 # for a tree nobody ever attested while it was being copied.
 # ---------------------------------------------------------------------------
 
-def _case_pre_clone_unmeasurable_survives_a_later_success(
-    rec: support.SmokeRecorder, root: Path
-) -> None:
+
+def _case_pre_clone_unmeasurable_survives_a_later_success(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "pre-clone-unmeasurable"
     source = _make_repo_source(root)
     releases = root / "releases"
@@ -662,10 +796,7 @@ def _case_pre_clone_unmeasurable_survives_a_later_success(
     payload = _read_version(releases, candidate.release_id)  # type: ignore[attr-defined]
     rec.check(
         payload.get("tree_state") == TREE_STATE_UNKNOWN,
-        f"[{tag}] unmeasurable at gate time stays UNKNOWN even though the tree "
-        f"measured clean afterwards — a clean reading AFTER the copy is not "
-        f"evidence the tree was clean DURING it "
-        f"(got {payload.get('tree_state')!r})",
+        f"[{tag}] unmeasurable at gate time stays UNKNOWN even though the tree measured clean afterwards — a clean reading AFTER the copy is not evidence the tree was clean DURING it (got {payload.get('tree_state')!r})",
     )
 
 
@@ -696,9 +827,7 @@ def _make_nested_environment(root: Path, relative: str, *, python_link: bool = F
     return environment
 
 
-def _case_ignored_environment_is_excluded_and_manifested(
-    rec: support.SmokeRecorder, root: Path
-) -> None:
+def _case_ignored_environment_is_excluded_and_manifested(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "selected-ignored-environment"
     source = _make_repo_source(root)
     relative = "plugins/foo_plugin/src/foo_plugin/.venv_cosyvoice"
@@ -722,23 +851,17 @@ def _case_ignored_environment_is_excluded_and_manifested(
         f"[{tag}] its cached file and interpreter link are absent from selected files",
     )
     rec.check(
-        any(row.get("path") == relative and row.get("reason") == "nested_python_environment"
-            for row in exclusions),
+        any(row.get("path") == relative and row.get("reason") == "nested_python_environment" for row in exclusions),
         f"[{tag}] manifest records positive pyvenv.cfg + interpreter exclusion evidence",
     )
     bound = payload.get("selected_file_manifest")
     rec.check(
-        isinstance(bound, dict)
-        and bound.get("filename") == SELECTED_FILE_MANIFEST_FILENAME
-        and isinstance(bound.get("sha256"), str)
-        and len(str(bound.get("sha256"))) == 64,
+        isinstance(bound, dict) and bound.get("filename") == SELECTED_FILE_MANIFEST_FILENAME and isinstance(bound.get("sha256"), str) and len(str(bound.get("sha256"))) == 64,
         f"[{tag}] VERSION binds the selected-file manifest SHA-256",
     )
 
 
-def _case_reserved_name_without_environment_evidence_ships(
-    rec: support.SmokeRecorder, root: Path
-) -> None:
+def _case_reserved_name_without_environment_evidence_ships(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "selected-reserved-ordinary-source"
     source = _make_repo_source(root)
     ordinary = source / "plugins" / "foo_plugin" / "src" / "foo_plugin" / ".venv_notes"
@@ -749,9 +872,7 @@ def _case_reserved_name_without_environment_evidence_ships(
 
     candidate = _build_or_fail(rec, tag, support.make_manager(source, root / "releases"))
     rec.check(
-        candidate is not None
-        and (root / "releases" / candidate.release_id / "code" / "plugins" / "foo_plugin"
-             / "src" / "foo_plugin" / ".venv_notes" / "readme.py").is_file(),  # type: ignore[attr-defined]
+        candidate is not None and (root / "releases" / candidate.release_id / "code" / "plugins" / "foo_plugin" / "src" / "foo_plugin" / ".venv_notes" / "readme.py").is_file(),  # type: ignore[attr-defined]
         f"[{tag}] a similarly named ordinary directory ships without pyvenv evidence",
     )
 
@@ -761,11 +882,7 @@ def _case_links_refuse_before_finalize(rec: support.SmokeRecorder, root: Path) -
     source = _make_repo_source(root)
     link = source / "plugins" / "foo_plugin" / "src" / "foo_plugin" / "escape.py"
     os.symlink("/etc/hosts", link)
-    exc = _capture(
-        lambda: support.make_manager(source, root / "releases").build_candidate(
-            allow_dirty=True
-        )
-    )
+    exc = _capture(lambda: support.make_manager(source, root / "releases").build_candidate(allow_dirty=True))
     rec.check(
         isinstance(exc, ReleaseManagerError) and "symbolic link" in str(exc),
         f"[{tag}] retained file link refuses rather than following outside source root",
@@ -776,9 +893,7 @@ def _case_links_refuse_before_finalize(rec: support.SmokeRecorder, root: Path) -
     )
 
 
-def _case_ignored_asset_link_is_excluded_before_traversal(
-    rec: support.SmokeRecorder, root: Path
-) -> None:
+def _case_ignored_asset_link_is_excluded_before_traversal(rec: support.SmokeRecorder, root: Path) -> None:
     """Local asset-reorg links are ignored content, not release code."""
     tag = "selected-ignored-asset-link"
     source = _make_repo_source(root)
@@ -787,9 +902,7 @@ def _case_ignored_asset_link_is_excluded_before_traversal(
     library.mkdir(parents=True)
     (library / "payload.bin").write_bytes(b"local asset bytes")
     asset_dir.mkdir(parents=True)
-    (asset_dir / "sample").symlink_to(
-        "../../../binary_libraries/foo_plugin/sample", target_is_directory=True
-    )
+    (asset_dir / "sample").symlink_to("../../../binary_libraries/foo_plugin/sample", target_is_directory=True)
     _ignore(source, "plugins/foo_plugin/assets")
     _ignore(source, "binary_libraries")
 
@@ -809,19 +922,12 @@ def _case_ignored_asset_link_is_excluded_before_traversal(
         f"[{tag}] ignored asset link is absent from selected files",
     )
     rec.check(
-        any(
-            row.get("path") == "plugins/foo_plugin/assets"
-            and row.get("reason") == "gitignored_path"
-            and row.get("evidence") == {"git_check_ignore": "matched"}
-            for row in exclusions
-        ),
+        any(row.get("path") == "plugins/foo_plugin/assets" and row.get("reason") == "gitignored_path" and row.get("evidence") == {"git_check_ignore": "matched"} for row in exclusions),
         f"[{tag}] manifest records the Git-ignore exclusion before link traversal",
     )
 
 
-def _case_tracked_link_refuses_before_finalize(
-    rec: support.SmokeRecorder, root: Path
-) -> None:
+def _case_tracked_link_refuses_before_finalize(rec: support.SmokeRecorder, root: Path) -> None:
     """Git tracking never turns a symbolic link into an ignorable artifact."""
     tag = "selected-tracked-link-refuse"
     source = _make_repo_source(root)
@@ -829,9 +935,7 @@ def _case_tracked_link_refuses_before_finalize(
     link.symlink_to("__init__.py")
     _git(source, "add", "-A")
     _git(source, *_GIT_IDENTITY, "commit", "--quiet", "-m", "tracked symbolic link")
-    exc = _capture(
-        lambda: support.make_manager(source, root / "releases").build_candidate()
-    )
+    exc = _capture(lambda: support.make_manager(source, root / "releases").build_candidate())
     rec.check(
         isinstance(exc, ReleaseManagerError) and "symbolic link" in str(exc),
         f"[{tag}] tracked symbolic link remains fail-closed",
@@ -842,9 +946,7 @@ def _case_tracked_link_refuses_before_finalize(
     )
 
 
-def _case_artifact_head_membership_is_complete(
-    rec: support.SmokeRecorder, root: Path
-) -> None:
+def _case_artifact_head_membership_is_complete(rec: support.SmokeRecorder, root: Path) -> None:
     """A tracked path deleted from the retained population is never equal."""
     tag = "artifact-head-membership"
     source = _make_repo_source(root)
@@ -864,16 +966,12 @@ def _case_artifact_head_membership_is_complete(
         f"[{tag}] deleted tracked scoped path ⇒ artifact-to-HEAD is unequal",
     )
     rec.check(
-        isinstance(mismatches, list)
-        and {"kind": "missing_from_artifact", "path": "plugins/foo_plugin/src/foo_plugin/__init__.py"}
-        in mismatches,
+        isinstance(mismatches, list) and {"kind": "missing_from_artifact", "path": "plugins/foo_plugin/src/foo_plugin/__init__.py"} in mismatches,
         f"[{tag}] mismatch identifies the tracked path missing from artifact",
     )
 
 
-def _case_artifact_head_executable_mode_is_complete(
-    rec: support.SmokeRecorder, root: Path
-) -> None:
+def _case_artifact_head_executable_mode_is_complete(rec: support.SmokeRecorder, root: Path) -> None:
     """Content identity does not hide a retained executable-bit change."""
     tag = "artifact-head-executable-mode"
     source = _make_repo_source(root)
@@ -905,9 +1003,7 @@ def _case_artifact_head_executable_mode_is_complete(
     )
 
 
-def _case_tracked_environment_conflict_refuses(
-    rec: support.SmokeRecorder, root: Path
-) -> None:
+def _case_tracked_environment_conflict_refuses(rec: support.SmokeRecorder, root: Path) -> None:
     """A clean Git checkout cannot silently exclude tracked environment bytes."""
     tag = "tracked-environment-conflict"
     source = _make_repo_source(root)
@@ -922,9 +1018,7 @@ def _case_tracked_environment_conflict_refuses(
     )
 
 
-def _case_staged_environment_conflict_refuses(
-    rec: support.SmokeRecorder, root: Path
-) -> None:
+def _case_staged_environment_conflict_refuses(rec: support.SmokeRecorder, root: Path) -> None:
     """An index-only environment is also too important to omit silently."""
     tag = "staged-environment-conflict"
     source = _make_repo_source(root)
@@ -961,10 +1055,7 @@ def _make_snapshot_bytecode_fixture(root: Path) -> tuple[Path, Path]:
     source_python = source / ".venv" / "bin" / "python3"
     source_python.unlink()
     source_python.symlink_to(sys.executable)
-    collector_path = (
-        source / "plugins" / "macos_self_deployment_plugin" / "src"
-        / "macos_self_deployment_plugin" / "schema_snapshot_collector.py"
-    )
+    collector_path = source / "plugins" / "macos_self_deployment_plugin" / "src" / "macos_self_deployment_plugin" / "schema_snapshot_collector.py"
     collector_path.parent.mkdir(parents=True)
     collector_path.write_text("import foo_plugin\nprint('{}')\n")
     _git(source, "add", "-A")
@@ -987,14 +1078,10 @@ def _run_pre_fix_snapshot_writer(source: Path, collector_path: Path, destination
         timeout=30,
     )
     if result.returncode != 0 or result.stdout.strip() != "{}":
-        raise RuntimeError(
-            f"pre-fix snapshot fixture failed: exit={result.returncode}, stderr={result.stderr!r}"
-        )
+        raise RuntimeError(f"pre-fix snapshot fixture failed: exit={result.returncode}, stderr={result.stderr!r}")
 
 
-def _case_snapshot_import_does_not_pollute_materialized_tree(
-    rec: support.SmokeRecorder, root: Path
-) -> None:
+def _case_snapshot_import_does_not_pollute_materialized_tree(rec: support.SmokeRecorder, root: Path) -> None:
     """The real snapshot producer must not invalidate collector verification."""
     tag = "snapshot-bytecode"
     source, collector_path = _make_snapshot_bytecode_fixture(root)
@@ -1006,15 +1093,16 @@ def _case_snapshot_import_does_not_pollute_materialized_tree(
     _run_pre_fix_snapshot_writer(source, collector_path, pre_fix_destination)
     pre_fix_error = _capture(lambda: collector.verify_materialized(plan, pre_fix_destination))
     rec.check(
-        isinstance(pre_fix_error, ReleaseCodeCollectionError)
-        and "selected-file set differs" in str(pre_fix_error),
+        isinstance(pre_fix_error, ReleaseCodeCollectionError) and "selected-file set differs" in str(pre_fix_error),
         f"[{tag}] pre-fix snapshot import writes destination bytecode and reproduces set refusal",
     )
 
     fixed_destination = root / "fixed_code"
     collector.materialize(plan, fixed_destination)
     snapshot_fn = build_schema_snapshot_fn(
-        solet_name="smoke", app_home=root / "profile", source_root=source,
+        solet_name="smoke",
+        app_home=root / "profile",
+        source_root=source,
     )
     rec.check(
         snapshot_fn(fixed_destination) == {},
@@ -1030,9 +1118,7 @@ def _case_snapshot_import_does_not_pollute_materialized_tree(
     )
 
 
-def _case_environment_root_symlink_refuses_without_git(
-    rec: support.SmokeRecorder, root: Path
-) -> None:
+def _case_environment_root_symlink_refuses_without_git(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "environment-root-symlink-nongit"
     source = support.build_fake_source(root)
     target = root / "external_environment"
@@ -1048,9 +1134,7 @@ def _case_environment_root_symlink_refuses_without_git(
     )
 
 
-def _case_dangling_link_refuses_without_git(
-    rec: support.SmokeRecorder, root: Path
-) -> None:
+def _case_dangling_link_refuses_without_git(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "dangling-link-nongit"
     source = support.build_fake_source(root)
     link = source / "plugins" / "foo_plugin" / "src" / "foo_plugin" / "dangling.py"
@@ -1062,9 +1146,7 @@ def _case_dangling_link_refuses_without_git(
     )
 
 
-def _case_excluded_environment_pth_refuses_without_git(
-    rec: support.SmokeRecorder, root: Path
-) -> None:
+def _case_excluded_environment_pth_refuses_without_git(rec: support.SmokeRecorder, root: Path) -> None:
     tag = "excluded-environment-pth-nongit"
     source = root / "source"
     source.mkdir(parents=True)
@@ -1109,7 +1191,12 @@ def main() -> int:
             _case_non_shipped_dirt_builds(rec, scratch / "non_shipped")
             _case_positive_attestation(rec, scratch / "positive")
             _case_override_is_disclosed(rec, scratch / "override")
-            _case_gate_follows_the_clone(rec, scratch / "follows_clone")
+            _case_declared_package_is_copied_and_scoped(rec, scratch / "declared_package")
+            _case_late_new_root_dirt_uses_one_scope(rec, scratch / "late_new_root")
+            _case_stale_declaration_refuses(rec, scratch / "stale_declaration")
+            _case_membership_lifecycle(rec, scratch / "membership")
+            _case_manifest_unavailable_discovers_structurally(rec, scratch / "manifest_unavailable")
+            _case_real_tree_roots_are_covered(rec)
             _case_setup_contracts_ship(rec, scratch / "setup_contracts")
             _case_untracked_refuses(rec, scratch / "untracked")
             _case_unattestable_is_not_clean(rec, scratch / "unattestable")

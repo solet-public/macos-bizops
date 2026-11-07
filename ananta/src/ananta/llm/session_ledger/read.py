@@ -55,6 +55,7 @@ from ananta.llm.session_ledger.schema import (
     NAMESPACE,
     TABLE_ACTIVE_LEASE,
     TABLE_EVENT,
+    TABLE_IMPORT_BATCH,
     TABLE_SESSION,
     TABLE_SOURCE,
     TABLE_SUMMARY,
@@ -84,6 +85,28 @@ def _naive_dt(value: datetime | None) -> datetime | None:
     """
     return cast("datetime", _naive_utc(value)) if value is not None else None
 
+
+def count_live_event_rows(
+    state: StateManagementInterface,
+) -> tuple[int | None, str | None]:
+    """Return one strict scalar count of live ledger events."""
+    try:
+        result = state.count(
+            NAMESPACE,
+            {"table": TABLE_EVENT, "filters": {"is_deleted": 0}},
+        )
+        if result.get("action_status") != ActionStatus.COMPLETED.value:
+            return None, "count_unavailable:state_count_failed"
+        data = result.get("data")
+        inner = data.get("result") if isinstance(data, dict) else None
+        value = inner.get("value") if isinstance(inner, dict) else None
+    except Exception:
+        return None, "count_unavailable:state_count_raised"
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None, "count_unavailable:invalid_scalar"
+    return value, None
+
+
 # Two well-separated seeds for the census row-identity fingerprint — two
 # order-independent XOR folds under distinct ``blake2b`` personalizations cut the
 # single-seed collision risk. See :func:`read_support._fingerprint_component` for
@@ -106,7 +129,9 @@ _EVENT_PAGE_ROWS = 100
 
 
 def _census_count(
-    state: StateManagementInterface, table: str, filters: dict[str, object],
+    state: StateManagementInterface,
+    table: str,
+    filters: dict[str, object],
 ) -> int:
     """``count_rows`` with the state interface curried in — the census counter.
 
@@ -118,7 +143,10 @@ def _census_count(
 
 
 def _census_min_value(
-    state: StateManagementInterface, table: str, column: str, filters: dict[str, object],
+    state: StateManagementInterface,
+    table: str,
+    column: str,
+    filters: dict[str, object],
 ) -> object:
     """``MIN(column)`` for the census's oldest-running-batch timestamp.
 
@@ -128,7 +156,8 @@ def _census_min_value(
     lives next to the arithmetic that depends on it.
     """
     result = state.min_value(
-        NAMESPACE, {"table": table, "column": column, "filters": filters},
+        NAMESPACE,
+        {"table": table, "column": column, "filters": filters},
     )
     if result.get("action_status") != ActionStatus.COMPLETED.value:
         return None
@@ -226,8 +255,7 @@ class SessionLedgerReadMixin(SessionLedgerRepositoryBase):
 
     Inherits the typed read seam (``_query`` / ``_query_ordered``) + ``_state``
     + ``_clock`` from :class:`SessionLedgerRepositoryBase`. Every method here is
-    exposed on the concrete ``SessionLedgerRepository`` via MI composition;
-    callers see no change vs the pre-decomposition monolith.
+    exposed on the concrete ``SessionLedgerRepository`` via MI composition.
     """
 
     __slots__ = ()
@@ -375,9 +403,7 @@ class SessionLedgerReadMixin(SessionLedgerRepositoryBase):
         return select_quiescent_sessions(
             candidates,
             summarized_session_ids={str(row["session_id"]) for row in summaries},
-            source_kind_by_id={
-                str(row["id"]): row.get("source_kind") for row in sources
-            },
+            source_kind_by_id={str(row["id"]): row.get("source_kind") for row in sources},
             trivial_sentinel=trivial_sentinel,
             limit=max(1, min(int(limit), 50)),
         )
@@ -427,7 +453,8 @@ class SessionLedgerReadMixin(SessionLedgerRepositoryBase):
             return []
         session_ids = list({str(lease["session_id"]) for lease in leases})
         sessions = self._query(
-            TABLE_SESSION, {"id": session_ids, "is_deleted": 0},
+            TABLE_SESSION,
+            {"id": session_ids, "is_deleted": 0},
         )
         return _merge_active_leases(leases, sessions)
 
@@ -439,7 +466,8 @@ class SessionLedgerReadMixin(SessionLedgerRepositoryBase):
         if not session_ids:
             return []
         return self._query(
-            TABLE_SESSION, {"id": list(session_ids), "is_deleted": 0},
+            TABLE_SESSION,
+            {"id": list(session_ids), "is_deleted": 0},
         )
 
     def list_canonical_contributors(
@@ -478,7 +506,8 @@ class SessionLedgerReadMixin(SessionLedgerRepositoryBase):
         projection + canonical-first / ``source_kind`` ASC sort happen in Python.
         """
         return build_canonical_contributors_via_group(
-            self._query, session_id=session_id,
+            self._query,
+            session_id=session_id,
         )
 
     def find_session_id_by_external_session_id(
@@ -721,6 +750,167 @@ class SessionLedgerReadMixin(SessionLedgerRepositoryBase):
             {"canonical_external_session_id": external_id, "is_deleted": 0},
         )
         return [session_id, *(str(row["id"]) for row in siblings)]
+
+
+def _codex_runtime_label(row: dict[str, object]) -> str | None:
+    label = row.get("vendor_session_label")
+    if row.get("vendor") == "codex" and row.get("source_kind") == "codex_local" and isinstance(label, str) and label.strip():
+        return label
+    return None
+
+
+def _resolved_usage_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Derive aliases from current local metadata; never rewrite stored ids."""
+    labels: dict[str, set[str]] = {}
+    runtimes: set[str] = set()
+    for row in rows:
+        label = _codex_runtime_label(row)
+        if label is not None:
+            labels.setdefault(str(row["external_session_id"]), set()).add(label)
+            runtimes.add(label)
+    resolved = [_resolve_usage_identity(row, labels, runtimes) for row in rows]
+    aliases: dict[tuple[str, str], set[str]] = {}
+    for row in resolved:
+        key = (str(row["vendor"]), str(row["resolved_runtime_session_id"]))
+        aliases.setdefault(key, set()).update((str(row["external_session_id"]), key[1]))
+    return [{**row, "runtime_session_aliases": sorted(aliases[(str(row["vendor"]), str(row["resolved_runtime_session_id"]))])} for row in resolved]
+
+
+def _resolve_usage_identity(row: dict[str, object], labels: dict[str, set[str]], runtimes: set[str]) -> dict[str, object]:
+    external = str(row["external_session_id"])
+    identity = external
+    advisories: list[str] = []
+    if row["vendor"] == "codex":
+        candidates = labels.get(external, set())
+        label = _codex_runtime_label(row)
+        if label is not None:
+            identity = label
+        elif external not in runtimes and len(candidates) == 1:
+            identity = next(iter(candidates))
+        if len(candidates) > 1:
+            advisories.append("runtime_identity_ambiguous:conflicting stored Codex-local labels")
+        if identity not in runtimes:
+            advisories.append("runtime_identity_unavailable:stored Codex-local UUID unavailable; exact id retained")
+    return {**row, "resolved_runtime_session_id": identity, "usage_identity_advisories": advisories}
+
+
+class SessionUsageReader:
+    """Scoped usage read adapter over the repository's state-interface seams.
+
+    Keep the four new usage responsibilities out of the existing read mixin's
+    public-method/LOC budget; existing repository behavior is unchanged.
+    """
+
+    def __init__(self, repository: SessionLedgerRepositoryBase) -> None:
+        self._state = repository._state
+        self._query_ordered = repository._query_ordered
+        self._query_membership_chunked = repository._query_membership_chunked
+
+    def list_session_usage_events(
+        self,
+        *,
+        session_id: str,
+        until: datetime | None = None,
+        before: datetime | None = None,
+        after: tuple[object, ...] | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        """Usage-bearing events newest first; each keyset page obeys the primitive cap."""
+        filters: dict[str, object] = {"session_id": session_id, "usage_json": {"op": "is_not_null"}}
+        if before is not None:
+            filters["event_at"] = {"op": "lt", "value": _naive_utc(before)}
+        elif until is not None:
+            filters["event_at"] = {"op": "lte", "value": _naive_utc(until)}
+        return self._query_ordered(TABLE_EVENT, filters=filters, order_by=[["event_at", "desc"], ["id", "desc"]], limit=limit, after=after)
+
+    def usage_last_poll_at(self, source_id: str) -> object:
+        """Newest completed source import, or explicit unavailable (never a session timestamp)."""
+        result = self._state.max_value(NAMESPACE, {"table": TABLE_IMPORT_BATCH, "column": "finished_at", "filters": {"source_id": source_id, "status": "completed", "is_deleted": 0}})
+        if result.get("action_status") != ActionStatus.COMPLETED.value:
+            return None
+        data = result.get("data")
+        inner = data.get("result") if isinstance(data, dict) else None
+        return inner.get("value") if isinstance(inner, dict) else None
+
+    def usage_session_siblings(self, runtime_session_ids: list[str], vendor: str | None = None) -> list[dict[str, object]]:
+        """Resolve exact ids and Codex-local labels to closure before ranking.
+
+        Every discovered external-id group and proven UUID is expanded, so
+        stem-only, UUID-only and combined requests see the same physical rows.
+        All membership pages obey the 100-row cap. No suffix guessing or writes.
+        """
+        rows: dict[str, dict[str, object]] = {}
+        pending = {(vendor, identity) for identity in runtime_session_ids}
+        seen: set[tuple[str | None, str]] = set()
+        while pending:
+            batches: dict[str | None, list[str]] = {}
+            for scope, identity in sorted(pending, key=lambda key: (key[0] or "", key[1])):
+                if (scope, identity) not in seen:
+                    batches.setdefault(scope, []).append(identity)
+                    seen.add((scope, identity))
+            pending.clear()
+            for scope, identities in batches.items():
+                for row, expand_external in self._usage_candidates(identities, scope):
+                    label = _codex_runtime_label(row)
+                    rows[str(row["id"])] = row
+                    if expand_external:
+                        pending.add((str(row["vendor"]), str(row["external_session_id"])))
+                    if label is not None:
+                        pending.add(("codex", label))
+        return _resolved_usage_rows(list(rows.values()))
+
+    def _usage_candidates(self, identities: list[str], vendor: str | None) -> list[tuple[dict[str, object], bool]]:
+        exact = self._usage_matches("external_session_id", identities, vendor)
+        labelled = self._usage_matches("vendor_session_label", identities, "codex") if vendor in (None, "codex") else []
+        exact_ids = {str(row["id"]) for row in exact}
+        # Only local-source labels prove aliases. An exact match from another
+        # source still participates in the existing metered-source ranking.
+        return [(row, str(row["id"]) not in exact_ids) for row in self._usage_with_sources([*exact, *labelled]) if str(row["id"]) in exact_ids or _codex_runtime_label(row) is not None]
+
+    def _usage_matches(self, column: str, identities: list[str], vendor: str | None) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for offset in range(0, len(identities), 100):
+            filters: dict[str, object] = {column: identities[offset : offset + 100]}
+            if vendor is not None:
+                filters["vendor"] = vendor
+            after: tuple[object, ...] | None = None
+            while True:
+                page = self._query_ordered(TABLE_SESSION, filters=filters, order_by=[["created_at", "asc"], ["id", "asc"]], limit=100, after=after)
+                rows.extend(page)
+                if len(page) < 100:
+                    break
+                after = (page[-1]["created_at"], page[-1]["id"])
+        return rows
+
+    def _usage_with_sources(self, rows: list[dict[str, object]]) -> list[dict[str, object]]:
+        sources = self._query_membership_chunked(TABLE_SOURCE, column="id", values=sorted({str(row["source_id"]) for row in rows}), extra_filters={"is_deleted": 0})
+        kinds = {str(row["id"]): row.get("source_kind") for row in sources}
+        return [{**row, "source_kind": kinds.get(str(row["source_id"]))} for row in rows]
+
+    def enumerate_usage_sessions_bounded(self, *, vendor: str, since: datetime, until: datetime) -> dict[str, object]:
+        """Count resolved runtime groups before the 200/201 bound, including aliases.
+
+        A capped canonical walk gives only its observed distinct-runtime lower
+        bound. Alias rows alone cannot prove overflow, even on the final page.
+        """
+        from ananta.llm.session_ledger.usage_totals import MAX_ENUMERATION_PAGES
+
+        filters: dict[str, object] = {"vendor": vendor, "canonical_external_session_id": {"op": "is_null"}, "last_event_at": {"op": "gte", "value": _naive_utc(since)}, "first_event_at": {"op": "lte", "value": _naive_utc(until)}}
+        kept: dict[str, dict[str, object]] = {}
+        after: tuple[object, ...] | None = None
+        for _page in range(MAX_ENUMERATION_PAGES):
+            page = self._query_ordered(TABLE_SESSION, filters=filters, order_by=[["last_event_at", "desc"], ["id", "desc"]], limit=100, after=after)
+            if vendor == "codex":
+                resolved = {str(row["id"]): row for row in self.usage_session_siblings([str(row["external_session_id"]) for row in page], vendor=vendor)}
+                page = [resolved.get(str(row["id"]), row) for row in page]
+            for row in page:
+                kept.setdefault(str(row.get("resolved_runtime_session_id", row["external_session_id"])), row)
+                if len(kept) == 201:
+                    return {"sessions": list(kept.values())[:200], "overflow": True, "sessions_at_least": 201, "advisories": []}
+            if len(page) < 100:
+                return {"sessions": list(kept.values()), "overflow": False, "sessions_at_least": len(kept), "advisories": []}
+            after = (page[-1]["last_event_at"], page[-1]["id"])
+        return {"sessions": list(kept.values())[:200], "overflow": False, "sessions_at_least": len(kept), "partial": True, "advisories": [f"enumeration_pages_truncated:{MAX_ENUMERATION_PAGES}"]}
 
 
 __all__ = ["RELOAD_SAFE", "SessionLedgerReadMixin"]

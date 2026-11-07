@@ -51,6 +51,7 @@ from ananta.services.state_service.bounded_read import (
 )
 
 from .constants import CONFIG_KEY_EXPORT_ALLOWED_ROOTS, PLUGIN_NAME
+from .corpus_counts import corpus_counts as read_corpus_counts
 from .export_containment import assert_path_within_allowed_roots
 from .memory_store import (
     delete_memory_records,
@@ -114,11 +115,7 @@ _UNSCOPED_FOCUS_CEILING = 100
 # destructive operator action, so failing loud and making them re-decide is the
 # right behaviour at that size.
 _PURGE_WALK_CEILING = 500_000
-_PURGE_WALK_CEILING_REASON = (
-    "one row per stored memory, including every knowledge-base chunk (measured "
-    "22,238 on 2026-08-15); a purge that collects ids in Python and deletes them "
-    "individually is sized for a corpus, not a warehouse."
-)
+_PURGE_WALK_CEILING_REASON = "one row per stored memory, including every knowledge-base chunk (measured 22,238 on 2026-08-15); a purge that collects ids in Python and deletes them individually is sized for a corpus, not a warehouse."
 
 # Tag used for identity memories (must match prompt_context_builder.IDENTITY_TAG)
 IDENTITY_TAG = "identity"
@@ -404,9 +401,7 @@ class ACTRMemoryBackend:
 
         Memories are global - session_id is optional filter, not required.
         """
-        query_data = build_memory_query(
-            session_id, max_events, max_age_hours, namespace_filter
-        )
+        query_data = build_memory_query(session_id, max_events, max_age_hours, namespace_filter)
         result = self.state_service.query_ordered(namespace="core", data=query_data)
 
         if result.get("action_status") != ActionStatus.COMPLETED.value:
@@ -500,19 +495,13 @@ class ACTRMemoryBackend:
         # Check for error response from embedding service
         if embedding_result.get("action_status") == ActionStatus.ERROR.value:
             error_info = embedding_result.get("error", {})
-            error_msg = (
-                error_info.get("message", str(error_info))
-                if isinstance(error_info, dict)
-                else str(error_info)
-            )
+            error_msg = error_info.get("message", str(error_info)) if isinstance(error_info, dict) else str(error_info)
             raise FrameworkError(
                 message=f"Embedding service error: {error_msg}",
                 error_code="memory.embedding_error",
             )
 
-        embedding: list[float] = (
-            embedding_result.get("data", {}).get("result", {}).get("embeddings", [[]])[0]
-        )
+        embedding: list[float] = embedding_result.get("data", {}).get("result", {}).get("embeddings", [[]])[0]
         if not embedding:
             embedding = embedding_result.get("data", {}).get("embeddings", [[]])[0]
 
@@ -572,28 +561,22 @@ class ACTRMemoryBackend:
             # Fail-fast: generate embedding BEFORE creating any records so a
             # failed embedding never leaves behind a persisted memory with no vector.
             embedding = self._generate_embedding(content)
-            memory = create_memory_record(
-                content, normalized_tags, source_file, session_id, now_iso
-            )
+            memory = create_memory_record(content, normalized_tags, source_file, session_id, now_iso)
             memory_id = save_memory(self.state_service, memory)
             store_memory_vector(self.vector_service, memory_id, embedding, now_iso, normalized_tags)
         elif embed:
             # Content exceeds EMBEDDING_MAX_CHARS — store without vector
             # rather than sending a truncated blob to the embedding model.
             logger.warning(
-                "EMBEDDING_SKIPPED: content length %d exceeds "
-                "EMBEDDING_MAX_CHARS %d — storing memory without vector",
-                len(content), EMBEDDING_MAX_CHARS,
+                "EMBEDDING_SKIPPED: content length %d exceeds EMBEDDING_MAX_CHARS %d — storing memory without vector",
+                len(content),
+                EMBEDDING_MAX_CHARS,
             )
-            memory = create_memory_record(
-                content, normalized_tags, source_file, session_id, now_iso
-            )
+            memory = create_memory_record(content, normalized_tags, source_file, session_id, now_iso)
             memory_id = save_memory(self.state_service, memory)
         else:
             # Focus-only mirror: store the memory record without a vector.
-            memory = create_memory_record(
-                content, normalized_tags, source_file, session_id, now_iso
-            )
+            memory = create_memory_record(content, normalized_tags, source_file, session_id, now_iso)
             memory_id = save_memory(self.state_service, memory)
 
         return {
@@ -628,8 +611,14 @@ class ACTRMemoryBackend:
             )
 
         return self._execute_recall(
-            query, top_k, memory_type, include_archived, tags, exclude_ids,
-            score_by_similarity, exclude_tags,
+            query,
+            top_k,
+            memory_type,
+            include_archived,
+            tags,
+            exclude_ids,
+            score_by_similarity,
+            exclude_tags,
         )
 
     def _execute_recall(
@@ -650,12 +639,15 @@ class ACTRMemoryBackend:
 
         query_embedding = self._generate_embedding(query)
 
-        matches = self._get_recall_matches(
-            query_embedding, top_k, memory_type, include_archived, tags, exclude_ids
-        )
+        matches = self._get_recall_matches(query_embedding, top_k, memory_type, include_archived, tags, exclude_ids)
 
         results = self._process_recall_matches(
-            matches, exclude_set, tags, now, score_by_similarity, exclude_tag_set,
+            matches,
+            exclude_set,
+            tags,
+            now,
+            score_by_similarity,
+            exclude_tag_set,
         )
         results.sort(key=lambda r: r["final_score"], reverse=True)
         results = results[:top_k]
@@ -972,9 +964,7 @@ class ACTRMemoryBackend:
         #    Union the slot tag with the provenance tags (slot first, deduped).
         extra_tags: list[str] = tags if tags is not None else []
         record_tags: list[str] = list(dict.fromkeys([tag, *extra_tags]))
-        remember_result = self.remember(
-            content=content, tags=record_tags, session_id=session_id
-        )
+        remember_result = self.remember(content=content, tags=record_tags, session_id=session_id)
         new_memory_id = remember_result.get("memory_id", "")
 
         # 3. Delete every previously-existing record on this slot (not the new one).
@@ -988,24 +978,15 @@ class ACTRMemoryBackend:
             if delete_result.get("action_status") == ActionStatus.COMPLETED.value:
                 deleted_count = delete_memory_records(self.state_service, existing_ids)
             else:
-                logger.warning(
-                    f"Failed to delete embeddings for old memories with tag '{tag}': "
-                    f"{delete_result.get('error')}"
-                )
+                logger.warning(f"Failed to delete embeddings for old memories with tag '{tag}': {delete_result.get('error')}")
 
         # A healthy slot holds 0 or 1 prior record; deleting >1 means we just
         # repaired stale duplicates left by an earlier failed old-vector delete.
         duplicates_reconciled = deleted_count - 1 if deleted_count > 1 else 0
         if duplicates_reconciled:
-            logger.warning(
-                f"Reconciled {duplicates_reconciled} duplicate record(s) on slot "
-                f"'{tag}' during upsert (newest wins, stale deleted)"
-            )
+            logger.warning(f"Reconciled {duplicates_reconciled} duplicate record(s) on slot '{tag}' during upsert (newest wins, stale deleted)")
 
-        logger.debug(
-            f"Upserted memory for tag '{tag}': deleted {deleted_count}, "
-            f"new memory_id={new_memory_id}"
-        )
+        logger.debug(f"Upserted memory for tag '{tag}': deleted {deleted_count}, new memory_id={new_memory_id}")
         return {
             "action_status": ActionStatus.COMPLETED.value,
             "data": {
@@ -1143,10 +1124,7 @@ class ACTRMemoryBackend:
         if existing_rows:
             holder = existing_rows[0].get("session_id", "")
             raise FrameworkError(
-                message=(
-                    f"Memory already focused: {memory_id} "
-                    f"(held by session {holder!r})"
-                ),
+                message=(f"Memory already focused: {memory_id} (held by session {holder!r})"),
                 error_code="memory.already_focused",
             )
 
@@ -1161,10 +1139,7 @@ class ACTRMemoryBackend:
         focused_rows = session_focused.get("data", {}).get("records", [])
         if len(focused_rows) >= self.MAX_FOCUSED:
             raise FrameworkError(
-                message=(
-                    f"Focus buffer full for session {session_id!r} "
-                    f"({self.MAX_FOCUSED} max). Unfocus a memory first."
-                ),
+                message=(f"Focus buffer full for session {session_id!r} ({self.MAX_FOCUSED} max). Unfocus a memory first."),
                 error_code="memory.focus_buffer_full",
             )
 
@@ -1204,10 +1179,7 @@ class ACTRMemoryBackend:
         existing_rows = existing.get("data", {}).get("records", [])
         if not existing_rows:
             raise FrameworkError(
-                message=(
-                    f"Memory not in focus buffer for session "
-                    f"{session_id!r}: {memory_id}"
-                ),
+                message=(f"Memory not in focus buffer for session {session_id!r}: {memory_id}"),
                 error_code="memory.not_focused",
             )
 
@@ -1297,23 +1269,13 @@ class ACTRMemoryBackend:
                     matched,
                     table="focus_buffer",
                     ceiling=_UNSCOPED_FOCUS_CEILING,
-                    reason=(
-                        "these are pre-JOS-02 legacy pins with no session_id; the "
-                        "migration clears them and nothing creates new ones, so the "
-                        "expected count is zero and any large number means the "
-                        "migration never ran."
-                    ),
+                    reason=("these are pre-JOS-02 legacy pins with no session_id; the migration clears them and nothing creates new ones, so the expected count is zero and any large number means the migration never ran."),
                 )
             )
         unscoped = [str(r.get("memory_id", "?")) for r in rows]
         if unscoped:
             raise FrameworkError(
-                message=(
-                    f"focus_buffer holds {len(unscoped)} pre-JOS-02 row(s) with "
-                    f"no session_id (memory_ids: {unscoped}). Run "
-                    f"plugins/actr_memory_plugin/migrations/"
-                    f"2026_07_07_jos02_clear_unscoped_focus_pins.py before boot."
-                ),
+                message=(f"focus_buffer holds {len(unscoped)} pre-JOS-02 row(s) with no session_id (memory_ids: {unscoped}). Run plugins/actr_memory_plugin/migrations/2026_07_07_jos02_clear_unscoped_focus_pins.py before boot."),
                 error_code="memory.unscoped_focus_rows",
             )
 
@@ -1574,9 +1536,7 @@ class ACTRMemoryBackend:
 
         return build_learn_result(path, memory_ids, skipped_count, memorized_count, memorize)
 
-    def _ingest_path(
-        self, file_path: Path, pattern: str, recursive: bool, tags: list[str]
-    ) -> tuple[list[str], int]:
+    def _ingest_path(self, file_path: Path, pattern: str, recursive: bool, tags: list[str]) -> tuple[list[str], int]:
         """Ingest files from path. Returns (memory_ids, skipped_count)."""
         if file_path.is_file():
             return self._ingest_single_file(file_path, tags)
@@ -1591,9 +1551,7 @@ class ACTRMemoryBackend:
             return [], 0
         return result.get("memory_ids", []), 0
 
-    def _ingest_directory(
-        self, dir_path: Path, pattern: str, recursive: bool, tags: list[str]
-    ) -> tuple[list[str], int]:
+    def _ingest_directory(self, dir_path: Path, pattern: str, recursive: bool, tags: list[str]) -> tuple[list[str], int]:
         """Ingest files from a directory."""
         files = list(dir_path.rglob(pattern)) if recursive else list(dir_path.glob(pattern))
 
@@ -1838,9 +1796,7 @@ class ACTRMemoryBackend:
         cutoff = now - timedelta(days=min_age_days)
 
         all_memories = get_all_memories(self.state_service, memory_type="episodic", status="active")
-        candidates = self._filter_consolidation_candidates(
-            all_memories, strength_threshold, cutoff, now
-        )
+        candidates = self._filter_consolidation_candidates(all_memories, strength_threshold, cutoff, now)
 
         if len(candidates) < MIN_CLUSTER_SIZE:
             return {
@@ -1885,9 +1841,7 @@ class ACTRMemoryBackend:
                 candidates.append(memory)
         return candidates
 
-    def _process_consolidation_clusters(
-        self, clusters: list[list[dict[str, Any]]], dry_run: bool
-    ) -> list[dict[str, Any]]:
+    def _process_consolidation_clusters(self, clusters: list[list[dict[str, Any]]], dry_run: bool) -> list[dict[str, Any]]:
         """Process clusters for consolidation."""
         consolidations = []
         for cluster in clusters:
@@ -1898,9 +1852,7 @@ class ACTRMemoryBackend:
                 consolidations.append(result)
         return consolidations
 
-    def _consolidate_single_cluster(
-        self, cluster: list[dict[str, Any]], dry_run: bool
-    ) -> dict[str, Any] | None:
+    def _consolidate_single_cluster(self, cluster: list[dict[str, Any]], dry_run: bool) -> dict[str, Any] | None:
         """Consolidate a single cluster of memories."""
         if dry_run:
             return {
@@ -1930,9 +1882,7 @@ class ACTRMemoryBackend:
             return generate_summary(contents, self.inference_service)
         return " | ".join([c[:100] for c in contents[:3]]) + "..."
 
-    def _finalize_consolidated_memory(
-        self, new_memory_id: str, cluster: list[dict[str, Any]]
-    ) -> None:
+    def _finalize_consolidated_memory(self, new_memory_id: str, cluster: list[dict[str, Any]]) -> None:
         """Update consolidated memory type and archive source memories."""
         new_memory = get_memory(self.state_service, new_memory_id)
         if new_memory:
@@ -2009,6 +1959,10 @@ class ACTRMemoryBackend:
             "by_status": by_status,
             "strength_distribution": strength_distribution,
         }
+
+    def corpus_counts(self) -> dict[str, Any]:
+        """Return one scalar count without loading memory rows."""
+        return read_corpus_counts(self.state_service)
 
     def list_memories(
         self,
@@ -2127,9 +2081,7 @@ class ACTRMemoryBackend:
         """
         if file_path is None and self._export_allowed_roots:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            first_root = os.path.realpath(
-                os.path.expandvars(os.path.expanduser(self._export_allowed_roots[0]))
-            )
+            first_root = os.path.realpath(os.path.expandvars(os.path.expanduser(self._export_allowed_roots[0])))
             file_path = os.path.join(first_root, f"actr_memory_export_{timestamp}.json")
         return assert_path_within_allowed_roots(
             file_path or "",
@@ -2305,11 +2257,7 @@ class ACTRMemoryBackend:
         all_memories = get_all_memories(self.state_service)
 
         if exclude_protected:
-            memory_ids = [
-                m["id"]
-                for m in all_memories
-                if m.get("id") and PURGE_PROTECTED_TAGS.isdisjoint(m.get("tags") or [])
-            ]
+            memory_ids = [m["id"] for m in all_memories if m.get("id") and PURGE_PROTECTED_TAGS.isdisjoint(m.get("tags") or [])]
         else:
             memory_ids = [m["id"] for m in all_memories if m.get("id")]
 
@@ -2458,9 +2406,7 @@ class ACTRMemoryBackend:
             ids.append(str(row.get("id")))
         return ids
 
-    def cleanup_orphaned_vectors(
-        self, dry_run: bool = False, confirm: bool = False
-    ) -> dict[str, Any]:
+    def cleanup_orphaned_vectors(self, dry_run: bool = False, confirm: bool = False) -> dict[str, Any]:
         """One-shot operator-gated REBUILD of the shared memory-vector namespace.
 
         Cascade-vector-first (the delete paths) now makes orphan-VECTORS
@@ -2496,10 +2442,7 @@ class ACTRMemoryBackend:
 
         if not confirm:
             raise FrameworkError(
-                message=(
-                    "cleanup_orphaned_vectors rebuilds the whole vector namespace "
-                    "(clears then regenerates every vector) — pass confirm=True to proceed"
-                ),
+                message=("cleanup_orphaned_vectors rebuilds the whole vector namespace (clears then regenerates every vector) — pass confirm=True to proceed"),
                 error_code="memory.rebuild_not_confirmed",
             )
 
@@ -2520,11 +2463,7 @@ class ACTRMemoryBackend:
         chunks share the ``memory`` table and ``get_all_memories`` is not
         actr-scoped, so this enumerates BOTH — the rebuild must regenerate every
         one (else clear-all would wipe kb chunk vectors with no restore)."""
-        return [
-            str(memory["id"])
-            for memory in get_all_memories(self.state_service, status="active")
-            if memory.get("is_deleted") in (None, 0) and memory.get("id")
-        ]
+        return [str(memory["id"]) for memory in get_all_memories(self.state_service, status="active") if memory.get("is_deleted") in (None, 0) and memory.get("id")]
 
     def _current_vector_count(self) -> int:
         """Current active-vector count in ``VECTOR_NAMESPACE`` (0 when empty — the
@@ -2548,14 +2487,22 @@ class ACTRMemoryBackend:
             rows = self._find_orphaned_memories()
             if not rows:
                 return total
-            total += self._reindex_memory_batch(rows)
+            batch = self._reindex_memory_batch(rows)
+            total += batch["reindex_count"]
+            if batch["failed_records"]:
+                # Failed records remain orphaned: retrying here would never drain.
+                raise FrameworkError(
+                    message="Vector rebuild incomplete: some memory records could not be indexed",
+                    error_code="memory.rebuild_incomplete",
+                    details=batch,
+                )
 
     # -------------------------------------------------------------------------
     # v58 NEW METHODS: Reindex and Compaction
     # -------------------------------------------------------------------------
 
     def reindex_orphaned_vectors(self) -> dict[str, Any]:
-        """Reindex memories that have DB records but no embeddings. Fails fast."""
+        """Reconcile orphaned records, returning every per-record failure loudly."""
         if not self.actr_enabled:
             raise FrameworkError(
                 message="Cannot reindex: ACT-R memory not enabled",
@@ -2569,11 +2516,8 @@ class ACTRMemoryBackend:
                 "data": {"reindex_count": 0, "message": "No orphaned memories"},
             }
 
-        reindexed = self._reindex_memory_batch(rows)
-        return {
-            "action_status": ActionStatus.COMPLETED.value,
-            "data": {"reindex_count": reindexed},
-        }
+        batch = self._reindex_memory_batch(rows)
+        return {"action_status": ActionStatus.COMPLETED.value, "data": batch}
 
     def _find_orphaned_memories(self) -> list[dict[str, Any]]:
         """Find active memories with no ACTIVE vector (orphaned → reindex).
@@ -2605,19 +2549,12 @@ class ACTRMemoryBackend:
         re-runs: reindexed memories gain an active vector and drop out).
         """
         memories = get_all_memories(self.state_service, status="active")
-        by_id = {
-            str(memory["id"]): memory
-            for memory in memories
-            if memory.get("is_deleted") in (None, 0)
-        }
+        by_id = {str(memory["id"]): memory for memory in memories if memory.get("is_deleted") in (None, 0)}
         if not by_id:
             return []
 
         missing_ids = self._memory_ids_without_vector(list(by_id.keys()))
-        orphaned = [
-            {"id": memory_id, "content": str(by_id[memory_id].get("content", ""))}
-            for memory_id in missing_ids
-        ]
+        orphaned = [{"id": memory_id, "content": str(by_id[memory_id].get("content", ""))} for memory_id in missing_ids]
         # SCALE NOTE: unlike the old DB-side LIMIT, this materializes all active
         # memories + the full missing set in Python before truncating. Fine for a
         # periodic idempotent reconcile bounded by the active-memory count; if
@@ -2648,26 +2585,52 @@ class ACTRMemoryBackend:
         inner = cast(dict[str, Any], data.get("result", {}))
         return cast(list[str], inner.get("missing", []))
 
-    def _reindex_memory_batch(self, rows: list[dict[str, Any]]) -> int:
-        """Reindex a batch of orphaned memories. Returns count reindexed."""
+    def _reindex_memory_batch(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """Index each record independently, reporting refusals without truncation."""
         now_iso = datetime.now(UTC).isoformat()
         reindexed = 0
-
+        failed: list[dict[str, Any]] = []
         for row in rows:
             memory_id = row.get("id")
             content = row.get("content")
+            tokens: int | None = None
+            try:
+                if not memory_id or not content:
+                    raise FrameworkError(
+                        message="Invalid memory record: missing id or content",
+                        error_code="memory.invalid_record",
+                    )
+                tokens = self._check_reindex_input_budget(content)
+                embedding = self._generate_embedding(content)
+                store_memory_vector(self.vector_service, memory_id, embedding, now_iso)
+            except Exception as exc:
+                # The provider's count is retained even for an over-budget refusal.
+                if isinstance(exc, FrameworkError):
+                    counted = exc.details.get("token_count")
+                    if isinstance(counted, int):
+                        tokens = counted
+                failed.append({"memory_id": memory_id, "token_count": tokens, "error": str(exc)})
+                logger.exception("Memory reindex failed: memory_id=%s token_count=%s error=%s", memory_id, tokens, exc)
+            else:
+                reindexed += 1
+        return {"reindex_count": reindexed, "failed_records": failed}
 
-            if not memory_id or not content:
-                raise FrameworkError(
-                    message="Invalid memory record: missing id or content",
-                    error_code="memory.invalid_record",
-                )
-
-            embedding = self._generate_embedding(content)
-            store_memory_vector(self.vector_service, memory_id, embedding, now_iso)
-            reindexed += 1
-
-        return reindexed
+    def _check_reindex_input_budget(self, content: str) -> int | None:
+        """Use the bound provider's counter; never invent a ceiling or shorten text."""
+        if self.embedding_service is None:
+            raise FrameworkError("Embedding service not available", "memory.embedding_unavailable")
+        budget = self.embedding_service.input_token_budget()
+        if budget is None:
+            # A provider with no declared budget still receives the complete input.
+            return None
+        tokens: int = budget.count(content)
+        if tokens > budget.max_input_tokens:
+            raise FrameworkError(
+                message=f"Input has {tokens} tokens, exceeds embedding limit {budget.max_input_tokens}",
+                error_code="memory.embedding_input_too_long",
+                details={"token_count": tokens, "max_input_tokens": budget.max_input_tokens},
+            )
+        return tokens
 
     def store_compaction_summary(
         self,
@@ -2824,21 +2787,12 @@ class ACTRMemoryBackend:
 
                 item = {
                     "memory_id": memory.get("id", ""),
-                    "content_preview": memory["content"][:150] + "..."
-                    if len(memory.get("content", "")) > 150
-                    else memory.get("content", ""),
+                    "content_preview": memory["content"][:150] + "..." if len(memory.get("content", "")) > 150 else memory.get("content", ""),
                     "strength": round(strength, 3),
                     "created_at": created_at_str,
                     "tags": memory.get("tags", []),
                     "is_old": is_old,
-                    "age_days": (
-                        now
-                        - datetime.fromisoformat(created_at_str.replace("Z", "+00:00")).replace(
-                            tzinfo=UTC
-                        )
-                    ).days
-                    if created_at_str
-                    else 0,
+                    "age_days": (now - datetime.fromisoformat(created_at_str.replace("Z", "+00:00")).replace(tzinfo=UTC)).days if created_at_str else 0,
                 }
 
                 # Classify as retry candidate or still valid

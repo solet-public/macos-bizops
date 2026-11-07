@@ -15,12 +15,17 @@ pure window-filter + projection live as module-level helpers
 
 from __future__ import annotations
 
+import json
+import logging
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from ananta.llm.session_ledger.base import SessionLedgerRepositoryBase, _naive_utc
+from ananta.llm.session_ledger.base import SessionLedgerRepositoryBase, _naive_utc, count_rows
+from ananta.llm.session_ledger.event_embedding_checkpoint import SweepCheckpoint, decode_checkpoint
 from ananta.llm.session_ledger.schema import TABLE_EVENT
 from ananta.llm.session_ledger.types import EventType, MessageRole
+
+logger = logging.getLogger(__name__)
 
 RELOAD_SAFE = True
 
@@ -50,6 +55,9 @@ _EVENT_EMBED_DRAIN_COUNTER_KV_KEY = "event_embed_drain_fires"
 # change forces one full reconciliation sweep, the backfill for events the old
 # policy could not embed.
 _EVENT_EMBED_CHUNK_POLICY_KV_KEY = "event_embed_chunk_policy"
+
+# Per-page drain progress (counts and timestamps only): the measured rate behind the coverage read.
+_EVENT_EMBED_PROGRESS_KV_KEY = "event_embed_drain_progress"
 
 
 def _event_at_naive(value: object) -> datetime:
@@ -113,11 +121,7 @@ def select_events_in_window(
     silently lost to the post-filter. ``since_naive`` is pre-normalized by the
     caller (F1 seam) so the compare is naive-vs-naive.
     """
-    kept = (
-        rows
-        if since_naive is None
-        else [row for row in rows if _event_at_naive(row["event_at"]) >= since_naive]
-    )
+    kept = rows if since_naive is None else [row for row in rows if _event_at_naive(row["event_at"]) >= since_naive]
     return [project_event_window_row(row) for row in kept]
 
 
@@ -172,9 +176,7 @@ class SessionLedgerSearchMixin(SessionLedgerRepositoryBase):
             order_by=[["event_at", "desc"], ["id", "desc"]],
             limit=max(1, min(int(limit), _MAX_WINDOW_LIMIT)),
         )
-        since_naive = (
-            cast("datetime", _naive_utc(since)) if since is not None else None
-        )
+        since_naive = cast("datetime", _naive_utc(since)) if since is not None else None
         return select_events_in_window(rows, since_naive=since_naive)
 
     # ------------------------------------------------------------------
@@ -250,70 +252,101 @@ class SessionLedgerSearchMixin(SessionLedgerRepositoryBase):
         empty-string id sentinel that sorts before every uuid) so same-arrival
         ties re-surface and ``find_missing`` skips the already-embedded ones.
         """
-        result = self._state.get_key_value(
-            namespace=_EVENT_EMBED_CURSOR_KV_NAMESPACE,
-            key=_EVENT_EMBED_CURSOR_KV_KEY,
-        )
-        if result.get("action_status") != "completed":
-            return None
-        raw = (result.get("data") or {}).get("value")
+        raw = self._read_embed_value(_EVENT_EMBED_CURSOR_KV_KEY)
+        if raw is not None and (not isinstance(raw, str) or not raw):
+            logger.warning("event embedding derived cursor/policy invalid; restarting safe sweep")
         return raw if isinstance(raw, str) and raw else None
 
     def set_event_embed_cursor(self, imported_at: str) -> None:
-        """Persist the drain frontier (an ``imported_at`` arrival timestamp) so a
-        restarted drain resumes there instead of re-walking the embedded region."""
-        self._state.set_key_value(
-            namespace=_EVENT_EMBED_CURSOR_KV_NAMESPACE,
-            key=_EVENT_EMBED_CURSOR_KV_KEY,
-            value=imported_at,
-        )
+        """Persist progress only after a safely completed page; never regress it."""
+        previous = self.get_event_embed_cursor()
+        if previous is None or imported_at > previous:
+            self._write_embed_value(_EVENT_EMBED_CURSOR_KV_KEY, imported_at)
 
     def bump_event_embed_drain_counter(self) -> int:
-        """Increment and return the durable drain-fire counter.
-
-        Drives the periodic reconciliation full-sweep: when the returned count
-        is a multiple of ``_RECONCILE_EVERY_FIRES`` the drain ignores the cursor
-        and re-checks the whole corpus (see
-        :meth:`event_embeddings.EventEmbeddingWriter.drain_missing_events`).
-        Single-slot drain execution means at most one drainer bumps at a time,
-        so the read-modify-write needs no compare-and-set.
-        """
-        result = self._state.get_key_value(
-            namespace=_EVENT_EMBED_CURSOR_KV_NAMESPACE,
-            key=_EVENT_EMBED_DRAIN_COUNTER_KV_KEY,
-        )
-        raw = (
-            (result.get("data") or {}).get("value")
-            if result.get("action_status") == "completed"
-            else None
-        )
+        """Advance the reconciliation schedule under the single-slot executor."""
+        raw = self._read_embed_value(_EVENT_EMBED_DRAIN_COUNTER_KV_KEY)
+        if raw is not None and not (isinstance(raw, str) and raw.isdigit()):
+            logger.warning("event embedding reconciliation counter invalid; restarting schedule")
         current = int(raw) if isinstance(raw, str) and raw.isdigit() else 0
         nxt = current + 1
-        self._state.set_key_value(
-            namespace=_EVENT_EMBED_CURSOR_KV_NAMESPACE,
-            key=_EVENT_EMBED_DRAIN_COUNTER_KV_KEY,
-            value=str(nxt),
-        )
+        self._write_embed_value(_EVENT_EMBED_DRAIN_COUNTER_KV_KEY, str(nxt))
         return nxt
 
     def get_event_embed_chunk_policy(self) -> str | None:
-        """The chunking policy the last completed backfill sweep ran under; ``None`` if never recorded."""
-        result = self._state.get_key_value(
-            namespace=_EVENT_EMBED_CURSOR_KV_NAMESPACE,
-            key=_EVENT_EMBED_CHUNK_POLICY_KV_KEY,
-        )
-        if result.get("action_status") != "completed":
-            return None
-        raw = (result.get("data") or {}).get("value")
+        """The policy of the last clean sweep; failed reads are not missing state."""
+        raw = self._read_embed_value(_EVENT_EMBED_CHUNK_POLICY_KV_KEY)
+        if raw is not None and (not isinstance(raw, str) or not raw):
+            logger.warning("event embedding derived cursor/policy invalid; restarting safe sweep")
         return raw if isinstance(raw, str) and raw else None
 
     def set_event_embed_chunk_policy(self, policy: str) -> None:
-        """Record that a full sweep under ``policy`` completed without halting."""
-        self._state.set_key_value(
-            namespace=_EVENT_EMBED_CURSOR_KV_NAMESPACE,
-            key=_EVENT_EMBED_CHUNK_POLICY_KV_KEY,
-            value=policy,
-        )
+        """Record a clean sweep before retiring its checkpoint."""
+        self._write_embed_value(_EVENT_EMBED_CHUNK_POLICY_KV_KEY, policy)
+
+    def count_event_embedding_candidates_after(self, imported_at: str | None) -> int:
+        """Embed-scope candidates (SQL legs) that arrived after ``imported_at``, all when ``None``; a COUNT, no rows."""
+        filters: dict[str, object] = {
+            "event_type": EventType.MESSAGE.value,
+            "role": [MessageRole.USER.value, MessageRole.ASSISTANT.value],
+            "content_text": {"op": "is_not_null"},
+            "is_deleted": 0,
+        }
+        if imported_at is not None:
+            filters["imported_at"] = {"op": "gt", "value": imported_at}
+        return count_rows(self._state, TABLE_EVENT, filters)
+
+    def get_event_embed_progress(self) -> dict[str, object] | None:
+        """The last drain fire's per-page progress record; ``None`` when absent or unreadable."""
+        raw = self._read_embed_value(_EVENT_EMBED_PROGRESS_KV_KEY)
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                raw = None
+        return cast(dict[str, object], raw) if isinstance(raw, dict) else None
+
+    def set_event_embed_progress(self, progress: dict[str, object]) -> None:
+        """Replace the drain progress record (telemetry; it never gates progress)."""
+        self._write_embed_value(_EVENT_EMBED_PROGRESS_KV_KEY, progress)
+
+    def get_event_embed_checkpoint(self) -> SweepCheckpoint | None:
+        """Read typed disposable sweep progress through the existing state service."""
+        return decode_checkpoint(self._read_embed_value("event_embed_sweep_checkpoint"))
+
+    def set_event_embed_checkpoint(
+        self,
+        checkpoint: SweepCheckpoint | None,
+        *,
+        expected: SweepCheckpoint | None,
+    ) -> None:
+        """Create/correct/clear only the expected generation under singleton custody.
+
+        Matching expected state and a completed persistence envelope are the
+        integrity pass condition. The installed ten-minute single-slot drain
+        supplies serialization; clean-page/restart/completion smokes pin it.
+        """
+        current = self.get_event_embed_checkpoint()
+        if current != expected:
+            raise RuntimeError("event embedding checkpoint changed; stale generation refused")
+        if checkpoint is None:
+            result = self._state.delete_key_value(namespace=_EVENT_EMBED_CURSOR_KV_NAMESPACE, key="event_embed_sweep_checkpoint")
+            if result.get("action_status") != "completed":
+                raise RuntimeError(f"event embedding checkpoint retirement failed: {result.get('error')!r}")
+        else:
+            self._write_embed_value("event_embed_sweep_checkpoint", checkpoint.payload())
+        logger.info("event embedding checkpoint transition: previous=%s current=%s", expected, checkpoint)
+
+    def _read_embed_value(self, key: str) -> object:
+        result = self._state.get_key_value(namespace=_EVENT_EMBED_CURSOR_KV_NAMESPACE, key=key)
+        if result.get("action_status") != "completed":
+            raise RuntimeError(f"event embedding KV read failed ({key}): {result.get('error')!r}")
+        return (result.get("data") or {}).get("value")
+
+    def _write_embed_value(self, key: str, value: object) -> None:
+        result = self._state.set_key_value(namespace=_EVENT_EMBED_CURSOR_KV_NAMESPACE, key=key, value=value)
+        if result.get("action_status") != "completed":
+            raise RuntimeError(f"event embedding KV write failed ({key}): {result.get('error')!r}")
 
     def list_events_by_ids(self, event_ids: list[str]) -> list[dict[str, object]]:
         """Read live ``__event`` rows by id (the ANN join-back read).

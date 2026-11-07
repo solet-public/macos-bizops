@@ -39,6 +39,7 @@ from urllib.parse import urlparse
 
 from .app_config import AppConfigLoader, SalesforceOrgConfig
 from .constants import (
+    CLI_RESPONSE_HEADER_NAMES,
     DEFAULT_API_VERSION,
     DEFAULT_SF_CLI_PATH,
     ERROR_AUTH_FAILED,
@@ -179,15 +180,18 @@ class SalesforceCliExecutor:
         method: str,
         path: str,
         *,
-        body: dict[str, Any] | None = None,
+        body: dict[str, Any] | str | None = None,
         raw_response: bool = False,
+        headers: Mapping[str, str] | None = None,
+        structured_response: bool = False,
     ) -> Any:
         """Run `sf api request rest <path> --method <method> [--body @file]`.
 
         Used only where the stable `data create/update record --values`
         mini-language is unsafe for arbitrary field content (see
-        `record_actions.py`). No `--json` support on this CLI command; the
-        raw REST response/error body is parsed directly.
+        `record_actions.py`). Existing actions parse the raw response;
+        ``structured_response=True`` parses the CLI's ``--include`` transcript,
+        preserving vendor status/headers/body even for 4xx/5xx responses.
 
         ``raw_response=True`` skips JSON-decoding a successful response and
         returns the CLI's raw stdout text instead — Bulk v2's
@@ -210,7 +214,15 @@ class SalesforceCliExecutor:
             ]
             if body_path is not None:
                 argv += ["--body", f"@{body_path}"]
-            completed = self._invoke(argv, None, target_org)
+            for name, value in (headers or {}).items():
+                argv += ["--header", f"{name}:{value}"]
+            if structured_response:
+                argv.append("--include")
+                completed = self._invoke(argv, {"NO_COLOR": "1", "FORCE_COLOR": "0"}, target_org, decode_errors="replace")
+            else:
+                completed = self._invoke(argv, None, target_org)
+        if structured_response:
+            return _parse_included_response(completed.stdout)
         if raw_response:
             return _parse_rest_response_raw(completed, target_org)
         return _parse_rest_response(completed, target_org)
@@ -242,6 +254,8 @@ class SalesforceCliExecutor:
         argv: list[str],
         env_overrides: Mapping[str, str] | None,
         target_org: str,
+        *,
+        decode_errors: str = "strict",
     ) -> subprocess.CompletedProcess[str]:
         """Fixed argv, no shell — the only interpolated values are operator config
         (binary path, org alias, API path) and query/body content passed via
@@ -252,6 +266,7 @@ class SalesforceCliExecutor:
                 argv,
                 capture_output=True,
                 text=True,
+                errors=decode_errors,
                 timeout=SF_CLI_TIMEOUT_SECONDS,
                 check=False,
                 env=env,
@@ -351,9 +366,7 @@ def _sf_plan_has_prohibited_mutation(lines: list[str], parents: set[str]) -> boo
     return any(line.startswith(prohibited) for line in lines) or not _dependency_upgrades_are_reviewed(lines, parents)
 
 
-_UPGRADE_DEPENDENCY_HEADER = re.compile(
-    r"^Would upgrade (?P<count>[1-9][0-9]*) dependenc(?:y|ies) for (?P<parent>.+):$"
-)
+_UPGRADE_DEPENDENCY_HEADER = re.compile(r"^Would upgrade (?P<count>[1-9][0-9]*) dependenc(?:y|ies) for (?P<parent>.+):$")
 _UPGRADE_ITEM = re.compile(r"^[a-z0-9][a-z0-9@._+/-]*(?:\s+[0-9][A-Za-z0-9@._+/-]*)?$")
 
 
@@ -406,6 +419,59 @@ def _parse_envelope(completed: subprocess.CompletedProcess[str], target_org: str
             f"sf CLI command failed for org {target_org!r} with no parseable output.",
         )
     raise SalesforceCliCallError(*_error_fields_from_envelope(payload))
+
+
+def _included_body(lines: list[str]) -> tuple[dict[str, str], str, bool]:
+    """Retain uncertainty when printed body text could be mistaken for headers."""
+    headers: dict[str, str] = {}
+    known_block = True
+    for index, line in enumerate(lines):
+        if not line.strip():
+            return headers, "".join(lines[index + 1 :]), known_block
+        header = re.fullmatch(r"([!#$%&'*+.^_`|~0-9A-Za-z-]+):[ \t]*(.*)", line.rstrip("\r\n"))
+        if header is None:
+            text = "".join(lines[index:])
+            # Explicit Main ruling: a complete final-line JSON object/array is
+            # the sole no-separator body exception. Scalars and pretty-printed
+            # containers remain opaque; never infer a boundary from their suffix.
+            container = len(text.splitlines()) == 1 and isinstance(_decode_json(text), (dict, list))
+            return headers, text, known_block and container
+        name = header[1].lower()
+        # Unknown or duplicate names could be a header-like body prefix. These
+        # are parsing premises only; unfamiliar vendor output is never refused.
+        known_block = known_block and name in CLI_RESPONSE_HEADER_NAMES and name not in headers
+        headers[name] = header[2]
+    # EOF supplies no separator proof, even if every printed line resembles a
+    # familiar header. Such a line may be vendor body text; retain all output.
+    return headers, "", False
+
+
+def _printed_body_value(text: str) -> Any:
+    """Decode only a selected body; retain a separate value for secret detection."""
+    text = text.removesuffix("\n").removesuffix("\r")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def _parse_included_response(transcript: str) -> dict[str, Any]:
+    """Preserve HTTP errors as responses, regardless of the CLI exit status."""
+    lines = transcript.splitlines(keepends=True)
+    status_line = re.fullmatch(r"HTTP/\S+ ([0-9]{3})(?: .*)?", lines[0].rstrip("\r\n")) if lines else None
+    status = int(status_line[1]) if status_line else None
+    headers, text, proven = _included_body(lines[1:]) if status_line else ({}, transcript, False)
+    decoded = _printed_body_value(text)
+    result = {"statusCode": status, "headers": headers, "body": decoded if proven else transcript}
+    if not proven:
+        result["body_advisory"] = "The printed header/body boundary is uncertain. The body preserves the entire credential-redacted printed text; status is unknown if no HTTP status line was printed."
+        result["transcript"] = transcript
+        # This is used only to discover credential values for redaction, never
+        # to interpret or shorten the public uncertain body.
+        result["_redaction_context"] = decoded
+    if "\ufffd" in transcript:
+        result["encoding_advisory"] = "The CLI transcript contains Unicode replacement characters; original response bytes are unavailable."
+    return result
 
 
 def _parse_rest_response(completed: subprocess.CompletedProcess[str], target_org: str) -> Any:
@@ -482,7 +548,7 @@ def _require_pinned_host(instance_url: str, pinned_host: str) -> None:
 
 
 @contextmanager
-def _json_body_file(body: dict[str, Any] | None) -> Generator[str | None]:
+def _json_body_file(body: dict[str, Any] | str | None) -> Generator[str | None]:
     """Write `body` to a tempfile as JSON for the call, then clean it up.
 
     File-based (never a shell-joined argv string) so arbitrary field values —
@@ -495,7 +561,10 @@ def _json_body_file(body: dict[str, Any] | None) -> Generator[str | None]:
     fd, path = tempfile.mkstemp(suffix=".json", prefix="salesforce_plugin_body_")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(body, handle)
+            if isinstance(body, str):
+                handle.write(body)
+            else:
+                json.dump(body, handle)
         yield path
     finally:
         os.unlink(path)

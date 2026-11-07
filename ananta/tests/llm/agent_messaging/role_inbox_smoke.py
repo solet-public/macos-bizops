@@ -130,11 +130,7 @@ class _FakeState:
     def query_state(self, namespace: str, data: dict[str, object]) -> dict[str, Any]:
         table = cast(str, data["table"])
         filters = cast("dict[str, object]", data.get("filters", {}))
-        rows = [
-            dict(row)
-            for row in self._table(namespace, table)
-            if all(row.get(key) == value for key, value in filters.items())
-        ]
+        rows = [dict(row) for row in self._table(namespace, table) if all(row.get(key) == value for key, value in filters.items())]
         return {"action_status": "completed", "data": {"records": rows}}
 
     def query_ordered(self, namespace: str, data: dict[str, object]) -> dict[str, Any]:
@@ -147,7 +143,10 @@ class _FakeState:
         }
 
     def update_state(
-        self, namespace: str, query: dict[str, object], updates: dict[str, object],
+        self,
+        namespace: str,
+        query: dict[str, object],
+        updates: dict[str, object],
     ) -> dict[str, Any]:
         table = cast(str, query["table"])
         filters = cast("dict[str, object]", query.get("filters", {}))
@@ -167,13 +166,13 @@ class _NoDirectInboxRepository:
 
 
 def _make_service(
-    state: _FakeState, *, include_direct_inbox: bool = False,
+    state: _FakeState,
+    *,
+    include_direct_inbox: bool = False,
 ) -> AgentMessagingService:
     """Construct the service with a faithful state fake and optional empty inbox."""
     return AgentMessagingService(
-        repository=(
-            _NoDirectInboxRepository() if include_direct_inbox else cast(Any, None)
-        ),
+        repository=(_NoDirectInboxRepository() if include_direct_inbox else cast(Any, None)),
         state_service=cast(StateManagementInterface, state),
         config=AgentMessagingConfig(),
     )
@@ -248,7 +247,11 @@ def _seed_role_msg(
 
 
 def _seed_mark(
-    state: _FakeState, *, role: str, covered_created_at: str, covered_id: str,
+    state: _FakeState,
+    *,
+    role: str,
+    covered_created_at: str,
+    covered_id: str,
 ) -> None:
     """Seed a ``role_covered_mark`` row directly — nothing attests it live in
     this suite (design §5b.vi: the mark is inert until the verb is called;
@@ -287,10 +290,7 @@ def test_cursor_roundtrip_and_scope() -> None:
     token = encode_role_cursor(scope, created_at_iso="2026-06-19T09:00:00", row_id="arm-007")
     decoded = decode_role_cursor(token, scope)
     _check(
-        decoded.outcome is RoleCursorOutcome.VALID
-        and decoded.row_id == "arm-007"
-        and decoded.created_at is not None
-        and decoded.created_at.isoformat() == "2026-06-19T09:00:00",
+        decoded.outcome is RoleCursorOutcome.VALID and decoded.row_id == "arm-007" and decoded.created_at is not None and decoded.created_at.isoformat() == "2026-06-19T09:00:00",
         "cursor round-trips (VALID) with naive-UTC created_at + id",
     )
 
@@ -376,8 +376,7 @@ def test_multirole_kway_merge_pagination() -> None:
 
     # Global (created_at,id)-desc order, every row exactly once, no skip/dup —
     # the 09:02 pair (arm-005,arm-004) STRADDLES the limit=2 page boundary.
-    expected = ["msg-arm-006", "msg-arm-005", "msg-arm-004",
-                "msg-arm-003", "msg-arm-002", "msg-arm-001"]
+    expected = ["msg-arm-006", "msg-arm-005", "msg-arm-004", "msg-arm-003", "msg-arm-002", "msg-arm-001"]
     _check(collected == expected, "multi-role k-way merge: global desc order, no skip/dup")
     _check(
         len(collected) == len(set(collected)),
@@ -411,10 +410,7 @@ def test_backlog_depths_repeat_and_cursor_completion() -> None:
             limit=5,
             role_after=None,
         )
-        expected_first = [
-            f"msg-depth-{index:02d}"
-            for index in range(count - 1, max(-1, count - 6), -1)
-        ]
+        expected_first = [f"msg-depth-{index:02d}" for index in range(count - 1, max(-1, count - 6), -1)]
         _check(
             _page_ids(first) == expected_first,
             f"role depth {count}: cursorless page starts at newest row",
@@ -427,6 +423,19 @@ def test_backlog_depths_repeat_and_cursor_completion() -> None:
             (cursor is None) is (count <= 5),
             f"role depth {count}: null cursor means no older row remains",
         )
+        if cursor is not None:
+            decoded = decode_role_cursor(
+                cursor,
+                RoleCursorScope(
+                    include_important=False,
+                    held_roles=("R1",),
+                    agent_instance_id=_INSTANCE,
+                ),
+            )
+            _check(
+                not decoded.is_history_token,
+                f"role depth {count}: ordinary continuation remains a plain cursor",
+            )
         collected = _page_ids(first)
         while cursor is not None:
             page, cursor, _, _ = service.list_silent_for_roles(
@@ -437,10 +446,7 @@ def test_backlog_depths_repeat_and_cursor_completion() -> None:
             )
             collected.extend(_page_ids(page))
         _check(
-            collected == [
-                f"msg-depth-{index:02d}"
-                for index in range(count - 1, -1, -1)
-            ],
+            collected == [f"msg-depth-{index:02d}" for index in range(count - 1, -1, -1)],
             f"role depth {count}: echoed cursor reaches every row exactly once",
         )
 
@@ -451,7 +457,10 @@ def test_held_role_set_change_resets() -> None:
     service = _make_service(state)
 
     _, cursor, _, _ = service.list_silent_for_roles(
-        agent_instance_id=_INSTANCE, include_important=False, limit=2, role_after=None,
+        agent_instance_id=_INSTANCE,
+        include_important=False,
+        limit=2,
+        role_after=None,
     )
     _check(cursor is not None, "page 1 returns a next_role_cursor")
 
@@ -459,7 +468,10 @@ def test_held_role_set_change_resets() -> None:
     _seed_binding(state, "R3")
     _seed_role_msg(state, row_id="arm-009", role="R3", created_at="2026-06-19T09:05:00")
     entries, _, _, _ = service.list_silent_for_roles(
-        agent_instance_id=_INSTANCE, include_important=False, limit=2, role_after=cursor,
+        agent_instance_id=_INSTANCE,
+        include_important=False,
+        limit=2,
+        role_after=cursor,
     )
     # Scope changed → reset to page 1 of the NEW scope → newest row (R3 09:05)
     # surfaces, NOT silently skipped past the stale cursor.
@@ -475,7 +487,9 @@ def test_malformed_role_after_rejected() -> None:
     service = _make_service(state)
     try:
         service.list_silent_for_roles(
-            agent_instance_id=_INSTANCE, include_important=False, limit=2,
+            agent_instance_id=_INSTANCE,
+            include_important=False,
+            limit=2,
             role_after="garbage!!",
         )
         _check(False, "malformed role_after → AgentRequestInvalidError (fail closed)")
@@ -493,13 +507,20 @@ def test_delivered_important_catchup() -> None:
     _seed_binding(state, "R1")
     _seed_role_msg(state, row_id="arm-100", role="R1", created_at="2026-06-19T08:00:00")  # silent
     _seed_role_msg(
-        state, row_id="arm-101", role="R1", created_at="2026-06-19T09:00:00",
-        important=True, delivered=True,  # delivered IMPORTANT
+        state,
+        row_id="arm-101",
+        role="R1",
+        created_at="2026-06-19T09:00:00",
+        important=True,
+        delivered=True,  # delivered IMPORTANT
     )
     service = _make_service(state)
 
     silent, _, _, _ = service.list_silent_for_roles(
-        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
+        agent_instance_id=_INSTANCE,
+        include_important=False,
+        limit=10,
+        role_after=None,
     )
     _check(
         _page_ids(silent) == ["msg-arm-100"],
@@ -507,7 +528,10 @@ def test_delivered_important_catchup() -> None:
     )
 
     catchup, _, _, _ = service.list_silent_for_roles(
-        agent_instance_id=_INSTANCE, include_important=True, limit=10, role_after=None,
+        agent_instance_id=_INSTANCE,
+        include_important=True,
+        limit=10,
+        role_after=None,
     )
     _check(
         set(_page_ids(catchup)) == {"msg-arm-100", "msg-arm-101"},
@@ -524,19 +548,23 @@ def test_projection_fields() -> None:
     state = _FakeState()
     _seed_binding(state, "Architect")
     _seed_role_msg(
-        state, row_id="arm-200", role="Architect", created_at="2026-06-19T09:00:00",
+        state,
+        row_id="arm-200",
+        role="Architect",
+        created_at="2026-06-19T09:00:00",
         text="ping",
     )
     service = _make_service(state)
     entries, _, _, _ = service.list_silent_for_roles(
-        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
+        agent_instance_id=_INSTANCE,
+        include_important=False,
+        limit=10,
+        role_after=None,
     )
     _check(len(entries) == 1, "projection: one entry returned")
     entry = entries[0]
     _check(
-        entry.sender_agent_instance_id == "agi-sender"
-        and entry.sender_agent_id == "claude_code"
-        and entry.thread_id == "role:Architect",
+        entry.sender_agent_instance_id == "agi-sender" and entry.sender_agent_id == "claude_code" and entry.thread_id == "role:Architect",
         "projection: targeted-reply fields present (sender instance/id + thread handle)",
     )
     _check(
@@ -544,8 +572,7 @@ def test_projection_fields() -> None:
         "projection: message.id == message_id, cursor == 0 sentinel",
     )
     _check(
-        len(entry.message.content) == 1
-        and entry.message.content[0].text == "ping",
+        len(entry.message.content) == 1 and entry.message.content[0].text == "ping",
         "projection: content rebuilt to typed parts",
     )
 
@@ -554,7 +581,10 @@ def test_empty_holder() -> None:
     state = _FakeState()
     service = _make_service(state)
     entries, cursor, floor_applied, history = service.list_silent_for_roles(
-        agent_instance_id="agi-nobody", include_important=False, limit=10, role_after=None,
+        agent_instance_id="agi-nobody",
+        include_important=False,
+        limit=10,
+        role_after=None,
     )
     _check(
         entries == () and cursor is None and floor_applied is False and history is None,
@@ -573,16 +603,11 @@ def test_drain_page_oldest_first() -> None:
     _seed_binding(state, "R2")
     # Undelivered IMPORTANT (drain candidates) interleaved across roles, plus a
     # delivered IMPORTANT and a silent row that must BOTH be excluded.
-    _seed_role_msg(state, row_id="d1", role="R1", created_at="2026-06-19T08:00:00",
-                   important=True, delivered=False)
-    _seed_role_msg(state, row_id="d2", role="R2", created_at="2026-06-19T08:01:00",
-                   important=True, delivered=False)
-    _seed_role_msg(state, row_id="d3", role="R1", created_at="2026-06-19T08:02:00",
-                   important=True, delivered=True)   # delivered → excluded
-    _seed_role_msg(state, row_id="d4", role="R2", created_at="2026-06-19T08:03:00",
-                   important=False, delivered=False)  # silent → excluded
-    _seed_role_msg(state, row_id="d5", role="R1", created_at="2026-06-19T08:04:00",
-                   important=True, delivered=False)
+    _seed_role_msg(state, row_id="d1", role="R1", created_at="2026-06-19T08:00:00", important=True, delivered=False)
+    _seed_role_msg(state, row_id="d2", role="R2", created_at="2026-06-19T08:01:00", important=True, delivered=False)
+    _seed_role_msg(state, row_id="d3", role="R1", created_at="2026-06-19T08:02:00", important=True, delivered=True)  # delivered → excluded
+    _seed_role_msg(state, row_id="d4", role="R2", created_at="2026-06-19T08:03:00", important=False, delivered=False)  # silent → excluded
+    _seed_role_msg(state, row_id="d5", role="R1", created_at="2026-06-19T08:04:00", important=True, delivered=False)
     service = _make_service(state)
 
     page = service.list_undelivered_for_instance(agent_instance_id=_INSTANCE, limit=10)
@@ -624,7 +649,10 @@ def test_floor_excludes_covered_rows_and_reports_applied() -> None:
     service = _make_service(state)
 
     entries, cursor, floor_applied, history = service.list_silent_for_roles(
-        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
+        agent_instance_id=_INSTANCE,
+        include_important=False,
+        limit=10,
+        role_after=None,
     )
     _check(
         _page_ids(entries) == ["msg-f04", "msg-f03"],
@@ -638,27 +666,55 @@ def test_floor_excludes_covered_rows_and_reports_applied() -> None:
 def test_history_cursor_reveals_pre_mark_backlog() -> None:
     state = _FakeState()
     _seed_binding(state, "R1")
-    _seed_role_msg(state, row_id="f01", role="R1", created_at="2026-06-19T08:00:00")
+    _seed_role_msg(state, row_id="f00", role="R1", created_at="2026-06-19T07:59:00")
+    _seed_role_msg(state, row_id="f01a", role="R1", created_at="2026-06-19T08:00:00")
+    _seed_role_msg(state, row_id="f01b", role="R1", created_at="2026-06-19T08:00:00")
     _seed_role_msg(state, row_id="f02", role="R1", created_at="2026-06-19T08:01:00")
     _seed_mark(state, role="R1", covered_created_at="2026-06-19T08:01:00", covered_id="f02")
     _seed_role_msg(state, row_id="f03", role="R1", created_at="2026-06-19T08:02:00")
     service = _make_service(state)
 
     _, _, _, history = service.list_silent_for_roles(
-        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
+        agent_instance_id=_INSTANCE,
+        include_important=False,
+        limit=10,
+        role_after=None,
     )
     assert history is not None
-    entries, _, floor_applied, _ = service.list_silent_for_roles(
-        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=history,
+    entries, continuation, floor_applied, _ = service.list_silent_for_roles(
+        agent_instance_id=_INSTANCE,
+        include_important=False,
+        limit=2,
+        role_after=history,
     )
     # Design §5b.vii disclosed edge: strictly OLDER than the mark, not the
     # mark's own row (f02) — that row was already delivered to whichever
     # session set the mark, since attestation only ever follows processing.
     _check(
-        _page_ids(entries) == ["msg-f01"],
-        "history cursor: echoing it back reveals rows strictly older than the mark",
+        _page_ids(entries) == ["msg-f01b", "msg-f01a"],
+        "history cursor: bounded page reveals older tied rows in descending order",
     )
     _check(floor_applied is False, "history read: the floor did not apply (deliberate deep read)")
+    assert continuation is not None
+    decoded = decode_role_cursor(
+        continuation,
+        RoleCursorScope(
+            include_important=False,
+            held_roles=("R1",),
+            agent_instance_id=_INSTANCE,
+        ),
+    )
+    _check(
+        decoded.is_history_token and decoded.created_at_iso == "2026-06-19T08:00:00" and decoded.row_id == "f01a",
+        "history continuation keeps history marker at last merged (created_at,id)",
+    )
+    next_entries, _, _, _ = service.list_silent_for_roles(
+        agent_instance_id=_INSTANCE,
+        include_important=False,
+        limit=2,
+        role_after=continuation,
+    )
+    _check(_page_ids(next_entries) == ["msg-f00"], "history continuation reaches next older row")
 
 
 def test_history_token_wrong_scope_resets_and_refloors() -> None:
@@ -673,7 +729,10 @@ def test_history_token_wrong_scope_resets_and_refloors() -> None:
     _seed_role_msg(state, row_id="f03", role="R1", created_at="2026-06-19T08:02:00")
     service = _make_service(state)
     _, _, _, history = service.list_silent_for_roles(
-        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
+        agent_instance_id=_INSTANCE,
+        include_important=False,
+        limit=10,
+        role_after=None,
     )
     assert history is not None
 
@@ -681,7 +740,10 @@ def test_history_token_wrong_scope_resets_and_refloors() -> None:
     # the token's issuing scope.
     _seed_binding(state, "R2")
     entries, _, floor_applied, _ = service.list_silent_for_roles(
-        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=history,
+        agent_instance_id=_INSTANCE,
+        include_important=False,
+        limit=10,
+        role_after=history,
     )
     _check(
         _page_ids(entries) == ["msg-f03"],
@@ -689,8 +751,7 @@ def test_history_token_wrong_scope_resets_and_refloors() -> None:
     )
     _check(
         floor_applied is True,
-        "scope-changed reset still floors R1's f01/f02 — the history token's "
-        "floor-skip did NOT survive the reset (R1's mark still excludes them)",
+        "scope-changed reset still floors R1's f01/f02 — the history token's floor-skip did NOT survive the reset (R1's mark still excludes them)",
     )
 
 
@@ -700,11 +761,13 @@ def test_floor_is_noop_without_a_mark() -> None:
     _seed_role_msg(state, row_id="f01", role="R1", created_at="2026-06-19T08:00:00")
     service = _make_service(state)
     entries, cursor, floor_applied, history = service.list_silent_for_roles(
-        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
+        agent_instance_id=_INSTANCE,
+        include_important=False,
+        limit=10,
+        role_after=None,
     )
     _check(
-        _page_ids(entries) == ["msg-f01"] and cursor is None
-        and floor_applied is False and history is None,
+        _page_ids(entries) == ["msg-f01"] and cursor is None and floor_applied is False and history is None,
         "no mark yet: today's behavior unchanged byte-for-byte (§12.3 fail-direction)",
     )
 
@@ -721,12 +784,18 @@ def test_byte_ceiling_truncates_short_of_the_row_limit() -> None:
     big_text = "x" * 60_000  # ~60KB/entry serialized; 4 entries ≈ 240KB > 200KB ceiling
     for i in range(6):
         _seed_role_msg(
-            state, row_id=f"b{i:02d}", role="R1",
-            created_at=f"2026-06-19T08:{i:02d}:00", text=big_text,
+            state,
+            row_id=f"b{i:02d}",
+            role="R1",
+            created_at=f"2026-06-19T08:{i:02d}:00",
+            text=big_text,
         )
     service = _make_service(state)
     entries, cursor, floor_applied, history = service.list_silent_for_roles(
-        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
+        agent_instance_id=_INSTANCE,
+        include_important=False,
+        limit=10,
+        role_after=None,
     )
     _check(
         0 < len(entries) < 10,
@@ -737,7 +806,10 @@ def test_byte_ceiling_truncates_short_of_the_row_limit() -> None:
     _check(history is None, "byte-stop: no history cursor (that's the floor-stop branch only)")
 
     remaining, _, _, _ = service.list_silent_for_roles(
-        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=cursor,
+        agent_instance_id=_INSTANCE,
+        include_important=False,
+        limit=10,
+        role_after=cursor,
     )
     _check(
         len(entries) + len(remaining) == 6,
@@ -751,11 +823,18 @@ def test_byte_ceiling_admits_at_least_one_oversized_entry() -> None:
     huge_text = "x" * 250_000  # a single entry alone exceeds the 200KB ceiling
     _seed_role_msg(state, row_id="next", role="R1", created_at="2026-06-19T08:00:00")
     _seed_role_msg(
-        state, row_id="huge", role="R1", created_at="2026-06-19T08:01:00", text=huge_text,
+        state,
+        row_id="huge",
+        role="R1",
+        created_at="2026-06-19T08:01:00",
+        text=huge_text,
     )
     service = _make_service(state)
     entries, cursor, _, _ = service.list_silent_for_roles(
-        agent_instance_id=_INSTANCE, include_important=False, limit=10, role_after=None,
+        agent_instance_id=_INSTANCE,
+        include_important=False,
+        limit=10,
+        role_after=None,
     )
     _check(
         _page_ids(entries) == ["msg-huge"],
@@ -765,20 +844,23 @@ def test_byte_ceiling_admits_at_least_one_oversized_entry() -> None:
 
 
 def _row_limit_metadata_matches(first: Any, ten: Any) -> bool:
-    return all((
-        first.role_limit == 6,
-        ten.role_limit == 10,
-        first.role_page_truncated is True,
-        ten.role_page_truncated is True,
-        first.role_truncation_reason is RoleTruncationReason.ROW_LIMIT,
-        ten.role_truncation_reason is RoleTruncationReason.ROW_LIMIT,
-        first.role_byte_ceiling is None,
-        ten.role_byte_ceiling is None,
-    ))
+    return all(
+        (
+            first.role_limit == 6,
+            ten.role_limit == 10,
+            first.role_page_truncated is True,
+            ten.role_page_truncated is True,
+            first.role_truncation_reason is RoleTruncationReason.ROW_LIMIT,
+            ten.role_truncation_reason is RoleTruncationReason.ROW_LIMIT,
+            first.role_byte_ceiling is None,
+            ten.role_byte_ceiling is None,
+        )
+    )
 
 
 def _drain_role_page_ids(
-    service: AgentMessagingService, cursor: str | None,
+    service: AgentMessagingService,
+    cursor: str | None,
 ) -> list[str]:
     collected: list[str] = []
     while cursor is not None:
@@ -786,9 +868,7 @@ def _drain_role_page_ids(
         collected.extend(_page_ids(page.role_entries))
         if page.next_role_cursor is None:
             _check(
-                page.role_page_truncated is False
-                and page.role_truncation_reason is None
-                and page.role_byte_ceiling is None,
+                page.role_page_truncated is False and page.role_truncation_reason is None and page.role_byte_ceiling is None,
                 "an exhausted role page discloses completeness, not truncation",
             )
         cursor = page.next_role_cursor
@@ -811,9 +891,7 @@ def test_role_page_metadata_discloses_limits_and_full_drain() -> None:
     first = service.peer_inbox(_inbox_request(limit=6))
     ten = service.peer_inbox(_inbox_request(limit=10))
     _check(
-        len(first.role_entries) == 6
-        and len(ten.role_entries) == 10
-        and _page_ids(first.role_entries) == _page_ids(ten.role_entries)[:6],
+        len(first.role_entries) == 6 and len(ten.role_entries) == 10 and _page_ids(first.role_entries) == _page_ids(ten.role_entries)[:6],
         "limits 6 then 10 return matching newest-first prefixes",
     )
     _check(
@@ -822,11 +900,11 @@ def test_role_page_metadata_discloses_limits_and_full_drain() -> None:
     )
 
     collected = _page_ids(first.role_entries) + _drain_role_page_ids(
-        service, first.next_role_cursor,
+        service,
+        first.next_role_cursor,
     )
     _check(
-        collected == [f"msg-metadata-{index:02d}" for index in range(11, -1, -1)]
-        and len(collected) == len(set(collected)),
+        collected == [f"msg-metadata-{index:02d}" for index in range(11, -1, -1)] and len(collected) == len(set(collected)),
         "continuing to a null cursor covers the role stream exactly once",
     )
 
@@ -846,11 +924,7 @@ def test_role_page_metadata_discloses_byte_ceiling() -> None:
         _inbox_request(limit=10),
     )
     _check(
-        0 < len(page.role_entries) < page.role_limit
-        and page.next_role_cursor is not None
-        and page.role_page_truncated is True
-        and page.role_truncation_reason is RoleTruncationReason.BYTE_CEILING
-        and page.role_byte_ceiling == 200_000,
+        0 < len(page.role_entries) < page.role_limit and page.next_role_cursor is not None and page.role_page_truncated is True and page.role_truncation_reason is RoleTruncationReason.BYTE_CEILING and page.role_byte_ceiling == 200_000,
         "a byte-limited short role page discloses its ceiling and cursor",
     )
 
@@ -863,30 +937,40 @@ def test_acknowledged_prefix_refills_to_older_unreceipted_rows() -> None:
         row_id = f"receipt-refill-{index}"
         _seed_role_msg(state, row_id=row_id, role="R1", created_at=f"2026-06-19T09:00:0{index}")
         if index >= 2:
-            state.upsert_state(ROLE_NAMESPACE, {
-                "table": TABLE_ROLE_READ_RECEIPT,
-                "record": {
-                    "external_id": receipt_external_id("R1", _INSTANCE, row_id),
-                    "recipient_key": "R1", "agent_instance_id": _INSTANCE,
-                    "role_row_id": row_id, "role_message_id": f"msg-{row_id}",
-                    "role_created_at": f"2026-06-19T09:00:0{index}",
-                    "acknowledged_at": "2026-06-19T10:00:00",
-                }, "conflict_columns": ["external_id"],
-            })
+            state.upsert_state(
+                ROLE_NAMESPACE,
+                {
+                    "table": TABLE_ROLE_READ_RECEIPT,
+                    "record": {
+                        "external_id": receipt_external_id("R1", _INSTANCE, row_id),
+                        "recipient_key": "R1",
+                        "agent_instance_id": _INSTANCE,
+                        "role_row_id": row_id,
+                        "role_message_id": f"msg-{row_id}",
+                        "role_created_at": f"2026-06-19T09:00:0{index}",
+                        "acknowledged_at": "2026-06-19T10:00:00",
+                    },
+                    "conflict_columns": ["external_id"],
+                },
+            )
     entries, cursor, _, _ = _make_service(state).list_silent_for_roles(
-        agent_instance_id=_INSTANCE, include_important=True, limit=2, role_after=None,
+        agent_instance_id=_INSTANCE,
+        include_important=True,
+        limit=2,
+        role_after=None,
     )
     _check(
-        _page_ids(entries) == ["msg-receipt-refill-1", "msg-receipt-refill-0"]
-        and cursor is None,
+        _page_ids(entries) == ["msg-receipt-refill-1", "msg-receipt-refill-0"] and cursor is None,
         "acknowledged raw prefix refills to older unreceipted rows without false exhaustion",
     )
 
 
 def _ack_request() -> PeerInboxRequest:
     return PeerInboxRequest(
-        recipient_agent_id="claude_code", recipient_agent_instance_id=_INSTANCE,
-        recipient_agent_session_id="sess-agi-holder", limit=2,
+        recipient_agent_id="claude_code",
+        recipient_agent_instance_id=_INSTANCE,
+        recipient_agent_session_id="sess-agi-holder",
+        limit=2,
     )
 
 
@@ -899,17 +983,23 @@ def _assert_exact_page_ack(service: AgentMessagingService, request: PeerInboxReq
     token = issued.role_read_page_token or ""
     try:
         service.acknowledge_role_read_page(
-            agent_session_id="foreign-session", agent_instance_id=_INSTANCE, token=token,
+            agent_session_id="foreign-session",
+            agent_instance_id=_INSTANCE,
+            token=token,
         )
         _check(False, "foreign session cannot ACK a server-issued page")
     except AgentRequestInvalidError:
         _check(True, "foreign session cannot ACK a server-issued page")
     ack = service.acknowledge_role_read_page(
-        agent_session_id="sess-agi-holder", agent_instance_id=_INSTANCE, token=token,
+        agent_session_id="sess-agi-holder",
+        agent_instance_id=_INSTANCE,
+        token=token,
     )
     _check(ack.status == "acked" and ack.receipt_count == 2, "ACK writes exact page receipts")
     again = service.acknowledge_role_read_page(
-        agent_session_id="sess-agi-holder", agent_instance_id=_INSTANCE, token=token,
+        agent_session_id="sess-agi-holder",
+        agent_instance_id=_INSTANCE,
+        token=token,
     )
     _check(again.status == "already_acked", "ACK retry preserves the first receipt fact")
 
@@ -917,14 +1007,16 @@ def _assert_exact_page_ack(service: AgentMessagingService, request: PeerInboxReq
 def _assert_receipt_bounds(service: AgentMessagingService) -> None:
     try:
         service.role_read_receipts(
-            agent_instance_id=_INSTANCE, candidates=[("R1", "x")] * 1001,
+            agent_instance_id=_INSTANCE,
+            candidates=[("R1", "x")] * 1001,
         )
         _check(False, "receipt API rejects more than 1000 candidates")
     except AgentRequestInvalidError:
         _check(True, "receipt API rejects more than 1000 candidates")
     try:
         service.role_read_receipts(
-            agent_instance_id=_INSTANCE, candidates=[("R1", "x" * 300_000)],
+            agent_instance_id=_INSTANCE,
+            candidates=[("R1", "x" * 300_000)],
         )
         _check(False, "receipt API rejects candidate payload above 256KiB")
     except AgentRequestInvalidError:
@@ -932,26 +1024,38 @@ def _assert_receipt_bounds(service: AgentMessagingService) -> None:
 
 
 def _assert_receipt_visibility(
-    service: AgentMessagingService, request: PeerInboxRequest,
+    service: AgentMessagingService,
+    request: PeerInboxRequest,
 ) -> None:
     regular = service.peer_inbox(request)
     _check(not regular.role_entries, "regular inbox suppresses exact acknowledged rows")
-    observer = service.peer_inbox(PeerInboxRequest(
-        recipient_agent_id="claude_code", recipient_agent_instance_id=_INSTANCE,
-        recipient_agent_session_id="sess-agi-holder", limit=2, observer=True,
-    ))
+    observer = service.peer_inbox(
+        PeerInboxRequest(
+            recipient_agent_id="claude_code",
+            recipient_agent_instance_id=_INSTANCE,
+            recipient_agent_session_id="sess-agi-holder",
+            limit=2,
+            observer=True,
+        )
+    )
     _check(
         len(observer.role_entries) == 2 and observer.role_read_page_token is None,
         "observer sees receipt-backed rows and cannot issue an ACK page",
     )
     history = encode_role_history_cursor(
         RoleCursorScope(include_important=True, held_roles=("R1",), agent_instance_id=_INSTANCE),
-        created_at_iso="2026-06-19T09:01:00", row_id="history-boundary",
+        created_at_iso="2026-06-19T09:01:00",
+        row_id="history-boundary",
     )
-    historical = service.peer_inbox(PeerInboxRequest(
-        recipient_agent_id="claude_code", recipient_agent_instance_id=_INSTANCE,
-        recipient_agent_session_id="sess-agi-holder", limit=2, role_after=history,
-    ))
+    historical = service.peer_inbox(
+        PeerInboxRequest(
+            recipient_agent_id="claude_code",
+            recipient_agent_instance_id=_INSTANCE,
+            recipient_agent_session_id="sess-agi-holder",
+            limit=2,
+            role_after=history,
+        )
+    )
     _check(
         len(historical.role_entries) == 2 and historical.role_read_page_token is None,
         "explicit history bypasses receipts and cannot issue an ACK page",
@@ -967,7 +1071,8 @@ def _assert_incomplete_page_rejected(request: PeerInboxRequest) -> None:
     tamper_state._table(ROLE_NAMESPACE, TABLE_ROLE_READ_PAGE_ITEM).clear()
     try:
         tamper_service.acknowledge_role_read_page(
-            agent_session_id="sess-agi-holder", agent_instance_id=_INSTANCE,
+            agent_session_id="sess-agi-holder",
+            agent_instance_id=_INSTANCE,
             token=tamper_issued.role_read_page_token or "",
         )
         _check(False, "ACK refuses an incomplete immutable item set")
@@ -1000,25 +1105,28 @@ def test_tied_213_row_ack_walk_has_no_cursor_gap() -> None:
                 state,
                 row_id=f"tied-213-{index:04d}",
                 role="R1" if index % 2 else "R2",
-                created_at=(
-                    datetime(2026, 9, 12, tzinfo=UTC) + timedelta(seconds=index // 2)
-                ).isoformat(),
+                created_at=(datetime(2026, 9, 12, tzinfo=UTC) + timedelta(seconds=index // 2)).isoformat(),
             )
         service = _make_service(state, include_direct_inbox=True)
         cursor: str | None = None
         seen: list[str] = []
         pages = 0
         while True:
-            page = service.peer_inbox(PeerInboxRequest(
-                recipient_agent_id="claude_code", recipient_agent_instance_id=_INSTANCE,
-                recipient_agent_session_id="sess-agi-holder", limit=limit,
-                role_after=cursor,
-            ))
+            page = service.peer_inbox(
+                PeerInboxRequest(
+                    recipient_agent_id="claude_code",
+                    recipient_agent_instance_id=_INSTANCE,
+                    recipient_agent_session_id="sess-agi-holder",
+                    limit=limit,
+                    role_after=cursor,
+                )
+            )
             seen.extend(_page_ids(page.role_entries))
             pages += 1
             if page.role_read_page_token:
                 service.acknowledge_role_read_page(
-                    agent_session_id="sess-agi-holder", agent_instance_id=_INSTANCE,
+                    agent_session_id="sess-agi-holder",
+                    agent_instance_id=_INSTANCE,
                     token=page.role_read_page_token,
                 )
             cursor = page.next_role_cursor
@@ -1049,7 +1157,9 @@ class _RaisingState(_FakeState):
 
 
 def _inbox_request(
-    role_after: str | None = None, *, limit: int = 50,
+    role_after: str | None = None,
+    *,
+    limit: int = 50,
 ) -> PeerInboxRequest:
     return PeerInboxRequest(
         recipient_agent_id="claude_code",
@@ -1061,12 +1171,9 @@ def _inbox_request(
 
 def test_q1_boundary_isolates_query_failure() -> None:
     service = _make_service(_RaisingState())
-    entries, cursor, floor_applied, history, status, error = (
-        service._collect_role_section(_inbox_request())  # noqa: SLF001
-    )
+    entries, cursor, floor_applied, history, status, error, _ = service._collect_role_section(_inbox_request())  # noqa: SLF001
     _check(
-        entries == () and cursor is None and status is RoleSectionStatus.ERROR
-        and floor_applied is False and history is None,
+        entries == () and cursor is None and status is RoleSectionStatus.ERROR and floor_applied is False and history is None,
         "Q1: role-query failure → empty role section + status=ERROR (not raised)",
     )
     _check(
@@ -1081,7 +1188,7 @@ def test_q1_boundary_malformed_cursor_isolated() -> None:
     state = _FakeState()
     _seed_binding(state, "Architect")
     service = _make_service(state)
-    _, _, _, _, status, error = service._collect_role_section(  # noqa: SLF001
+    _, _, _, _, status, error, _ = service._collect_role_section(  # noqa: SLF001
         _inbox_request(role_after="not!a!valid!cursor"),
     )
     _check(
@@ -1095,9 +1202,7 @@ def test_q1_boundary_ok_passthrough() -> None:
     _seed_binding(state, "Architect")
     _seed_role_msg(state, row_id="q1", role="Architect", created_at="2026-06-19T08:00:00")
     service = _make_service(state)
-    entries, _, _, _, status, error = (
-        service._collect_role_section(_inbox_request())  # noqa: SLF001
-    )
+    entries, _, _, _, status, error, _ = service._collect_role_section(_inbox_request())  # noqa: SLF001
     _check(
         status is RoleSectionStatus.OK and error is None and len(entries) == 1,
         "Q1: healthy role section → status=OK, error=None, entries served",

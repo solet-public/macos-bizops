@@ -8,7 +8,6 @@ explicit public responses for each probe.
 from __future__ import annotations
 
 import json
-import os
 import queue
 import shlex
 import shutil
@@ -16,9 +15,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import unittest
 from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -26,8 +26,16 @@ _SRC = _PLUGIN_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import github_midwife_plugin.installation_doctor as installation_doctor  # noqa: E402
+import github_midwife_plugin.installation_plugin_doctor as installation_plugin_doctor  # noqa: E402
+import github_midwife_plugin.setup_adapter_runtime as setup_adapter_runtime  # noqa: E402
+import github_midwife_plugin.setup_operations as setup_operations  # noqa: E402
+import github_midwife_plugin.setup_plugin_operations as setup_plugin_operations  # noqa: E402
 from executable_hydration_failure_diagnostic_support import (  # noqa: E402
     run_genesis_diagnostic_regression,
+)
+from executable_hydration_launchagent_support import (  # noqa: E402
+    run_launchagent_restart_regression,
 )
 from executable_hydration_plugin_list_support import (  # noqa: E402
     prepare_claude_receipt_fixture,
@@ -48,6 +56,7 @@ from executable_hydration_structured_output_cap_support import (  # noqa: E402
 )
 from github_midwife_plugin import setup_shell_operations  # noqa: E402
 from github_midwife_plugin.coordination_hook_installation import build_receipt  # noqa: E402
+from github_midwife_plugin.readiness_support import ReadinessObservation  # noqa: E402
 from github_midwife_plugin.setup_adapter_contract import (  # noqa: E402
     AdapterInputError,
     AdapterRequest,
@@ -57,18 +66,40 @@ from github_midwife_plugin.setup_adapter_contract import (  # noqa: E402
     result,
 )
 from github_midwife_plugin.setup_adapter_runtime import (  # noqa: E402
-    _OUTPUT_LIMIT,
-    _STRUCTURED_OUTPUT_LIMIT,
     CommandOutcome,
+    Runtime,
     bounded_command_outcome,
     executable_fallback_directories,
 )
-from github_midwife_plugin.setup_operations import operation_handlers  # noqa: E402
-from github_midwife_plugin.setup_plugin_operations import _receipt_surfaces  # noqa: E402
-from github_midwife_plugin.setup_shell_operations import _render_json  # noqa: E402
+from github_midwife_plugin.setup_operations import OperationHandler, operation_handlers  # noqa: E402
 from readiness_deadline_scenarios import run_scenarios  # noqa: E402
+from solet_setup_contracts.hook_interpreter_pin import (  # noqa: E402
+    instance_interpreter,
+    pin_hook_interpreter,
+)
 
-_CHECKS = 0
+_OUTPUT_LIMIT_ATTRIBUTE = "_OUTPUT_LIMIT"
+_STRUCTURED_OUTPUT_LIMIT_ATTRIBUTE = "_STRUCTURED_OUTPUT_LIMIT"
+_RECEIPT_SURFACES_ATTRIBUTE = "_receipt_surfaces"
+_RENDER_JSON_ATTRIBUTE = "_render_json"
+_TEMPLATES_ATTRIBUTE = "_TEMPLATES"
+_FAILED_OUTCOME_ATTRIBUTE = "_failed_outcome"
+_MANIFEST_HAS_ABSOLUTE_PYTHON_ATTRIBUTE = "_manifest_has_absolute_python"
+_MANIFEST_ABSOLUTE_ATTRIBUTE = "_manifest_absolute"
+_WAIT_FOR_TARGET_READINESS_ATTRIBUTE = "_wait_for_target_readiness"
+
+_OUTPUT_LIMIT = cast(int, getattr(setup_adapter_runtime, _OUTPUT_LIMIT_ATTRIBUTE))
+_STRUCTURED_OUTPUT_LIMIT = cast(int, getattr(setup_adapter_runtime, _STRUCTURED_OUTPUT_LIMIT_ATTRIBUTE))
+_receipt_surfaces = cast(
+    Callable[[Any, Path], tuple[Any, ...]],
+    getattr(setup_plugin_operations, _RECEIPT_SURFACES_ATTRIBUTE),
+)
+_render_json = cast(
+    Callable[[Path, dict[str, str]], str],
+    getattr(setup_shell_operations, _RENDER_JSON_ATTRIBUTE),
+)
+
+_checks = 0
 
 # This smoke is the hermetic integration boundary for target-local setup.
 # Its groups intentionally cover the following independently mutable contracts:
@@ -96,14 +127,26 @@ _CHECKS = 0
 # Coordinator ruling 2026-09-01 ~15:1xZ: these four pre-existing orphaned
 # preconditions are a separately dispatched design disposition. Exact equality
 # forces this debt record to be removed when any item is repaired.
-_PREEXISTING_ORPHAN_PRECONDITIONS = frozenset()
+_PREEXISTING_ORPHAN_PRECONDITIONS = frozenset[str]()
 
 
 def _check(condition: object, label: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    global _checks
+    _checks += 1
     if not condition:
         raise AssertionError(label)
+
+
+def _session_source_operation_handlers() -> dict[str, Callable[..., dict[str, object]]]:
+    """Widen typed JSON results for the older support helper's object map."""
+
+    def widen(handler: OperationHandler) -> Callable[..., dict[str, object]]:
+        def invoke(request: AdapterRequest, runtime: Runtime) -> dict[str, object]:
+            return dict(handler(request, runtime))
+
+        return invoke
+
+    return {name: widen(handler) for name, handler in operation_handlers().items()}
 
 
 class FakeRuntime:
@@ -141,9 +184,7 @@ class FakeRuntime:
         if configured is not None:
             return self._bounded(configured, output_limit)
         if argv[:1] == ("/usr/bin/which",) and len(argv) == 2:
-            return self._bounded(
-                CommandOutcome(0, False, 1, f"/fixture/{argv[1]}\n", ""), output_limit
-            )
+            return self._bounded(CommandOutcome(0, False, 1, f"/fixture/{argv[1]}\n", ""), output_limit)
         return self._bounded(CommandOutcome(0, False, 1, "", ""), output_limit)
 
     def executable_absent(self, name: str, duration_ms: int = 1) -> None:
@@ -234,21 +275,15 @@ class ControlledReadinessRuntime(FakeRuntime):
                     0,
                     False,
                     1,
-                    json.dumps(
-                        {"status": "healthy", "action_path": {"action_path_stalled": False}}
-                    ),
+                    json.dumps({"status": "healthy", "action_path": {"action_path_stalled": False}}),
                     "",
                 ),
                 output_limit,
             )
         if argv == embedding_vector:
-            self.observations.put(
-                "probe_after_ready" if self.ready.is_set() else "probe_before_ready"
-            )
+            self.observations.put("probe_after_ready" if self.ready.is_set() else "probe_before_ready")
             if not self.ready.is_set():
-                return self._bounded(
-                    CommandOutcome(1, False, 1, "", "readiness latch is closed"), output_limit
-                )
+                return self._bounded(CommandOutcome(1, False, 1, "", "readiness latch is closed"), output_limit)
             return self._bounded(
                 CommandOutcome(
                     0,
@@ -287,6 +322,8 @@ def _raw_request(
     public_inputs: JsonObject | None = None,
 ) -> dict[str, object]:
     apply = phase == "apply"
+    if public_inputs is None and operation_ref in {"hydration::shell.install", "hydration::shell.probe_path"}:
+        public_inputs = {"selected_coding_agents": ["claude_code", "codex"]}
     return {
         "protocol_version": 1,
         "kind": "operation_request",
@@ -315,9 +352,7 @@ def _readiness_inputs(*, purpose: str, parent_seconds: int) -> JsonObject:
         "startup_readiness_source_artifact": "macos_setup_flow.json",
         "startup_readiness_budget_source": ("executor_contracts.start_command.timeout_seconds"),
         "startup_readiness_budget_unit": "seconds",
-        "startup_readiness_semantic_scope": (
-            "target_start_through_target_cli_health_status_healthy"
-        ),
+        "startup_readiness_semantic_scope": ("target_start_through_target_cli_health_status_healthy"),
         "startup_readiness_release_signal": ("target_cli_health_top_level_status_healthy"),
         "startup_readiness_consumer_probe_purposes": ["stage_exit", "completion"],
         "startup_readiness_consumer_probe_purpose": purpose,
@@ -329,14 +364,10 @@ def _readiness_inputs(*, purpose: str, parent_seconds: int) -> JsonObject:
 
 
 def _request(target: Path, **changes: object) -> AdapterRequest:
-    raw = _raw_request(target)
+    raw = _raw_request(target, operation_ref=str(changes.get("operation_ref", "hydration::shell.install")))
     raw.update(changes)
     purpose = raw["probe_purpose"]
-    if (
-        purpose in {"stage_exit", "completion"}
-        and raw["operation_id"] == "embedding_request_succeeds"
-        and "public_inputs" not in changes
-    ):
+    if purpose in {"stage_exit", "completion"} and raw["operation_id"] == "embedding_request_succeeds" and "public_inputs" not in changes:
         timeout = raw["timeout_seconds"]
         if isinstance(purpose, str) and isinstance(timeout, int):
             raw["public_inputs"] = _readiness_inputs(
@@ -448,11 +479,7 @@ def _operation_counterexamples(target: Path, runtime: FakeRuntime) -> None:
     )
     applied = handlers[configured_apply.operation_ref](configured_apply, runtime)
     _check(applied["checkpoint_status"] == "applied", "model apply never claims verified")
-    config = json.loads(
-        (target / "profile/config/plugins/openai_embeddings_plugin.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    config = json.loads((target / "profile/config/plugins/openai_embeddings_plugin.json").read_text(encoding="utf-8"))
     _check(
         config == {"base_url": "http://localhost:1234/v1", "model": "embedding-model"},
         "exact model config",
@@ -503,9 +530,7 @@ def _operation_counterexamples(target: Path, runtime: FakeRuntime) -> None:
             purpose=None,
         )
     )
-    runtime.responses[("/fixture/brew", "install", "--dry-run", "tmux")] = CommandOutcome(
-        0, False, 1, "Would install 1 formula:\ntmux\n", ""
-    )
+    runtime.responses[("/fixture/brew", "install", "--dry-run", "tmux")] = CommandOutcome(0, False, 1, "Would install 1 formula:\ntmux\n", "")
     runtime.responses[("/fixture/brew", "install", "tmux")] = CommandOutcome(
         None,
         True,
@@ -551,9 +576,7 @@ def _shell_and_hook_counterexamples(target: Path, runtime: FakeRuntime) -> None:
     _check(".local/bin" in rendered_shell, "named launcher path rendered")
     for launcher_name in ("claude-iris", "codex-iris"):
         launcher = (target / "client" / "bin" / launcher_name).read_text(encoding="utf-8")
-        _check(
-            "GIT_CONTROLLER_NAME=" not in launcher, f"{launcher_name} solo render omits the gate"
-        )
+        _check("GIT_CONTROLLER_NAME=" not in launcher, f"{launcher_name} solo render omits the gate")
     _check(
         "BEGIN SOLET iris" in (runtime.home / ".zshrc").read_text(encoding="utf-8"),
         "managed zsh block",
@@ -562,9 +585,7 @@ def _shell_and_hook_counterexamples(target: Path, runtime: FakeRuntime) -> None:
     _path_prepend_guard_counterexample(target)
     _fresh_zsh_path_is_unique(target, runtime)
     _shell_target_quoting_counterexample(target, runtime)
-    armed_raw = _raw_request(
-        target, phase="apply", purpose=None, public_inputs={"git_controller_name": "Git-Controller"}
-    )
+    armed_raw = _raw_request(target, phase="apply", purpose=None, public_inputs={"git_controller_name": "Git-Controller", "selected_coding_agents": ["claude_code", "codex"]})
     armed = AdapterRequest.from_dict(armed_raw)
     operation_handlers()[armed.operation_ref](armed, runtime)
     for launcher_name in ("claude-iris", "codex-iris"):
@@ -586,9 +607,7 @@ def _shell_target_quoting_counterexample(target: Path, runtime: FakeRuntime) -> 
     special = _raw_request(special_target, phase="apply", purpose=None)
     special_request = AdapterRequest.from_dict(special)
     applied = operation_handlers()[special_request.operation_ref](special_request, runtime)
-    _check(
-        applied["checkpoint_status"] == "applied", "special-character target shell apply succeeds"
-    )
+    _check(applied["checkpoint_status"] == "applied", "special-character target shell apply succeeds")
     launchers = (
         special_target / "client" / "bin" / "claude-iris",
         special_target / "client" / "bin" / "codex-iris",
@@ -677,9 +696,7 @@ def _fresh_zsh_path_is_unique(target: Path, runtime: FakeRuntime) -> None:
         sources.append(solet_target / "client" / f"{name}.zsh")
         expected_client_bins.append(str(solet_target / "client" / "bin"))
 
-    source_commands = "\n".join(
-        f"source {shlex.quote(str(source))}" for source in (*sources, *sources)
-    )
+    source_commands = "\n".join(f"source {shlex.quote(str(source))}" for source in (*sources, *sources))
     fresh_shell = subprocess.run(
         ["zsh", "-f", "-c", f"{source_commands}\nprint -r -- $PATH"],
         capture_output=True,
@@ -700,9 +717,7 @@ def _fresh_zsh_path_is_unique(target: Path, runtime: FakeRuntime) -> None:
         "fresh zsh has one shared .local/bin component",
     )
     source_manifest = _PLUGIN_ROOT / "claude_plugin/coordination-hooks/hooks/hooks.json"
-    target_manifest = (
-        target / "plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks/hooks.json"
-    )
+    target_manifest = target / "plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks/hooks.json"
     target_manifest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_manifest, target_manifest)
 
@@ -713,14 +728,16 @@ def _fresh_zsh_path_is_unique(target: Path, runtime: FakeRuntime) -> None:
         public_inputs={"solet_name": "iris", "clone_directory": str(target)},
     )
     selector = "coordination-hooks@iris"
-    runtime.responses[("claude", "plugin", "list")] = CommandOutcome(
-        0, False, 1, selector, "system-python=3.9"
-    )
+    runtime.responses[("claude", "plugin", "list")] = CommandOutcome(0, False, 1, selector, "system-python=3.9")
     pre_patch = operation_handlers()[plugin_request.operation_ref](plugin_request, runtime)
     _check(pre_patch["checkpoint_status"] == "pending", "bare/system Python hook is non-green")
 
     prepare_claude_receipt_fixture(
-        target, runtime, plugin_root=_PLUGIN_ROOT, selector=selector, command_outcome=CommandOutcome,
+        target,
+        runtime,
+        plugin_root=_PLUGIN_ROOT,
+        selector=selector,
+        command_outcome=CommandOutcome,
     )
     run_receipt_surface_shape_regression(
         target,
@@ -748,9 +765,7 @@ def _fresh_zsh_path_is_unique(target: Path, runtime: FakeRuntime) -> None:
         "post-apply refuses to bless stale cache bytes when CLI readback did not repair them",
     )
     manifest_text = target_manifest.read_text(encoding="utf-8")
-    _check(
-        str(target / ".venv/bin/python3") in manifest_text, "hook bound to absolute target Python"
-    )
+    _check(str(target / ".venv/bin/python3") in manifest_text, "hook bound to absolute target Python")
     _check('"command": "python3"' not in manifest_text, "bare Python hook removed")
 
     target_manifest.write_text(source_manifest.read_text(encoding="utf-8"), encoding="utf-8")
@@ -766,13 +781,14 @@ def _path_prepend_guard_counterexample(target: Path) -> None:
 
     template_name = "solet.zsh.template"
     guard = '    [[ "$existing_path_entry" == "$path_entry" ]] && return 0\n'
-    template = setup_shell_operations._TEMPLATES / template_name
+    templates = cast(Path, getattr(setup_shell_operations, _TEMPLATES_ATTRIBUTE))
+    template = templates / template_name
     rendered = template.read_text(encoding="utf-8")
     _check(guard in rendered, "path membership guard is present before mutation")
 
     with tempfile.TemporaryDirectory(prefix="path-prepend-guard-mutation-") as temporary:
         mutated_templates = Path(temporary) / "hydration_templates"
-        shutil.copytree(setup_shell_operations._TEMPLATES, mutated_templates)
+        shutil.copytree(templates, mutated_templates)
         mutated_template = mutated_templates / template_name
         mutated_template.write_text(rendered.replace(guard, "", 1), encoding="utf-8")
         runtime = FakeRuntime(target / "path-prepend-guard-mutation-runtime")
@@ -785,16 +801,18 @@ def _path_prepend_guard_counterexample(target: Path) -> None:
                     "removing the path membership guard makes PATH uniqueness red",
                 )
             else:
-                raise AssertionError(
-                    "removing the path membership guard must make PATH uniqueness red"
-                )
+                raise AssertionError("removing the path membership guard must make PATH uniqueness red")
 
 
 def _coding_agent_cli_preconditions(target: Path) -> None:
     """Missing user-managed clients block before planning or manifest mutation."""
 
     from github_midwife_plugin.installation_plugin_doctor import selected_plugins
-    from github_midwife_plugin.setup_operations import _failed_outcome
+
+    failed_outcome = cast(
+        Callable[[AdapterRequest, CommandOutcome, str], JsonObject],
+        getattr(setup_operations, _FAILED_OUTCOME_ATTRIBUTE),
+    )
 
     for cli, operation_id, operation_ref in (
         ("codex", "install_codex_plugin", "hydration::codex.install_plugin"),
@@ -810,9 +828,7 @@ def _coding_agent_cli_preconditions(target: Path) -> None:
             f"missing {cli} keeps discriminator",
         )
         _check(preview_result["retry_safe"] is True, f"missing {cli} is a satisfiable precondition")
-        _check(
-            preview_result["planned_actions"] == [], f"missing {cli} plans no impossible actions"
-        )
+        _check(preview_result["planned_actions"] == [], f"missing {cli} plans no impossible actions")
         _check(
             preview_result["reason"]
             == {
@@ -838,15 +854,10 @@ def _coding_agent_cli_preconditions(target: Path) -> None:
             )
         )
         apply_result = operation_handlers()[operation_ref](apply, runtime)
-        _check(
-            apply_result["planned_actions"] == [], f"missing {cli} apply keeps phase-pure actions"
-        )
+        _check(apply_result["planned_actions"] == [], f"missing {cli} apply keeps phase-pure actions")
         _check(not runtime.writes, f"missing {cli} does not patch a hook manifest")
         _check(
-            all(
-                "marketplace" not in command and "plugin" not in command[1:]
-                for command in runtime.commands
-            ),
+            all("marketplace" not in command and "plugin" not in command[1:] for command in runtime.commands),
             f"missing {cli} never launches marketplace or plugin commands",
         )
 
@@ -881,7 +892,7 @@ def _coding_agent_cli_preconditions(target: Path) -> None:
             "nonzero_exit",
         ),
     ):
-        failed = _failed_outcome(request, outcome, "fixture_command_failed")
+        failed = failed_outcome(request, outcome, "fixture_command_failed")
         reason = cast(JsonObject, failed["reason"])
         _check(reason["outcome_class"] == expected, f"{expected} reason remains distinct")
         _check(reason["duration_ms"] == outcome.duration_ms, f"{expected} reason keeps duration")
@@ -900,16 +911,10 @@ def _coding_agent_cli_preconditions(target: Path) -> None:
     )
 
     marketplace_runtime = FakeRuntime(target / "marketplace-nonzero")
-    manifest = (
-        target / "plugins/github_midwife_plugin/codex_plugin/coordination-hooks/hooks/hooks.json"
-    )
+    manifest = target / "plugins/github_midwife_plugin/codex_plugin/coordination-hooks/hooks/hooks.json"
     manifest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(_PLUGIN_ROOT / "codex_plugin/coordination-hooks/hooks/hooks.json", manifest)
-    marketplace_runtime.responses[
-        ("/fixture/codex", "plugin", "marketplace", "add", str(target))
-    ] = bounded_command_outcome(
-        returncode=17, timed_out=False, duration_ms=13, stdout="visible", stderr=f"token={private}"
-    )
+    marketplace_runtime.responses[("/fixture/codex", "plugin", "marketplace", "add", str(target))] = bounded_command_outcome(returncode=17, timed_out=False, duration_ms=13, stdout="visible", stderr=f"token={private}")
     failed_marketplace = operation_handlers()["hydration::codex.install_plugin"](
         AdapterRequest.from_dict(
             _raw_request(
@@ -939,33 +944,13 @@ def _coding_agent_cli_preconditions(target: Path) -> None:
 def _precondition_reference_contract() -> None:
     """Preconditions either gate work or appear in the exact tracked-debt set."""
 
-    flow = json.loads(
-        (_PLUGIN_ROOT / "knowledge_base/macos_setup_flow.json").read_text(encoding="utf-8")
-    )
-    referenced = {
-        probe_id
-        for operation in cast(dict[str, JsonObject], flow["operations"]).values()
-        for probe_id in cast(
-            list[str], cast(JsonObject, operation["idempotency"])["precondition_probe_refs"]
-        )
-    }
-    referenced.update(
-        probe_id
-        for stage in cast(dict[str, JsonObject], flow["stages"]).values()
-        for probe_id in cast(list[str], stage.get("entry_probe_refs", []))
-    )
-    referenced.update(
-        probe_id
-        for stage in cast(dict[str, JsonObject], flow["stages"]).values()
-        for probe_id in cast(list[str], stage.get("exit_probe_refs", []))
-    )
-    preconditions = {
-        probe_id
-        for probe_id, definition in cast(dict[str, JsonObject], flow["probes"]).items()
-        if definition.get("level") == "precondition"
-    }
+    flow = json.loads((_PLUGIN_ROOT / "knowledge_base/macos_setup_flow.json").read_text(encoding="utf-8"))
+    referenced = {probe_id for operation in cast(dict[str, JsonObject], flow["operations"]).values() for probe_id in cast(list[str], cast(JsonObject, operation["idempotency"])["precondition_probe_refs"])}
+    referenced.update(probe_id for stage in cast(dict[str, JsonObject], flow["stages"]).values() for probe_id in cast(list[str], stage.get("entry_probe_refs", [])))
+    referenced.update(probe_id for stage in cast(dict[str, JsonObject], flow["stages"]).values() for probe_id in cast(list[str], stage.get("exit_probe_refs", [])))
+    preconditions = {probe_id for probe_id, definition in cast(dict[str, JsonObject], flow["probes"]).items() if definition.get("level") == "precondition"}
     _check(
-        preconditions - referenced == _PREEXISTING_ORPHAN_PRECONDITIONS,
+        preconditions - referenced == set(_PREEXISTING_ORPHAN_PRECONDITIONS),
         "precondition orphans exactly match separately-dispatched tracked debt",
     )
 
@@ -1028,12 +1013,7 @@ def _classify_latch_outcome(
     final_observation = _queued_observation(observations, timeout=0)
     if final_observation == "no_readiness_observation":
         return "probe_not_observed"
-    if (
-        first_observation == "health_not_ready"
-        and final_observation == "probe_after_ready"
-        and results
-        and results[0]["checkpoint_status"] == "verified"
-    ):
+    if first_observation == "health_not_ready" and final_observation == "probe_after_ready" and results and results[0]["checkpoint_status"] == "verified":
         return "verified"
     return f"unexpected:{first_observation}:{final_observation}"
 
@@ -1043,9 +1023,7 @@ def _adapter_and_doctor_red_boundary(target: Path, runtime: FakeRuntime) -> None
         from github_midwife_plugin.installation_doctor import probe_handlers
         from github_midwife_plugin.setup_adapter import dispatch_request, run_once
     except ImportError as exc:
-        raise AssertionError(
-            "RED: closed adapter dispatcher and installation-doctor registry are not implemented"
-        ) from exc
+        raise AssertionError("RED: closed adapter dispatcher and installation-doctor registry are not implemented") from exc
 
     unknown = _request(target, operation_ref="setup::unknown.operation")
     unknown_result = dispatch_request(unknown, runtime)
@@ -1109,7 +1087,10 @@ def _adapter_and_doctor_red_boundary(target: Path, runtime: FakeRuntime) -> None
         f"controlled readiness latch repeated outcomes: {latch_outcomes}",
     )
 
-    from github_midwife_plugin.installation_doctor import _wait_for_target_readiness
+    wait_for_target_readiness = cast(
+        Callable[..., ReadinessObservation | JsonObject],
+        getattr(installation_doctor, _WAIT_FOR_TARGET_READINESS_ATTRIBUTE),
+    )
 
     health_vector = (str(target / ".venv/bin/solet-bridge"), "health")
     healthy = CommandOutcome(
@@ -1144,14 +1125,14 @@ def _adapter_and_doctor_red_boundary(target: Path, runtime: FakeRuntime) -> None
         healthy,
     ]
     clock = FakeClock()
-    readiness = _wait_for_target_readiness(
+    readiness = wait_for_target_readiness(
         embedding_probe,
         runtime,
         monotonic=clock.monotonic,
         sleep=clock.sleep,
     )
     _check(
-        not isinstance(readiness, dict) and readiness.last_status == "healthy",
+        isinstance(readiness, ReadinessObservation) and readiness.last_status == "healthy",
         "readiness wait observes an explicit starting-to-healthy transition",
     )
     _check(
@@ -1175,20 +1156,21 @@ def _adapter_and_doctor_red_boundary(target: Path, runtime: FakeRuntime) -> None
         probe_purpose="stage_exit",
         timeout_seconds=6,
     )
-    timed_out = _wait_for_target_readiness(
+    timed_out = wait_for_target_readiness(
         timeout_probe,
         timeout_runtime,
         monotonic=timeout_clock.monotonic,
         sleep=timeout_clock.sleep,
     )
     _check(
-        timed_out is not None
-        and timed_out["checkpoint_status"] == "blocked"
-        and timed_out["error_kind"] == "target_readiness_timeout",
+        isinstance(timed_out, dict) and timed_out.get("checkpoint_status") == "blocked" and timed_out.get("error_kind") == "target_readiness_timeout",
         "readiness timeout fails closed with a stable error kind",
     )
-    timeout_repair = str(timed_out["repair"])
-    _check("Waited" in timeout_repair and "health" in timeout_repair, "timeout is actionable")
+    timeout_repair = timed_out.get("repair") if isinstance(timed_out, dict) else None
+    _check(
+        isinstance(timeout_repair, str) and "Waited" in timeout_repair and "health" in timeout_repair,
+        "timeout is actionable",
+    )
 
     runtime.responses[health_vector] = healthy
     runtime.responses[embedding_vector] = CommandOutcome(
@@ -1270,7 +1252,14 @@ def _adapter_and_doctor_red_boundary(target: Path, runtime: FakeRuntime) -> None
         "existing hook without behavioral output is non-green",
     )
 
-    _launchagent_crash_loop_regression(target, runtime, dispatch_request)
+    run_launchagent_restart_regression(
+        target,
+        runtime,
+        request=_request,
+        dispatch_request=dispatch_request,
+        command_outcome=CommandOutcome,
+        check=_check,
+    )
     run_router_and_qualification_regressions(
         target,
         runtime,
@@ -1286,58 +1275,91 @@ def _adapter_and_doctor_red_boundary(target: Path, runtime: FakeRuntime) -> None
     )
 
 
-def _launchagent_crash_loop_regression(
+def _codex_pin_rejection_cases(
+    raw: bytes,
     target: Path,
-    runtime: FakeRuntime,
-    dispatch_request: Callable[[AdapterRequest, FakeRuntime], JsonObject],
-) -> None:
-    autostart = _request(
-        target,
-        operation_id="launchagent_running",
-        operation_ref="genesis::autostart.verify",
-        probe_purpose="completion",
-        public_inputs={"autostart": "enabled"},
-    )
-    command = ("/bin/launchctl", "print", f"gui/{os.getuid()}/local.solet.iris")
-    runtime.responses[command] = CommandOutcome(
-        0, False, 1, "\tstate = running\n\truns = 1\n\tlast exit code = 0\n", ""
-    )
+    spaced_target: Path,
+) -> tuple[tuple[str, bytes], ...]:
+    """Build wrong-target, unpinned and partial fixtures from the real writer."""
+    other = pin_hook_interpreter(raw, instance_interpreter(target / "other"))
+    assert other is not None
+    complete = pin_hook_interpreter(raw, instance_interpreter(spaced_target))
+    assert complete is not None
+    prefix = shlex.quote(instance_interpreter(spaced_target)) + " "
+    partial = complete.replace(prefix.encode(), b"python3 ", 1)
     _check(
-        dispatch_request(autostart, runtime)["checkpoint_status"] == "verified",
-        "running LaunchAgent with one clean start verifies",
+        partial != complete and prefix.encode() in partial,
+        "partial-pin fixture has both pinned and bare Python commands",
     )
-    runtime.responses[command] = CommandOutcome(
-        0,
-        False,
-        1,
-        "\tstate = running\n\truns = 1\n\tpid = 8814\n\tlast exit code = (never exited)\n",
-        "",
+    return (("different target", other), ("unpinned", raw), ("partial", partial))
+
+
+def _hook_pin_recognizer_counterexamples(target: Path) -> None:
+    """Both readers recognize the real writer's output and reject incomplete pins.
+
+    Use the shipped manifests so the fixture includes Codex's mixed Node and
+    Python commands as well as Claude's bare Python commands. A spaced target
+    distinguishes the quoted argument form from the writer's unquoted bare
+    interpreter form; both must qualify without executing any shell command.
+
+    The partial fixture preserves one pinned command and leaves one bare,
+    distinguishing an all-command requirement from an any-command predicate.
+    Collect both readers' observations before asserting so a failing mutant
+    still exposes the doctor's result alongside the installer's named killer.
+    """
+    recognizers = (
+        (
+            "installer",
+            cast(
+                Callable[[Path, Path], bool],
+                getattr(setup_plugin_operations, _MANIFEST_HAS_ABSOLUTE_PYTHON_ATTRIBUTE),
+            ),
+        ),
+        (
+            "doctor",
+            cast(
+                Callable[[Path, Path], bool],
+                getattr(installation_plugin_doctor, _MANIFEST_ABSOLUTE_ATTRIBUTE),
+            ),
+        ),
     )
-    never_exited = dispatch_request(autostart, runtime)
+    spaced_target = target / "My Workspace" / "target"
     _check(
-        never_exited["checkpoint_status"] == "verified"
-        and never_exited["evidence"][0]["observed"]
-        == "state=running,last_exit=(never exited),runs=1",
-        "receipt-128 running LaunchAgent that never exited verifies",
+        shlex.quote(instance_interpreter(spaced_target)) != instance_interpreter(spaced_target),
+        "quoted-pin fixture requires shell quoting",
     )
-    runtime.responses[command] = CommandOutcome(
-        0, False, 1, "\tstate = running\n\truns = 4\n\tlast exit code = 1\n", ""
-    )
-    crash_loop = dispatch_request(autostart, runtime)
-    _check(
-        crash_loop["checkpoint_status"] == "blocked"
-        and crash_loop["error_kind"] == "launchagent_crash_loop",
-        "loaded crash-looping LaunchAgent blocks with a distinct error kind",
-    )
-    runtime.responses[command] = CommandOutcome(
-        0, False, 1, "\tstate = running\n\truns = 1\n\tlast exit code = unavailable\n", ""
-    )
-    unreadable = dispatch_request(autostart, runtime)
-    _check(
-        unreadable["checkpoint_status"] == "blocked"
-        and unreadable["error_kind"] == "launchagent_status_unreadable",
-        "unrecognized launchctl last-exit form remains unreadable",
-    )
+    manifest = target / "recognizer-hooks.json"
+    observations: list[tuple[str, bool, bool]] = []
+    for cli in ("codex", "claude"):
+        raw = (_PLUGIN_ROOT / f"{cli}_plugin/coordination-hooks/hooks/hooks.json").read_bytes()
+        for label, install_target in (("plain", target), ("quoted", spaced_target)):
+            pinned = pin_hook_interpreter(raw, instance_interpreter(install_target))
+            _check(pinned is not None, f"{cli} {label}: shipped manifest has bare Python hooks")
+            assert pinned is not None
+            manifest.write_bytes(pinned)
+            for name, recognize in recognizers:
+                observations.append(
+                    (
+                        f"{name} {cli} {label} pin accepted",
+                        recognize(manifest, install_target),
+                        True,
+                    )
+                )
+        if cli == "codex":
+            for label, content in _codex_pin_rejection_cases(raw, target, spaced_target):
+                manifest.write_bytes(content)
+                for name, recognize in recognizers:
+                    observations.append(
+                        (
+                            f"{name} codex {label} pin rejected",
+                            recognize(manifest, spaced_target),
+                            False,
+                        )
+                    )
+    for label, observed, expected in observations:
+        print(f"hook-pin recognizer: {label}: observed={observed}, expected={expected}")
+    for label, observed, expected in observations:
+        _check(observed is expected, label)
 
 
 def main() -> int:
@@ -1354,6 +1376,7 @@ def main() -> int:
         )
         solet.chmod(0o755)
         runtime = FakeRuntime(root)
+        _hook_pin_recognizer_counterexamples(target)
         _protocol_counterexamples(target)
         _operation_counterexamples(target, runtime)
         run_session_source_boot_registration_regression(
@@ -1361,7 +1384,7 @@ def main() -> int:
             fake_runtime=FakeRuntime,
             adapter_request=AdapterRequest,
             raw_request=_raw_request,
-            operation_handlers=operation_handlers,
+            operation_handlers=_session_source_operation_handlers,
             command_outcome=CommandOutcome,
             check=_check,
         )
@@ -1399,7 +1422,11 @@ def main() -> int:
             set(readiness_report) == {"deterministic", "controls"},
             "derived readiness deadline scenarios are registered",
         )
-    print(f"executable_hydration_smoke: {_CHECKS}/{_CHECKS} checks passed")
+    from codex_optional_smoke import CodexOptional
+
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(CodexOptional)
+    _check(unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful(), "Codex-optional cross-package lifecycle tests pass")
+    print(f"executable_hydration_smoke: {_checks}/{_checks} checks passed")
     return 0
 
 

@@ -1,0 +1,2 @@
+# Bounded Claude/spool enumeration, direct worker placement, callback lifecycle.
+plugins/claude_code_filesystem_session_source_plugin/tests/bounded_sweep_smoke.py

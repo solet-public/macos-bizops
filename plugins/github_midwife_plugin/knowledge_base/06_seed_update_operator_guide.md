@@ -438,3 +438,15 @@ full list of what changed, in more detail than this guide covers.
   re-runs selectively.
 - `RELEASE_NOTES.md` at the repo root — the full changelog for every
   release, including the ones summarized above.
+
+### Hook interpreter pins during an update
+
+When an update changes the coding-agent hook manifest, the Manager carries its
+interpreter setting onto the new release automatically. The preview lists the
+files under `hook_pin_carry`. Keep those files unchanged while the update runs.
+If it stops, resume through the printed command; before the source advances,
+abandon also restores the previous pins. The running coding agent continues
+using its cached hooks until the update refreshes that cache. Extra hand edits
+and structural changes still produce a named refusal instead of being discarded.
+Keep file permissions unchanged too: resume and abandon preserve a later chmod
+and refuse before restoring either manifest.

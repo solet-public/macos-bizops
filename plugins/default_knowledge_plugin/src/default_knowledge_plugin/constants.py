@@ -71,6 +71,10 @@ TAG_PREFIX_PLUGIN = "knowledge:plugin:"
 TAG_PREFIX_PROCESS_KEY = "knowledge:process_key:"
 TAG_PREFIX_MANIFEST_TAG = "knowledge:tag:"
 TAG_PREFIX_DOC = "knowledge:doc:"
+# Per-file content digest carried by every chunk of a file (prb_f6964132). It
+# hashes the relative path, the enriched chunk texts and the chunk tags, so a
+# stale KB re-embeds only the files whose digest changed.
+TAG_PREFIX_FILE_DIGEST = "knowledge:file_digest:"
 # Knowledge layer tag prefix. Each chunk carries exactly one
 # ``knowledge:layer:<n>`` tag for chunks derived from articles with an
 # ``Article Layer:`` annotation, or ``knowledge:layer:unlabeled`` for
@@ -93,9 +97,7 @@ DEFAULT_CHUNK_OVERLAP_CHARS = 200
 # (Tier 1) and tag (Tier 2) searches always include these KBs. Architect Q1
 # ruling 2026-07-16 (RATIFY-WITH-CONDITIONS); ``workbench`` joins the set as a
 # name/summary discovery index reachable only by explicit ``name="workbench"``.
-SEARCH_EXCLUDED_KB_NAMES: frozenset[str] = frozenset(
-    {"thinking_plans", "thinking_playbooks", "workbench"}
-)
+SEARCH_EXCLUDED_KB_NAMES: frozenset[str] = frozenset({"thinking_plans", "thinking_playbooks", "workbench"})
 
 DEFAULT_INCLUDE_PATTERNS = ["*.md", "*.txt", "*.rst"]
 DEFAULT_EXCLUDE_PATTERNS = ["**/.git/**", "**/.archive/**", "**/scripts/**"]
@@ -138,6 +140,10 @@ def manifest_tag(tag: str) -> str:
 def document_tag(relative_path: str) -> str:
     normalized = normalize_text_for_tag(relative_path)
     return f"{TAG_PREFIX_DOC}{normalized}"
+
+
+def file_digest_tag(digest: str) -> str:
+    return f"{TAG_PREFIX_FILE_DIGEST}{digest}"
 
 
 def knowledge_layer_tag(layer: int) -> str:

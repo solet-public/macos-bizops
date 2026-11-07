@@ -38,8 +38,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -48,6 +50,7 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
+from _register_unit_double import RegisterUnitDouble, fixture_assignment  # noqa: E402
 
 from agent_messaging_plugin import session_claude_mapping_ingest  # noqa: E402
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
@@ -171,9 +174,7 @@ def test_app_home_fallback_drains_platform_side() -> None:
             result == {"files_seen": 1, "upserted": 1, "skipped_malformed": 0},
             "env var unset + APP_HOME set -> drain resolves APP_HOME/data/session_claude_mapping_spool and ingests",
         )
-        _check(
-            not path.exists(), "APP_HOME-fallback ingest deletes the spool file after durable write"
-        )
+        _check(not path.exists(), "APP_HOME-fallback ingest deletes the spool file after durable write")
 
 
 def test_explicit_spool_env_wins_over_app_home() -> None:
@@ -353,8 +354,7 @@ def test_crash_before_delete_reingests_idempotently() -> None:
         rows = list_session_claude_mappings(state, "agi-crash-1")
         _check(
             len(rows) == 1,
-            "exactly ONE row exists after the crash-then-reingest sequence -- idempotent upsert, "
-            "never a duplicate",
+            "exactly ONE row exists after the crash-then-reingest sequence -- idempotent upsert, never a duplicate",
         )
 
 
@@ -394,7 +394,7 @@ def _spawn_managed_session(
         ManagedSessionSpec(
             agent_instance_id=agent_instance_id,
             lane_id="lane-hook-absence",
-            brief_ref="",
+            assignment=fixture_assignment(),
             work_class=WORK_CLASS_READ_ONLY,
             budget_line="b1",
             host=host,
@@ -587,20 +587,22 @@ def test_sweep_tick_wiring_reaches_hook_absence_detection() -> None:
         created_at=long_ago,
     )
     records, original = _capture_warnings()
+    register = RegisterUnitDouble()
     fake_self = SimpleNamespace(
         _get_state_service=lambda: state,
+        _register_unit_client=lambda: register,
         _peer_registry=None,
         _bridge_manager=None,
         _session_role_claim_pruner=None,
     )
     try:
-        AgentMessagingPlugin._run_session_lifecycle_sweep(cast("Any", fake_self))  # noqa: SLF001
+        with patch("agent_messaging_plugin.plugin.collect_ledger_tmux_report", return_value={"observations": [], "advisories": []}):
+            AgentMessagingPlugin._run_session_lifecycle_sweep(cast("Any", fake_self))  # noqa: SLF001
     finally:
         session_claude_mapping_ingest.logger.warning = original
     _check(
         any("agi-wired-hookless-1" in r for r in records),
-        "the REAL _run_session_lifecycle_sweep genuinely reaches hook-absence detection, "
-        "not just that the function exists unwired",
+        "the REAL _run_session_lifecycle_sweep genuinely reaches hook-absence detection, not just that the function exists unwired",
     )
 
 
@@ -700,8 +702,7 @@ def test_cross_check_clear_row_never_contaminates_the_pairing() -> None:
         session_claude_mapping_ingest.logger.warning = original
     _check(
         records == [],
-        "a differing hook:clear row alongside a CLEAN startup/init_event pair fires NO "
-        "warning -- clear rows are out of the pairing's scope by construction",
+        "a differing hook:clear row alongside a CLEAN startup/init_event pair fires NO warning -- clear rows are out of the pairing's scope by construction",
     )
 
 
@@ -775,8 +776,7 @@ def test_full_drain_pipeline_fires_the_cross_check() -> None:
         _check(result["upserted"] == 2, "both spool files (hook:startup + init_event) are ingested")
         _check(
             any("agi-xcheck-e2e" in r for r in records),
-            "the full drain() pipeline itself fires the cross-check WARNING -- genuinely "
-            "wired, not just the standalone comparison function",
+            "the full drain() pipeline itself fires the cross-check WARNING -- genuinely wired, not just the standalone comparison function",
         )
 
 
@@ -797,20 +797,22 @@ def test_sweep_tick_wiring_reaches_the_real_drain() -> None:
         )
         os.environ[_SPOOL_ENV] = str(spool_dir)
         state = RealShapeState()
+        register = RegisterUnitDouble()
         fake_self = SimpleNamespace(
             _get_state_service=lambda: state,
+            _register_unit_client=lambda: register,
             _peer_registry=None,
             _bridge_manager=None,
             _session_role_claim_pruner=None,
         )
         try:
-            AgentMessagingPlugin._run_session_lifecycle_sweep(cast("Any", fake_self))  # noqa: SLF001
+            with patch("agent_messaging_plugin.plugin.collect_ledger_tmux_report", return_value={"observations": [], "advisories": []}):
+                AgentMessagingPlugin._run_session_lifecycle_sweep(cast("Any", fake_self))  # noqa: SLF001
         finally:
             os.environ.pop(_SPOOL_ENV, None)
         _check(
             not path.exists(),
-            "the REAL _run_session_lifecycle_sweep deleted the spool file -- the drain is "
-            "genuinely wired into the sweep tick, not just a standalone function",
+            "the REAL _run_session_lifecycle_sweep deleted the spool file -- the drain is genuinely wired into the sweep tick, not just a standalone function",
         )
         rows = list_session_claude_mappings(state, "agi-wired-1")
         _check(

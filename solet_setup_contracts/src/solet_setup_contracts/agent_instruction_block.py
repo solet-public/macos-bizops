@@ -19,6 +19,8 @@ __all__ = [
     "HYDRATION_END",
     "agent_template_path",
     "carry_agent_block",
+    "extract_hydration_block",
+    "hydration_drift",
     "is_hydrated",
     "merge_agent_block",
     "render_agent_instructions",
@@ -59,6 +61,33 @@ def is_hydrated(committed: str, local: str) -> bool:
     """``local`` carries a delimited block and is exactly ``committed`` with that block merged in, nothing else changed."""
     start = local.find(HYDRATION_BEGIN)
     return start >= 0 and local.find(HYDRATION_END) >= start and merge_agent_block(committed, local) == local
+
+
+def extract_hydration_block(text: str) -> str | None:
+    """The delimited block in ``text``, markers included, or ``None`` when it carries no complete block."""
+    start = text.find(HYDRATION_BEGIN)
+    finish = text.find(HYDRATION_END)
+    if start < 0 or finish < start:
+        return None
+    return text[start : finish + len(HYDRATION_END)]
+
+
+def hydration_drift(local: str, rendered_template: str) -> str | None:
+    """A finding when ``local``'s block is not the block ``rendered_template`` carries, else ``None``.
+
+    ``rendered_template`` is the seed template after ``render_agent_instructions``. ``None`` covers both
+    agreement and a file with no block at all: this check reports a block that has gone stale, it does
+    not require one. A template with no block is a defect in the authoritative source, so it is a finding.
+    """
+    local_block = extract_hydration_block(local)
+    if local_block is None:
+        return None
+    expected = extract_hydration_block(rendered_template)
+    if expected is None:
+        return "template carries no hydration block: the authoritative source is defective"
+    if local_block == expected:
+        return None
+    return "hydration block is stale against its template: re-merge it with merge_agent_block(local, rendered_template)"
 
 
 def carry_agent_block(local: str, candidate: str) -> str | None:

@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::get_usage_rate_detail",
+  "display_name": "Zuora: Get Usage Rate Detail",
+  "description": "Read how a usage-based invoice item's amount was rated (GET /v1/invoices/invoice-item/{invoice-item-id}/usage-rate-detail), as on the PDF invoice; not for overage or multi-attribute charge models. Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "Explain how a usage-based invoice line was priced: the quantities, tiers and rates that add up to the billed amount, as shown on the PDF invoice. Use when a customer disputes a metered charge. Not available for overage or multi-attribute pricing charges.",
+  "result_processor_customizations": {
+    "action_label": "Zuora usage rate detail read",
+    "result_type": "zuora_get_usage_rate_detail_result",
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+  },
+  "error_processor_customizations": {
+    "action_context": "Read how a usage-based invoice item's amount was rated (GET /v1/invoices/invoice-item/{invoice-item-id}/usage-rate-detail), as on the PDF invoice; not for overage or multi-attribute charge models.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape: a bad identifier, header value or query pairing, a body missing a required field, or an unreadable or wrongly typed upload file. zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.validation_failed is a vendor 4xx or an HTTP 200 carrying success false, with Zuora's reasons. zuora.object_not_found, zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the Billing permission the reason names (bill runs, usage import or usage records). Read current state with get_bill_run or get_usage before retrying a write; pass an idempotency_key where offered. Back off on rate limits."
+  }
+}

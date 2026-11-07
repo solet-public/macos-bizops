@@ -42,6 +42,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .register_unit_client import UnitAssignment
+
 _TEMPLATE_PATH = (
     Path(__file__).resolve().parents[2] / "templates" / "authority_delegation_contract.txt"
 )
@@ -49,10 +51,9 @@ _TEMPLATE_PATH = (
 _PLACEHOLDER_RE = re.compile(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}")
 
 _PLACEHOLDER_NAMES = (
-    "agent_instance_id", "role_class", "lane_id", "brief_ref", "unit_id", "spawned_by_role",
+    "agent_instance_id", "role_class", "lane_id", "revision_id", "unit_id", "spawned_by_role",
     "repository_root",
 )
-_OPTIONAL_UNIT_ID_LINE = "UNIT ID: {unit_id}\n"
 
 
 class UnresolvedPlaceholderError(ValueError):
@@ -66,9 +67,8 @@ def render_authority_delegation_contract(
     agent_instance_id: str,
     role_class: str,
     lane_id: str,
-    brief_ref: str,
+    assignment: UnitAssignment,
     spawned_by_role: str,
-    unit_id: str = "",
     repository_root: str = "",
 ) -> str:
     """Renders the delegation contract for one spawn. Raises
@@ -77,14 +77,13 @@ def render_authority_delegation_contract(
     template) -- never silently ships a raw ``{placeholder}`` token into a
     worker's live system prompt."""
     template = _TEMPLATE_PATH.read_text()
-    if not unit_id:
-        template = template.replace(_OPTIONAL_UNIT_ID_LINE, "")
+    assignment.to_record()
     values = {
         "agent_instance_id": agent_instance_id,
         "role_class": role_class,
         "lane_id": lane_id,
-        "brief_ref": brief_ref,
-        "unit_id": unit_id,
+        "revision_id": assignment.revision.revision_id,
+        "unit_id": assignment.unit_id,
         "spawned_by_role": spawned_by_role,
         "repository_root": repository_root,
     }

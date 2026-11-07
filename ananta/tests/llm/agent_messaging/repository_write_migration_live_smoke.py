@@ -50,10 +50,9 @@ Coverage:
   (the ``jsonb_set`` failure mode); the merged dict serializes to JSONB with no
   ``::jsonb`` cast; an empty patch is a no-op; a missing message raises.
 
-Needs Postgres up; env-gated behind ``AGENT_MESSAGING_WRITE_LIVE_SMOKE=1``. Run::
-
-    AGENT_MESSAGING_WRITE_LIVE_SMOKE=1 \\
-      .venv/bin/python3 ananta/tests/llm/agent_messaging/repository_write_migration_live_smoke.py
+Private fixture: run under quality_gates/provision_test_pg.py using the
+explicit the private manifest variable contract. Without it, exit 77; legacy enable flags
+never select a live profile. See quality_gates/private_postgres.md.
 """
 
 from __future__ import annotations
@@ -68,12 +67,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, LiteralString, cast
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+_ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(_ROOT))
+REPO_ROOT = _ROOT
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(
-    0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
+    0,
+    str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 
+from ananta.core.domain.types import ActionResult  # noqa: E402
 from ananta.llm.agent_messaging.models import (  # noqa: E402
     MessageKind,
     MessageRole,
@@ -91,6 +94,7 @@ from ananta.llm.agent_messaging.schema import (  # noqa: E402
     NAMESPACE,
     get_agent_messaging_schema,
 )
+from ananta.services.state_service import StateService  # noqa: E402
 from ananta.types.schema_standardizer import SchemaStandardizer  # noqa: E402
 from postgres_state_management_plugin.plugin import (  # noqa: E402
     _PostgresStateTransaction,
@@ -104,6 +108,8 @@ from postgres_state_management_plugin.postgres_backend.ddl_renderer import (  # 
 from postgres_state_management_plugin.postgres_backend.provider import (  # noqa: E402
     PostgresProvider,
 )
+
+from quality_gates.private_test_pg import MANIFEST_ENV, load_fixture, skip_fixture  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
@@ -125,23 +131,15 @@ def _check(condition: object, label: str) -> None:
         print(f"  FAIL  {label}")
 
 
-_PROFILE_PG_CONFIG = (
-    REPO_ROOT / "profile" / "config" / "plugins"
-    / "postgres_state_management_plugin.json"
-)
-
-
 def _load_pg_config(schema_name: str) -> PostgresConfig:
-    config = PostgresConfig(**json.loads(_PROFILE_PG_CONFIG.read_text(encoding="utf-8")))
-    config.pg_schema = schema_name
-    return config
+    return PostgresConfig(**load_fixture("messaging_write").connection_config(schema_name))
 
 
-def _envelope(data: dict[str, Any]) -> dict[str, Any]:
+def _envelope(data: dict[str, object]) -> ActionResult:
     return {"action_status": "completed", "data": data, "actions": [], "error": None}
 
 
-class _LiveStateAdapter:
+class _LiveStateAdapter(StateService):
     """Full StateManagementInterface stand-in over a real provider.
 
     Autocommit ``write_state`` / ``update_state`` / ``query_state`` /
@@ -154,9 +152,16 @@ class _LiveStateAdapter:
     """
 
     def __init__(self, provider: PostgresProvider) -> None:
+        super().__init__()
         self._provider = provider
 
-    def write_state(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:
+    def write_state(
+        self,
+        namespace: str,
+        data: dict[str, object],
+        calling_service: str | None = None,
+        calling_namespace: str | None = None,
+    ) -> ActionResult:
         row_id = self._provider.insert(
             namespace=namespace,
             table=str(data["table"]),
@@ -164,9 +169,7 @@ class _LiveStateAdapter:
         )
         return _envelope({"result": {"generated_id": row_id, "inserted": 1}})
 
-    def update_state(
-        self, namespace: str, query: dict[str, Any], updates: dict[str, Any]
-    ) -> dict[str, Any]:
+    def update_state(self, namespace: str, query: dict[str, object], updates: dict[str, object]) -> ActionResult:
         filters = query.get("filters") or {}
         affected = self._provider.update(
             namespace=namespace,
@@ -176,16 +179,17 @@ class _LiveStateAdapter:
         )
         return _envelope({"result": {"updated": affected}})
 
-    def query_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
-        filters = query.get("filters") or {}
+    def query_state(self, namespace: str, filters: dict[str, object]) -> ActionResult:
+        query = filters
+        where_filters = query.get("filters") or {}
         rows = self._provider.select(
             namespace=namespace,
             table=str(query["table"]),
-            conditions=cast("dict[str, Any]", filters) if isinstance(filters, dict) else None,
+            conditions=cast("dict[str, Any]", where_filters) if isinstance(where_filters, dict) else None,
         )
         return _envelope({"records": rows, "count": len(rows)})
 
-    def query_ordered(self, namespace: str, data: dict[str, Any]) -> dict[str, Any]:
+    def query_ordered(self, namespace: str, data: dict[str, object]) -> ActionResult:
         filters = data.get("filters") or {}
         order_by = cast("list[list[str]]", data.get("order_by") or [])
         rows = self._provider.select_ordered(
@@ -228,11 +232,7 @@ def _create_schema_tables(provider: PostgresProvider) -> None:
     # exactly as the lifecycle does before rendering.
     schema = SchemaStandardizer().standardize_schema(get_agent_messaging_schema())
     schema_name = provider.config.schema_name
-    ops = [
-        op
-        for table in schema.tables.values()
-        for op in emit_create_table_ops(NAMESPACE, table, schema_name)
-    ]
+    ops = [op for table in schema.tables.values() for op in emit_create_table_ops(NAMESPACE, table, schema_name)]
     with provider.get_transactional_connection() as conn, conn.cursor() as cur:
         provider.apply_schema_change_ops(cur, schema, ops)
 
@@ -292,8 +292,7 @@ def test_w1_create_thread(repo: AgentMessagingRepository) -> str:
     _check(fetched.last_message_cursor == 0, "W1: last_message_cursor defaults to 0")
     _check(
         fetched.created_at == fetched.updated_at,
-        f"W1: created_at == updated_at from the DB default (statement-stable "
-        f"NOW(), omitted by the migration); got {fetched.created_at} vs {fetched.updated_at}",
+        f"W1: created_at == updated_at from the DB default (statement-stable NOW(), omitted by the migration); got {fetched.created_at} vs {fetched.updated_at}",
     )
     _check(fetched.closed_at is None, "W1: closed_at is NULL on a fresh thread")
     return thread.id
@@ -320,8 +319,7 @@ def test_w2_update_thread(repo: AgentMessagingRepository, thread_id: str) -> Non
     _check(row.backend_session_id == "bsess-1", "W2a: backend_session_id set")
     _check(
         row.updated_at >= created_at,
-        f"W2a: trigger maintains updated_at (>= created_at), not the migration; "
-        f"got {row.updated_at} vs {created_at}",
+        f"W2a: trigger maintains updated_at (>= created_at), not the migration; got {row.updated_at} vs {created_at}",
     )
 
     # (b) clear_active_action -> both NULL, other fields untouched
@@ -335,7 +333,8 @@ def test_w2_update_thread(repo: AgentMessagingRepository, thread_id: str) -> Non
 
     # (c) status CLOSED + set_closed_at
     repo.update_thread(
-        thread_id, ThreadStatusUpdate(status=ThreadStatus.CLOSED, set_closed_at=True),
+        thread_id,
+        ThreadStatusUpdate(status=ThreadStatus.CLOSED, set_closed_at=True),
     )
     row = repo.get_thread(thread_id)
     assert row is not None
@@ -350,7 +349,8 @@ def test_w2_update_thread(repo: AgentMessagingRepository, thread_id: str) -> Non
 
 
 def test_w3_conditional_update_thread(
-    repo: AgentMessagingRepository, thread_id: str,
+    repo: AgentMessagingRepository,
+    thread_id: str,
 ) -> None:
     # HIT: thread is OPEN, which is in the allowed set -> CAS applies.
     hit = repo.conditional_update_thread(
@@ -381,8 +381,7 @@ def test_w3_conditional_update_thread(
     assert after is not None
     _check(
         after.status == ThreadStatus.RUNNING and after.closed_at is None,
-        f"W3 miss: row UNTOUCHED by the missed CAS (=ANY predicate held); "
-        f"status={after.status.value!r} closed_at={after.closed_at!r}",
+        f"W3 miss: row UNTOUCHED by the missed CAS (=ANY predicate held); status={after.status.value!r} closed_at={after.closed_at!r}",
     )
 
     # NOT-FOUND: a missing thread -> raise (0-row CAS, re-read finds nothing).
@@ -401,7 +400,9 @@ def test_w3_conditional_update_thread(
     raised = False
     try:
         repo.conditional_update_thread(
-            thread_id, ThreadStatusUpdate(), require_status_in=(ThreadStatus.RUNNING,),
+            thread_id,
+            ThreadStatusUpdate(),
+            require_status_in=(ThreadStatus.RUNNING,),
         )
     except RepositoryError:
         raised = True
@@ -471,8 +472,7 @@ def test_w4_append_message(repo: AgentMessagingRepository) -> None:
     after_count = len(repo.recent_messages(g, limit=50))
     _check(
         g_miss.last_message_cursor == before_cursor and after_count == before_count,
-        f"W4 gated-miss: NO cursor burn + NO message inserted (=ANY held); "
-        f"cursor {before_cursor}->{g_miss.last_message_cursor}, msgs {before_count}->{after_count}",
+        f"W4 gated-miss: NO cursor burn + NO message inserted (=ANY held); cursor {before_cursor}->{g_miss.last_message_cursor}, msgs {before_count}->{after_count}",
     )
 
     # Not-found: missing thread -> raise (0-row increment).
@@ -505,9 +505,7 @@ def _seed_message(
         cur.execute(
             cast(
                 LiteralString,
-                f'INSERT INTO "{schema}"."{_MESSAGE_TABLE}" '
-                "(id, namespace, thread_id, cursor, role, kind, content, metadata) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)",
+                f'INSERT INTO "{schema}"."{_MESSAGE_TABLE}" (id, namespace, thread_id, cursor, role, kind, content, metadata) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)',
             ),
             (
                 message_id,
@@ -530,13 +528,17 @@ def test_w5_merge_message_metadata(
 ) -> None:
     message_id = f"agm-_{uuid.uuid4().hex}"
     _seed_message(
-        provider, schema, thread_id=thread_id, message_id=message_id,
+        provider,
+        schema,
+        thread_id=thread_id,
+        message_id=message_id,
         metadata={"important": True, "timeout_seconds": 30},
     )
 
     # shallow merge: overwrite timeout_seconds, ADD assembled_prompt, PRESERVE important
     repo.merge_message_metadata(
-        message_id, {"assembled_prompt": "PROMPT", "timeout_seconds": 45},
+        message_id,
+        {"assembled_prompt": "PROMPT", "timeout_seconds": 45},
     )
     merged = _find_message(repo, thread_id, message_id)
     _check(
@@ -566,10 +568,8 @@ def _find_message(repo: AgentMessagingRepository, thread_id: str, message_id: st
 
 
 def main() -> int:
-    if os.environ.get("AGENT_MESSAGING_WRITE_LIVE_SMOKE") != "1":
-        print("=== repository_write_migration_live_smoke ===")
-        print("  SKIP  set AGENT_MESSAGING_WRITE_LIVE_SMOKE=1 to run; needs Postgres up.")
-        return 0
+    if not os.environ.get(MANIFEST_ENV):
+        return skip_fixture()
     print("=== repository_write_migration_live_smoke ===")
     schema_name = f"example_test_agm_write_{secrets.token_hex(3)}"
     provider = PostgresProvider(_load_pg_config(schema_name))
@@ -596,6 +596,7 @@ def main() -> int:
         for label in _failed:
             print(f"  FAILED: {label}")
         return 1
+    print("PRIVATE_PG_BODY messaging_write")
     return 0
 
 

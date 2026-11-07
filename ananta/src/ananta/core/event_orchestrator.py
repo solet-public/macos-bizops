@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from ananta.constants import CONTEXT_KEY_FLOW_ID, CONTEXT_KEY_SESSION_ID
 from ananta.core.actions.instance_pin import CLAIM_PIN_KEY, process_instance_id
+from ananta.core.domain.error_codes import ErrorCode
 from ananta.core.events import ActionEvent, EventResult, SystemEvent
 from ananta.core.orchestration.event_handler_manager import EventHandlerManager
 from ananta.core.orchestration.initialization_manager import InitializationManager
@@ -89,9 +90,7 @@ class EventOrchestrator:
         self.starting_prompt: str = init_result.starting_prompt
         self.max_consecutive_errors: int | None = init_result.max_consecutive_errors
         self.max_actions_per_cycle: int | None = init_result.max_actions_per_cycle
-        self.plugin_operational_config: dict[str, dict[str, object]] = (
-            init_result.plugin_operational_config
-        )
+        self.plugin_operational_config: dict[str, dict[str, object]] = init_result.plugin_operational_config
         self.default_inference_provider: str | None = init_result.default_inference_provider
         self.current_session_id: str | None = init_result.current_session_id
         self.current_flow_id: str | None = init_result.current_flow_id
@@ -130,12 +129,8 @@ class EventOrchestrator:
 
         # ServiceManager and ActionCoordinator now initialized in STARTUP_SEQUENCE
         # Verify they were initialized properly
-        assert hasattr(self, "service_manager"), (
-            "ServiceManager must be initialized by startup sequence"
-        )
-        assert hasattr(self, "action_coordinator"), (
-            "ActionCoordinator must be initialized by startup sequence"
-        )
+        assert hasattr(self, "service_manager"), "ServiceManager must be initialized by startup sequence"
+        assert hasattr(self, "action_coordinator"), "ActionCoordinator must be initialized by startup sequence"
         assert hasattr(self, "action_factory"), "action_factory must be set by startup sequence"
 
         # Delegate attributes for backward compatibility
@@ -149,9 +144,7 @@ class EventOrchestrator:
             ActionProcessor as OrchActionProcessor,
         )
 
-        assert self.action_factory is not None, (
-            "ActionFactory must be initialized before ActionProcessor"
-        )
+        assert self.action_factory is not None, "ActionFactory must be initialized before ActionProcessor"
         self.action_processor = OrchActionProcessor(
             state_manager=self.state_manager,
             action_factory=self.action_factory,
@@ -162,9 +155,7 @@ class EventOrchestrator:
         # Register core event handlers
         self._register_core_event_handlers()
 
-        logger.debug(
-            "EventOrchestrator: Three-phase initialization complete via InitializationManager"
-        )
+        logger.debug("EventOrchestrator: Three-phase initialization complete via InitializationManager")
 
     def _delegate_service_attributes(self) -> None:
         """Delegate service attributes from ServiceManager for compatibility."""
@@ -188,9 +179,7 @@ class EventOrchestrator:
             "action_recorder",
         ]
         for attr in required_attrs:
-            assert getattr(self.service_manager, attr) is not None, (
-                f"ServiceManager.{attr} must be initialized"
-            )
+            assert getattr(self.service_manager, attr) is not None, f"ServiceManager.{attr} must be initialized"
 
     def _delegate_core_services(self) -> None:
         """Delegate core service attributes from ServiceManager.
@@ -209,9 +198,7 @@ class EventOrchestrator:
         assert self.service_manager.blob_storage_service is not None
 
         self.config = self.service_manager.config
-        _ = (
-            self.service_manager.app_home
-        )  # Verify app_home is set (self.APP_HOME already set in __init__)
+        _ = self.service_manager.app_home  # Verify app_home is set (self.APP_HOME already set in __init__)
         self._system_platform_manager = self.service_manager._system_platform_manager
         self.plugin_manager: PluginManager = self.service_manager.plugin_manager
         self.state_service: StateService = self.service_manager.state_service
@@ -237,9 +224,7 @@ class EventOrchestrator:
         # Action processing components - narrowed with assertions above
         # Note: action_processor is created separately in __init__ with session/flow IDs
         self.action_manager: ActionManager = self.action_coordinator.action_manager
-        self.action_preparation_service: ActionPreparationService | None = (
-            self.action_coordinator.action_preparation_service
-        )
+        self.action_preparation_service: ActionPreparationService | None = self.action_coordinator.action_preparation_service
         self.action_factory = self.action_coordinator.action_factory
         self.action_queue_poller = self.action_coordinator.action_queue_poller
         # L3 Slice D: bind the poller's color-active getter to this orchestrator's
@@ -271,9 +256,7 @@ class EventOrchestrator:
         self._process_registry: dict[str, object] = self.action_coordinator._process_registry
 
         # Flags
-        self._framework_services_initialized: bool = (
-            self.action_coordinator._framework_services_initialized
-        )
+        self._framework_services_initialized: bool = self.action_coordinator._framework_services_initialized
         self._plugins_ready: bool = self.action_coordinator._plugins_ready
 
     def _validate_inference_provider(self) -> None:
@@ -294,21 +277,33 @@ class EventOrchestrator:
         return self.plugin_manager.get_plugin(plugin_name)
 
     # Services available as direct attributes on the orchestrator
-    _DIRECT_ATTR_SERVICES: frozenset[str] = frozenset({
-        "state_service", "blob_storage_service", "discovery_service",
-        "context_service",
-        "io_interface_service", "knowledge_service", "thinking_service",
-        "session_ledger_service",
-    })
+    _DIRECT_ATTR_SERVICES: frozenset[str] = frozenset(
+        {
+            "state_service",
+            "blob_storage_service",
+            "discovery_service",
+            "context_service",
+            "io_interface_service",
+            "knowledge_service",
+            "thinking_service",
+            "session_ledger_service",
+        }
+    )
 
     # Services that live on service_manager (created later in startup)
-    _SERVICE_MANAGER_SERVICES: frozenset[str] = frozenset({
-        "inference_service",
-        "job_service", "flow_service", "lifecycle_management_service",
-        "scheduling_service", "context_management_service",
-        "prompt_assembly_service",
-        "plan_lifecycle_service", "wbs_lifecycle_service",
-    })
+    _SERVICE_MANAGER_SERVICES: frozenset[str] = frozenset(
+        {
+            "inference_service",
+            "job_service",
+            "flow_service",
+            "lifecycle_management_service",
+            "scheduling_service",
+            "context_management_service",
+            "prompt_assembly_service",
+            "plan_lifecycle_service",
+            "wbs_lifecycle_service",
+        }
+    )
 
     def get_service(self, service_name: str) -> object | None:
         """Get service instance by name for dynamic service routing.
@@ -372,14 +367,10 @@ class EventOrchestrator:
             raise RuntimeError("SystemPlatformManager not initialized")
         # get_plugin_lifecycle_manager returns object (per protocol) but actually returns
         # PluginLifecycleManager - cast to use its methods
-        plugin_lifecycle_manager = cast(
-            "PluginLifecycleManager", self._system_platform_manager.get_plugin_lifecycle_manager()
-        )
+        plugin_lifecycle_manager = cast("PluginLifecycleManager", self._system_platform_manager.get_plugin_lifecycle_manager())
         await plugin_lifecycle_manager.initialize_plugins(self.plugin_manager)
 
-    def _load_starting_action_definitions(
-        self, config_path: Path
-    ) -> list[dict[str, object]] | None:
+    def _load_starting_action_definitions(self, config_path: Path) -> list[dict[str, object]] | None:
         """Load starting action definitions from config file.
 
         Returns:
@@ -424,9 +415,7 @@ class EventOrchestrator:
             context[CONTEXT_KEY_FLOW_ID] = self.current_flow_id
         return context
 
-    def _submit_starting_actions(
-        self, action_definitions: list[dict[str, object]], context: dict[str, object]
-    ) -> None:
+    def _submit_starting_actions(self, action_definitions: list[dict[str, object]], context: dict[str, object]) -> None:
         """Submit each action definition through the standard pipeline.
 
         Injects flow_id/session_id into each action_def before submission since
@@ -460,7 +449,27 @@ class EventOrchestrator:
             name = action_def.get("name") or action_def.get("process_key", "unknown")
             logger.debug(f"EventOrchestrator: Submitting starting action: {name}")
             # submit_action_definition raises on failure
-            self.action_factory.submit_action_definition(action_def, context)
+            try:
+                self.action_factory.submit_action_definition(action_def, context)
+            except FrameworkError as exc:
+                optional_key = "plugin::fleet_maintenance_plugin::ensure_dispatch_schedule"
+                if not self._missing_fleet_startup(action_def, exc):
+                    raise
+                logger.warning(
+                    "%s: %s; fleet plugin activation is missing; retry on next boot",
+                    optional_key,
+                    exc.error_code,
+                )
+
+    def _missing_fleet_startup(
+        self,
+        action_def: dict[str, object],
+        exc: FrameworkError,
+    ) -> bool:
+        """Only an absent optional plugin registration earns a boot advisory."""
+        key = "plugin::fleet_maintenance_plugin::ensure_dispatch_schedule"
+        processes = self._process_registry.get("processes")
+        return action_def.get("process_key") == key and exc.error_code == ErrorCode.ACTION_PROCESS_NOT_FOUND and exc.details.get("process_key") == key and isinstance(processes, dict) and key not in processes
 
     def _initialize_actions(self, state: dict[str, object]) -> dict[str, object]:
         """Initialize starting actions from config file.
@@ -480,9 +489,7 @@ class EventOrchestrator:
 
     def _register_core_event_handlers(self) -> None:
         """Register core event handlers using EventHandlerManager for clean delegation."""
-        logger.debug(
-            "EventOrchestrator: Delegating event handler registration to EventHandlerManager"
-        )
+        logger.debug("EventOrchestrator: Delegating event handler registration to EventHandlerManager")
 
         # Delegate complex event handler registration to EventHandlerManager
         event_handler_manager = EventHandlerManager(orchestrator_ref=self)
@@ -514,9 +521,7 @@ class EventOrchestrator:
 
             # Check if we need to initialize actions
             if not legacy_actions:
-                logger.debug(
-                    f"EventOrchestrator: No pending actions, initializing with starting prompt: {self.starting_prompt}"
-                )
+                logger.debug(f"EventOrchestrator: No pending actions, initializing with starting prompt: {self.starting_prompt}")
                 state = self._initialize_actions(state)
                 await self.state_manager.save(state)
                 logger.debug("EventOrchestrator: Starting prompt action initialized and saved")
@@ -601,9 +606,7 @@ class EventOrchestrator:
         still exits in time to be a clean ``exit 0`` (no SIGKILL → no ghost).
         """
         try:
-            await asyncio.wait_for(
-                self._run_teardown(), timeout=_GRACEFUL_TEARDOWN_TIMEOUT_SECONDS
-            )
+            await asyncio.wait_for(self._run_teardown(), timeout=_GRACEFUL_TEARDOWN_TIMEOUT_SECONDS)
         except TimeoutError:
             logger.warning("graceful teardown exceeded budget; exiting anyway")
         except Exception as exc:  # noqa: BLE001 — teardown is best-effort; exit regardless
@@ -659,18 +662,14 @@ class EventOrchestrator:
         except Exception:
             pass
 
-    def create_session(
-        self, namespace: str, context_type: str, metadata: dict[str, object] | None = None
-    ) -> str:
+    def create_session(self, namespace: str, context_type: str, metadata: dict[str, object] | None = None) -> str:
         # FIX: Use SessionManager to persist to database instead of creating unused events
         session_id = self.session_manager.create_session(namespace, context_type, metadata)
         self.current_session_id = session_id
 
         return str(session_id)
 
-    def create_flow(
-        self, session_id: str, trigger_type: str, trigger_data: dict[str, object], priority: int = 5
-    ) -> str:
+    def create_flow(self, session_id: str, trigger_type: str, trigger_data: dict[str, object], priority: int = 5) -> str:
         # FIX: Use FlowManager to persist to database instead of creating unused events
         flow_id = self.flow_manager.create_flow(session_id, trigger_type, trigger_data, priority)
         self.current_flow_id = flow_id
@@ -771,9 +770,7 @@ class EventOrchestrator:
                     "provider": str(process_info_obj.get("provider", "")),
                     "function_name": str(process_info_obj.get("function_name", "")),
                     "description": str(process_info_obj.get("description", "")),
-                    "is_inference_capable": bool(
-                        process_info_obj.get("is_inference_capable", False)
-                    ),
+                    "is_inference_capable": bool(process_info_obj.get("is_inference_capable", False)),
                 }
             )
 
@@ -814,7 +811,8 @@ class EventOrchestrator:
         return self._process_registry
 
     def apply_knowledge_base_updates(
-        self, updates: dict[str, dict[str, object]],
+        self,
+        updates: dict[str, dict[str, object]],
     ) -> dict[str, object]:
         """Apply knowledge base text updates to the process registry at runtime."""
         result = self.action_coordinator.apply_knowledge_base_updates(updates)

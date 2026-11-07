@@ -51,6 +51,10 @@ the KB "Gate Allowlist Conventions", adding entries without operator
 approval defeats the gate's purpose. Removing an entry is the unit of
 remediation progress.
 
+The checkout's tracked-debt register is loaded by default, including for direct
+CLI calls. ``--allowlist`` selects an explicit replacement register; an empty
+replacement exposes every finding. Counts retain every allowlisted finding.
+
 Reference: the state-service consolidation master plan (dev-checkout
 workbench — not part of the shipped tree) §1.7, §3.6, §4 W-WINT2-EARLY.
 """
@@ -72,17 +76,20 @@ if str(REPO_ROOT) not in sys.path:
 from quality_gates.allowlist_schema import load_allowlist as _load_tagged_allowlist  # noqa: E402
 
 CHECK_ID = "D1.1"
+_DEFAULT_ALLOWLIST = REPO_ROOT / "quality_gates/wint2_driver_import_allowlist.txt"
 
 # Driver-root module names — top dotted segment only. The gate matches
 # both bare `import psycopg` AND `from psycopg.rows import dict_row` to
 # the same root `psycopg`.
-_DRIVER_ROOTS = frozenset({
-    "psycopg",
-    "psycopg_pool",
-    "asyncpg",
-    "pg8000",
-    "sqlalchemy",
-})
+_DRIVER_ROOTS = frozenset(
+    {
+        "psycopg",
+        "psycopg_pool",
+        "asyncpg",
+        "pg8000",
+        "sqlalchemy",
+    }
+)
 
 _SCAN_ROOTS = (
     REPO_ROOT / "ananta" / "src",
@@ -91,9 +98,14 @@ _SCAN_ROOTS = (
 
 # `plugins/<X>/{research,tools,migrations,parity_tests}/...` segments
 # are operator-tooling per the KB "Peer Pre-Completion Gate Procedure" — skipped.
-_OPERATOR_TOOLING_PLUGIN_SEGMENTS = frozenset({
-    "research", "tools", "migrations", "parity_tests",
-})
+_OPERATOR_TOOLING_PLUGIN_SEGMENTS = frozenset(
+    {
+        "research",
+        "tools",
+        "migrations",
+        "parity_tests",
+    }
+)
 
 # Bundled venv segments (.venv, .venv_cosyvoice, ...) ship vendored
 # third-party deps whose own driver imports are not platform code.
@@ -192,7 +204,7 @@ def _is_in_scope(path: Path) -> bool:
             return False
         # Belt-and-suspenders: catch nested operator-tooling under src/
         # or tests/. Currently none, but cheap to defend.
-        remaining = parts[plugins_idx + 3:]
+        remaining = parts[plugins_idx + 3 :]
         if any(seg in _OPERATOR_TOOLING_PLUGIN_SEGMENTS for seg in remaining):
             return False
     return True
@@ -257,19 +269,16 @@ def _findings_from_module(module: ast.Module, path: Path) -> list[Finding]:
     rel = _rel(path)
     findings: list[Finding] = []
     for lineno, root in _scan_module_for_drivers(module):
-        findings.append(Finding(
-            check_id=CHECK_ID,
-            scope_qualifier=rel,
-            specifier=f"{lineno}::{root}",
-            message=(
-                f"{rel}:{lineno} imports '{root}' — only the two "
-                "state_service plugins (postgres_state_management_plugin, "
-                "rds_postgres_state_management_plugin) may import Postgres "
-                "drivers in the runtime code base. See master plan §1.7."
-            ),
-            file_path=rel,
-            lineno=lineno,
-        ))
+        findings.append(
+            Finding(
+                check_id=CHECK_ID,
+                scope_qualifier=rel,
+                specifier=f"{lineno}::{root}",
+                message=(f"{rel}:{lineno} imports '{root}' — only the two state_service plugins (postgres_state_management_plugin, rds_postgres_state_management_plugin) may import Postgres drivers in the runtime code base. See master plan §1.7."),
+                file_path=rel,
+                lineno=lineno,
+            )
+        )
     return findings
 
 
@@ -313,20 +322,27 @@ def _emit_json(findings: list[Finding], allowlist: Allowlist) -> tuple[int, int]
             allowlisted += 1
         else:
             blocking += 1
-        payload_findings.append({
-            "check_id": finding.check_id,
-            "scope_qualifier": finding.scope_qualifier,
-            "specifier": finding.specifier,
-            "message": finding.message,
-            "file_path": finding.file_path,
-            "lineno": finding.lineno,
-            "allowlisted": is_allow,
-        })
-    print(json.dumps({
-        "blocking": blocking,
-        "allowlisted": allowlisted,
-        "findings": payload_findings,
-    }, indent=2))
+        payload_findings.append(
+            {
+                "check_id": finding.check_id,
+                "scope_qualifier": finding.scope_qualifier,
+                "specifier": finding.specifier,
+                "message": finding.message,
+                "file_path": finding.file_path,
+                "lineno": finding.lineno,
+                "allowlisted": is_allow,
+            }
+        )
+    print(
+        json.dumps(
+            {
+                "blocking": blocking,
+                "allowlisted": allowlisted,
+                "findings": payload_findings,
+            },
+            indent=2,
+        )
+    )
     return blocking, allowlisted
 
 
@@ -337,15 +353,9 @@ def _emit_json(findings: list[Finding], allowlist: Allowlist) -> tuple[int, int]
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--allowlist", type=Path, default=None,
-                        help="Path to tracked-debt allowlist file.")
-    parser.add_argument("--json", action="store_true",
-                        help="Emit machine-readable JSON instead of human text.")
-    parser.add_argument("--warn-only", action="store_true",
-                        help=("Always exit 0; print findings but do NOT "
-                              "contribute to the blocking verdict. This is "
-                              "the W-WINT2-EARLY (Tier 0) mode. W-WINT2-FINAL "
-                              "(Tier 7) drops this flag to flip to fail-mode."))
+    parser.add_argument("--allowlist", type=Path, default=_DEFAULT_ALLOWLIST, help="Path to tracked-debt allowlist file (default: this checkout's register).")
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of human text.")
+    parser.add_argument("--warn-only", action="store_true", help=("Always exit 0; print findings but do NOT contribute to the blocking verdict. This is the W-WINT2-EARLY (Tier 0) mode. W-WINT2-FINAL (Tier 7) drops this flag to flip to fail-mode."))
     return parser
 
 
@@ -373,16 +383,11 @@ def main(argv: list[str]) -> int:
             if not findings:
                 print("OK: 0 findings; W-WINT2 driver-import gate clean.")
             else:
-                print(
-                    f"OK: {len(findings)} finding(s) — all allowlisted; "
-                    "W-WINT2 driver-import gate clean."
-                )
+                print(f"OK: {len(findings)} finding(s) — all allowlisted; W-WINT2 driver-import gate clean.")
         else:
             mode = "warn" if args.warn_only else "fail"
             print(
-                f"\n{len(findings)} W-WINT2 driver-import finding(s) "
-                f"({allowlisted} allowlisted; {blocking} non-allowlisted; "
-                f"mode={mode}).",
+                f"\n{len(findings)} W-WINT2 driver-import finding(s) ({allowlisted} allowlisted; {blocking} non-allowlisted; mode={mode}).",
                 file=sys.stderr,
             )
     if args.warn_only:

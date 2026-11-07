@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "ananta" / "src"))
 sys.path.insert(0, str(ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -45,7 +46,7 @@ from agent_messaging_plugin.usage_economics_quota import plan_for_runtime  # noq
 
 _passed = 0
 _failed: list[str] = []
-_NOW = datetime(2026, 10, 1, 3, 15, tzinfo=UTC)
+_NOW = datetime(2026, 10, 3, 12, tzinfo=UTC)  # admits the newest shipped economics profile
 _SHIPPED = ROOT / "plugins" / "agent_messaging_plugin" / "model_profiles" / "usage_economics.v1.json"
 _PROFILE = "anthropic-max-20x-2026-08-22"
 _RULING = "rul_29449a0b-3b9e-4251-bf87-4d295269a409"
@@ -175,7 +176,7 @@ def _add_second_covering_plan(raw: dict[str, Any]) -> None:
 
 
 def _select(state: StateManagementInterface, score: float, **params: Any) -> dict[str, Any]:
-    return verbs.select_dispatch_tier(state, {"required_score": score, **params}, now=_NOW)
+    return verbs.select_dispatch_tier(state, {"required_score": score, "max_staleness_hours": 72, **params}, now=_NOW)
 
 
 def _pick(selection: dict[str, Any]) -> tuple[str, str]:
@@ -240,8 +241,13 @@ def test_table_validation_is_loud() -> None:
 
 def test_longest_prefix_wins() -> None:
     table = DispatchWeights(
-        basis="operator_policy", ruling_id=_RULING, evidence_ref=None, declared_at=_NOW, default_weight=1.0,
-        by_model_prefix=(("claude-sonnet", 0.5), ("claude-sonnet-5-5", 0.4)), note=None,
+        basis="operator_policy",
+        ruling_id=_RULING,
+        evidence_ref=None,
+        declared_at=_NOW,
+        default_weight=1.0,
+        by_model_prefix=(("claude-sonnet", 0.5), ("claude-sonnet-5-5", 0.4)),
+        note=None,
     )
     _check(table.weight_for("claude-sonnet-5-5") == 0.4 and table.weight_for("claude-sonnet-5") == 0.5, "the longest matching prefix wins, whatever the order")
     _check(table.weight_for("gpt-6-sol") == 1.0, "no match takes the declared default")
@@ -262,7 +268,10 @@ def test_pure_selector_objective() -> None:
     _check(weighted.selected.model == "claude-sonnet-5-5" and plain.selected.model == "claude-opus-5-5", "the weight reorders cells that relative ranks the other way")
     scaled = select_tier(
         (replace(opus, relative_cost_multiplier=2 * 297.78), replace(sonnet, relative_cost_multiplier=2 * 608.89)),
-        required_score=50, objective="allowance_weighted", now=now, max_age=window,
+        required_score=50,
+        objective="allowance_weighted",
+        now=now,
+        max_age=window,
     )
     _check(scaled.selected.model == weighted.selected.model, "the ranking is scale-invariant, so the catalog-wide price floor does not matter")
 
@@ -275,8 +284,7 @@ def test_golden_table_on_the_shipped_profile() -> None:
     _check(sample["billing_objective"] == "allowance_weighted", "a covered runtime constraint defaults to allowance_weighted")
     basis = sample.get("cost_basis", {})
     _check(
-        basis.get("plan_profile_id") == _PROFILE and basis.get("ruling_id") == _RULING and basis.get("selected_weight") == 0.5
-        and basis.get("by_model_prefix") == {"claude-sonnet": 0.5} and basis.get("default_weight") == 1.0,
+        basis.get("plan_profile_id") == _PROFILE and basis.get("ruling_id") == _RULING and basis.get("selected_weight") == 0.5 and basis.get("by_model_prefix") == {"claude-sonnet": 0.5} and basis.get("default_weight") == 1.0,
         "cost_basis names the plan, the ruling, the table and the weight applied",
     )
     _check(sample["selected"].get("plan_weight") == 0.5 and "warnings" not in sample, "the selected cell carries its weight and there is no warning")
@@ -333,8 +341,11 @@ def test_profile_faults_refuse_with_their_documented_codes() -> None:
     with _ProfileFile(_drop_pools):
         code, message = _refusal(lambda: _select(state, 45, runtime="claude_code"))
         _check(code == "usage_economics_invalid", f"a runtime-constrained selection loads the profile first and refuses usage_economics_invalid ({message[:60]})")
-        code, _ = _refusal(lambda: _select(state, 45))
-        _check(code == "quota_state_unknown", "an unconstrained selection keeps refusing quota_state_unknown for the same fault")
+        unconstrained = _select(state, 45)
+        _check(
+            unconstrained["selected"] is not None and "quota_unknown_used" not in unconstrained["advisories"],
+            "unconstrained metered selection does not load quota profiles",
+        )
     with _ProfileFile(lambda row: row["dispatch_weights"].update({"default_weight": 0})):
         code, _ = _refusal(lambda: _select(state, 45, runtime="claude_code"))
         _check(code == "usage_economics_invalid", "a malformed dispatch_weights table refuses a constrained selection as usage_economics_invalid")
@@ -345,8 +356,15 @@ def test_profile_faults_refuse_with_their_documented_codes() -> None:
 
 def _verify(state: StateManagementInterface, receipt: dict[str, Any], selected: dict[str, Any]) -> None:
     verbs.verify_selection_receipt(
-        state, difficulty_score=float(receipt["required_score"]), selection_receipt=receipt, dispatch_kind="implement",
-        scope_tags=(), agent_runtime=selected["runtime"], model=selected["model"], effort=selected["effort"], now=_NOW,
+        state,
+        difficulty_score=float(receipt["required_score"]),
+        selection_receipt=receipt,
+        dispatch_kind="implement",
+        scope_tags=(),
+        agent_runtime=selected["runtime"],
+        model=selected["model"],
+        effort=selected["effort"],
+        now=_NOW,
     )
 
 
@@ -354,16 +372,21 @@ def test_receipt_round_trips_and_pins_the_ranking() -> None:
     state = _state()
     selection = _select(state, 41, runtime="claude_code")
     receipt = selection["selection_receipt"]
+    assert {"pin", "pin_basis", "effort_ceiling", "exclude_model_prefixes", "exclude_runtimes"} <= set(receipt), "final five receipt keys"
     _check(
-        set(receipt) == {"required_score", "billing_objective", "score_margin", "cost_tolerance", "max_staleness_hours", "runtime_constraint", "selected"},
-        "the receipt key set is unchanged",
+        set(receipt) == {"required_score", "billing_objective", "score_margin", "cost_tolerance", "max_staleness_hours", "runtime_constraint", "selected", "effort_ceiling", "exclude_model_prefixes", "exclude_runtimes", "pin", "pin_basis"},
+        "the receipt includes the original seven, three constraint and two pin keys",
     )
     _check(receipt["billing_objective"] == "allowance_weighted" and receipt["selected"]["model"] == "claude-sonnet-5-5", "the receipt pins the weighted ranking")
     _check(_refusal(lambda: _verify(state, receipt, receipt["selected"])) == ("", ""), "it verifies for its spawn tuple")
     relative = {**receipt, "billing_objective": "relative"}
-    _check(_refusal(lambda: _verify(state, relative, relative["selected"]))[0] == "selection_receipt_mismatch", "a receipt re-labelled relative no longer replays to the same answer")
+    relative_selected = relative["selected"]
+    assert isinstance(relative_selected, dict)
+    _check(_refusal(lambda: _verify(state, relative, relative_selected))[0] == "selection_receipt_mismatch", "a receipt re-labelled relative no longer replays to the same answer")
     stripped = {**receipt, "runtime_constraint": None}
-    code, message = _refusal(lambda: _verify(state, stripped, stripped["selected"]))
+    stripped_selected = stripped["selected"]
+    assert isinstance(stripped_selected, dict)
+    code, message = _refusal(lambda: _verify(state, stripped, stripped_selected))
     _check(code == "selection_receipt_mismatch" and "runtime_constraint" in message, "a weighted receipt without its runtime constraint is refused as a mismatch")
     legacy = _select(state, 41, runtime="claude_code", billing_objective="relative")["selection_receipt"]
     _check(_refusal(lambda: _verify(state, legacy, legacy["selected"])) == ("", ""), "a receipt issued under relative still verifies unchanged")
@@ -375,21 +398,26 @@ def test_receipt_round_trips_and_pins_the_ranking() -> None:
         _check(_refusal(lambda: _verify(state, receipt, receipt["selected"]))[0] == "selection_receipt_mismatch", "editing the weight invalidates an in-flight receipt until the dispatcher re-selects")
 
 
-def test_an_exhausted_pool_still_excludes_a_weighted_cell() -> None:
+def test_exhausted_pool_does_not_exclude_weighted_cells() -> None:
     state = _state()
+    expected = _select(state, 45, runtime="claude_code")["selected"]
     for pool in ("rolling-five-hour", "weekly-all-model", "weekly-model-family"):
         verbs.record_pool_reading(
             state,
             {
-                "profile_id": _PROFILE, "pool_id": pool, "consumed": 100.0 if pool == "weekly-model-family" else 10.0,
-                "as_of": (_NOW - timedelta(minutes=5)).isoformat(), "next_reset_at": (_NOW + timedelta(hours=2)).isoformat(),
-                "source": f"fixture reading; {_RULING}", "recorded_by": "Coordinator",
+                "profile_id": _PROFILE,
+                "pool_id": pool,
+                "consumed": 100.0 if pool == "weekly-model-family" else 10.0,
+                "as_of": (_NOW - timedelta(minutes=5)).isoformat(),
+                "next_reset_at": (_NOW + timedelta(hours=2)).isoformat(),
+                "source": f"fixture reading; {_RULING}",
+                "recorded_by": "Coordinator",
             },
             now=_NOW,
         )
     selection = _select(state, 45, runtime="claude_code")
-    _check(_pick(selection) == ("claude-opus-5-5", "medium"), "Sonnet's own pool is used up: the weight cannot bring Sonnet back")
-    _check(selection["excluded"]["quota_exhausted"] >= 1 and selection["billing_objective"] == "allowance_weighted", "the exclusion is the exhausted pool, under the weighted objective")
+    _check(selection["selected"] == expected, "exhausted pool does not change weighted selection")
+    _check("quota_exhausted" not in selection["excluded"] and selection["billing_objective"] == "allowance_weighted", "quota admission is absent under the weighted objective")
 
 
 def test_haiku_is_not_declared_so_it_keeps_the_default_weight() -> None:
@@ -398,6 +426,11 @@ def test_haiku_is_not_declared_so_it_keeps_the_default_weight() -> None:
     _check(_pick(_select(state, 14, runtime="claude_code")) == ("claude-sonnet-5", "low"), "required 14 now selects Sonnet 5 low (24 / $0.51) over Haiku (16 / $0.28)")
     with _ProfileFile(_drop_weights):
         _check(_pick(_select(state, 14, runtime="claude_code")) == ("claude-haiku-4.5", "non_reasoning"), "without the table Haiku wins as before")
+
+
+def test_constraint_receipt_defaults() -> None:
+    receipt = _select(_state(), 41, runtime="claude_code")["selection_receipt"]
+    _check(receipt["effort_ceiling"] is None and receipt["exclude_model_prefixes"] == [] and receipt["exclude_runtimes"] == [], "weighted receipt carries constraint defaults")
 
 
 if __name__ == "__main__":
@@ -411,8 +444,9 @@ if __name__ == "__main__":
     test_missing_table_warns_without_refusing()
     test_allowance_weighted_is_plan_scoped()
     test_profile_faults_refuse_with_their_documented_codes()
+    test_constraint_receipt_defaults()
     test_receipt_round_trips_and_pins_the_ranking()
-    test_an_exhausted_pool_still_excludes_a_weighted_cell()
+    test_exhausted_pool_does_not_exclude_weighted_cells()
     test_haiku_is_not_declared_so_it_keeps_the_default_weight()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     sys.exit(1 if _failed else 0)

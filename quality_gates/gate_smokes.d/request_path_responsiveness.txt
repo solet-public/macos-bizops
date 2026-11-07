@@ -1,0 +1,4 @@
+# F1: independent backend loop responsiveness and bounded request pools.
+plugins/agent_messaging_plugin/tests/request_path_responsiveness_smoke.py
+plugins/session_shipper_bootstrap_plugin/tests/request_path_responsiveness_smoke.py
+plugins/g_suite_plugin/tests/request_path_responsiveness_smoke.py

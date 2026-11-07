@@ -1,0 +1,7 @@
+# Fragment of the gate-smoke register, owned by one candidate (prb_2e7713d4, chg_4eeea054). Same grammar and
+# meaning as quality_gates/gate_smokes.txt. The smoke builds its own fixture manifest and tree in a temporary
+# directory and reads nothing outside the plugin's source, so it ships with default_knowledge_plugin (prb_0211d1e8).
+
+# content.selection reads only the root's notes, archive/ and reviews/<review>/ write-ups;
+# generated trees are skipped and an unlisted top-level dir is skipped with an advisory. Offline.
+plugins/default_knowledge_plugin/tests/workbench_source_selection_smoke.py

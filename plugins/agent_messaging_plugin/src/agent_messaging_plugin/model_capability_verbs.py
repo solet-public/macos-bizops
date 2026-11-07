@@ -1,45 +1,68 @@
-"""Model capability catalog verbs (iss_48ea8171): seed, read, select, record.
+"""Model capability catalog verbs (iss_48ea8171): seed, refresh, read, select, record, withdraw, reinstate, history.
 
 Validation layer between the plugin's ``@platform_process`` methods and the
 store + pure selector. Every refusal is a ``CatalogError`` or
 ``TierSelectionError`` with a stable code; the plugin method maps it to a
-failure envelope unchanged. Nothing here touches the network — the refresh
-that would is a later, separately authorized unit.
+failure envelope unchanged. Only ``refresh_model_capability_catalog`` touches the
+network and the host's harness caches; every other verb reads or writes state.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import logging
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import httpx
+from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE
+from ananta.llm.agent_messaging.state_results import require_records
 
 from .allowance_pool_readings import (
-    apply_pool_readings,
     read_allowance_pool_readings,
-    read_pool_readings,
     record_allowance_pool_reading,
     retract_allowance_pool_reading,
 )
-from .dispatch_tier_selection import BillingObjective, CapabilityCell, TierSelection, TierSelectionError, select_tier
-from .model_capability_fetch import fetch_all_readings
+from .dispatch_tier_selection import (
+    EFFORT_ORDER,
+    BillingObjective,
+    CapabilityCell,
+    Constraints,
+    Pin,
+    StaleReading,
+    TierSelection,
+    TierSelectionError,
+    select_tier,
+)
+from .model_capability_fetch import DiscoveryRun, discover_readings
+from .model_capability_harness import HarnessContext, run_process
+from .model_capability_harness_pass import apply_harness_pass
+from .model_capability_reconcile import catalog_models_by_runtime
 from .model_capability_store import (
+    CATALOG_PAGE_SIZE,
+    CATALOG_READ_CEILING,
+    HISTORY_DEFAULT_LIMIT,
     KNOWN_RUNTIMES,
     CatalogError,
+    CatalogWindow,
+    CellRead,
+    CellTransition,
     ManualCell,
-    catalog_staleness_window,
     close_refresh_run,
     default_billing_objective,
     load_seed_table,
     open_refresh_run,
-    read_cells,
-    reconcile_and_write,
+    read_cell_history,
+    read_cells_page,
+    reconcile_discovery,
     record_manual_cell,
+    reinstate_cells,
+    resolve_catalog_window,
     seed_catalog,
     selection_catalog,
+    withdraw_cells,
 )
 from .model_dispatch_policy import (
     AppliedFloor,
@@ -48,18 +71,30 @@ from .model_dispatch_policy import (
     load_dispatch_policy,
     validate_dispatch_kind,
 )
-from .schema import CELL_ACCEPTANCE_ACCEPTED
+from .schema import CELL_ACCEPTANCE_ACCEPTED, TABLE_MODEL_CAPABILITY_REFRESH_RUN
 from .usage_economics_profiles import (
     FlatRateQuotaProfile,
     UsageEconomicsProfileValidationError,
     load_usage_economics_profile_catalog,
 )
-from .usage_economics_quota import plan_for_runtime, quota_status_for_pair
+from .usage_economics_quota import plan_for_runtime
 
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
+logger = logging.getLogger(__name__)
+
 _OBJECTIVES: frozenset[str] = frozenset({"metered_usd", "relative", "allowance_weighted"})
+_REFRESH_PROCESS_KEY: Final[str] = "plugin::agent_messaging_plugin::refresh_model_capability_catalog"
+_STALE_SELECTION_TRIGGER: Final[str] = "selector_stale"
+_REFRESH_RUN_TRIGGERS: Final[frozenset[str]] = frozenset({"cron", "policy_change", _STALE_SELECTION_TRIGGER})
+_REFRESH_REQUEST_DEDUPE: Final[timedelta] = timedelta(hours=12)
+"""How long after a refresh run started the selector asks for no further one.
+
+Deliberately long: a refresh can fail (the detail-source parse_error,
+iss_6cb8fe86), and a failing refresh must not be re-requested on every
+selection. The stored staleness window is 72h, so a stale catalog is still
+re-requested several times a day."""
 _USAGE_ECONOMICS_PROFILE_PATH = Path(__file__).resolve().parents[2] / "model_profiles" / "usage_economics.v1.json"
 
 
@@ -71,19 +106,67 @@ def seed_model_capability_catalog(state: StateManagementInterface, *, staleness_
     return seed_catalog(state, seed=seed, staleness_window_hours=staleness_window_hours)
 
 
-_VALID_TRIGGERS: frozenset[str] = frozenset({"manual", "cron", "policy_change"})
+_VALID_TRIGGERS: frozenset[str] = frozenset({"manual", "cron", "policy_change", _STALE_SELECTION_TRIGGER})
 
 
-def refresh_model_capability_catalog(state: StateManagementInterface, *, trigger: str, client: httpx.Client | None = None) -> dict[str, Any]:
-    """iss_d136ae29 -- the real crosscheck refresh: fetch live readings from
-    the two independent Artificial Analysis pages, reconcile each roster
-    cell, and write the result. This is the only verb that can ever move a
-    cell to `accepted`; `seed_model_capability_catalog` never does.
+_CODEX_BINARY_UNCONFIGURED: Final[Path] = Path("<codex binary not configured>")
+"""Stands in for a Codex binary nobody supplied. It is not absolute, so the Codex reader refuses to run it
+(a binary is never looked up on PATH), reads the cache file as a DEGRADED list, and says so."""
 
-    A source that fails to fetch is recorded on the run's `sources_failed`
-    column, never silently dropped -- and never aborts the whole run: one
-    bad URL for one model+effort must not blank out every other cell's
-    otherwise-good readings.
+
+def _discover_or_close(
+    state: StateManagementInterface,
+    run_id: str,
+    client: httpx.Client | None,
+    context: HarnessContext,
+    known_models: Mapping[str, Sequence[str]],
+) -> DiscoveryRun:
+    """Run discovery over `client` (a real one when None); a fault closes the run row before it propagates."""
+    active_client = client or httpx.Client()
+    try:
+        return discover_readings(active_client, context, catalog_models=known_models)
+    except Exception as exc:  # noqa: BLE001 -- a refresh run must close cleanly even on an unanticipated fetch-layer fault
+        close_refresh_run(
+            state,
+            run_id,
+            counts={"cells_accepted": 0, "cells_conflicted": 0, "cells_unchanged": 0},
+            sources_ok=[],
+            sources_failed=[f"unexpected: {exc}"],
+            note=f"refresh aborted before reconciliation: {exc}",
+        )
+        raise CatalogError("refresh_fetch_failed", f"model capability refresh could not fetch: {exc}") from exc
+    finally:
+        if client is None:
+            active_client.close()
+
+
+def refresh_model_capability_catalog(
+    state: StateManagementInterface,
+    *,
+    trigger: str,
+    client: httpx.Client | None = None,
+    codex_binary: Path | None = None,
+    home: Path | None = None,
+) -> dict[str, Any]:
+    """iss_d136ae29, iss_0e805222, iss_52fdb8e5 -- the discovery refresh: learn which models
+    exist from the harness lists (the launching Codex binary's own listing, Claude Code's own
+    cache), take score and cost from the Artificial Analysis leaderboard and each model's detail
+    page, reconcile, and write. This is the only verb that can move a cell to `accepted`;
+    `seed_model_capability_catalog` never does.
+
+    `codex_binary` is the absolute path of the binary that launches Codex lanes; None means it
+    was not supplied, and the Codex list is then read from Codex's cache file as a degraded list
+    with a loud advisory (never a refusal, never a PATH lookup). `home` is the directory the
+    harness caches live under (default: the process's home).
+
+    After discovery and before the reconcile it runs the harness pass: a cell whose model a
+    current, readable harness list stops listing starts a clock, is withdrawn automatically after
+    one staleness window, and is reinstated when the model is listed again; a withdrawal made by
+    a person is never reversed (see `model_capability_harness_pass`).
+
+    A source that fails to fetch is recorded on the run's `sources_failed` column, never silently
+    dropped -- and never aborts the whole run: one bad URL for one model+effort must not blank out
+    every other cell's otherwise-good readings.
 
     `client` is an injection point for tests (an `httpx.Client` built on a
     `MockTransport`) -- production callers never pass it and get a real one.
@@ -91,33 +174,25 @@ def refresh_model_capability_catalog(state: StateManagementInterface, *, trigger
     if trigger not in _VALID_TRIGGERS:
         raise CatalogError("parameter_invalid", f"trigger must be one of {sorted(_VALID_TRIGGERS)}; got {trigger!r}.")
     run_id = open_refresh_run(state, trigger=trigger)
-    owns_client = client is None
-    active_client = client or httpx.Client()
-    try:
-        try:
-            readings, failures = fetch_all_readings(active_client)
-        except Exception as exc:  # noqa: BLE001 -- a refresh run must close cleanly even on an unanticipated fetch-layer fault
-            close_refresh_run(
-                state, run_id,
-                counts={"cells_accepted": 0, "cells_conflicted": 0, "cells_unchanged": 0},
-                sources_ok=[], sources_failed=[f"unexpected: {exc}"], note=f"refresh aborted before reconciliation: {exc}",
-            )
-            raise CatalogError("refresh_fetch_failed", f"model capability refresh could not fetch: {exc}") from exc
-    finally:
-        if owns_client:
-            active_client.close()
-    sources_ok = sorted({reading.source_id for reading in readings})
-    sources_failed = [f"{source_id}: {reason}" for source_id, reason in failures]
-    counts = reconcile_and_write(state, run_id, readings)
-    note = f"{len(readings)} readings from {len(sources_ok)} source(s); {len(sources_failed)} source fetch(es) failed" if sources_failed else None
-    close_refresh_run(state, run_id, counts=counts, sources_ok=sources_ok, sources_failed=sources_failed, note=note)
+    known_models = catalog_models_by_runtime(read_cells_page(state, ceiling=None).rows)  # a state fault here propagates as itself, not as a fetch fault
+    context = HarnessContext(home=home or Path.home(), codex_binary=codex_binary or _CODEX_BINARY_UNCONFIGURED, run=run_process, now=datetime.now(UTC))
+    run = _discover_or_close(state, run_id, client, context, known_models)
+    sources_failed = [f"{source_id}: {reason}" for source_id, reason in run.failures]
+    # The harness pass runs first, so the reconcile below sees a relisted model as accepted again and a withdrawn one as withdrawn.
+    harness_pass = apply_harness_pass(state, run_id, run, read_cells_page(state, ceiling=None).rows, now=context.now)
+    report = reconcile_discovery(state, run_id, run, now=context.now)
+    note = "; ".join(part for part in (report.note, harness_pass.note()) if part) or None
+    close_refresh_run(state, run_id, counts=report.counts, sources_ok=list(run.sources_ok), sources_failed=sources_failed, note=note)
     return {
         "run_id": run_id,
         "trigger": trigger,
-        "readings_gathered": len(readings),
-        "sources_ok": sources_ok,
+        "readings_gathered": len(run.readings),
+        "sources_ok": list(run.sources_ok),
         "sources_failed": sources_failed,
-        **counts,
+        **report.counts,
+        **report.result_fields,
+        **harness_pass.result_fields(),
+        "advisories": [*report.result_fields["advisories"], *harness_pass.advisories],
     }
 
 
@@ -161,36 +236,118 @@ def record_model_capability_cell(state: StateManagementInterface, params: dict[s
     return record_manual_cell(state, cell, staleness_window_hours=window_raw)
 
 
-def _is_fresh(row: dict[str, Any], *, now: datetime) -> bool:
+def _transition_request(params: dict[str, Any]) -> CellTransition:
+    """The caller's lifecycle request; effort omitted or blank means every effort of the model."""
+    effort_raw = params.get("effort")
+    return CellTransition(
+        runtime=_required_text(params.get("runtime"), "runtime"),
+        model=_required_text(params.get("model"), "model"),
+        effort=None if effort_raw is None or effort_raw == "" else _required_text(effort_raw, "effort"),
+        reason=_required_text(params.get("reason"), "reason"),
+        expected_acceptance=_required_text(params.get("expected_acceptance"), "expected_acceptance"),
+        actor=_required_text(params.get("actor"), "actor"),
+    )
+
+
+def withdraw_model_capability_cell(state: StateManagementInterface, params: dict[str, Any]) -> dict[str, Any]:
+    """Operator ruling rul_2bff72b8: retire a catalog cell (or every effort of a model) from dispatch.
+
+    The score, cost and measured_at are kept, so `reinstate_model_capability_cell`
+    can reopen the cell; the selector excludes it as `not_accepted`. Refused with
+    `stale_cell_state` when the cell no longer holds the caller's `expected_acceptance`.
+    """
+    return withdraw_cells(state, _transition_request(params))
+
+
+def reinstate_model_capability_cell(state: StateManagementInterface, params: dict[str, Any]) -> dict[str, Any]:
+    """Operator ruling rul_2bff72b8: reopen a withdrawn catalog cell as accepted with its retained values.
+
+    Refused with `parameter_invalid` when the cell kept no score (record it instead)
+    and with `stale_cell_state` when it is no longer withdrawn. The answer says
+    whether the next refresh would withdraw it again.
+    """
+    return reinstate_cells(state, _transition_request(params))
+
+
+def _history_limit(raw: object) -> int:
+    if raw is None or raw == "":
+        return HISTORY_DEFAULT_LIMIT
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 1 <= raw <= CATALOG_PAGE_SIZE:
+        raise CatalogError("parameter_invalid", f"limit must be an integer between 1 and {CATALOG_PAGE_SIZE}.")
+    return raw
+
+
+def _history_cursor(raw: object) -> list[object] | None:
+    if raw is None or raw == "":
+        return None
+    if not isinstance(raw, list) or len(raw) != 2 or any(not isinstance(item, str) or not item for item in raw):
+        raise CatalogError("parameter_invalid", "after must be the next_after list [fetched_at, id] of the previous page.")
+    return list(raw)
+
+
+def read_model_capability_history(state: StateManagementInterface, params: dict[str, Any]) -> dict[str, Any]:
+    """Operator ruling rul_2bff72b8: the append-only history of one cell, oldest first, a page at a time."""
+    return read_cell_history(
+        state,
+        runtime=_required_text(params.get("runtime"), "runtime"),
+        model=_required_text(params.get("model"), "model"),
+        effort=_required_text(params.get("effort"), "effort"),
+        limit=_history_limit(params.get("limit")),
+        after=_history_cursor(params.get("after")),
+    )
+
+
+def _is_fresh(row: dict[str, Any], *, now: datetime, max_age: timedelta | None) -> bool | None:
     measured = row.get("measured_at")
-    window = row.get("staleness_window_hours")
-    if not isinstance(measured, str) or not isinstance(window, int):
-        return False
+    if max_age is None or not isinstance(measured, str):
+        return None
     try:
         measured_at = datetime.fromisoformat(measured.replace("Z", "+00:00"))
     except ValueError:
-        return False
-    return measured_at.tzinfo is not None and now - measured_at <= timedelta(hours=window)
+        return None
+    return measured_at.tzinfo is not None and now - measured_at <= max_age
 
 
 def read_model_capability_catalog(
-    state: StateManagementInterface, *, runtime: str | None, model: str | None, include_unaccepted: bool, now: datetime,
+    state: StateManagementInterface,
+    *,
+    runtime: str | None,
+    model: str | None,
+    include_unaccepted: bool,
+    now: datetime,
 ) -> dict[str, Any]:
-    """The catalog as stored, each row annotated with whether dispatch may use it now."""
-    rows = read_cells(state, runtime=runtime, model=model)
+    """The catalog as stored, each row annotated with whether dispatch may use it now.
+
+    An accepted row is servable whatever its age (operator ruling rul_becb4bed);
+    ``is_fresh`` only reports whether it is inside its window.
+    """
+    read = read_cells_page(state, runtime=runtime, model=model)
+    window = resolve_catalog_window(state, read.rows)
     annotated: list[dict[str, Any]] = []
-    for row in rows:
+    for row in read.rows:
         accepted = row.get("acceptance") == CELL_ACCEPTANCE_ACCEPTED
         if not accepted and not include_unaccepted:
             continue
-        fresh = _is_fresh(row, now=now)
-        annotated.append({**row, "is_fresh": fresh, "servable": accepted and fresh})
-    return {
+        annotated.append({**row, "enabled": row.get("enabled", True), "is_fresh": _is_fresh(row, now=now, max_age=window.max_age()), "servable": accepted and row.get("enabled", True)})
+    result: dict[str, Any] = {
         "cells": annotated,
-        "total_cells": len(rows),
+        "total_cells": len(read.rows),
         "servable_cells": sum(1 for row in annotated if row["servable"]),
         "as_of": now.isoformat(),
+        "freshness_window": asdict(window),
     }
+    warnings = [*window.advisories, *_truncation_warnings(read)]
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
+def _truncation_warnings(read: CellRead) -> list[str]:
+    """The notice for a catalog read that stopped at the ceiling; the answer still runs over the rows read."""
+    if read.first_unconsidered is None:
+        return []
+    named = "/".join(read.first_unconsidered)
+    return [f"catalog read truncated at {CATALOG_READ_CEILING} rows; the first row not considered is {named}, so cells from there on are missing from this answer."]
 
 
 def _plan_for(runtime: str | None, *, now: datetime) -> FlatRateQuotaProfile | None:
@@ -241,7 +398,8 @@ def _number(raw: object, field: str, *, default: float) -> float:
 
 
 def _capability_floor_pairs(
-    dispatch_kind: str | None, scope_tags: tuple[str, ...],
+    dispatch_kind: str | None,
+    scope_tags: tuple[str, ...],
 ) -> tuple[frozenset[tuple[str, str]] | None, str | None, tuple[AppliedFloor, ...]]:
     """Capability-floor pairs only; dispatch kind is provenance, never a filter."""
     if dispatch_kind is None and not scope_tags:
@@ -257,13 +415,9 @@ def _capability_floor_pairs(
     return allowed, policy.policy_version, floors
 
 
-def _window(cells: list[dict[str, Any]], max_staleness_hours: object) -> timedelta:
-    stored = catalog_staleness_window(cells)
-    if max_staleness_hours is None or max_staleness_hours == "":
-        return stored
-    if isinstance(max_staleness_hours, bool) or not isinstance(max_staleness_hours, int) or max_staleness_hours <= 0:
-        raise CatalogError("parameter_invalid", "max_staleness_hours must be a positive integer.")
-    return min(stored, timedelta(hours=max_staleness_hours))
+def _window(state: StateManagementInterface, cells: list[dict[str, Any]], max_staleness_hours: object) -> CatalogWindow:
+    requested = None if max_staleness_hours == "" else max_staleness_hours
+    return resolve_catalog_window(state, cells, requested=requested)
 
 
 def _cell_payload(cell: CapabilityCell, *, weighted: bool) -> dict[str, Any]:
@@ -294,6 +448,88 @@ def _cost_basis(plan: FlatRateQuotaProfile, selected: CapabilityCell) -> dict[st
     }
 
 
+def _stale_reading_payload(reading: StaleReading) -> dict[str, Any]:
+    payload = asdict(reading)
+    payload["measured_at"] = reading.measured_at.isoformat()
+    return payload
+
+
+def _matching_refresh_run(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next((dict(row) for row in rows if row.get("trigger") in _REFRESH_RUN_TRIGGERS and row.get("sources_ok") != ["operator_policy"]), None)
+
+
+def _recent_refresh_run(state: StateManagementInterface, *, now: datetime) -> tuple[dict[str, Any] | None, list[str]]:
+    """The newest refresh run, in flight or finished, that started inside the dedupe window.
+
+    Seed runs and direct cell recordings are not discovery refreshes and do not count.
+    """
+    try:
+        rows = require_records(
+            state.query_ordered(
+                AGENT_ROLE_BINDING_NAMESPACE,
+                {
+                    "table": TABLE_MODEL_CAPABILITY_REFRESH_RUN,
+                    "filters": {"started_at": {"op": "gte", "value": (now - _REFRESH_REQUEST_DEDUPE).isoformat()}},
+                    "order_by": [["started_at", "desc"], ["id", "desc"]],
+                    "limit": 50,
+                },
+            ),
+        )
+        recent = _matching_refresh_run(rows)
+    except Exception as exc:  # noqa: BLE001 — only the optional advisory history lookup
+        logger.warning("refresh history unavailable; retaining catalog refresh request: %s", exc, exc_info=True)
+        return None, [f"refresh history unavailable ({exc}); no recent refresh could be confirmed."]
+    return recent, []
+
+
+def _refresh_advice(
+    state: StateManagementInterface,
+    selection: TierSelection,
+    *,
+    now: datetime,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """The operator notice and, when none is recent, the refresh request for a selection made from stale readings.
+
+    The request is a returned action the plugin wrapper submits; this read
+    path writes nothing. A refresh run started inside ``_REFRESH_REQUEST_DEDUPE``
+    suppresses the request, whatever its outcome, so a failing refresh is not
+    re-requested on every selection.
+    """
+    stale = selection.stale_readings
+    if not stale:
+        return None, []
+    oldest = max(reading.age_hours for reading in stale)
+    window = stale[0].window_hours
+    summary = f"{len(stale)} feasible reading(s) are older than the {window:g}h window (oldest {oldest:g}h); the selection used them."
+    recent, history_warnings = _recent_refresh_run(state, now=now)
+    if recent is not None:
+        return None, [
+            f"{summary} No refresh was requested: refresh run {recent.get('id')} started {recent.get('started_at')} ({recent.get('status')}) and may not have renewed the catalog. If readings stay stale, tell the operator and file an issue.",
+        ]
+    request = {
+        "process_key": _REFRESH_PROCESS_KEY,
+        "arguments": {"trigger": _STALE_SELECTION_TRIGGER},
+    }
+    return request, [
+        *history_warnings,
+        f"{summary} A catalog refresh was requested; the catalog may stay stale if it fails. If readings are still stale after it, tell the operator and file an issue.",
+    ]
+
+
+def _pin_payload(selection: TierSelection, pin_basis: str | None) -> dict[str, Any]:
+    return {
+        "selection_mode": "cheapest" if selection.pin is None else "pinned",
+        "pin_basis": pin_basis,
+        "pin_cost_delta": selection.pin_cost_delta,
+        "pin_overrides_constraints": selection.pin_overrides_constraints,
+        "pin_below_threshold": selection.pin_below_threshold,
+    }
+
+
+def _pin_receipt(selection: TierSelection, pin_basis: str | None) -> dict[str, Any]:
+    return {"pin": None if selection.pin is None else asdict(selection.pin), "pin_basis": pin_basis}
+
+
 def _selection_payload(
     selection: TierSelection,
     *,
@@ -302,21 +538,23 @@ def _selection_payload(
     cost_tolerance: float,
     max_staleness_hours: int | None,
     runtime_constraint: str | None,
+    constraints: Constraints,
+    pin_basis: str | None,
     plan: FlatRateQuotaProfile | None,
 ) -> dict[str, Any]:
     weighted = selection.objective == "allowance_weighted"
     payload = {
         "selected": _cell_payload(selection.selected, weighted=weighted),
+        **_pin_payload(selection, pin_basis),
         "billing_objective": selection.objective,
         "required_score": selection.required_score,
         "effective_required_score": selection.effective_required_score,
         "frontier": [_cell_payload(cell, weighted=weighted) for cell in selection.frontier],
-        "dominated": [
-            {"weaker": _cell_payload(weaker, weighted=weighted), "stronger": _cell_payload(stronger, weighted=weighted)}
-            for weaker, stronger in selection.dominated
-        ],
+        "dominated": [{"weaker": _cell_payload(weaker, weighted=weighted), "stronger": _cell_payload(stronger, weighted=weighted)} for weaker, stronger in selection.dominated],
         "ladder": [asdict(step) for step in selection.ladder],
         "excluded": dict(selection.excluded),
+        "advisories": dict(selection.advisories),
+        "stale_readings": [_stale_reading_payload(reading) for reading in selection.stale_readings],
         "catalog_run_id": run_id,
     }
     if weighted and plan is not None:
@@ -328,6 +566,8 @@ def _selection_payload(
         "cost_tolerance": cost_tolerance,
         "max_staleness_hours": max_staleness_hours,
         "runtime_constraint": runtime_constraint,
+        **_constraint_payload(constraints),
+        **_pin_receipt(selection, pin_basis),
         "selected": {
             "runtime": selection.selected.runtime,
             "model": selection.selected.model,
@@ -335,19 +575,6 @@ def _selection_payload(
         },
     }
     return payload
-
-
-def _quota_statuses(
-    state: StateManagementInterface, catalog: tuple[CapabilityCell, ...], *, now: datetime,
-) -> tuple[dict[tuple[str, str], str], tuple[str, ...]]:
-    """Quota status per pair from the static profile with recorded readings laid over it, plus expired-reading notes."""
-    try:
-        static = load_usage_economics_profile_catalog(_USAGE_ECONOMICS_PROFILE_PATH, as_of=now)
-    except UsageEconomicsProfileValidationError as exc:
-        raise CatalogError("quota_state_unknown", f"quota profile is unavailable: {exc}") from exc
-    economics, expired = apply_pool_readings(static, read_pool_readings(state), now=now)
-    statuses = {cell.pair: quota_status_for_pair(economics, runtime=cell.runtime, model=cell.model) for cell in catalog}
-    return statuses, expired
 
 
 def _required_score(params: dict[str, Any]) -> float:
@@ -365,35 +592,135 @@ def _runtime_constraint(raw: object) -> str | None:
     return raw
 
 
+def _constraint_strings(params: dict[str, Any], name: str) -> tuple[str, ...]:
+    raw = params.get(name, [])
+    if not isinstance(raw, list) or any(not isinstance(item, str) or not item for item in raw):
+        raise CatalogError("parameter_invalid", f"{name} must be a list of non-empty strings.")
+    return tuple(raw)
+
+
+def _constraints(params: dict[str, Any]) -> Constraints:
+    ceiling = params.get("effort_ceiling")
+    if ceiling is not None and (not isinstance(ceiling, str) or ceiling not in EFFORT_ORDER):
+        raise CatalogError("parameter_invalid", f"effort_ceiling must be null or one of {list(EFFORT_ORDER)}.")
+    return Constraints(ceiling, _constraint_strings(params, "exclude_model_prefixes"), _constraint_strings(params, "exclude_runtimes"))
+
+
+def _constraint_payload(constraints: Constraints) -> dict[str, Any]:
+    return {
+        "effort_ceiling": constraints.effort_ceiling,
+        "exclude_model_prefixes": list(constraints.exclude_model_prefixes),
+        "exclude_runtimes": list(constraints.exclude_runtimes),
+    }
+
+
+def _pin_inputs(params: dict[str, Any], runtime: str | None) -> tuple[Pin | None, str | None]:
+    raw = params.get("pin")
+    basis = params.get("pin_basis")
+    if raw is None:
+        if basis is not None:
+            raise CatalogError("parameter_invalid", "pin_basis requires pin.")
+        return None, None
+    pin = _parse_pin(raw)
+    if not isinstance(basis, str) or not basis.strip():
+        raise CatalogError("parameter_invalid", "pin requires nonempty pin_basis provenance.")
+    if runtime is not None and runtime != pin.runtime:
+        raise CatalogError("parameter_invalid", "explicit runtime must match pin.runtime.")
+    return pin, basis
+
+
+def _parse_pin(raw: object) -> Pin:
+    if not isinstance(raw, dict) or set(raw) != {"runtime", "model", "effort"}:
+        raise CatalogError("parameter_invalid", "pin must identify exactly runtime, model and effort.")
+    if any(not isinstance(value, str) or not value.strip() for value in raw.values()) or raw["effort"] not in EFFORT_ORDER:
+        raise CatalogError("parameter_invalid", "pin needs three nonempty strings and a known effort.")
+    return Pin(raw["runtime"], raw["model"], raw["effort"])
+
+
+def _canonical_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    required = {"required_score", "billing_objective", "score_margin", "cost_tolerance", "max_staleness_hours", "runtime_constraint", "selected"}
+    defaults = {**_constraint_payload(Constraints()), "pin": None, "pin_basis": None}
+    if not required <= receipt.keys() or receipt.keys() - required - defaults.keys():
+        raise CatalogError("selection_receipt_invalid", "selection_receipt has missing or unexpected fields.")
+    return {**defaults, **receipt}
+
+
+def _unscored_pin(rows: list[dict[str, Any]], pin: Pin | None) -> bool:
+    if pin is None:
+        return False
+    requested = asdict(pin)
+    return any({key: row.get(key) for key in requested} == requested and row.get("acceptance") == CELL_ACCEPTANCE_ACCEPTED and row.get("capability_score") is None for row in rows)
+
+
+def _pin_error_message(message: str, code: str, unscored_pin: bool) -> str:
+    if unscored_pin and code == "pin_cell_unavailable":
+        return f"Requested accepted tuple has no capability score. {message}"
+    return message
+
+
 def _select_within(
-    catalog: tuple[CapabilityCell, ...], runtime: str | None, expired_readings: tuple[str, ...], **kwargs: Any,
+    catalog: tuple[CapabilityCell, ...],
+    runtime: str | None,
+    unscored_pin: bool = False,
+    **kwargs: Any,
 ) -> TierSelection:
     """Run the pure selector over only ``runtime``'s cells, filtered before domination and choice.
 
-    A refusal names the runtime and any expired allowance readings, which no longer count as exhausted.
+    A refusal names the constrained runtime.
     """
     candidates = catalog if runtime is None else tuple(cell for cell in catalog if cell.runtime == runtime)
     try:
         return select_tier(candidates, **kwargs)
     except TierSelectionError as exc:
         message = exc.message if runtime is None else f"runtime={runtime}: {exc.message}"
-        if expired_readings:
-            message = f"{message} Expired allowance readings no longer count: {list(expired_readings)}."
+        message = _pin_error_message(message, exc.code, unscored_pin)
         raise TierSelectionError(exc.code, message) from exc
 
 
+def _pin_warnings(selection: TierSelection) -> list[str]:
+    return [f"{key}: accepted pin overrides this exclusion." for key in ("pin_floor_disallowed",) if selection.advisories.get(key)]
+
+
+def _attach_notices(
+    payload: dict[str, Any],
+    state: StateManagementInterface,
+    selection: TierSelection,
+    *,
+    plan_warnings: list[str],
+    now: datetime,
+) -> None:
+    """Add the operator notices (``warnings``) and, for a stale selection with no recent refresh, the ``refresh_request``."""
+    refresh_request, stale_notice = _refresh_advice(state, selection, now=now)
+    warnings = [*plan_warnings, *stale_notice]
+    warnings.extend(_pin_warnings(selection))
+    if warnings:
+        payload["warnings"] = warnings
+    if refresh_request is not None:
+        payload["refresh_request"] = refresh_request
+
+
 def select_dispatch_tier(state: StateManagementInterface, params: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
-    """Cheapest fresh, accepted, policy-allowed (model, effort) clearing the required score, within ``runtime`` when given."""
+    """Cheapest accepted, policy-allowed (model, effort) clearing the required score, within ``runtime`` when given.
+
+    A reading past its staleness window is used, not excluded: the answer lists
+    the stale readings with their ages and, when no refresh run started recently,
+    carries a ``refresh_request`` action for the plugin wrapper to submit. The
+    ``selection_receipt`` holds neither, so an advisory selection still verifies.
+    """
     moment = now or datetime.now(UTC)
     required_score = _required_score(params)
     dispatch_kind = params.get("dispatch_kind")
     if dispatch_kind is not None and not isinstance(dispatch_kind, str):
         raise DispatchPolicyError("dispatch_policy_violation", f"unknown dispatch_kind {dispatch_kind!r}.")
     floor_pairs, policy_version, floors = _capability_floor_pairs(
-        dispatch_kind, _scope_tags(params.get("scope_tags")),
+        dispatch_kind,
+        _scope_tags(params.get("scope_tags")),
     )
     runtime = _runtime_constraint(params.get("runtime"))
-    rows = read_cells(state)
+    constraints = _constraints(params)
+    pin, pin_basis = _pin_inputs(params, runtime)
+    read = read_cells_page(state)
+    rows = read.rows
     plan = _plan_for(runtime, now=moment)
     catalog = selection_catalog(rows, _plan_weight_fn(plan))
     objective = _objective(params.get("billing_objective"), plan=plan, now=moment)
@@ -401,19 +728,20 @@ def select_dispatch_tier(state: StateManagementInterface, params: dict[str, Any]
     cost_tolerance = _number(params.get("cost_tolerance"), "cost_tolerance", default=0.05)
     raw_max_staleness = params.get("max_staleness_hours")
     max_staleness_hours = None if raw_max_staleness is None or raw_max_staleness == "" else raw_max_staleness
-    quota_status_by_pair, expired_readings = _quota_statuses(state, catalog, now=moment)
+    window = _window(state, rows, params.get("max_staleness_hours"))
     selection = _select_within(
         catalog,
         runtime,
-        expired_readings,
+        unscored_pin=_unscored_pin(rows, pin),
         required_score=required_score,
         objective=objective,
         now=moment,
-        max_age=_window(rows, params.get("max_staleness_hours")),
+        max_age=window.max_age(),
         capability_floor_pairs=floor_pairs,
-        quota_status_by_pair=quota_status_by_pair,
         score_margin=score_margin,
         cost_tolerance=cost_tolerance,
+        constraints=constraints,
+        pin=pin,
     )
     run_ids = {str(row.get("last_refresh_run_id")) for row in rows if row.get("acceptance") == CELL_ACCEPTANCE_ACCEPTED}
     payload = _selection_payload(
@@ -423,13 +751,25 @@ def select_dispatch_tier(state: StateManagementInterface, params: dict[str, Any]
         cost_tolerance=cost_tolerance,
         max_staleness_hours=max_staleness_hours,
         runtime_constraint=runtime,
+        constraints=constraints,
+        pin_basis=pin_basis,
         plan=plan,
     )
-    payload.update(_selection_warnings(params.get("billing_objective"), plan))
+    _attach_notices(
+        payload,
+        state,
+        selection,
+        plan_warnings=[
+            *_selection_warnings(params.get("billing_objective"), plan).get("warnings", []),
+            *_truncation_warnings(read),
+            *window.advisories,
+        ],
+        now=moment,
+    )
+    payload["freshness_window"] = asdict(window)
     payload["policy_version"] = policy_version
     payload["capability_floors"] = [asdict(floor) for floor in floors]
     payload["unscored_cells"] = len(rows) - len(catalog)
-    payload["expired_allowance_readings"] = list(expired_readings)
     return payload
 
 
@@ -473,17 +813,12 @@ def verify_selection_receipt(
     effort: str,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Replay the selector and prove the requested spawn is its cheapest answer."""
+    """Replay the selector and prove the requested spawn matches its exact selection."""
     if isinstance(difficulty_score, bool) or not isinstance(difficulty_score, (int, float)):
         raise CatalogError("difficulty_score_required", "spawn_session requires a numeric difficulty_score.")
     if not isinstance(selection_receipt, dict):
         raise CatalogError("selection_receipt_required", "spawn_session requires a selector-issued selection_receipt.")
-    required_keys = {
-        "required_score", "billing_objective", "score_margin", "cost_tolerance", "max_staleness_hours",
-        "runtime_constraint", "selected",
-    }
-    if set(selection_receipt) != required_keys:
-        raise CatalogError("selection_receipt_invalid", "selection_receipt has missing or unexpected fields.")
+    canonical = _canonical_receipt(selection_receipt)
     if selection_receipt.get("required_score") != float(difficulty_score):
         raise CatalogError("selection_receipt_mismatch", "selection_receipt.required_score must equal difficulty_score.")
     constraint = _receipt_runtime_constraint(selection_receipt, agent_runtime=agent_runtime, model=model, effort=effort)
@@ -500,11 +835,16 @@ def verify_selection_receipt(
             "cost_tolerance": selection_receipt["cost_tolerance"],
             "max_staleness_hours": selection_receipt["max_staleness_hours"],
             "runtime": constraint,
+            "effort_ceiling": canonical["effort_ceiling"],
+            "exclude_model_prefixes": canonical["exclude_model_prefixes"],
+            "exclude_runtimes": canonical["exclude_runtimes"],
+            "pin": canonical["pin"],
+            "pin_basis": canonical["pin_basis"],
         },
         now=now,
     )
-    if actual["selection_receipt"] != selection_receipt:
-        raise CatalogError("selection_receipt_mismatch", "selection_receipt is not the current cheapest-clearing answer.")
+    if _canonical_receipt(actual["selection_receipt"]) != canonical:
+        raise CatalogError("selection_receipt_mismatch", "selection_receipt is not the current selector answer.")
     return selection_receipt
 
 
@@ -518,12 +858,15 @@ def _scope_tags(raw: object) -> tuple[str, ...]:
 
 __all__ = [
     "read_model_capability_catalog",
+    "read_model_capability_history",
     "read_pool_readings_view",
     "record_model_capability_cell",
     "record_pool_reading",
     "refresh_model_capability_catalog",
+    "reinstate_model_capability_cell",
     "retract_pool_reading",
     "seed_model_capability_catalog",
     "select_dispatch_tier",
     "verify_selection_receipt",
+    "withdraw_model_capability_cell",
 ]

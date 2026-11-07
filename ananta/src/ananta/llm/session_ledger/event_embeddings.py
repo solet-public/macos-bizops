@@ -31,10 +31,19 @@ thinking, so they stay embeddable.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from ananta.llm.session_ledger.event_embedding_checkpoint import (
+    SweepCheckpoint,
+    checkpoint_page,
+    finish_sweep,
+    prepare_sweep,
+)
+from ananta.llm.session_ledger.event_embedding_pacing import DutyCycle, PacingSettings
 from ananta.llm.session_ledger.schema import EVENT_VECTOR_NAMESPACE
 from ananta.llm.session_ledger.search import project_event_window_row
 from ananta.llm.session_ledger.types import EventType, MessageRole
@@ -175,7 +184,8 @@ def chunk_policy(budget: TokenBudget | None) -> str:
     e.g. LM Studio -> Core AI) is a full reconciliation sweep -- the backfill
     for every event the old policy failed to embed or embedded truncated
     (:func:`policy_backfill_chunks`).  The policy is recorded only after a
-    sweep that did not halt, so an interrupted backfill repeats.
+    clean sweep. Interrupted sweeps resume their checkpoint; exhausted failures
+    wait for the existing periodic reconciliation retry.
     """
     if budget is None:
         return f"chars:{EVENT_CHUNK_MAX_CHARS}"
@@ -221,25 +231,29 @@ def _chunks_to_replace(row: dict[str, object], missing: bool, backfill: PolicyBa
     return 0 if missing else None
 
 
-def _policy_backfill_plan(repository: SessionLedgerRepository, budget: TokenBudget | None) -> tuple[str, PolicyBackfill | None]:
-    """``(policy, backfill)``; ``backfill`` is set only when the recorded policy differs (the sweep fire)."""
-    policy = chunk_policy(budget)
-    previous = repository.get_event_embed_chunk_policy()
-    return policy, None if previous == policy else PolicyBackfill(budget, previous)
+def _current_policy_probe(text: str, backfill: PolicyBackfill, old_count: int) -> tuple[int, bool] | None:
+    """``(chunk index, current when present)`` showing the new cut already landed, else ``None`` (prb_f6964132).
 
-
-def _record_policy_backfill(repository: SessionLedgerRepository, policy: str, *, completed: bool) -> None:
-    """Record ``policy`` once its backfill sweep completed without halting or skipping an event; any other repeats."""
-    if completed:
-        repository.set_event_embed_chunk_policy(policy)
+    Re-embedding deletes the old ids past the new count and stores the new ones, so the last id of the
+    longer cut tells the two apart: a new cut with more chunks is current when its last id exists, one
+    with fewer is current when the old last id is gone.  Only a reproducible previous policy has a real
+    ``old_count``; equal counts cannot be told apart and are re-embedded.
+    """
+    if backfill.previous not in (None, chunk_policy(None)):
+        return None
+    new_count = len(chunk_event_content(text, backfill.budget)[:EVENT_MAX_CHUNKS])
+    if new_count > old_count:
+        return new_count - 1, True
+    if new_count < old_count:
+        return old_count - 1, False
+    return None
 
 
 def require_query_fits(query: str, budget: TokenBudget | None) -> None:
     """Refuse, naming both counts, a search query the provider would refuse; never truncate it."""
     if budget is not None and not budget.fits(query):
         raise ValueError(
-            f"search_event_content query has {budget.count(query)} tokens; the embedding "
-            f"provider accepts at most {budget.max_input_tokens} -- shorten the query",
+            f"search_event_content query has {budget.count(query)} tokens; the embedding provider accepts at most {budget.max_input_tokens} -- shorten the query",
         )
 
 
@@ -274,7 +288,9 @@ def build_event_embedding_coverage(
     """
     cursor = repository.get_event_embed_cursor()
     newest_rows = repository.list_event_embedding_candidates(
-        limit=1, order_column="imported_at", ascending=False,
+        limit=1,
+        order_column="imported_at",
+        ascending=False,
     )
     newest_imported_at = str(newest_rows[0]["imported_at"]) if newest_rows else None
     if newest_imported_at is None:
@@ -288,7 +304,46 @@ def build_event_embedding_coverage(
         "cursor_imported_at": cursor,
         "newest_in_scope_imported_at": newest_imported_at,
         "embedded_chunk_count": _embedded_chunk_count(vector_service),
+        **_sweep_health(repository, cursor),
     }
+
+
+def _sweep_health(repository: SessionLedgerRepository, cursor: str | None) -> dict[str, Any]:
+    """Remaining work and measured rate, so completion is a read, not a guess (prb_f6964132, ord 64 check 2).
+
+    Remaining is counted in candidate EVENTS (SQL scope legs): how many chunks they hold is only
+    known after tokenizing them.  A sweep re-walks every candidate past its checkpoint, most of
+    them skipped as already embedded, so its ETA uses the measured candidate scan rate.
+    """
+    checkpoint = repository.get_event_embed_checkpoint()
+    sweep_after = checkpoint.after[0] if checkpoint is not None and checkpoint.after is not None else None
+    past_sweep = None if checkpoint is None else repository.count_event_embedding_candidates_after(sweep_after)
+    past_cursor = repository.count_event_embedding_candidates_after(cursor)
+    progress = repository.get_event_embed_progress()
+    return {
+        "sweep_checkpoint": checkpoint.payload() if checkpoint is not None else None,
+        "remaining_candidate_events_past_cursor": past_cursor,
+        "remaining_candidate_events_past_sweep": past_sweep,
+        "drain_progress": progress,
+        **_measured_rates(progress or {}, past_sweep if past_sweep is not None else past_cursor),
+    }
+
+
+def _measured_rates(progress: dict[str, object], remaining: int) -> dict[str, float | None]:
+    """Per-hour rates of the recorded fire and the ETA for ``remaining`` candidates; ``None`` before a page completes."""
+    hours = _number(progress.get("elapsed_seconds")) / 3600
+    if not hours:
+        return {"candidates_scanned_per_hour": None, "events_embedded_per_hour": None, "estimated_hours_remaining": None}
+    scanned = _number(progress.get("candidates_scanned")) / hours
+    return {
+        "candidates_scanned_per_hour": scanned,
+        "events_embedded_per_hour": _number(progress.get("events_embedded")) / hours,
+        "estimated_hours_remaining": remaining / scanned if scanned else None,
+    }
+
+
+def _number(raw: object) -> float:
+    return float(raw) if isinstance(raw, int | float) and not isinstance(raw, bool) else 0.0
 
 
 def _embedded_chunk_count(vector_service: VectorServiceInterface | None) -> int:
@@ -351,42 +406,44 @@ class EventEmbeddingWriter:
         event_id = str(event_row["id"])
         if not is_embeddable_event(event_row):
             raise ValueError(
-                f"event {event_id} is outside the embeddable scope "
-                "(MESSAGE + user/assistant + non-blank content, minus "
-                f"excluded subtypes {sorted(EXCLUDED_MESSAGE_SUBTYPES)})",
+                f"event {event_id} is outside the embeddable scope (MESSAGE + user/assistant + non-blank content, minus excluded subtypes {sorted(EXCLUDED_MESSAGE_SUBTYPES)})",
             )
-        content = str(event_row["content_text"])
-        chunks = chunk_event_content(content, self._input_budget())
-        truncated = len(chunks) > EVENT_MAX_CHUNKS
-        if truncated:
-            # Coverage is reported in chunks and characters actually kept: under token
-            # windows a chunk's length varies, so no character constant describes it.
-            kept_chars = content.find(chunks[EVENT_MAX_CHUNKS - 1]) + len(chunks[EVENT_MAX_CHUNKS - 1])
-            logger.warning(
-                "embed_event: event %s produced %d chunks; embedding the first %d "
-                "(%d of %d chars) and dropping the last %d",
-                event_id,
-                len(chunks),
-                EVENT_MAX_CHUNKS,
-                kept_chars,
-                len(content),
-                len(chunks) - EVENT_MAX_CHUNKS,
+        phase = "generation"
+        try:
+            content = str(event_row["content_text"])
+            chunks = chunk_event_content(content, self._input_budget())
+            truncated = len(chunks) > EVENT_MAX_CHUNKS
+            if truncated:
+                # Coverage is reported in chunks and characters actually kept: under token
+                # windows a chunk's length varies, so no character constant describes it.
+                kept_chars = content.find(chunks[EVENT_MAX_CHUNKS - 1]) + len(chunks[EVENT_MAX_CHUNKS - 1])
+                logger.warning(
+                    "embed_event: event %s produced %d chunks; embedding the first %d (%d of %d chars) and dropping the last %d",
+                    event_id,
+                    len(chunks),
+                    EVENT_MAX_CHUNKS,
+                    kept_chars,
+                    len(content),
+                    len(chunks) - EVENT_MAX_CHUNKS,
+                )
+                chunks = chunks[:EVENT_MAX_CHUNKS]
+            vectors = self._generate_embeddings(chunks)
+            external_ids = [event_chunk_external_id(event_id, index) for index in range(len(chunks))]
+            phase = "delete"
+            self._delete_existing_vectors(
+                [event_chunk_external_id(event_id, index) for index in range(max(len(chunks), replaces_chunks))],
             )
-            chunks = chunks[:EVENT_MAX_CHUNKS]
-        vectors = self._generate_embeddings(chunks)
-        external_ids = [
-            event_chunk_external_id(event_id, index) for index in range(len(chunks))
-        ]
-        self._delete_existing_vectors(
-            [event_chunk_external_id(event_id, index) for index in range(max(len(chunks), replaces_chunks))],
-        )
-        records = self._build_vector_records(
-            event_row=event_row,
-            event_id=event_id,
-            vectors=vectors,
-            external_ids=external_ids,
-        )
-        self._store_vectors(records)
+            records = self._build_vector_records(
+                event_row=event_row,
+                event_id=event_id,
+                vectors=vectors,
+                external_ids=external_ids,
+            )
+            phase = "store"
+            self._store_vectors(records)
+        except Exception as exc:
+            exc.add_note(f"event_embedding_phase={phase}")
+            raise
         return {
             "event_id": event_id,
             "chunks_stored": len(chunks),
@@ -399,7 +456,10 @@ class EventEmbeddingWriter:
     # ------------------------------------------------------------------
 
     def embed_missing_events(
-        self, *, batch_limit: int, page_size: int = 100,
+        self,
+        *,
+        batch_limit: int,
+        page_size: int = 100,
     ) -> dict[str, Any]:
         """Embed up to ``batch_limit`` not-yet-embedded events, newest first.
 
@@ -419,6 +479,7 @@ class EventEmbeddingWriter:
             "events_embedded": 0,
             "chunks_stored": 0,
             "events_skipped_existing": 0,
+            "events_skipped_duplicate": 0,
             "events_skipped_filtered": 0,
             "events_truncated": 0,
             "events_failed": 0,
@@ -427,7 +488,8 @@ class EventEmbeddingWriter:
         exhausted = False
         while tally["events_embedded"] < batch_limit:
             rows = self._repository.list_event_embedding_candidates(
-                limit=page_size, after=cursor,
+                limit=page_size,
+                after=cursor,
             )
             if not rows:
                 exhausted = True
@@ -447,6 +509,7 @@ class EventEmbeddingWriter:
         batch_limit: int | None,
         tally: dict[str, int],
         backfill: PolicyBackfill | None = None,
+        fire: DrainFire | None = None,
     ) -> None:
         """Embed the not-yet-embedded embeddable events of one candidate page.
 
@@ -455,22 +518,18 @@ class EventEmbeddingWriter:
         the durable cursor, not a per-call count.  ``backfill`` is set on a
         chunking-policy backfill sweep: an event whose stored chunks differ
         from the new policy's is re-embedded too (see
-        :func:`policy_backfill_chunks`).
+        :func:`policy_backfill_chunks`).  ``fire.fresh`` holds the events this fire already embedded under
+        the current policy; they are never embedded twice, and a successful embed joins it.
         """
         embeddable = [row for row in rows if is_embeddable_event(dict(row))]
         tally["events_skipped_filtered"] += len(rows) - len(embeddable)
         if not embeddable:
             return
-        keys = {str(row["id"]): event_chunk_external_id(str(row["id"]), 0) for row in embeddable}
-        missing = self._find_missing_external_ids(list(keys.values()))
-        for row in embeddable:
+        plan, current = _plan_page(self, embeddable, backfill)
+        for row, replaces in plan:
             if batch_limit is not None and tally["events_embedded"] >= batch_limit:
                 return
-            replaces = _chunks_to_replace(row, keys[str(row["id"])] in missing, backfill)
-            if replaces is None:
-                tally["events_skipped_existing"] += 1
-                continue
-            _embed_event_or_skip(self, self._generate_embeddings, row, replaces, tally)
+            _embed_planned(self, row, replaces, current, tally, fire)
 
     # ------------------------------------------------------------------
     # Write — Lane-1 heartbeat drain (durable cursor, drain-until-caught-up)
@@ -508,8 +567,8 @@ class EventEmbeddingWriter:
           re-reads every row sharing the boundary ``imported_at`` and
           ``find_missing`` skips the embedded ones — closing the same-arrival
           uuid-tiebreak gap that a strict ``(imported_at, id)`` cursor leaves).
-        * **Transient-safe / poison-loud.** A page whose embed raises because the
-          embedder is down does NOT advance the cursor — the fire halts and the
+        * **Transient-safe / poison-loud.** Generation outages, delete/store
+          failures and unknown errors do NOT advance the page cursor — the fire halts and the
           next heartbeat retries the same page once it recovers (idempotent
           skip-existing means no double work). A lone un-embeddable event is
           instead skipped with a WARNING naming its event_id and counted in
@@ -520,75 +579,66 @@ class EventEmbeddingWriter:
         Runs on the single-slot drain thread (see
         ``SessionLedgerService.drain_event_embeddings``) so its synchronous
         embedder/vector calls cannot park the action queue. Returns the
+        Policy sweeps checkpoint each completed page in existing KV, retaining
+        the original previous policy. Exhausted failures remain pending until
+        the next 144-fire reconciliation; ordinary fires continue incrementally.
+        Results include pending checkpoint and retry timing. Returns the
         drain-wide tally plus ``halted_on_error`` and ``reconcile`` (True when
         this fire was a full-corpus reconciliation sweep).
         """
         self._require_services()
         if page_size < 1:
             raise ValueError("drain_missing_events page_size must be >= 1")
-        # Every _RECONCILE_EVERY_FIRES-th fire is a RECONCILIATION full-sweep:
-        # ignore the cursor and re-check the whole corpus so a row that
-        # committed into visibility BELOW the advanced cursor (imported_at is
-        # pre-assigned before the autocommit insert, so it is not
-        # commit-visibility-monotonic) is still found and embedded. Incremental
-        # fires stay O(new).
-        policy, backfill = _policy_backfill_plan(self._repository, self._input_budget())
-        policy_changed = backfill is not None
-        reconcile = (
-            self._repository.bump_event_embed_drain_counter()
-            % _RECONCILE_EVERY_FIRES
-            == 0
-        ) or policy_changed
-        cursor_imported_at = (
-            None if reconcile else self._repository.get_event_embed_cursor()
+        policy = chunk_policy(self._input_budget())
+        tally: dict[str, int] = dict.fromkeys(
+            (
+                "candidates_scanned",
+                "events_embedded",
+                "chunks_stored",
+                "events_skipped_existing",
+                "events_skipped_current",
+                "events_skipped_duplicate",
+                "events_skipped_filtered",
+                "events_truncated",
+                "events_failed",
+                "events_deferred",
+                "pages",
+                "paused_ms",
+            ),
+            0,
         )
-        page_after: tuple[object, object] | None = (
-            (cursor_imported_at, "") if cursor_imported_at is not None else None
-        )
-        tally: dict[str, int] = {
-            "candidates_scanned": 0,
-            "events_embedded": 0,
-            "chunks_stored": 0,
-            "events_skipped_existing": 0,
-            "events_skipped_filtered": 0,
-            "events_truncated": 0,
-            "events_failed": 0,
-            "pages": 0,
-        }
+        active: SweepCheckpoint | None = None
+        pending: SweepCheckpoint | None = None
+        reconcile = False
+        fire = 0
         halted_on_error = False
-        while True:
-            rows = self._repository.list_event_embedding_candidates(
-                limit=page_size, after=page_after,
-                order_column="imported_at", ascending=True,
+        pending_readback_available = True
+        try:
+            fire = self._repository.bump_event_embed_drain_counter()
+            active, pending = prepare_sweep(self._repository, policy, scheduled=fire % _RECONCILE_EVERY_FIRES == 0)
+            reconcile = active is not None
+            active, pending = _walk_fire(self, page_size, policy, (active, pending), tally)
+        except Exception:
+            halted_on_error = True
+            tally["events_deferred"] += 1
+            logger.exception(
+                "drain_missing_events: deferred page=%d; durable progress retained; next heartbeat retries",
+                tally["pages"] + 1,
             )
-            if not rows:
-                break
-            tally["candidates_scanned"] += len(rows)
             try:
-                self._embed_missing_in_page(rows, batch_limit=None, tally=tally, backfill=backfill)
+                pending = self._repository.get_event_embed_checkpoint()
             except Exception:
-                logger.exception(
-                    "drain_missing_events: page embed failed at imported_at>%s "
-                    "(%d events embedded this drain); halting without advancing "
-                    "the cursor — the next heartbeat resumes this page once the "
-                    "embedder recovers",
-                    cursor_imported_at, tally["events_embedded"],
-                )
-                halted_on_error = True
-                break
-            tally["pages"] += 1
-            last_imported_at = str(rows[-1]["imported_at"])
-            page_after = (last_imported_at, rows[-1]["id"])
-            self._repository.set_event_embed_cursor(last_imported_at)
-        _record_policy_backfill(
-            self._repository, policy, completed=policy_changed and not halted_on_error and tally["events_failed"] == 0,
-        )
+                pending_readback_available = False
+                logger.warning("pending checkpoint readback unavailable; last known state only", exc_info=True)
         return {
             **tally,
             "halted_on_error": halted_on_error,
             "reconcile": reconcile,
             "chunk_policy": policy,
-            "policy_backfill": policy_changed,
+            "policy_backfill": bool(active and active.previous != policy),
+            "pending_checkpoint": pending.payload() if pending else None,
+            "pending_readback_available": pending_readback_available,
+            "next_reconciliation_in_fires": _RECONCILE_EVERY_FIRES - fire % _RECONCILE_EVERY_FIRES,
         }
 
     def _input_budget(self) -> TokenBudget | None:
@@ -619,10 +669,7 @@ class EventEmbeddingWriter:
         if not hits:
             return []
         event_ids = list({event_id for event_id, _, _ in hits})
-        rows_by_id = {
-            str(row["id"]): row
-            for row in self._repository.list_events_by_ids(event_ids)
-        }
+        rows_by_id = {str(row["id"]): row for row in self._repository.list_events_by_ids(event_ids)}
         envelopes = [
             {
                 **project_event_window_row(rows_by_id[event_id]),
@@ -677,15 +724,14 @@ class EventEmbeddingWriter:
         outside the writer's write-focused surface).
         """
         return build_event_embedding_coverage(
-            repository=self._repository, vector_service=self._vector_service,
+            repository=self._repository,
+            vector_service=self._vector_service,
         )
 
     def _require_services(self) -> None:
         if self._embedding_service is None or self._vector_service is None:
             raise EventEmbeddingServicesUnavailableError(
-                "event-content embedding requires both embedding_service and "
-                "vector_service bindings; this profile has not bound at "
-                "least one of them.",
+                "event-content embedding requires both embedding_service and vector_service bindings; this profile has not bound at least one of them.",
             )
 
     def _generate_embeddings(self, texts: list[str]) -> list[list[float]]:
@@ -698,7 +744,8 @@ class EventEmbeddingWriter:
         if self._embedding_service is None:  # pragma: no cover - guarded above
             raise EventEmbeddingServicesUnavailableError("embedding_service is None")
         result = self._embedding_service.generate_embeddings(
-            inputs=texts, input_type="text",
+            inputs=texts,
+            input_type="text",
         )
         if result.get("action_status") != "completed":
             raise RuntimeError(
@@ -709,9 +756,7 @@ class EventEmbeddingWriter:
         embeddings = inner.get("embeddings")
         if not isinstance(embeddings, list) or len(embeddings) != len(texts):
             raise RuntimeError(
-                "embedding_service returned "
-                f"{len(embeddings) if isinstance(embeddings, list) else 'no'} "
-                f"embeddings for {len(texts)} inputs; refusing a partial store",
+                f"embedding_service returned {len(embeddings) if isinstance(embeddings, list) else 'no'} embeddings for {len(texts)} inputs; refusing a partial store",
             )
         vectors: list[list[float]] = []
         for embedding in embeddings:
@@ -751,7 +796,8 @@ class EventEmbeddingWriter:
         if self._vector_service is None:  # pragma: no cover - guarded above
             raise EventEmbeddingServicesUnavailableError("vector_service is None")
         result = self._vector_service.store_vectors(
-            namespace=EVENT_VECTOR_NAMESPACE, vectors=records,
+            namespace=EVENT_VECTOR_NAMESPACE,
+            vectors=records,
         )
         if result.get("action_status") != "completed":
             raise RuntimeError(
@@ -762,7 +808,8 @@ class EventEmbeddingWriter:
         if self._vector_service is None:  # pragma: no cover - guarded above
             raise EventEmbeddingServicesUnavailableError("vector_service is None")
         result = self._vector_service.delete_by_external_ids(
-            namespace=EVENT_VECTOR_NAMESPACE, external_ids=external_ids,
+            namespace=EVENT_VECTOR_NAMESPACE,
+            external_ids=external_ids,
         )
         if result.get("action_status") != "completed":
             raise RuntimeError(
@@ -773,25 +820,27 @@ class EventEmbeddingWriter:
         if self._vector_service is None:  # pragma: no cover - guarded above
             raise EventEmbeddingServicesUnavailableError("vector_service is None")
         result = self._vector_service.find_missing_external_ids(
-            namespace=EVENT_VECTOR_NAMESPACE, candidate_external_ids=candidates,
+            namespace=EVENT_VECTOR_NAMESPACE,
+            candidate_external_ids=candidates,
         )
         if result.get("action_status") != "completed":
             raise RuntimeError(
-                f"vector_service.find_missing_external_ids failed: "
-                f"{result.get('error')!r}",
+                f"vector_service.find_missing_external_ids failed: {result.get('error')!r}",
             )
         data = _as_dict(result.get("data"))
         inner = _as_dict(data.get("result"))
         missing = inner.get("missing")
         if not isinstance(missing, list):
             raise RuntimeError(
-                "vector_service.find_missing_external_ids returned no "
-                "'missing' list; refusing to guess the embedded set",
+                "vector_service.find_missing_external_ids returned no 'missing' list; refusing to guess the embedded set",
             )
         return {str(external_id) for external_id in missing}
 
     def _vector_search(
-        self, *, query_vector: list[float], top_k: int,
+        self,
+        *,
+        query_vector: list[float],
+        top_k: int,
     ) -> list[dict[str, Any]]:
         """ANN read with the real provider envelope shape (``data.result.results``)."""
         if self._vector_service is None:  # pragma: no cover - guarded above
@@ -813,34 +862,247 @@ class EventEmbeddingWriter:
         return [row for row in rows if isinstance(row, dict)]
 
 
+def _plan_page(
+    writer: EventEmbeddingWriter,
+    embeddable: list[dict[str, object]],
+    backfill: PolicyBackfill | None,
+) -> tuple[list[tuple[dict[str, object], int | None]], set[str]]:
+    """Each event's chunks to replace (``None``: embedded and current) and the ids already holding the new cut."""
+    keys = {str(row["id"]): event_chunk_external_id(str(row["id"]), 0) for row in embeddable}
+    missing = writer._find_missing_external_ids(list(keys.values()))
+    plan = [(row, _chunks_to_replace(row, keys[str(row["id"])] in missing, backfill)) for row in embeddable]
+    return plan, _already_current(writer, plan, missing={key for key in keys if keys[key] in missing}, backfill=backfill)
+
+
+def _already_current(
+    writer: EventEmbeddingWriter,
+    plan: list[tuple[dict[str, object], int | None]],
+    *,
+    missing: set[str],
+    backfill: PolicyBackfill | None,
+) -> set[str]:
+    """Event ids a backfill would re-embed although their new-policy vectors already exist (prb_f6964132)."""
+    if backfill is None:
+        return set()
+    probes: dict[str, tuple[str, bool]] = {}
+    for row, replaces in plan:
+        event_id = str(row["id"])
+        if not replaces or event_id in missing:
+            continue
+        probe = _current_policy_probe(str(row["content_text"]), backfill, replaces)
+        if probe is not None:
+            probes[event_id] = (event_chunk_external_id(event_id, probe[0]), probe[1])
+    if not probes:
+        return set()
+    absent = writer._find_missing_external_ids([external_id for external_id, _ in probes.values()])
+    return {event_id for event_id, (external_id, when_present) in probes.items() if (external_id not in absent) == when_present}
+
+
+@dataclass(slots=True)
+class DrainFire:
+    """One drain fire's state: its duty-cycle pacer and the events it embedded under the current policy."""
+
+    pacer: DutyCycle
+    fresh: set[str] = field(default_factory=set)
+    started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    started: float = field(default_factory=time.monotonic)
+
+    def record(self, repository: SessionLedgerRepository, tally: dict[str, int]) -> None:
+        """Persist this fire's progress after a page; a failed write is an advisory, never a halt."""
+        progress: dict[str, object] = {
+            "fire_started_at": self.started_at,
+            "updated_at": datetime.now(UTC).isoformat(),
+            "elapsed_seconds": round(time.monotonic() - self.started, 3),
+            "paused_ms": round(self.pacer.paused_seconds * 1000),
+            **{key: tally[key] for key in ("pages", "candidates_scanned", "events_embedded", "events_skipped_existing", "events_failed")},
+        }
+        try:
+            repository.set_event_embed_progress(progress)
+        except Exception:  # noqa: BLE001 - progress is telemetry; the page itself already completed safely
+            logger.warning("event embedding progress record not written; coverage rate will lag", exc_info=True)
+
+
+def _make_pacer(writer: EventEmbeddingWriter) -> DutyCycle:
+    """The fire's pacer; idle is read from the newest in-scope arrival (prb_f6964132)."""
+    return DutyCycle(PacingSettings.from_environment(), newest_arrival=lambda: _newest_arrival(writer))
+
+
+def _newest_arrival(writer: EventEmbeddingWriter) -> object:
+    rows = writer._repository.list_event_embedding_candidates(limit=1, order_column="imported_at", ascending=False)
+    return rows[0]["imported_at"] if rows else None
+
+
+def _walk_fire(
+    writer: EventEmbeddingWriter,
+    page_size: int,
+    policy: str,
+    checkpoints: tuple[SweepCheckpoint | None, SweepCheckpoint | None],
+    tally: dict[str, int],
+) -> tuple[SweepCheckpoint | None, SweepCheckpoint | None]:
+    """One fire's walk: new arrivals past the cursor first, then the active sweep or the incremental pass.
+
+    A corpus re-walk must not hold new conversation content back (prb_f6964132); ``fire.fresh`` keeps an
+    arrival embedded by the first pass from being embedded again by the sweep in the same fire.
+    """
+    active, pending = checkpoints
+    cursor = writer._repository.get_event_embed_cursor()
+    fire = DrainFire(_make_pacer(writer))
+    try:
+        if active is not None and cursor is not None:
+            _drain_sweep_pages(writer, page_size, policy, (None, pending), (cursor, ""), None, tally, fire)
+        page_after = active.after if active else ((cursor, "") if cursor is not None else None)
+        backfill = PolicyBackfill(writer._input_budget(), active.previous) if active and active.previous != policy else None
+        return _drain_sweep_pages(writer, page_size, policy, (active, pending), page_after, backfill, tally, fire)
+    finally:
+        tally["paused_ms"] += round(fire.pacer.paused_seconds * 1000)
+
+
+def _embed_planned(
+    writer: EventEmbeddingWriter,
+    row: dict[str, object],
+    replaces: int | None,
+    current: set[str],
+    tally: dict[str, int],
+    fire: DrainFire | None,
+) -> None:
+    """Embed one planned event unless it is embedded and current, or already holds this fire's cut."""
+    event_id = str(row["id"])
+    if replaces is None:
+        tally["events_skipped_existing"] += 1
+    elif event_id in current or (fire is not None and event_id in fire.fresh):
+        tally["events_skipped_current"] = tally.get("events_skipped_current", 0) + 1
+    elif _embed_event_or_skip(writer, writer._generate_embeddings, row, replaces, tally) and fire is not None:
+        fire.fresh.add(event_id)
+        fire.pacer.pace()
+
+
+def _drain_sweep_pages(
+    writer: EventEmbeddingWriter,
+    page_size: int,
+    policy: str,
+    checkpoints: tuple[SweepCheckpoint | None, SweepCheckpoint | None],
+    page_after: tuple[str, str] | None,
+    backfill: PolicyBackfill | None,
+    tally: dict[str, int],
+    fire: DrainFire,
+) -> tuple[SweepCheckpoint | None, SweepCheckpoint | None]:
+    """Walk safely completed pages; a failed page remains at its prior checkpoint.
+
+    ``checkpoints`` is ``(active, pending)``; an incremental pass has no active sweep.
+    """
+    active, pending = checkpoints
+    if active is not None and active.after is not None:
+        writer._repository.set_event_embed_cursor(active.after[0])
+    while True:
+        rows = writer._repository.list_event_embedding_candidates(
+            limit=page_size,
+            after=page_after,
+            order_column="imported_at",
+            ascending=True,
+        )
+        if not rows:
+            break
+        tally["candidates_scanned"] += len(rows)
+        _log_drain_page("start", tally, page_after, active is not None, pending)
+        failures = tally["events_failed"]
+        writer._embed_missing_in_page(rows, batch_limit=None, tally=tally, backfill=backfill, fire=fire)
+        after = (str(rows[-1]["imported_at"]), str(rows[-1]["id"]))
+        if chunk_policy(writer._input_budget()) != policy:
+            raise RuntimeError("event embedding policy changed during sweep; stale generation refused")
+        if active is not None:
+            active = checkpoint_page(writer._repository, active, after, tally["events_failed"] - failures)
+            pending = active
+        writer._repository.set_event_embed_cursor(after[0])
+        page_after = after
+        tally["pages"] += 1
+        _log_drain_page("complete", tally, page_after, active is not None, pending)
+        fire.record(writer._repository, tally)
+        fire.pacer.pace()
+    if active is not None:
+        pending = finish_sweep(writer._repository, active)
+    return active, pending
+
+
 def _embed_event_or_skip(
     writer: EventEmbeddingWriter,
     embed_texts: Callable[[list[str]], list[list[float]]],
     row: dict[str, object],
     replaces: int,
     tally: dict[str, int],
-) -> None:
-    """Embed one event; a failure caused by that event is a WARNING naming the event_id, counted, and skipped.
+) -> bool:
+    """Skip only a generation/input refusal with a successful generation probe; True when the event landed.
 
-    One event the embedder or store refuses must not stall the cursor for its whole page (iss_6aa96266).  A
-    failure that is not the event's -- the embedder itself is down -- is told apart by a probe embed through
-    ``embed_texts``: if the probe also fails it raises, so the page halts without advancing the cursor and the
-    next fire retries it.  A skipped event stays un-embedded, so the reconciliation sweep retries it.
+    Exception notes preserve causal stage without changing direct exception
+    types. Store/delete/unknown failures propagate and leave the page retryable.
     """
     try:
         outcome = writer.embed_event(dict(row), replaces_chunks=replaces)
-    except Exception:
+    except Exception as exc:
         tally["events_failed"] += 1
+        phase = next((note.split("=", 1)[1] for note in getattr(exc, "__notes__", []) if note.startswith("event_embedding_phase=")), "unknown")
+        if phase == "store" and _is_duplicate_external_id_error(exc):
+            tally["events_failed"] -= 1
+            tally["events_skipped_duplicate"] = tally.get("events_skipped_duplicate", 0) + 1
+            logger.warning(
+                "embed_event: event %s skipped duplicate external_id during store (events_skipped_duplicate=%d); drain continues",
+                row["id"],
+                tally["events_skipped_duplicate"],
+            )
+            return False
+        try:
+            if phase != "generation":
+                raise
+            embed_texts([_EMBEDDER_PROBE_TEXT])
+        except Exception:
+            logger.warning(
+                "embed_event: deferred phase=%s event=%s; cursor retained; next heartbeat retries",
+                phase,
+                row["id"],
+                exc_info=True,
+            )
+            raise
         logger.warning(
-            "embed_event: event %s failed to embed; skipping it so the cursor can advance "
-            "(events_failed=%d) -- the reconciliation sweep retries it",
-            row["id"], tally["events_failed"], exc_info=True,
+            "embed_event: event %s failed generation; skipping after successful probe (events_failed=%d); reconciliation retries it",
+            row["id"],
+            tally["events_failed"],
+            exc_info=True,
         )
-        embed_texts([_EMBEDDER_PROBE_TEXT])
-        return
+        return False
     tally["events_embedded"] += 1
     tally["chunks_stored"] += int(outcome["chunks_stored"])
     tally["events_truncated"] += 1 if outcome["truncated"] else 0
+    return True
+
+
+def _is_duplicate_external_id_error(error: BaseException) -> bool:
+    """Identify the vector-store duplicate race without hiding other failures."""
+    messages: list[str] = []
+    current: BaseException | None = error
+    while current is not None:
+        messages.append(str(current).lower())
+        current = current.__cause__
+    message = " ".join(messages)
+    return "external_id" in message and any(marker in message for marker in ("duplicate", "unique constraint", "uniqueviolation", "already exists"))
+
+
+def _log_drain_page(
+    stage: str,
+    tally: dict[str, int],
+    cursor: tuple[str, str] | None,
+    sweep: bool,
+    pending: SweepCheckpoint | None,
+) -> None:
+    logger.info(
+        "event embedding page-%s page=%d cursor=%s embedded=%d failed=%d deferred=%d sweep=%s pending=%s",
+        stage,
+        tally["pages"] + (stage == "start"),
+        cursor,
+        tally["events_embedded"],
+        tally["events_failed"],
+        tally["events_deferred"],
+        sweep,
+        pending is not None,
+    )
 
 
 def _as_dict(value: object) -> dict[str, Any]:

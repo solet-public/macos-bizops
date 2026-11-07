@@ -1,0 +1,6 @@
+# Private-PostgreSQL real-path proof for prb_351c9641 / iss_25ca0b87: what a
+# sender's receipt and a seat's own merged inbox read actually say when the
+# recipient is a real host='operator' managed_session row with no verified pane,
+# so no driver channel and no wake mechanism exist. Registered in its own
+# fragment per quality_gates/gate_smokes.txt's header (prb_ae6d81ea).
+plugins/agent_messaging_plugin/tests/channel_absent_seat_pg_smoke.py

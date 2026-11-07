@@ -1,0 +1,19 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::read_model_capability_history",
+  "display_name": "Read the history of one model capability catalog cell",
+  "description": "Operator ruling rul_2bff72b8 (full lifecycle verbs). Use it to see how one catalog cell (runtime, model, effort) got to its present state. Returns the cell's observation rows, which are append-only and never rewritten, ordered by fetched_at and then id, oldest first: seed readings, refresh readings, manual_record readings and the acceptance_change rows that withdraw_model_capability_cell and reinstate_model_capability_cell write (value_text such as accepted->withdrawn: manual, the reason in raw_excerpt, the actor in fetch_method). Also returns current, the cell as it stands now (acceptance, capability_score, cost_per_task_usd, measured_at, accepted_at, disagreement_note, staleness_window_hours, last_refresh_run_id, updated_at), or null when no cell exists. Paged with the state layer's after cursor: limit is 1 to 100 (default 100); next_after is the list to pass as after for the following page, and is null once a page comes back short, so the history is exhausted. A full page may be followed by an empty one. Required: runtime, model and effort; effort values outside the known ladder are accepted so malformed cells can be inspected. Read-only.",
+  "embedding_description": "Reading the timeline of one AI model's capability row: every score reading, manual correction, withdrawal and reinstatement recorded for it, oldest first, page by page, next to the row's current state.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Capability cell history read",
+    "result_type": "read_model_capability_history_result",
+    "result_description": "runtime, model, effort, current (the cell now, or null), observations (one page of rows ordered by fetched_at then id), next_after (the cursor for the next page, or null when the history is exhausted).",
+    "presentation_guidance": "Start with the cell's current acceptance and score, then list the observations oldest first, one line each: when, source, metric and value. Show acceptance_change rows with their reason and actor. Say when next_after is set that older or newer pages remain.",
+    "output_action_guidance": "Pass next_after as after to read the next page. To change the cell, call withdraw_model_capability_cell or reinstate_model_capability_cell with the acceptance shown in current as expected_acceptance."
+  },
+  "error_processor_customizations": {
+    "action_context": "One ordered, bounded query over model_capability_observation and one keyed read of model_capability_cell through the state interface; no writes.",
+    "error_interpretation": "parameter_invalid: runtime is not claude_code or codex; model or effort is blank; limit is not an integer from 1 to 100; or after is not a two-item list of text from a previous next_after. state_service_unavailable: the state service is not bound.",
+    "recovery_guidance": "Fix the named parameter and call again. Pass after exactly as the previous page returned next_after. An empty observations list with current null means the catalog has no record of that cell: check the spelling against read_model_capability_catalog with include_unaccepted true."
+  }
+}

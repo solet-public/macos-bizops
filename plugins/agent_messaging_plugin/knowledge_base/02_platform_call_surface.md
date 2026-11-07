@@ -194,3 +194,47 @@ When in doubt:
 - `post_message` schema and error tokens →
   `processes/post_message.json`.
 - HTTP routes that back each MCP tool → `05_http_reference.md`.
+
+## Failure attribution in MCP dispatch
+
+Failure-only `MCP failure attribution` observations use the existing module
+loggers in `platform_surface`, `mcp_bridge.__main__`, and `mcp_streamable.router`.
+Read the correlated observations from the deployment's ordinary application
+logs (stdio's observation is on its subprocess logger/stderr). Each record
+also exposes the same fields as structured logging extra `mcp_failure`:
+
+| Field | Meaning |
+|---|---|
+| `tool` | Recognized transport tool name, otherwise `unknown` |
+| `process_key` | Bounded, validated process-key shape, otherwise `unknown` |
+| `transport` | Locally known `stdio` or `streamable`, otherwise `unknown` |
+| `stage` | `schema_discovery`, `call_submission`, `forwarder_dispatch`, or `tool_dispatch` |
+| `exception_type` | Exception class at this boundary; no exception message |
+| `code` | Existing JSON-RPC numeric code or recognized bridge/argument code, otherwise `unknown` |
+| `bridge_code` | Recognized bridge code, including a translated error's chained cause, otherwise `unknown` |
+| `bridge_id` | Existing server-issued bridge identity when available, otherwise `unknown` |
+| `request_id_digest` | SHA-256 correlation digest of a bounded client request id, otherwise `unknown` |
+
+Server discovery and submission observations distinguish service stages from
+stdio forwarding and Streamable tool dispatch. A local context carries transport
+and request correlation through synchronous Streamable dispatch. It does not
+cross an HTTP hop: ordinary server-side HTTP calls, including forwarded stdio
+calls, report transport/request identity as `unknown`; correlate their existing
+bridge identity with the stdio `forwarder_dispatch` observation. Missing identity
+is advisory and never a new refusal. The in-process fake stdio harness exercises
+a reconstructed discovery failure without claiming captured wire provenance.
+
+Added fields contain no raw arguments, reason, payload, request ids, headers,
+credentials, exception messages or tracebacks. Existing responses and exception
+logging are unchanged. Successful calls produce no attribution observation;
+submission remains single-shot. An unavailable diagnostic logger cannot replace
+the original exception. These append-only log observations use existing retention;
+a correction is a later correlated observation, with no new mutable record or
+clear/retire lifecycle.
+
+The fleet schema smoke uses reconstructed `tools/call` requests for
+`plugin::agent_messaging_plugin::record_fleet_liveness_run`, with fake collaborators
+and no real fleet append. Instrumentation does not establish the historical
+Codex `-32603` cause or claim its repair. Native Codex verification, paired control
+and steward uptake remain separate seat-authorized operational work; a failing
+native trace requires a cause-bound fix plan before changing the mechanism.

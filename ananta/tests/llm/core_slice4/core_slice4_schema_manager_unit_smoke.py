@@ -26,6 +26,7 @@ Run::
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -38,7 +39,10 @@ from ananta.core.orchestration.service_bindings import (  # noqa: E402
     ServiceBindings,
     ServiceName,
 )
+from ananta.error_handling import FrameworkError  # noqa: E402
 from ananta.services.schema_manager import SchemaManager  # noqa: E402
+from ananta.services.state_service import StateService  # noqa: E402
+from ananta.services.string_generation_operations.string_generation_service import StringGenerationService  # noqa: E402
 from ananta.types.schema_types import (  # noqa: E402
     ColumnDefinition,
     ColumnType,
@@ -162,7 +166,52 @@ def test_legacy_dead_code_removed() -> None:
            "IndexDefinition dataclass + fields (consumed by the live ddl_renderer) preserved")
 
 
+def _assert_registry_prefixes(state: StateService) -> None:
+    assert state._get_table_id_prefix("slice4_probe", "thing") == "thg"  # noqa: SLF001
+    assert state._get_table_id_prefix("slice4_probe", "other") == "oth"  # noqa: SLF001
+    assert str(state.prepare_record("slice4_probe", "thing", {})["id"]).startswith("thg-")
+    assert str(state.prepare_record("slice4_probe", "other", {})["id"]).startswith("oth-")
+
+
+def _assert_conflict_refused(
+    manager: SchemaManager, lifecycle: _RecordingLifecycle,
+    state: StateService, second: SchemaDefinition,
+) -> None:
+    conflict = replace(second, tables={"other": replace(second.tables["other"], id_prefix="bad")})
+    try:
+        manager.initialize_schemas([conflict])
+    except FrameworkError as error:
+        assert "Conflicting schema declaration" in str(error)
+    else:
+        raise AssertionError("conflicting table declaration must fail")
+    assert len(lifecycle.calls) == 2, "conflict must be refused before lifecycle install"
+    assert state._get_table_id_prefix("slice4_probe", "other") == "oth"  # noqa: SLF001
+
+
+def test_piecewise_schema_registry() -> None:
+    """Keep all same-namespace tables and reject conflicts before lifecycle DDL."""
+    lifecycle = _RecordingLifecycle()
+    manager = SchemaManager(cast("Any", _ExplodingStateService()), lifecycle)
+    first = _schema_def()
+    first.tables["thing"].id_prefix = "thg"
+    second = replace(first, tables={"other": replace(first.tables["thing"], table_name="other", id_prefix="oth")})
+    manager.initialize_schemas([first, second])
+    state = StateService.__new__(StateService)
+    state._schema_manager = manager  # noqa: SLF001
+    state._string_generation_service = StringGenerationService()  # noqa: SLF001
+    _assert_registry_prefixes(state)
+    assert len(lifecycle.calls) == 2
+    assert set(cast("dict[str, object]", lifecycle.calls[0][1]["tables"])) == {"thing"}
+    assert set(cast("dict[str, object]", lifecycle.calls[1][1]["tables"])) == {"other"}
+    manager.initialize_schemas([first, second])
+    assert len(lifecycle.calls) == 2, "identical repeated declarations remain idempotent"
+    assert set(first.tables) == {"thing"} and set(second.tables) == {"other"}
+    _assert_conflict_refused(manager, lifecycle, state, second)
+    _check(True, "piecewise prefix union, idempotence, no input mutation, fail-fast conflict")
+
+
 def main() -> int:
+    test_piecewise_schema_registry()
     print("=== core_slice4_schema_manager_unit_smoke ===")
     test_plugin_schema_service_is_required()
     test_initialize_schemas_routes_through_lifecycle_only()

@@ -1,0 +1,21 @@
+name: codex_filesystem_session_source_plugin
+description: |
+  LLM session ledger source for Codex CLI's local rollout JSONL files.
+  Walks ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl (and the archived_sessions
+  sibling) as ingest sessions. Parsing machinery lives in
+  ananta.llm.session_ledger.vendor.codex; this plugin is the local-profile
+  adapter. The cloud-profile sibling is codex_pushed_session_source_plugin
+  (one plugin per implementation scenario; profile bindings choose).
+implements:
+  - interface: LLMSessionSourceInterface
+  - interface: PullingSourceMixin
+optional: true
+config:
+  root_dir:
+    type: string
+    default: "~/.codex/sessions"
+    description: |
+      Root directory holding Codex rollout JSONL files. The walker also
+      checks <root_dir>/../archived_sessions for archived rollouts. ~ and
+      env vars are expanded at read time. Override per-deployment via the
+      standard plugin-config override surface.

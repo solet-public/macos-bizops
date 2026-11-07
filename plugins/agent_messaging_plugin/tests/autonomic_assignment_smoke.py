@@ -9,7 +9,7 @@ extraction paths run) plus in-memory bridge/registry/provider collaborators:
       claim, new-holder notice, drain invoked (lane re-lit).
   T2  non-provider register → ``not_provider`` (slot untouched).
   T3  live-held slot + another register → ``held`` (no displacement).
-  T4  crash-heal: holder's provider gone → next register claims; the DEAD
+  T4  crash-heal: holder's native host is dead → next register claims; the DEAD
       prior gets NO displaced notice (genuinely-ended rule).
   T5  close of a non-holder bridge → ``not_holder`` (no timer armed).
   T6  close of the holder's bridge → ``scheduled``; cancel_all() disarms.
@@ -38,7 +38,12 @@ Run from repo root:
 
 from __future__ import annotations
 
+import copy
+import io
+import logging
+import os
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -49,7 +54,12 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _real_state_fake import CapEnforcingState, RealShapeState  # noqa: E402
-from ananta.llm.agent_messaging.role_binding import SYS_AUTONOMIC_SLOT  # noqa: E402
+from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
+    AGENT_ROLE_BINDING_NAMESPACE,
+    HOLDER_KIND_INFERENCE_PROVIDER,
+    SYS_AUTONOMIC_SLOT,
+    TABLE_ROLE_BINDING,
+)
 from ananta.services.inference_service.schema import (  # noqa: E402
     COL_FLOW_ID,
     INFERENCE_DEFERRED_VERTEX_NAMESPACE,
@@ -62,9 +72,12 @@ from agent_messaging_plugin.autonomic_assignment import (  # noqa: E402
 )
 from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
 from agent_messaging_plugin.role_binding_store import (  # noqa: E402
+    HolderClaim,
     RoleBindingVacantError,
+    claim_role_binding_v4,
     resolve_role_binding_v4,
 )
+from agent_messaging_plugin.schema import TABLE_MANAGED_SESSION  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
@@ -87,7 +100,10 @@ class _Bridge:
 
 
 def _binding(
-    bridge_id: str, agi: str, sid: str, agent_id: str = "claude_code",
+    bridge_id: str,
+    agi: str,
+    sid: str,
+    agent_id: str = "claude_code",
     label: str = "",
 ) -> BridgeBinding:
     return BridgeBinding(
@@ -115,8 +131,13 @@ class _Harness:
         self._queue_ordinal = 0
 
     def add_session(
-        self, bridge_id: str, agi: str, sid: str, created_at: str,
-        *, provider: bool = True,
+        self,
+        bridge_id: str,
+        agi: str,
+        sid: str,
+        created_at: str,
+        *,
+        provider: bool = True,
     ) -> BridgeBinding:
         bound = _binding(bridge_id, agi, sid)
         self.bridges.append(_Bridge(bridge_id, created_at))
@@ -125,7 +146,25 @@ class _Harness:
             self.live_providers.add(agi)
         if sid:
             self.live_by_session[sid] = bound
+        rows = self.state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_SESSION)
+        rows[:] = [row for row in rows if row["agent_instance_id"] != agi]
+        rows.append(
+            {
+                "agent_instance_id": agi,
+                "agent_runtime": "claude_code",
+                "host": "headless",
+                "host_ref": str(os.getpid()),
+                "lifecycle_state": "live",
+                "is_deleted": 0,
+            }
+        )
         return bound
+
+    def mark_dead(self, agi: str) -> None:
+        """The shipped synthetic host has no process; its native probe is dead."""
+        for row in self.state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_SESSION):
+            if row["agent_instance_id"] == agi:
+                row["host"] = "synthetic"
 
     def drop_session(self, bridge_id: str) -> None:
         """Simulate close_bridge aftermath: bridge gone, provider cleared."""
@@ -135,7 +174,12 @@ class _Harness:
         self.bridges = [b for b in self.bridges if b.bridge_id != bridge_id]
         self.bindings.pop(bridge_id, None)
 
-    def assignment(self, *, grace_seconds: int = 30) -> AutonomicAssignment:
+    def assignment(
+        self,
+        *,
+        grace_seconds: int = 30,
+        holder_presence: Callable[[str], tuple[str, str]] | None = None,
+    ) -> AutonomicAssignment:
         return AutonomicAssignment(
             state_service=lambda: self.state,
             list_active_bridges=lambda: list(self.bridges),
@@ -155,10 +199,16 @@ class _Harness:
             forward_serve_window_seconds=900,
             forward_attempts_cap=5,
             terminal_gc_after_seconds=172_800,
+            holder_presence=holder_presence,
         )
 
     def _notice(
-        self, *, peer_id: str, peer_agent_instance_id: str, prose: str, kind: str,
+        self,
+        *,
+        peer_id: str,
+        peer_agent_instance_id: str,
+        prose: str,
+        kind: str,
     ) -> bool:
         del prose
         self.notices.append((peer_id, peer_agent_instance_id, kind))
@@ -167,7 +217,8 @@ class _Harness:
     def holder_agi(self) -> str | None:
         try:
             return resolve_role_binding_v4(
-                cast("Any", self.state), SYS_AUTONOMIC_SLOT,
+                cast("Any", self.state),
+                SYS_AUTONOMIC_SLOT,
             ).agent_instance_id
         except RoleBindingVacantError:
             return None
@@ -175,20 +226,32 @@ class _Harness:
     def queue_deferred(self, flow_id: str, *, state: str = "deferred") -> None:
         self._queue_ordinal += 1
         self.state.rows(
-            INFERENCE_DEFERRED_VERTEX_NAMESPACE, TABLE_INFERENCE_DEFERRED_VERTEX,
-        ).append({
-            "role": SYS_AUTONOMIC_SLOT, "flow_id": flow_id,
-            "method": "process_error", "agent_instance_id": None, "is_deleted": 0,
-            "state": state, "id": f"dv-{self._queue_ordinal:06d}",
-            "created_at": (datetime(2026, 8, 1, tzinfo=UTC) + timedelta(
-                seconds=self._queue_ordinal,
-            )).isoformat(),
-        })
+            INFERENCE_DEFERRED_VERTEX_NAMESPACE,
+            TABLE_INFERENCE_DEFERRED_VERTEX,
+        ).append(
+            {
+                "role": SYS_AUTONOMIC_SLOT,
+                "flow_id": flow_id,
+                "method": "process_error",
+                "agent_instance_id": None,
+                "is_deleted": 0,
+                "state": state,
+                "id": f"dv-{self._queue_ordinal:06d}",
+                "created_at": (
+                    datetime(2026, 8, 1, tzinfo=UTC)
+                    + timedelta(
+                        seconds=self._queue_ordinal,
+                    )
+                ).isoformat(),
+            }
+        )
 
     def deferred_flow_ids(self) -> set[str]:
         return {
-            str(r.get(COL_FLOW_ID)) for r in self.state.rows(
-                INFERENCE_DEFERRED_VERTEX_NAMESPACE, TABLE_INFERENCE_DEFERRED_VERTEX,
+            str(r.get(COL_FLOW_ID))
+            for r in self.state.rows(
+                INFERENCE_DEFERRED_VERTEX_NAMESPACE,
+                TABLE_INFERENCE_DEFERRED_VERTEX,
             )
         }
 
@@ -206,7 +269,10 @@ class _DrainSpy(AutonomicAssignment):
 
 
 def _register(
-    assignment: AutonomicAssignment, bound: BridgeBinding, *, provides: bool = True,
+    assignment: AutonomicAssignment,
+    bound: BridgeBinding,
+    *,
+    provides: bool = True,
 ) -> str:
     return assignment.on_register(
         agent_id=bound.agent_id,
@@ -222,8 +288,7 @@ def _trigger1_fill_cases(world: _Harness, assignment: AutonomicAssignment) -> No
 
     # T2 — a non-provider register never claims.
     _check(
-        _register(assignment, first, provides=False) == "not_provider"
-        and world.holder_agi() is None,
+        _register(assignment, first, provides=False) == "not_provider" and world.holder_agi() is None,
         "T2 non-provider register → not_provider (slot untouched)",
     )
 
@@ -234,8 +299,7 @@ def _trigger1_fill_cases(world: _Harness, assignment: AutonomicAssignment) -> No
         "T1 vacancy-fill: first provider-capable register claims the slot",
     )
     _check(
-        ("claude_code", "agi-1", "autonomic-new-holder") in world.notices
-        and not any(k == "autonomic-displaced" for _, _, k in world.notices),
+        ("claude_code", "agi-1", "autonomic-new-holder") in world.notices and not any(k == "autonomic-displaced" for _, _, k in world.notices),
         "T1 new-holder notice fired; no displaced notice on a fresh claim",
     )
 
@@ -248,7 +312,8 @@ def _trigger1_fill_cases(world: _Harness, assignment: AutonomicAssignment) -> No
 
 
 def _trigger1_crash_heal_case(
-    world: _Harness, assignment: AutonomicAssignment,
+    world: _Harness,
+    assignment: AutonomicAssignment,
 ) -> None:
     # T4 — crash-heal: holder dies without close — its bridge is popped
     # (sweep) and its provider is unreachable, but its registry row SURVIVES
@@ -256,16 +321,15 @@ def _trigger1_crash_heal_case(
     # the stale row must NOT draw a displaced notice.
     world.notices.clear()
     world.live_providers.discard("agi-1")
+    world.mark_dead("agi-1")
     world.bridges = [b for b in world.bridges if b.bridge_id != "br-1"]
     third = world.add_session("br-3", "agi-3", "sid-3", "2026-07-03T03:00:00")
     _check(
-        _register(assignment, third) == "crash_heal"
-        and world.holder_agi() == "agi-3",
+        _register(assignment, third) == "crash_heal" and world.holder_agi() == "agi-3",
         "T4 crash-heal: dead holder replaced by the just-registered session",
     )
     _check(
-        ("claude_code", "agi-3", "autonomic-new-holder") in world.notices
-        and not any(k == "autonomic-displaced" for _, _, k in world.notices),
+        ("claude_code", "agi-3", "autonomic-new-holder") in world.notices and not any(k == "autonomic-displaced" for _, _, k in world.notices),
         "T4 genuinely-ended prior gets NO displaced notice (REL-04 rule)",
     )
 
@@ -276,6 +340,212 @@ def _trigger1_cases() -> None:
     assignment = world.assignment()
     _trigger1_fill_cases(world, assignment)
     _trigger1_crash_heal_case(world, assignment)
+
+
+def _slot_rows(world: _Harness) -> list[dict[str, Any]]:
+    return copy.deepcopy(world.state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_ROLE_BINDING))
+
+
+def test_restart_registration_preserves_stored_holder() -> None:
+    print("Restart — durable ownership survives missing transient providers:")
+    world = _Harness()
+    old_assignment = world.assignment()
+    holder = world.add_session("br-old", "agi-holder", "ledger-holder", "2026-07-03T01:00:00")
+    _register(old_assignment, holder)
+    before = _slot_rows(world)
+    old_assignment.cancel_all()
+    world.drop_session("br-old")  # startup purge clears bindings/providers, not managed rows
+    world.notices.clear()
+    assignment = world.assignment()  # plugin startup reconstructs this policy object
+    other = world.add_session("br-first", "agi-first", "ledger-first", "2026-07-03T02:00:00")
+    _check(
+        _register(assignment, other) == "held" and _slot_rows(world) == before,
+        "restart: first different provider preserves exact stored holder and claim epoch",
+    )
+    _check(
+        not world.notices and not assignment._slot_serves_inference(),
+        "restart: no handover notice; preserved owner still lacks a serving provider",
+    )
+    reconnect = world.add_session("br-reconnect", "agi-holder", "ledger-holder", "2026-07-03T03:00:00")
+    _check(
+        _register(assignment, reconnect) == "held" and assignment._slot_serves_inference() and _slot_rows(world) == before and not world.notices,
+        "restart: original reconnect serves normally without a claim or epoch change",
+    )
+
+
+def test_confirmed_dead_holder_crash_heals() -> None:
+    print("Native dead evidence — one replacement, repeated registration is inert:")
+    world = _Harness()
+    assignment = world.assignment()
+    holder = world.add_session("br-old", "agi-dead", "ledger-dead", "2026-07-03T01:00:00")
+    _register(assignment, holder)
+    epoch = _slot_rows(world)[0]["claim_epoch"]
+    world.drop_session("br-old")
+    world.mark_dead("agi-dead")
+    world.notices.clear()
+    other = world.add_session("br-new", "agi-new", "ledger-new", "2026-07-03T02:00:00")
+    _check(
+        _register(assignment, other) == "crash_heal" and world.holder_agi() == "agi-new" and _slot_rows(world)[0]["claim_epoch"] == epoch + 1,
+        "native managed-row reader + host probe confirm dead; one CAS bumps epoch once",
+    )
+    after = _slot_rows(world)
+    _check(
+        _register(assignment, other) == "held" and _slot_rows(world) == after and world.notices == [("claude_code", "agi-new", "autonomic-new-holder")],
+        "confirmed-dead replacement is idempotent and sends exactly one lawful notice",
+    )
+
+
+class _PresenceFaultState(RealShapeState):
+    def query_state(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
+        if query.get("table") == TABLE_MANAGED_SESSION:
+            raise RuntimeError("managed-session reader unavailable")
+        return super().query_state(namespace, query)
+
+
+def _unknown_presence_case(kind: str) -> None:
+    world = _Harness()
+    if kind == "reader_fault":
+        world.state = _PresenceFaultState()
+    assignment = world.assignment()
+    holder = world.add_session("br-old", "agi-holder", "ledger-holder", "2026-07-03T01:00:00")
+    _register(assignment, holder)
+    world.drop_session("br-old")
+    rows = world.state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_SESSION)
+    if kind == "missing_row":
+        # A dead row under the stable ledger id is deliberately NOT the holder's row.
+        rows[0].update(agent_instance_id="ledger-holder", host="synthetic")
+    elif kind == "missing_host_ref":
+        rows[0]["host_ref"] = ""
+    elif kind == "probe_fault":
+        rows[0]["host"] = "unregistered-host"
+    elif kind == "operator":
+        rows[0]["host"] = "operator"
+    before = _slot_rows(world)
+    other = world.add_session("br-new", "agi-new", "ledger-new", "2026-07-03T02:00:00")
+    world.notices.clear()
+    output = io.StringIO()
+    handler = logging.StreamHandler(output)
+    log = logging.getLogger("agent_messaging_plugin.autonomic_assignment")
+    log.addHandler(handler)
+    try:
+        token = _register(assignment, other)
+    finally:
+        log.removeHandler(handler)
+    _check(
+        token == "held" and _slot_rows(world) == before and not world.notices and "advisory" in output.getvalue() and "presence=unknown" in output.getvalue(),
+        f"unknown {kind}: registration succeeds; exact ownership/epoch/notices preserved with advisory",
+    )
+    _check(
+        assignment.set_slot(agent_instance_id="agi-new").get("success") is True,
+        f"unknown {kind}: explicit manual correction stays usable",
+    )
+
+
+def test_unknown_holder_presence_is_advisory() -> None:
+    print("Unknown presence — advisory, with manual override still usable:")
+    for kind in ("missing_row", "missing_host_ref", "probe_fault", "operator", "reader_fault"):
+        _unknown_presence_case(kind)
+    world = _Harness()
+    holder = world.add_session("br-old", "agi-holder", "ledger-holder", "2026-07-03T01:00:00")
+    _register(world.assignment(), holder)
+    world.drop_session("br-old")
+    before = _slot_rows(world)
+    other = world.add_session("br-new", "agi-new", "ledger-new", "2026-07-03T02:00:00")
+
+    def unavailable(agi: str) -> tuple[str, str]:
+        _check(agi == "agi-holder", "presence seam receives exact stored instance, never ledger id")
+        raise RuntimeError("presence seam unavailable")
+
+    _check(
+        _register(world.assignment(holder_presence=unavailable), other) == "held" and _slot_rows(world) == before,
+        "injected presence fault is advisory and preserves authority",
+    )
+
+
+def _plugin_holder_case() -> None:
+    world = _Harness()
+    claim_role_binding_v4(
+        cast("Any", world.state),
+        name=SYS_AUTONOMIC_SLOT,
+        claim=HolderClaim(
+            holder_kind=HOLDER_KIND_INFERENCE_PROVIDER,
+            holder_identity={"provider_kind": "plugin", "provider_ref": "native"},
+            agent_instance_id="plugin-owner",
+            agent_session_id="",
+            session_label="",
+        ),
+    )
+    before = _slot_rows(world)
+    other = world.add_session("br-new", "agi-new", "ledger-new", "2026-07-03T02:00:00")
+    calls: list[str] = []
+
+    def dead(agi: str) -> tuple[str, str]:
+        calls.append(agi)
+        return "dead", "must not probe plugin-owned authority"
+
+    _check(
+        _register(world.assignment(holder_presence=dead), other) == "held" and _slot_rows(world) == before and not calls and not world.notices,
+        "plugin-owned holder is never probed or automatically displaced",
+    )
+
+
+class _RacingState(RealShapeState):
+    def __init__(self) -> None:
+        super().__init__()
+        self.before_role_update: Callable[[], None] | None = None
+        self.role_updates: list[tuple[dict[str, Any], int]] = []
+
+    def update_state(
+        self,
+        namespace: str,
+        query: dict[str, Any],
+        updates: dict[str, Any],
+    ) -> dict[str, Any]:
+        if query.get("table") == TABLE_ROLE_BINDING and self.before_role_update is not None:
+            callback, self.before_role_update = self.before_role_update, None
+            callback()
+        result = super().update_state(namespace, query, updates)
+        if query.get("table") == TABLE_ROLE_BINDING:
+            self.role_updates.append((dict(query["filters"]), result["data"]["result"]["updated"]))
+        return result
+
+
+def _crash_heal_cas_race_case() -> None:
+    print("Crash-heal CAS race — stale death evidence cannot overwrite a new claim:")
+    world = _Harness()
+    state = _RacingState()
+    world.state = state
+    assignment = world.assignment()
+    holder = world.add_session("br-old", "agi-old", "ledger-old", "2026-07-03T01:00:00")
+    _register(assignment, holder)
+    world.drop_session("br-old")
+    world.mark_dead("agi-old")
+    epoch = _slot_rows(world)[0]["claim_epoch"]
+    other = world.add_session("br-new", "agi-new", "ledger-new", "2026-07-03T02:00:00")
+    world.add_session("br-winner", "agi-winner", "ledger-winner", "2026-07-03T03:00:00")
+    world.notices.clear()
+
+    def manual_claim() -> None:
+        assignment.set_slot(agent_instance_id="agi-winner")
+
+    state.before_role_update = manual_claim
+    _check(
+        _register(assignment, other) == "held" and world.holder_agi() == "agi-winner" and _slot_rows(world)[0]["claim_epoch"] == epoch + 1,
+        "CAS interleave: winning manual claim preserved; stale crash-heal never retries",
+    )
+    _check(
+        state.role_updates[-1]
+        == (
+            {"external_id": f"role:{SYS_AUTONOMIC_SLOT}", "claim_epoch": epoch, "is_deleted": 0},
+            0,
+        )
+        and world.notices == [("claude_code", "agi-winner", "autonomic-new-holder")],
+        "exact stale epoch predicate affects zero rows and emits no stale handover notice",
+    )
+    _check(
+        assignment.set_slot(agent_instance_id="agi-new").get("success") is True and assignment.set_slot(agent_instance_id="agi-winner").get("success") is True and _slot_rows(world)[0]["claim_epoch"] == epoch + 3,
+        "manual correction and reversal continue through native CAS after a lost crash-heal",
+    )
 
 
 def _trigger2_cases() -> None:
@@ -326,7 +596,11 @@ def _trigger2_cases() -> None:
     _register(assignment2, holder2)
     world2.add_session("br-B", "agi-B", "sid-B", "2026-07-03T02:00:00")
     world2.add_session(  # newest but NOT provider-capable → must be skipped
-        "br-C", "agi-C", "sid-C", "2026-07-03T03:00:00", provider=False,
+        "br-C",
+        "agi-C",
+        "sid-C",
+        "2026-07-03T03:00:00",
+        provider=False,
     )
     departed2 = resolve_role_binding_v4(cast("Any", world2.state), SYS_AUTONOMIC_SLOT)
     world2.drop_session("br-A")
@@ -337,8 +611,7 @@ def _trigger2_cases() -> None:
         "T8 succession: newest LIVE provider-capable other claims (agi-B)",
     )
     _check(
-        ("claude_code", "agi-B", "autonomic-new-holder") in world2.notices
-        and not any(k == "autonomic-displaced" for _, _, k in world2.notices),
+        ("claude_code", "agi-B", "autonomic-new-holder") in world2.notices and not any(k == "autonomic-displaced" for _, _, k in world2.notices),
         "T8 successor notified; departed (ended) holder is not",
     )
 
@@ -409,26 +682,22 @@ def _manual_set_cases() -> None:
     # T10 — displaces the LIVE holder with both-party notices (§5.4).
     outcome = assignment.set_slot(agent_instance_id="agi-2")
     _check(
-        outcome.get("success") is True and outcome.get("action") == "displaced"
-        and world.holder_agi() == "agi-2",
+        outcome.get("success") is True and outcome.get("action") == "displaced" and world.holder_agi() == "agi-2",
         "T10 manual-set displaces the live holder (action=displaced)",
     )
     _check(
-        ("claude_code", "agi-1", "autonomic-displaced") in world.notices
-        and ("claude_code", "agi-2", "autonomic-new-holder") in world.notices,
+        ("claude_code", "agi-1", "autonomic-displaced") in world.notices and ("claude_code", "agi-2", "autonomic-new-holder") in world.notices,
         "T10 both-party notices: displaced LIVE prior + new holder (§5.4)",
     )
 
     # T10b — fail-fast rejections.
     _check(
-        assignment.set_slot(agent_instance_id="agi-ghost").get("code")
-        == "no_live_provider",
+        assignment.set_slot(agent_instance_id="agi-ghost").get("code") == "no_live_provider",
         "T10b no live provider → no_live_provider (lane-strand guard)",
     )
     world.live_providers.add("agi-unbound")
     _check(
-        assignment.set_slot(agent_instance_id="agi-unbound").get("code")
-        == "not_registered",
+        assignment.set_slot(agent_instance_id="agi-unbound").get("code") == "not_registered",
         "T10c provider without a live registration → not_registered",
     )
 
@@ -499,6 +768,7 @@ def _drain_cases() -> None:
     _register(spy, b)  # held → no drain
     spy.set_slot(agent_instance_id="agi-2")  # live→live displace → no drain
     world3.live_providers.discard("agi-2")
+    world3.mark_dead("agi-2")
     c = world3.add_session("br-3", "agi-3", "sid-3", "2026-07-03T03:00:00")
     _register(spy, c)  # crash_heal → drain
     _check(
@@ -534,14 +804,15 @@ def _paged_drain_case() -> None:
         grace_seconds=30,
         forward_completion=lambda _holder, _row: None,
         serve_window_seconds=900,
-        resubmit_vertex=lambda flow_id, _row: (resubmitted.append(flow_id) or True),
+        resubmit_vertex=lambda flow_id, _row: resubmitted.append(flow_id) or True,
         forward_serve_window_seconds=900,
         forward_attempts_cap=5,
         terminal_gc_after_seconds=172_800,
     )
     drained, remaining = assignment._drain_deferred("paged-smoke")  # noqa: SLF001
     surviving = world.state.rows(
-        INFERENCE_DEFERRED_VERTEX_NAMESPACE, TABLE_INFERENCE_DEFERRED_VERTEX,
+        INFERENCE_DEFERRED_VERTEX_NAMESPACE,
+        TABLE_INFERENCE_DEFERRED_VERTEX,
     )
     _check(
         drained == 210 and remaining == 0 and len(resubmitted) == len(set(resubmitted)) == 210,
@@ -556,6 +827,11 @@ def _paged_drain_case() -> None:
 def main() -> int:
     print("=== sys:autonomic auto-assignment lifecycle smoke ===")
     _trigger1_cases()
+    test_restart_registration_preserves_stored_holder()
+    test_confirmed_dead_holder_crash_heals()
+    test_unknown_holder_presence_is_advisory()
+    _plugin_holder_case()
+    _crash_heal_cas_race_case()
     _trigger2_cases()
     _selection_cases()
     _manual_set_cases()
