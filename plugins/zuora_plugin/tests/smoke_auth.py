@@ -36,7 +36,7 @@ import httpx
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "zuora_plugin" / "src"))
 
-from smoke_request import CredentialEncodingTests, RequestTests  # noqa: E402
+from smoke_request import RequestTests  # noqa: E402
 from zuora_plugin.app_config import AppConfigError, AppConfigLoader  # noqa: E402
 from zuora_plugin.http_client import ZuoraAuthError, ZuoraClient  # noqa: E402
 from zuora_plugin.plugin import ZuoraPlugin  # noqa: E402
@@ -186,12 +186,7 @@ def main() -> int:
     test_401_triggers_one_refetch_and_retry()
     test_failed_token_mint_raises()
     test_edge_parity()
-    request_suite = unittest.TestSuite(
-        (
-            unittest.defaultTestLoader.loadTestsFromTestCase(RequestTests),
-            unittest.defaultTestLoader.loadTestsFromTestCase(CredentialEncodingTests),
-        )
-    )
+    request_suite = unittest.TestSuite((unittest.defaultTestLoader.loadTestsFromTestCase(RequestTests),))
     request_result = unittest.TextTestRunner(verbosity=2).run(request_suite)
     print()
     print(f"Results: {_passed} passed, {len(_failed)} failed")

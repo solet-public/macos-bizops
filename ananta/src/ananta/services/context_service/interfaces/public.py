@@ -23,6 +23,7 @@ from ananta.core.actions.action_metadata import (
 )
 from ananta.core.domain.enums import ProcessorPolicyCategory
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.async_job_manager import registered_job_return_schema
 
 
 class ContextServiceAPI(ABC):
@@ -34,6 +35,7 @@ class ContextServiceAPI(ABC):
     """
 
     @service_interface_process(
+        is_async=True,
         name="assemble_agent_context",
         work_count_impact=0,  # Non-terminal: the agent uses the briefing to act next.
         provider="context_service",
@@ -50,91 +52,64 @@ class ContextServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "context_id": ParameterMetadata(
-                description=(
-                    "Optional platform-managed context stream id. When omitted, "
-                    "the platform resolves the context per the active mode."
-                ),
+                description=("Optional platform-managed context stream id. When omitted, the platform resolves the context per the active mode."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "budget": ParameterMetadata(
-                description=(
-                    "Optional cap on the number of context blocks included. A "
-                    "briefing service, not a prompt shrinker: when omitted, EVERY "
-                    "block is included (nothing is silently trimmed). When supplied, "
-                    "at most this many blocks are retained and the manifest records "
-                    "how many were dropped."
-                ),
+                description=("Optional cap on the number of context blocks included. A briefing service, not a prompt shrinker: when omitted, EVERY block is included (nothing is silently trimmed). When supplied, at most this many blocks are retained and the manifest records how many were dropped."),
                 required=False,
                 type=ParameterType.INTEGER,
             ),
             "requested_bundles": ParameterMetadata(
-                description=(
-                    "Optional list of bundle names to include (process_catalog, "
-                    "plan_state, guidance, frame, conversation, answer_contract, "
-                    "other). When omitted, every bundle is returned."
-                ),
+                description=("Optional list of bundle names to include (process_catalog, plan_state, guidance, frame, conversation, answer_contract, other). When omitted, every bundle is returned."),
                 required=False,
                 type=ParameterType.LIST,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=(
-                "Structured agent-context briefing: named bundles of context blocks "
-                "with provenance, the answer contract, available process contracts, a "
-                "flat provenance list, and an assembly manifest."
-            ),
-            type=ParameterType.OBJECT,
-            properties={
-                "profile": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="The assembly profile name ('agent_context').",
-                    required=True,
-                ),
-                "bundles": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description=(
-                        "Named bundles keyed by name (process_catalog, plan_state, "
-                        "guidance, frame, conversation, answer_contract, other); each "
-                        "value is a list of {content, source_kind, subtype, "
-                        "reasoning_slot, provenance{kind, ref}} items."
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Structured agent-context briefing: named bundles of context blocks with provenance, the answer contract, available process contracts, a flat provenance list, and an assembly manifest."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "profile": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="The assembly profile name ('agent_context').",
+                        required=True,
                     ),
-                    required=True,
-                ),
-                "answer_contract": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description=(
-                        "The decode/answer-spec schema as DATA (a decision spec for "
-                        "the agent, not a token-level cage); null when no schema was "
-                        "produced."
+                    "bundles": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description=("Named bundles keyed by name (process_catalog, plan_state, guidance, frame, conversation, answer_contract, other); each value is a list of {content, source_kind, subtype, reasoning_slot, provenance{kind, ref}} items."),
+                        required=True,
                     ),
-                    required=False,
-                ),
-                "available_contracts": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Process-key strings surfaced in the briefing (from process_catalog provenance).",
-                    required=True,
-                ),
-                "provenance": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Flat provenance rows: {block_id, source_kind, kind, ref} — one per included block.",
-                    required=True,
-                ),
-                "manifest": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description=(
-                        "Assembly manifest: {block_count, bundle_counts, budget, "
-                        "budget_applied, dropped, has_answer_contract}."
+                    "answer_contract": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description=("The decode/answer-spec schema as DATA (a decision spec for the agent, not a token-level cage); null when no schema was produced."),
+                        required=False,
                     ),
-                    required=True,
-                ),
-            },
-            usage_patterns=[
-                "Get grounding (process catalog, plan state, guidance, answer contract) before acting.",
-                "Read provenance to trace each context block back to its source.",
-                "Use available_contracts + answer_contract to construct valid next actions.",
-                "Assemble grounding on a deployment with no local reasoner.",
-            ],
+                    "available_contracts": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Process-key strings surfaced in the briefing (from process_catalog provenance).",
+                        required=True,
+                    ),
+                    "provenance": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Flat provenance rows: {block_id, source_kind, kind, ref} — one per included block.",
+                        required=True,
+                    ),
+                    "manifest": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description=("Assembly manifest: {block_count, bundle_counts, budget, budget_applied, dropped, has_answer_contract}."),
+                        required=True,
+                    ),
+                },
+                usage_patterns=[
+                    "Get grounding (process catalog, plan state, guidance, answer contract) before acting.",
+                    "Read provenance to trace each context block back to its source.",
+                    "Use available_contracts + answer_contract to construct valid next actions.",
+                    "Assemble grounding on a deployment with no local reasoner.",
+                ],
+            )
         ),
         is_enabled=True,
         error_processor_customizations=MergeErrorProcessorCustomizations(),

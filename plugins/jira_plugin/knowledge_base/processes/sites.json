@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::jira_plugin::sites",
+  "display_name": "Jira: Sites",
+  "description": "Site lifecycle operations: list; bind_api_token with site, entry_name, expected_version and optional set_default; set_default with site/expected_version; disconnect with site/expected_version. Every verb accepts site. Disconnect removes local credentials, not the vendor token. Native vault auditing records stores/rotations/deletes; secret history is not returned. history reads non-secret append-only binding events. Failed post-unbind cleanup is visible in credential_cleanup_pending and can be resumed by disconnect at the new version.",
+  "embedding_description": "Connect several Jira Cloud sites with separate vaulted credentials, list and correct bindings, choose a default and disconnect a site. API-token bindings copy a vault-referenced address-book entry. Version checks prevent stale binding changes; the original legacy site remains available.",
+  "result_processor_customizations": {
+    "action_label": "Jira sites",
+    "result_type": "jira_sites_result",
+    "result_description": "Site index/default/version, consent URL, or pending status. No tokens or client secrets.",
+    "presentation_guidance": "Report the selected site and binding outcome. A consent URL means pending consent, not connected."
+  },
+  "error_processor_customizations": {
+    "action_context": "Jira sites",
+    "error_interpretation": "stale_binding requires a fresh index version; oauth_state requires fresh consent; oauth_resources means the site is not granted; vault_error means persistence failed.",
+    "recovery_guidance": "Read current site state, correct configuration, or restart consent as indicated. Never expose credentials.",
+    "retryable": false
+  }
+}

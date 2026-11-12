@@ -1,7 +1,7 @@
 {
   "process_key": "service_interface::knowledge_service::search_planning_references",
   "display_name": "Search Planning References",
-  "description": "Search for planning-scoped knowledge base articles: reference plans, process contracts, and workflow patterns. Used to ground plan creation and single-step routing decisions.",
+  "description": "Search for planning-scoped knowledge base articles: reference plans, process contracts, and workflow patterns. Used to ground plan creation and single-step routing decisions. Registered calls return a queued job_id/status receipt. Read that exact job with service_interface::job_service::get_job until terminal; job.result contains the complete operation result and job.error retains any failure. In-process calls return the complete result synchronously.",
   "embedding_description": "Semantic search restricted to planning-scoped knowledge: reference plans, process contracts, work-breakdown templates, and workflow patterns. Returns articles that ground how to author a plan or route a single planning step. Use during plan creation or step routing, as opposed to general documentation or capability lookup.",
   "result_processor_customizations": {
     "action_label": "planning references retrieved",

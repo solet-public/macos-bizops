@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::g_suite_plugin::slides_presentations_create",
+  "display_name": "Slides Presentations Create",
+  "description": "slides.presentations.create: POST v1/presentations. Creates a blank presentation using the title given in the request. If a presentationId is provided, it is used as the ID of the new presentation. Otherwise, a new ID is generated. Other fields in the request, including any provided content, are ignored. Returns the created presentation. Body: vendor Presentation JSON, checked against the pinned discovery schema. Runs as a background job; completion preserves the vendor response and names the selected account. key, access_token and oauth_token are refused: the connected account authenticates. Parameters use exact vendor names. See editors_api_coverage.md for scopes, bodies and lifecycle.",
+  "embedding_description": "Use Slides Presentations Create to creates a blank presentation using the title given in the request in Google Slides, as the selected connected Google account (POST v1/presentations). Send the vendor Presentation body; it is checked against Google's schema. Returns Google's full response.",
+  "result_processor_customizations": {
+    "action_label": "Slides Presentations Create queued",
+    "result_type": "g_suite_slides_presentations_create_result",
+    "result_description": "Job queued; completion includes account, method, full vendor response and response headers.",
+    "presentation_guidance": "Show the account that answered and the identifiers the caller needs next.",
+    "output_action_guidance": "Return one short message through the active IO plugin."
+  },
+  "error_processor_customizations": {
+    "action_context": "Slides Presentations Create",
+    "error_interpretation": "gsuite.invalid_params names the argument or body field and the vendor rule it broke, including refused key/access_token/oauth_token; gsuite.unknown_account names connected accounts; gsuite.missing_scope requires reconnect; gsuite.auth_expired includes Testing-mode renewal guidance; gsuite.permission_denied, gsuite.not_found and gsuite.rate_limited preserve vendor messages.",
+    "recovery_guidance": "Correct the named vendor field, choose a connected account, or reconnect with start_interface and connect_account to approve missing scopes. Retry rate limits later."
+  }
+}

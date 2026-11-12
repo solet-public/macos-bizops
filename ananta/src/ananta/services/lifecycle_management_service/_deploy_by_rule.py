@@ -107,7 +107,22 @@ def bridge_swap_status(payload: Row) -> Row:
 
 
 def process(p: Ports, args: argparse.Namespace, key: str, values: Row) -> Row:
-    payload = json.loads(p.command([args.bridge, "call", key, json.dumps(values)]))
+    """Await admitted jobs and restore their original action result envelope.
+
+    The piped CLI returns only admission unless --wait is explicit. With it,
+    synchronous keys retain their outer envelope, while jobs return the exact
+    get_job record with the original action response under result. A failed
+    CLI wait leaves the job running or terminal; callers retain its diagnostics
+    through the existing advisory/reconciliation paths, without replaying APPLY.
+    """
+    try:
+        payload = json.loads(p.command([args.bridge, "call", key, json.dumps(values), "--wait"]))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise ValueError(f"bridge_call_unresolved: {error}; stdout={error.stdout!r}; stderr={error.stderr!r}") from error
+    if "id" in payload:
+        if payload.get("status") != "completed" or payload.get("error") or not isinstance(payload.get("result"), dict):
+            raise ValueError(f"bridge_job_unresolved: {payload}")
+        payload = {"status": "completed", "result": payload["result"]}
     return bridge_swap_status(payload) if key == SWAP else bridge_data(payload)
 
 
@@ -284,17 +299,49 @@ def record(p: Ports, args: argparse.Namespace, target: str, proof: Row, notes: l
     return {"decision": "deployed", "measurement_id": observed["measurement_id"]}
 
 
-def notify_main(p: Ports, args: argparse.Namespace, verified: Row, notes: list[str]) -> Row:
-    """Attempt one advisory notice after verified record readback; never retry APPLY.
+def _bounded(value: Any, limit: int = 240) -> str | None:
+    """Keep exception notices useful without forwarding unbounded diagnostics."""
+    if value is None:
+        return None
+    text = str(value)
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
 
-    A receipt is queued delivery, not model acceptance. The measurement key
-    identifies duplicate notices; reversal is another verified measurement.
+
+def notify_main(p: Ports, args: argparse.Namespace, terminal: Row, notes: list[str]) -> Row:
+    """Attempt one advisory exception notice for a non-success terminal outcome.
+
+    A receipt is queued delivery, not model acceptance. The exception identity
+    is stable for the same invocation identity; no deployment effect is retried.
     """
-    notice_key = hashlib.sha256(json.dumps([args.solet_name, verified["measurement_id"]]).encode()).hexdigest()
+    decision = terminal.get("decision")
+    notice_key = hashlib.sha256(
+        json.dumps(
+            [
+                args.solet_name,
+                args.trigger,
+                decision,
+                terminal.get("target"),
+                terminal.get("release"),
+                terminal.get("measurement_id"),
+            ],
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
     recipient = f"{args.solet_name.title()}-Main"
     notice: Row = {"notice_key": notice_key, "recipient": recipient, "status": "uncertain", "message_id": None}
-    content = {key: verified[key] for key in ("target", "release", "measurement_id", "decision")}
-    content.update(solet=args.solet_name, notice_key=notice_key, duplicate_semantics="Repeated notices with this key refer to the same deployment.")
+    content = {
+        "solet": args.solet_name,
+        "outcome": decision,
+        "decision": decision,
+        "trigger": args.trigger,
+        "target": terminal.get("target"),
+        "release": terminal.get("release"),
+        "measurement_id": terminal.get("measurement_id"),
+        "error": _bounded(terminal.get("error")),
+        "advisories": [_bounded(note) for note in notes[:8]],
+        "notice_key": notice_key,
+        "duplicate_semantics": "Repeated exception notices with this key refer to the same terminal outcome.",
+    }
     try:
         receipt = process(p, args, NOTICE, {"name": recipient, "content": json.dumps(content, sort_keys=True)})
         message_id = receipt.get("message_id")
@@ -305,6 +352,14 @@ def notify_main(p: Ports, args: argparse.Namespace, verified: Row, notes: list[s
         notice["advisory"] = f"notice_delivery_uncertain:{type(error).__name__}:{error}"
         notes.append(notice["advisory"])
     return notice
+
+
+def terminal_notice(p: Ports, args: argparse.Namespace, terminal: Row, notes: list[str]) -> Row:
+    """Attach one notice only to failures and deferred terminal holds."""
+    decision = terminal.get("decision")
+    if decision == "failed" or (isinstance(decision, str) and decision.startswith("deferred_")):
+        return {**terminal, "notice": notify_main(p, args, terminal, notes)}
+    return terminal
 
 
 def selected(p: Ports, args: argparse.Namespace, target: str, notes: list[str]) -> tuple[Row, list[str]]:
@@ -327,10 +382,12 @@ def deploy(p: Ports, args: argparse.Namespace) -> Row:
     try:
         with p.lock(args.app_home / "data/runtime/deploy-by-rule.lock") as acquired:
             if not acquired:
-                return {**result, "decision": "deferred_lock"}
-            return {**result, **execute(p, args, notes)}
+                terminal = {**result, "decision": "deferred_lock"}
+            else:
+                terminal = {**result, **execute(p, args, notes)}
     except (OSError, ValueError, KeyError, TypeError, StopIteration, subprocess.SubprocessError) as error:
-        return {**result, "decision": "failed", "error": str(error)}
+        terminal = {**result, "decision": "failed", "error": str(error)}
+    return terminal_notice(p, args, terminal, notes)
 
 
 def execute(p: Ports, args: argparse.Namespace, notes: list[str]) -> Row:
@@ -360,7 +417,7 @@ def execute(p: Ports, args: argparse.Namespace, notes: list[str]) -> Row:
     if git(p, args, "rev-parse", "--verify", "master^{commit}") != target:
         notes.append("master_advanced")
     verified = {**result, **proof, **record(p, args, target, proof, notes)}
-    return {**verified, "notice": notify_main(p, args, verified, notes)}
+    return verified
 
 
 def main(argv: list[str] | None = None) -> int:

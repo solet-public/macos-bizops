@@ -11,6 +11,7 @@ import sys
 import tempfile
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 _PACKAGE_ROOT = Path(
@@ -62,6 +63,7 @@ from solet_manager.models import (  # noqa: E402
     CommandResult,
     ExitCode,
     InstanceRecord,
+    JsonValue,
 )
 from solet_manager.paths import ManagerPaths  # noqa: E402
 from solet_manager.plan_builder import remediation_operations  # noqa: E402
@@ -132,7 +134,7 @@ _RECONCILIATION_PUBLIC_ENVELOPES = {
 
 def _check(condition: object, label: str) -> None:
     global _CHECKS
-    _CHECKS += 1
+    _CHECKS += 1  # pyright: ignore[reportConstantRedefinition] -- Mutable smoke counter; preserve the fixture API.
     if not condition:
         raise AssertionError(label)
 
@@ -191,11 +193,12 @@ def _tagless_seed_lock(
 
 
 def _decision_precedence_is_correct(config: CreateConfig) -> bool:
-    return all((
-        config.decisions
-        == {"execution_topology": "solo", "coding_agents": ["claude_code", "codex"]},
-        config.decision_sources == {"execution_topology": "config", "coding_agents": "flag"},
-    ))
+    return all(
+        (
+            config.decisions == {"execution_topology": "solo", "coding_agents": ["claude_code", "codex"]},
+            config.decision_sources == {"execution_topology": "config", "coding_agents": "flag"},
+        )
+    )
 
 
 def _lifecycle_probe_filter_is_correct(bundle: ContractBundle) -> bool:
@@ -209,24 +212,19 @@ def _lifecycle_probe_filter_is_correct(bundle: ContractBundle) -> bool:
         {"setup_profile": "macos-bizops", "coding_agents": ["codex"]},
         ("router_ready", "peer_identity_valid"),
     )
-    return all((
-        free == ("peer_identity_valid",),
-        business_profile == ("router_ready", "peer_identity_valid"),
-    ))
+    return all(
+        (
+            free == ("peer_identity_valid",),
+            business_profile == ("router_ready", "peer_identity_valid"),
+        )
+    )
 
 
 def _static_prompt_blocks(
     preview: CommandResult,
     prompts: object,
 ) -> bool:
-    return bool(
-        preview.error_kind == "decisions_required"
-        and isinstance(preview.data.get("approval_fingerprint"), str)
-        and isinstance(prompts, list)
-        and prompts
-        and isinstance(prompts[0], dict)
-        and prompts[0].get("id") == "inference_implementation"
-    )
+    return bool(preview.error_kind == "decisions_required" and isinstance(preview.data.get("approval_fingerprint"), str) and isinstance(prompts, list) and prompts and isinstance(prompts[0], dict) and prompts[0].get("id") == "inference_implementation")
 
 
 def _flow_only_change_alters_plan(
@@ -235,11 +233,13 @@ def _flow_only_change_alters_plan(
 ) -> bool:
     base_ids = {operation.operation_id for operation in base.operations}
     changed_ids = {operation.operation_id for operation in changed.operations}
-    return all((
-        "install_shell_integration" in base_ids,
-        "build_instance_environment" in base_ids,
-        "install_shell_integration" not in changed_ids,
-    ))
+    return all(
+        (
+            "install_shell_integration" in base_ids,
+            "build_instance_environment" in base_ids,
+            "install_shell_integration" not in changed_ids,
+        )
+    )
 
 
 def _tree_paths(root: Path) -> list[str]:
@@ -282,9 +282,7 @@ def _write_health_fixture(target: Path, *, status: str, exit_code: int = 0) -> N
     executable = target / ".venv/bin/solet-bridge"
     executable.parent.mkdir(parents=True)
     executable.write_text(
-        "#!/bin/sh\n"
-        f"printf '%s\\n' '{{\"status\":\"{status}\"}}'\n"
-        f"exit {exit_code}\n",
+        f"#!/bin/sh\nprintf '%s\\n' '{{\"status\":\"{status}\"}}'\nexit {exit_code}\n",
         encoding="utf-8",
     )
     executable.chmod(0o755)
@@ -338,7 +336,7 @@ def _reconciliation(result: CommandResult | None) -> dict[str, object]:
     if result is None:
         return {}
     value = result.data.get("reconciliation")
-    return value if isinstance(value, dict) else {}
+    return cast(dict[str, object], value) if isinstance(value, dict) else {}
 
 
 def _prepare_reconciliation_runtime(target: Path, control: str) -> None:
@@ -377,11 +375,13 @@ def _check_reconciliation_fields(
     reconciliation = _reconciliation(result)
     expected = _RECONCILIATION_EXPECTED[control]
     _check(
-        all((
-            reconciliation.get("classification") == expected[0],
-            reconciliation.get("agreement") is expected[1],
-            reconciliation.get("wrong_side") == expected[2],
-        )),
+        all(
+            (
+                reconciliation.get("classification") == expected[0],
+                reconciliation.get("agreement") is expected[1],
+                reconciliation.get("wrong_side") == expected[2],
+            )
+        ),
         f"{control} identifies agreement and the wrong side; result={result}",
     )
     next_action = reconciliation.get("safe_next_action")
@@ -404,11 +404,13 @@ def _check_reconciliation_public_envelope(
     if public_envelope is None or result is None:
         return
     _check(
-        all((
-            result.status == public_envelope[0],
-            result.exit_code is public_envelope[1],
-            result.error_kind == public_envelope[2],
-        )),
+        all(
+            (
+                result.status == public_envelope[0],
+                result.exit_code is public_envelope[1],
+                result.error_kind == public_envelope[2],
+            )
+        ),
         f"{control} public envelope refuses false green; result={result}",
     )
 
@@ -485,9 +487,7 @@ def _provisional_manager_record_fixture(root: Path) -> tuple[ManagerPaths, str, 
     paths = ManagerPaths.resolve(environ={}, home=subject_home, explicit_home=manager_home)
     transaction = _fixture_transaction(name=name, target=target)
     write_transaction(paths.transaction_path(name), transaction)
-    InstanceRegistry(paths.registry_path).add(
-        _provisional_instance_record(transaction, subject_home)
-    )
+    InstanceRegistry(paths.registry_path).add(_provisional_instance_record(transaction, subject_home))
     return paths, name, transaction
 
 
@@ -522,8 +522,7 @@ def _assert_provisional_status(status: CommandResult, name: str) -> None:
 
 def _assert_provisional_doctor(doctor: CommandResult, name: str) -> None:
     _check(
-        (doctor.status, doctor.error_kind, doctor.repair)
-        == ("awaiting_user", "instance_setup_incomplete", f"Resume with: solet create {name}"),
+        (doctor.status, doctor.error_kind, doctor.repair) == ("awaiting_user", "instance_setup_incomplete", f"Resume with: solet create {name}"),
         "doctor refuses to represent setup-incomplete materialization as verified",
     )
 
@@ -534,9 +533,7 @@ def _assert_provisional_listing(
     transaction: Transaction,
 ) -> None:
     _check(
-        isinstance(instances, list)
-        and (len(instances), instances[0]["input_fingerprint"], instances[0]["expected_router_name"])
-        == (1, transaction.input_fingerprint, name),
+        isinstance(instances, list) and (len(instances), instances[0]["input_fingerprint"], instances[0]["expected_router_name"]) == (1, transaction.input_fingerprint, name),
         "list retains the transaction fingerprint and expected router identity",
     )
 
@@ -552,23 +549,13 @@ def _required_help_is_present(help_text: str) -> bool:
 def _assert_seedless_diagnostic_matches_list_seeds(unavailable: CommandResult) -> None:
     seedless_error: SourceError | None = None
     try:
-        seedless_path = cli_commands._resolve_seed_lock(
-            build_parser().parse_args(["create", "sample"])
-        )
+        seedless_path = cli_commands._resolve_seed_lock(build_parser().parse_args(["create", "sample"]))
         load_seed_lock(seedless_path)
     except SourceError as exc:
         seedless_error = exc
     _check(
-        seedless_error is not None
-        and str(seedless_error) == unavailable.message
-        and seedless_error.repair == unavailable.repair
-        and unavailable.repair is not None
-        and "solet --seed-lock <path> create <name>" in unavailable.repair,
-        "seedless create and list-seeds share one actionable missing-seed "
-        f"diagnostic; list-seeds={unavailable.message!r}, "
-        f"create={None if seedless_error is None else str(seedless_error)!r}, "
-        f"list-repair={unavailable.repair!r}, "
-        f"create-repair={None if seedless_error is None else seedless_error.repair!r}",
+        seedless_error is not None and str(seedless_error) == unavailable.message and seedless_error.repair == unavailable.repair and unavailable.repair is not None and "solet --seed-lock <path> create <name>" in unavailable.repair,
+        f"seedless create and list-seeds share one actionable missing-seed diagnostic; list-seeds={unavailable.message!r}, create={None if seedless_error is None else str(seedless_error)!r}, list-repair={unavailable.repair!r}, create-repair={None if seedless_error is None else seedless_error.repair!r}",
     )
 
 
@@ -595,9 +582,7 @@ def _assert_empty_target_conflict_is_actionable(
         and unmanaged_error.repair is not None
         and f"rmdir -- {config.target}" in unmanaged_error.repair
         and "rerun the same create command" in unmanaged_error.repair,
-        "empty unmanaged target refusal states expected, found, and executable "
-        f"recovery; message={None if unmanaged_error is None else str(unmanaged_error)!r}, "
-        f"repair={None if unmanaged_error is None else unmanaged_error.repair!r}",
+        f"empty unmanaged target refusal states expected, found, and executable recovery; message={None if unmanaged_error is None else str(unmanaged_error)!r}, repair={None if unmanaged_error is None else unmanaged_error.repair!r}",
     )
 
 
@@ -623,11 +608,13 @@ def _named_seed_resolution_checks(root: Path) -> None:
         )
         listing = cli_commands.run_list_seeds_command()
         _check(
-            all((
-                listing.status == "available",
-                listing.data["seeds"] == [{"name": "macos-samantha", "profile": "macos-samantha"}],
-                listing.data["inventory"] == "live tap view",
-            )),
+            all(
+                (
+                    listing.status == "available",
+                    listing.data["seeds"] == [{"name": "macos-samantha", "profile": "macos-samantha"}],
+                    listing.data["inventory"] == "live tap view",
+                )
+            ),
             "list-seeds reports each valid named seed as a live tap view",
         )
         malformed_lock = seed_root / "malformed-seed" / "seed.lock.json"
@@ -635,8 +622,7 @@ def _named_seed_resolution_checks(root: Path) -> None:
         malformed_lock.write_text("{}", encoding="utf-8")
         listing = cli_commands.run_list_seeds_command()
         _check(
-            listing.data["invalid_seeds"]
-            == [{"name": "malformed-seed", "error": "seed lock fields differ from v1; missing=['commit', 'profile', 'release_tag', 'repository', 'schema_version', 'tree_hash'], unknown=[]"}],
+            listing.data["invalid_seeds"] == [{"name": "malformed-seed", "error": "seed lock fields differ from v1; missing=['commit', 'profile', 'release_tag', 'repository', 'schema_version', 'tree_hash'], unknown=[]"}],
             "list-seeds reports a malformed entry without crashing",
         )
         _raises(
@@ -665,11 +651,13 @@ def _named_seed_resolution_checks(root: Path) -> None:
     with patch.object(cli_commands.sys, "prefix", str(absent_prefix)):
         unavailable = cli_commands.run_list_seeds_command()
         _check(
-            all((
-                unavailable.status == "unavailable",
-                unavailable.exit_code == ExitCode.OK,
-                unavailable.message.startswith("no seed set available"),
-            )),
+            all(
+                (
+                    unavailable.status == "unavailable",
+                    unavailable.exit_code == ExitCode.OK,
+                    unavailable.message.startswith("no seed set available"),
+                )
+            ),
             "list-seeds reports an absent seed set without failing",
         )
         _assert_seedless_diagnostic_matches_list_seeds(unavailable)
@@ -685,11 +673,13 @@ def _named_seed_resolution_checks(root: Path) -> None:
     with patch.object(cli_commands.sys, "prefix", str(broken_prefix)):
         unavailable = cli_commands.run_list_seeds_command()
         _check(
-            all((
-                unavailable.status == "unavailable",
-                unavailable.message.startswith("tap not reachable"),
-                "tap appears to have been removed" in unavailable.message,
-            )),
+            all(
+                (
+                    unavailable.status == "unavailable",
+                    unavailable.message.startswith("tap not reachable"),
+                    "tap appears to have been removed" in unavailable.message,
+                )
+            ),
             "list-seeds diagnoses a broken tap symlink without failing",
         )
         _raises(
@@ -723,8 +713,7 @@ def _configuration_and_path_checks(root: Path) -> tuple[Path, ManagerPaths]:
         "repeatable flag decisions override public TOML decisions with source evidence",
     )
     _check(
-        _parse_decisions(["coding_agents=codex", "coding_agents=claude_code"])
-        == {"coding_agents": ["codex", "claude_code"]},
+        _parse_decisions(["coding_agents=codex", "coding_agents=claude_code"]) == {"coding_agents": ["codex", "claude_code"]},
         "repeatable decision flags preserve ordered-multiple selection order",
     )
     _check(
@@ -894,11 +883,13 @@ def _seed_lock_schema_checks(root: Path) -> tuple[Path, Path]:
     )
     additional_seed = load_seed_lock(additional_lock)
     _check(
-        all((
-            additional_seed.repository == "https://github.com/solet-public/macos-samantha.git",
-            additional_seed.profile == "macos-samantha",
-            additional_seed.archive_sha256 is None,
-        )),
+        all(
+            (
+                additional_seed.repository == "https://github.com/solet-public/macos-samantha.git",
+                additional_seed.profile == "macos-samantha",
+                additional_seed.archive_sha256 is None,
+            )
+        ),
         "additional seed locks parse with their declared identity and no payload checksum",
     )
     _check(
@@ -909,11 +900,13 @@ def _seed_lock_schema_checks(root: Path) -> tuple[Path, Path]:
     _tagless_seed_lock(tagless_lock, profile="macos-bizops")
     tagless_seed = load_seed_lock(tagless_lock)
     _check(
-        all((
-            tagless_seed.release_tag is None,
-            tagless_seed.commit == "a" * 40,
-            tagless_seed.tree_hash == "b" * 40,
-        )),
+        all(
+            (
+                tagless_seed.release_tag is None,
+                tagless_seed.commit == "a" * 40,
+                tagless_seed.tree_hash == "b" * 40,
+            )
+        ),
         "schema v2 tagless seed lock parses with its commit and tree identity",
     )
     _check(
@@ -947,12 +940,14 @@ def _tagless_preview_check(
     ).preview(replace(preview_config, name="tagless", target=root / "tagless-target"))
     tagless_actions = tagless_preview.data["manager_actions"]
     _check(
-        all((
-            tagless_preview.status == "preview_ready",
-            tagless_preview.data["source"]["seed_tag"] is None,
-            isinstance(tagless_actions, list),
-            tagless_actions[0]["title"] == f"Materialize locked seed commit:{'a' * 40}",
-        )),
+        all(
+            (
+                tagless_preview.status == "preview_ready",
+                cast(dict[str, JsonValue], tagless_preview.data["source"])["seed_tag"] is None,
+                isinstance(tagless_actions, list),
+                cast(list[dict[str, JsonValue]], tagless_actions)[0]["title"] == f"Materialize locked seed commit:{'a' * 40}",
+            )
+        ),
         "--seed-lock accepts schema v2 without a CLI flag change",
     )
 
@@ -991,7 +986,6 @@ def _preview_and_contract_checks(
             "embeddings_implementation": "lm_studio",
             "inference_implementation": "lm_studio",
             "execution_topology": "solo",
-            "git_mutation_control": "single_session",
             "session_sources": [],
         },
         home=home,
@@ -1043,9 +1037,7 @@ def _flow_plan_change_check(
     shutil.copytree(_CONTRACTS, changed_contracts)
     changed_flow_path = changed_contracts / "macos_setup_flow.json"
     changed_flow = json.loads(changed_flow_path.read_text(encoding="utf-8"))
-    changed_flow["plugins"]["github_midwife_plugin"]["setup_operation_refs"].remove(
-        "install_shell_integration"
-    )
+    changed_flow["plugins"]["github_midwife_plugin"]["setup_operation_refs"].remove("install_shell_integration")
     changed_flow_path.write_text(json.dumps(changed_flow, indent=2), encoding="utf-8")
     changed_bundle = ContractBundle.load(source_revision="a" * 40, directory=changed_contracts)
     changed_plan = build_setup_plan(
@@ -1071,12 +1063,14 @@ def _permission_remediation_plan_checks(
         decisions={"setup_profile": "macos-bizops", "autostart": "enabled"},
     )
     _check(
-        all((
-            len(remediation) == 1,
-            remediation[0].stage_id == "genesis",
-            remediation[0].operation_id == "open_background_items_settings",
-            remediation[0].operation_ref == "macos::settings.background_items",
-        )),
+        all(
+            (
+                len(remediation) == 1,
+                remediation[0].stage_id == "genesis",
+                remediation[0].operation_id == "open_background_items_settings",
+                remediation[0].operation_ref == "macos::settings.background_items",
+            )
+        ),
         "a failed permission probe materializes its closed settings remediation operation",
     )
     _check(
@@ -1104,14 +1098,16 @@ def _preview_create(paths: ManagerPaths, seed_lock: Path, config: CreateConfig) 
     _check(preview.status == "preview_ready", "outer acquisition preview ready")
     _check(preview.data["dry_run_writes"] == 0, "dry-run reports zero writes")
     _check(
-        all((
-            isinstance(preview.data["manager_actions"], list),
-            bool(preview.data["manager_actions"]),
-        )),
+        all(
+            (
+                isinstance(preview.data["manager_actions"], list),
+                bool(preview.data["manager_actions"]),
+            )
+        ),
         "acquisition action is concrete",
     )
     _check(
-        "embedding_model" in preview.data["deferred_setup_decisions"],
+        "embedding_model" in cast(list[str], preview.data["deferred_setup_decisions"]),
         "discovery decision explicitly deferred until target probes",
     )
     _check("approval_fingerprint" in preview.data, "approval fingerprint emitted")
@@ -1175,17 +1171,18 @@ def main() -> int:
         bundle = ContractBundle.load(source_revision="a" * 40, directory=_CONTRACTS)
         _check(bundle.flow_id == "macos.repository_setup", "flow loaded")
         _check(
-            bundle.operations["request_homebrew_install"]["implementation_status"]
-            == "implemented",
+            bundle.operations["request_homebrew_install"]["implementation_status"] == "implemented",
             "Homebrew installation status matches the implemented bootstrap route",
         )
         _check(
-            all((
-                len(bundle.completion_probe_ids) == 28,
-                "instance_environment_dependency_closure_valid" in bundle.completion_probe_ids,
-                "lm_studio_inference_model_indexed" in bundle.completion_probe_ids,
-                "coreai_embedding_request_succeeds" in bundle.completion_probe_ids,
-            )),
+            all(
+                (
+                    len(bundle.completion_probe_ids) == 28,
+                    "instance_environment_dependency_closure_valid" in bundle.completion_probe_ids,
+                    "lm_studio_inference_model_indexed" in bundle.completion_probe_ids,
+                    "coreai_embedding_request_succeeds" in bundle.completion_probe_ids,
+                )
+            ),
             "dependency closure probe is pinned as required completion evidence",
         )
         _check(
@@ -1222,18 +1219,16 @@ def main() -> int:
         _check(_human_render_matches(rendered_human), "human uses same result")
         help_text = build_parser().format_help()
         _check(
-            all((
-                _required_help_is_present(help_text),
-                "list-seeds" in help_text,
-                "--seed-lock" in help_text,
-                "place before `create`" in help_text,
-                build_parser()
-                .parse_args(["--seed-lock", "/fixture/seed.lock.json", "create", "sample"])
-                .seed_lock
-                == Path("/fixture/seed.lock.json"),
-                build_parser().parse_args(["create", "sample", "--seed", "macos-samantha"]).seed
-                == "macos-samantha",
-            )),
+            all(
+                (
+                    _required_help_is_present(help_text),
+                    "list-seeds" in help_text,
+                    "--seed-lock" in help_text,
+                    "place before `create`" in help_text,
+                    build_parser().parse_args(["--seed-lock", "/fixture/seed.lock.json", "create", "sample"]).seed_lock == Path("/fixture/seed.lock.json"),
+                    build_parser().parse_args(["create", "sample", "--seed", "macos-samantha"]).seed == "macos-samantha",
+                )
+            ),
             "public seed controls are discoverable and parse in their supported positions",
         )
         _check(" stop " not in f" {help_text} ", "stop deferred from help")

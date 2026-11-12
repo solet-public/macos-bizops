@@ -6,6 +6,7 @@ import ast
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -47,6 +48,15 @@ from solet_manager.existing_install_inspection import (  # noqa: E402, I001
 from solet_manager.paths import ManagerPaths  # noqa: E402
 from solet_manager.release_lock import SeedLock  # noqa: E402
 from solet_manager._existing_install_inspection_classification import _ROWS  # noqa: E402
+
+
+def _wheel_source(root: Path) -> Path:
+    """Build a real manager wheel from a temporary copy, never in the checkout."""
+    source = root / "solet_cli"
+    source.mkdir()
+    shutil.copy2(_ROOT / "solet_cli" / "pyproject.toml", source / "pyproject.toml")
+    shutil.copytree(_ROOT / "solet_cli" / "src", source / "src")
+    return source
 
 
 def _facts(repository: RepositoryRelation) -> ExistingInstallFacts:
@@ -91,9 +101,7 @@ def _check(
 def _classification_witnesses() -> dict[ExistingInstallClass, ExistingInstallFacts]:
     base = _facts(RepositoryRelation.CANONICAL)
     return {
-        ExistingInstallClass.DEVELOPMENT_CHECKOUT: replace(
-            base, anchor_kind=InspectionAnchorKind.DEVELOPMENT_CHECKOUT, anchor_id="development"
-        ),
+        ExistingInstallClass.DEVELOPMENT_CHECKOUT: replace(base, anchor_kind=InspectionAnchorKind.DEVELOPMENT_CHECKOUT, anchor_id="development"),
         ExistingInstallClass.PROVENANCE_UNAVAILABLE: replace(
             base,
             provenance_condition=ProvenanceCondition.MISSING,
@@ -121,12 +129,8 @@ def _classification_witnesses() -> dict[ExistingInstallClass, ExistingInstallFac
             anchor_id="pre-manager",
             channel_relation=ChannelRelation.DIVERGED,
         ),
-        ExistingInstallClass.BLOCKING_LOCAL_STATE: replace(
-            base, submodules=ObservedPaths(ObservationAvailability.OBSERVED, ("nested",))
-        ),
-        ExistingInstallClass.REVIEWED_HISTORICAL_REPOSITORY: _facts(
-            RepositoryRelation.REVIEWED_HISTORICAL
-        ),
+        ExistingInstallClass.BLOCKING_LOCAL_STATE: replace(base, submodules=ObservedPaths(ObservationAvailability.OBSERVED, ("nested",))),
+        ExistingInstallClass.REVIEWED_HISTORICAL_REPOSITORY: _facts(RepositoryRelation.REVIEWED_HISTORICAL),
         ExistingInstallClass.UNKNOWN_REPOSITORY_CANONICAL_COMMIT: _facts(RepositoryRelation.OTHER),
         # Step 7 section 6.4: row 10 is the real-clone shape -- a mixed tree (genesis rewrites + genesis untracked paths).
         ExistingInstallClass.LOCAL_CHANGES_PRESENT: replace(
@@ -135,16 +139,12 @@ def _classification_witnesses() -> dict[ExistingInstallClass, ExistingInstallFac
             tracked_paths=ObservedPaths(ObservationAvailability.OBSERVED, ("root_manifest.yaml",)),
             untracked_paths=ObservedPaths(ObservationAvailability.OBSERVED, (".gitignore", ".solet/genesis.json")),
         ),
-        ExistingInstallClass.PRE_MANAGER_SEED_CLONE: replace(
-            base, anchor_kind=InspectionAnchorKind.PRE_MANAGER_SEED, anchor_id="pre-manager"
-        ),
+        ExistingInstallClass.PRE_MANAGER_SEED_CLONE: replace(base, anchor_kind=InspectionAnchorKind.PRE_MANAGER_SEED, anchor_id="pre-manager"),
         ExistingInstallClass.CLEAN_FAST_FORWARD_SEED_CLONE: base,
     }
 
 
-def _result_with_inventory(
-    check: InspectionCheck, paths: ManagerPaths
-) -> ExistingInstallInspectionResult:
+def _result_with_inventory(check: InspectionCheck, paths: ManagerPaths) -> ExistingInstallInspectionResult:
     facts = _facts(RepositoryRelation.CANONICAL)
     identity = TargetFilesystemIdentity(Path("/fixed"), Path("/fixed"), 1, 2, 3, 4)
     channel = ChannelInspectionIdentity(
@@ -180,9 +180,7 @@ def _result_with_inventory(
 
 
 def _canonical_result(result: ExistingInstallInspectionResult) -> bytes:
-    return json.dumps(
-        result.to_command_result().to_dict(), sort_keys=True, separators=(",", ":")
-    ).encode()
+    return json.dumps(result.to_command_result().to_dict(), sort_keys=True, separators=(",", ":")).encode()
 
 
 def _assert_fixture_repositories() -> None:
@@ -259,9 +257,7 @@ def _fixture_metadata() -> InstalledInspectionMetadata:
     )
     return InstalledInspectionMetadata(
         identity,
-        SeedLock(
-            "https://example.invalid/repository.git", "r1", "a" * 40, "b" * 40, None, "profile"
-        ),
+        SeedLock("https://example.invalid/repository.git", "r1", "a" * 40, "b" * 40, None, "profile"),
         (),
     )
 
@@ -269,10 +265,7 @@ def _fixture_metadata() -> InstalledInspectionMetadata:
 def _assert_classifications() -> None:
     witnesses = _classification_witnesses()
     assert len(witnesses) == 12
-    classified = {
-        kind: classify_existing_install(facts).installation_class
-        for kind, facts in witnesses.items()
-    }
+    classified = {kind: classify_existing_install(facts).installation_class for kind, facts in witnesses.items()}
     assert classified == {kind: kind for kind in ExistingInstallClass}
     assert len(_ROWS) == 12
     for kind, facts in witnesses.items():
@@ -315,14 +308,8 @@ def _assert_row_four_and_nine(witnesses: dict[ExistingInstallClass, ExistingInst
     # R6's explicit row-4/row-9 discriminator changes only repository relation.
     row4 = witnesses[ExistingInstallClass.INSPECTION_INCOMPLETE]
     row9 = replace(row4, repository_relation=RepositoryRelation.OTHER)
-    assert (
-        classify_existing_install(row4).installation_class
-        is ExistingInstallClass.INSPECTION_INCOMPLETE
-    )
-    assert (
-        classify_existing_install(row9).installation_class
-        is ExistingInstallClass.UNKNOWN_REPOSITORY_CANONICAL_COMMIT
-    )
+    assert classify_existing_install(row4).installation_class is ExistingInstallClass.INSPECTION_INCOMPLETE
+    assert classify_existing_install(row9).installation_class is ExistingInstallClass.UNKNOWN_REPOSITORY_CANONICAL_COMMIT
 
 
 def _assert_pairwise_rows(witnesses: dict[ExistingInstallClass, ExistingInstallFacts]) -> None:
@@ -346,18 +333,12 @@ def _assert_call_boundary() -> None:
     production = _ROOT / "solet_cli" / "src" / "solet_manager" / "existing_install_inspection.py"
     tree = ast.parse(production.read_text(encoding="utf-8"))
     banned = {"parse_seed_lock", "load_seed_lock", "read_maintenance_inventory"}
-    calls = {
-        node.func.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
+    calls = {node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
     assert not calls & banned
 
 
 def _assert_exit_precedence() -> None:
-    attention = ExistingInstallClassification(
-        ExistingInstallClass.INSPECTION_INCOMPLETE, (), "diagnostic_only", "blocked", True
-    )
+    attention = ExistingInstallClassification(ExistingInstallClass.INSPECTION_INCOMPLETE, (), "diagnostic_only", "blocked", True)
     complete = ExistingInstallClassification(
         ExistingInstallClass.CLEAN_FAST_FORWARD_SEED_CLONE,
         (),
@@ -379,18 +360,12 @@ def _assert_exit_precedence() -> None:
 def _assert_inventory_invariance() -> None:
     with tempfile.TemporaryDirectory() as directory:
         base = Path(directory)
-        paths = {
-            name: ManagerPaths(base / name, base / "state", base / "cache")
-            for name in ("valid", "malformed", "absent")
-        }
+        paths = {name: ManagerPaths(base / name, base / "state", base / "cache") for name in ("valid", "malformed", "absent")}
         paths["valid"].config_dir.mkdir()
         paths["valid"].registry_path.write_bytes(b'{"schema_version":2,"records":[]}')
         paths["malformed"].config_dir.mkdir()
         paths["malformed"].registry_path.write_bytes(b"not-json")
-        checks = {
-            name: _inventory_check(path, _ProductionInspectionEffectTracker())
-            for name, path in paths.items()
-        }
+        checks = {name: _inventory_check(path, _ProductionInspectionEffectTracker()) for name, path in paths.items()}
         assert checks["valid"].status is InspectionStatus.VERIFIED
         assert checks["malformed"].status is InspectionStatus.FAILED
         assert checks["absent"].status is InspectionStatus.MISSING
@@ -418,7 +393,7 @@ def _assert_installed_wheel_record_proof() -> None:
                 "--no-deps",
                 "--wheel-dir",
                 str(wheel_dir),
-                str(_ROOT / "solet_cli"),
+                str(_wheel_source(root)),
             ),
             check=True,
             capture_output=True,
@@ -442,12 +417,7 @@ def _assert_installed_wheel_record_proof() -> None:
                 capture_output=True,
                 text=True,
             )
-            resource = (
-                site
-                / "solet_manager"
-                / "released_metadata"
-                / "existing_install_inspection_catalog.v1.json"
-            )
+            resource = site / "solet_manager" / "released_metadata" / "existing_install_inspection_catalog.v1.json"
             record = next(site.glob("solet_cli-*.dist-info/RECORD"))
             expected_error = ""
             if case == "tampered":
@@ -483,7 +453,7 @@ def _assert_released_pre_manager_anchor_proof() -> None:
                 "--no-deps",
                 "--wheel-dir",
                 str(wheel_dir),
-                str(_ROOT / "solet_cli"),
+                str(_wheel_source(root)),
             ),
             check=True,
             capture_output=True,
@@ -531,19 +501,9 @@ def _assert_released_pre_manager_anchor_proof() -> None:
 
 
 def _installed_seed_lock_bytes() -> bytes:
-    path = (
-        _ROOT
-        / "solet_cli"
-        / "tests"
-        / "fixtures"
-        / "existing_install_inspection"
-        / "installed_seed.lock.json"
-    )
+    path = _ROOT / "solet_cli" / "tests" / "fixtures" / "existing_install_inspection" / "installed_seed.lock.json"
     value = path.read_bytes()
-    assert (
-        hashlib.sha256(value).hexdigest()
-        == "ed6f512cdf25de483d5fb3b090f2a133e324214a8d95e2c7cf9bd9b024f464ab"
-    )
+    assert hashlib.sha256(value).hexdigest() == "ed6f512cdf25de483d5fb3b090f2a133e324214a8d95e2c7cf9bd9b024f464ab"
     return value
 
 
@@ -551,9 +511,7 @@ def _create_released_anchor_target(target: Path) -> None:
     target.mkdir()
     subprocess.run(("git", "init", "--quiet", str(target)), check=True)
     subprocess.run(("git", "-C", str(target), "config", "user.name", "Inspection"), check=True)
-    subprocess.run(
-        ("git", "-C", str(target), "config", "user.email", "inspection@example.invalid"), check=True
-    )
+    subprocess.run(("git", "-C", str(target), "config", "user.email", "inspection@example.invalid"), check=True)
     provenance = {
         "ancestry": [],
         "bundle": {"name": "macos-bizops", "platform": "local"},
@@ -566,9 +524,7 @@ def _create_released_anchor_target(target: Path) -> None:
         "source_commit": "a" * 40,
         "source_date": "2026-09-16T00:00:00+00:00",
     }
-    (target / "PROVENANCE.json").write_text(
-        json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    (target / "PROVENANCE.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     subprocess.run(("git", "-C", str(target), "add", "PROVENANCE.json"), check=True)
     environment = dict(os.environ)
     environment.update(
@@ -593,9 +549,7 @@ def _create_released_anchor_target(target: Path) -> None:
             "Minted-At: 2026-09-16T00:00:00+00:00",
         )
     )
-    subprocess.run(
-        ("git", "-C", str(target), "commit", "--quiet", "-m", message), check=True, env=environment
-    )
+    subprocess.run(("git", "-C", str(target), "commit", "--quiet", "-m", message), check=True, env=environment)
     subprocess.run(
         (
             "git",
@@ -625,31 +579,18 @@ def _run_installed_anchor_inspection(site: Path, target: Path) -> subprocess.Com
             "import sys",
             "from pathlib import Path",
             f"sys.prefix = {str(site)!r}",
-            (
-                "from solet_manager.existing_install_inspection import "
-                "ExistingInstallInspectionRequest, inspect_existing_install, "
-                "load_installed_inspection_metadata"
-            ),
+            ("from solet_manager.existing_install_inspection import ExistingInstallInspectionRequest, inspect_existing_install, load_installed_inspection_metadata"),
             "from solet_manager.paths import ManagerPaths",
             f"target = Path({str(target)!r})",
-            (
-                f"paths = ManagerPaths(Path({str(site / 'manager' / 'config')!r}), "
-                f"Path({str(site / 'manager' / 'state')!r}), "
-                f"Path({str(site / 'manager' / 'cache')!r}))"
-            ),
-            (
-                "result = inspect_existing_install(ExistingInstallInspectionRequest(target, "
-                "'stable', paths), metadata_loader=load_installed_inspection_metadata)"
-            ),
+            (f"paths = ManagerPaths(Path({str(site / 'manager' / 'config')!r}), Path({str(site / 'manager' / 'state')!r}), Path({str(site / 'manager' / 'cache')!r}))"),
+            ("result = inspect_existing_install(ExistingInstallInspectionRequest(target, 'stable', paths), metadata_loader=load_installed_inspection_metadata)"),
             "assert result.facts.anchor_kind.value == 'pre_manager_seed'",
             "assert result.facts.identity_status.value == 'verified'",
             "assert result.classification.installation_class.value == 'pre_manager_seed_clone'",
         )
     )
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join(
-        (str(site), str(_ROOT / "solet_setup_contracts" / "src"))
-    )
+    environment["PYTHONPATH"] = os.pathsep.join((str(site), str(_ROOT / "solet_setup_contracts" / "src")))
     return subprocess.run(
         (sys.executable, "-c", source),
         check=False,
@@ -668,24 +609,11 @@ def _run_installed_wheel_reader(site: Path) -> subprocess.CompletedProcess[str]:
             "class Tracker:",
             "    def record_resource_read(self, value): pass",
             "raw = _package_bytes('existing_install_inspection_catalog.v1.json', Tracker())",
-            "assert hashlib.sha256(raw).hexdigest() == '"
-            + hashlib.sha256(
-                (
-                    _ROOT
-                    / "solet_cli"
-                    / "src"
-                    / "solet_manager"
-                    / "released_metadata"
-                    / "existing_install_inspection_catalog.v1.json"
-                ).read_bytes()
-            ).hexdigest()
-            + "'",
+            "assert hashlib.sha256(raw).hexdigest() == '" + hashlib.sha256((_ROOT / "solet_cli" / "src" / "solet_manager" / "released_metadata" / "existing_install_inspection_catalog.v1.json").read_bytes()).hexdigest() + "'",
         )
     )
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join(
-        (str(site), str(_ROOT / "solet_setup_contracts" / "src"))
-    )
+    environment["PYTHONPATH"] = os.pathsep.join((str(site), str(_ROOT / "solet_setup_contracts" / "src")))
     return subprocess.run(
         (sys.executable, "-c", source),
         check=False,
@@ -696,13 +624,8 @@ def _run_installed_wheel_reader(site: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _normalized_inventory_results(
-    paths: dict[str, ManagerPaths], checks: dict[str, InspectionCheck]
-) -> list[bytes]:
-    results = [
-        _result_with_inventory(checks[name], paths[name])
-        for name in ("valid", "malformed", "absent")
-    ]
+def _normalized_inventory_results(paths: dict[str, ManagerPaths], checks: dict[str, InspectionCheck]) -> list[bytes]:
+    results = [_result_with_inventory(checks[name], paths[name]) for name in ("valid", "malformed", "absent")]
     normalized = []
     for result in results:
         payload = json.loads(_canonical_result(result))

@@ -107,6 +107,11 @@ class _FakeAsyncJobManager:
         return {"action_status": "completed", "data": {"job_id": job_id, "updated": True}}
 
 
+def _mock_client() -> MagicMock:
+    """A mocked transport for the plugin's finish step."""
+    return MagicMock()
+
+
 def _plugin_with_fake_manager() -> tuple[ZuoraPlugin, _FakeAsyncJobManager]:
     plugin = ZuoraPlugin()
     plugin.initialize({})
@@ -199,7 +204,7 @@ def _dispatch_and_get_job_id(plugin: ZuoraPlugin, action_name: str, params: dict
 
 def test_worker_completes_get_object_on_success() -> None:
     plugin, fake_manager = _plugin_with_fake_manager()
-    plugin._client = MagicMock()  # noqa: SLF001
+    plugin._client = _mock_client()  # noqa: SLF001
     job_id = _dispatch_and_get_job_id(plugin, "get_object", {"type": "Account", "id": "2c1x"})
 
     plugin._client.get.return_value = httpx.Response(  # noqa: SLF001
@@ -219,7 +224,7 @@ def test_worker_completes_get_object_on_success() -> None:
 
 def test_worker_completes_create_object_write() -> None:
     plugin, fake_manager = _plugin_with_fake_manager()
-    plugin._client = MagicMock()  # noqa: SLF001
+    plugin._client = _mock_client()  # noqa: SLF001
     job_id = _dispatch_and_get_job_id(
         plugin,
         "create_object",
@@ -243,7 +248,7 @@ def test_worker_completes_create_object_write() -> None:
 
 def test_worker_data_query_writes_tsv_via_export_path_gate() -> None:
     plugin, fake_manager = _plugin_with_fake_manager()
-    plugin._client = MagicMock()  # noqa: SLF001
+    plugin._client = _mock_client()  # noqa: SLF001
     with tempfile.TemporaryDirectory(prefix="zuora_async_smoke_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
         job_id = _dispatch_and_get_job_id(
@@ -272,7 +277,7 @@ def test_worker_data_query_writes_tsv_via_export_path_gate() -> None:
 
 def test_worker_completes_test_connection_on_success() -> None:
     plugin, fake_manager = _plugin_with_fake_manager()
-    plugin._client = MagicMock()  # noqa: SLF001
+    plugin._client = _mock_client()  # noqa: SLF001
     plugin._client._config = MagicMock(base_url="https://tenant.zuora.com", client_id="client-abc")  # noqa: SLF001
     job_id = _dispatch_and_get_job_id(plugin, "test_connection", {})
 
@@ -281,13 +286,13 @@ def test_worker_completes_test_connection_on_success() -> None:
     completed_result = fake_manager.update_calls[-1][1]["result"]
     _assert("test_connection worker returns ok True", completed_result["ok"] is True, str(completed_result))
     _assert("test_connection worker carries base_url", completed_result["base_url"] == "https://tenant.zuora.com")
-    _assert("test_connection worker carries client_id", completed_result["client_id"] == "client-abc")
+    _assert("test_connection worker returns the registered client_id as received", completed_result["client_id"] == "client-abc")
     _assert("worker called ensure_authenticated", plugin._client.ensure_authenticated.called)  # noqa: SLF001
 
 
 def test_worker_completes_job_on_error_topology_safe() -> None:
     plugin, fake_manager = _plugin_with_fake_manager()
-    plugin._client = MagicMock()  # noqa: SLF001
+    plugin._client = _mock_client()  # noqa: SLF001
     job_id = _dispatch_and_get_job_id(plugin, "get_object", {"type": "Account", "id": "2c1x"})
 
     response = httpx.Response(

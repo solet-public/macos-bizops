@@ -45,7 +45,6 @@ from .commerce_fields import (
     SUBSCRIPTION_VERSION,
     V1_HEADERS,
     page_check,
-    payment_secrets,
     segment_check,
     vendor_body,
 )
@@ -68,7 +67,6 @@ ORDER_OPERATIONS: Final[tuple[Operation, ...]] = (
         query_fields=_SUMMARIZE,
         header_fields=IDEMPOTENT_HEADERS,
         body=vendor_body(*_PREVIEW_REQUIRED),
-        secrets=payment_secrets,
         envelope=True,
     ),
     Operation(
@@ -78,7 +76,6 @@ ORDER_OPERATIONS: Final[tuple[Operation, ...]] = (
         query_fields=_SUMMARIZE,
         header_fields=IDEMPOTENT_HEADERS,
         body=vendor_body(*_PREVIEW_REQUIRED),
-        secrets=payment_secrets,
         envelope=True,
     ),
     Operation("list_orders", "GET", "/v1/orders", query_fields=ORDER_LIST_FIELDS, header_fields=V1_HEADERS, query_check=page_check, paging="page_number", envelope=True),
@@ -89,7 +86,6 @@ ORDER_OPERATIONS: Final[tuple[Operation, ...]] = (
         query_fields=_RETURN_IDS,
         header_fields=IDEMPOTENT_HEADERS,
         body=vendor_body(*_ORDER_REQUIRED),
-        secrets=payment_secrets,
         envelope=True,
     ),
     Operation(
@@ -99,7 +95,6 @@ ORDER_OPERATIONS: Final[tuple[Operation, ...]] = (
         query_fields=_RETURN_IDS,
         header_fields=IDEMPOTENT_HEADERS,
         body=vendor_body(*_ORDER_REQUIRED),
-        secrets=payment_secrets,
         envelope=True,
     ),
     Operation("delete_order", "DELETE", "/v1/orders/{order_number}", path_fields=ORDER_NUMBER, header_fields=V1_HEADERS, envelope=True),
@@ -119,7 +114,6 @@ ORDER_OPERATIONS: Final[tuple[Operation, ...]] = (
         path_fields=ORDER_NUMBER,
         header_fields=V1_HEADERS,
         body=vendor_body(*_ORDER_REQUIRED),
-        secrets=payment_secrets,
         envelope=True,
     ),
     Operation("delete_order_async", "DELETE", "/v1/async/orders/{order_number}", path_fields=ORDER_NUMBER, header_fields=IDEMPOTENT_HEADERS, envelope=True),
@@ -196,7 +190,6 @@ SUBSCRIPTION_OPERATIONS: Final[tuple[Operation, ...]] = (
         "/v1/subscriptions/preview",
         header_fields=IDEMPOTENT_HEADERS,
         body=vendor_body(*_SUBSCRIPTION_PREVIEW_REQUIRED),
-        secrets=payment_secrets,
         envelope=True,
     ),
     Operation(
@@ -214,7 +207,6 @@ SUBSCRIPTION_OPERATIONS: Final[tuple[Operation, ...]] = (
         "/v1/subscriptions",
         header_fields=IDEMPOTENT_HEADERS,
         body=vendor_body(*_SUBSCRIPTION_REQUIRED),
-        secrets=payment_secrets,
         envelope=True,
     ),
     Operation(

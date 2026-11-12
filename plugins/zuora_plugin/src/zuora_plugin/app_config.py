@@ -42,7 +42,7 @@ class AppConfigError(RuntimeError):
 class ZuoraTenantConfig:
     """Resolved Zuora tenant identity + credentials.
 
-    ``repr`` redacts the client secret so logging the object never leaks it.
+    ``repr`` never renders the client id or secret, so logging the object never leaks them.
     """
 
     base_url: str
@@ -50,10 +50,8 @@ class ZuoraTenantConfig:
     client_secret: str
 
     def __repr__(self) -> str:
-        return (
-            f"ZuoraTenantConfig(base_url={self.base_url!r}, "
-            f"client_id={self.client_id!r}, client_secret={_SECRET_REDACTION!r})"
-        )
+        # Structural omission: the credential fields are never rendered.
+        return f"ZuoraTenantConfig(base_url={self.base_url!r}, client_id {_SECRET_REDACTION}, client_secret {_SECRET_REDACTION})"
 
 
 class AppConfigLoader:
@@ -110,15 +108,9 @@ class AppConfigLoader:
         if missing:
             raise AppConfigError(
                 ERROR_ADDRESS_BOOK_ENTRY_INCOMPLETE,
-                (
-                    f"Address book entry '{ADDRESS_BOOK_ENTRY_NAME}' is missing "
-                    f"field_type values: {missing}. Register with base_url, "
-                    "client_id, and a client_secret vault-ref."
-                ),
+                (f"Address book entry '{ADDRESS_BOOK_ENTRY_NAME}' is missing field_type values: {missing}. Register with base_url, client_id, and a client_secret vault-ref."),
             )
-        return ZuoraTenantConfig(
-            base_url=base_url.rstrip("/"), client_id=client_id, client_secret=client_secret
-        )
+        return ZuoraTenantConfig(base_url=base_url.rstrip("/"), client_id=client_id, client_secret=client_secret)
 
 
 def _first_value(entries: list[dict[str, Any]], field_type: str) -> str:
@@ -145,6 +137,6 @@ def _missing_entry_message() -> str:
         '"value": "<oauth-client-id>"}},\n'
         f'      {{"field_type": "{ADDRESS_BOOK_FIELD_CLIENT_SECRET}", '
         f'"value": "{secret_reference}"}}\n'
-        '    ]\n'
-        '  }'
+        "    ]\n"
+        "  }"
     )

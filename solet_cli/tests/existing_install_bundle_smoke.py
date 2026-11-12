@@ -228,10 +228,34 @@ def _check_public_later_predecessors(bundle: TransitionBundle) -> None:
 
 
 def _check_shipped_in_clone_artifacts(bundle: Any) -> None:
-    _check({item.artifact_id for item in bundle.managed_artifacts if item.in_target} == {"clone_exclude_block", "fleet_launcher"}, "the current release declares exactly the fleet launcher and the clone-exclude block that ignores it as in-target artifacts (section 6.3)")
-    _check({item.artifact_id for item in bundle.managed_artifacts} == {"instance_launchagent_plist", "shell_startup_block", "user_claude_md_section", "feedback_skill", "clone_exclude_block", "fleet_launcher"}, "shipped artifacts")
-    _check([item.artifact_id for item in bundle.managed_artifacts if item.in_target] == ["clone_exclude_block", "fleet_launcher"], "the clone-exclude block precedes the file it makes ignored, so hydration writes it first")
-    _check(bundle.artifact("fleet_launcher").section_end == "# One function per role the operator chose in Step 4a.", "the fleet launcher is refreshed above the role-function line only")
+    retired = {
+        "retired_controller_claude_launcher",
+        "retired_controller_codex_launcher",
+        "retired_controller_fleet_launcher",
+        "retired_controller_shell_environment",
+    }
+    in_target = [item.artifact_id for item in bundle.managed_artifacts if item.in_target]
+    _check(
+        set(in_target) == {"clone_exclude_block", "fleet_launcher", *retired},
+        "the release declares its clone ignore block, fleet refresh and four removal-only launcher/environment paths",
+    )
+    _check(
+        {item.artifact_id for item in bundle.managed_artifacts}
+        == {
+            "instance_launchagent_plist",
+            "shell_startup_block",
+            "user_claude_md_section",
+            "feedback_skill",
+            "clone_exclude_block",
+            "fleet_launcher",
+            *retired,
+        },
+        "shipped artifacts",
+    )
+    _check(
+        in_target[:2] == ["clone_exclude_block", "fleet_launcher"] and set(in_target[2:]) == retired,
+        "the clone-exclude block precedes all client-file writes",
+    )
 
 
 def _check_shipped_bundle() -> None:

@@ -12,27 +12,32 @@ Run: SOLET_NAME=<name> .venv/bin/python plugins/zuora_plugin/tests/smoke_query_j
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import json
 import sys
-import tempfile
-import unittest
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
-from urllib.parse import quote
+from unittest.mock import NonCallableMagicMock
 
-import httpx
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta/src"))
+import base64  # noqa: E402
+import hashlib  # noqa: E402
+import json  # noqa: E402
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
+from collections.abc import Callable  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
+from urllib.parse import quote  # noqa: E402
+
+import httpx  # noqa: E402
+from ananta.file_locations.containment import PathRefusedError  # noqa: E402
+from ananta.file_locations.resolution import SoletTree  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "zuora_plugin" / "src"))
 
 from zuora_plugin import data_query_actions, typed_verbs  # noqa: E402
 from zuora_plugin.app_config import ZuoraTenantConfig  # noqa: E402
-from zuora_plugin.constants import REQUEST_REDACTION  # noqa: E402
 from zuora_plugin.errors import ZuoraServiceError  # noqa: E402
-from zuora_plugin.export_containment import ExportPathRefusedError  # noqa: E402
 from zuora_plugin.http_client import ZuoraClient  # noqa: E402
 from zuora_plugin.plugin import ZuoraPlugin  # noqa: E402
 from zuora_plugin.typed_operations import execute  # noqa: E402
@@ -45,6 +50,23 @@ _QUERY = "data-query-fixture-statement-7"
 _HEADERS = {"Zuora-Request-Id": "req-dq1", "Zuora-Track-Id": "track-1"}
 _OPS = {op.name: op for op in data_query_actions.OPERATIONS}
 _JOB_ID = "2c92c0f8-6f1e-4d37-a5ef-0c9d3c4e7a11"
+
+
+_LOCATION_ROOT = Path(__file__).resolve().parents[3]
+_LOCATION_TREE = SoletTree(_LOCATION_ROOT, _LOCATION_ROOT / "profile")
+
+
+def _bind_locations(plugin: Any, directories: list[str]) -> NonCallableMagicMock:
+    """Supply a live address-book service through the production binding."""
+    orchestrator = NonCallableMagicMock()
+    orchestrator.APP_HOME = str(_LOCATION_TREE.app_home)
+    orchestrator.plugin_manager.get_plugin.return_value = None
+    orchestrator.get_service.return_value.list_path_addresses.return_value = {
+        "action_status": "completed",
+        "data": {"addresses": [{"name": f"project-{index}", "tags": [], "updated_at": datetime.now(UTC).isoformat(), "entries": [{"field_type": "path", "value": directory}]} for index, directory in enumerate(directories)]},
+    }
+    plugin.orchestrator_ref = orchestrator
+    return orchestrator
 
 
 def job(status: str, *, data_file: str | None = None) -> dict[str, Any]:
@@ -69,7 +91,8 @@ class TenantCase(unittest.TestCase):
         self.addCleanup(self.workspace.cleanup)
         self.root = Path(self.workspace.name)
         self.plugin = ZuoraPlugin()
-        self.plugin.initialize({"export_allowed_roots": [str(self.root)]})
+        self.plugin.initialize({})
+        _bind_locations(self.plugin, [str(self.root)])
         self.requests: list[httpx.Request] = []
         self.presigned: list[httpx.Request] = []
 
@@ -183,7 +206,7 @@ class ResultDownloadTests(TenantCase):
         self.assertEqual(self.presigned, [])
         self.assertFalse((self.root / "result.csv").exists())
 
-    def test_completed_job_downloads_vendor_url_without_bearer_and_scrubs_credentials(self) -> None:
+    def test_completed_job_downloads_vendor_url_without_bearer_and_writes_bytes_as_received(self) -> None:
         content = f"Id,Name\n8a90e5e4,Acme\n8a90e5e5,{_TOKEN} {base64.b64encode(_SECRET.encode()).decode()} {quote(_TOKEN)}\n".encode()
 
         def bucket(req: httpx.Request) -> httpx.Response:
@@ -197,10 +220,7 @@ class ResultDownloadTests(TenantCase):
         self.assertTrue(result["downloaded"])
         self.assertEqual(result["output_rows"], 2)
         self.assertEqual(result["file"]["sha256"], hashlib.sha256(written).hexdigest())
-        self.assertTrue(written.startswith(b"Id,Name\n8a90e5e4,Acme\n"))
-        for leaked in (_TOKEN, base64.b64encode(_SECRET.encode()).decode(), quote(_TOKEN)):
-            self.assertNotIn(leaked.encode(), written)
-        self.assertIn(REQUEST_REDACTION.encode(), written)
+        self.assertEqual(written, content)
         self.assertEqual(len(self.presigned), 1)
 
     def test_result_url_failures_are_reported_not_retried(self) -> None:
@@ -216,9 +236,9 @@ class ResultDownloadTests(TenantCase):
 
     def test_output_path_contained_before_any_vendor_call(self) -> None:
         client = self.client(lambda _: self.fail("no vendor request expected"))
-        with self.assertRaises(ExportPathRefusedError):
+        with self.assertRaises(PathRefusedError):
             self.run_op("download_data_query_result", client, {"job_id": _JOB_ID, "output_path": "/elsewhere/result.csv"})
-        with self.assertRaises(ExportPathRefusedError):
+        with self.assertRaises(PathRefusedError):
             self.run_op("download_file", client, {"file_id": "2c92c08a", "output_path": "relative.pdf"})
         self.refuse("download_file", {"file_id": "2c92c08a"})
         self.assertEqual(self.requests, [])

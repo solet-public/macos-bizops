@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::jira_plugin::oauth",
+  "display_name": "Jira: Oauth",
+  "description": "OAuth operations: begin with site/base_url and optional app_entry; status or cancel with site; complete with site/state/code_vault_key/expected_version and optional set_default. OAuth app entry contains client_id, vault-referenced client_secret, registered redirect_uri and scopes including offline_access. Consent URL redirects to that registered URI; capture the authorization code agent-blind into a plugin oauth_code vault key, then complete with the returned state. No local callback server is created. Disconnect the local binding through sites; revoke the vendor grant through Atlassian account permissions.",
+  "embedding_description": "Authorize a Jira Cloud site through Atlassian OAuth 2.0 three-legged consent, inspect or cancel pending consent, and complete the grant from a vaulted authorization code. State, expiry and accessible-site identity are verified; runtime access refresh persists rotating refresh tokens.",
+  "result_processor_customizations": {
+    "action_label": "Jira oauth",
+    "result_type": "jira_oauth_result",
+    "result_description": "Site index/default/version, consent URL, or pending status. No tokens or client secrets.",
+    "presentation_guidance": "Report the selected site and binding outcome. A consent URL means pending consent, not connected."
+  },
+  "error_processor_customizations": {
+    "action_context": "Jira oauth",
+    "error_interpretation": "stale_binding requires a fresh index version; oauth_state requires fresh consent; oauth_resources means the site is not granted; vault_error means persistence failed.",
+    "recovery_guidance": "Read current site state, correct configuration, or restart consent as indicated. Never expose credentials.",
+    "retryable": false
+  }
+}

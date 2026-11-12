@@ -6,8 +6,8 @@
   "result_processor_customizations": {
     "action_label": "Zuora orders listed for invoice owner",
     "result_type": "zuora_list_orders_by_invoice_owner_result",
-    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id, data (Zuora's response body, redacted) and pagination {page, next_page, vendor}; next_page is the page number to pass back and null on the last page.",
-    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id, data (Zuora's response body as received) and pagination {page, next_page, vendor}; next_page is the page number to pass back and null on the last page.",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically."
   },
   "error_processor_customizations": {
     "action_context": "List the orders an account is invoiced for (GET /v1/orders/invoiceOwner/{accountNumber}), one page per call, filtered by date range and status; completion carries next_page.",

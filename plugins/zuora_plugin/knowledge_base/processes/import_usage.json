@@ -1,16 +1,16 @@
 {
   "process_key": "plugin::zuora_plugin::import_usage",
   "display_name": "Zuora: Import Usage",
-  "description": "Import a usage file (POST /v1/usage, multipart/form-data) from input_path under export_allowed_roots; Zuora answers with a checkImportStatus URL, only Completed means imported, and a failing record rolls the whole file back. The PRODUCT_RATE_PLAN_CHARGE_ID column needs x_zuora_wsdl_version 146 or higher. Returns job_id/status queued at once; dispatch is not completion.",
+  "description": "Import a usage file (POST /v1/usage, multipart/form-data) from input_path under registered path addresses; Zuora answers with a checkImportStatus URL, only Completed means imported, and a failing record rolls the whole file back. The PRODUCT_RATE_PLAN_CHARGE_ID column needs x_zuora_wsdl_version 146 or higher. Returns job_id/status queued at once; dispatch is not completion.",
   "embedding_description": "Upload a spreadsheet or CSV of metered consumption, such as API calls, gigabytes or minutes, so Zuora can rate and bill it. The import is all-or-nothing and returns a status link to check whether it completed.",
   "result_processor_customizations": {
     "action_label": "Zuora usage imported",
     "result_type": "zuora_import_usage_result",
-    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
-    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body as received).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically."
   },
   "error_processor_customizations": {
-    "action_context": "Import a usage file (POST /v1/usage, multipart/form-data) from input_path under export_allowed_roots; Zuora answers with a checkImportStatus URL, only Completed means imported, and a failing record rolls the whole file back. The PRODUCT_RATE_PLAN_CHARGE_ID column needs x_zuora_wsdl_version 146 or higher.",
+    "action_context": "Import a usage file (POST /v1/usage, multipart/form-data) from input_path under a saved location; Zuora answers with a checkImportStatus URL, only Completed means imported, and a failing record rolls the whole file back. The PRODUCT_RATE_PLAN_CHARGE_ID column needs x_zuora_wsdl_version 146 or higher.",
     "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape: a bad identifier, header value or query pairing, a body missing a required field, or an unreadable or wrongly typed upload file. zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.validation_failed is a vendor 4xx or an HTTP 200 carrying success false, with Zuora's reasons. zuora.object_not_found, zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
     "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the Billing permission the reason names (bill runs, usage import or usage records). Read current state with get_bill_run or get_usage before retrying a write; pass an idempotency_key where offered. Back off on rate limits."
   }

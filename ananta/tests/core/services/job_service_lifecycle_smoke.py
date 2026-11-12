@@ -52,17 +52,35 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
+import importlib
 import inspect
 import json
 import sys
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+ROOT = REPO_ROOT
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
+sys.path.insert(0, str(REPO_ROOT))
+for plugin_name in ("postgres_state_management_plugin", "agent_messaging_plugin"):
+    sys.path.insert(0, str(REPO_ROOT / "plugins" / plugin_name / "src"))
 
+from ananta.core.actions.action_processor import ActionProcessor  # noqa: E402
+from ananta.core.actions.action_queue_poller import ActionQueuePoller  # noqa: E402
+from ananta.core.orchestration.managers.flow_manager import FlowManager  # noqa: E402
+from ananta.core.plugins.plugin_manager import PluginManager  # noqa: E402
+from ananta.core.process_registry.invocation_schema_generator import InvocationSchemaGenerator  # noqa: E402
+from ananta.core.process_registry.service_interface_scanner import ServiceInterfaceScanner  # noqa: E402
 from ananta.core.state.async_job_manager import AsyncJobManager  # noqa: E402
+from ananta.core.state.execution_token_context import action_execution_context  # noqa: E402
+from ananta.core.state.flow_runtime_graph import FlowRuntimeGraph  # noqa: E402
 from ananta.interfaces.state_service_protocol import StateServiceProtocol  # noqa: E402
 from ananta.services.job_service.service import JobService  # noqa: E402
 
@@ -132,6 +150,14 @@ class _FakeStateService:
     def query_state(self, namespace: str, filters: dict[str, object]) -> dict[str, object]:
         return _ok(self._rows_for(dict(filters)))
 
+    def query_ordered(self, namespace: str, data: dict[str, object]) -> dict[str, object]:
+        from ananta.services.state_service.ordered_query import apply_ordered_query_in_memory, parse_ordered_query
+
+        del namespace
+        spec = parse_ordered_query(data)
+        source = {"job": self.jobs, "job_payload": self.payloads, "flow_tokens": self.tokens}[spec.table]
+        return _ok(apply_ordered_query_in_memory(source, spec))
+
     def write_state(
         self,
         namespace: str,
@@ -141,9 +167,7 @@ class _FakeStateService:
     ) -> dict[str, object]:
         return {"action_status": "completed"}
 
-    def update_state(
-        self, namespace: str, query: dict[str, object], updates: dict[str, object]
-    ) -> dict[str, object]:
+    def update_state(self, namespace: str, query: dict[str, object], updates: dict[str, object]) -> dict[str, object]:
         self.update_state_calls.append({"query": dict(query), "updates": dict(updates)})
         filters = query.get("filters") or {}
         if isinstance(filters, dict):
@@ -161,9 +185,7 @@ class _RecordingJobManager:
 
     def update_job(self, job_id: str, updates: dict[str, object]) -> dict[str, object]:
         self.update_job_calls.append((job_id, dict(updates)))
-        self._state.update_state(
-            "core", {"table": "job", "filters": {"id": job_id}}, dict(updates)
-        )
+        self._state.update_state("core", {"table": "job", "filters": {"id": job_id}}, dict(updates))
         return {"action_status": "completed", "data": {"job_id": job_id, "updated": True}}
 
 
@@ -230,16 +252,14 @@ def test_sweep_terminates_only_stale_processing_rows() -> None:
         "the sweep goes through AsyncJobManager.update_job, not a direct ledger write",
     )
     _check(
-        bool(manager.update_job_calls)
-        and manager.update_job_calls[0][1].get("status") == "error",
+        bool(manager.update_job_calls) and manager.update_job_calls[0][1].get("status") == "error",
         "the swept job is transitioned to a terminal error status",
     )
 
 
 def test_sweep_ignores_queued_rows() -> None:
     """Case 2: a queued job is a backlog, not a death."""
-    svc, _state, manager = _service([_job("job-queued", status="queued",
-                                          updated_minutes_ago=999)])
+    svc, _state, manager = _service([_job("job-queued", status="queued", updated_minutes_ago=999)])
     envelope = svc.sweep_stale_jobs(max_age_minutes=1)
     _check(_result(envelope, "count") == 0, "an ancient QUEUED job is never swept")
     assert manager is not None
@@ -264,8 +284,7 @@ def test_swept_reason_names_the_sweep() -> None:
 
 def test_sweep_refuses_without_a_job_manager() -> None:
     """Case 4: refuse rather than write a terminal status behind the manager."""
-    svc, state, _ = _service([_job("job-dead", updated_minutes_ago=90)],
-                             with_manager=False)
+    svc, state, _ = _service([_job("job-dead", updated_minutes_ago=90)], with_manager=False)
     envelope = svc.sweep_stale_jobs(max_age_minutes=30)
     _check(
         envelope.get("action_status") == "error",
@@ -315,8 +334,7 @@ def test_detector_excludes_resolved_and_missing_tokens() -> None:
     envelope = svc.detect_unresolved_completion_tokens()
     _check(
         _result(envelope, "count") == 0,
-        "a resolved token is not reported, and a MISSING token row is not either "
-        "(absent evidence is not evidence of the defect)",
+        "a resolved token is not reported, and a MISSING token row is not either (absent evidence is not evidence of the defect)",
     )
 
 
@@ -335,9 +353,7 @@ def test_detector_mutates_nothing() -> None:
 def test_fakes_track_real_signatures() -> None:
     """Rail: protocol/implementation drift must red this smoke."""
     for method_name in ("read_state", "write_state", "update_state", "query_state"):
-        real_params = list(
-            inspect.signature(getattr(StateServiceProtocol, method_name)).parameters
-        )
+        real_params = list(inspect.signature(getattr(StateServiceProtocol, method_name)).parameters)
         fake_params = list(inspect.signature(getattr(_FakeStateService, method_name)).parameters)
         _check(
             real_params == fake_params,
@@ -347,12 +363,388 @@ def test_fakes_track_real_signatures() -> None:
     fake_update = list(inspect.signature(_RecordingJobManager.update_job).parameters)
     _check(
         real_update == fake_update,
-        f"_RecordingJobManager.update_job params {fake_update} match "
-        f"AsyncJobManager's {real_update}",
+        f"_RecordingJobManager.update_job params {fake_update} match AsyncJobManager's {real_update}",
     )
 
 
+def native_runtime(fixture: Any) -> tuple[Any, ...]:
+    """Build the actual registered runtime on an owned PostgreSQL fixture."""
+    from ananta.config.core_schemas import CoreSchemaDefinitions
+    from ananta.core.actions.action_factory import ActionFactory
+    from ananta.core.event_orchestrator import EventOrchestrator
+    from ananta.core.orchestration.execution_context import ExecutionContextManager
+    from ananta.core.orchestration.managers.action_event_recorder import ActionEventRecorder
+    from ananta.core.process_registry.plugin_process_scanner import PluginProcessScanner
+    from ananta.core.process_registry.plugin_registration_validator import PluginRegistrationValidator
+    from ananta.core.process_registry.service_interface_metadata_generator import ServiceInterfaceMetadataGenerator
+    from ananta.core.services.compilation_context_builder import CompilationContextBuilder
+    from ananta.platform.new_template_engine import NewTemplateEngine
+    from ananta.platform.unified_metadata_registry import UnifiedMetadataRegistry
+    from ananta.services.discovery_service.service import DiscoveryService
+    from ananta.services.inference_service.interfaces.public import InferenceServiceAPI
+    from ananta.services.job_service.interfaces.public import JobServiceAPI
+    from ananta.services.job_service.service import JobService
+    from ananta.services.lifecycle_management_service.interfaces.public import LifecycleManagementAPI
+    from ananta.services.schema_manager import SchemaManager
+    from ananta.services.state_service.interfaces.public import StateManagementAPI
+
+    from agent_messaging_plugin.models import BridgeSessionState
+    from agent_messaging_plugin.platform_surface import PlatformSurface
+
+    state = fixture.state
+    SchemaManager(state, fixture.plugin).initialize_schemas(CoreSchemaDefinitions.get_all_core_schemas())
+    processes: dict[str, object] = {}
+    scanner = ServiceInterfaceScanner(InvocationSchemaGenerator())
+    for api in (StateManagementAPI, JobServiceAPI, InferenceServiceAPI, LifecycleManagementAPI):
+        scanner._scan_class_methods(api, processes)
+    ledger_public = importlib.import_module("ananta.services.session_ledger_service.interfaces.public")
+    scanner._scan_module_classes(ledger_public, ledger_public.__name__, processes)
+    local_public = importlib.import_module("ananta.services.local_self_deployment_service.interfaces.public")
+    scanner._scan_module_classes(local_public, local_public.__name__, processes)
+    registry: dict[str, object] = {"processes": processes}
+    plugins = PluginManager()
+    plugins.plugins[fixture.plugin.name] = fixture.plugin
+    plugin_scanner = PluginProcessScanner(plugins, PluginRegistrationValidator(), ServiceInterfaceMetadataGenerator(), InvocationSchemaGenerator())
+    sql_metadata = next(action for action in fixture.plugin.get_available_actions() if action.name == "execute_sql")
+    plugin_scanner._register_plugin_process(fixture.plugin.name, sql_metadata, registry)
+    graph = FlowRuntimeGraph(state)
+    manager = AsyncJobManager(state, graph)
+    flow_manager = FlowManager(state)
+    recorder = ActionEventRecorder(state, flow_manager, graph)
+    metadata = UnifiedMetadataRegistry(str(ROOT / "ananta/src/ananta/platform/metadata"), str(ROOT / "plugins"), str(fixture.app_home))
+    engine = NewTemplateEngine(metadata, state_service=state)
+    factory = ActionFactory(registry, template_engine=engine, state_service=state, action_event_recorder=recorder, app_home=str(fixture.app_home))
+    manager.set_action_factory(factory)
+    control: Any = manager.create_job("boundary_fixture", "point_read", {"notes": "existing exact-id reader control"})
+    # Use the production resolver without starting any application lifecycle.
+    orchestrator: Any = EventOrchestrator.__new__(EventOrchestrator)
+    orchestrator.APP_HOME = str(fixture.app_home)
+    orchestrator.state_service = state
+    orchestrator.async_job_manager = manager
+    orchestrator._registered_control_job_id = control["data"]["job_id"]
+    orchestrator.action_recorder = recorder
+    orchestrator.service_manager = SimpleNamespace(job_service=JobService(state, manager))
+    fixture.plugin.set_orchestrator_ref(orchestrator)
+    discovery: Any = DiscoveryService.__new__(DiscoveryService)
+    discovery.processes = processes
+    contexts = ExecutionContextManager()
+    processor = ActionProcessor(plugins, state_service=state, action_factory=factory, orchestrator=orchestrator, process_registry=registry, execution_context_manager=contexts, discovery_service=discovery)
+    poller = ActionQueuePoller(state, cast(Any, processor), graph, cast(Any, factory), blob_storage_service=cast(Any, object()), app_home=str(fixture.app_home), execution_context_manager=contexts)
+    surface = PlatformSurface(action_factory=factory, flow_manager=flow_manager, compilation_context_builder=CompilationContextBuilder(), bridge_manager=cast(Any, None), process_registry=registry, state_service=state)
+    session = state.write_state("core", {"table": "sessions", "record": {"context_type": "registered-boundary-fixture"}})
+    session_id = session["data"]["result"]["generated_id"]
+    bridge = BridgeSessionState("registered-boundary-fixture", session_id)
+    return state, plugins, manager, orchestrator, poller, surface, bridge
+
+
+async def registered_count_boundary(fixture: Any) -> None:
+    """Drive the real bridge/factory/poller against an owned PostgreSQL leaf."""
+    state, plugins, manager, orchestrator, poller, surface, bridge = native_runtime(fixture)
+    first = surface._submit_process_call(bridge=bridge, process_key="service_interface::state_service::count", arguments={"namespace": "core", "data": {"table": "job", "filters": {}}}, reason="park the actual private aggregate", deliver_to_bridge=False)
+    second = surface._submit_process_call(bridge=bridge, process_key="service_interface::job_service::get_job", arguments={"job_id": orchestrator._registered_control_job_id}, reason="ordinary exact-id action while the effect is parked", deliver_to_bridge=False)
+    entered, release = threading.Event(), threading.Event()
+    at_leaf: list[dict[str, Any]] = []
+    provider = fixture.plugin._get_provider()
+    aggregate = provider.aggregate
+
+    def parked(namespace: str, table: str, *args: Any, **kwargs: Any) -> Any:
+        if table != "job":
+            return aggregate(namespace, table, *args, **kwargs)
+        snapshot = state.query_state("core", {"table": "job", "filters": {"provider_name": "state_service.count"}, "limit": 1})
+        at_leaf.extend(snapshot["data"]["records"])
+        entered.set()
+        assert release.wait(10), "fixture must release the parked aggregate"
+        return aggregate(namespace, table, *args, **kwargs)
+
+    task: asyncio.Task[None] | None = None
+    with patch.object(provider, "aggregate", side_effect=parked):
+        try:
+            task = asyncio.create_task(poller._poll_once())
+            assert await asyncio.to_thread(entered.wait, 5), "actual aggregate leaf must be reached"
+            assert len(at_leaf) == 1, "registered count must persist its owned job before entering the aggregate leaf"
+            await asyncio.wait_for(asyncio.shield(task), 3)
+            dispatched = state.query_state("core", {"table": "action_events", "filters": {"id": second["action_id"]}, "limit": 1})
+            assert dispatched["data"]["records"][0]["status"] == "completed", "another ordinary action must dispatch while the effect leaf is parked"
+            assert first["action_id"] != second["action_id"]
+        finally:
+            release.set()
+            if task is not None:
+                await task
+    assert len(at_leaf) == 1
+    terminal = await terminal_job(orchestrator.service_manager.job_service, str(at_leaf[0]["id"]))
+    assert terminal["result"]["data"]["result"]["value"] >= 1
+    assert json.loads(terminal["metadata"])["registered_action_id"] == first["action_id"]
+    assert terminal["flow_token_id"], "the admitted owner retains the actual action token"
+
+    await native_latest_lookup(manager, state, orchestrator, surface, bridge, poller, terminal["id"], first["action_id"])
+    await native_sql_boundaries(provider, state, orchestrator, surface, bridge, poller)
+    await native_specialized_bodies(fixture, orchestrator, plugins, surface, bridge, poller)
+    await drained_registered_workers(manager)
+    print("PASS real_bridge_factory_poller, persisted_receipt_before_leaf, ordinary_dispatch_while_parked")
+
+
+async def drained_registered_workers(manager: AsyncJobManager) -> None:
+    """Fixture teardown follows all durable outcome and notification writes."""
+    for owner in manager._owners.values():
+        thread = owner._thread
+        if thread is not None:
+            await asyncio.to_thread(thread.join, 5)
+            assert not thread.is_alive(), "the owned worker must finish before closing its private pool"
+
+
+async def native_latest_lookup(manager: AsyncJobManager, state: Any, orchestrator: Any, surface: Any, bridge: Any, poller: ActionQueuePoller, previous_job_id: str, first_action_id: str) -> None:
+    """A native lookup fixes its answer before its bookkeeping admission."""
+    # A concurrent newer job and this lookup's own job cannot replace the
+    # pre-admission answer. Use the actual bridge and original reader.
+    create_job = manager.create_job
+
+    def concurrent_create(*args: Any, **kwargs: Any) -> dict[str, object]:
+        receipt = create_job(*args, **kwargs)
+        from ananta.core.state.async_job_manager import registered_action_context
+
+        with registered_action_context(None), action_execution_context(None):
+            create_job("concurrent", "newer", {"notes": "frontier control"})
+        return receipt
+
+    with patch.object(manager, "create_job", side_effect=concurrent_create):
+        latest = surface._submit_process_call(bridge=bridge, process_key="service_interface::job_service::get_latest_job", arguments={}, reason="lookup excludes its own admission and concurrent newer jobs", deliver_to_bridge=False)
+        await poller._poll_once()
+    lookup = state.query_state("core", {"table": "job", "filters": {"provider_name": "job_service.get_latest_job"}, "limit": 1})["data"]["records"][0]
+    answer = await terminal_job(orchestrator.service_manager.job_service, str(lookup["id"]))
+    assert answer["result"]["data"]["result"]["job"]["id"] == previous_job_id, "latest lookup must use its pre-admission frontier"
+    assert latest["action_id"] != first_action_id
+
+
+async def native_sql_boundaries(provider: Any, state: Any, orchestrator: Any, surface: Any, bridge: Any, poller: ActionQueuePoller) -> None:
+    """Both native SQL registrations park the same owned PostgreSQL leaf."""
+    for key in ("service_interface::state_service::execute_sql", "plugin::postgres_state_management_plugin::execute_sql"):  # wint:negative-fixture
+        entered, release = threading.Event(), threading.Event()
+        observed: list[dict[str, Any]] = []
+        execute_query = provider.execute_query
+
+        def parked_sql(*args: Any, rows: list[dict[str, Any]] = observed, reached: threading.Event = entered, resume: threading.Event = release, execute: Any = execute_query, **kwargs: Any) -> Any:
+            result = state.query_state("core", {"table": "job", "filters": {"provider_name": "postgres_state_management_plugin.execute_sql", "status": "processing"}, "limit": 1})
+            rows.extend(result["data"]["records"])
+            reached.set()
+            assert resume.wait(10)
+            return execute(*args, **kwargs)
+
+        surface._submit_process_call(bridge=bridge, process_key=key, arguments={"sql_query": "SELECT 7 AS owned_value"}, reason="both SQL endpoints use the same owner", deliver_to_bridge=False)
+        ordinary = surface._submit_process_call(bridge=bridge, process_key="service_interface::job_service::get_job", arguments={"job_id": orchestrator._registered_control_job_id}, reason="ordinary action during SQL leaf", deliver_to_bridge=False)
+        with patch.object(provider, "execute_query", side_effect=parked_sql):
+            task = asyncio.create_task(poller._poll_once())
+            try:
+                assert await asyncio.to_thread(entered.wait, 5)
+                assert len(observed) == 1, "each SQL endpoint must persist the same owner's job before SQL"
+                await asyncio.wait_for(asyncio.shield(task), 3)
+                row = state.query_state("core", {"table": "action_events", "filters": {"id": ordinary["action_id"]}, "limit": 1})["data"]["records"][0]
+                assert row["status"] == "completed"
+            finally:
+                release.set()
+                await task
+        result = await terminal_job(orchestrator.service_manager.job_service, str(observed[0]["id"]))
+        assert result["result"]["data"]["records"] == [[7]], "retain the original provider row-list shape"
+
+
+async def native_specialized_bodies(fixture: Any, orchestrator: Any, plugins: PluginManager, surface: Any, bridge: Any, poller: ActionQueuePoller) -> None:
+    """Actual VERTEX, poll-executor, repair and manifest bodies, owned effect leaves."""
+    import ananta.services.lifecycle_management_service.service as lifecycle_module
+    from ananta.services.inference_service import InferenceService
+    from ananta.services.inference_service.vertex_resolver import InferenceProviderResolver
+    from ananta.services.lifecycle_management_service.service import LifecycleManagementService
+    from ananta.services.session_ledger_service.service import SessionLedgerService, _LedgerPollExecutor
+
+    from agent_messaging_plugin.session_inference_provider import SessionInferenceProvider
+
+    state = fixture.state
+
+    async def drive(key: str, arguments: dict[str, object], target: Any, method: str, effect: Any, while_parked: Any = None) -> dict[str, Any]:
+        entered, release = threading.Event(), threading.Event()
+        observed: list[dict[str, Any]] = []
+        owner_name = key.removeprefix("service_interface::").replace("::", ".")
+
+        def parked(*args: Any, **kwargs: Any) -> Any:
+            rows = state.query_state("core", {"table": "job", "filters": {"provider_name": owner_name, "status": "processing"}, "limit": 1})["data"]["records"]
+            observed.extend(rows)
+            entered.set()
+            assert release.wait(10)
+            return effect(*args, **kwargs)
+
+        surface._submit_process_call(bridge=bridge, process_key=key, arguments=arguments, reason="native specialized body", deliver_to_bridge=False)
+        ordinary = surface._submit_process_call(bridge=bridge, process_key="service_interface::job_service::get_job", arguments={"job_id": orchestrator._registered_control_job_id}, reason="ordinary progress during specialized effect", deliver_to_bridge=False)
+        with patch.object(target, method, side_effect=parked):
+            task = asyncio.create_task(poller._poll_once())
+            try:
+                assert await asyncio.to_thread(entered.wait, 5), (key, "effect leaf not reached")
+                assert len(observed) == 1, (key, "receipt did not precede effect leaf")
+                await asyncio.wait_for(asyncio.shield(task), 3)
+                row = state.query_state("core", {"table": "action_events", "filters": {"id": ordinary["action_id"]}, "limit": 1})["data"]["records"][0]
+                assert row["status"] == "completed"
+                if while_parked is not None:
+                    await while_parked()
+            finally:
+                release.set()
+                await task
+        return await terminal_job(orchestrator.service_manager.job_service, str(observed[0]["id"]))
+
+    delivered: list[dict[str, Any]] = []
+
+    def append(_bridge: str, _kind: str, content: str, _metadata: object) -> None:
+        delivered.append(json.loads(content))
+
+    events = SimpleNamespace(append_event=append)
+    vertex = SessionInferenceProvider(bridge_id="owned-vertex", agent_instance_id="owned-vertex-instance", agent_id="fixture", session_label="owned vertex", bridge_manager=cast(Any, events))
+    messaging = SimpleNamespace(resolve_role_to_instance=lambda _role: "owned-vertex-instance", get_inference_provider=lambda _instance: vertex, was_inference_provider_bound=lambda _instance: True, get_autonomic_provider=lambda: vertex)
+    plugins.plugins["agent_messaging_plugin"] = cast(Any, messaging)
+    inference: Any = InferenceService.__new__(InferenceService)
+    inference._state_service = state
+    inference._vertex_resolver = InferenceProviderResolver(plugin_manager=plugins, state_service=state)
+    orchestrator.service_manager.inference_service = inference
+    bridge.agent_instance_id = "owned-vertex-instance"
+    for name in ("process_error", "process_results"):
+        result = await drive(f"service_interface::inference_service::{name}", {"params": {"model": {}, "prompt": {}}, "state": {"flow_id": "spoof"}}, events, "append_event", append)
+        assert result["status"] == "completed", result
+        assert delivered[-1]["state"]["session_id"] == bridge.session_id
+        assert delivered[-1]["state"]["flow_id"] != "spoof"
+    bridge.agent_instance_id = None
+
+    importer = SimpleNamespace(poll_source=lambda _source: SimpleNamespace(sources_polled=1, sessions_seen=2, events_persisted=3, batches_failed=0))
+    repository = SimpleNamespace(backfill_event_external_ids=lambda **_kwargs: {"sessions_scanned": 1, "events_stamped": 2, "collisions_skipped": 0})
+    ledger: Any = SessionLedgerService.__new__(SessionLedgerService)
+    ledger._poll_executor, ledger._importer, ledger._repository = _LedgerPollExecutor(), importer, repository
+    ledger._blob_adapter = SimpleNamespace(fetch_event_text=lambda _blob: "owned fixture")
+    orchestrator.session_ledger_service = ledger
+    polled = await drive("service_interface::session_ledger_service::poll_source", {"source_id": "owned-source"}, importer, "poll_source", importer.poll_source)
+    assert polled["result"]["events_persisted"] == 3
+    repaired = await drive("service_interface::session_ledger_service::backfill_event_external_ids", {}, repository, "backfill_event_external_ids", repository.backfill_event_external_ids)
+    assert repaired["result"]["events_stamped"] == 2
+
+    lifecycle: Any = LifecycleManagementService.__new__(LifecycleManagementService)
+    lifecycle._orchestrator = orchestrator
+    orchestrator.service_manager.lifecycle_management_service = lifecycle
+    from ananta.core.orchestration.service_bindings import BindingSource, ServiceBinding, ServiceBindings, ServiceName
+
+    later_effects: list[str] = []
+    later_actions: list[str] = []
+
+    def admit(action_name: str, parameters: dict[str, Any], _context: dict[str, Any]) -> dict[str, object] | None:
+        if action_name != "rollback_release":
+            return None
+
+        def body(_values: dict[str, object]) -> dict[str, object]:
+            first = state.query_state("core", {"table": "job", "filters": {"provider_name": "lifecycle_management_service.apply_manifest"}, "limit": 1})["data"]["records"][0]
+            assert first["status"] in {"completed", "error"}, "a later deploy effect cannot overtake the first terminal write"
+            later_effects.append(action_name)
+            return {"action_status": "completed", "data": {"ordered": True}}
+
+        return orchestrator.async_job_manager.submit_registered_operation("owned-deploy-contract", action_name, parameters, body)
+
+    plugins.plugins["owned-deploy-contract"] = cast(Any, SimpleNamespace(admit_registered_operation=admit))
+    orchestrator.plugin_manager = plugins
+    bindings = ServiceBindings(fixture.app_home)
+    bindings._bindings = {ServiceName.LOCAL_SELF_DEPLOYMENT_SERVICE: ServiceBinding(ServiceName.LOCAL_SELF_DEPLOYMENT_SERVICE, "owned-deploy-contract", BindingSource.CONFIG)}
+    bindings._loaded = True
+    orchestrator.service_bindings = bindings
+
+    async def later_deploy() -> None:
+        # Arguments come from this exact registered declaration; the owner
+        # contract double performs no release/router/host activity.
+        entry = surface._process_registry["processes"]["service_interface::local_self_deployment_service::rollback_release"]
+        arguments: dict[str, object] = {}
+        for name, parameter in entry["parameters"].items():
+            if parameter.get("required"):
+                arguments[name] = {} if parameter["type"] == "object" else "owned-release"
+        submitted = surface._submit_process_call(bridge=bridge, process_key="service_interface::local_self_deployment_service::rollback_release", arguments=arguments, reason="cross-key deploy ordering", deliver_to_bridge=False)
+        later_actions.append(submitted["action_id"])
+        ordinary = surface._submit_process_call(bridge=bridge, process_key="service_interface::job_service::get_job", arguments={"job_id": orchestrator._registered_control_job_id}, reason="ordinary progress while deploy slot held", deliver_to_bridge=False)
+        await poller._poll_once()
+        row = state.query_state("core", {"table": "action_events", "filters": {"id": submitted["action_id"]}, "limit": 1})["data"]["records"][0]
+        assert row["status"] == "queued" and later_effects == [], "a later deploy stays unclaimed through the owner outcome"
+        ordinary_row = state.query_state("core", {"table": "action_events", "filters": {"id": ordinary["action_id"]}, "limit": 1})["data"]["records"][0]
+        assert ordinary_row["status"] == "completed"
+
+    await drive("service_interface::lifecycle_management_service::apply_manifest", {"new_manifest": {"plugins": []}, "reason": "owned dry-run preflight", "dry_run": True}, lifecycle_module, "read_current_manifest_state", lifecycle_module.read_current_manifest_state, later_deploy)
+    assert poller._detached_deploy is not None
+    await asyncio.wait_for(asyncio.shield(poller._detached_deploy.task), 3)
+    await poller._poll_once()
+    assert poller._detached_deploy is not None
+    await asyncio.wait_for(asyncio.shield(poller._detached_deploy.task), 3)
+    assert later_actions and later_effects == ["rollback_release"]
+    print("PASS actual_VERTEX_forward, ledger_poll_executor_and_repair, manifest_read_preflight_before_return, no_live_effects")
+
+
+async def terminal_job(service: Any, job_id: str) -> dict[str, Any]:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        result = service.get_job(job_id)
+        assert result["action_status"] == "completed", result
+        job = result["data"]["result"]["job"]
+        assert job is not None
+        if job["status"] in {"completed", "error", "cancelled"}:
+            return job
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"fixture job {job_id} did not reach a durable outcome")
+
+
+def real_payload_histories(fixture: Any) -> None:
+    """A long physical history never becomes a truncated or absent answer."""
+    from ananta.services.job_service.service import JobService
+
+    state = fixture.state
+    manager = AsyncJobManager(state, FlowRuntimeGraph(state))
+    receipt: Any = manager.create_job("history", "readback", {"notes": "long result and NULL error history"})
+    job_id = receipt["data"]["job_id"]
+    for sequence in range(1, 202):
+        result = state.write_state("core", {"table": "job_payload", "record": {"job_id": job_id, "payload_type": "result", "sequence": sequence, "payload_data": json.dumps({"sequence": sequence})}})
+        assert result["action_status"] == "completed", result
+    for kind, sequence, payload in (("result", None, {"sequence": "null"}), ("result", 201, {"sequence": "tied"}), ("error", None, {"detail": "null sequence retained"})):
+        result = state.write_state("core", {"table": "job_payload", "record": {"job_id": job_id, "payload_type": kind, "sequence": sequence, "payload_data": json.dumps(payload)}})
+        assert result["action_status"] == "completed", result
+    service = JobService(state, manager)
+    ordered = state.query_ordered
+    queries: list[dict[str, object]] = []
+
+    def observed(namespace: str, data: dict[str, object]) -> Any:
+        queries.append(data)
+        return ordered(namespace, data)
+
+    with patch.object(state, "query_ordered", side_effect=observed), patch.object(manager, "create_job", side_effect=AssertionError("exact-id read must not admit another job")):
+        result = service.get_job(job_id)
+        assert result["action_status"] == "completed", result
+        job = result["data"]["result"]["job"]
+        assert job["result"]["sequence"] in {201, "tied"}, "numeric maximum wins over NULL, including an equal-sequence tie"
+        assert job["error"] == {"detail": "null sequence retained"}
+        assert queries and all(query["limit"] == 1 for query in queries)
+    missing_and_failed_payloads(state, manager, service, job_id, ordered)
+
+
+def missing_and_failed_payloads(state: Any, manager: AsyncJobManager, service: Any, job_id: str, ordered: Any) -> None:
+    """A missing payload and a failed read remain different outcomes."""
+    absent: Any = manager.create_job("history", "absent", {"notes": "no result or error exists"})
+    empty = service.get_job(absent["data"]["job_id"])["data"]["result"]["job"]
+    assert empty["result"] is None and empty["error"] is None
+
+    def failed(namespace: str, data: dict[str, object]) -> Any:
+        if data.get("table") == "job_payload":
+            return {"action_status": "error", "error": {"code": "fixture.payload_read_failed"}}
+        return ordered(namespace, data)
+
+    with patch.object(state, "query_ordered", side_effect=failed):
+        result = service.get_job(job_id)
+        assert result["action_status"] == "error", "a failed payload read must not look like an absent payload"
+    print("PASS real_PG_long_numeric_null_tied_missing_failed_payloads, store_limit1, exact_id_non_recursion")
+
+
 def main() -> int:
+    from quality_gates.private_test_pg import MissingFixtureError, ledger_fixture, load_fixture, skip_fixture
+
+    try:
+        load_fixture("fast_return_census")
+    except MissingFixtureError:
+        return skip_fixture()
+    with ledger_fixture("fast_return_census", schema="registered_boundary") as fixture:
+        asyncio.run(registered_count_boundary(fixture))
+        real_payload_histories(fixture)
     print("JobService lifecycle smoke — staleness sweep + unresolved-token detector")
     print("\nCase 1: the sweep terminates only stale processing rows")
     test_sweep_terminates_only_stale_processing_rows()

@@ -43,7 +43,7 @@ sys.path.insert(
 )
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ananta.llm.session_ledger.importer import (  # noqa: E402
+from ananta.llm.session_ledger.importer_persistence import (  # noqa: E402
     _event_external_id,
     _OrdinalCounter,
 )

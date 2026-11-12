@@ -118,7 +118,12 @@ def _preflight(spec: LaunchSpec) -> tuple[str, str, str]:
 
 
 def _launch_environment(
-    spec: LaunchSpec, *, instance_id: str, session_id: str, model: str, effort: str,
+    spec: LaunchSpec,
+    *,
+    instance_id: str,
+    session_id: str,
+    model: str,
+    effort: str,
 ) -> dict[str, str]:
     """Replace borrowed session identity with a fresh, complete operator pair."""
     target = _checked_target(spec)
@@ -132,7 +137,6 @@ def _launch_environment(
         "AGENT_ROLE_AUTOBIND": "0",
         "AGENT_WAKE_CLI": str(target.bridge_cli),
         "FLEET_TRANSPORT": "watch",
-        "GIT_CONTROLLER_NAME": target.git_controller_name,
         "OPERATOR_CODEX_MODEL": model,
         "OPERATOR_CODEX_EFFORT": effort,
         "OPERATOR_CODEX_CWD": str(spec.cwd.resolve()),
@@ -144,8 +148,10 @@ def _launch_environment(
 def _codex_argv(spec: LaunchSpec) -> list[str]:
     """Place launcher-owned Codex options before a caller's ``--`` separator."""
     owned = [
-        "-c", f"mcp_servers.{spec.solet}.enabled=false",
-        "--cd", str(spec.cwd.resolve()),
+        "-c",
+        f"mcp_servers.{spec.solet}.enabled=false",
+        "--cd",
+        str(spec.cwd.resolve()),
     ]
     args = list(spec.codex_args)
     try:
@@ -166,27 +172,45 @@ def _validate_codex_argv(spec: LaunchSpec) -> None:
 
 
 def _pane_command(spec: LaunchSpec, host: str, log_path: Path) -> str:
-    watcher = shlex.join(_without_parent_runtime_env([
-        "/usr/bin/env", f"AGENT_ROLE={spec.role}",
-        str(spec.bridge_cli), "watch", "--agent-id", "codex", "--role", spec.role,
-        "--operator-tmux-host", host,
-        *([] if spec.claim_role else ["--no-claim"]),
-    ]))
+    watcher = shlex.join(
+        _without_parent_runtime_env(
+            [
+                "/usr/bin/env",
+                f"AGENT_ROLE={spec.role}",
+                str(spec.bridge_cli),
+                "watch",
+                "--agent-id",
+                "codex",
+                "--role",
+                spec.role,
+                "--operator-tmux-host",
+                host,
+                *([] if spec.claim_role else ["--no-claim"]),
+            ]
+        )
+    )
     # The watcher must be a child of the pane's exec'd Codex process. Its
     # first registration can retry while the shell is still entering exec.
     watch = f"{watcher} --exit-with-parent $$ >{shlex.quote(str(log_path))} 2>&1 & "
     # Reuse managed Codex's parent-runtime cleanup, then restore only the
     # operator's explicitly selected role. In particular, never carry a
     # predecessor's CODEX_THREAD_ID into a newly minted logical session.
-    command = _without_parent_runtime_env([
-        "/usr/bin/env", f"AGENT_ROLE={spec.role}",
-        *_codex_argv(spec),
-    ])
-    return watch + "exec " + shlex.join(command)
+    command = _without_parent_runtime_env(
+        [
+            "/usr/bin/env",
+            f"AGENT_ROLE={spec.role}",
+            *_codex_argv(spec),
+        ]
+    )
+    return "unset GIT_CONTROLLER_NAME; " + watch + "exec " + shlex.join(command)
 
 
 def _new_host_command(
-    tmux: str, spec: LaunchSpec, host: str, environment: dict[str, str], log_path: Path,
+    tmux: str,
+    spec: LaunchSpec,
+    host: str,
+    environment: dict[str, str],
+    log_path: Path,
 ) -> list[str]:
     command = [tmux, "new-session", "-d", "-s", host, "-c", str(spec.cwd.resolve())]
     for key, value in environment.items():
@@ -223,9 +247,15 @@ def _wait_for_arm(tmux: str, host: str, instance_id: str, log_path: Path) -> Non
 
 def _stop_failed_host(tmux: str, host: str, instance_id: str) -> None:
     """Clean up only the host this invocation created, with fresh identity proof."""
-    identity = _run([
-        tmux, "show-environment", "-t", "=" + host, "AGENT_INSTANCE_ID",
-    ])
+    identity = _run(
+        [
+            tmux,
+            "show-environment",
+            "-t",
+            "=" + host,
+            "AGENT_INSTANCE_ID",
+        ]
+    )
     if identity.returncode == 0 and identity.stdout.strip() == f"AGENT_INSTANCE_ID={instance_id}":
         _checked([tmux, "kill-session", "-t", "=" + host])
 
@@ -247,15 +277,24 @@ def launch(spec: LaunchSpec, *, output: TextIO = sys.stdout) -> str:
     instance_id = "agi-" + uuid.uuid4().hex
     session_id = "ases-" + uuid.uuid4().hex
     environment = _launch_environment(
-        spec, instance_id=instance_id, session_id=session_id, model=model, effort=effort,
+        spec,
+        instance_id=instance_id,
+        session_id=session_id,
+        model=model,
+        effort=effort,
     )
     directory = Path.home() / ".local" / "state" / "solet-operator-codex" / instance_id
     directory.mkdir(parents=True, mode=0o700)
     log_path = directory / "watch.log"
-    _write_receipt(directory / "launch.json", {
-        "host_ref": host, "environment": environment,
-        "codex_args": list(spec.codex_args), "status": "qualification_pending",
-    })
+    _write_receipt(
+        directory / "launch.json",
+        {
+            "host_ref": host,
+            "environment": environment,
+            "codex_args": list(spec.codex_args),
+            "status": "qualification_pending",
+        },
+    )
     # new-session is the atomic duplicate guard; a racing refusal must not
     # terminate the winner. Cleanup starts only after our own create succeeds.
     _checked(_new_host_command(tmux, spec, host, environment, log_path))
@@ -265,10 +304,15 @@ def launch(spec: LaunchSpec, *, output: TextIO = sys.stdout) -> str:
         _write_receipt(directory / "failure.json", {"error": str(exc)})
         _stop_failed_host(tmux, host, instance_id)
         raise
-    _write_receipt(directory / "qualified.json", {
-        "host_ref": host, "agent_instance_id": instance_id, "agent_session_id": session_id,
-        "qualification": "watcher_armed_after_verified_host_registration",
-    })
+    _write_receipt(
+        directory / "qualified.json",
+        {
+            "host_ref": host,
+            "agent_instance_id": instance_id,
+            "agent_session_id": session_id,
+            "qualification": "watcher_armed_after_verified_host_registration",
+        },
+    )
     print(f"{spec.role}: watcher and native host registered; {directory}", file=output, flush=True)
     return host
 
@@ -280,11 +324,16 @@ def main() -> int:
         except OperatorLaunchError as exc:
             print(f"operator target refused: {exc}", file=sys.stderr)
             return 1
-        print(json.dumps({
-            "solet": target.solet,
-            "bridge_cli": str(target.bridge_cli),
-            "git_controller_name": target.git_controller_name,
-        }, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "solet": target.solet,
+                    "bridge_cli": str(target.bridge_cli),
+                    "git_controller_name": target.git_controller_name,
+                },
+                sort_keys=True,
+            )
+        )
         return 0
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--role", required=True)
@@ -297,8 +346,11 @@ def main() -> int:
     args = parser.parse_args()
     codex_args = args.codex_args[1:] if args.codex_args[:1] == ["--"] else args.codex_args
     spec = LaunchSpec(
-        role=args.role, solet=args.solet, cwd=args.cwd,
-        bridge_cli=args.bridge_cli, codex_binary=args.codex_binary,
+        role=args.role,
+        solet=args.solet,
+        cwd=args.cwd,
+        bridge_cli=args.bridge_cli,
+        codex_binary=args.codex_binary,
         codex_args=tuple(codex_args),
         claim_role=not args.no_role_claim,
     )

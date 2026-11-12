@@ -60,12 +60,6 @@
 # it works. The hydration wizard's MCP path sets both variables together.
 # Defaults are watch + channels OFF; do not suggest MCP unprompted.
 #
-# GIT_CONTROLLER_NAME records the operator's chosen git-controller role.
-# Hydration renders that choice, launcher refresh preserves it, and managed
-# workers inherit it. The coordination-hooks git gate was removed in 0.9.0;
-# this variable does not enforce Git permissions. Git control is the
-# repository's responsibility. A single-session deployment may omit the line.
-# Keep the recorded choice identical here and in claude-{{SOLET_NAME}}.
 # tmux self-hosting. Every fleet session runs inside a tmux session named
 # exactly its role. Headless sessions are not supported: the solet drives and
 # wakes a session through its tmux pane, so a session started in a bare
@@ -115,6 +109,7 @@ _tmux_host_for_{{SOLET_NAME}}() {
 }
 
 _claude_for_{{SOLET_NAME}}() {
+  unset GIT_CONTROLLER_NAME
   local role="$1"
   local model="$2"    # optional CLI model alias; empty = settings.json default
   local effort="$3"   # optional effort level; empty = settings.json default
@@ -140,7 +135,6 @@ _claude_for_{{SOLET_NAME}}() {
   AGENT_SESSION_LABEL="$role" \
   AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
   AGENT_WAKE_CLI="{{SOLET_NAME}}" \
-  GIT_CONTROLLER_NAME="{{GIT_CONTROLLER_NAME}}" \
   exec claude \
       --name "$role" \
       --remote-control "$role" \

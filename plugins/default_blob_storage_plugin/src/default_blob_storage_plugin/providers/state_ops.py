@@ -37,12 +37,7 @@ from ..errors import BlobStorageErrorCode, create_error_response, is_unique_cons
 # (verified 2026-08-15), so nothing invokes this path today. Before anything
 # wires it up, it needs redesigning — see the report.
 _METADATA_TABLE_CEILING = 10_000
-_METADATA_TABLE_CEILING_REASON = (
-    "one row per stored blob (measured: 193,390), and the caller unlinks every "
-    "blob file whose id is missing from this set, so a partial read would delete "
-    "live blobs; reading them all would be a larger scan than the one that caused "
-    "the 2026-08-15 outage."
-)
+_METADATA_TABLE_CEILING_REASON = "one row per stored blob (measured: 193,390), and the caller unlinks every blob file whose id is missing from this set, so a partial read would delete live blobs; reading them all would be a larger scan than the one that caused the 2026-08-15 outage."
 
 
 def extract_generated_id(result: ActionResult) -> str | None:
@@ -147,22 +142,17 @@ def store_metadata_with_conflict_check(
     log_prefix: str,
 ) -> tuple[str | None, ActionResult | None]:
     """Store metadata, mapping unique-constraint violations to EXTERNAL_ID_CONFLICT."""
-    generated_id, error_result = store_metadata_to_state(
-        state_service, plugin_name, namespace, metadata, log_prefix
-    )
+    generated_id, error_result = store_metadata_to_state(state_service, plugin_name, namespace, metadata, log_prefix)
     if error_result is None:
         return generated_id, None
 
     error_dict: object = error_result.get("error", {})
-    error_message = str(
-        error_dict.get("message", "") if isinstance(error_dict, dict) else error_dict
-    )
+    error_message = str(error_dict.get("message", "") if isinstance(error_dict, dict) else error_dict)
     if is_unique_constraint_error(error_message):
         external_id = metadata.get("external_id", "<unknown>")
         return None, create_error_response(
             BlobStorageErrorCode.EXTERNAL_ID_CONFLICT.value,
-            f"Cannot store blob: external_id '{external_id}' already exists. "
-            "Use a different name or delete the existing blob.",
+            f"Cannot store blob: external_id '{external_id}' already exists. Use a different name or delete the existing blob.",
         )
     return None, error_result
 
@@ -207,7 +197,8 @@ def update_blob_id_in_metadata(
         error_details = update_result.get("error", "Unknown error")
         logger.error(
             "%s STATE_UPDATE: FAILED - blob_id field is required for retrieval: %s",
-            log_prefix, error_details,
+            log_prefix,
+            error_details,
         )
         rollback_blob_and_metadata(state_service, plugin_name, blob_path, generated_id, log_prefix)
         return create_error_response(
@@ -217,9 +208,7 @@ def update_blob_id_in_metadata(
     return None
 
 
-def get_metadata_blob_ids(
-    state_service: StateServiceProtocol, plugin_name: str
-) -> set[str]:
+def get_metadata_blob_ids(state_service: StateServiceProtocol, plugin_name: str) -> set[str]:
     """Return set of blob_ids that have metadata records."""
     result = state_service.read_state(
         namespace=plugin_name,
@@ -240,11 +229,7 @@ def get_metadata_blob_ids(
         # Fail loud instead. The caller wraps this in a blanket `except
         # Exception: pass`, so the raise skips that cleanup pass — which is the
         # safe direction for a destructive operation whose input is unavailable.
-        raise RuntimeError(
-            f"blob metadata read failed for namespace {plugin_name!r}; refusing to "
-            f"report an empty metadata set, because the caller deletes every blob "
-            f"file missing from it: {result.get('error')}"
-        )
+        raise RuntimeError(f"blob metadata read failed for namespace {plugin_name!r}; refusing to report an empty metadata set, because the caller deletes every blob file missing from it: {result.get('error')}")
     data = result.get("data", {})
     records = data.get("records", [])
     if not isinstance(records, list):
@@ -280,3 +265,33 @@ def fetch_namespace_records(
     data: dict[str, Any] = result.get("data") or {}
     records = data.get("records", [])
     return records if isinstance(records, list) else []
+
+
+def fetch_records_by_file_hash(
+    state_service: StateServiceProtocol,
+    plugin_name: str,
+    namespace: str,
+    file_hash: str,
+) -> list[Any]:
+    """Fetch metadata rows through the indexed ``file_hash`` column.
+
+    The ordinary namespace search intentionally refuses to materialize the
+    growing metadata table. Content-addressed reuse must stay on the typed
+    state-service filter path so PostgreSQL can use ``idx_file_hash``.
+    """
+    filters: dict[str, Any] = {"file_hash": file_hash, "is_deleted": 0}
+    if namespace:
+        filters["plugin_namespace"] = namespace
+    result = state_service.read_state(
+        namespace=plugin_name,
+        query={"table": "metadata", "filters": filters, "limit": 1},
+    )
+    if result.get("action_status") != "completed":
+        raise RuntimeError(f"file_hash metadata lookup failed: {result.get('error')!r}")
+    data = result.get("data")
+    if not isinstance(data, dict):
+        raise RuntimeError(f"file_hash metadata lookup returned malformed data: {data!r}")
+    records = data.get("records")
+    if not isinstance(records, list):
+        raise RuntimeError(f"file_hash metadata lookup returned malformed records: {records!r}")
+    return records

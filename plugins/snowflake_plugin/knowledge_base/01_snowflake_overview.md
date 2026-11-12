@@ -95,19 +95,19 @@ not that it loaded them: `insert_report` (continued with `next_begin_mark`) and
 file transfer (`PUT`, `GET`), `REMOVE` and `COPY INTO` are connector SQL, not
 part of the Stage REST API: `run_statement` forwards them until a typed stage
 file verb exists. `presigned_url` returns a time-limited bearer URL for one file,
-which is the product the caller asked for and is therefore not redacted.
+which is the product the caller asked for.
 
 `rest_families.py` checks typed input against the vendor's published shape
 (identifier pattern, documented query names, types and ranges such as
 `showLimit` 1 to 10000, `createMode` values, required body members) before
 queueing; it never classifies reads against
-writes. Results carry HTTP status, typed `error_code`, the redacted body, and
+writes. Results carry HTTP status, typed `error_code`, the body as received, and
 a `pagination` hint (statement handles, next partition, `next_from_name`, Link
 relations, 202 result handler). The hint is never followed automatically.
-Credential redaction covers raw, percent-encoded and base64 spellings of the
-signing key, the issued JWT, any token the vendor returns, and any credential
-the caller sends in a request body (for example a stage's `aws_secret_key`,
-`aws_token` or `azure_sas_token`) should the vendor echo it back.
+Results are not scanned. The connector returns the vendor result as received;
+bulk results go to disk through `output_path`. Audit and log lines are built
+only from method, path without query values, status, duration and correlation
+id, so they never carry headers, bodies or credential values.
 
 ## Connecting the operator's account (one-time)
 
@@ -220,6 +220,67 @@ contains no SQL string literals and stays fully gated.
 | `src/snowflake_plugin/plugin.py` | The `SnowflakePlugin` EDGE provider — connection lifecycle, error mapping, EDGE registration, D0.3 dispatch. |
 | `src/snowflake_plugin/async_jobs.py` | D0.3 deferred-completion machinery: the single lazily-started background worker thread that does the real connect + query/statement I/O for every verb. |
 | `plugins/snowflake_plugin/src/snowflake_plugin/rest_client.py` | Account-bound REST transport: per-call RSA JWT, tenant-bound relative paths, no redirects or retries. |
-| `plugins/snowflake_plugin/src/snowflake_plugin/rest_redaction.py` | Credential redaction of every encoded spelling across result bodies, headers and HTTP diagnostics. |
+| `plugins/snowflake_plugin/src/snowflake_plugin/outward_values.py` | JSON-compatible outward forms of native stage-file keys and values (hex binary, text Decimal/date/time, arrays for tuples). |
 | `plugins/snowflake_plugin/src/snowflake_plugin/rest_families.py` | Typed `sql_api`, `task`, `stream`, `dynamic_table`, `database`, `schema`, `warehouse`, `stage`, `table`, `view`, `sequence` and `pipe` operation tables, input checks, and pagination hints. |
 | `src/snowflake_plugin/completion_templates.py` | Builds the `completion_handlers` block each async job's metadata carries, routing job completion back into the originating flow. |
+
+## Stage files (build 5)
+
+`stage_files` is the typed connector family for `put`, `get`, `list`, `remove`,
+`copy_into_table`, `copy_into_location` and `copy_files`. It runs on the same
+single async worker as other verbs. The queued envelope is separate from the
+vendor outcome; inspect every file status and the COPY result TSV. No automatic
+retry or rollback is promised: transfers and COPY/REMOVE can have partial effects.
+
+Supply `stage_location` without SQL string quotes, for example `@DB.PUBLIC.FILES/path/`,
+`@%TABLE/path/` or `@~/path/`. PUT and GET apply to internal stages, as the vendor
+requires. COPY INTO supports internal/external stages and cloud locations with `s3://`,
+`s3china://`, `s3gov://`, `gcs://` or `azure://` protocols. Snowflake validates
+region/account support. COPY FILES targets a named internal/external stage and
+reads a named stage or a query of file URLs (including scoped/stage URLs);
+cloud storage is configured on those stages.
+PUT takes an absolute local filename or wildcard; every realpath-resolved match
+must be under a saved location. GET takes an existing absolute directory
+under those same roots. It downloads into an isolated directory before replacing
+matching destination entries; an existing destination symlink is replaced, never
+followed. GET does not decompress files. For a byte-equality round trip, PUT with
+`AUTO_COMPRESS=false` and `SOURCE_COMPRESSION='NONE'`, then GET the same file.
+PUT with `OVERWRITE=true` corrects/replaces a file, false retains it as SKIPPED;
+REMOVE retires files, and PUT recreates them. LIST returns every vendor row.
+There is no file history, close/reopen state or optimistic-concurrency token in
+these vendor commands; correction is overwrite and concurrency follows Snowflake.
+Use separate versioned stage prefixes when preserving old bytes matters.
+
+`options` accepts SQL option names case insensitively. PUT supports `PARALLEL`
+(1–99), `AUTO_COMPRESS`, `SOURCE_COMPRESSION` and `OVERWRITE`; GET supports
+`PARALLEL` (1–99) and `PATTERN`; LIST/REMOVE support `PATTERN`. Omitted options
+retain Snowflake defaults. COPY accepts every option name, with vendor validation
+of types/combinations: strings become SQL literals, booleans/numbers remain
+literals, lists become SQL lists, and nested objects become option groups.
+For example `{"FILE_FORMAT":{"TYPE":"CSV","SKIP_HEADER":1},"FORCE":true}`.
+Use `{"sql":"expression"}` for an identifier or SQL expression, including
+`STORAGE_INTEGRATION`, nested `INCLUDE_METADATA` column assignments, or SQL NULL.
+`query` supplies transformation/unload/COPY FILES query text without parentheses;
+`columns` maps COPY INTO table targets; `partition_by` supplies an unload
+expression. Partition values appear in filenames and Snowflake logs, so choose
+nonsensitive date/time/boolean values as the vendor recommends.
+
+Both COPY INTO forms require `output_tsv_path`: every result row, including
+validation/RETURN_ROWS business data, goes to that contained TSV. COPY FILES and
+transfer/list/remove results contain file metadata inline. Every key and value
+first becomes JSON-compatible: binary buffers use `hex:<lowercase hex>`
+strings, Decimal/date/time use text, and tuples use arrays (tuple keys use
+compact JSON strings). SQL NULL remains an empty TSV cell. Status/success and
+counts are computed from the rows as received. Results are not scanned. The connector returns the vendor result as received;
+bulk results go to disk through `output_path`. Audit and log lines are built
+only from method, path without query values, status, duration and correlation
+id, so they never carry headers, bodies or credential values.
+The input job payload holds the request needed for execution, like the
+existing SQL/REST jobs; never put its credential-bearing contents in a
+user-facing transcript.
+
+`stage_sql.py` builds commands, `stage_paths.py` applies local containment, and
+`stage_files.py` runs commands and maps results. The registered offline smoke
+`plugins/snowflake_plugin/tests/smoke_stage_files.py` proves binary round trip, correction/removal/recreation,
+containment, COPY shapes and error mapping using
+a connector-shaped fake. It does not measure a live Snowflake account.

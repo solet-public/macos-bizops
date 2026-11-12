@@ -20,7 +20,6 @@ to delete anything; retirement does not consult packets yet.
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import json
 import os
@@ -28,23 +27,19 @@ import re
 import stat
 import subprocess
 import tempfile
-import uuid
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Literal
 
-from .lane_worktree_evidence import EXECUTABLE_MODE, REGULAR_MODE, SYMLINK_MODE, LocalEntry, read_entry
+from . import custody_store as store
 from .lane_worktrees import LaneWorktree, LaneWorktreeError, _git_environment, _is_ignorable_untracked, lane_worktree_for
 from .register_unit_client import RegisterUnitError, UnitAssignment
 
 PACKET_SCHEMA = "lane-custody-packet/v1"
 STORE_PARTS = ("lane-evidence", "v1")
-MANIFEST_NAME = "manifest.json"
-PAYLOAD_DIRECTORY = "payload"
-STAGING_PREFIX = ".staging-"
 DISPOSITION_PRESERVED = "preserved"
 DISPOSITION_SUPERSEDED = "superseded"
 KIND_FILE = "file"
@@ -53,7 +48,7 @@ KIND_DIRECTORY = "directory"
 KIND_ABSENT = "absent"
 
 _DISPOSITIONS = frozenset({DISPOSITION_PRESERVED, DISPOSITION_SUPERSEDED})
-_LEAF_KINDS = {REGULAR_MODE: KIND_FILE, EXECUTABLE_MODE: KIND_FILE, SYMLINK_MODE: KIND_SYMLINK}
+_LEAF_KINDS = {store.REGULAR_MODE: KIND_FILE, store.EXECUTABLE_MODE: KIND_FILE, store.SYMLINK_MODE: KIND_SYMLINK}
 _OID_LENGTHS = {"sha1": 40, "sha256": 64}
 _INDEX_FLAG_CODES = {
     "assume_unchanged": "unsupported_index_assume_unchanged",
@@ -61,27 +56,17 @@ _INDEX_FLAG_CODES = {
     "skip_worktree": "unsupported_index_skip_worktree",
 }
 _MANIFEST_SCALARS = ("schema", "object_format", "head_commit", "head_tree", "fingerprint")
-_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-_CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _HEX = re.compile(r"[0-9a-f]+")
 _SUMMARY_PATH_LIMIT = 20
 
-Sink = Callable[[bytes], None]
 
-
-class LaneCustodyError(RuntimeError):
+class LaneCustodyError(store.CustodyStoreError):
     """A named reason custody could not be captured, verified or read.
 
     Public functions turn it into a refusing ``CustodyResult``; ``incomplete``
     carries the paths an incomplete capture left in place.
     """
-
-    def __init__(self, code: str, detail: str, incomplete: tuple[tuple[str, str], ...] = ()) -> None:
-        super().__init__(f"{code}: {detail}")
-        self.code = code
-        self.detail = detail
-        self.incomplete = incomplete
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,22 +84,6 @@ class LaneCustodyContext:
     agent_instance_id: str
     assignment: UnitAssignment
     actor: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class PacketWriter:
-    """The filesystem steps publication depends on, so a test can fail each one.
-
-    Every payload and the manifest go through ``write`` and ``fsync``, and the
-    staged packet becomes visible only through ``rename``.
-    """
-
-    write: Callable[[int, bytes], int] = os.write
-    fsync: Callable[[int], None] = os.fsync
-    rename: Callable[..., None] = os.rename
-
-
-DEFAULT_WRITER = PacketWriter()
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,7 +176,7 @@ class CustodyManifest:
     schema: str = PACKET_SCHEMA
 
     def encode(self) -> bytes:
-        return _canonical(asdict(self))
+        return store.canonical_bytes(asdict(self))
 
     def payloads(self) -> dict[str, tuple[str, int]]:
         """Each stored payload's SHA-256 with the one object id and size it must have."""
@@ -328,16 +297,6 @@ class _Inventory:
     fingerprint: str
 
 
-@dataclass(frozen=True, slots=True)
-class _Payload:
-    """Where one payload is copied from, and the exact identity its bytes must have."""
-
-    sha256: str
-    oid: str
-    read: Callable[[Sink], LocalEntry]
-    mode: int | None = None
-
-
 class _Git:
     """Git plumbing under the caller's environment, bytes in and out.
 
@@ -390,7 +349,7 @@ class _Walker:
 
     def scan(self) -> None:
         with ExitStack() as stack:
-            self._directory(_open_directory(self._root, (), stack), "")
+            self._directory(store.open_store_directory(self._root, (), stack), "")
 
     def _directory(self, descriptor: int, prefix: str) -> None:
         with os.scandir(descriptor) as listing:
@@ -424,7 +383,7 @@ class _Walker:
             self.build_output.append(f"{path}/")
             return
         try:
-            child = os.open(name, _DIRECTORY_FLAGS, dir_fd=descriptor)
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
         except OSError:
             self.incomplete.append((f"{path}/", "protected_inaccessible"))
             return
@@ -438,7 +397,7 @@ class _Walker:
 
     def _leaf(self, path: str) -> None:
         """Hash one leaf's raw bytes or link text through the shared no-follow reader."""
-        entry = read_entry(self._root, path, object_format=self._object_format, digest=True)
+        entry = store.read_entry(self._root, path, object_format=self._object_format, digest=True)
         if entry.mode is None:
             self.incomplete.append((path, "protected_inaccessible" if not entry.readable else "changed_during_inventory"))
             return
@@ -453,7 +412,7 @@ def snapshot_lane_custody(context: LaneCustodyContext, *, environment: Mapping[s
     try:
         session = _open_session(context, environment, lane=True)
         inventory = _inventory(session)
-    except LaneCustodyError as exc:
+    except store.CustodyStoreError as exc:
         return _refusal(exc)
     snapshot = CustodySnapshot(
         inventory.fingerprint,
@@ -473,7 +432,7 @@ def capture_lane_custody(
     rationale: str,
     predecessor: str | None = None,
     environment: Mapping[str, str] | None = None,
-    writer: PacketWriter = DEFAULT_WRITER,
+    writer: store.PacketWriter = store.DEFAULT_WRITER,
 ) -> CustodyResult:
     """Publish one immutable packet of exactly the state ``expected_fingerprint`` names.
 
@@ -493,7 +452,7 @@ def capture_lane_custody(
         if inventory.fingerprint != expected_fingerprint:
             raise LaneCustodyError("custody_fingerprint_stale", f"the lane is now {inventory.fingerprint}, not the expected {expected_fingerprint}")
         manifest, payloads = _manifest(session, inventory, provenance)
-    except LaneCustodyError as exc:
+    except store.CustodyStoreError as exc:
         return _refusal(exc)
     return _publish(session, manifest, payloads, writer, advisories, partial(_require_unchanged, session, inventory))
 
@@ -505,7 +464,7 @@ def correct_lane_custody(
     disposition: str,
     rationale: str,
     environment: Mapping[str, str] | None = None,
-    writer: PacketWriter = DEFAULT_WRITER,
+    writer: store.PacketWriter = store.DEFAULT_WRITER,
 ) -> CustodyResult:
     """Publish a successor holding the predecessor's verified bytes with corrected provenance.
 
@@ -518,7 +477,7 @@ def correct_lane_custody(
         prior = _verify_packet(session, predecessor)
         manifest = replace(prior.manifest, provenance=provenance)
         payloads = _stored_payloads(session, predecessor, manifest)
-    except LaneCustodyError as exc:
+    except store.CustodyStoreError as exc:
         return _refusal(exc)
     return _publish(session, manifest, payloads, writer, advisories, None)
 
@@ -531,7 +490,7 @@ def read_lane_custody(context: LaneCustodyContext, packet_id: str, *, environmen
     """
     try:
         packet = _verify_packet(_open_session(context, environment, lane=False), packet_id)
-    except LaneCustodyError as exc:
+    except store.CustodyStoreError as exc:
         return _refusal(exc)
     return CustodyResult(True, "custody_verified", packet=packet, advisories=packet.advisories)
 
@@ -556,14 +515,14 @@ def read_custody_payload(
         record = next((item for item in records if item.path == path), None)
         if record is None or record.sha256 is None or record.oid is None:
             raise LaneCustodyError("custody_payload_absent", f"{layer} entry {path!r} holds no bytes in packet {packet_id}")
-        relative = "/".join((*session.packet_parts(packet_id), PAYLOAD_DIRECTORY, record.sha256))
-        data = _read_exact(session.common_dir, relative, session.object_format, (record.sha256, record.oid))
-    except LaneCustodyError as exc:
+        relative = "/".join((*session.packet_parts(packet_id), store.PAYLOAD_DIRECTORY, record.sha256))
+        data = store.read_payload(session.common_dir, relative, session.object_format, (record.sha256, record.oid))
+    except store.CustodyStoreError as exc:
         return _refusal(exc)
     return CustodyResult(True, "custody_payload", packet=packet, payload=data)
 
 
-def _refusal(exc: LaneCustodyError, staging: str = "") -> CustodyResult:
+def _refusal(exc: store.CustodyStoreError, staging: str = "") -> CustodyResult:
     """The refusing answer for a named error, keeping its incomplete paths and any staging.
 
     Every public function ends here on failure, so no refusal escapes as an
@@ -764,14 +723,14 @@ def _fingerprint(
     Declared build output is excluded because it is reproducible and changes
     while tools run; everything else, including incompleteness, is included.
     """
-    digest = hashlib.sha256(_canonical(["head", head_commit, head_tree, branch]))
+    digest = hashlib.sha256(store.canonical_bytes(["head", head_commit, head_tree, branch]))
     for record in sorted(index, key=lambda item: (item.path, item.stage)):
-        digest.update(_canonical(["index", record.path, record.mode, record.oid, record.stage, list(record.flags)]))
+        digest.update(store.canonical_bytes(["index", record.path, record.mode, record.oid, record.stage, list(record.flags)]))
     for path in sorted(worktree):
         entry = worktree[path]
-        digest.update(_canonical(["worktree", path, entry.kind, entry.mode, entry.oid]))
+        digest.update(store.canonical_bytes(["worktree", path, entry.kind, entry.mode, entry.oid]))
     for path, code in incomplete:
-        digest.update(_canonical(["incomplete", path, code]))
+        digest.update(store.canonical_bytes(["incomplete", path, code]))
     return digest.hexdigest()
 
 
@@ -804,7 +763,7 @@ def _summary(index: Sequence[IndexRecord], worktree: Sequence[WorktreeRecord], b
     return CustodySummary(len(index), len(worktree), len(build_output), tuple(paths[:_SUMMARY_PATH_LIMIT]))
 
 
-def _manifest(session: _Session, inventory: _Inventory, provenance: CustodyProvenance) -> tuple[CustodyManifest, dict[str, _Payload]]:
+def _manifest(session: _Session, inventory: _Inventory, provenance: CustodyProvenance) -> tuple[CustodyManifest, dict[str, store.Payload]]:
     """The packet's manifest, and where each of its payloads is copied from."""
     worktree = _worktree_delta(inventory)
     payloads = {digest: _worktree_payload(session, entry, digest) for entry in worktree if (digest := entry.sha256)}
@@ -824,7 +783,7 @@ def _manifest(session: _Session, inventory: _Inventory, provenance: CustodyProve
     return manifest, payloads
 
 
-def _with_content(session: _Session, record: IndexRecord, known: Mapping[str, WorktreeRecord], payloads: dict[str, _Payload]) -> IndexRecord:
+def _with_content(session: _Session, record: IndexRecord, known: Mapping[str, WorktreeRecord], payloads: dict[str, store.Payload]) -> IndexRecord:
     """Give an index entry its blob's digest, copied from the worktree when the bytes are there.
 
     A staged-only blob is read raw from the object database and checked against
@@ -837,84 +796,68 @@ def _with_content(session: _Session, record: IndexRecord, known: Mapping[str, Wo
         payloads.setdefault(source.sha256, _worktree_payload(session, source, source.sha256))
         return replace(record, size=source.size, sha256=source.sha256)
     data = session.git().run("cat-file", "blob", record.oid)
-    if _blob_oid(data, session.object_format) != record.oid:
+    if store.blob_oid(data, session.object_format) != record.oid:
         raise LaneCustodyError("custody_object_mismatch", f"object {record.oid} does not hash to its name")
     digest = hashlib.sha256(data).hexdigest()
-    payloads.setdefault(digest, _Payload(digest, record.oid, partial(_held, data, digest, record.oid)))
+    payloads.setdefault(digest, store.Payload.from_bytes(data, session.object_format))
     return replace(record, size=len(data), sha256=digest)
 
 
-def _worktree_payload(session: _Session, entry: WorktreeRecord, digest: str) -> _Payload:
+def _worktree_payload(session: _Session, entry: WorktreeRecord, digest: str) -> store.Payload:
     """Copy a leaf straight from the lane, insisting on the mode it was inventoried with.
 
     The copy re-reads and re-hashes the path, so a file edited since the
     inventory cannot be stored under the old digest.
     """
-    return _Payload(digest, entry.oid or "", partial(_read_leaf, session.lane.path, entry.path, session.object_format), entry.mode)
+    return store.Payload.from_path(session.lane.path, entry.path, session.object_format, sha256=digest, oid=entry.oid or "", mode=entry.mode)
 
 
-def _stored_payloads(session: _Session, packet_id: str, manifest: CustodyManifest) -> dict[str, _Payload]:
+def _stored_payloads(session: _Session, packet_id: str, manifest: CustodyManifest) -> dict[str, store.Payload]:
     """A verified packet's payloads, as the sources a successor copies and rechecks."""
-    base = "/".join((*session.packet_parts(packet_id), PAYLOAD_DIRECTORY))
-    return {digest: _Payload(digest, oid, partial(_read_leaf, session.common_dir, f"{base}/{digest}", session.object_format)) for digest, (oid, _) in manifest.payloads().items()}
-
-
-def _read_leaf(root: Path, relative: str, object_format: str, sink: Sink) -> LocalEntry:
-    return read_entry(root, relative, object_format=object_format, digest=True, sink=sink)
-
-
-def _held(data: bytes, digest: str, oid: str, sink: Sink) -> LocalEntry:
-    """Feed bytes already in memory and already checked against their names.
-
-    Used for staged-only blobs and for the manifest itself.
-    """
-    sink(data)
-    return LocalEntry(REGULAR_MODE, digest, oid, size=len(data))
-
-
-def _blob_oid(data: bytes, object_format: str) -> str:
-    oid = hashlib.new(object_format, b"blob %d\0" % len(data))
-    oid.update(data)
-    return oid.hexdigest()
+    base = "/".join((*session.packet_parts(packet_id), store.PAYLOAD_DIRECTORY))
+    return {digest: store.Payload.from_path(session.common_dir, f"{base}/{digest}", session.object_format, sha256=digest, oid=oid) for digest, (oid, _) in manifest.payloads().items()}
 
 
 def _publish(
     session: _Session,
     manifest: CustodyManifest,
-    payloads: Mapping[str, _Payload],
-    writer: PacketWriter,
+    payloads: Mapping[str, store.Payload],
+    writer: store.PacketWriter,
     advisories: tuple[str, ...],
     recheck: Callable[[], None] | None,
 ) -> CustodyResult:
-    """Stage, recheck, verify, then atomically publish under the manifest's digest.
-
-    An existing packet of that digest is reverified and returned, never
-    replaced.  Any failure leaves the source and every published packet as they
-    were, and names the staging it left behind.
-    """
+    """Keep lane binding/semantic checks around the shared byte-store publisher."""
     raw = manifest.encode()
     packet_id = hashlib.sha256(raw).hexdigest()
-    staging = f"{STAGING_PREFIX}{packet_id[:16]}-{uuid.uuid4().hex}"
-    staged = ""
+
+    def validate(staging: str) -> None:
+        if recheck is not None:
+            recheck()
+        _verify_packet(session, packet_id, directory=staging)
+
     try:
         existing = _published(session, packet_id)
         if existing is not None:
             return CustodyResult(True, "custody_already_published", packet=existing, advisories=(*advisories, *existing.advisories))
-        with ExitStack() as stack:
-            store = _open_directory(session.common_dir, session.store_parts(), stack, create=True)
-            os.mkdir(staging, 0o755, dir_fd=store)
-            staged = "/".join(session.packet_parts(staging))
-            _stage(store, staging, raw, payloads, writer)
-            if recheck is not None:
-                recheck()
-            _verify_packet(session, packet_id, directory=staging)
-            code = _promote(store, staging, packet_id, writer)
+        publication = store.publish_packet(
+            session.common_dir,
+            session.store_parts(),
+            raw,
+            payloads,
+            writer,
+            dir_mode=0o755,
+            file_mode=0o444,
+            pool=None,
+            validate=validate,
+            retain_failed_staging=True,
+        )
         packet = _verify_packet(session, packet_id)
-    except LaneCustodyError as exc:
-        return _refusal(exc, staged)
+    except store.CustodyStoreError as exc:
+        return _refusal(exc, exc.staging)
     except OSError as exc:
-        return CustodyResult(False, "custody_publication_failed", f"{exc}; the source and every published packet are unchanged", staging=staged)
-    return CustodyResult(True, code, packet=packet, advisories=(*advisories, *packet.advisories), staging=staged if code == "custody_already_published" else "")
+        return CustodyResult(False, "custody_publication_failed", str(exc))
+    code = "custody_captured" if publication.created else "custody_already_published"
+    return CustodyResult(True, code, packet=packet, advisories=(*advisories, *packet.advisories))
 
 
 def _published(session: _Session, packet_id: str) -> VerifiedPacket | None:
@@ -925,64 +868,10 @@ def _published(session: _Session, packet_id: str) -> VerifiedPacket | None:
     """
     try:
         return _verify_packet(session, packet_id)
-    except LaneCustodyError as exc:
+    except store.CustodyStoreError as exc:
         if exc.code == "custody_packet_missing":
             return None
         raise
-
-
-def _stage(store: int, staging: str, raw: bytes, payloads: Mapping[str, _Payload], writer: PacketWriter) -> None:
-    """Write every payload and then the manifest, each made durable before the next step."""
-    with ExitStack() as stack:
-        directory = _open_directory_at(store, staging, stack)
-        os.mkdir(PAYLOAD_DIRECTORY, 0o755, dir_fd=directory)
-        payload_directory = _open_directory_at(directory, PAYLOAD_DIRECTORY, stack)
-        for payload in payloads.values():
-            _copy_payload(payload_directory, payload, writer)
-        writer.fsync(payload_directory)
-        _write_file(directory, MANIFEST_NAME, writer, partial(_held, raw, "", ""))
-        writer.fsync(directory)
-
-
-def _copy_payload(directory: int, payload: _Payload, writer: PacketWriter) -> None:
-    """Copy one payload while hashing it; bytes that changed since the inventory abort."""
-    entry = _write_file(directory, payload.sha256, writer, payload.read)
-    if not entry.readable or (entry.sha256, entry.oid) != (payload.sha256, payload.oid) or payload.mode not in {None, entry.mode}:
-        raise LaneCustodyError("custody_source_changed", f"payload {payload.sha256} no longer matches the inventory; nothing was published")
-
-
-def _write_file(directory: int, name: str, writer: PacketWriter, read: Callable[[Sink], LocalEntry]) -> LocalEntry:
-    """Create one read-only file exclusively, stream its bytes in, and make it durable."""
-    descriptor = os.open(name, _CREATE_FLAGS, 0o444, dir_fd=directory)
-    try:
-        entry = read(partial(_write_all, writer, descriptor))
-        writer.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    return entry
-
-
-def _write_all(writer: PacketWriter, descriptor: int, data: bytes) -> None:
-    """Write every byte, since one ``write`` may accept only part of a chunk."""
-    offset = 0
-    while offset < len(data):
-        offset += writer.write(descriptor, data[offset:])
-
-
-def _promote(store: int, staging: str, packet_id: str, writer: PacketWriter) -> str:
-    """Rename staging to its digest; a packet already there is never replaced.
-
-    A non-empty directory is never a rename target, so a concurrent publisher
-    that won leaves this staging behind, unpublished, and its packet stands.
-    """
-    try:
-        writer.rename(staging, packet_id, src_dir_fd=store, dst_dir_fd=store)
-    except OSError as exc:
-        if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
-            raise
-        return "custody_already_published"
-    writer.fsync(store)
-    return "custody_captured"
 
 
 def _verify_packet(session: _Session, packet_id: str, *, directory: str | None = None) -> VerifiedPacket:
@@ -994,48 +883,14 @@ def _verify_packet(session: _Session, packet_id: str, *, directory: str | None =
     if not _SHA256.fullmatch(packet_id):
         raise LaneCustodyError("custody_packet_id_invalid", f"{packet_id!r} is not a packet digest")
     parts = session.packet_parts(directory or packet_id)
-    if _listing(session.common_dir, parts) != {MANIFEST_NAME, PAYLOAD_DIRECTORY}:
-        raise LaneCustodyError("custody_packet_corrupt", f"packet {packet_id} does not hold exactly its manifest and payload")
-    raw = _read_exact(session.common_dir, "/".join((*parts, MANIFEST_NAME)), session.object_format, (packet_id, None))
+    raw = store.read_verified(session.common_dir, parts, packet_id=packet_id, object_format=session.object_format)
     manifest = _decode_manifest(raw)
     if manifest.binding != session.binding:
         raise LaneCustodyError("custody_packet_foreign", f"packet {packet_id} binds {manifest.binding}, not this lane")
-    _verify_payloads(session, parts, manifest)
+    store.verify_payload_set(session.common_dir, parts, manifest.payloads(), object_format=session.object_format)
     advisories = _verify_history(session, manifest)
     sizes = {digest: size for digest, (_, size) in manifest.payloads().items()}
     return VerifiedPacket(packet_id, manifest, _summary(manifest.index, manifest.worktree, manifest.build_output), len(sizes), sum(sizes.values()), advisories)
-
-
-def _listing(root: Path, parts: Sequence[str]) -> set[str]:
-    """The names in one store directory, reached without following any link.
-
-    A packet must hold exactly what it names, so an extra entry is as much a
-    corruption as a missing one.
-    """
-    with ExitStack() as stack, os.scandir(_open_directory(root, parts, stack)) as entries:
-        return {entry.name for entry in entries}
-
-
-def _read_exact(root: Path, relative: str, object_format: str, expected: tuple[str, str | None]) -> bytes:
-    """One stored regular file's bytes, refused unless its SHA-256 and object id are as named."""
-    chunks: list[bytes] = []
-    entry = read_entry(root, relative, object_format=object_format, digest=True, sink=chunks.append)
-    digest, oid = expected
-    if entry.mode != REGULAR_MODE or entry.sha256 != digest or oid not in {None, entry.oid}:
-        raise LaneCustodyError("custody_packet_corrupt", f"{relative} is not the exact regular file its packet names")
-    return b"".join(chunks)
-
-
-def _verify_payloads(session: _Session, parts: tuple[str, ...], manifest: CustodyManifest) -> None:
-    """Exactly the named payloads exist, each a regular file of exactly its bytes."""
-    expected = manifest.payloads()
-    names = _listing(session.common_dir, (*parts, PAYLOAD_DIRECTORY))
-    if names != expected.keys():
-        raise LaneCustodyError("custody_packet_corrupt", f"payload set disagrees: missing {sorted(expected.keys() - names)}, unexpected {sorted(names - expected.keys())}")
-    for digest, (oid, _) in expected.items():
-        entry = read_entry(session.common_dir, "/".join((*parts, PAYLOAD_DIRECTORY, digest)), object_format=session.object_format, digest=True)
-        if (entry.mode, entry.sha256, entry.oid) != (REGULAR_MODE, digest, oid):
-            raise LaneCustodyError("custody_packet_corrupt", f"payload {digest} is not the exact regular file its packet names")
 
 
 def _verify_history(session: _Session, manifest: CustodyManifest) -> tuple[str, ...]:
@@ -1155,44 +1010,3 @@ def _unique_paths(records: Sequence[IndexRecord | WorktreeRecord]) -> bool:
     """Each path once, in the sorted order a capture writes."""
     paths = [record.path for record in records]
     return paths == sorted(set(paths))
-
-
-def _canonical(value: object) -> bytes:
-    """Sorted keys, no whitespace and ASCII escapes, so equal content means equal bytes.
-
-    A packet's name is the SHA-256 of these bytes, and a manifest that does not
-    re-encode to exactly its own bytes is refused.
-    """
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-
-
-def _open_directory(root: Path, parts: Sequence[str], stack: ExitStack, *, create: bool = False) -> int:
-    """Open ``root``, then each part beneath it, refusing a symlink or non-directory on the way.
-
-    With ``create``, a missing part is made and its parent flushed, so a new
-    store directory survives a crash along with the packet published into it.
-    """
-    descriptor = os.open(root, _DIRECTORY_FLAGS)
-    stack.callback(os.close, descriptor)
-    for part in parts:
-        if create:
-            with suppress(FileExistsError):
-                os.mkdir(part, 0o755, dir_fd=descriptor)
-                os.fsync(descriptor)
-        descriptor = _open_directory_at(descriptor, part, stack)
-    return descriptor
-
-
-def _open_directory_at(parent: int, name: str, stack: ExitStack) -> int:
-    """Open one directory beneath an open parent; a link or file there is unsafe.
-
-    A missing directory means nothing was published there yet.
-    """
-    try:
-        descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent)
-    except FileNotFoundError as exc:
-        raise LaneCustodyError("custody_packet_missing", f"{name} does not exist in the custody store") from exc
-    except OSError as exc:
-        raise LaneCustodyError("custody_store_unsafe", f"{name} is not a plain directory: {exc}") from exc
-    stack.callback(os.close, descriptor)
-    return descriptor

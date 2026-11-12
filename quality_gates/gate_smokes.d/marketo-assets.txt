@@ -1,2 +1,2 @@
-# Marketo Folder and My Token lifecycle, form payload, paging, RBAC and redaction transcripts.
+# Marketo Folder and My Token lifecycle, form payload, paging and RBAC transcripts.
 plugins/marketo_plugin/tests/asset_api_smoke.py

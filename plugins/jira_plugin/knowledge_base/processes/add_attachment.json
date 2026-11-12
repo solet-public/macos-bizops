@@ -1,13 +1,14 @@
 {
   "process_key": "plugin::jira_plugin::add_attachment",
   "display_name": "Jira: Add Attachment",
-  "description": "Attach bytes from a blob (blob_key) to a Jira issue. Content comes from blob storage ONLY — no local path parameter. Optional filename override. Write action.",
-  "embedding_description": "Upload a file to a Jira issue as an attachment, taking the bytes from platform blob storage via a blob key, with an optional filename override. Attaching something held on local disk means ingesting it into blob storage first and passing the resulting key to this verb.",
+  "description": "Attach bytes from a blob (blob_key) to a Jira issue. Content comes from blob storage ONLY — no local path parameter. Optional filename override. Write action. Optional site selects a bound Atlassian site; omitted uses the default. Queued and completed results identify the site. Returns immediately with data {job_id, status: queued}. Retrieve service_interface::job_service::get_job by that exact id until terminal; the complete former response envelope is in job.result and failures are also in job.error. Proceed with dependent work only after successful completion.",
+  "embedding_description": "Attach blob-storage bytes to a Jira issue, with an optional filename override and site selector. Local paths are not accepted; ingest the file first. Returns data {job_id, status: queued}. Read service_interface::job_service::get_job until terminal; job.result retains the original response and job.error preserves failures.",
   "result_processor_customizations": {
     "action_label": "Jira attachment added",
     "result_type": "jira_add_attachment_result",
-    "result_description": "The new attachment's id and filename.",
-    "presentation_guidance": "Confirm the file was attached to the named issue and give the filename. This adds a real file to a ticket."
+    "result_description": "Queued receipt {job_id, status}; after terminal success, job.result.data contains: The new attachment's id and filename.",
+    "presentation_guidance": "Retrieve the job by its canonical id and distinguish queued/processing from terminal. After terminal success: Confirm the file was attached to the named issue and give the filename. This adds a real file to a ticket.",
+    "output_action_guidance": "Read job_service.get_job until terminal; use job.result for the original result, and handle job.error on failure before dependent work."
   },
   "error_processor_customizations": {
     "action_context": "Attach bytes from blob storage to a Jira issue.",

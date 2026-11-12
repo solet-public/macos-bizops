@@ -66,7 +66,7 @@ corrects an existing local My Token; an empty string clears its value.
 `delete_asset_token` takes the same key without `value`; recreate with
 `set_asset_token` and the saved value to reverse a deletion. Token reads export
 the vendor's nested folder/tokens structure. These tokens are asset content;
-OAuth bearer credentials remain in memory and are redacted from all results.
+OAuth bearer credentials remain in memory.
 
 Folder and token writes are form encoded; embedded references are serialized
 as JSON. Poll `check_marketo_job_status` after every dispatch. Asset write
@@ -125,9 +125,10 @@ found`, or a sales person still linked to active leads) is data, not a job
 failure. Vendor RBAC is the boundary: there is no plugin-side confirmation or
 read-only gate on `sync_`/`delete_`. Adobe documents the opportunity-role API
 as unavailable on subscriptions with a native CRM sync; the vendor error is
-returned as-is. Every result and TSV is passed through the client's credential
-redaction (client secret and every minted bearer token, raw, percent-encoded
-and base64).
+returned as-is. Results are not scanned. The connector returns the vendor result as received;
+bulk results go to disk through `output_path`. Audit and log lines are built
+only from method, path without query values, status, duration and correlation
+id, so they never carry headers, bodies or credential values.
 
 ## Named accounts, named account lists and custom objects
 
@@ -197,6 +198,23 @@ searchable_fields" and `get_api_usage`'s "returns `calls_today`..." above
 describe what the FINISHED job's result carries, retrieved via
 `check_marketo_job_status(job_id)` — not what the dispatch call itself
 returns, which is `{job_id, status}` only, same as the four above.
+
+**The writes and diagnostics followed on 2026-11-08 (born-async
+completion).** `create_or_update_leads`, `delete_leads`, `merge_leads`,
+`trigger_campaign`, `add_leads_to_list`, `remove_leads_from_list`,
+`test_connection` and `check_setup` were the last verbs that called Marketo
+on the dispatch path. Each now checks its parameters at dispatch (a bad
+batch, an over-cap list or a malformed token is still refused immediately,
+with no job), returns `{job_id, status}`, and does every vendor call in the
+same worker — including `create_or_update_leads`' read-only field preflight,
+`test_connection`'s address-book read and token mint, and all six
+`check_setup` probes. The finished job's result is exactly what each verb
+returned before: per-record `results`, `row_count` and `tallies` for the four
+batch writes, `success` and `request_id` for a merge or campaign trigger, and
+the diagnostic report for the two setup verbs. A vendor fault (permission,
+auth, validation) or a read-only refusal now arrives in the job's `error`
+field rather than in the dispatch response. No Marketo verb calls the vendor
+on the dispatch path any more.
 
 The four internally-paged reads do not share one safe raw continuation
 signal:
@@ -347,6 +365,12 @@ and can only be
 confirmed by first real use — a missing one surfaces as
 `marketo.permission_denied` naming the gap.
 
+Both diagnostics are queued like every other verb: `test_connection` and
+`check_setup` return `{job_id, status}` at once, and their report (or an
+`auth_failed`/`not_configured` error) is read with
+`check_marketo_job_status(job_id)`. A queued handle proves only that the job
+was accepted, not that the credentials or Role work.
+
 **`reads_verified` is partial in a second, less obvious way: whole permission
 classes are out of its reach.** The Lead Database object verbs (companies,
 opportunities, opportunity roles, sales persons, named accounts, named account
@@ -375,10 +399,8 @@ caller's `output_tsv_path` — never records inline, at any size
 lowered). Blob storage has retired from this plugin entirely — `get_api_usage`
 is the only read verb untouched by this migration (small, bounded, no PII,
 outside the six §7.1 names). Neither destination is platform blob storage —
-the path must be absolute, end in `.tsv`, and lie under an
-operator-configured `export_allowed_roots` entry in this plugin's config
-(`export_containment.py`, realpath + `commonpath` containment mirroring
-`ledger_allowed_roots`; the default `[]` REFUSES every write).
+the path must be absolute, end in `.tsv`, and lie under a
+saved path address, the session launch folder, or the solet home. The shared file-location guard excludes the installation tree.
 
 **Superseded by the hide-paging change (2026-08-03) for four of the six — see below.** At
 Tier-2 landing, none of the six carried an `acknowledge_default_limit_override`/
@@ -416,12 +438,12 @@ the process description with a `get_api_usage` check suggested first. The
 that the caller no longer loops to reach the 500/5,000-row policy ceiling.
 
 New error code: `marketo.export_path_refused` (path not absolute / not
-`.tsv` / not contained under any configured `export_allowed_roots` entry).
+`.tsv` / not contained under any saved location).
 
 **`check_setup`'s five migrated probes do NOT touch the operator's real
 export workspace, and force `row_limit=1` on the three now-internally-paged
 probes.** A permission probe must succeed whether or not
-`export_allowed_roots` is configured at all — `_run_read_probe` writes each
+a project location has been saved — `_run_read_probe` writes each
 probed verb's result to a throwaway tempfile via a passthrough gate, never
 the plugin's real `_export_path_gate`, and deletes the tempfile
 unconditionally afterward. `get_leads`/`list_campaigns`/`list_static_lists`'
@@ -438,7 +460,7 @@ every fault class. **Marketo returns HTTP 200 with a JSON envelope**
 (`{"success": false, "errors": [{"code": "...", "message": "..."}]}`) for
 almost every API-level fault instead — only the identity/token endpoint and
 true transport faults (5xx, connection errors, non-JSON bodies) carry a
-meaningful HTTP status. `http_client.py::MarketoClient` typed JSON helpers decode response bodies and classify on the envelope's `success`/`errors[].code`, not on `response.status_code`; the generic `request` verb instead preserves HTTP status and vendor body/errors as data, with credential redaction. See `errors.py` for the sourced
+meaningful HTTP status. `http_client.py::MarketoClient` typed JSON helpers decode response bodies and classify on the envelope's `success`/`errors[].code`, not on `response.status_code`; the generic `request` verb instead preserves HTTP status and vendor body/errors as data, as received. See `errors.py` for the sourced
 code -> (our error code, retryable) table (601/602/603/604/606/607/609/610/
 612/613/615/701/702/709/714/1001-1037), built from the official Adobe Marketo
 Engage REST API error-codes reference (2026-07-28).
@@ -575,7 +597,8 @@ existing one's Role turns out to be missing a permission `check_setup` names.
 7. **Register the address-book entry** `marketo_instance`: literals
    `base_url` and `client_id`, plus `client_secret` = the `vault::` reference
    from step 6.
-8. Run `test_connection` then `check_setup` (see above) to confirm the
+8. Run `test_connection` then `check_setup` (see above), reading each job's
+   finished report with `check_marketo_job_status`, to confirm the
    credentials work AND the Role grants what this plugin's read verbs need.
 
 Full operator-facing phrasing (the pitch, the "check for an existing service
@@ -600,16 +623,17 @@ detail.
   of its own (`get_required_vault_keys`/`get_declared_vault_keys` both
   return `[]`). The re-minted bearer token is never vaulted.
 
-## Scope note — no typed Bulk Extract/Import job flow yet
+## Files and bulk transfers (build 5)
 
-Marketo's Bulk Extract and Import APIs (create job → enqueue → poll status →
-download file) are a materially different, multi-call control-flow shape from
-every other verb in this connector. Each step is reachable now through the
-generic `request` verb (`/bulk/v1/…`); typed job-ledger flows are later builds
-in `vendor_api_coverage.md`.
-`get_leads`'s internal pagination up to its row_limit hard cap (see
-"Business-data limits + data-export migration" above) covers the common
-ad-hoc case without the async job machinery.
+Files/images now have typed by-id/by-name/browse, multipart create/upsert and
+content replacement. Bulk Import has typed submission/status/failures/warnings
+for leads, custom objects and program members. Bulk Extract has typed
+list/create/enqueue/status/download/cancel for leads, activities and program
+members. Every operation uses the existing deferred job worker. A platform
+job finishing only confirms that HTTP operation; retain the vendor batchId or
+exportId and poll its typed status verb for the vendor terminal outcome.
+See `03_bulk_and_files.md` for every parameter, lifecycle and download contract.
+The generic `request` also accepts multipart files with form fields.
 
 ## SQL-lockdown gate note
 
@@ -627,8 +651,8 @@ silent for this plugin — no allowlist entry needed anywhere in `src/` or
 | `src/marketo_plugin/app_config.py` | Resolves `marketo_instance` from the address book; the client_secret is chain-consumed. |
 | `src/marketo_plugin/http_client.py` | `MarketoClient` — synchronous httpx client with cached, envelope-triggered re-mintable bearer auth (client-credentials grant, GET-based token mint). |
 | `src/marketo_plugin/errors.py` | Envelope-first error classification (`classify_marketo_envelope`) from the response body's `errors[]` list. |
-| `src/marketo_plugin/export_containment.py` | Own-copy workspace-root containment gate (`assert_export_path_allowed`) binding `export_allowed_roots` — admits `output_tsv_path` for the six data-export-migrated read verbs. |
-| `src/marketo_plugin/marketing_actions.py` | Pure verb implementations: `describe_lead_fields`, `get_leads`, `get_api_usage`, `list_activity_types`, `get_activities`, `create_or_update_leads`, `delete_leads`, `merge_leads`, `list_campaigns`, `trigger_campaign`, `list_static_lists`, `add_leads_to_list`, `remove_leads_from_list`, `check_setup` — the six-verb data-export set write to `output_tsv_path` under the §7.1 migration (see above). |
-| `plugins/marketo_plugin/src/marketo_plugin/lead_database_objects.py` | Typed company, opportunity, opportunity-role and sales-person verbs: verified vendor paths, validation, pagination, per-record write results, redaction. |
+| `ananta/src/ananta/file_locations/containment.py` | Shared `assert_path_allowed` guard using saved path addresses, the session folder and solet home — admits `output_tsv_path` for the six data-export-migrated read verbs. |
+| `src/marketo_plugin/marketing_actions.py` | Pure verb implementations: `describe_lead_fields`, `get_leads`, `get_api_usage`, `list_activity_types`, `get_activities`, `create_or_update_leads`, `delete_leads`, `merge_leads`, `list_campaigns`, `trigger_campaign`, `list_static_lists`, `add_leads_to_list`, `remove_leads_from_list`, `check_setup` — the six-verb data-export set write to `output_tsv_path` under the §7.1 migration (see above). Each queued verb splits into a dispatch-path `prepare_<verb>` (validation only) and a worker-side `execute_<verb>` (the vendor calls); the combined `<verb>` function remains for direct in-process callers. |
+| `plugins/marketo_plugin/src/marketo_plugin/lead_database_objects.py` | Typed company, opportunity, opportunity-role and sales-person verbs: verified vendor paths, validation, pagination, per-record write results. |
 | `plugins/marketo_plugin/src/marketo_plugin/lead_database_process_metadata.py` | Shared descriptions and parameter maps for those sixteen process declarations. |
 | `src/marketo_plugin/plugin.py` | The `MarketoPlugin` EDGE provider — client lifecycle, error mapping, EDGE registration, `_export_path_gate`. |

@@ -122,6 +122,10 @@ class AccountStore:
             return  # the legacy pair migrates in the worker
         _select(records, selector)
 
+    def select(self, selector: str) -> AccountRecord:
+        """The connected account ``selector`` names (vault read only, no network); TokenStoreError when none does."""
+        return _select(self.records(), selector)
+
     def legacy_pending(self) -> bool:
         """True while the legacy pair exists and no account was migrated from it."""
         return self._legacy_pending(self.records())

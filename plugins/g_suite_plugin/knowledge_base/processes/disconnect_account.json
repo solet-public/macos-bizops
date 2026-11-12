@@ -1,17 +1,18 @@
 {
   "process_key": "plugin::g_suite_plugin::disconnect_account",
   "display_name": "Google Workspace: Disconnect Account",
-  "description": "Disconnect one Google account: revoke its grant at Google (POST oauth2.googleapis.com/revoke) and delete only that account's tokens from the vault. Other accounts are untouched. If it was the default, the next connected account becomes the default. A revoke failure is reported in revoke_status and the local credentials are still deleted. For an account migrated from the pre-multi-account credential, the legacy vault entries are deleted too.",
+  "description": "Disconnect one Google account: revoke its grant at Google (POST oauth2.googleapis.com/revoke) and delete only that account's tokens from the vault. Other accounts are untouched. If it was the default, the next connected account becomes the default. A revoke failure is reported in revoke_status and the local credentials are still deleted. For an account migrated from the pre-multi-account credential, the legacy vault entries are deleted too. Runs as a background job: a missing or unknown account is refused at once; otherwise dispatch returns a job_id immediately, and the outcome arrives via a follow-up message once the revoke and the vault deletion complete (read it any time with service_interface::job_service::get_job).",
   "embedding_description": "Unlink one Google account (work, home or a personal Gmail) from this assistant: revoke its access at Google and delete only its stored tokens, leaving other linked accounts working. Reports whether the revoke succeeded and which account is the new default.",
   "result_processor_customizations": {
-    "action_label": "Google account disconnected",
+    "action_label": "Google account disconnect started",
     "result_type": "g_suite_disconnect_account_result",
-    "result_description": "{account, revoke_status (revoked, already_invalid, revoke_failed_*), credentials_deleted, new_default}.",
-    "presentation_guidance": "Confirm which account was disconnected and name the new default if one changed; mention revoke_status only when it is not revoked."
+    "result_description": "Job queued for the disconnect (job_id, status queued); the finished job's result is {account, revoke_status (revoked, already_invalid, revoke_failed_*), credentials_deleted, new_default}. Completion is delivered automatically.",
+    "presentation_guidance": "Say the disconnect is running. Once it completes, confirm which account was disconnected and name the new default if one changed; mention revoke_status only when it is not revoked.",
+    "output_action_guidance": "Return exactly one action using the active IO plugin's post_message (process_key: plugin::<io_plugin>::post_message). Use the provided session_id. Keep the message short and friendly. Do NOT invent process identifiers (no present_result, no status actions)."
   },
   "error_processor_customizations": {
     "action_context": "Disconnect one connected Google account.",
-    "error_interpretation": "gsuite.unknown_account: no connected account matches; the message lists the connected accounts. gsuite.invalid_params: account missing.",
-    "recovery_guidance": "Pick an email or alias from the listed accounts (list_accounts)."
+    "error_interpretation": "At dispatch: gsuite.unknown_account: no connected account matches; the message lists the connected accounts. gsuite.invalid_params: account missing. In the finished job: gsuite.unknown_account when the account was removed after dispatch. gsuite.invalid_params at dispatch can also mean the session_id/flow_id context is missing. gsuite.api_error at dispatch means the job could not be queued (AsyncJobManager unavailable or job creation failed).",
+    "recovery_guidance": "Pick an email or alias from the listed accounts (list_accounts). gsuite.api_error at dispatch: retry once platform startup has completed."
   }
 }

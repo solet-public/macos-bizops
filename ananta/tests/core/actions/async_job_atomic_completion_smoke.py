@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Atomic job persistence, public service adapters, and completion race proof."""
+
 from __future__ import annotations
 
 import json
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +13,9 @@ from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT / "ananta" / "src"))
+sys.path.insert(0, str(ROOT))
+for plugin_name in ("postgres_state_management_plugin", "agent_messaging_plugin"):
+    sys.path.insert(0, str(ROOT / "plugins" / plugin_name / "src"))
 
 from ananta.core.actions.action_metadata import ParameterMetadata, ParameterType, ReturnValueSchema  # noqa: E402
 from ananta.core.actions.action_processor import ActionProcessor  # noqa: E402
@@ -20,12 +25,53 @@ from ananta.core.plugins.plugin_manager import PluginManager  # noqa: E402
 from ananta.core.process_registry.invocation_schema_generator import InvocationSchemaGenerator  # noqa: E402
 from ananta.core.process_registry.service_interface_scanner import ServiceInterfaceScanner  # noqa: E402
 from ananta.core.services.service_interface_decorator import service_interface_process  # noqa: E402
-from ananta.core.state.async_job_manager import AsyncJobManager  # noqa: E402
+from ananta.core.state.async_job_manager import AsyncJobManager, registered_action_context  # noqa: E402
 from ananta.core.state.async_job_persistence import create_job_and_request, update_job_and_payloads  # noqa: E402
 from ananta.core.state.execution_token_context import action_execution_context, get_current_flow_token_id  # noqa: E402
 from ananta.core.state.flow_runtime_graph import FlowRuntimeGraph, TokenOwnerType, TokenState  # noqa: E402
 from ananta.error_handling import FrameworkError  # noqa: E402
 from async_job_fixture_support import JobState  # noqa: E402
+
+
+def joined_job_routes() -> None:
+    """A sibling terminal write cannot resolve a token while routing is parked."""
+    for first_status in ("completed", "error"):
+        state, manager, token_id, completed = manager_fixture()
+        unrelated = create(manager, token_id)
+        with registered_action_context("action", "flow", "s"):
+            first_id, second_id = create(manager, token_id), create(manager, token_id)
+        assert_registered_lineage(state, first_id, second_id)
+        routing, release = threading.Event(), threading.Event()
+
+        def route(job_id: str, _status: str, _result: object, _error: object, *, target_job: str = first_id, reached: threading.Event = routing, resume: threading.Event = release) -> bool:
+            if job_id == target_job:
+                reached.set()
+                assert resume.wait(5)
+            return False
+
+        manager._route_completion_to_role = route
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(manager.update_job, first_id, {"status": first_status})
+            try:
+                assert routing.wait(5)
+                assert manager.update_job(second_id, {"status": "completed"})["action_status"] == "completed"
+                assert completed == [], "sibling persistence cannot overtake original completion routing"
+            finally:
+                release.set()
+            assert future.result(timeout=5)["action_status"] == "completed"
+        assert completed == ["flow"]
+        assert state.rows["flow_tokens"][0]["state"] == ("completed" if first_status == "completed" else "failed")
+        assert next(job for job in state.rows["job"] if job["id"] == unrelated)["status"] == "queued", "unrelated queued work must not hold this owner's token"
+    print("PASS linked_job_join, sibling_terminal_during_routing, retained_failure, one_token_resolution")
+
+
+def assert_registered_lineage(state: JobState, root_id: str, child_id: str) -> None:
+    root = next(job for job in state.rows["job"] if job["id"] == root_id)
+    child = next(job for job in state.rows["job"] if job["id"] == child_id)
+    assert root["group_id"] == child["group_id"] == "registered:action"
+    assert json.loads(root["metadata"])["registered_action_id"] == "action"
+    assert json.loads(child["metadata"])["registered_root_job_id"] == root_id
+    assert "registered_action_id" not in json.loads(child["metadata"]), "a child cannot duplicate the original action route"
 
 
 @dataclass
@@ -42,7 +88,9 @@ class Service:
         return {"count": 23}
 
     @service_interface_process(
-        name="rebuild", provider="fixture_service", is_async=True,
+        name="rebuild",
+        provider="fixture_service",
+        is_async=True,
         parameters={"state": ParameterMetadata(type=ParameterType.OBJECT, required=False)},
         return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="job receipt"),
     )
@@ -139,7 +187,7 @@ def commit_before_resolution() -> None:
         poller: Any = ActionQueuePoller.__new__(ActionQueuePoller)
         poller.state_service = state
         poller._flow_runtime_graph = manager._flow_runtime_graph
-        poller._retrieve_action_details = lambda _id: ("plugin::fixture::call", "notes", None, None, "s", "flow", None, {}, None, None, None)  # wint:negative-fixture
+        poller._retrieve_action_details = lambda _id, **_kwargs: ("plugin::fixture::call", "notes", None, None, "s", "flow", None, {}, None, None, None)  # wint:negative-fixture
         for name in ("_update_action_status_to_completed", "_store_action_result", "_record_work_products_after_success"):
             setattr(poller, name, lambda *_args: None)
         poller._extract_and_store_attachments = lambda *_args: []
@@ -203,7 +251,10 @@ def _assert_standard_record(record: dict[str, Any]) -> None:
 def record_preparation() -> None:
     state = JobState()
     supplied: dict[str, object] = {
-        "id": "job-explicit", "name": "named", "created_by": "creator", "updated_by": "editor",
+        "id": "job-explicit",
+        "name": "named",
+        "created_by": "creator",
+        "updated_by": "editor",
     }
     prepared = state.prepare_record("core", "job", supplied)
     assert prepared == {**supplied, "namespace": "core"}
@@ -225,9 +276,12 @@ def transactional_ids() -> None:
     """A real transaction requires ids before insert; fakes must not mint them."""
     state = JobState()
     record: dict[str, object] = {
-        "status": "queued", "external_id": "caller-id",
-        "provider_type": "plugin", "provider_name": "fixture",
-        "description": "standard-field fixture", "notes": "required business columns",
+        "status": "queued",
+        "external_id": "caller-id",
+        "provider_type": "plugin",
+        "provider_name": "fixture",
+        "description": "standard-field fixture",
+        "notes": "required business columns",
     }
     job_id = create_job_and_request(cast(Any, state), record, {"input": 1})
     assert job_id.startswith("job-") and len(job_id) == 17
@@ -248,6 +302,7 @@ def transactional_ids() -> None:
 
 
 def main() -> None:
+    joined_job_routes()
     record_preparation()
     transactional_ids()
     service_adapter()

@@ -7,14 +7,18 @@ Discoverability Policy (Task #47, 2026-05-24):
 - EVERY method declares ``is_discoverable=True`` explicitly. The base decorator
   default for ``@service_interface_process`` is ``is_discoverable=False`` (service
   methods are presumed internal); vault operations are agent-callable end-to-end
-  (operator stores/rotates secrets, agent retrieves via ``resolve_with_secrets``,
-  operator manages OAuth clients), so the per-method flag overrides the default.
+  (operator stores/rotates secrets and manages OAuth clients), so the
+  per-method flag overrides the default. Plaintext retrieval is absent.
 - Adding a new method without ``is_discoverable=True`` will SILENTLY exclude it
   from ``process_search`` and the agent will not be able to find it. Always set
   the flag explicitly when authoring a new vault operation.
-- The only way a vault operation should stay non-discoverable is if it is pure
-  internal plumbing (no current cases — the four `_persist*`/`_validate*` helpers
-  on the plugin are private methods, not decorated processes).
+- Runtime ``use`` and typed ``metadata`` are internal caller-bound methods.
+  The transitional runtime ``retrieve`` method is also internal; none is a
+  session-callable process in this API.
+- Selected host/credential/crypto registrations return an owned job receipt;
+  their public terminal outcome is read by exact id from job_service.get_job.
+  Exists/store/rotate/export_encrypted retain synchronous bridge-consumer results. Secret
+  operands remain in volatile worker closures, never in job payloads.
 
 Security Model:
 - Two-tier key management: passphrase -> KEK -> Master Key
@@ -38,6 +42,7 @@ from ananta.core.actions.action_metadata import (
 from ananta.core.domain.types import ActionResult
 from ananta.core.services.call_context import CallContext
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.registered_job_operations import registered_job_return_schema
 
 
 class VaultQualificationAPI(ABC):
@@ -48,16 +53,19 @@ class VaultQualificationAPI(ABC):
         is_discoverable=True,
         provider="vault_service",
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Configured Keychain availability and current-user accessibility",
-            type=ParameterType.OBJECT,
-            properties={
-                "backend": ParameterMetadata(type=ParameterType.STRING, description="Vault substrate"),
-                "available": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether a usable Keychain backend is configured"),
-                "current_user_accessible": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the current user can read the configured Keychain namespace"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Configured Keychain availability and current-user accessibility",
+                type=ParameterType.OBJECT,
+                properties={
+                    "backend": ParameterMetadata(type=ParameterType.STRING, description="Vault substrate"),
+                    "available": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether a usable Keychain backend is configured"),
+                    "current_user_accessible": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the current user can read the configured Keychain namespace"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
@@ -70,17 +78,20 @@ class VaultQualificationAPI(ABC):
         is_discoverable=True,
         provider="vault_service",
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Private vault canary store, retrieve, compare, and deletion proof",
-            type=ParameterType.OBJECT,
-            properties={
-                "stored": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the private canary was stored"),
-                "retrieved": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the private canary was retrieved"),
-                "matched": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether retrieved bytes matched the private canary"),
-                "deleted": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether only the private canary was deleted before return"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Private vault canary store, retrieve, compare, and deletion proof",
+                type=ParameterType.OBJECT,
+                properties={
+                    "stored": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the private canary was stored"),
+                    "retrieved": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the private canary was retrieved"),
+                    "matched": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether retrieved bytes matched the private canary"),
+                    "deleted": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether only the private canary was deleted before return"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
@@ -130,16 +141,11 @@ class VaultServiceAPI(ABC):
             description="Store confirmation with key (never value)",
             type=ParameterType.OBJECT,
             properties={
-                "key": ParameterMetadata(
-                    type=ParameterType.STRING, description="The secret key that was stored"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
+                "key": ParameterMetadata(type=ParameterType.STRING, description="The secret key that was stored"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
         requires_call_context=True,
     )
     @abstractmethod
@@ -156,41 +162,6 @@ class VaultServiceAPI(ABC):
         pass
 
     @service_interface_process(
-        name="retrieve",
-        is_discoverable=True,
-        provider="vault_service",
-        parameters={
-            "key": ParameterMetadata(
-                description="The secret identifier (e.g., 'api_keys/openai')",
-                required=True,
-                type=ParameterType.STRING,
-            ),
-        },
-        return_value_schema=ReturnValueSchema(
-            description="Retrieved secret with decrypted value",
-            type=ParameterType.OBJECT,
-            properties={
-                "key": ParameterMetadata(type=ParameterType.STRING, description="The secret key"),
-                "value": ParameterMetadata(
-                    type=ParameterType.STRING, description="Decrypted secret value"
-                ),
-            },
-        ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
-        requires_call_context=True,
-    )
-    @abstractmethod
-    def retrieve(
-        self,
-        key: str,
-        *,
-        call_context: CallContext | None = None,
-    ) -> ActionResult:
-        """Get decrypted secret value."""
-        pass
-
-    @service_interface_process(
         name="delete",
         is_discoverable=True,
         provider="vault_service",
@@ -201,20 +172,18 @@ class VaultServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Delete confirmation",
-            type=ParameterType.OBJECT,
-            properties={
-                "key": ParameterMetadata(
-                    type=ParameterType.STRING, description="The deleted secret key"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Delete confirmation",
+                type=ParameterType.OBJECT,
+                properties={
+                    "key": ParameterMetadata(type=ParameterType.STRING, description="The deleted secret key"),
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
@@ -239,21 +208,21 @@ class VaultServiceAPI(ABC):
                 default=None,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="List of secrets (keys and metadata only)",
-            type=ParameterType.OBJECT,
-            properties={
-                "secrets": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="List of secret records (key, tags, metadata, version)",
-                ),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of secrets"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="List of secrets (keys and metadata only)",
+                type=ParameterType.OBJECT,
+                properties={
+                    "secrets": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="List of secret records (key, tags, metadata, version)",
+                    ),
+                    "count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of secrets"),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
@@ -282,13 +251,10 @@ class VaultServiceAPI(ABC):
             type=ParameterType.OBJECT,
             properties={
                 "key": ParameterMetadata(type=ParameterType.STRING, description="The secret key"),
-                "exists": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="Whether the secret exists"
-                ),
+                "exists": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the secret exists"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
         requires_call_context=True,
     )
     @abstractmethod
@@ -330,28 +296,26 @@ class VaultServiceAPI(ABC):
                 default={},
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Mint + store confirmation; plaintext is never returned",
-            type=ParameterType.OBJECT,
-            properties={
-                "key": ParameterMetadata(
-                    type=ParameterType.STRING, description="The secret key that was stored"
-                ),
-                "byte_length": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of random bytes minted",
-                ),
-                "plaintext_fingerprint": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="sha256(plaintext) truncated; one-way fingerprint",
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Mint + store confirmation; plaintext is never returned",
+                type=ParameterType.OBJECT,
+                properties={
+                    "key": ParameterMetadata(type=ParameterType.STRING, description="The secret key that was stored"),
+                    "byte_length": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Number of random bytes minted",
+                    ),
+                    "plaintext_fingerprint": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="sha256(plaintext) truncated; one-way fingerprint",
+                    ),
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
@@ -378,28 +342,19 @@ class VaultServiceAPI(ABC):
         is_discoverable=True,
         provider="vault_service",
         parameters={
-            "key": ParameterMetadata(
-                description="The secret identifier", required=True, type=ParameterType.STRING
-            ),
-            "new_value": ParameterMetadata(
-                description="New secret value", required=True, type=ParameterType.STRING
-            ),
+            "key": ParameterMetadata(description="The secret identifier", required=True, type=ParameterType.STRING),
+            "new_value": ParameterMetadata(description="New secret value", required=True, type=ParameterType.STRING),
         },
         return_value_schema=ReturnValueSchema(
             description="Rotation confirmation with new version",
             type=ParameterType.OBJECT,
             properties={
                 "key": ParameterMetadata(type=ParameterType.STRING, description="The secret key"),
-                "version": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="New version number"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
+                "version": ParameterMetadata(type=ParameterType.INTEGER, description="New version number"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
         requires_call_context=True,
     )
     @abstractmethod
@@ -419,46 +374,38 @@ class VaultServiceAPI(ABC):
         provider="vault_service",
         parameters={
             "old_key": ParameterMetadata(
-                description=(
-                    "Current secret identifier. The value (and "
-                    "version/tags/metadata where the substrate supports "
-                    "them) is preserved across the rename."
-                ),
+                description=("Current secret identifier. The value (and version/tags/metadata where the substrate supports them) is preserved across the rename."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "new_key": ParameterMetadata(
-                description=(
-                    "Target secret identifier. Must not already exist."
-                ),
+                description=("Target secret identifier. Must not already exist."),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=(
-                "Rename confirmation. Never contains the secret value — "
-                "the rename happens server-side so plaintext never "
-                "crosses the process boundary."
-            ),
-            type=ParameterType.OBJECT,
-            properties={
-                "old_key": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="The key that was renamed from",
-                ),
-                "new_key": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="The key that was renamed to",
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Confirmation message",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Rename confirmation. Never contains the secret value — the rename happens server-side so plaintext never crosses the process boundary."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "old_key": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="The key that was renamed from",
+                    ),
+                    "new_key": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="The key that was renamed to",
+                    ),
+                    "message": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Confirmation message",
+                    ),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
@@ -508,23 +455,19 @@ class VaultServiceAPI(ABC):
                 default={},
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Store confirmation with key (never value)",
-            type=ParameterType.OBJECT,
-            properties={
-                "key": ParameterMetadata(
-                    type=ParameterType.STRING, description="The secret key that was stored"
-                ),
-                "version": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Stored version number"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Store confirmation with key (never value)",
+                type=ParameterType.OBJECT,
+                properties={
+                    "key": ParameterMetadata(type=ParameterType.STRING, description="The secret key that was stored"),
+                    "version": ParameterMetadata(type=ParameterType.INTEGER, description="Stored version number"),
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
@@ -578,23 +521,19 @@ class VaultServiceAPI(ABC):
                 default={},
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Store confirmation with key (never value)",
-            type=ParameterType.OBJECT,
-            properties={
-                "key": ParameterMetadata(
-                    type=ParameterType.STRING, description="The secret key that was stored"
-                ),
-                "version": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Stored version number"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Store confirmation with key (never value)",
+                type=ParameterType.OBJECT,
+                properties={
+                    "key": ParameterMetadata(type=ParameterType.STRING, description="The secret key that was stored"),
+                    "version": ParameterMetadata(type=ParameterType.INTEGER, description="Stored version number"),
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
@@ -632,10 +571,7 @@ class VaultServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "format": ParameterMetadata(
-                description=(
-                    "File format: 'env', 'json', or 'yaml'. "
-                    "Null/omitted = auto-detect by extension."
-                ),
+                description=("File format: 'env', 'json', or 'yaml'. Null/omitted = auto-detect by extension."),
                 required=False,
                 type=ParameterType.STRING,
                 default=None,
@@ -659,23 +595,19 @@ class VaultServiceAPI(ABC):
                 default={},
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Store confirmation with key (never value)",
-            type=ParameterType.OBJECT,
-            properties={
-                "key": ParameterMetadata(
-                    type=ParameterType.STRING, description="The secret key that was stored"
-                ),
-                "version": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Stored version number"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Store confirmation with key (never value)",
+                type=ParameterType.OBJECT,
+                properties={
+                    "key": ParameterMetadata(type=ParameterType.STRING, description="The secret key that was stored"),
+                    "version": ParameterMetadata(type=ParameterType.INTEGER, description="Stored version number"),
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
@@ -705,26 +637,18 @@ class VaultServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "service": ParameterMetadata(
-                description=(
-                    "Keychain service name (the 'site/title' shown in Apple Passwords)"
-                ),
+                description=("Keychain service name (the 'site/title' shown in Apple Passwords)"),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "account": ParameterMetadata(
-                description=(
-                    "Keychain account name. If null, the current OS user's login "
-                    "name (getpass.getuser()) is used."
-                ),
+                description=("Keychain account name. If null, the current OS user's login name (getpass.getuser()) is used."),
                 required=False,
                 type=ParameterType.STRING,
                 default=None,
             ),
             "keychain": ParameterMetadata(
-                description=(
-                    "RESERVED for future per-keychain selection. Must be null; "
-                    "non-null values fail fast with keychain_selection_unsupported."
-                ),
+                description=("RESERVED for future per-keychain selection. Must be null; non-null values fail fast with keychain_selection_unsupported."),
                 required=False,
                 type=ParameterType.STRING,
                 default=None,
@@ -742,23 +666,19 @@ class VaultServiceAPI(ABC):
                 default={},
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Store confirmation with key (never value)",
-            type=ParameterType.OBJECT,
-            properties={
-                "key": ParameterMetadata(
-                    type=ParameterType.STRING, description="The secret key that was stored"
-                ),
-                "version": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Stored version number"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Store confirmation with key (never value)",
+                type=ParameterType.OBJECT,
+                properties={
+                    "key": ParameterMetadata(type=ParameterType.STRING, description="The secret key that was stored"),
+                    "version": ParameterMetadata(type=ParameterType.INTEGER, description="Stored version number"),
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
@@ -785,28 +705,26 @@ class VaultServiceAPI(ABC):
         is_discoverable=True,
         provider="vault_service",
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Vault status information",
-            type=ParameterType.OBJECT,
-            properties={
-                "initialized": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="Whether vault has been initialized"
-                ),
-                "unlocked": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="Whether vault is currently unlocked"
-                ),
-                "backend": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Storage backend (System Keychain or File Storage)",
-                ),
-                "recovery_key_exists": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="Whether a recovery key has been created",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Vault status information",
+                type=ParameterType.OBJECT,
+                properties={
+                    "initialized": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether vault has been initialized"),
+                    "unlocked": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether vault is currently unlocked"),
+                    "backend": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Storage backend (System Keychain or File Storage)",
+                    ),
+                    "recovery_key_exists": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="Whether a recovery key has been created",
+                    ),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
@@ -819,24 +737,20 @@ class VaultServiceAPI(ABC):
         is_discoverable=True,
         provider="vault_service",
         parameters={
-            "passphrase": ParameterMetadata(
-                description="Vault passphrase", required=True, type=ParameterType.STRING
-            ),
+            "passphrase": ParameterMetadata(description="Vault passphrase", required=True, type=ParameterType.STRING),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Unlock result",
-            type=ParameterType.OBJECT,
-            properties={
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Status message"
-                ),
-                "unlocked": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="Lock state after operation"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Unlock result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Status message"),
+                    "unlocked": ParameterMetadata(type=ParameterType.BOOLEAN, description="Lock state after operation"),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
@@ -858,17 +772,14 @@ class VaultServiceAPI(ABC):
             description="Lock result",
             type=ParameterType.OBJECT,
             properties={
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Status message"
-                ),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Status message"),
                 "unlocked": ParameterMetadata(
                     type=ParameterType.BOOLEAN,
                     description="Lock state after operation (should be False)",
                 ),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
         requires_call_context=True,
     )
     @abstractmethod
@@ -881,27 +792,31 @@ class VaultServiceAPI(ABC):
         is_discoverable=True,
         provider="vault_service",
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Keypair bootstrap result",
-            type=ParameterType.OBJECT,
-            properties={
-                "created": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True if a new keypair was generated, False if one was already present",
-                ),
-                "public_key": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Base64-encoded X25519 public key (32 bytes)",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Keypair bootstrap result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "created": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="True if a new keypair was generated, False if one was already present",
+                    ),
+                    "public_key": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Base64-encoded X25519 public key (32 bytes)",
+                    ),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
     def ensure_encryption_keypair(
-        self, *, call_context: CallContext | None = None,
+        self,
+        *,
+        call_context: CallContext | None = None,
     ) -> ActionResult:
         """Bootstrap the X25519 identity keypair if absent. Idempotent."""
         pass
@@ -911,23 +826,27 @@ class VaultServiceAPI(ABC):
         is_discoverable=True,
         provider="vault_service",
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Local X25519 public key",
-            type=ParameterType.OBJECT,
-            properties={
-                "public_key": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Base64-encoded X25519 public key (32 bytes)",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Local X25519 public key",
+                type=ParameterType.OBJECT,
+                properties={
+                    "public_key": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Base64-encoded X25519 public key (32 bytes)",
+                    ),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
     def get_public_key(
-        self, *, call_context: CallContext | None = None,
+        self,
+        *,
+        call_context: CallContext | None = None,
     ) -> ActionResult:
         """Return the local X25519 public key for sealed-box transfer. Lazy-inits if absent."""
         pass
@@ -967,8 +886,7 @@ class VaultServiceAPI(ABC):
                 ),
             },
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
         requires_call_context=True,
     )
     @abstractmethod
@@ -1009,21 +927,21 @@ class VaultServiceAPI(ABC):
                 type=ParameterType.BOOLEAN,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Import confirmation + one-way plaintext fingerprint",
-            type=ParameterType.OBJECT,
-            properties={
-                "ok": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="True on success"
-                ),
-                "plaintext_fingerprint": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="sha256(plaintext) truncated; must match the export side",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Import confirmation + one-way plaintext fingerprint",
+                type=ParameterType.OBJECT,
+                properties={
+                    "ok": ParameterMetadata(type=ParameterType.BOOLEAN, description="True on success"),
+                    "plaintext_fingerprint": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="sha256(plaintext) truncated; must match the export side",
+                    ),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
@@ -1056,14 +974,7 @@ class VaultServiceAPI(ABC):
                 default=["mcp:read", "mcp:write"],
             ),
             "redirect_uris": ParameterMetadata(
-                description=(
-                    "Pre-registered redirect URIs for the "
-                    "authorization_code grant.  Exact-matched at "
-                    "/authorize.  Required (non-empty) for the "
-                    "claude.ai connector flow; empty list is only "
-                    "valid for clients whose grant_types is "
-                    "['client_credentials']."
-                ),
+                description=("Pre-registered redirect URIs for the authorization_code grant.  Exact-matched at /authorize.  Required (non-empty) for the claude.ai connector flow; empty list is only valid for clients whose grant_types is ['client_credentials']."),
                 required=False,
                 type=ParameterType.LIST,
                 default=[],
@@ -1085,13 +996,7 @@ class VaultServiceAPI(ABC):
             ),
         },
         return_value_schema=ReturnValueSchema(
-            description=(
-                "OAuth client registration result; client_secret is returned "
-                "ONCE and never recoverable afterwards. Every client minted "
-                "via this process is automatically operator_approved=True — "
-                "the MCP OAuth transport refuses to issue tokens for "
-                "clients without that flag."
-            ),
+            description=("OAuth client registration result; client_secret is returned ONCE and never recoverable afterwards. Every client minted via this process is automatically operator_approved=True — the MCP OAuth transport refuses to issue tokens for clients without that flag."),
             type=ParameterType.OBJECT,
             properties={
                 "client_id": ParameterMetadata(
@@ -1116,16 +1021,11 @@ class VaultServiceAPI(ABC):
                 ),
                 "grant_types": ParameterMetadata(
                     type=ParameterType.LIST,
-                    description=(
-                        "Grant types this client is authorized to use."
-                    ),
+                    description=("Grant types this client is authorized to use."),
                 ),
                 "operator_approved": ParameterMetadata(
                     type=ParameterType.BOOLEAN,
-                    description=(
-                        "Always True for clients minted via this "
-                        "operator-only platform process."
-                    ),
+                    description=("Always True for clients minted via this operator-only platform process."),
                 ),
             },
         ),
@@ -1195,25 +1095,27 @@ class VaultServiceAPI(ABC):
         is_discoverable=True,
         provider="vault_service",
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="List of registered OAuth clients (public metadata only)",
-            type=ParameterType.OBJECT,
-            properties={
-                "clients": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=(
-                        "List of {client_id, client_name, scopes, "
-                        "created_at} entries sorted by created_at"
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="List of registered OAuth clients (public metadata only)",
+                type=ParameterType.OBJECT,
+                properties={
+                    "clients": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("List of {client_id, client_name, scopes, created_at} entries sorted by created_at"),
                     ),
-                ),
-            },
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
     def oauth_client_list(
-        self, *, call_context: CallContext | None = None,
+        self,
+        *,
+        call_context: CallContext | None = None,
     ) -> ActionResult:
         """List registered OAuth clients (public metadata only; never the secret)."""
         pass
@@ -1229,19 +1131,13 @@ class VaultServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "redirect_uri": ParameterMetadata(
-                description=(
-                    "Absolute redirect URI to register for the client; "
-                    "exact-matched at /authorize"
-                ),
+                description=("Absolute redirect URI to register for the client; exact-matched at /authorize"),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
         return_value_schema=ReturnValueSchema(
-            description=(
-                "Confirmation; surfaces the full redirect_uris list "
-                "after the add and an idempotency flag"
-            ),
+            description=("Confirmation; surfaces the full redirect_uris list after the add and an idempotency flag"),
             type=ParameterType.OBJECT,
             properties={
                 "client_id": ParameterMetadata(
@@ -1294,22 +1190,24 @@ class VaultServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Initialization result",
-            type=ParameterType.OBJECT,
-            properties={
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status message",
-                ),
-                "wrapped_key_path": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Path to the persisted wrapped master key",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Initialization result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "message": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status message",
+                    ),
+                    "wrapped_key_path": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Path to the persisted wrapped master key",
+                    ),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
@@ -1332,31 +1230,29 @@ class VaultServiceAPI(ABC):
         provider="vault_service",
         parameters={
             "recovery_passphrase": ParameterMetadata(
-                description=(
-                    "Operator passphrase that wraps a second copy of "
-                    "the master key. Record this independently from the "
-                    "primary passphrase."
-                ),
+                description=("Operator passphrase that wraps a second copy of the master key. Record this independently from the primary passphrase."),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Recovery-key creation result",
-            type=ParameterType.OBJECT,
-            properties={
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status message",
-                ),
-                "recovery_key_path": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Path to the persisted recovery-wrapped master key",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Recovery-key creation result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "message": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status message",
+                    ),
+                    "recovery_key_path": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Path to the persisted recovery-wrapped master key",
+                    ),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod
@@ -1388,18 +1284,20 @@ class VaultServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Rotation result",
-            type=ParameterType.OBJECT,
-            properties={
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Confirmation message",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Rotation result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "message": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Confirmation message",
+                    ),
+                },
+            )
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
+        is_async=True,
         requires_call_context=True,
     )
     @abstractmethod

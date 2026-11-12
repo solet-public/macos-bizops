@@ -280,7 +280,7 @@ def test_schema_cli_projection_round_trips_two_call_positionals() -> None:
     call_result = _invoke(projected_argv, handler)
     assert call_result.exit_code == 0, call_result.output
     assert len(process_calls) == 1, process_calls
-    assert process_calls[0] == {"process_key": process_key, "arguments": arguments}
+    assert process_calls[0] == {"process_key": process_key, "arguments": arguments, "bridge_wait_attached": True}
 
 
 def test_call_polls_until_completion() -> None:

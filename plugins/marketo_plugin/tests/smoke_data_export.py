@@ -13,7 +13,7 @@ bound to a fake config_provider) and the real ``assert_export_path_allowed``
 directly — the containment boundary is exactly what must not be mocked.
 
 Exercises:
-  1. red-first: export path OUTSIDE every allowed root -> ExportPathRefusedError,
+  1. red-first: export path OUTSIDE every allowed root -> PathRefusedError,
      no file written, the vendor call never runs
   2. red-first: EMPTY export_allowed_roots -> refused naming the config key
   3. red-first: RELATIVE or BLANK configured root -> refused as misconfigured
@@ -35,25 +35,54 @@ Exits 0 on success, 1 on first failure.
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import NonCallableMagicMock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta/src"))
+import tempfile  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+from ananta.file_locations.containment import PathRefusedError, assert_path_allowed, derive_allowed_roots  # noqa: E402
+from ananta.file_locations.resolution import PathAddress, SoletTree  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "marketo_plugin" / "src"))
 
 from marketo_plugin import marketing_actions  # noqa: E402
-from marketo_plugin.constants import CONFIG_KEY_EXPORT_ALLOWED_ROOTS  # noqa: E402
-from marketo_plugin.errors import MarketoServiceError  # noqa: E402
-from marketo_plugin.export_containment import (  # noqa: E402
-    ExportPathRefusedError,
-    assert_export_path_allowed,
-)
 from marketo_plugin.plugin import MarketoPlugin  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
+
+
+_LOCATION_ROOT = Path(__file__).resolve().parents[3]
+_LOCATION_TREE = SoletTree(_LOCATION_ROOT, _LOCATION_ROOT / "profile")
+
+
+def _checked_path(path: str, directories: list[str], *, suffix: str | None = ".tsv", param_name: str = "output_tsv_path", reading: bool = False) -> str:
+    """Exercise real address-derived containment, never a mocked boundary."""
+    addresses = [PathAddress(f"project-{index}", Path(directory), frozenset(), frozenset(), datetime.now(UTC)) for index, directory in enumerate(directories)]
+    roots = derive_allowed_roots(addresses, None, _LOCATION_TREE, _LOCATION_ROOT.parent / "test-solet-files")
+    result = assert_path_allowed(path, roots, _LOCATION_TREE, suffix=suffix, param_name=param_name, plugin_name="test")
+    if reading and not Path(result.value).is_file():
+        raise PathRefusedError(f"{param_name} must name an existing regular file")
+    return result.value
+
+
+def _bind_locations(plugin: Any, directories: list[str]) -> NonCallableMagicMock:
+    """Supply a live address-book service through the production binding."""
+    orchestrator = NonCallableMagicMock()
+    orchestrator.APP_HOME = str(_LOCATION_TREE.app_home)
+    orchestrator.plugin_manager.get_plugin.return_value = None
+    orchestrator.get_service.return_value.list_path_addresses.return_value = {
+        "action_status": "completed",
+        "data": {"addresses": [{"name": f"project-{index}", "tags": [], "updated_at": datetime.now(UTC).isoformat(), "entries": [{"field_type": "path", "value": directory}]} for index, directory in enumerate(directories)]},
+    }
+    plugin.orchestrator_ref = orchestrator
+    return orchestrator
 
 
 def _assert(label: str, cond: bool, msg: str = "") -> None:
@@ -68,9 +97,7 @@ def _assert(label: str, cond: bool, msg: str = "") -> None:
 
 def _gate_for(roots: list[str]) -> Any:
     def gate(output_tsv_path: str) -> str:
-        return assert_export_path_allowed(
-            output_tsv_path, roots, config_key=CONFIG_KEY_EXPORT_ALLOWED_ROOTS, plugin_name="marketo_plugin",
-        )
+        return _checked_path(output_tsv_path, roots, suffix=".tsv", param_name="output_tsv_path", reading=False)
 
     return gate
 
@@ -89,7 +116,7 @@ def test_export_path_outside_allowed_root_refused() -> None:
         raised = False
         try:
             marketing_actions.list_activity_types(client, {"output_tsv_path": out_path}, gate)
-        except ExportPathRefusedError:
+        except PathRefusedError:
             raised = True
         _assert("outside-root path refused", raised)
         _assert("vendor never called when the path is refused", client.get_json.call_count == 0)
@@ -97,26 +124,27 @@ def test_export_path_outside_allowed_root_refused() -> None:
 
 
 def test_empty_allowed_roots_refused() -> None:
-    gate = _gate_for([])
-    client = _fake_get_json_client()
-    raised: ExportPathRefusedError | None = None
-    try:
-        marketing_actions.list_activity_types(client, {"output_tsv_path": "/tmp/x.tsv"}, gate)
-    except ExportPathRefusedError as exc:
-        raised = exc
-    _assert("empty export_allowed_roots refuses", raised is not None)
-    _assert("refusal names the config key", raised is not None and CONFIG_KEY_EXPORT_ALLOWED_ROOTS in str(raised))
+    with tempfile.TemporaryDirectory() as directory:
+        home = Path(directory).resolve() / "home"
+        roots = derive_allowed_roots([], None, _LOCATION_TREE, home)
+        result = assert_path_allowed(str(home / "Exports.nosync/out.tsv"), roots, _LOCATION_TREE, suffix=".tsv", param_name="output_tsv_path", plugin_name="test")
+        _assert("empty address book admits computed exports folder", result.value == str(home / "Exports.nosync/out.tsv"))
+        _assert("computed default carries an advisory", bool(result.advisories))
 
 
 def test_relative_root_misconfigured() -> None:
-    gate = _gate_for(["relative/path"])
-    client = _fake_get_json_client()
-    raised = False
-    try:
-        marketing_actions.list_activity_types(client, {"output_tsv_path": "/tmp/x.tsv"}, gate)
-    except ExportPathRefusedError:
-        raised = True
-    _assert("relative configured root refused as misconfigured", raised)
+    with tempfile.TemporaryDirectory() as directory:
+        home = Path(directory).resolve() / "home"
+        for raw in ("relative-root", ""):
+            addresses = [PathAddress("malformed", Path(raw), frozenset(), frozenset(), datetime.now(UTC))]
+            roots = derive_allowed_roots(addresses, None, _LOCATION_TREE, home)
+            _assert("malformed address is disclosed", any("malformed" in message for message in roots.advisories))
+            raised = False
+            try:
+                assert_path_allowed(str(Path(directory).resolve() / "outside.tsv"), roots, _LOCATION_TREE, suffix=".tsv", param_name="output_tsv_path", plugin_name="test")
+            except PathRefusedError as exc:
+                raised = "path address" in str(exc)
+            _assert("malformed address never authorizes another folder", raised)
 
 
 def test_path_inside_allowed_root_admitted() -> None:
@@ -146,22 +174,37 @@ def test_check_setup_needs_no_export_allowed_roots() -> None:
 
 
 def test_plugin_export_path_gate_rejects_malformed_config() -> None:
+    from ananta.file_locations.containment import location_advisories, location_session
+
     plugin = MarketoPlugin()
-    plugin.config_provider = {CONFIG_KEY_EXPORT_ALLOWED_ROOTS: "not-a-list"}
-    raised: MarketoServiceError | None = None
-    try:
-        plugin._export_path_gate("/tmp/x.tsv")
-    except MarketoServiceError as exc:
-        raised = exc
-    _assert("malformed export_allowed_roots config raises loudly", raised is not None)
-    _assert(
-        "malformed-config error names the config key",
-        raised is not None and CONFIG_KEY_EXPORT_ALLOWED_ROOTS in str(raised),
-        str(raised),
-    )
+    plugin.initialize({"export_allowed_roots": "retired setting is ignored"})
+    orchestrator = _bind_locations(plugin, [])
+    orchestrator.get_service("address_book_service").list_path_addresses.return_value = {"action_status": "error", "error": "unavailable"}
+    with location_session(None):
+        roots, _ = plugin._location_roots()
+        path = str(roots.value[-1] / "out.tsv")
+        _assert("unavailable addresses admit computed home", plugin._export_path_gate(path) == path)
+        _assert("unavailable address service is advisory", any("unavailable" in text.lower() for text in location_advisories()))
+
+
+def test_address_root_replaces_config() -> None:
+    """A live address authorizes exports without a connector root setting."""
+    from marketo_plugin.plugin import MarketoPlugin
+
+    with tempfile.TemporaryDirectory() as directory:
+        plugin = MarketoPlugin()
+        plugin.initialize({})
+        orchestrator = MagicMock()
+        orchestrator.APP_HOME = str(REPO_ROOT / "profile")
+        orchestrator.get_service.return_value.list_path_addresses.return_value = {"action_status": "completed", "data": {"addresses": [{"name": "project", "tags": [], "updated_at": "2026-11-08T00:00:00+00:00", "entries": [{"field_type": "path", "value": directory}]}]}}
+        orchestrator.plugin_manager.get_plugin.return_value = None
+        plugin.orchestrator_ref = orchestrator
+        path = str(Path(directory).resolve() / "out.tsv")
+        _assert("live path address authorizes export without connector config", plugin._export_path_gate(path) == path)
 
 
 def main() -> int:
+    test_address_root_replaces_config()
     print("\nmarketo_plugin data-export containment-gate smoke tests")
     print("=" * 57)
     test_export_path_outside_allowed_root_refused()

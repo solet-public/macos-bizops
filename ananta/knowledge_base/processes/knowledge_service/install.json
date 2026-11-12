@@ -1,7 +1,7 @@
 {
   "process_key": "service_interface::knowledge_service::install",
   "display_name": "Install Knowledge Base",
-  "description": "Index a knowledge base directory. Source resolution: if source URL provided, clone from it; if knowledge_base/{name}/ exists locally, index it; otherwise resolve source URL and credentials from address book. Idempotent — re-installing archives old chunks and creates new ones.",
+  "description": "Index a knowledge base directory. Source resolution: if source URL provided, clone from it; if knowledge_base/{name}/ exists locally, index it; otherwise resolve source URL and credentials from address book. Idempotent — re-installing archives old chunks and creates new ones. Registered calls return a queued job_id/status receipt. Read that exact job with service_interface::job_service::get_job until terminal; job.result contains the complete operation result and job.error retains any failure. In-process calls return the complete result synchronously.",
   "embedding_description": "Index a knowledge base for the first time, or fully rebuild one from scratch. Resolves the source three ways: an explicit git URL to clone, an existing local knowledge_base/<name>/ directory, or a source URL plus credentials looked up in the address book. Always archives any prior chunks and recreates the whole index, re-embedding every document. Use to add a brand-new KB or force a clean full reindex.",
   "result_processor_customizations": {
     "action_label": "Knowledge base installed",

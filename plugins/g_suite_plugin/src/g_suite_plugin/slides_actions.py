@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from .constants import BLOB_NAMESPACE, SLIDES_DEFAULT_EXPORT_FORMAT, SLIDES_EXPORT_MIME_BY_FORMAT
-from .drive_actions import BlobWriter, export_media_to_blob, resolve_export_mime
+from .drive_actions import BlobWriter, export_media_to_blob, export_target
 
 
 def create_presentation(slides: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -37,20 +37,13 @@ def batch_update(slides: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Apply a list of raw Slides API batchUpdate request objects."""
     presentation_id = _require_str(params, "id")
     requests = _require_requests(params)
-    response = (
-        slides.presentations()
-        .batchUpdate(presentationId=presentation_id, body={"requests": requests})
-        .execute()
-    )
+    response = slides.presentations().batchUpdate(presentationId=presentation_id, body={"requests": requests}).execute()
     return {"replies": response.get("replies") or []}
 
 
 def export_presentation(drive: Any, params: dict[str, Any], blob_writer: BlobWriter) -> dict[str, Any]:
     """Export a presentation to pdf/pptx via Drive's export_media; return deck_blob_key."""
-    presentation_id = _require_str(params, "id")
-    fmt = _as_str(params.get("format")) or SLIDES_DEFAULT_EXPORT_FORMAT
-    mime = resolve_export_mime(fmt, SLIDES_EXPORT_MIME_BY_FORMAT)
-    filename = f"{presentation_id}.{fmt}"
+    presentation_id, mime, filename = export_target(params, SLIDES_DEFAULT_EXPORT_FORMAT, SLIDES_EXPORT_MIME_BY_FORMAT)
     blob_key = export_media_to_blob(drive, presentation_id, mime, filename, blob_writer)
     return {"deck_blob_key": blob_key, "namespace": BLOB_NAMESPACE, "filename": filename}
 

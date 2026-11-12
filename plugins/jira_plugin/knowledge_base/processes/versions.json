@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::jira_plugin::versions",
+  "display_name": "Jira: Versions",
+  "description": "Run the complete Jira versions API family on one bound site. Vendor RBAC controls reads, writes and deletes. Choose operation; path/query/body use vendor field names and preserve every optional field. Returns job_id/status queued; completion includes site, HTTP status, native response and next_query. Operations: createRelatedWork, createVersion, deleteAndReplaceVersion, deleteRelatedWork, deleteVersion, getProjectVersions, getProjectVersionsPaginated, getRelatedWork, getVersion, getVersionRelatedIssues, getVersionUnresolvedIssues, mergeVersions, moveVersion, updateRelatedWork, updateVersion. Exact shapes: vendor_operations.json, derived from the linked Atlassian OpenAPI specifications. body_json is an alternative JSON text parameter for scalar/array/null property values; mutually exclusive with body.",
+  "embedding_description": "Work with Jira versions on a selected Atlassian site, including the complete vendor lifecycle, mutations and deletes where available. Select a documented operation and pass vendor path, query and body fields; queued completion reports the site, native response and pagination for follow-up.",
+  "result_processor_customizations": {
+    "action_label": "Jira versions queued",
+    "result_type": "jira_versions_result",
+    "result_description": "Queued job_id/status and site; completion includes site, operation, status, response and next_query.",
+    "presentation_guidance": "Queued does not prove the vendor applied a write. Report vendor results and errors; follow next_query or native cursor for another page."
+  },
+  "error_processor_customizations": {
+    "action_context": "Jira versions operation",
+    "error_interpretation": "jira.invalid_params for invalid vendor shapes; auth_failed/permission_denied/not_found/conflict/rate_limited for vendor status; unknown_site for missing binding.",
+    "recovery_guidance": "Verify site and vendor permissions, correct fields and honor Retry-After. Do not retry mutations without checking their result.",
+    "retryable": false
+  }
+}

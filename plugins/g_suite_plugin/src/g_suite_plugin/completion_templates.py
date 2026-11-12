@@ -10,7 +10,27 @@ from __future__ import annotations
 
 from typing import Literal
 
+from ananta.core.actions.action_metadata import ParameterMetadata, ParameterType, ReturnValueSchema
+
+from .calendar_operations import COMPLETION_LABELS as _CALENDAR_LABELS
+
+JOB_STATUS_PROCESS = "service_interface::job_service::get_job"
+
+
+def queued_handle_schema(finished: str) -> ReturnValueSchema:
+    """Return schema of a verb that answers with a job handle; ``finished`` names what its finished job's result holds."""
+    return ReturnValueSchema(
+        type=ParameterType.OBJECT,
+        description=f"job_id + status 'queued', returned at once. The finished job's result is {finished}; a failed job's error is {{code, message}}. Read it with {JOB_STATUS_PROCESS}.",
+        properties={
+            "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+            "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+        },
+    )
+
+
 _VERB_LABELS: dict[str, str] = {
+    **_CALENDAR_LABELS,
     "drive_download_file": "Drive file download",
     "drive_upload_file": "Drive file upload",
     "sheets_create_from_files": "spreadsheet creation from files",
@@ -28,10 +48,8 @@ def build_completion_template(
         instructions = [
             f"A Google Workspace job ({label}) completed successfully.",
             "Write a brief, friendly message confirming the result.",
-            "DO NOT mention blob keys, blob://, technical IDs, file paths, or internal "
-            "system details.",
-            "Reply with action using the active IO plugin's post_message "
-            "(process_key: plugin::<io_plugin>::post_message).",
+            "DO NOT mention blob keys, blob://, technical IDs, file paths, or internal system details.",
+            "Reply with action using the active IO plugin's post_message (process_key: plugin::<io_plugin>::post_message).",
             "Set attachments to [] (empty list).",
         ]
     else:
@@ -39,8 +57,7 @@ def build_completion_template(
             f"A Google Workspace job ({label}) ended with an error.",
             "Explain what went wrong in simple terms the user can understand.",
             "DO NOT dump stack traces, blob keys, or internal system details.",
-            "Reply with action using the active IO plugin's post_message "
-            "(process_key: plugin::<io_plugin>::post_message).",
+            "Reply with action using the active IO plugin's post_message (process_key: plugin::<io_plugin>::post_message).",
             "Set attachments to [] (empty list).",
         ]
 

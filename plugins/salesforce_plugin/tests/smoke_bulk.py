@@ -44,10 +44,17 @@ Exits 0 on success, 1 on first failure.
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta/src"))
+import tempfile  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+from ananta.file_locations.containment import PathRefusedError, assert_path_allowed, derive_allowed_roots  # noqa: E402
+from ananta.file_locations.resolution import PathAddress, SoletTree  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "salesforce_plugin" / "src"))
@@ -55,17 +62,23 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "salesforce_plugin" / "src"))
 from salesforce_plugin import bulk_actions  # noqa: E402
 from salesforce_plugin.constants import CSV_SUFFIX  # noqa: E402
 from salesforce_plugin.errors import SalesforceCliCallError, classify_salesforce_error  # noqa: E402
-from salesforce_plugin.export_containment import (  # noqa: E402
-    ExportPathRefusedError,
-    assert_export_path_allowed,
-)
-from salesforce_plugin.import_containment import (  # noqa: E402
-    ImportPathRefusedError,
-    assert_import_path_allowed,
-)
 
 _passed = 0
 _failed: list[str] = []
+
+
+_LOCATION_ROOT = Path(__file__).resolve().parents[3]
+_LOCATION_TREE = SoletTree(_LOCATION_ROOT, _LOCATION_ROOT / "profile")
+
+
+def _checked_path(path: str, directories: list[str], *, suffix: str | None = ".tsv", param_name: str = "output_tsv_path", reading: bool = False) -> str:
+    """Exercise real address-derived containment, never a mocked boundary."""
+    addresses = [PathAddress(f"project-{index}", Path(directory), frozenset(), frozenset(), datetime.now(UTC)) for index, directory in enumerate(directories)]
+    roots = derive_allowed_roots(addresses, None, _LOCATION_TREE, _LOCATION_ROOT.parent / "test-solet-files")
+    result = assert_path_allowed(path, roots, _LOCATION_TREE, suffix=suffix, param_name=param_name, plugin_name="test")
+    if reading and not Path(result.value).is_file():
+        raise PathRefusedError(f"{param_name} must name an existing regular file")
+    return result.value
 
 
 def _assert(label: str, cond: bool, msg: str = "") -> None:
@@ -92,25 +105,14 @@ def _job_info(**overrides: Any) -> dict[str, Any]:
 
 def _real_import_gate(allowed_roots: list[str]):
     def gate(csv_path: str) -> str:
-        return assert_import_path_allowed(
-            csv_path,
-            allowed_roots,
-            config_key="import_allowed_roots",
-            plugin_name="salesforce_plugin",
-        )
+        return _checked_path(csv_path, allowed_roots, suffix=".csv", param_name="csv_path", reading=True)
 
     return gate
 
 
 def _real_export_gate(allowed_roots: list[str]):
     def gate(output_csv_path: str) -> str:
-        return assert_export_path_allowed(
-            output_csv_path,
-            allowed_roots,
-            config_key="export_allowed_roots",
-            plugin_name="salesforce_plugin",
-            required_suffix=CSV_SUFFIX,
-        )
+        return _checked_path(output_csv_path, allowed_roots, suffix=CSV_SUFFIX, param_name="output_tsv_path", reading=False)
 
     return gate
 
@@ -258,7 +260,7 @@ def test_submit_csv_path_containment_refusals() -> None:
                 {"operation": "insert", "sobject": "Account", "csv_path": outside_path},
                 gate,
             )
-        except ImportPathRefusedError:
+        except PathRefusedError:
             raised = True
         _assert("csv_path outside every allowed root is refused", raised)
         _assert("outside-root refusal never reaches the executor", not executor.run_json.called)
@@ -272,10 +274,10 @@ def test_submit_csv_path_containment_refusals() -> None:
                 {"operation": "insert", "sobject": "Account", "csv_path": outside_path},
                 empty_gate,
             )
-        except ImportPathRefusedError as exc:
+        except PathRefusedError as exc:
             raised = True
-            _assert("empty-roots refusal names the config key", "import_allowed_roots" in str(exc), str(exc))
-        _assert("empty import_allowed_roots refuses (refuse-all default)", raised)
+            _assert("outside-root refusal names address registration", "path address" in str(exc), str(exc))
+        _assert("an unregistered folder outside computed home is refused", raised)
 
         # Refused: contained under the allowed root, but the file does not exist.
         missing_path = str(allowed_dir / "missing.csv")
@@ -286,7 +288,7 @@ def test_submit_csv_path_containment_refusals() -> None:
                 {"operation": "insert", "sobject": "Account", "csv_path": missing_path},
                 gate,
             )
-        except ImportPathRefusedError:
+        except PathRefusedError:
             raised = True
         _assert("a contained but nonexistent csv_path is refused", raised)
         _assert("nonexistent-file refusal never reaches the executor", not executor.run_json.called)
@@ -450,7 +452,7 @@ def test_bulk_job_results_containment_refusal() -> None:
                 },
                 gate,
             )
-        except ExportPathRefusedError:
+        except PathRefusedError:
             raised = True
         _assert("a results path outside every allowed root is refused", raised)
         _assert("refusal happens before ANY REST call is made", not executor.run_rest.called)
@@ -480,7 +482,7 @@ def test_edge_parity_bulk_verbs_present() -> None:
     names = {action.name for action in actions}
     expected_bulk = {"bulk_ingest_submit", "bulk_job_status", "bulk_job_results", "bulk_job_abort"}
     _assert("all four bulk verbs discovered", expected_bulk.issubset(names), str(sorted(names)))
-    _assert("twenty-three verbs total (including provisioning, authenticated request and the typed families)", len(actions) == 23, str(len(actions)))
+    _assert("twenty-five verbs total (including provisioning, authenticated request and the typed families)", len(actions) == 25, str(len(actions)))
 
 
 def main() -> int:

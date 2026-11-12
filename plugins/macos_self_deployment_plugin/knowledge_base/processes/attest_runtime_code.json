@@ -1,12 +1,12 @@
 {
   "process_key": "plugin::macos_self_deployment_plugin::attest_runtime_code",
   "display_name": "Attest router-served runtime code",
-  "description": "Read the router-served local self-deployment process identity, immutable release identity, deterministic source and release surface digests, and already-loaded module origins. This verb is read-only and never imports a requested module.",
+  "description": "The registered call returns a queued job receipt with job_id and status. Read the complete original outcome from service_interface::job_service::get_job using that exact job_id; admission is not operation completion. Read the router-served local self-deployment process identity, immutable release identity, deterministic source and release surface digests, and already-loaded module origins. This verb is read-only and never imports a requested module.",
   "embedding_description": "Verify which immutable macOS blue-green release is serving and whether its already-loaded Python modules came from that release. Use for reconciliation verification or doctor diagnostics of shipped-but-unread code.",
   "result_processor_customizations": {
     "action_label": "runtime code attestation",
     "result_type": "local_runtime_code_attestation",
-    "result_description": "Router and process identity, immutable release digests, and requested module load origins.",
+    "result_description": "Queued receipt; the complete operational outcome is in the exact job.result. Router and process identity, immutable release digests, and requested module load origins.",
     "presentation_guidance": "Lead with served_by_self, release_id, current_release_id, and the two surface digests. Call out any unloaded module or module origin outside the immutable release root."
   },
   "error_processor_customizations": {

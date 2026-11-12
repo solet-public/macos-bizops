@@ -72,7 +72,12 @@ class Fixture:
             measurement_id="cme-fixture",
             notice_reply=envelope({"message_id": "arm-fixture", "delivery": "queued_watcher"}),
             notice_timeout=False,
+            async_keys=(self.m.SWAP, self.m.APPLY),
+            job_failure=None,
+            job_timeouts=0,
+            job_timeout_during_drain=False,
         )
+        self.jobs: list[dict[str, Any]] = []
         self.s.flat_swap = False
         self.s.drain_consumes_deadline = False
         self.ports = self.m.Ports(self.command, self.read, self.resolve, self.receipts, lambda target: self.s.receipt_live if isinstance(target, int) else self.s.receipt_lock_held, self.lock, lambda: self.s.ticks, self.sleep, lambda: "2026-10-15T00:00:00+00:00")
@@ -129,7 +134,7 @@ class Fixture:
                 raise OSError("fixture holder unavailable")
             return json.dumps({"result": {"success": True, "data": {"holds": self.s.holder}}})
         if argv[0] == self.args.bridge:
-            return self.process(argv[2], json.loads(argv[3]))
+            return self.bridge_call(argv)
         if argv[1] == "deployed":
             self.log.append("REACHED_RECORD")
             print("REACHED_RECORD", flush=True)
@@ -138,6 +143,31 @@ class Fixture:
                 raise subprocess.TimeoutExpired(argv, 30)
             return "{}"
         return self.current()
+
+    def bridge_call(self, argv: list[str]) -> str:
+        """Mirror call's queued admission and --wait's get_job record output.
+
+        Admission alone must not execute the operation. A waited success keeps
+        the original ActionResult under result, as both owner workers persist
+        it. CLI failures carry the finished record on stdout; a wait timeout
+        retains a processing job and reports its identity on stderr.
+        """
+        key, data = argv[2], json.loads(argv[3])
+        if key not in self.s.async_keys:
+            return self.process(key, data)
+        job: dict[str, Any] = {"id": f"job-fixture-{len(self.jobs)}", "provider_name": key.split("::")[1], "status": "queued", "result": None, "error": None}
+        self.jobs.append(job)
+        if "--wait" not in argv:
+            return envelope({"job_id": job["id"], "status": "queued"})
+        if self.s.job_timeouts and (not self.s.job_timeout_during_drain or self.s.committed):
+            self.s.job_timeouts -= 1
+            job["status"] = "processing"
+            raise subprocess.CalledProcessError(7, argv, stderr=f"job {job['id']} still processing; the job is still running")
+        if key == self.s.job_failure:
+            job.update(status="error", error={"message": "fixture job failed"})
+            raise subprocess.CalledProcessError(6, argv, output=json.dumps(job), stderr="fixture job failed")
+        job.update(status="completed", result=json.loads(self.process(key, data))["result"])
+        return json.dumps(job)
 
     def current(self) -> str:
         """Simulate an observation becoming visible after an ambiguous write."""

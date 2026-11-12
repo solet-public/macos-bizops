@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "g_suite_plugin"
 version = "1.0.0"
-description = "Google Workspace (Gmail, Drive, Sheets, Docs, Slides) plugin for Ananta"
+description = "Google Workspace (Gmail, Calendar, Drive, Sheets, Docs, Slides) plugin for Ananta"
 authors = [
     {name = "Ananta Development Team", email = "dev@ananta.ai"},
 ]

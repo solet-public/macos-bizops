@@ -4,13 +4,19 @@
 # stands in; no sf CLI executable and no Salesforce org.
 # Build 3: composite, tooling and bulk_jobs families, hardDelete, queryAll;
 # routing, vendor-shape input checks, real-shaped success/pagination/error
-# transcripts, credential-redaction variants and the three-artifact check.
+# transcripts, results returned as received and the three-artifact check.
 plugins/salesforce_plugin/tests/smoke_typed_families.py
 # Build 4 (unt_b0cd740d): reports, dashboards, rest_resources and actions
 # families; real-shaped report runs, async instances, dashboard refresh,
 # query paging, external-id upsert/conflict/stale write, invocable-action
-# per-input failures, 401/403 mapping and redaction variants per family.
+# per-input failures, 401/403 mapping and results as received per family.
 plugins/salesforce_plugin/tests/smoke_typed_families_build4.py
+# Build 5 (unt_18666803): Tooling composite and apexCompileResults, Bulk
+# resultPages, report instance delete, relationship writes, and the metadata
+# (REST deployRequest multipart package) and content_files (ContentVersion
+# upload, --stream-to-file download proven by ContentSize and Checksum,
+# ContentDocument delete) families; 401/403 mapping.
+plugins/salesforce_plugin/tests/smoke_typed_families_build5.py
 # Build 1's generic request smoke and the Bulk ingest smoke were never
 # registered; same plugin, same hermetic shape.
 plugins/salesforce_plugin/tests/test_authenticated_request.py

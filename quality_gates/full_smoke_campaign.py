@@ -99,7 +99,7 @@ def campaign_budget(directory: Path, *, registered_count: int, per_smoke_seconds
             row = json.loads(path.read_bytes())
             start, end = datetime.fromisoformat(row["started_at"]), datetime.fromisoformat(row["finished_at"])
             seconds = (end - start).total_seconds()
-            if seconds > 0 and row.get("result") in ("passed", "passed_with_retries") and row.get("summary", {}).get("total") == registered_count:
+            if seconds > 0 and row.get("result") == "passed" and row.get("summary", {}).get("total") == registered_count:
                 measurements.append((seconds, str(path)))
         except (OSError, ValueError, KeyError, TypeError):
             continue
@@ -110,4 +110,4 @@ def campaign_budget(directory: Path, *, registered_count: int, per_smoke_seconds
 
     estimates = {**_HISTORICAL_ENTRY_BUDGETS_SECONDS, **load_budgets(_CALIBRATION_ROWS)}
     bound = sum(max(per_smoke_seconds, estimates.get(entry, per_smoke_seconds)) for entry in entries) if entries else max(1, registered_count) * max([per_smoke_seconds, *estimates.values()])
-    return {"seconds": bound * 3, "basis": "conservative serial per-entry bounds plus retry/setup headroom", "evidence": None, "advisory": "whole-battery timing UNKNOWN; calibrate after first physical campaign"}
+    return {"seconds": bound * 3, "basis": "conservative serial per-entry bounds plus setup headroom", "evidence": None, "advisory": "whole-battery timing UNKNOWN; calibrate after first physical campaign"}

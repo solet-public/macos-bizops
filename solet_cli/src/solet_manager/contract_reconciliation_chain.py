@@ -33,23 +33,12 @@ def resolve_reconciliation_chain(
         if direct:
             return _one_direct_reconciliation(direct, current, destination_digest, chain)
         if len(candidates) != 1:
-            raise StateConflictError(
-                "contract reconciliation manifest authoring error: multiple forward entries match "
-                f"intermediate source identity {current[1]}"
-            )
+            raise StateConflictError(f"contract reconciliation manifest authoring error: multiple forward entries match intermediate source identity {current[1]}")
         next_candidates = digest_reconciliation_candidates(candidates[0], declarations)
         if not next_candidates:
-            raise StateConflictError(
-                "release-declared reconciliation entries exist for this source but none target "
-                f"the installed contract {destination_digest}; a forward-only entry for this "
-                "destination is needed"
-            )
+            raise StateConflictError(f"release-declared reconciliation entries exist for this source but none target the installed contract {destination_digest}; a forward-only entry for this destination is needed")
         if len(next_candidates) != 1:
-            raise StateConflictError(
-                "contract reconciliation manifest authoring error: intermediate destination "
-                f"digest {candidates[0].destination_digest} has "
-                f"{len(next_candidates)} declared successor identities"
-            )
+            raise StateConflictError(f"contract reconciliation manifest authoring error: intermediate destination digest {candidates[0].destination_digest} has {len(next_candidates)} declared successor identities")
         chain.append(candidates[0])
         current = _source_identity(next_candidates[0])
 
@@ -72,26 +61,17 @@ def digest_reconciliation_candidates(
     item: ContractReconciliation,
     declarations: tuple[ContractReconciliation, ...],
 ) -> tuple[ContractReconciliation, ...]:
-    return tuple(
-        candidate
-        for candidate in declarations
-        if candidate.flow_id == item.flow_id
-        and candidate.source_digest == item.destination_digest
-    )
+    return tuple(candidate for candidate in declarations if candidate.flow_id == item.flow_id and candidate.source_digest == item.destination_digest)
 
 
 def _source_identity(item: ContractReconciliation) -> tuple[str, str, str]:
     return item.flow_id, item.source_revision, item.source_digest
 
 
-def _raise_missing_chain_entry(
-    chain: list[ContractReconciliation], identity: tuple[str, str, str]
-) -> None:
+def _raise_missing_chain_entry(chain: list[ContractReconciliation], identity: tuple[str, str, str]) -> None:
     if not chain:
         raise StateConflictError("no release-declared contract reconciliation matches this source identity")
-    raise StateConflictError(
-        f"release-declared reconciliation chain has no entry for intermediate identity {identity[1]}"
-    )
+    raise StateConflictError(f"release-declared reconciliation chain has no entry for intermediate identity {identity[1]}")
 
 
 def _one_direct_reconciliation(
@@ -101,10 +81,7 @@ def _one_direct_reconciliation(
     chain: list[ContractReconciliation],
 ) -> ContractReconciliation:
     if len(direct) != 1:
-        raise StateConflictError(
-            "contract reconciliation manifest authoring error: multiple entries match "
-            f"source digest {current[2]} and installed destination digest {destination_digest}"
-        )
+        raise StateConflictError(f"contract reconciliation manifest authoring error: multiple entries match source digest {current[2]} and installed destination digest {destination_digest}")
     return compose_reconciliation_chain((*chain, direct[0]))
 
 
@@ -114,9 +91,7 @@ def compose_reconciliation_chain(
     if len(chain) == 1:
         return chain[0]
     if any(item.first_use_inactive_probe_migrations for item in chain):
-        raise StateConflictError(
-            "chained reconciliation with first-use probe migrations requires a direct declaration"
-        )
+        raise StateConflictError("chained reconciliation with first-use probe migrations requires a direct declaration")
     mappings, reset_ids, answer_migrations = _compose_chain_data(chain)
     _validate_unique_destinations(mappings)
     return _build_composed_reconciliation(chain, mappings, reset_ids, answer_migrations)
@@ -162,13 +137,11 @@ def _build_composed_reconciliation(
         source_revision=first.source_revision,
         source_digest=first.source_digest,
         destination_digest=last.destination_digest,
-        stage_probe_mappings=tuple(
-            StageProbeMapping(source=source, destination=destination)
-            for source, destination in mappings.items()
-            if source != destination
-        ),
+        stage_probe_mappings=tuple(StageProbeMapping(source=source, destination=destination) for source, destination in mappings.items() if source != destination),
         operation_statuses_to_reset=tuple(reset_ids),
         answer_value_migrations=answer_migrations,
+        retired_decision_ids=tuple(dict.fromkeys(key for item in chain for key in item.retired_decision_ids)),
+        retired_public_input_ids=tuple(dict.fromkeys(key for item in chain for key in item.retired_public_input_ids)),
     )
 
 
@@ -177,10 +150,7 @@ def compose_stage_probe_mappings(
     next_mappings: tuple[StageProbeMapping, ...],
 ) -> dict[tuple[str, str, str], tuple[str, str, str]]:
     next_map = {item.source: item.destination for item in next_mappings}
-    composed = {
-        source: next_map.get(destination, destination)
-        for source, destination in prior.items()
-    }
+    composed = {source: next_map.get(destination, destination) for source, destination in prior.items()}
     for source, destination in next_map.items():
         if source not in composed and source not in prior.values():
             composed[source] = destination

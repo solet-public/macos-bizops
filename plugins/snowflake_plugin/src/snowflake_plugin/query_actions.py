@@ -66,8 +66,8 @@ from .constants import (
 from .statement_guard import assert_read_statement
 
 # path_gate(output_tsv_path) -> realpath-resolved path to write, or raises
-# ExportPathRefusedError. Injected by the plugin, which binds the operator's
-# export_allowed_roots config (export_containment.assert_export_path_allowed).
+# PathRefusedError. Injected by the plugin, which binds the operator's
+# registered path addresses config (ananta.file_locations.containment.assert_path_allowed).
 PathGate = Callable[[str], str]
 
 

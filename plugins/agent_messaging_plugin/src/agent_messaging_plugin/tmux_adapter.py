@@ -351,9 +351,6 @@ def _env_pairs(
         "PYTHONPATH": worktree_pythonpath(cwd, os.environ.get("PYTHONPATH", "")),
     }.items():
         pairs += ["-e", f"{key}={value}"]
-    git_controller_name = os.environ.get("GIT_CONTROLLER_NAME", "").strip()
-    if git_controller_name:
-        pairs += ["-e", f"GIT_CONTROLLER_NAME={git_controller_name}"]
     if isinstance(allowed_tools, (list, tuple)) and allowed_tools:
         pairs += ["-e", f"FLEET_HEADLESS_TOOL_ALLOWLIST={','.join(str(t) for t in allowed_tools)}"]
     # T1 usage-capture lane (ruling 2026-08-05, Q1(a)): same declared-not-
@@ -411,6 +408,7 @@ def _pane_command(
     """
     emit_script = _emit_role_tag_path()
     parts = [
+        "unset GIT_CONTROLLER_NAME; ",
         f"sh {shlex.quote(str(emit_script))} {shlex.quote(label)}; " if emit_script.exists() else "",
     ]
     if transport == "watch" and solet_bin:

@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -17,6 +19,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from quality_gates import candidate_repo  # noqa: E402
 from quality_gates.smoke_import_environment import ImportOriginError, SmokeImportEnvironment  # noqa: E402
+
+__all__ = ["FinderSmoke", "ProcessGroupReapSmoke", "_assert_missing_setup_advises"]
 
 FINDER = "__editable___fixture_1_0_finder"
 PTH = "__editable__.fixture-1.0.pth"
@@ -340,9 +344,41 @@ def _assert_missing_setup_advises(workspace: Path, runner: Path) -> None:
             assert "OWNED_IMPORT_ORIGIN_IS_NOT_RUNNER_TREE" in str(exc), exc
 
 
+class ProcessGroupReapSmoke(unittest.TestCase):
+    def test_permission_denial_is_not_group_disappearance(self) -> None:
+        from _run_smokes_scratch_fixture import _group_alive, _wait_for_groups_exit
+
+        with patch("_run_smokes_scratch_fixture.os.killpg", side_effect=PermissionError):
+            self.assertTrue(_group_alive(123))
+            with self.assertRaisesRegex(AssertionError, "OWNED_PROCESS_GROUP_STILL_PRESENT"):
+                _wait_for_groups_exit((123,), timeout=0)
+
+    def test_unreaped_group_waits_for_owned_child_reap(self) -> None:
+        from _run_smokes_scratch_fixture import _wait_for_groups_exit
+
+        child = subprocess.Popen([sys.executable, "-c", "import os; os._exit(0)"], start_new_session=True)
+        try:
+            time.sleep(0.05)
+            with self.assertRaisesRegex(AssertionError, "OWNED_PROCESS_GROUP_STILL_PRESENT"):
+                _wait_for_groups_exit((child.pid,), timeout=0)
+
+            def reap() -> None:
+                time.sleep(0.05)
+                child.wait(timeout=5)
+
+            reaper = threading.Thread(target=reap)
+            reaper.start()
+            _wait_for_groups_exit((child.pid,))
+            reaper.join(timeout=5)
+            self.assertFalse(reaper.is_alive())
+            self.assertEqual(child.returncode, 0)
+        finally:
+            child.wait(timeout=5)
+
+
 def _assert_cleanup_after_supervised_exit() -> None:
     """A lingering real group is reaped while its private interpreter exists."""
-    from _run_smokes_scratch_fixture import _group_alive
+    from _run_smokes_scratch_fixture import _group_alive, _wait_for_groups_exit
 
     from quality_gates import run_smokes
 
@@ -352,6 +388,7 @@ def _assert_cleanup_after_supervised_exit() -> None:
     def finish(environment: SmokeImportEnvironment) -> None:
         supervisor = run_smokes._scratch_runtime().select_supervisor(lambda: run_smokes._SmokeProcessSupervisor(100, 1))
         groups, _ = supervisor.cancel_snapshot()
+        _wait_for_groups_exit(groups)
         assert groups and not any(_group_alive(group) for group in groups), "OWNED_ENVIRONMENT_REMOVED_AFTER_SUPERVISED_EXIT"
         assert environment.path is not None
         closed.append(environment.path)

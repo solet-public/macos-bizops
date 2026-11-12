@@ -1,7 +1,7 @@
 {
   "process_key": "plugin::jira_plugin::update_issue",
   "display_name": "Jira: Update Issue",
-  "description": "Apply a non-empty fields object (summary, description, assignee, labels, custom fields, ...) to an existing Jira issue by key. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the update being applied; the confirmation is delivered when the job completes. Write action.",
+  "description": "Apply a non-empty fields object (summary, description, assignee, labels, custom fields, ...) to an existing Jira issue by key. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the update being applied; the confirmation is delivered when the job completes. Write action. Optional site selects a bound Atlassian site; omitted uses the default. Queued and completed results identify the site.",
   "embedding_description": "Edit fields on an existing Jira issue by key: change its summary or description, reassign it, adjust labels, or set custom fields through a non-empty fields object. Dispatches asynchronously, returning a job_id immediately; the saved-change confirmation arrives via job completion. In-place field maintenance on a ticket whose key is already known.",
   "result_processor_customizations": {
     "action_label": "Jira issue update queued",

@@ -46,16 +46,12 @@ from typing import Any, cast
 import psycopg
 from psycopg.rows import DictRow, dict_row
 
-DEFAULT_BRIDGE_PORT_FILE = (
-    Path.home() / ".ananta" / "runtime" / f"{os.environ['SOLET_NAME']}.bridge.port"
-)
+DEFAULT_BRIDGE_PORT_FILE = Path.home() / ".ananta" / "runtime" / f"{os.environ['SOLET_NAME']}.bridge.port"
 DEFAULT_BRIDGE_HOST = "127.0.0.1"
 API_PREFIX = "/api/v1/bridge"
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_POSTGRES_CONFIG_FILE = (
-    _REPO_ROOT / "profile" / "config" / "plugins" / "postgres_state_management_plugin.json"
-)
+_POSTGRES_CONFIG_FILE = _REPO_ROOT / "profile" / "config" / "plugins" / "postgres_state_management_plugin.json"
 AUDIT_TABLE_FULLNAME = "default_vault_plugin__secret_transfer_audit"
 
 PROCESS_KEY_ENSURE = "service_interface::vault_service::ensure_encryption_keypair"
@@ -64,7 +60,6 @@ PROCESS_KEY_EXPORT = "service_interface::vault_service::export_encrypted"
 PROCESS_KEY_IMPORT = "service_interface::vault_service::import_encrypted"
 PROCESS_KEY_DELETE = "service_interface::vault_service::delete"
 PROCESS_KEY_STORE = "service_interface::vault_service::store"
-PROCESS_KEY_RETRIEVE = "service_interface::vault_service::retrieve"
 
 SECRET_NAME = "sealed_box_smoke_test_secret"
 RESULT_POLL_TIMEOUT_SECONDS = 30.0
@@ -83,7 +78,9 @@ def _post(url: str, body: dict[str, Any], transcript: list[str]) -> dict[str, An
     payload = json.dumps(body).encode("utf-8")
     transcript.append(f"POST {url} body={json.dumps(body)}")
     req = urllib.request.Request(
-        url, data=payload, method="POST",
+        url,
+        data=payload,
+        method="POST",
         headers={"Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -107,10 +104,7 @@ def _resolve_bridge_port() -> int:
     if env_port:
         return int(env_port)
     if not DEFAULT_BRIDGE_PORT_FILE.exists():
-        raise SmokeError(
-            f"bridge port file not found at {DEFAULT_BRIDGE_PORT_FILE}; "
-            "is the solet running? Try `./launch.py`."
-        )
+        raise SmokeError(f"bridge port file not found at {DEFAULT_BRIDGE_PORT_FILE}; is the solet running? Try `./launch.py`.")
     return int(DEFAULT_BRIDGE_PORT_FILE.read_text().strip())
 
 
@@ -125,10 +119,7 @@ def _prereq_skip_reason() -> str | None:
     convention), and skip-clean when the bridge is unreachable (mirrors
     ``cross_host_kara_ledger``'s reachability model)."""
     if os.environ.get(_LIVE_ENV) != "1":
-        return (
-            f"set {_LIVE_ENV}=1 to run "
-            "(LIVE-writes vault keypair + Postgres audit rows on the running solet)"
-        )
+        return f"set {_LIVE_ENV}=1 to run (LIVE-writes vault keypair + Postgres audit rows on the running solet)"
     env_port = os.environ.get("EXAMPLE_BRIDGE_PORT")
     if env_port:
         port = int(env_port)
@@ -174,9 +165,7 @@ def _process_call(
     )
     action_id = call_payload.get("action_id")
     if not isinstance(action_id, str) or not action_id:
-        raise SmokeError(
-            f"process_call returned no action_id: {call_payload!r}"
-        )
+        raise SmokeError(f"process_call returned no action_id: {call_payload!r}")
 
     deadline = time.monotonic() + RESULT_POLL_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
@@ -184,9 +173,7 @@ def _process_call(
         if result.get("status") in {"completed", "error", "failed"}:
             return result
         time.sleep(RESULT_POLL_INTERVAL_SECONDS)
-    raise SmokeError(
-        f"timed out waiting for action {action_id} on {process_key}"
-    )
+    raise SmokeError(f"timed out waiting for action {action_id} on {process_key}")
 
 
 def _result_data(result: dict[str, Any]) -> dict[str, Any]:
@@ -236,38 +223,21 @@ def _result_error_code(result: dict[str, Any]) -> str | None:
     return str(code) if isinstance(code, str) else None
 
 
-def _ensure_secret_absent(
-    base: str, bridge_id: str, name: str, transcript: list[str]
-) -> None:
+def _ensure_secret_absent(base: str, bridge_id: str, name: str, transcript: list[str]) -> None:
     """Delete the test secret if a previous run left it lying around."""
     _process_call(base, bridge_id, PROCESS_KEY_DELETE, {"key": name}, transcript)
 
 
-def _store_test_secret(
-    base: str, bridge_id: str, name: str, value: str, transcript: list[str]
-) -> None:
+def _store_test_secret(base: str, bridge_id: str, name: str, value: str, transcript: list[str]) -> None:
     result = _process_call(
-        base, bridge_id, PROCESS_KEY_STORE,
+        base,
+        bridge_id,
+        PROCESS_KEY_STORE,
         {"key": name, "value": value},
         transcript,
     )
     if _result_status(result) != "completed":
         raise SmokeError(f"store({name}) did not complete: {result!r}")
-
-
-def _retrieve_test_secret(
-    base: str, bridge_id: str, name: str, transcript: list[str]
-) -> str:
-    result = _process_call(
-        base, bridge_id, PROCESS_KEY_RETRIEVE,
-        {"key": name},
-        transcript,
-    )
-    data = _result_data(result)
-    value = data.get("value")
-    if not isinstance(value, str):
-        raise SmokeError(f"retrieve({name}) returned no string value: {result!r}")
-    return value
 
 
 def _assert_eq(label: str, actual: Any, expected: Any) -> None:
@@ -278,11 +248,7 @@ def _assert_eq(label: str, actual: Any, expected: Any) -> None:
 def _assert_no_plaintext_in_transcript(plaintext: str, transcript: list[str]) -> None:
     joined = "\n".join(transcript)
     if plaintext in joined:
-        raise SmokeError(
-            "PLAINTEXT LEAK: the secret value appeared in the captured "
-            "HTTP transcript at least once. This is the discipline failure "
-            "the protocol exists to prevent."
-        )
+        raise SmokeError("PLAINTEXT LEAK: the secret value appeared in the captured HTTP transcript at least once. This is the discipline failure the protocol exists to prevent.")
 
 
 def _connect_postgres() -> psycopg.Connection[DictRow]:
@@ -294,12 +260,7 @@ def _connect_postgres() -> psycopg.Connection[DictRow]:
     parameter, so we cast through ``Connection[DictRow]`` explicitly.
     """
     cfg: dict[str, Any] = json.loads(_POSTGRES_CONFIG_FILE.read_text())
-    conninfo = (
-        f"host={cfg['host']} port={cfg['port']} "
-        f"dbname={cfg['database']} user={cfg['user']} "
-        f"password={cfg['password']} "
-        f"options=-csearch_path={cfg['schema']},public"
-    )
+    conninfo = f"host={cfg['host']} port={cfg['port']} dbname={cfg['database']} user={cfg['user']} password={cfg['password']} options=-csearch_path={cfg['schema']},public"
     return cast(
         "psycopg.Connection[DictRow]",
         psycopg.Connection.connect(
@@ -311,14 +272,7 @@ def _connect_postgres() -> psycopg.Connection[DictRow]:
 
 def _read_audit_rows_for_secret(secret_name: str) -> list[dict[str, Any]]:
     """Return the most recent audit rows for ``secret_name`` (newest first)."""
-    sql = (
-        f"SELECT direction, secret_name, peer_identifier, "
-        f"peer_pubkey_fingerprint, plaintext_fingerprint, status, "
-        f"error_message, created_at "
-        f"FROM {AUDIT_TABLE_FULLNAME} "
-        f"WHERE secret_name = %s "
-        f"ORDER BY created_at DESC LIMIT 50"
-    )
+    sql = f"SELECT direction, secret_name, peer_identifier, peer_pubkey_fingerprint, plaintext_fingerprint, status, error_message, created_at FROM {AUDIT_TABLE_FULLNAME} WHERE secret_name = %s ORDER BY created_at DESC LIMIT 50"
     with _connect_postgres() as conn, conn.cursor() as cur:
         cur.execute(sql, (secret_name,))
         return [dict(row) for row in cur.fetchall()]
@@ -326,10 +280,7 @@ def _read_audit_rows_for_secret(secret_name: str) -> list[dict[str, Any]]:
 
 def _audit_success_rows(rows: list[dict[str, object]], direction: str) -> list[dict[str, object]]:
     """Filter audit rows to the success entries for one direction."""
-    return [
-        r for r in rows
-        if r["direction"] == direction and r["status"] == "success"
-    ]
+    return [r for r in rows if r["direction"] == direction and r["status"] == "success"]
 
 
 def _assert_audit_direction_fingerprint(
@@ -341,16 +292,10 @@ def _assert_audit_direction_fingerprint(
     """Assert one success row exists for ``direction`` and its fingerprint matches."""
     success_rows = _audit_success_rows(rows, direction)
     if not success_rows:
-        raise SmokeError(
-            f"audit log has no successful {direction} row for {secret_name!r}; "
-            f"rows={rows!r}"
-        )
+        raise SmokeError(f"audit log has no successful {direction} row for {secret_name!r}; rows={rows!r}")
     actual = success_rows[0]["plaintext_fingerprint"]
     if actual != expected_fingerprint:
-        raise SmokeError(
-            f"audit {direction} row has mismatched plaintext_fingerprint: "
-            f"expected {expected_fingerprint!r}, got {actual!r}"
-        )
+        raise SmokeError(f"audit {direction} row has mismatched plaintext_fingerprint: expected {expected_fingerprint!r}, got {actual!r}")
 
 
 def _assert_audit_no_secret_leakage(
@@ -364,10 +309,7 @@ def _assert_audit_no_secret_leakage(
         flattened = " ".join(str(v) for v in row.values() if v is not None)
         for forbidden in forbidden_substrings:
             if forbidden and forbidden in flattened:
-                raise SmokeError(
-                    "audit row contains forbidden content (plaintext or "
-                    f"ciphertext): row={row!r}"
-                )
+                raise SmokeError(f"audit row contains forbidden content (plaintext or ciphertext): row={row!r}")
 
 
 def _assert_audit_round_trip(
@@ -385,10 +327,7 @@ def _assert_audit_round_trip(
     """
     rows = _read_audit_rows_for_secret(secret_name)
     if not rows:
-        raise SmokeError(
-            f"audit table {AUDIT_TABLE_FULLNAME} returned no rows for "
-            f"secret_name={secret_name!r}"
-        )
+        raise SmokeError(f"audit table {AUDIT_TABLE_FULLNAME} returned no rows for secret_name={secret_name!r}")
     _assert_audit_direction_fingerprint(secret_name, "export", rows, expected_fingerprint)
     _assert_audit_direction_fingerprint(secret_name, "import", rows, expected_fingerprint)
     _assert_audit_no_secret_leakage(rows, plaintext, ciphertext)
@@ -405,9 +344,9 @@ def main() -> int:
         return 0
     # The leak-check covers only the four sealed-box protocol calls — the
     # security boundary the protocol is designed to protect. The setup
-    # calls (store/retrieve/cleanup-delete) legitimately carry plaintext
-    # over HTTP because that is what those vault operations do; they're
-    # not part of the protocol's no-leak guarantee.
+    # fixture-store call supplies a generated test value; cleanup only names
+    # its key. Verification uses another encrypted export, never a plaintext
+    # retrieval route. No real credential is used by this smoke.
     setup_transcript: list[str] = []
     transcript: list[str] = []
     port = _resolve_bridge_port()
@@ -446,7 +385,9 @@ def main() -> int:
 
         _print_step("export_encrypted")
         r4 = _process_call(
-            base, bridge_id, PROCESS_KEY_EXPORT,
+            base,
+            bridge_id,
+            PROCESS_KEY_EXPORT,
             {
                 "secret_name": SECRET_NAME,
                 "recipient_pubkey": pub_first,
@@ -464,7 +405,9 @@ def main() -> int:
 
         _print_step("import_encrypted with overwrite=True (round-trip into same vault)")
         r5 = _process_call(
-            base, bridge_id, PROCESS_KEY_IMPORT,
+            base,
+            bridge_id,
+            PROCESS_KEY_IMPORT,
             {
                 "name": SECRET_NAME,
                 "ciphertext": ciphertext,
@@ -481,13 +424,21 @@ def main() -> int:
             export_fp,
         )
 
-        _print_step("retrieve confirms the imported plaintext matches the original")
-        recovered = _retrieve_test_secret(base, bridge_id, SECRET_NAME, setup_transcript)
-        _assert_eq("recovered plaintext", recovered, secret_plaintext)
+        _print_step("encrypted re-export confirms the imported reference still matches")
+        verified = _process_call(
+            base,
+            bridge_id,
+            PROCESS_KEY_EXPORT,
+            {"secret_name": SECRET_NAME, "recipient_pubkey": pub_first, "recipient_identifier": "self"},
+            transcript,
+        )
+        _assert_eq("re-exported fingerprint", _result_data(verified).get("plaintext_fingerprint"), export_fp)
 
         _print_step("import_encrypted with overwrite=False against existing name -> SECRET_ALREADY_EXISTS")
         r6 = _process_call(
-            base, bridge_id, PROCESS_KEY_IMPORT,
+            base,
+            bridge_id,
+            PROCESS_KEY_IMPORT,
             {
                 "name": SECRET_NAME,
                 "ciphertext": ciphertext,
@@ -503,7 +454,9 @@ def main() -> int:
 
         _print_step("import_encrypted with malformed ciphertext -> DECRYPT_FAILED")
         r7 = _process_call(
-            base, bridge_id, PROCESS_KEY_IMPORT,
+            base,
+            bridge_id,
+            PROCESS_KEY_IMPORT,
             {
                 "name": SECRET_NAME + "_bogus",
                 "ciphertext": "AAECAwQFBgcICQ==",  # 10 bytes, way too short to decrypt

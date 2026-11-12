@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 from collections.abc import Callable
+from collections.abc import Set as AbstractSet
 from copy import deepcopy
 from pathlib import Path
 from typing import cast
@@ -18,6 +19,7 @@ from solet_manager import (
     operation_executor,  # noqa: E402
     stage_boundaries,  # noqa: E402
 )
+from solet_manager.adapters import AdapterRegistry  # noqa: E402
 from solet_manager.contracts import (  # noqa: E402
     ContractBundle,
     active_decision_ids,
@@ -41,10 +43,9 @@ from solet_manager.flow import (  # noqa: E402
 )
 from solet_manager.journal_migrations import activation_site_key  # noqa: E402
 from solet_manager.journal_rollup import derive_stage_statuses  # noqa: E402
-from solet_manager.models import CheckpointStatus, CommandResult, ExitCode  # noqa: E402
+from solet_manager.models import CheckpointStatus, CommandResult, ExitCode, JsonValue  # noqa: E402
 from solet_manager.paths import ManagerPaths  # noqa: E402
 from solet_manager.plan_builder import (  # noqa: E402
-    _selected_option_input_refs,
     selected_operation_ids,
 )
 from solet_manager.release_lock import SeedLock  # noqa: E402
@@ -56,14 +57,12 @@ from solet_manager.stage_boundaries import (  # noqa: E402
 from solet_manager.transaction import Transaction  # noqa: E402
 
 _CHECKS = 0
-_CONTRACTS = (
-    Path(__file__).resolve().parents[2] / "plugins" / "github_midwife_plugin" / "knowledge_base"
-)
+_CONTRACTS = Path(__file__).resolve().parents[2] / "plugins" / "github_midwife_plugin" / "knowledge_base"
 
 
 def _check(condition: object, label: str) -> None:
     global _CHECKS
-    _CHECKS += 1
+    _CHECKS += 1  # pyright: ignore[reportConstantRedefinition] -- Mutable smoke counter; preserve the fixture API.
     if not condition:
         raise AssertionError(label)
 
@@ -193,7 +192,7 @@ def _seed() -> SeedLock:
     )
 
 
-def _answers(target: Path) -> dict[str, object]:
+def _answers(target: Path) -> dict[str, JsonValue]:
     return {
         "schema_version": 1,
         "flow_id": "macos.repository_setup",
@@ -227,7 +226,7 @@ def _assert_activation_contract(bundle: ContractBundle) -> None:
         {"setup_profile": "macos-bizops", "autostart": "enabled"},
     )
     _check(
-        free_active
+        cast(AbstractSet[str], free_active)
         == {
             "setup_profile",
             "embeddings_implementation",
@@ -238,7 +237,7 @@ def _assert_activation_contract(bundle: ContractBundle) -> None:
         "free activation is exactly the selected profile follow-up closure",
     )
     _check(
-        bizops_active
+        cast(AbstractSet[str], bizops_active)
         == {
             "setup_profile",
             "embeddings_implementation",
@@ -256,11 +255,10 @@ def _assert_activation_contract(bundle: ContractBundle) -> None:
         "autostart" not in free_active and "autostart" not in bizops_active,
         "dedicated autostart carrier is recordable without global activation",
     )
-    inactive_selections = {
+    inactive_selections: dict[str, JsonValue] = {
         "setup_profile": "macos-bizops",
         "autostart": "enabled",
         "connectors_to_configure": ["jira"],
-        "git_mutation_control": "designated_controller",
     }
     _check(
         "configure_jira" not in selected_operation_ids(bundle, inactive_selections),
@@ -271,20 +269,15 @@ def _assert_activation_contract(bundle: ContractBundle) -> None:
         "independent autostart carrier remains eligible for operation selection",
     )
     _check(
-        "git_controller_name" not in _selected_option_input_refs(bundle, inactive_selections),
-        "an inactive decision cannot activate an option input selection",
+        "git_controller_name" not in bundle.inputs,
+        "the retired controller input is absent from the current contract",
     )
     _check(
         bundle.probes["git_checkout_valid"]["runner"] == "bootstrap",
         "checkout probe is pre-venv",
     )
     _check(
-        all(
-            field not in definition
-            for registry in (bundle.probes, bundle.stages)
-            for definition in registry.values()
-            for field in ("failure_behavior", "restart_behavior", "live_required")
-        ),
+        all(field not in definition for registry in (bundle.probes, bundle.stages) for definition in registry.values() for field in ("failure_behavior", "restart_behavior", "live_required")),
         "unimplemented lifecycle policies are absent from the executable contract",
     )
     _check(
@@ -302,8 +295,7 @@ def _assert_launchagent_follows_models_contract(bundle: ContractBundle) -> None:
     genesis_exit_probes = genesis.get("exit_probe_refs")
     models_exit_probes = models.get("exit_probe_refs")
     _check(
-        isinstance(genesis_operations, list)
-        and "install_launchagent" not in genesis_operations,
+        isinstance(genesis_operations, list) and "install_launchagent" not in genesis_operations,
         "genesis does not start the service before models configure inference",
     )
     _check(
@@ -322,9 +314,7 @@ def _assert_launchagent_follows_models_contract(bundle: ContractBundle) -> None:
         "models configures inference before starting the LaunchAgent",
     )
     _check(
-        isinstance(genesis_exit_probes, list)
-        and "launchagent_running" not in genesis_exit_probes
-        and "router_ready" not in genesis_exit_probes,
+        isinstance(genesis_exit_probes, list) and "launchagent_running" not in genesis_exit_probes and "router_ready" not in genesis_exit_probes,
         "genesis completion does not require the service that awaits models",
     )
     _check(
@@ -408,10 +398,7 @@ def _assert_contract_rejections() -> None:
             _late_required_when,
         )
         _check(
-            "coding_agents" in str(later_condition_error)
-            and "decision_review" in str(later_condition_error)
-            and "embedding_model" in str(later_condition_error)
-            and "models" in str(later_condition_error),
+            "coding_agents" in str(later_condition_error) and "decision_review" in str(later_condition_error) and "embedding_model" in str(later_condition_error) and "models" in str(later_condition_error),
             "bundle load names both stages for a later required_when decision",
         )
         undeclared_probe_error = _contract_error(
@@ -420,8 +407,7 @@ def _assert_contract_rejections() -> None:
             _undeclared_qualification_probe,
         )
         _check(
-            "undeclared probe" in str(undeclared_probe_error)
-            and "undeclared_qualification_probe" in str(undeclared_probe_error),
+            "undeclared probe" in str(undeclared_probe_error) and "undeclared_qualification_probe" in str(undeclared_probe_error),
             "bundle load rejects an undeclared qualification probe",
         )
 
@@ -432,7 +418,7 @@ def _assert_postcondition_scope_contract(bundle: ContractBundle) -> None:
         ("install_shell_integration", "fresh_shell_python_valid"),
     )
     for operation_id, probe_id in controls:
-        idempotency = _flow_at(bundle.flow, "operations", operation_id, "idempotency")
+        idempotency = _flow_at(cast(dict[str, object], bundle.flow), "operations", operation_id, "idempotency")
         refs = idempotency.get("postcondition_probe_refs")
         _check(
             isinstance(refs, list) and probe_id in refs,
@@ -452,7 +438,7 @@ def _assert_postcondition_scope_contract(bundle: ContractBundle) -> None:
         ("configure_lm_studio_inference", ()),
     )
     for operation_id, expected in precondition_subset_controls:
-        idempotency = _flow_at(bundle.flow, "operations", operation_id, "idempotency")
+        idempotency = _flow_at(cast(dict[str, object], bundle.flow), "operations", operation_id, "idempotency")
         refs = idempotency.get("precondition_probe_refs")
         _check(
             refs == list(expected),
@@ -473,14 +459,12 @@ def _assert_postcondition_scope_contract(bundle: ContractBundle) -> None:
                 _later_postcondition_remediation(operation_id, probe_id),
             )
             _check(
-                operation_id in str(error)
-                and probe_id in str(error)
-                and later_operation in str(error),
+                operation_id in str(error) and probe_id in str(error) and later_operation in str(error),
                 f"bundle load rejects later postcondition remediation {operation_id}->{probe_id}",
             )
 
 
-def _remediation_plan(bundle: ContractBundle, answers: dict[str, object]) -> SetupPlan:
+def _remediation_plan(bundle: ContractBundle, answers: dict[str, JsonValue]) -> SetupPlan:
     definition = bundle.operations["configure_postgresql"]
     idempotency = _mapping(definition.get("idempotency"), "configure_postgresql")
     return SetupPlan(
@@ -493,12 +477,8 @@ def _remediation_plan(bundle: ContractBundle, answers: dict[str, object]) -> Set
                 runner=str(definition["runner"]),
                 risk=str(definition["risk"]),
                 requires_confirmation=bool(definition["requires_confirmation"]),
-                precondition_probe_ids=tuple(
-                    cast(list[str], idempotency["precondition_probe_refs"])
-                ),
-                postcondition_probe_ids=tuple(
-                    cast(list[str], idempotency["postcondition_probe_refs"])
-                ),
+                precondition_probe_ids=tuple(cast(list[str], idempotency["precondition_probe_refs"])),
+                postcondition_probe_ids=tuple(cast(list[str], idempotency["postcondition_probe_refs"])),
                 public_inputs={},
             ),
         ),
@@ -522,7 +502,7 @@ def _remediation_preview() -> CommandResult:
 def _assert_boundary_remediation(
     bundle: ContractBundle,
     transaction: Transaction,
-    answers: dict[str, object],
+    answers: dict[str, JsonValue],
     root: Path,
 ) -> None:
     with (
@@ -540,17 +520,14 @@ def _assert_boundary_remediation(
         _updated, _observations, permission_failures = run_stage_boundaries(
             bundle=bundle,
             transaction=transaction,
-            registry=None,
+            registry=cast(AdapterRegistry, None),
             stage_ids=("models",),
             boundary="exit",
             answers=answers,
             persist_path=None,
         )
     _check(
-        len(permission_failures) == 1
-        and permission_failures[0].stage_id == "models"
-        and permission_failures[0].probe_id == "launchagent_running"
-        and permission_failures[0].remediation_operation_ids == ("install_launchagent",),
+        len(permission_failures) == 1 and permission_failures[0].stage_id == "models" and permission_failures[0].probe_id == "launchagent_running" and permission_failures[0].remediation_operation_ids == ("install_launchagent",),
         "a failed launch-agent boundary prefers its declared repair over Settings navigation",
     )
     with (
@@ -568,16 +545,14 @@ def _assert_boundary_remediation(
         _updated, _observations, postgres_entry_failures = run_stage_boundaries(
             bundle=bundle,
             transaction=transaction,
-            registry=None,
+            registry=cast(AdapterRegistry, None),
             stage_ids=("system_dependencies",),
             boundary="entry",
             answers=answers,
             persist_path=None,
         )
     _check(
-        len(postgres_entry_failures) == 1
-        and postgres_entry_failures[0].remediation_operation_ids
-        == ("install_postgresql", "configure_postgresql"),
+        len(postgres_entry_failures) == 1 and postgres_entry_failures[0].remediation_operation_ids == ("install_postgresql", "configure_postgresql"),
         "a declared probe remediation is available at an entry boundary",
     )
     remediation_paths = ManagerPaths(
@@ -603,14 +578,12 @@ def _assert_boundary_remediation(
             bundle=bundle,
             plan=_remediation_plan(bundle, answers),
             transaction=transaction,
-            registry=None,
+            registry=cast(AdapterRegistry, None),
             paths=remediation_paths,
             refresh_preview=_remediation_preview,
         )
     _check(
-        exit_outcome.terminal_result is not None
-        and exit_outcome.terminal_result.error_kind == "stage_boundary_remediation_required"
-        and exit_outcome.transaction.result_kind == "stage_boundary_remediation_required",
+        exit_outcome.terminal_result is not None and exit_outcome.terminal_result.error_kind == "stage_boundary_remediation_required" and exit_outcome.transaction.result_kind == "stage_boundary_remediation_required",
         "a remediable exit boundary renders a new approval-required preview",
     )
     with (
@@ -635,13 +608,12 @@ def _assert_boundary_remediation(
                 unresolved_consents=(),
             ),
             frontier=("system_dependencies",),
-            registry=None,
+            registry=cast(AdapterRegistry, None),
             paths=remediation_paths,
             refresh_preview=_remediation_preview,
         )
     _check(
-        resume_outcome.terminal_result is not None
-        and resume_outcome.terminal_result.error_kind == "stage_boundary_remediation_required",
+        resume_outcome.terminal_result is not None and resume_outcome.terminal_result.error_kind == "stage_boundary_remediation_required",
         "a resumed read-only exit boundary renders its declared remediation preview",
     )
     with (
@@ -659,7 +631,7 @@ def _assert_boundary_remediation(
         _updated, _observations, successful_failures = run_stage_boundaries(
             bundle=bundle,
             transaction=transaction,
-            registry=None,
+            registry=cast(AdapterRegistry, None),
             stage_ids=("models",),
             boundary="exit",
             answers=answers,
@@ -674,8 +646,8 @@ def _assert_boundary_remediation(
 def _initial_transaction(
     bundle: ContractBundle,
     target: Path,
-    answers: dict[str, object],
-) -> tuple[Transaction, dict[str, object]]:
+    answers: dict[str, JsonValue],
+) -> tuple[Transaction, dict[str, JsonValue]]:
     stage_probes = initial_stage_probe_statuses(bundle, answers)
     guarded_connector_probes = (
         "google_workspace_connection_valid",
@@ -689,47 +661,26 @@ def _initial_transaction(
     probe_activations = initial_probe_activations(bundle, answers)
     _check(
         all(
-            stage_probes["optional_accounts"]["exit"][probe_id] is CheckpointStatus.NOT_APPLICABLE
-            and probe_activations[activation_site_key("optional_accounts", "exit", probe_id)][
-                "state"
-            ]
-            == "inactive"
-            and probe_activations[activation_site_key("optional_accounts", "exit", probe_id)][
-                "reason"
-            ]
-            == "decision_unselected"
+            stage_probes["optional_accounts"]["exit"][probe_id] is CheckpointStatus.NOT_APPLICABLE and probe_activations[activation_site_key("optional_accounts", "exit", probe_id)]["state"] == "inactive" and probe_activations[activation_site_key("optional_accounts", "exit", probe_id)]["reason"] == "decision_unselected"
             for probe_id in guarded_connector_probes
         ),
         "inactive connector probes retain pending outcomes with explicit activation causes",
     )
     active_unresolved_answers = deepcopy(answers)
-    active_unresolved_answers["decisions"]["connector_configuration_timing"] = "configure_now"
+    cast(dict[str, JsonValue], active_unresolved_answers["decisions"])["connector_configuration_timing"] = "configure_now"
     active_unresolved_statuses = initial_stage_probe_statuses(bundle, active_unresolved_answers)
     active_unresolved_activations = initial_probe_activations(bundle, active_unresolved_answers)
     _check(
-        all(
-            active_unresolved_statuses["optional_accounts"]["exit"][probe_id]
-            is CheckpointStatus.PENDING
-            and active_unresolved_activations[
-                activation_site_key("optional_accounts", "exit", probe_id)
-            ]["state"]
-            == "active"
-            for probe_id in guarded_connector_probes
-        ),
+        all(active_unresolved_statuses["optional_accounts"]["exit"][probe_id] is CheckpointStatus.PENDING and active_unresolved_activations[activation_site_key("optional_accounts", "exit", probe_id)]["state"] == "active" for probe_id in guarded_connector_probes),
         "an activated but unresolved connector decision remains conservative",
     )
     newly_introduced_activations = initial_probe_activations(
         bundle,
         active_unresolved_answers,
-        prior_decision_ids=frozenset(
-            set(active_unresolved_answers["decisions"]) - {"connectors_to_configure"}
-        ),
+        prior_decision_ids=frozenset(set(cast(dict[str, JsonValue], active_unresolved_answers["decisions"])) - {"connectors_to_configure"}),
     )
     _check(
-        newly_introduced_activations[
-            activation_site_key("optional_accounts", "exit", "google_workspace_connection_valid")
-        ]["reason"]
-        == "newly_introduced_pending",
+        newly_introduced_activations[activation_site_key("optional_accounts", "exit", "google_workspace_connection_valid")]["reason"] == "newly_introduced_pending",
         "a newly introduced active decision drives its probe activation reason",
     )
     return (
@@ -766,10 +717,7 @@ def main() -> int:
         _check("stage_probe_statuses" in serialized, "journal serializes stage probe statuses")
         _check("stage_probe_attempts" in serialized, "journal serializes stage probe attempts")
         _check(
-            set(serialized["stage_probe_statuses"]["preflight"]["entry"])
-            == {"minimum_physical_memory_valid", "git_checkout_valid"}
-            and set(serialized["stage_probe_statuses"]["preflight"]["exit"])
-            == {"python_version_valid"},
+            set(cast(dict[str, dict[str, dict[str, str]]], serialized["stage_probe_statuses"])["preflight"]["entry"]) == {"minimum_physical_memory_valid", "git_checkout_valid"} and set(cast(dict[str, dict[str, dict[str, str]]], serialized["stage_probe_statuses"])["preflight"]["exit"]) == {"python_version_valid"},
             "preflight separates host-and-checkout entry probes from runtime exit keys",
         )
         _check(
@@ -801,11 +749,7 @@ def main() -> int:
         ).with_statuses(
             stages={
                 "preflight": CheckpointStatus.NOT_APPLICABLE,
-                **{
-                    stage_id: CheckpointStatus.PENDING
-                    for stage_id in inactive_dependency_bundle.stages
-                    if stage_id != "preflight"
-                },
+                **{stage_id: CheckpointStatus.PENDING for stage_id in inactive_dependency_bundle.stages if stage_id != "preflight"},
             }
         )
         _check(
@@ -977,19 +921,13 @@ def main() -> int:
             "reason": "decision_selected",
             "decided_by": "autostart",
         }
-        reason_activations[
-            activation_site_key("optional_accounts", "exit", "google_workspace_connection_valid")
-        ] = {
+        reason_activations[activation_site_key("optional_accounts", "exit", "google_workspace_connection_valid")] = {
             "state": "inactive",
             "reason": "decision_unselected",
             "decided_by": "connectors_to_configure",
         }
-        reason_activations[
-            activation_site_key("optional_accounts", "exit", "jira_connection_valid")
-        ] = {"state": "inactive", "reason": "plan_dropped", "decided_by": "plan"}
-        reason_activations[
-            activation_site_key("optional_accounts", "exit", "marketo_connection_valid")
-        ] = {
+        reason_activations[activation_site_key("optional_accounts", "exit", "jira_connection_valid")] = {"state": "inactive", "reason": "plan_dropped", "decided_by": "plan"}
+        reason_activations[activation_site_key("optional_accounts", "exit", "marketo_connection_valid")] = {
             "state": "active",
             "reason": "newly_introduced_pending",
             "decided_by": "connectors_to_configure",
@@ -1009,12 +947,7 @@ def main() -> int:
             completion_probe_ids=bundle.completion_probe_ids,
         )
         _check(
-            {
-                item["reason"]
-                for item in Transaction.from_dict(
-                    five_reason_transaction.to_dict()
-                ).probe_activations.values()
-            }
+            {item["reason"] for item in Transaction.from_dict(five_reason_transaction.to_dict()).probe_activations.values()}
             >= {
                 "plan_bound",
                 "decision_selected",
@@ -1024,44 +957,30 @@ def main() -> int:
             },
             "all five closed probe activation reasons round-trip through v3",
         )
-        unsafe = transaction.bind_operations(
-            {"configure_google_workspace": "optional_accounts"}
-        ).with_operation_status("configure_google_workspace", CheckpointStatus.APPLIED)
-        unsafe = unsafe.with_statuses(
-            stages={**unsafe.stages, "optional_accounts": CheckpointStatus.VERIFIED}
-        )
+        unsafe = transaction.bind_operations({"configure_google_workspace": "optional_accounts"}).with_operation_status("configure_google_workspace", CheckpointStatus.APPLIED)
+        unsafe = unsafe.with_statuses(stages={**unsafe.stages, "optional_accounts": CheckpointStatus.VERIFIED})
         _raises(
             ReopenUnsafeAppliedStateError,
             lambda: reconcile_stage_probe_activation(bundle, unsafe, active_unresolved_answers),
             "newly active probe refuses reopening a verified stage with applied work",
         )
-        probe_only = transaction.with_statuses(
-            stages={**transaction.stages, "optional_accounts": CheckpointStatus.VERIFIED}
-        )
+        probe_only = transaction.with_statuses(stages={**transaction.stages, "optional_accounts": CheckpointStatus.VERIFIED})
         reopened = reconcile_stage_probe_activation(bundle, probe_only, active_unresolved_answers)
         _check(
             reopened.stages["optional_accounts"] is CheckpointStatus.PENDING,
             "probe-only reopening is allowed and reopens the verified stage",
         )
         declined_answers = deepcopy(answers)
-        declined_answers["decisions"]["connector_configuration_timing"] = declined_answer(
-            decided_at="2026-09-04T08:20:00Z", decided_by="interactive"
-        )
+        cast(dict[str, JsonValue], declined_answers["decisions"])["connector_configuration_timing"] = declined_answer(decided_at="2026-09-04T08:20:00Z", decided_by="interactive")
         validate_normalized_answers(bundle, declined_answers)
         _check(
-            derive_decision_dispositions(bundle, declined_answers["decisions"])[
-                "connector_configuration_timing"
-            ]
-            == "declined",
+            derive_decision_dispositions(bundle, cast(dict[str, JsonValue], declined_answers["decisions"]))["connector_configuration_timing"] == "declined",
             "explicit declined carrier derives declined",
         )
         absent_answers = deepcopy(answers)
-        del absent_answers["decisions"]["connector_configuration_timing"]
+        del cast(dict[str, JsonValue], absent_answers["decisions"])["connector_configuration_timing"]
         _check(
-            derive_decision_dispositions(bundle, absent_answers["decisions"])[
-                "connector_configuration_timing"
-            ]
-            != "declined",
+            derive_decision_dispositions(bundle, cast(dict[str, JsonValue], absent_answers["decisions"]))["connector_configuration_timing"] != "declined",
             "absent answer never infers declined",
         )
         stale = transaction.to_dict()

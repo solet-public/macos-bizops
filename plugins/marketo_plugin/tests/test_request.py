@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import base64
 import json
-import re
 import sys
 import unittest
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock
-from urllib.parse import quote, quote_plus
 
 import httpx
 
@@ -122,95 +119,24 @@ class RequestTests(unittest.TestCase):
         self.client.request("GET", "/rest/v1/example.json", headers={"Host": "tenant.mktorest.test"})
         self.assertEqual(self.seen[-1].headers["Host"], "tenant.mktorest.test")
 
-    def test_audit_redacts_query_values_and_never_logs_bodies_or_credentials(self) -> None:
+    def test_audit_line_carries_no_query_value_body_or_credential(self) -> None:
         self.response = lambda _: httpx.Response(200, json={"success": True, "access_token": "fresh-identity-token", "echo": "secret+value bearer-1"})
-        with self.assertLogs(level="INFO") as captured:
+        with self.assertLogs("marketo_plugin.http_client", level="INFO") as captured:
             result = self.client.request("POST", "/identity/oauth/token?private=hidden-path", query={"other": "hidden-query"}, json_body={"private": "hidden-body"})
         logs = "\n".join(captured.output)
-        for secret in ("secret+value", "secret%2Bvalue", "bearer-1", "hidden-path", "hidden-query", "hidden-body"):
+        for secret in ("secret+value", "secret%2Bvalue", "bearer-1", "fresh-identity-token", "hidden-path", "hidden-query", "hidden-body"):
             self.assertNotIn(secret, logs)
-        for field in ("method=POST", "path=", "status=200", "duration_ms=", "correlation_id="):
+        for field in ("method=POST", "path=/identity/oauth/token?private=", "status=200", "duration_ms=", "correlation_id="):
             self.assertIn(field, logs)
-        self.assertEqual(result["body"]["access_token"], "[REDACTED]")
-        self.assertNotIn("secret+value", json.dumps(result))
-        self.assertNotIn("bearer-1", json.dumps(result))
-        self.assertNotIn("fresh-identity-token", json.dumps(result))
+        self.assertEqual(result["body"], {"success": True, "access_token": "fresh-identity-token", "echo": "secret+value bearer-1"})
 
-    def test_registered_secret_encodings_are_redacted_from_audit_and_echoes(self) -> None:
-        secret = "tenant secret+/é=???>>>!"
-        self.client.close()
-        self.client = MarketoClient(
-            MarketoInstanceConfig(base_url="https://tenant.mktorest.test", client_id="test-client", client_secret=secret),
-            timeout_seconds=5.0,
-        )
-        self.client._http.close()
-        self.client._http = httpx.Client(base_url="https://tenant.mktorest.test", transport=httpx.MockTransport(self.handle))
-        self.addCleanup(self.client.close)
-        encodings = self._assert_encoded_echoes(secret)
-        self.assertNotEqual(encodings["base64"], encodings["base64url"])
-        self.assertTrue(encodings["base64"].endswith("="))
-
-    def test_bearer_encodings_are_redacted_from_audit_and_echoes(self) -> None:
-        self.client.ensure_authenticated()
-        self._assert_encoded_echoes("bearer-1")
-
-    def _assert_encoded_echoes(self, secret: str) -> dict[str, str]:
-        encoded_bytes = secret.encode()
-        percent = quote(secret, safe="")
-        encodings = {
-            "raw": secret,
-            "percent_upper": percent,
-            "percent_lower": re.sub(r"%[0-9A-F]{2}", lambda match: match.group().lower(), percent),
-            "percent_mixed": percent.replace("%2B", "%2b"),
-            "form_plus": quote_plus(secret),
-            "url_path": quote(secret),
-            "all_bytes_percent": "".join(f"%{value:02x}" for value in encoded_bytes),
-            "base64": base64.b64encode(encoded_bytes).decode(),
-            "base64_unpadded": base64.b64encode(encoded_bytes).decode().rstrip("="),
-            "base64url": base64.urlsafe_b64encode(encoded_bytes).decode(),
-            "base64url_unpadded": base64.urlsafe_b64encode(encoded_bytes).decode().rstrip("="),
-            "double_percent": quote(percent, safe=""),
-            "form_plus_escaped": quote(quote_plus(secret), safe=""),
-            "base64_url_escaped": quote(base64.b64encode(encoded_bytes).decode(), safe=""),
-        }
-        for name, encoded in encodings.items():
-            with self.subTest(encoding=name):
-                path_value = quote(encoded, safe="") if name == "raw" else encoded
-                header_value = encoded if encoded.isascii() else quote(encoded, safe="")
-                self.response = lambda r, encoded=encoded, header_value=header_value: httpx.Response(
-                    200,
-                    json={
-                        "success": True,
-                        "path": r.url.raw_path.decode("ascii"),
-                        "query": r.url.params["echo"],
-                        "header": r.headers["X-Echo"],
-                        "json": json.loads(r.content),
-                        "map": {encoded: encoded},
-                    },
-                    headers={"Retry-After": header_value},
-                )
-                # Raw Unicode cannot be a header value. Its JSON/path/query echoes still exercise it.
-                with self.assertLogs(level="INFO") as captured:
-                    result = self.client.request(
-                        "POST",
-                        f"/rest/v1/echo/{path_value}/end",
-                        query={"echo": encoded},
-                        headers={"X-Echo": header_value},
-                        json_body={"echo": encoded},
-                    )
-                self.assertEqual(result["body"]["query"], "[REDACTED]")
-                self.assertEqual(result["body"]["header"], "[REDACTED]")
-                self.assertEqual(result["body"]["json"]["echo"], "[REDACTED]")
-                self.assertEqual(result["body"]["map"], {"[REDACTED]": "[REDACTED]"})
-                self.assertEqual(result["retry_after"], "[REDACTED]")
-                logs = "\n".join(captured.output)
-                self.assertIn("path=/rest/v1/echo/[REDACTED]/end", logs)
-                self.assertNotIn(encoded, logs)
-                self.assertNotIn(encoded, json.dumps(result, ensure_ascii=False))
-                self.response = lambda _, encoded=encoded: httpx.Response(200, text="before " + encoded + " after")
-                text_result = self.client.request("GET", "/rest/v1/echo.json")
-                self.assertEqual(text_result["body"], "before [REDACTED] after")
-        return encodings
+    def test_vendor_echoes_are_returned_as_received(self) -> None:
+        self.response = lambda r: httpx.Response(200, json={"success": True, "query": r.url.params["echo"], "header": r.headers["X-Echo"], "json": json.loads(r.content)}, headers={"Retry-After": "7"})
+        result = self.client.request("POST", "/rest/v1/echo.json", query={"echo": "q-value"}, headers={"X-Echo": "h-value"}, json_body={"echo": "j-value"})
+        self.assertEqual(result["body"], {"success": True, "query": "q-value", "header": "h-value", "json": {"echo": "j-value"}})
+        self.assertEqual(result["retry_after"], "7")
+        self.response = lambda _: httpx.Response(200, text="before text after")
+        self.assertEqual(self.client.request("GET", "/rest/v1/echo.json")["body"], "before text after")
 
     def test_one_expired_token_retry_uses_existing_cache(self) -> None:
         self.response = lambda r: httpx.Response(200, json={"success": r.headers["Authorization"] == "Bearer bearer-2", "errors": [{"code": "602"}]})

@@ -29,6 +29,7 @@ EMBEDDING_DESCRIPTION: Mint and publish a shareable solet seed repository: assem
 [ ] 1. Assemble a clean seed bundle from the committed ref
     RESULT_PROCESSOR_KIND: deterministic_continuation
     a) Assemble a clean seed bundle from the committed ref into output_dir (plugin::seed_factory_plugin::assemble_seed)
+    b) Retain `data.job_id` and schedule `service_interface::job_service::get_job` with that exact id. While queued or processing, schedule another read; proceed only from a terminal successful job. Read the assembled `bundle_path` and `manifest_hash` from `job.result.data`, never from the dispatch receipt. On error or cancellation inspect `job.error` and stop the dependent steps; do not resubmit assembly merely because a read is pending.
 
 [ ] 2. (Publish only) Re-validate and SEAL the assembled bundle
     RESULT_PROCESSOR_KIND: deterministic_continuation
@@ -48,7 +49,7 @@ EMBEDDING_DESCRIPTION: Mint and publish a shareable solet seed repository: assem
 ## Binding Guidance
 
 - Bind step 1 `bundle_name` XOR `plugins` (exactly one) and `ref` (default `HEAD`, or a tag/branch for a reproducible seed); bind `output_dir` to a scratch path outside the shared worktree.
-- Bind step 2 `output_dir` to step 1's returned `bundle_path`, `expected_ref` to step 1's `ref`, and `manifest_hash` to step 1's `manifest_hash` — all from the same run, so the seal provenance matches what was assembled.
+- Bind step 2 `output_dir` to step 1's terminal `job.result.data.bundle_path`, `expected_ref` to step 1's `ref`, and `manifest_hash` to step 1's `manifest_hash` — all from the same run, so the seal provenance matches what was assembled.
 - Bind step 4 `repo_path` to step 2's returned `repo_path` and `sealed_commit_sha` to step 2's `commit_sha` — same-run provenance, mirroring the step-1→2 binding rule. Bind `repo_name` to a name following the seed naming convention `<yyyy-mm-dd>_<platform>_<consumer>_<short-commit>`, all lowercase (validated as a strict subset of GitHub's `[A-Za-z0-9._-]{1,100}` rule, with `ananta` banned as a substring; a non-conforming name → `repo_name_invalid`; explicitly NOT the solet name); leave `owner` unset to publish under the authenticated `gh` login, or set it to target an org.
 - Bind step 4's `visibility` to `private` unless step 3's explicit operator confirmation selected `public`. There is no default-public path.
 - Steps 1, 2, and 4 are platform verbs (`process_call`). Step 3 is agent-executed — a HUMAN consent gate (operator confirmation), not a credential step; it binds step 4's `visibility="public"` and is skipped entirely for the private default.

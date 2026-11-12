@@ -81,7 +81,10 @@ manager or cross-device sync could in principle capture it in that window.
 ## Verify — `check_setup` is the "check" step
 
 Once `marketo_instance` is registered: run `test_connection` (credentials
-valid?) then `check_setup` (what does the Role actually grant?).
+valid?) then `check_setup` (what does the Role actually grant?). Both return
+a job handle at once; read each finished report with
+`check_marketo_job_status(job_id)` — the handle alone proves nothing about
+the credentials or the Role.
 `check_setup` runs six safe read probes and names the exact missing
 Access API permission for anything that fails, plus which admin screen fixes
 it. It **cannot** check write/execute permissions without performing them:
@@ -91,7 +94,8 @@ companies, opportunities, opportunity roles, sales persons, named accounts,
 named account lists and custom objects, and
 `add_`/`remove_named_account_list_members`, `create_asset_folder`,
 `update_asset_folder`, `delete_asset_folder`, `set_asset_token` and
-`delete_asset_token` are listed as `writes_unverified`
+`delete_asset_token`, file creation/content replacement, Bulk Import submission
+and Bulk Extract create/enqueue/cancel are listed as `writes_unverified`
 and will surface as `marketo.permission_denied`, naming the gap, on first real
 use if the Role is short one. The object read verbs (`describe_`/`get_` for
 those objects, `get_named_account_list_members` and `list_custom_object_types`)
@@ -104,10 +108,14 @@ The Asset API surface (`/rest/asset/v1/…`: programs, smart campaigns, smart
 lists, emails, email templates, landing pages, forms, files, tokens, folders,
 tags, channels) is **reachable now** through the generic `request` verb,
 including create, clone, update, approve and delete with JSON or form bodies
-(file uploads need multipart support that `request` does not have yet); typed
-Folder and My Token verbs are now typed: folder browse/by-id/by-name/content,
-create/update/archive/unarchive/delete, and token read/set/delete. Other typed
-Asset families follow in later builds. What it can do is decided by the Role's **`Read-Only Assets`**
+(including multipart file/image uploads via `multipart_files`). Typed Folder
+and My Token verbs cover browse/by-id/by-name/content,
+create/update/archive/unarchive/delete, and token read/set/delete. Typed Files
+verbs cover by-id/by-name/browse, create/upsert and content replacement. No
+file delete/archive endpoint is published. Other typed Asset families follow
+in later builds. Bulk Import for leads/custom objects/program members and
+Bulk Extract for leads/activities/program members also have typed job verbs;
+see `03_bulk_and_files.md` for vendor job status and download handling. What it can do is decided by the Role's **`Read-Only Assets`**
 and **`Read-Write Assets`** Access API permissions and by the asset's
 workspace. All six `check_setup` probes are Lead-API reads, so a green
 `check_setup` says nothing about Asset access. Ask the operator to confirm on

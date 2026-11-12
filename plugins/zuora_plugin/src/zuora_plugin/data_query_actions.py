@@ -19,13 +19,13 @@ window. Files are read, status-checked, and restored from the archive.
 from __future__ import annotations
 
 from typing import Any, Final
-from urllib.parse import urlsplit
+
+import httpx
 
 from .commerce_fields import V1_HEADERS
 from .constants import ERROR_API_ERROR
-from .errors import ZuoraServiceError
+from .errors import ZuoraServiceError, vendor_url
 from .http_client import ZuoraClient
-from .request_actions import redact_bytes
 from .typed_operations import Field, Operation, PathGate, call, collect, contained_output, response_body, write_file
 
 QUERY_STATUSES: Final[tuple[str, ...]] = ("submitted", "accepted", "in_progress", "completed", "failed", "cancelled")
@@ -91,7 +91,7 @@ OPERATIONS: Final[tuple[Operation, ...]] = (SUBMIT, LIST_JOBS, GET_JOB, CANCEL_J
 
 def _require_output_path(params: dict[str, Any]) -> None:
     if not isinstance(params.get("output_path"), str) or not params["output_path"]:
-        raise ValueError("output_path is required: an absolute path under an export_allowed_roots entry")
+        raise ValueError("output_path is required: an absolute path under a registered path address")
 
 
 def validate_download(params: dict[str, Any]) -> None:
@@ -107,7 +107,7 @@ def download_data_query_result(client: ZuoraClient, params: dict[str, Any], gate
     """
     _require_output_path(params)
     resolved = contained_output(gate, params["output_path"], suffix=None)
-    response, secrets, result = call(DOWNLOAD_RESULT, client, params, gate)
+    response, result = call(DOWNLOAD_RESULT, client, params, gate)
     job = response_body(response)
     record = job.get("data") if isinstance(job, dict) else None
     if not isinstance(record, dict):
@@ -116,12 +116,15 @@ def download_data_query_result(client: ZuoraClient, params: dict[str, Any], gate
     data_file = record.get("dataFile")
     if status != "completed" or not isinstance(data_file, str) or not data_file:
         return {**result, "downloaded": False, "query_status": status}
-    if urlsplit(data_file).scheme != "https":
+    if vendor_url(data_file).scheme != "https":
         raise ZuoraServiceError(ERROR_API_ERROR, "Zuora's dataFile location is not an https URL; nothing was downloaded.")
-    download = client.fetch_presigned(data_file)
+    try:
+        download = client.fetch_presigned(data_file)
+    except (ValueError, httpx.InvalidURL):
+        raise ZuoraServiceError(ERROR_API_ERROR, "Zuora returned an unusable result-file URL.") from None
     if download.is_error:
         raise ZuoraServiceError(ERROR_API_ERROR, f"Zuora's result file download failed (status {download.status_code}); request a fresh dataFile with get_data_query_job.")
-    handle = write_file(resolved, redact_bytes(download.content, secrets))
+    handle = write_file(resolved, download.content)
     return {**result, "downloaded": True, "query_status": status, "output_rows": record.get("outputRows"), "file": handle}
 
 
@@ -129,6 +132,6 @@ def download_file(client: ZuoraClient, params: dict[str, Any], gate: PathGate) -
     """Fetch one tenant file (export result, invoice PDF, report) and write it to output_path."""
     _require_output_path(params)
     resolved = contained_output(gate, params["output_path"], suffix=None)
-    response, secrets, result = call(DOWNLOAD_FILE, client, params, gate)
-    handle = write_file(resolved, redact_bytes(response.content, secrets))
+    response, result = call(DOWNLOAD_FILE, client, params, gate)
+    handle = write_file(resolved, response.content)
     return {**result, "content_type": response.headers.get("content-type"), "file": handle}

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import re
 import sys
 import time
@@ -324,9 +325,12 @@ class Forwarder:
         while True:
             attempt += 1
             try:
+                # Main-seat R2 (2026-11-08) reverses the 2026-07-15
+                # no-session-cwd ruling; this stays on in-memory bridge state.
+                launch_directory = os.environ.get("SOLET_LAUNCH_DIRECTORY")
                 payload = await self._post(
                     "/api/v1/bridge/open",
-                    {"parent_pid": self._parent_pid},
+                    {"parent_pid": self._parent_pid, "caller_agent_session_id": self._agent_session_id, "launch_directory": {"path": launch_directory if launch_directory is not None else os.getcwd(), "source": "launcher" if launch_directory is not None else "cwd_fallback"}},
                 )
                 bridge_id = payload.get("bridge_id")
                 if not isinstance(bridge_id, str):
@@ -1009,7 +1013,7 @@ class Forwarder:
     async def process_result(self, *, action_id: str) -> dict[str, Any]:
         async def call() -> dict[str, Any]:
             path = self._bridge_path(
-                f"/process/result/{quote(action_id, safe='')}",
+                f"/process/result/{quote(action_id, safe='')}?follow_job=true",
             )
             return await self._get(path)
 

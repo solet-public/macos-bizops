@@ -1,0 +1,4 @@
+# Guarded execute-path job dispatch and completion for six subprocess verbs.
+plugins/salesforce_plugin/tests/subprocess_verbs_smoke.py
+plugins/code_vetting_plugin/tests/subprocess_verbs_smoke.py
+plugins/macos_coding_agent_session_plugin/tests/subprocess_verbs_smoke.py

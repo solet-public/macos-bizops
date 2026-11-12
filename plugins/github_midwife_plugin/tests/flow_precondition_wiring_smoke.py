@@ -119,20 +119,16 @@ def _flow() -> dict[str, Any]:
 def _check_stage_wiring(flow: dict[str, Any]) -> None:
     preflight = flow["stages"]["preflight"]
     _check(
-        preflight.get("entry_probe_refs")
-        == ["minimum_physical_memory_valid", "git_checkout_valid"]
-        and preflight["exit_probe_refs"] == ["python_version_valid"],
+        preflight.get("entry_probe_refs") == ["minimum_physical_memory_valid", "git_checkout_valid"] and preflight["exit_probe_refs"] == ["python_version_valid"],
         "red: preserve RAM and checkout preflight entry probes",
     )
     session_stage = flow["stages"]["session_sources"]
     _check(
-        session_stage.get("entry_probe_refs")
-        == ["codex_session_roots_readable", "claude_session_roots_readable"],
+        session_stage.get("entry_probe_refs") == ["codex_session_roots_readable", "claude_session_roots_readable"],
         "red: remove a session-root stage-entry probe",
     )
     _check(
-        flow["probes"]["launchagent_running"].get("remediation_operation_refs")
-        == ["install_launchagent"],
+        flow["probes"]["launchagent_running"].get("remediation_operation_refs") == ["install_launchagent"],
         "red: offer Settings navigation instead of the LaunchAgent repair",
     )
 
@@ -140,8 +136,7 @@ def _check_stage_wiring(flow: dict[str, Any]) -> None:
 def _check_conditional_wiring(flow: dict[str, Any]) -> None:
     probes = flow["probes"]
     _check(
-        probes["codex_session_roots_readable"].get("required_when")
-        == {"decision_ref": "session_sources", "operator": "contains", "value": "codex_local"}
+        probes["codex_session_roots_readable"].get("required_when") == {"decision_ref": "session_sources", "operator": "contains", "value": "codex_local"}
         and probes["claude_session_roots_readable"].get("required_when")
         == {
             "decision_ref": "session_sources",
@@ -152,20 +147,16 @@ def _check_conditional_wiring(flow: dict[str, Any]) -> None:
     )
     salesforce = probes["salesforce_cli_available"]
     _check(
-        salesforce.get("required_when")
-        == {"decision_ref": "connectors_to_configure", "operator": "contains", "value": "salesforce"},
+        salesforce.get("required_when") == {"decision_ref": "connectors_to_configure", "operator": "contains", "value": "salesforce"},
         "red: make the Salesforce CLI probe unconditional",
     )
 
 
 def _check_salesforce_flow(flow: dict[str, Any]) -> None:
     probe = flow["probes"]["salesforce_cli_available"]
-    preconditions = flow["operations"]["configure_salesforce"]["idempotency"][
-        "precondition_probe_refs"
-    ]
+    preconditions = flow["operations"]["configure_salesforce"]["idempotency"]["precondition_probe_refs"]
     _check(
-        preconditions == ["salesforce_connection_valid"]
-        and probe.get("remediation_operation_refs") == ["provision_salesforce_cli"],
+        preconditions == ["salesforce_connection_valid"] and probe.get("remediation_operation_refs") == ["provision_salesforce_cli"],
         "red: restore the Salesforce provisioning self-remediation pair",
     )
 
@@ -173,10 +164,7 @@ def _check_salesforce_flow(flow: dict[str, Any]) -> None:
 def _check_coding_agent_preconditions(flow: dict[str, Any]) -> None:
     operations = flow["operations"]
     _check(
-        operations["install_codex_plugin"]["idempotency"]["precondition_probe_refs"]
-        == ["node_available", "codex_cli_available", "codex_plugin_visible"]
-        and operations["install_claude_plugin"]["idempotency"]["precondition_probe_refs"]
-        == ["claude_cli_available", "claude_plugin_visible"],
+        operations["install_codex_plugin"]["idempotency"]["precondition_probe_refs"] == ["node_available", "codex_cli_available", "codex_plugin_visible"] and operations["install_claude_plugin"]["idempotency"]["precondition_probe_refs"] == ["claude_cli_available", "claude_plugin_visible"],
         "red: drop consented coding-agent executable preconditions while wiring this flow",
     )
 
@@ -184,8 +172,7 @@ def _check_coding_agent_preconditions(flow: dict[str, Any]) -> None:
 def _check_keychain_and_auth_cleanup(flow: dict[str, Any]) -> None:
     keychain = flow["probes"]["keychain_available"]
     _check(
-        keychain["level"] == "behavior"
-        and keychain["probe_ref"] == "service_interface::vault_service.qualify_keychain",
+        keychain["level"] == "behavior" and keychain["probe_ref"] == "service_interface::vault_service.qualify_keychain",
         "red: restore the keychain precondition or stale process ref",
     )
     options = flow["decisions"]["coding_agents"]["option_source"]["options"]
@@ -204,30 +191,15 @@ def _has_typed_empty_orphan_preconditions() -> bool:
     """Read the allowlist declaration as Python syntax, including its type."""
     source = _HYDRATION_SMOKE_PATH.read_text(encoding="utf-8")
     module = ast.parse(source)
-    return any(
-        _defines_orphan_preconditions(statement)
-        and _is_empty_typed_frozenset(statement.value)
-        for statement in module.body
-    )
+    return any(_defines_orphan_preconditions(statement) and _is_empty_typed_frozenset(statement.value) for statement in module.body)
 
 
 def _defines_orphan_preconditions(statement: ast.stmt) -> bool:
-    return isinstance(statement, ast.Assign) and any(
-        isinstance(target, ast.Name)
-        and target.id == "_PREEXISTING_ORPHAN_PRECONDITIONS"
-        for target in statement.targets
-    )
+    return isinstance(statement, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "_PREEXISTING_ORPHAN_PRECONDITIONS" for target in statement.targets)
 
 
 def _is_empty_typed_frozenset(value: ast.expr) -> bool:
-    return (
-        isinstance(value, ast.Call)
-        and isinstance(value.func, ast.Subscript)
-        and isinstance(value.func.value, ast.Name)
-        and value.func.value.id == "frozenset"
-        and not value.args
-        and not value.keywords
-    )
+    return isinstance(value, ast.Call) and isinstance(value.func, ast.Subscript) and isinstance(value.func.value, ast.Name) and value.func.value.id == "frozenset" and not value.args and not value.keywords
 
 
 def _check_r4_closeout() -> None:
@@ -250,6 +222,8 @@ def _check_r4_closeout() -> None:
         stale_keychain_ref not in _REGISTRY_ALLOWLIST_PATH.read_text(encoding="utf-8").splitlines(),
         "red: retain stale source-absent Keychain registry debt",
     )
+
+
 def _salesforce_outcome(*, executable: bool) -> CommandOutcome:
     data: JsonObject = {"executable": executable, "configured": executable}
     if executable:
@@ -270,13 +244,11 @@ def _check_salesforce_inner_predicate(target: Path, runtime: FakeRuntime) -> Non
         operation_ref="plugin::salesforce_plugin.probe_cli",
     )
     salesforce_probe_key = "plugin::salesforce_plugin::" + "probe_cli"
-    vector = (str(target / ".venv/bin/solet-bridge"), "call", salesforce_probe_key, "{}")
+    vector = (str(target / ".venv/bin/solet-bridge"), "call", salesforce_probe_key, "{}", "--wait")
     runtime.responses[vector] = _salesforce_outcome(executable=False)
     false_envelope = dispatch_request(request, runtime)
     _check(
-        false_envelope["checkpoint_status"] == "blocked"
-        and false_envelope["error_kind"] == "salesforce_cli_missing"
-        and false_envelope["planned_actions"] == [],
+        false_envelope["checkpoint_status"] == "blocked" and false_envelope["error_kind"] == "salesforce_cli_missing" and false_envelope["planned_actions"] == [],
         "red: accept data.executable=false from a completed Salesforce envelope",
     )
     runtime.responses[vector] = _salesforce_outcome(executable=True)
@@ -287,8 +259,7 @@ def _check_salesforce_inner_predicate(target: Path, runtime: FakeRuntime) -> Non
     )
     evidence_items = verified_envelope.get("evidence")
     evidence_item = evidence_items[0] if isinstance(evidence_items, list) else None
-    _check(_salesforce_evidence_is_deterministic(evidence_item),
-           "Salesforce CLI evidence uses deterministic unique public strings")
+    _check(_salesforce_evidence_is_deterministic(evidence_item), "Salesforce CLI evidence uses deterministic unique public strings")
     if not isinstance(evidence_item, dict):
         raise AssertionError("Salesforce CLI probe must emit one evidence object")
     validate_evidence(evidence_item)
@@ -340,15 +311,13 @@ def _check_session_roots_absent_is_not_a_denial(target: Path, runtime: FakeRunti
 
     codex, claude = _session_root_requests(target)
     _check(
-        not (runtime.home / ".codex/sessions").exists()
-        and not (runtime.home / ".claude/projects").exists(),
+        not (runtime.home / ".codex/sessions").exists() and not (runtime.home / ".claude/projects").exists(),
         "fresh-target fixture must leave the approved session roots absent",
     )
     codex_result = session_roots(codex, runtime)
     claude_result = session_roots(claude, runtime)
     _check(
-        codex_result["checkpoint_status"] == "verified"
-        and claude_result["checkpoint_status"] == "verified",
+        codex_result["checkpoint_status"] == "verified" and claude_result["checkpoint_status"] == "verified",
         "red: block a fresh target whose session roots have simply never been created",
     )
     _check(
@@ -388,8 +357,7 @@ def _check_session_root_block_kinds(target: Path, runtime: FakeRuntime) -> None:
         codex_result = session_roots(codex, runtime)
         claude_result = session_roots(claude, runtime)
     _check(
-        codex_result["error_kind"] == "codex_session_roots_unreadable"
-        and claude_result["error_kind"] == "claude_session_roots_unreadable",
+        codex_result["error_kind"] == "codex_session_roots_unreadable" and claude_result["error_kind"] == "claude_session_roots_unreadable",
         "red: collapse distinct unreadable Codex and Claude root kinds",
     )
     _check(
@@ -398,8 +366,7 @@ def _check_session_root_block_kinds(target: Path, runtime: FakeRuntime) -> None:
     )
     codex_readable = session_roots(codex, runtime)
     _check(
-        codex_readable["checkpoint_status"] == "verified"
-        and _absent_evidence(codex_readable, "codex_session_roots_absent") is None,
+        codex_readable["checkpoint_status"] == "verified" and _absent_evidence(codex_readable, "codex_session_roots_absent") is None,
         "a present and readable root verifies with no absence recorded",
     )
 
@@ -428,15 +395,11 @@ def _check_empty_history_exit_predicate(runtime: FakeRuntime) -> None:
         "red: excuse an empty backfill when the root exists and should have yielded content",
     )
     _check(
-        not _selected_source_row_valid(
-            {**row, "registered": False}, frozenset({"codex_local"})
-        ),
+        not _selected_source_row_valid({**row, "registered": False}, frozenset({"codex_local"})),
         "red: accept an unregistered source just because its root is absent",
     )
     _check(
-        _selected_source_row_valid(
-            {**row, "backfill_count": 2, "retrieval_ok": True}, frozenset()
-        ),
+        _selected_source_row_valid({**row, "backfill_count": 2, "retrieval_ok": True}, frozenset()),
         "a measured backfill with retrieval proof stays valid",
     )
     _check(
@@ -446,8 +409,7 @@ def _check_empty_history_exit_predicate(runtime: FakeRuntime) -> None:
     for relative in (".codex/sessions", ".claude/projects"):
         _rmtree(runtime.home / relative)
     _check(
-        _sources_with_absent_roots(runtime)
-        == frozenset({"codex_local", "claude_code_local"}),
+        _sources_with_absent_roots(runtime) == frozenset({"codex_local", "claude_code_local"}),
         "red: claim a root is present when it does not exist",
     )
 
@@ -463,8 +425,7 @@ def _check_qualified_source_kind_drift() -> None:
     from ananta.services.session_ledger_service.selected_sources import _SOURCE_SPECS
 
     _check(
-        _QUALIFIED_SOURCE_KINDS
-        == {source: source_kind for source, _consent, source_kind in _SOURCE_SPECS},
+        _QUALIFIED_SOURCE_KINDS == {source: source_kind for source, _consent, source_kind in _SOURCE_SPECS},
         "red: let the midwife option-to-source_kind map drift from the ledger's",
     )
 

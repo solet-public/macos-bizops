@@ -6,8 +6,8 @@
   "result_processor_customizations": {
     "action_label": "Zuora payment unapplied and refunded",
     "result_type": "zuora_refund_payment_with_auto_unapply_result",
-    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
-    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body as received).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically."
   },
   "error_processor_customizations": {
     "action_context": "Refund a payment, first unapplying it from invoices and debit memos (POST /v1/payments/{paymentKey}/refunds/unapply), optionally writing off; body needs type.",

@@ -1,13 +1,14 @@
 name: external_postgres_plugin
 description: >
-  Read-only "super Datagrip" over FOREIGN Postgres databases the operator
-  registers as external_pg::<name> address-book entries. Every verb takes a
-  connection NAME (never a DSN); connections are built SOLELY from those
-  registered entries — a foreign-target invariant a gate reviewer can verify —
-  and the platform's OWN database instance (host+port+dbname) is refused
-  role-independently by the containment guard. READ-ONLY, HARD: the psycopg3
-  connection read-only characteristic is the developer-proof write-stopper and
-  no write verb exists. Per-connection passwords are chain-consumed through the
+  "Super Datagrip" over FOREIGN Postgres databases the operator registers as
+  external_pg::<name> address-book entries: queries and exports, single
+  statements, transactional scripts, COPY file loads and exports, pg_dump and
+  pg_restore, and session, lock, size and statistics administration. The
+  registered role's own server-side GRANTs are the only boundary (USER ruling
+  rul_4c99a30d). Every verb takes a connection NAME (never a DSN); connections
+  are built SOLELY from those registered entries, and the platform's OWN
+  database instance (host+port+dbname) is refused role-independently by the
+  containment guard. Per-connection passwords are chain-consumed through the
   address book resolver, so this plugin owns no vault keys and needs no vault
   binding.
 optional: true
@@ -31,14 +32,19 @@ config:
       The platform's OWN Postgres port, used by the containment guard to refuse
       the platform DB instance (host + port + dbname, role-independent). Keep in
       sync if the platform ever runs Postgres off 5432.
-  export_allowed_roots:
-    type: list
+  client_bin_dir:
+    type: string
     required: false
-    default: []
+    default: ""
     description: >
-      Absolute workspace directories export_query may write TSV files under
-      (realpath + commonpath containment, mirroring ledger_allowed_roots).
-      Empty by default = REFUSE-ALL: every export is refused until the operator
-      opts workspace roots in here (operator ruling 2026-07-15 — bulk query
-      data lands in the operator's own workspace, never context or platform
-      blob storage). Prefer the exact export directories over broad parents.
+      Directory holding the PostgreSQL client programs pg_dump and pg_restore,
+      used by dump_database and restore_database. Empty (the default)
+      searches PATH, then the standard Homebrew and Debian PostgreSQL bin
+      directories. pg_dump must be at least the server's major version.
+  client_tool_timeout_seconds:
+    type: integer
+    required: false
+    default: 3600
+    description: >
+      Longest one pg_dump or pg_restore run may take before it is stopped
+      (external_pg.timeout).

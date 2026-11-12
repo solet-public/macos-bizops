@@ -1,7 +1,7 @@
 {
   "process_key": "service_interface::thinking_service::update_plan",
   "display_name": "Update Plan",
-  "description": "Report progress on a plan and get updated reasoning. Sends the status update with the plan's full context through the platform inference service, then updates the stored memory with the new plan content. Automatically re-focuses if the plan was in the focus buffer.",
+  "description": "Report progress on a plan and get updated reasoning. Sends the status update with the plan's full context through the platform inference service, then updates the stored memory with the new plan content. Automatically re-focuses if the plan was in the focus buffer. Returns a queued job receipt; retrieve its exact job_id with job_service.get_job for the complete original operation result or typed error.",
   "embedding_description": "Update plan progress. Mark step as done. Report progress on my plan. I finished this step. Advance to the next step. Modify the plan. Update my task status. Step completed, what's next. Continue with the plan. Change the plan steps. Revise the current plan.",
   "result_processor_customizations": {
     "action_label": "Plan updated",
@@ -14,5 +14,6 @@
     "action_context": "Updating a plan with progress via the platform inference service",
     "error_interpretation": "TaskNotFound: plan_id doesn't exist or was deleted. inference_unusable: the bound inference provider returned an envelope with an error, a non-completed status, or empty text — inspect the provider's health; provider connection/timeout failures raise their own typed errors.",
     "recovery_guidance": "Verify the plan_id exists with list_plans."
-  }
+  },
+  "is_async": true
 }

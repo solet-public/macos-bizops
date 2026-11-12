@@ -53,6 +53,7 @@ from ananta.interfaces.edge_process_provider import (
     EdgeProcessProvider,
 )
 
+from macos_coding_agent_session_plugin.async_jobs import AsyncJobs
 from macos_coding_agent_session_plugin.bridge_tracker import (
     BridgeTracker,
     SpawnFn,
@@ -84,12 +85,12 @@ _SOLET_NAME_PARAM = ParameterMetadata(
 )
 
 
-
 def _spawn_return_schema() -> ReturnValueSchema:
     return ReturnValueSchema(
         type=ParameterType.OBJECT,
-        description="spawn_bridge outcome.",
+        description="Job receipt; the other fields describe the completed spawn result.",
         properties={
+            "job_id": ParameterMetadata(type=ParameterType.STRING, description="Read this job through job_service.get_job."),
             "status": ParameterMetadata(type=ParameterType.STRING, description="."),
             "agent_instance_id": ParameterMetadata(type=ParameterType.STRING, description="."),
             "solet_name": ParameterMetadata(type=ParameterType.STRING, description="."),
@@ -174,9 +175,7 @@ class MacosCodingAgentSessionPlugin(
 
     name: str = PLUGIN_NAME
 
-    service_interfaces: ClassVar[tuple[type, ...]] = (
-        CodingAgentSessionServiceInterface,
-    )
+    service_interfaces: ClassVar[tuple[type, ...]] = (CodingAgentSessionServiceInterface,)
     supported_interface_versions: ClassVar[dict[type, str]] = {
         CodingAgentSessionServiceInterface: CodingAgentSessionServiceInterface.INTERFACE_VERSION,
     }
@@ -191,6 +190,7 @@ class MacosCodingAgentSessionPlugin(
         # Smoke-only override: tests inject a fake spawn function so no
         # real `python -m agent_messaging_plugin.mcp_bridge` is started.
         self._spawn_fn: SpawnFn = default_spawn
+        self._spawn_jobs = AsyncJobs(self.name)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -206,10 +206,7 @@ class MacosCodingAgentSessionPlugin(
         """Validate env, build tracker + watcher, mark ready."""
         solet_name = os.environ.get(ENV_SOLET_NAME)
         if not solet_name:
-            msg = (
-                f"{PLUGIN_NAME}: {ENV_SOLET_NAME} env var is required "
-                "(set by the launching script)."
-            )
+            msg = f"{PLUGIN_NAME}: {ENV_SOLET_NAME} env var is required (set by the launching script)."
             raise RuntimeError(msg)
         self._solet_name = solet_name
         runtime_dir = _runtime_dir()
@@ -300,7 +297,8 @@ class MacosCodingAgentSessionPlugin(
     ) -> BridgeSpawnResult:
         tracker = self._require_tracker()
         status, row, message = tracker.spawn(
-            agent_instance_id=agent_instance_id, solet_name=solet_name,
+            agent_instance_id=agent_instance_id,
+            solet_name=solet_name,
         )
         if status == "failed" or row is None:
             return BridgeSpawnResult(
@@ -311,11 +309,7 @@ class MacosCodingAgentSessionPlugin(
                 started_at="",
                 message=message,
             )
-        spawn_status = (
-            BridgeSpawnStatus.ALREADY_RUNNING
-            if status == "already_running"
-            else BridgeSpawnStatus.SUCCESS
-        )
+        spawn_status = BridgeSpawnStatus.ALREADY_RUNNING if status == "already_running" else BridgeSpawnStatus.SUCCESS
         return BridgeSpawnResult(
             status=spawn_status,
             agent_instance_id=row.agent_instance_id,
@@ -408,6 +402,7 @@ class MacosCodingAgentSessionPlugin(
 
     @platform_process(
         name="spawn_bridge",
+        is_async=True,
         context_handling=ContextHandling.NONE,
         parameters={
             "agent_instance_id": _AGENT_INSTANCE_ID_PARAM,
@@ -427,7 +422,6 @@ class MacosCodingAgentSessionPlugin(
         params: dict[str, Any],
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        del state
         agent_instance_id = str(params.get("agent_instance_id") or "")
         solet_name = str(params.get("solet_name") or "")
         if not agent_instance_id or not solet_name:
@@ -435,6 +429,12 @@ class MacosCodingAgentSessionPlugin(
                 "missing_args",
                 "spawn_bridge requires agent_instance_id + solet_name.",
             )
+        return self._spawn_jobs.submit(self, "spawn_bridge", params, state, self._spawn_bridge_now)
+
+    def _spawn_bridge_now(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The dispatched operation; the separate typed service method stays synchronous."""
+        agent_instance_id = str(params.get("agent_instance_id") or "")
+        solet_name = str(params.get("solet_name") or "")
         try:
             result = self.spawn_bridge(
                 agent_instance_id=agent_instance_id,
@@ -476,7 +476,8 @@ class MacosCodingAgentSessionPlugin(
         agent_instance_id = str(params.get("agent_instance_id") or "")
         if not agent_instance_id:
             return self._error_envelope(
-                "missing_args", "terminate_bridge requires agent_instance_id.",
+                "missing_args",
+                "terminate_bridge requires agent_instance_id.",
             )
         try:
             result = self.terminate_bridge(agent_instance_id=agent_instance_id)
@@ -515,7 +516,8 @@ class MacosCodingAgentSessionPlugin(
         agent_instance_id = str(params.get("agent_instance_id") or "")
         if not agent_instance_id:
             return self._error_envelope(
-                "missing_args", "restart_bridge requires agent_instance_id.",
+                "missing_args",
+                "restart_bridge requires agent_instance_id.",
             )
         try:
             result = self.restart_bridge(agent_instance_id=agent_instance_id)
@@ -571,10 +573,7 @@ class MacosCodingAgentSessionPlugin(
     def _require_tracker(self) -> BridgeTracker:
         tracker = self._tracker
         if tracker is None:
-            msg = (
-                f"{PLUGIN_NAME}: tracker not initialized — "
-                "prepare_for_readiness not called?"
-            )
+            msg = f"{PLUGIN_NAME}: tracker not initialized — prepare_for_readiness not called?"
             raise RuntimeError(msg)
         return tracker
 

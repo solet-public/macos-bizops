@@ -9,6 +9,7 @@ from ananta.core.actions.action_metadata import (
 )
 from ananta.core.domain.types import ActionResult
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.registered_job_operations import registered_job_return_schema
 
 
 def _contract_properties(data_description: str) -> dict[str, ParameterMetadata]:
@@ -19,20 +20,14 @@ def _contract_properties(data_description: str) -> dict[str, ParameterMetadata]:
             description="Status: completed, or error when the bound provider refused the call",
             required=False,
         ),
-        "data": ParameterMetadata(
-            type=ParameterType.OBJECT, description=data_description, required=False
-        ),
-        "actions": ParameterMetadata(
-            type=ParameterType.LIST, description="Follow-up actions; always empty", required=False
-        ),
+        "data": ParameterMetadata(type=ParameterType.OBJECT, description=data_description, required=False),
+        "actions": ParameterMetadata(type=ParameterType.LIST, description="Follow-up actions; always empty", required=False),
         "error": ParameterMetadata(
             type=ParameterType.OBJECT,
             description="None on success; on refusal the provider's typed error (type, code, message)",
             required=False,
         ),
-        "timestamp": ParameterMetadata(
-            type=ParameterType.STRING, description="ISO-8601 UTC time of the result", required=False
-        ),
+        "timestamp": ParameterMetadata(type=ParameterType.STRING, description="ISO-8601 UTC time of the result", required=False),
     }
 
 
@@ -41,6 +36,7 @@ class EmbeddingServiceAPI(ABC):
 
     @service_interface_process(
         name="generate_embeddings",
+        is_async=True,
         is_discoverable=True,
         provider="embedding_service",
         parameters={
@@ -60,24 +56,21 @@ class EmbeddingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="One vector per input, with the bound provider's own model id and vector dimension",
-            properties=_contract_properties(
-                "On success {result: {embeddings: one vector per input in input order, "
-                "dimension: the provider's vector length, model: the provider's model id}}"
-            ),
-            usage_patterns=[
-                "Generate embeddings through the bound embedding service without naming a provider",
-                "Embed a batch of texts and check model and dimension against stored vectors",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="One vector per input, with the bound provider's own model id and vector dimension",
+                properties=_contract_properties("On success {result: {embeddings: one vector per input in input order, dimension: the provider's vector length, model: the provider's model id}}"),
+                usage_patterns=[
+                    "Generate embeddings through the bound embedding service without naming a provider",
+                    "Read the exact job until terminal before consuming embeddings, model and dimension",
+                ],
+            )
         ),
         is_inference_capable=False,
     )
     @abstractmethod
-    def generate_embeddings(
-        self, inputs: list[str], model: str | None = None, input_type: str = "text"
-    ) -> ActionResult:
+    def generate_embeddings(self, inputs: list[str], model: str | None = None, input_type: str = "text") -> ActionResult:
         """Generate vector embeddings from text."""
         ...
 
@@ -95,10 +88,7 @@ class EmbeddingServiceAPI(ABC):
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="The bound provider's model id and vector dimension, without embedding anything",
-            properties=_contract_properties(
-                "On success {result: {dimension: the provider's vector length, "
-                "model: the provider's model id}}"
-            ),
+            properties=_contract_properties("On success {result: {dimension: the provider's vector length, model: the provider's model id}}"),
             usage_patterns=[
                 "Read the bound embedding model and dimension without embedding text",
                 "Validate vector sizes against a stored index",

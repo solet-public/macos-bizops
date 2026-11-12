@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Private live PostgreSQL multistatement behavioral proof.
+"""Private live PostgreSQL proof of run_script (one transaction, savepoints).
 
 Run under quality_gates/provision_test_pg.py; the private manifest variable
 selects this smoke's independent database on the owned loopback cluster.
 No fixture returns 77; provisioned setup or body failures return nonzero.
-The original SQL behavior, read/write probes and dynamic OS-user assertions
-remain exercised. See quality_gates/private_postgres.md.
+Proves a migration with a dollar-quoted function body commits, on_error
+rollback names the failing statement and commits nothing, on_error continue
+keeps the good statements, commit=false is a dry run, and a command the server
+refuses in a transaction block reports its SQLSTATE. The dynamic OS-user
+assertions remain exercised. See quality_gates/private_postgres.md.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ sys.path.insert(0, str(_ROOT))
 REPO_ROOT = _ROOT
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "external_postgres_plugin" / "src"))
 
+from external_postgres_plugin import script_actions  # noqa: E402
 from external_postgres_plugin.app_config import ExternalDsn  # noqa: E402
 from external_postgres_plugin.connection import connect  # noqa: E402
 from external_postgres_plugin.statement_guard import (  # noqa: E402
@@ -46,7 +50,6 @@ _HOST = "127.0.0.1"
 _PORT = 0
 _USER = getpass.getuser()
 _PROBE = "epg_probe"
-_READ_ONLY_SQLSTATE = "25006"
 
 _passed = 0
 _failed: list[str] = []
@@ -75,7 +78,7 @@ def _configure_fixture() -> None:
     config = load_fixture("external_multistatement")
     if config.user != _USER:
         raise FixtureIntegrityError("fixture user differs from the current OS user")
-    _HOST, _PORT, _SCRATCH_DB = config.host, config.port, config.database
+    _HOST, _PORT, _SCRATCH_DB = config.host, config.port, config.database  # pyright: ignore[reportConstantRedefinition] -- fixture endpoint bound once per run
 
 
 def _dsn() -> ExternalDsn:
@@ -103,47 +106,84 @@ def _psql(sql: str) -> subprocess.CompletedProcess[str]:
 def _setup() -> bool:
     try:
         subprocess.run([str(pg_binary("createdb")), *load_fixture("external_multistatement").endpoint_args(), "--maintenance-db=postgres", _SCRATCH_DB], env=without_libpq(os.environ), capture_output=True, text=True, timeout=20)
-        return _psql(f"DROP TABLE IF EXISTS {_PROBE}; CREATE TABLE {_PROBE}(id int); INSERT INTO {_PROBE} VALUES (1), (2);").returncode == 0
+        return _psql(f"DROP SCHEMA IF EXISTS epg_app CASCADE; DROP TABLE IF EXISTS {_PROBE}; CREATE TABLE {_PROBE}(id int); INSERT INTO {_PROBE} VALUES (1), (2);").returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
 
 def _teardown() -> None:
     try:
-        _psql(f"DROP TABLE IF EXISTS {_PROBE};")
+        _psql(f"DROP TABLE IF EXISTS {_PROBE}; DROP SCHEMA IF EXISTS epg_app CASCADE;")
     except (OSError, subprocess.SubprocessError):
         pass
 
 
-def _sqlstate(conn: Any, sql: str) -> str | None:
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql)
-        conn.rollback()
-        return None
-    except Exception as exc:
-        conn.rollback()
-        return getattr(exc, "sqlstate", None)
+def _scalar(sql: str) -> str | None:
+    result = subprocess.run(
+        [str(pg_binary("psql")), "-X", *load_fixture("external_multistatement").endpoint_args(), "-d", _SCRATCH_DB, "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c", sql],
+        env=without_libpq(os.environ),
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def test_parser_belt() -> None:
     _assert("parser admits one statement", _single_ok("SELECT * FROM t WHERE id = 1"))
-    _assert("parser refuses two statements", not _single_ok("SELECT 1; DELETE FROM t"))
+    _assert("parser refuses two statements on the single-statement verbs", not _single_ok("SELECT 1; DELETE FROM t"))
+
+
+def _script(sql: str, **params: Any) -> dict[str, Any]:
+    conn = connect(_dsn(), statement_timeout_ms=30_000, platform_pg_port=_PORT)
+    try:
+        return script_actions.run_script(conn, {"sql": sql, **params})
+    finally:
+        conn.close()
 
 
 def _run_live_checks() -> None:
-    conn = connect(_dsn(), statement_timeout_ms=30_000, platform_pg_port=_PORT)
-    try:
-        # Bypass the parser: send the two-statement string straight to psycopg.
-        state = _sqlstate(conn, f"SELECT 1; INSERT INTO {_PROBE} VALUES (99)")
-        print(f"    observed SQLSTATE {state} for a parser-bypassing 2-stmt write")
-        _assert("parser-bypass write refused at the connection (25006)", state == _READ_ONLY_SQLSTATE)
+    # (1) A migration in one transaction: schema, table, function with a
+    # dollar-quoted body containing ';', and rows — all committed.
+    migration = "CREATE SCHEMA epg_app;\nCREATE TABLE epg_app.item (id int PRIMARY KEY, name text NOT NULL);\nCREATE FUNCTION epg_app.item_count() RETURNS bigint AS $$ SELECT count(*) FROM epg_app.item; $$ LANGUAGE sql;\nINSERT INTO epg_app.item VALUES (1, 'a'), (2, 'b');\nSELECT epg_app.item_count();\n"
+    result = _script(migration)
+    print(f"    observed run_script result = {result}")
+    _assert("five statements ran", result["statement_count"] == 5 and result["failed_count"] == 0)
+    _assert("command tag of the insert", result["statements"][3]["command_tag"] == "INSERT 0 2")
+    _assert("the SELECT reports a result set without rows", result["statements"][4]["has_result_set"] is True)
+    _assert("migration committed (separate connection)", _scalar("SELECT epg_app.item_count()") == "2")
 
-        # Two READS bypassing the parser both run — the parser is hygiene, not safety.
-        two_reads_ok = _sqlstate(conn, "SELECT 1; SELECT 2") is None
-        _assert("two reads bypassing the parser both run (no error)", two_reads_ok)
-    finally:
-        conn.close()
+    # (2) on_error=rollback: the failing statement is named and NOTHING commits.
+    failed_message = ""
+    try:
+        _script("INSERT INTO epg_app.item VALUES (3, 'c');\nINSERT INTO epg_app.item VALUES (1, 'dup');\n")
+    except script_actions.ScriptStatementError as exc:
+        failed_message = str(exc)
+    print(f"    observed failure = {failed_message}")
+    _assert("failure names statement 2 of 2", "statement 2 of 2" in failed_message)
+    _assert("failure carries SQLSTATE 23505", "SQLSTATE 23505" in failed_message)
+    _assert("statement 1 was rolled back too", _scalar("SELECT count(*) FROM epg_app.item") == "2")
+
+    # (3) on_error=continue: only the failing statement rolls back to its savepoint.
+    cont = _script(
+        "INSERT INTO epg_app.item VALUES (3, 'c');\nINSERT INTO epg_app.item VALUES (1, 'dup');\nINSERT INTO epg_app.item VALUES (4, 'd');\n",
+        on_error="continue",
+    )
+    _assert("continue: two succeeded, one failed", (cont["succeeded_count"], cont["failed_count"]) == (2, 1))
+    _assert("continue: the good rows committed", _scalar("SELECT count(*) FROM epg_app.item") == "4")
+
+    # (4) commit=false: a dry run leaves nothing behind.
+    dry = _script("DELETE FROM epg_app.item;", commit=False)
+    _assert("dry run reports not committed", dry["committed"] is False)
+    _assert("dry run left the rows", _scalar("SELECT count(*) FROM epg_app.item") == "4")
+
+    # (5) A command the server refuses in a transaction block fails with its SQLSTATE.
+    vacuum_message = ""
+    try:
+        _script("VACUUM epg_app.item;")
+    except script_actions.ScriptStatementError as exc:
+        vacuum_message = str(exc)
+    _assert("VACUUM in a script reports SQLSTATE 25001", "SQLSTATE 25001" in vacuum_message, vacuum_message)
 
 
 def _mid_run_fail(detail: str) -> int:
@@ -220,8 +260,8 @@ def _check_source_carries_no_operator_username() -> None:
 
 
 def main() -> int:
-    print("\nexternal_postgres_plugin LIVE single-statement / defense-in-depth smoke")
-    print("=" * 68)
+    print("\nexternal_postgres_plugin LIVE run_script smoke")
+    print("=" * 46)
     _check_user_is_dynamic_getuser()
     _check_source_carries_no_operator_username()
     test_parser_belt()
@@ -244,7 +284,7 @@ def main() -> int:
     if _failed:
         print("FAILED:", _failed)
         return 1
-    print("All single-statement / defense-in-depth checks passed.")
+    print("All run_script checks passed.")
     print("PRIVATE_PG_BODY external_multistatement")
     return 0
 

@@ -8,10 +8,19 @@ from __future__ import annotations
 import json
 from typing import Any
 
-_SEARCH_RESERVED_KEYS: frozenset[str] = frozenset({
-    "blob_id", "mime_type", "tags", "original_name", "external_id",
-    "plugin_namespace", "limit", "offset",
-})
+_SEARCH_RESERVED_KEYS: frozenset[str] = frozenset(
+    {
+        "blob_id",
+        "mime_type",
+        "tags",
+        "original_name",
+        "external_id",
+        "file_hash",
+        "plugin_namespace",
+        "limit",
+        "offset",
+    }
+)
 
 
 def matches_filters(metadata: dict[str, Any], filters: dict[str, Any]) -> bool:
@@ -24,6 +33,8 @@ def matches_filters(metadata: dict[str, Any], filters: dict[str, Any]) -> bool:
     if not _matches_name(metadata, filters):
         return False
     if not _matches_external_id(metadata, filters):
+        return False
+    if not _matches_file_hash(metadata, filters):
         return False
     if not _matches_namespace(metadata, filters):
         return False
@@ -83,6 +94,12 @@ def _matches_external_id(metadata: dict[str, Any], filters: dict[str, Any]) -> b
     return search_id == external_id
 
 
+def _matches_file_hash(metadata: dict[str, Any], filters: dict[str, Any]) -> bool:
+    if "file_hash" not in filters:
+        return True
+    return bool(metadata.get("file_hash") == filters["file_hash"])
+
+
 def _matches_namespace(metadata: dict[str, Any], filters: dict[str, Any]) -> bool:
     if "plugin_namespace" not in filters:
         return True
@@ -99,7 +116,7 @@ def _matches_plugin_metadata(metadata: dict[str, Any], filters: dict[str, Any]) 
             continue
         if plugin_meta_cache is None:
             plugin_meta_cache = extract_plugin_metadata(metadata)
-        path = key[len("plugin_metadata."):]
+        path = key[len("plugin_metadata.") :]
         actual = resolve_dotted_path(plugin_meta_cache, path)
         if isinstance(expected, list):
             if actual not in expected:
@@ -137,14 +154,8 @@ def resolve_dotted_path(data: dict[str, Any], path: str) -> Any:
     return cursor
 
 
-def collect_matching_files(
-    records: list[Any], metadata_filters: dict[str, Any]
-) -> list[dict[str, Any]]:
+def collect_matching_files(records: list[Any], metadata_filters: dict[str, Any]) -> list[dict[str, Any]]:
     """Filter records by metadata_filters, format for response, and sort by created_at desc."""
-    result: list[dict[str, Any]] = [
-        {"blob_id": m.get("blob_id"), "metadata": m}
-        for m in records
-        if isinstance(m, dict) and matches_filters(m, metadata_filters)
-    ]
+    result: list[dict[str, Any]] = [{"blob_id": m.get("blob_id"), "metadata": m} for m in records if isinstance(m, dict) and matches_filters(m, metadata_filters)]
     result.sort(key=lambda x: x["metadata"].get("created_at", ""), reverse=True)
     return result

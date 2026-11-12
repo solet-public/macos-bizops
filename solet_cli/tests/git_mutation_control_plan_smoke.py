@@ -1,4 +1,4 @@
-"""Planner regression smoke for Git-mutation-control input propagation."""
+"""Planner regression smoke for the retired Git-control question and topology projection."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def _check(condition: object, label: str) -> None:
         raise AssertionError(label)
 
 
-def _shell_inputs(git_mutation_control: str) -> dict[str, JsonValue]:
+def _shell_inputs(execution_topology: str) -> dict[str, JsonValue]:
     seed = SeedLock(
         "https://github.com/solet-public/macos-bizops.git",
         "release-2026-08-20",
@@ -41,14 +41,12 @@ def _shell_inputs(git_mutation_control: str) -> dict[str, JsonValue]:
         decisions={
             "embeddings_implementation": "lm_studio",
             "inference_implementation": "lm_studio",
-            "execution_topology": "solo",
-            "git_mutation_control": git_mutation_control,
+            "execution_topology": execution_topology,
         },
         decision_sources={
             "embeddings_implementation": "config",
             "inference_implementation": "config",
             "execution_topology": "config",
-            "git_mutation_control": "config",
         },
     )
     plan = build_setup_plan(
@@ -63,14 +61,13 @@ def _shell_inputs(git_mutation_control: str) -> dict[str, JsonValue]:
 
 
 def main() -> int:
-    _check(
-        _shell_inputs("designated_controller") == {"git_controller_name": "Git-Controller", "selected_coding_agents": ["claude_code"]},
-        "designated Git controller reaches the shell-integration plan step",
-    )
-    _check(
-        _shell_inputs("single_session") == {"selected_coding_agents": ["claude_code"]},
-        "single-session Git control leaves the shell-integration gate unarmed",
-    )
+    for topology in ("solo", "fleet"):
+        inputs = _shell_inputs(topology)
+        _check(
+            inputs == {"execution_topology": topology, "selected_coding_agents": ["claude_code"]},
+            "shell integration receives topology independently of a controller setting",
+        )
+        _check("git_controller_name" not in inputs, "the retired controller input is never projected")
     print(f"git_mutation_control_plan_smoke OK: {_checks} checks passed")
     return 0
 

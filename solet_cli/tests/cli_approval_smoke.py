@@ -21,7 +21,7 @@ from solet_manager.errors import (  # noqa: E402
     ApprovalFingerprintMalformedError,
     ApprovalFingerprintRequiredError,
 )
-from solet_manager.models import CommandResult, ExitCode  # noqa: E402
+from solet_manager.models import CommandResult, ExitCode, JsonValue  # noqa: E402
 
 _REPO = Path(__file__).resolve().parents[2]
 _CONTRACTS = _REPO / "plugins" / "github_midwife_plugin" / "knowledge_base"
@@ -30,7 +30,7 @@ _CHECKS = 0
 
 def _check(condition: object, label: str) -> None:
     global _CHECKS
-    _CHECKS += 1
+    _CHECKS += 1  # pyright: ignore[reportConstantRedefinition] -- Mutable smoke counter; preserve the fixture API.
     if not condition:
         raise AssertionError(label)
 
@@ -71,21 +71,13 @@ def _selected_decisions(result: CommandResult) -> dict[str, object]:
     raw = result.data.get("decisions")
     if not isinstance(raw, list):
         return {}
-    return {
-        str(item["id"]): item.get("selected")
-        for item in raw
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
+    return {str(item["id"]): item.get("selected") for item in raw if isinstance(item, dict) and isinstance(item.get("id"), str)}
 
 
 def _decision_activation_regression(base: list[str]) -> str:
     bare = cli_module.run([*base, "--dry-run", "--json"])
     _check(
-        bare.status == "awaiting_user"
-        and bare.error_kind == "decisions_required"
-        and bare.data["unresolved_decisions"]
-        == ["inference_implementation", "session_sources", "git_mutation_control"]
-        and _selected_decisions(bare)["execution_topology"] == "solo",
+        bare.status == "awaiting_user" and bare.error_kind == "decisions_required" and bare.data["unresolved_decisions"] == ["inference_implementation", "session_sources"] and _selected_decisions(bare)["execution_topology"] == "solo",
         "bare macos-bizops preview prompts every unresolved decision after defaulting solo",
     )
 
@@ -93,23 +85,17 @@ def _decision_activation_regression(base: list[str]) -> str:
         "--decision",
         "inference_implementation=lm_studio",
         "--decision",
-        "git_mutation_control=single_session",
-        "--decision",
         "session_sources=",
     ]
     reviewed = cli_module.run([*base, *prompted_replies, "--dry-run", "--json"])
     _check(
-        reviewed.status == "preview_ready"
-        and _selected_decisions(reviewed)["execution_topology"] == "solo"
-        and _selected_decisions(reviewed)["git_mutation_control"] == "single_session",
+        reviewed.status == "preview_ready" and _selected_decisions(reviewed)["execution_topology"] == "solo" and "git_mutation_control" not in _selected_decisions(reviewed),
         "the exact prompted replies resolve against the silently defaulted parent",
     )
 
     child_first = cli_module.run(
         [
             *base,
-            "--decision",
-            "git_mutation_control=single_session",
             "--decision",
             "execution_topology=solo",
             "--decision",
@@ -121,17 +107,15 @@ def _decision_activation_regression(base: list[str]) -> str:
         ]
     )
     _check(
-        child_first.status == "preview_ready"
-        and _selected_decisions(child_first)["execution_topology"] == "solo"
-        and _selected_decisions(child_first)["git_mutation_control"] == "single_session",
-        "child-before-parent decision flags remain order independent",
+        child_first.status == "preview_ready" and _selected_decisions(child_first)["execution_topology"] == "solo" and "git_mutation_control" not in _selected_decisions(child_first),
+        "explicit decision flags remain order independent without the retired question",
     )
     return str(reviewed.data["approval_fingerprint"])
 
 
 def _prompt_discovered_decisions_ui_helper() -> None:
     """Exercise prompt rendering only; lifecycle coverage owns model timing."""
-    existing = {"inference_implementation": "lm_studio"}
+    existing: dict[str, JsonValue] = {"inference_implementation": "lm_studio"}
     unresolved = CommandResult(
         kind="create_preview",
         status="awaiting_user",
@@ -174,8 +158,7 @@ def _prompt_discovered_decisions_ui_helper() -> None:
     ):
         interactive_selections = prompt_discovered_decisions(unresolved, existing)
     _check(
-        prompted.call_count == 2
-        and prompt_output.getvalue().count("Select candidate number") == 0,
+        prompted.call_count == 2 and prompt_output.getvalue().count("Select candidate number") == 0,
         "UI helper consumes exactly two deterministic model indexes",
     )
     _check(
@@ -212,22 +195,18 @@ def main() -> int:
             "--decision",
             "inference_implementation=lm_studio",
             "--decision",
-            "git_mutation_control=single_session",
-            "--decision",
             "session_sources=",
         ]
         resolved_base = [*base, *prompted_replies]
         fingerprint = _decision_activation_regression(base)
         decisions_blocked = cli_module.run([*base, "--dry-run", "--json"])
         _check(
-            decisions_blocked.error_kind == "decisions_required"
-            and isinstance(decisions_blocked.data.get("approval_fingerprint"), str),
+            decisions_blocked.error_kind == "decisions_required" and isinstance(decisions_blocked.data.get("approval_fingerprint"), str),
             "blocking decisions JSON carries its computed approval fingerprint",
         )
         approval_blocked = cli_module.run([*resolved_base, "--json"])
         _check(
-            approval_blocked.error_kind == "approval_required"
-            and approval_blocked.data.get("approval_fingerprint") == fingerprint,
+            approval_blocked.error_kind == "approval_required" and approval_blocked.data.get("approval_fingerprint") == fingerprint,
             "blocking approval JSON preserves the reviewed approval fingerprint",
         )
 

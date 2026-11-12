@@ -11,7 +11,7 @@
   },
   "error_processor_customizations": {
     "action_context": "List the Marketo custom object types on the configured instance.",
-    "error_interpretation": "marketo.invalid_params: refused at dispatch before any vendor call (missing or malformed parameters, more than 300 entries, an action/dedupe_by/delete_by value Marketo does not define, or an output_tsv_path outside export_allowed_roots). On the finished job: marketo.permission_denied (vendor 603 or HTTP 403) means the API user's Role lacks the Access API permission; marketo.auth_failed (601/602 after one re-mint, or HTTP 401) means the credential was rejected; marketo.validation_failed and other vendor codes carry Marketo's own message.",
+    "error_interpretation": "marketo.invalid_params: refused at dispatch before any vendor call (missing or malformed parameters, more than 300 entries, an action/dedupe_by/delete_by value Marketo does not define, or an output_tsv_path outside saved locations). On the finished job: marketo.permission_denied (vendor 603 or HTTP 403) means the API user's Role lacks the Access API permission; marketo.auth_failed (601/602 after one re-mint, or HTTP 401) means the credential was rejected; marketo.validation_failed and other vendor codes carry Marketo's own message.",
     "recovery_guidance": "marketo.permission_denied: grant the Role's read permission for custom objects under Admin > Users & Roles > Roles > the API role > Access API (Adobe's Custom Objects page names no checkbox; look for Read-Only Custom Object or Read-Write Custom Object and confirm the label on that screen), then retry. Custom objects also require a subscription that includes them."
   }
 }

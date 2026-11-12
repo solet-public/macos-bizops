@@ -1,0 +1,2 @@
+# Advisory plugin-action handler wall time recorded as loop_invariant evidence.
+ananta/tests/core/plugins/handler_wall_time_smoke.py

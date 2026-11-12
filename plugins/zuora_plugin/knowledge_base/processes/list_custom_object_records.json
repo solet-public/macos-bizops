@@ -6,8 +6,8 @@
   "result_processor_customizations": {
     "action_label": "Zuora custom object records listed",
     "result_type": "zuora_list_custom_object_records_result",
-    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id, data (Zuora's response body, redacted) and pagination {cursor, next_cursor, returned, vendor, hint}; pass next_cursor back as cursor, null on the last page.",
-    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id, data (Zuora's response body as received) and pagination {cursor, next_cursor, returned, vendor, hint}; pass next_cursor back as cursor, null on the last page.",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically."
   },
   "error_processor_customizations": {
     "action_context": "List records of a custom object (GET /objects/records/default/{object}) by query q or ids, one page per call; next_cursor is the cursor to pass back with page_size, null at the end.",

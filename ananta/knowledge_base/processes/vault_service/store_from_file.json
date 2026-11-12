@@ -1,12 +1,12 @@
 {
   "process_key": "service_interface::vault_service::store_from_file",
   "display_name": "Store Secret From File",
-  "description": "Read a single secret from an absolute file path (entire file contents as the value) and store it (encrypted at rest). Optionally strips trailing whitespace. Useful for private keys, certificates, and other multi-line credentials that don't survive copy-paste.",
-  "embedding_description": "Store secret from a file. Ingest credential, load private key, persist signing key, single-value file as secret. Agent supplies absolute file path plus vault key; the solet reads whole file (optionally rstripped) as one secret. Use for SSH private keys, X.509 certificates, GPG keys, JWT signing keys, multi-line tokens. Variants: store_from_env, store_from_kv_file, store_from_keychain.",
+  "description": "Returns an owned vault job receipt (job_id/status); read the exact job with job_service.get_job for its public terminal outcome. Read a single secret from an absolute file path (entire file contents as the value) and store it (encrypted at rest). Optionally strips trailing whitespace. Useful for private keys, certificates, and other multi-line credentials that don't survive copy-paste.",
+  "embedding_description": "Store secret from a file. Ingest credential, load private key, persist signing key, single-value file as secret. Agent supplies absolute file path plus vault key; the solet reads whole file (optionally rstripped) as one secret. Use for SSH private keys, X.509 certificates, GPG keys, JWT signing keys, multi-line tokens. Variants: store_from_env, store_from_kv_file, store_from_keychain. Registered execution returns job_id/status; the complete public outcome is in job.result. Secret operands remain volatile and failures are sanitized; uncertain effects require reconciliation, never automatic replay.",
   "result_processor_customizations": {
     "action_label": "Secret stored from file",
     "result_type": "secret_stored",
-    "result_description": "Confirmation that file contents were read, encrypted, and stored. Contains key (vault identifier), version, and message. NEVER contains the secret value.",
+    "result_description": "Queued vault job receipt. Completed public outcome: Confirmation that file contents were read, encrypted, and stored. Contains key (vault identifier), version, and message. NEVER contains the secret value.",
     "presentation_guidance": "",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },

@@ -1,7 +1,7 @@
 {
   "process_key": "service_interface::knowledge_service::refresh_plugin_processes",
   "display_name": "Refresh Plugin Processes",
-  "description": "Reload all process JSON files from the named plugin's knowledge base and update the live process registry. Performs full discovery rebuild after applying changes. Use plugin_name='ananta' for platform service interfaces.",
+  "description": "Reload all process JSON files from the named plugin's knowledge base and update the live process registry. Performs full discovery rebuild after applying changes. Use plugin_name='ananta' for platform service interfaces. Registered calls return a queued job_id/status receipt. Read that exact job with service_interface::job_service::get_job until terminal; job.result contains the complete operation result and job.error retains any failure. In-process calls return the complete result synchronously.",
   "embedding_description": "Bulk-reload every process a plugin owns in one sweep after editing or adding several of its JSON files, rebuilding all of that plugin's live registry entries at once without a restart. Takes only plugin_name and needs no process_key, refreshing the whole plugin's entire process surface together; pass 'ananta' for platform service interfaces. Use after a batch of process JSON edits.",
   "result_processor_customizations": {
     "action_label": "Plugin processes refreshed",

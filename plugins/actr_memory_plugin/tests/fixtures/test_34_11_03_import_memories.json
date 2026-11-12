@@ -1,13 +1,14 @@
 {
   "name": "test_import_memories",
-  "description": "Verify importing memories from a JSON backup file",
+  "description": "Verify importing memories from a JSON backup file Submit returns a queued job receipt; the registered http_jobs_smoke asserts terminal result and error through JobService.",
   "process_key": "plugin::actr_memory_plugin::import_memories_action",
   "arguments": {
     "params": {
       "file_path": "/tmp/memory_backup_test.json"
     },
     "state": {
-      "session_id": "test-session-102"
+      "session_id": "test-session-102",
+      "flow_id": "test-flow-test_import_memories"
     }
   },
   "timeout_seconds": 120

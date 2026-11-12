@@ -1,0 +1,275 @@
+{
+  "disconnect_account": {
+    "invalid": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "error": {
+        "code": "gsuite.unknown_account",
+        "message": "No connected Google account matches 'nobody@corp.example'. Connected accounts: owner@corp.example [default], home@gmail.com (alias 'home'). Pass one of those emails or aliases as `account`, or run connect_account to add it."
+      },
+      "stored_blobs": []
+    },
+    "success": {
+      "accounts_after": [
+        "owner@corp.example"
+      ],
+      "result": {
+        "account": "home@gmail.com",
+        "credentials_deleted": true,
+        "new_default": "",
+        "revoke_status": "revoked"
+      },
+      "stored_blobs": []
+    },
+    "vendor_failure": {
+      "accounts_after": [
+        "owner@corp.example"
+      ],
+      "result": {
+        "account": "home@gmail.com",
+        "credentials_deleted": true,
+        "new_default": "",
+        "revoke_status": "revoke_failed_RuntimeError"
+      },
+      "stored_blobs": []
+    }
+  },
+  "docs_export": {
+    "invalid": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "error": {
+        "code": "gsuite.invalid_params",
+        "message": "unsupported export format 'pptx'; choose one of ['docx', 'pdf', 'txt']"
+      },
+      "stored_blobs": []
+    },
+    "success": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "result": {
+        "account": "owner@corp.example",
+        "doc_blob_key": "blob-1",
+        "filename": "doc-1.docx",
+        "namespace": "g_suite_plugin"
+      },
+      "stored_blobs": [
+        {
+          "content": "doc-1 as application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "filename": "doc-1.docx",
+          "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "namespace": "g_suite_plugin"
+        }
+      ]
+    },
+    "vendor_failure": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "error": {
+        "code": "gsuite.permission_denied",
+        "message": "Google denied access (403, unspecified): The user does not have sufficient permissions for file doc-1."
+      },
+      "stored_blobs": []
+    }
+  },
+  "sheets_export": {
+    "invalid": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "error": {
+        "code": "gsuite.invalid_params",
+        "message": "unsupported export format 'pdf'; choose one of ['csv', 'xlsx']"
+      },
+      "stored_blobs": []
+    },
+    "success": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "result": {
+        "account": "owner@corp.example",
+        "filename": "sheet-1.xlsx",
+        "namespace": "g_suite_plugin",
+        "sheet_blob_key": "blob-1"
+      },
+      "stored_blobs": [
+        {
+          "content": "sheet-1 as application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "filename": "sheet-1.xlsx",
+          "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "namespace": "g_suite_plugin"
+        }
+      ]
+    },
+    "vendor_failure": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "error": {
+        "code": "gsuite.not_found",
+        "message": "Resource not found (404): File not found: sheet-1."
+      },
+      "stored_blobs": []
+    }
+  },
+  "slides_export": {
+    "invalid": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "error": {
+        "code": "gsuite.unknown_account",
+        "message": "No connected Google account matches 'nobody@corp.example'. Connected accounts: owner@corp.example [default], home@gmail.com (alias 'home'). Pass one of those emails or aliases as `account`, or run connect_account to add it."
+      },
+      "stored_blobs": []
+    },
+    "success": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "result": {
+        "account": "owner@corp.example",
+        "deck_blob_key": "blob-1",
+        "filename": "deck-1.pdf",
+        "namespace": "g_suite_plugin"
+      },
+      "stored_blobs": [
+        {
+          "content": "deck-1 as application/pdf",
+          "filename": "deck-1.pdf",
+          "mime_type": "application/pdf",
+          "namespace": "g_suite_plugin"
+        }
+      ]
+    },
+    "vendor_failure": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "error": {
+        "code": "gsuite.rate_limited",
+        "message": "Google rate limit hit (429): Rate limit exceeded.. Wait and retry."
+      },
+      "stored_blobs": []
+    }
+  },
+  "start_interface": {
+    "invalid": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "error": "invalid literal for int() with base 10: 'not-a-port'",
+      "stored_blobs": []
+    },
+    "success": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "result": {
+        "callback_url": "http://127.0.0.1:18765/oauth/google/callback",
+        "host": "127.0.0.1",
+        "message": "OAuth callback server started on the requested bind host.",
+        "port": 18765
+      },
+      "stored_blobs": []
+    },
+    "vendor_failure": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "error": {
+        "code": "callback_server_start_failed",
+        "message": "Google OAuth callback server could not bind 127.0.0.1:18765: [Errno 48] Address already in use"
+      },
+      "stored_blobs": []
+    }
+  },
+  "test_connection": {
+    "invalid": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "error": {
+        "code": "gsuite.unknown_account",
+        "message": "No connected Google account matches 'nobody@corp.example'. Connected accounts: owner@corp.example [default], home@gmail.com (alias 'home'). Pass one of those emails or aliases as `account`, or run connect_account to add it."
+      },
+      "stored_blobs": []
+    },
+    "success": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "result": {
+        "account": "home@gmail.com",
+        "account_identity": "home@gmail.com",
+        "account_tier": "consumer",
+        "granted_scopes": [
+          "https://www.googleapis.com/auth/gmail.modify"
+        ],
+        "harmless_read_ok": true,
+        "missing_default_scopes": [
+          "https://www.googleapis.com/auth/calendar.acls",
+          "https://www.googleapis.com/auth/calendar.acls.readonly",
+          "https://www.googleapis.com/auth/calendar.calendarlist",
+          "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+          "https://www.googleapis.com/auth/calendar.calendars",
+          "https://www.googleapis.com/auth/calendar.calendars.readonly",
+          "https://www.googleapis.com/auth/calendar.events",
+          "https://www.googleapis.com/auth/calendar.events.freebusy",
+          "https://www.googleapis.com/auth/calendar.events.readonly",
+          "https://www.googleapis.com/auth/calendar.settings.readonly",
+          "https://www.googleapis.com/auth/contacts",
+          "https://www.googleapis.com/auth/contacts.other.readonly",
+          "https://www.googleapis.com/auth/directory.readonly",
+          "https://www.googleapis.com/auth/documents",
+          "https://www.googleapis.com/auth/drive",
+          "https://www.googleapis.com/auth/drive.apps.readonly",
+          "https://www.googleapis.com/auth/gmail.settings.basic",
+          "https://www.googleapis.com/auth/presentations",
+          "https://www.googleapis.com/auth/spreadsheets",
+          "https://www.googleapis.com/auth/tasks",
+          "https://www.googleapis.com/auth/user.addresses.read",
+          "https://www.googleapis.com/auth/user.birthday.read",
+          "https://www.googleapis.com/auth/user.emails.read",
+          "https://www.googleapis.com/auth/user.gender.read",
+          "https://www.googleapis.com/auth/user.organization.read",
+          "https://www.googleapis.com/auth/user.phonenumbers.read",
+          "https://www.googleapis.com/auth/userinfo.email",
+          "https://www.googleapis.com/auth/userinfo.profile"
+        ]
+      },
+      "stored_blobs": []
+    },
+    "vendor_failure": {
+      "accounts_after": [
+        "owner@corp.example",
+        "home@gmail.com"
+      ],
+      "error": {
+        "code": "gsuite.auth_expired",
+        "message": "Google rejected the access token (401): Request had invalid authentication credentials.. If this repeats, run connect_account for this account again."
+      },
+      "stored_blobs": []
+    }
+  }
+}

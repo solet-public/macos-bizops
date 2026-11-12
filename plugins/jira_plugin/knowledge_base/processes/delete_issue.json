@@ -1,7 +1,7 @@
 {
   "process_key": "plugin::jira_plugin::delete_issue",
   "display_name": "Jira: Delete Issue",
-  "description": "Permanently delete a Jira issue by key. Destructive write action taking an EXPLICIT target — the issue key is required and there is no bulk form. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the delete being applied; the confirmation is delivered when the job completes.",
+  "description": "Permanently delete a Jira issue by key. Destructive write action taking an EXPLICIT target \u2014 the issue key is required and there is no bulk form. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the delete being applied; the confirmation is delivered when the job completes. Optional site selects a bound Atlassian site; omitted uses the default. Queued and completed results identify the site.",
   "embedding_description": "Permanently delete exactly one Jira issue by its required key, including the ticket's comments and attachments. Dispatches asynchronously, returning a job_id immediately; the deletion confirmation arrives via job completion. This irreversible destructive write has a single-record target.",
   "result_processor_customizations": {
     "action_label": "Jira issue deletion queued",
@@ -12,6 +12,6 @@
   "error_processor_customizations": {
     "action_context": "Permanently delete a Jira issue by key.",
     "error_interpretation": "jira.not_found: no issue with that key exists (it may already be deleted). jira.permission_denied: the service account lacks delete permission for this project. jira.invalid_params: the key was missing or empty.",
-    "recovery_guidance": "jira.not_found: confirm the key; the issue may already be gone. jira.permission_denied: deletion often needs an elevated project role — grant it or ask an admin. jira.invalid_params: supply the exact issue key."
+    "recovery_guidance": "jira.not_found: confirm the key; the issue may already be gone. jira.permission_denied: deletion often needs an elevated project role \u2014 grant it or ask an admin. jira.invalid_params: supply the exact issue key."
   }
 }

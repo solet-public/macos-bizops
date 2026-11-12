@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import re
 import subprocess
 import sys
 import unittest
@@ -113,7 +112,7 @@ class AuthenticatedRequestTests(unittest.TestCase):
                 request_actions.authenticated_request(self.executor, {"method": "DELETE", "path": "/x", "headers": headers})
         self.executor.run_rest.assert_not_called()
 
-    def test_audit_and_result_hide_secrets_but_keep_outcome(self) -> None:
+    def test_audit_omits_secrets_and_result_is_returned_as_received(self) -> None:
         self.executor.run_rest.return_value = {
             "statusCode": 201,
             "headers": {"Set-Cookie": "credential-cookie", "Content-Type": "application/json"},
@@ -124,15 +123,15 @@ class AuthenticatedRequestTests(unittest.TestCase):
                 self.executor,
                 {"method": "POST", "path": "/services/apexrest/create?password=query-secret", "query": {"token": "query-token"}, "headers": {"X-Api-Key": "header-secret"}, "body": '{"password":"input-secret"}'},
             )
-        rendered = json.dumps(result) + str(audit.output)
+        logged = str(audit.output)
         for secret in ("vendor-token", "input-secret", "query-secret", "query-token", "header-secret", "credential-cookie"):
-            self.assertNotIn(secret, rendered)
-        self.assertEqual(result["body"]["id"], "new-id")
+            self.assertNotIn(secret, logged)
+        self.assertEqual(result["body"], {"access_token": "vendor-token", "echo": "input-secret", "id": "new-id"})
         self.assertIn("duration_ms", audit.output[0])
         self.assertIn(result["correlation_id"], audit.output[0])
         self.assertIn("201", audit.output[0])
 
-    def test_xml_credentials_and_transport_failure_audit(self) -> None:
+    def test_xml_body_as_received_and_transport_failure_audit(self) -> None:
         self.executor.run_rest.return_value = {
             "statusCode": 200,
             "headers": {},
@@ -142,8 +141,7 @@ class AuthenticatedRequestTests(unittest.TestCase):
             self.executor,
             {"method": "POST", "path": "/services/Soap/u/62.0", "body": "<sessionId>xml-secret</sessionId>"},
         )
-        self.assertNotIn("vendor-session", result["body"])
-        self.assertNotIn("xml-secret", result["body"])
+        self.assertEqual(result["body"], "<sessionId>vendor-session</sessionId><echo>xml-secret</echo>")
         self.executor.run_rest.side_effect = SalesforceServiceError("sf.auth_failed", "No HTTP response")
         with self.assertLogs(request_actions.logger, level="INFO") as audit, self.assertRaises(SalesforceServiceError):
             request_actions.authenticated_request(self.executor, {"method": "POST", "path": "/x?q=hidden"})
@@ -219,39 +217,23 @@ class AuthenticatedRequestTests(unittest.TestCase):
         self.assertEqual(result["body"], transcript)
         self.assertEqual(result["transcript"], transcript)
 
-    def test_encoded_secret_echoes_are_redacted_in_results_and_audit(self) -> None:
+    def test_result_as_received_and_audit_built_without_headers_body_or_query_values(self) -> None:
         secret = "demo + /secret? ÿÿÿ"
-        encoded = secret.encode()
-        variants = {
-            secret,
-            quote(secret, safe=""),
-            quote_plus(secret, safe=""),
-            re.sub(r"%[0-9A-F]{2}", lambda match: match[0].lower(), quote(secret, safe="")),
-            base64.b64encode(encoded).decode(),
-            base64.urlsafe_b64encode(encoded).decode(),
-            base64.b64encode(encoded).decode().rstrip("="),
-            base64.urlsafe_b64encode(encoded).decode().rstrip("="),
-        }
         self.executor.run_rest.return_value = {
             "statusCode": 200,
             "headers": {"Set-Cookie": ["session=cookie-secret/+; Secure"], "Authorization": "Bearer response-token/+"},
-            "body": {"echoes": sorted(variants), "bearer_echo": base64.b64encode(b"response-token/+").decode(), "cookie_echo": quote("cookie-secret/+", safe="")},
-            "body_advisory": "Printed transcript retained",
-            "transcript": " ".join(variants) + " session=cookie-secret/+; Secure Bearer response-token/+",
+            "body": {"echo": secret},
         }
-        for variant in variants:
-            with self.subTest(variant=variant), self.assertLogs(request_actions.logger, level="INFO") as audit:
-                result = request_actions.authenticated_request(
-                    self.executor,
-                    {"method": "POST", "path": "/services/apexrest/" + variant.replace("/", "%2F"), "headers": {"X-Api-Key": secret}},
-                )
-                rendered = json.dumps(result, ensure_ascii=False) + str(audit.output)
-                for echo in variants:
-                    self.assertNotIn(echo, rendered)
-                self.assertNotIn(base64.b64encode(b"response-token/+").decode(), rendered)
-                self.assertNotIn(quote("cookie-secret/+", safe=""), rendered)
-                self.assertNotIn("cookie-secret/+", rendered)
-                self.assertNotIn("response-token/+", rendered)
+        with self.assertLogs(request_actions.logger, level="INFO") as audit:
+            result = request_actions.authenticated_request(
+                self.executor,
+                {"method": "POST", "path": "/services/apexrest/echo", "query": {"key": secret}, "headers": {"X-Api-Key": secret}, "body": json.dumps({"secret": secret})},
+            )
+        self.assertEqual(result["body"], {"echo": secret})
+        logged = str(audit.output)
+        self.assertIn("/services/apexrest/echo", logged)
+        for value in (secret, quote(secret, safe=""), quote_plus(secret, safe=""), "cookie-secret/+", "response-token/+"):
+            self.assertNotIn(value, logged)
 
     def test_registration_and_deferred_completion(self) -> None:
         plugin = SalesforcePlugin()
@@ -329,7 +311,7 @@ class PrintedBoundaryTests(unittest.TestCase):
         self.assertEqual(result["transcript"], transcript)
         self.assertTrue(result["body_advisory"])
 
-    def test_uncertain_full_transcript_still_redacts_json_credentials(self) -> None:
+    def test_uncertain_full_transcript_is_returned_as_received(self) -> None:
         executor = SalesforceCliExecutor(MagicMock())
         executor._target_org = "bound-org"  # noqa: SLF001
         token = "vendor-token/+ ÿ"
@@ -339,11 +321,9 @@ class PrintedBoundaryTests(unittest.TestCase):
         with patch("salesforce_plugin.client.subprocess.run", return_value=subprocess.CompletedProcess([], 0, transcript, "")):
             result = request_actions.authenticated_request(executor, {"method": "GET", "path": "/x"})
         self.assertTrue(result["body_advisory"])
-        self.assertEqual(result["body"], result["transcript"])
-        rendered = json.dumps(result)
-        for secret in (token, json.dumps(token)[1:-1], encoded, "cookie-secret"):
-            self.assertNotIn(secret, rendered)
-        self.assertNotIn("_redaction_context", result)
+        self.assertEqual(result["body"], transcript)
+        self.assertEqual(result["transcript"], transcript)
+        self.assertNotIn("_decoded_body", result)
 
 
 if __name__ == "__main__":

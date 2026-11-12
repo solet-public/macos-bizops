@@ -35,7 +35,7 @@ Exercises:
   11. list_invoices — row_limit caps what is WRITTEN from a single-call
       response (no vendor-side pagination assumed)
   12-15. list_invoices — 4-case override-friction set (§5)
-  16. red-first: export path OUTSIDE every allowed root -> ExportPathRefusedError,
+  16. red-first: export path OUTSIDE every allowed root -> PathRefusedError,
       no file written, no vendor call made
 
 Run:
@@ -48,32 +48,41 @@ Exits 0 on success, 1 on first failure.
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
 
-import httpx
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta/src"))
+import tempfile  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+import httpx  # noqa: E402
+from ananta.file_locations.containment import PathRefusedError, assert_path_allowed, derive_allowed_roots  # noqa: E402
+from ananta.file_locations.resolution import PathAddress, SoletTree  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "zuora_plugin" / "src"))
 
 from zuora_plugin import billing_actions  # noqa: E402
-from zuora_plugin.constants import (  # noqa: E402
-    CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
-    DEFAULT_ROW_LIMIT,
-    LIST_ROW_LIMIT_CAP,
-    PARAM_ACKNOWLEDGE_OVERRIDE,
-    PARAM_ROW_LIMIT,
-    ZUORA_LIST_PAGE_SIZE_MAX,
-)
-from zuora_plugin.export_containment import (  # noqa: E402
-    ExportPathRefusedError,
-    assert_export_path_allowed,
-)
+from zuora_plugin.constants import DEFAULT_ROW_LIMIT, LIST_ROW_LIMIT_CAP, PARAM_ACKNOWLEDGE_OVERRIDE, PARAM_ROW_LIMIT, ZUORA_LIST_PAGE_SIZE_MAX  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
+
+
+_LOCATION_ROOT = Path(__file__).resolve().parents[3]
+_LOCATION_TREE = SoletTree(_LOCATION_ROOT, _LOCATION_ROOT / "profile")
+
+
+def _checked_path(path: str, directories: list[str], *, suffix: str | None = ".tsv", param_name: str = "output_tsv_path", reading: bool = False) -> str:
+    """Exercise real address-derived containment, never a mocked boundary."""
+    addresses = [PathAddress(f"project-{index}", Path(directory), frozenset(), frozenset(), datetime.now(UTC)) for index, directory in enumerate(directories)]
+    roots = derive_allowed_roots(addresses, None, _LOCATION_TREE, _LOCATION_ROOT.parent / "test-solet-files")
+    result = assert_path_allowed(path, roots, _LOCATION_TREE, suffix=suffix, param_name=param_name, plugin_name="test")
+    if reading and not Path(result.value).is_file():
+        raise PathRefusedError(f"{param_name} must name an existing regular file")
+    return result.value
 
 
 def _assert(label: str, cond: bool, msg: str = "") -> None:
@@ -88,9 +97,7 @@ def _assert(label: str, cond: bool, msg: str = "") -> None:
 
 def _gate_for(roots: list[str]) -> Any:
     def gate(output_tsv_path: str) -> str:
-        return assert_export_path_allowed(
-            output_tsv_path, roots, config_key=CONFIG_KEY_EXPORT_ALLOWED_ROOTS, plugin_name="zuora_plugin",
-        )
+        return _checked_path(output_tsv_path, roots, suffix=".tsv", param_name="output_tsv_path", reading=False)
 
     return gate
 
@@ -195,7 +202,9 @@ def _list_override_friction_cases(verb: Any, list_key: str, label_prefix: str) -
 
         client = _paged_client(list_key, [[{"id": str(i)} for i in range(600)]])
         result = verb(
-            client, {"account_id": "acc1", "output_tsv_path": out_path, PARAM_ACKNOWLEDGE_OVERRIDE: True, PARAM_ROW_LIMIT: 600}, _passthrough_gate,
+            client,
+            {"account_id": "acc1", "output_tsv_path": out_path, PARAM_ACKNOWLEDGE_OVERRIDE: True, PARAM_ROW_LIMIT: 600},
+            _passthrough_gate,
         )
         _assert(f"{label_prefix}: override reaches 600", result["row_count"] == 600)
 
@@ -245,7 +254,9 @@ def test_list_invoices_row_limit_caps_single_call_response() -> None:
     with tempfile.TemporaryDirectory(prefix="zuora_inv_cap_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
         result = billing_actions.list_invoices(
-            client, {"account_id": "acc1", "output_tsv_path": out_path, PARAM_ACKNOWLEDGE_OVERRIDE: True, PARAM_ROW_LIMIT: 10}, _passthrough_gate,
+            client,
+            {"account_id": "acc1", "output_tsv_path": out_path, PARAM_ACKNOWLEDGE_OVERRIDE: True, PARAM_ROW_LIMIT: 10},
+            _passthrough_gate,
         )
         _assert("write-side cap applied", result["row_count"] == 10)
         _assert("truncated True — more than the cap were returned by the vendor call", result["truncated"] is True)
@@ -263,7 +274,7 @@ def test_export_path_outside_allowed_root_refused() -> None:
         raised = False
         try:
             billing_actions.list_subscriptions(client, {"account_id": "acc1", "output_tsv_path": out_path}, gate)
-        except ExportPathRefusedError:
+        except PathRefusedError:
             raised = True
         _assert("outside-root path refused", raised)
         _assert("vendor never called when the path is refused", client.get.call_count == 0)

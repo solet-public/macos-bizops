@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "external_postgres_plugin"
 version = "1.0.0"
-description = "Read-only foreign-Postgres query plugin (a super Datagrip) for Ananta"
+description = "Foreign-Postgres plugin (a super Datagrip): queries, writes, scripts, COPY, dump/restore and administration for Ananta"
 authors = [
     {name = "Ananta Development Team", email = "dev@ananta.ai"},
 ]
@@ -15,8 +15,8 @@ dependencies = [
     "ananta",
     # Official psycopg v3 (binary wheel avoids a libpq build dep) — the executor.
     "psycopg[binary]>=3.2",
-    # sqlparse (BSD) — the single-statement parser (result-shape hygiene, NOT the
-    # write boundary; the read-only connection is the boundary). Operator-ratified
+    # sqlparse (BSD) — the statement splitter (result-shape hygiene and run_script's
+    # statement boundaries, never an access-control decision). Operator-ratified
     # rev-F-final over pglast (GPL-3.0).
     "sqlparse>=0.5",
 ]

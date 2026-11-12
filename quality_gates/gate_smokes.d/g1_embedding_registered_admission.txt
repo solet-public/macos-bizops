@@ -1,0 +1,1 @@
+plugins/coreai_embeddings_plugin/tests/g1_embedding_registered_admission_smoke.py

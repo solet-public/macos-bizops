@@ -1,12 +1,12 @@
 {
   "process_key": "service_interface::vault_service::unlock",
   "display_name": "Unlock Vault",
-  "description": "Unlock the vault with passphrase. Required before accessing secrets. Can also be done via the per-solet <SOLET_NAME>_VAULT_PASSPHRASE env var (e.g. EXAMPLE_VAULT_PASSPHRASE for a solet named 'example').",
-  "embedding_description": "Vault: unlock. Provide the passphrase so the platform derives the master key (PBKDF2, 1.2M iterations) and decrypts stored secrets. Required before retrieve, store, rotate, or delete will succeed. Can also be done implicitly at startup via the per-solet <NAME>_VAULT_PASSPHRASE env var (e.g. EXAMPLE_VAULT_PASSPHRASE for a solet named 'example').",
+  "description": "Returns an owned vault job receipt (job_id/status); read the exact job with job_service.get_job for its public terminal outcome. Unlock the vault with passphrase. Required before accessing secrets. Can also be done via the per-solet <SOLET_NAME>_VAULT_PASSPHRASE env var (e.g. EXAMPLE_VAULT_PASSPHRASE for a solet named 'example').",
+  "embedding_description": "Vault: unlock. Provide the passphrase so the platform derives the master key (PBKDF2, 1.2M iterations) and decrypts stored secrets. Required before retrieve, store, rotate, or delete will succeed. Can also be done implicitly at startup via the per-solet <NAME>_VAULT_PASSPHRASE env var (e.g. EXAMPLE_VAULT_PASSPHRASE for a solet named 'example'). Registered execution returns job_id/status; the complete public outcome is in job.result. Secret operands remain volatile and failures are sanitized; uncertain effects require reconciliation, never automatic replay.",
   "result_processor_customizations": {
     "action_label": "Vault unlocked",
     "result_type": "vault_unlocked",
-    "result_description": "Vault unlock result. Contains message (status) and unlocked (true if successful). Master key is now in memory.",
+    "result_description": "Queued vault job receipt. Completed public outcome: Vault unlock result. Contains message (status) and unlocked (true if successful). Master key is now in memory.",
     "presentation_guidance": "",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },

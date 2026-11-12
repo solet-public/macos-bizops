@@ -1,13 +1,13 @@
 {
   "process_key": "plugin::actr_memory_plugin::learn_action",
   "display_name": "Learn",
-  "description": "Ingest knowledge from files",
-  "embedding_description": "Ingest knowledge from files or directories into long-term memory. Provide path, optional glob pattern, recursive flag, tags, and memorize option. Returns counts of memories created and files skipped. Works well with markdown sources by default.",
+  "description": "Ingest knowledge from files Returns immediately with data {job_id, status: queued}. Retrieve service_interface::job_service::get_job by that exact id until terminal; the complete former response envelope is in job.result and failures are also in job.error. Proceed with dependent work only after successful completion.",
+  "embedding_description": "Ingest files or directories using path, pattern, recursion, tags and optional memorization. Markdown is the default pattern. Returns data {job_id, status: queued}. Read service_interface::job_service::get_job until terminal; job.result retains the original response and job.error preserves failures.",
   "result_processor_customizations": {
     "action_label": "Knowledge ingested",
     "result_type": "knowledge_ingested",
-    "result_description": "Ingestion results with memories_created count and file statistics",
-    "presentation_guidance": "",
-    "output_action_guidance": "Determine the appropriate next action based on the context and action result."
+    "result_description": "Queued receipt {job_id, status}; after terminal success, job.result.data contains: Ingestion results with memories_created count and file statistics",
+    "presentation_guidance": "Retrieve the job by its canonical id and distinguish queued/processing from terminal. After terminal success: ",
+    "output_action_guidance": "Read job_service.get_job until terminal; use job.result for the original result, and handle job.error on failure before dependent work."
   }
 }

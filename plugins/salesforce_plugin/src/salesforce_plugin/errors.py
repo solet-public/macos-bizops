@@ -42,14 +42,10 @@ from .constants import (
 )
 
 # Salesforce REST errorCode strings -> this plugin's sf.* classification.
-_ERROR_CODE_PERMISSION_DENIED: frozenset[str] = frozenset(
-    {"INSUFFICIENT_ACCESS_OR_READONLY", "INSUFFICIENT_ACCESS"}
-)
+_ERROR_CODE_PERMISSION_DENIED: frozenset[str] = frozenset({"INSUFFICIENT_ACCESS_OR_READONLY", "INSUFFICIENT_ACCESS"})
 _ERROR_CODE_RATE_LIMITED: frozenset[str] = frozenset({"REQUEST_LIMIT_EXCEEDED"})
 _ERROR_CODE_NOT_FOUND: frozenset[str] = frozenset({"NOT_FOUND"})
-_ERROR_CODE_MALFORMED_QUERY: frozenset[str] = frozenset(
-    {"MALFORMED_QUERY", "INVALID_FIELD", "INVALID_TYPE", "MALFORMED_ID"}
-)
+_ERROR_CODE_MALFORMED_QUERY: frozenset[str] = frozenset({"MALFORMED_QUERY", "INVALID_FIELD", "INVALID_TYPE", "MALFORMED_ID"})
 _ERROR_CODE_SESSION_EXPIRED: frozenset[str] = frozenset({"INVALID_SESSION_ID"})
 _ERROR_CODE_AUTH_FAILED: frozenset[str] = frozenset({"INVALID_LOGIN"})
 
@@ -66,6 +62,10 @@ class SalesforceServiceError(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class TypedFamilyError(ValueError):
+    """Caller input that the vendor document would reject; no I/O was attempted."""
 
 
 class SalesforceCliCallError(Exception):
@@ -98,8 +98,7 @@ def classify_salesforce_error(exc: Exception) -> tuple[str, str]:
     if code in _ERROR_CODE_PERMISSION_DENIED:
         return (
             ERROR_PERMISSION_DENIED,
-            "Salesforce denied access. The integration user lacks permission for "
-            "this object or operation.",
+            "Salesforce denied access. The integration user lacks permission for this object or operation.",
         )
     if code in _ERROR_CODE_RATE_LIMITED:
         return ERROR_RATE_LIMITED, "Salesforce API request limit exceeded. Retry after a short delay."

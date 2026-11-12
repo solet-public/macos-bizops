@@ -134,7 +134,9 @@ def test_get_leads_named_acceptance_scenario() -> None:
     """Request 500 -> 2 internal pages (300 + 200) -> one complete file."""
     client = _token_pages_client([_full_page(MARKETO_LIST_PAGE_ROW_CAP), _full_page(200, start=MARKETO_LIST_PAGE_ROW_CAP)])
     result = marketing_actions.get_leads(
-        client, {"filter_type": "id", "filter_values": ["x"], "output_tsv_path": _tmp_tsv_path()}, _passthrough_gate,
+        client,
+        {"filter_type": "id", "filter_values": ["x"], "output_tsv_path": _tmp_tsv_path()},
+        _passthrough_gate,
     )
     _assert("get_leads named scenario: exactly 2 internal vendor calls", client.get_json.call_count == 2)
     _assert("get_leads named scenario: one complete file with 500 rows", result["row_count"] == DEFAULT_ROW_LIMIT)
@@ -144,7 +146,9 @@ def test_get_leads_named_acceptance_scenario() -> None:
 def test_get_leads_override_friction() -> None:
     _override_friction_cases(
         lambda client, params: marketing_actions.get_leads(
-            client, {"filter_type": "id", "filter_values": ["x"], **params}, _passthrough_gate,
+            client,
+            {"filter_type": "id", "filter_values": ["x"], **params},
+            _passthrough_gate,
         ),
         "get_leads",
     )
@@ -193,7 +197,8 @@ def test_list_campaigns_named_acceptance_scenario() -> None:
 
 def test_list_campaigns_override_friction() -> None:
     _override_friction_cases(
-        lambda client, params: marketing_actions.list_campaigns(client, params, _passthrough_gate), "list_campaigns",
+        lambda client, params: marketing_actions.list_campaigns(client, params, _passthrough_gate),
+        "list_campaigns",
     )
 
 
@@ -212,7 +217,8 @@ def test_list_static_lists_named_acceptance_scenario() -> None:
 
 def test_list_static_lists_override_friction() -> None:
     _override_friction_cases(
-        lambda client, params: marketing_actions.list_static_lists(client, params, _passthrough_gate), "list_static_lists",
+        lambda client, params: marketing_actions.list_static_lists(client, params, _passthrough_gate),
+        "list_static_lists",
     )
 
 

@@ -38,4 +38,5 @@ class ErrorCode:
     NOT_FOUND = "address_book.not_found"
     ENTRY_NOT_FOUND = "address_book.entry_not_found"
     INVALID_ENTRY = "address_book.invalid_entry"
+    PATH_OVERLAPS_TREE = "address_book.path_overlaps_tree"
     MEMORY_ERROR = "address_book.memory_error"

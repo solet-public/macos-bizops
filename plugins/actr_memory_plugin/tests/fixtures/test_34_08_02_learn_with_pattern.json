@@ -1,6 +1,6 @@
 {
   "name": "test_learn_with_pattern",
-  "description": "Verify ingesting files matching a specific glob pattern",
+  "description": "Verify ingesting files matching a specific glob pattern Submit returns a queued job receipt; the registered http_jobs_smoke asserts terminal result and error through JobService.",
   "process_key": "plugin::actr_memory_plugin::learn_action",
   "arguments": {
     "params": {
@@ -9,7 +9,8 @@
       "recursive": true
     },
     "state": {
-      "session_id": "test-session-071"
+      "session_id": "test-session-071",
+      "flow_id": "test-flow-test_learn_with_pattern"
     }
   },
   "timeout_seconds": 60

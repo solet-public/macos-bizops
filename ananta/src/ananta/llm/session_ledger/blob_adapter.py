@@ -10,8 +10,14 @@ convention.
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import re
+import time
+from collections.abc import Generator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from hashlib import sha256
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ananta.llm.session_ledger.schema import CONTENT_INLINE_TEXT_MAX_BYTES, NAMESPACE
@@ -41,6 +47,39 @@ class BlobAdapterError(RuntimeError):
     """
 
 
+@contextmanager
+def blob_write_guard(root: Path, *, timeout: float | None = None) -> Generator[bool]:
+    """Serialize filesystem blob acquisition/reference and reclaim across processes.
+
+    Open a fresh descriptor per acquisition so threads in one process also
+    exclude each other. Never unlink this stable lock file: changing its inode
+    would split ownership. Importers wait; reclaim may yield False on timeout.
+    """
+    lock_path = root / ".session_ledger_write_guard.lock"
+    with lock_path.open("a") as handle:
+        acquired = False
+        try:
+            if timeout is None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                acquired = True
+            else:
+                deadline = time.monotonic() + timeout
+                while True:
+                    try:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        acquired = True
+                        break
+                    except BlockingIOError:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        time.sleep(min(0.01, remaining))
+            yield acquired
+        finally:
+            if acquired:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def _decode_blob_text(raw_content: object, blob_id: str) -> str:
     """Decode a ``retrieve_blob`` ``content`` field back to its UTF-8 string.
 
@@ -54,8 +93,7 @@ def _decode_blob_text(raw_content: object, blob_id: str) -> str:
     if isinstance(raw_content, str) and raw_content and _BLOB_HEX_RE.match(raw_content):
         return bytes.fromhex(raw_content).decode("utf-8")
     raise BlobAdapterError(
-        f"blob {blob_id!r} returned undecodable content "
-        f"(type={type(raw_content).__name__})",
+        f"blob {blob_id!r} returned undecodable content (type={type(raw_content).__name__})",
     )
 
 
@@ -75,6 +113,15 @@ class SessionLedgerBlobAdapter:
     def blob_storage_service(self) -> BlobStorageServiceInterface:
         """Return the bound blob storage service (used by startup smoke for identity check)."""
         return self._blob_storage_service
+
+    def write_guard(self) -> AbstractContextManager[bool]:
+        """Guard offloaded event acquisition through reference publication.
+
+        Remote/bootstrap stores have no shared filesystem and cannot run the
+        filesystem reclaim verb; they do not participate in this file lock.
+        """
+        root = self._blob_storage_service.get_blob_store_root()
+        return nullcontext(True) if root is None else blob_write_guard(root)
 
     def should_offload_text(self, content_text: str) -> bool:
         """Return True iff inline storage would exceed the per-event byte cap.
@@ -96,18 +143,57 @@ class SessionLedgerBlobAdapter:
 
         Metadata is non-secret diagnostic data (session ids + sequence).
         """
+        content = content_text.encode("utf-8")
+        file_hash = sha256(content).hexdigest()
+        existing_blob_id = self._find_event_blob_by_hash(file_hash)
+        if existing_blob_id is not None:
+            return existing_blob_id
         metadata: dict[str, object] = {
             "kind": "event_content_text",
             "session_id": session_id,
             "external_session_id": external_session_id,
             "sequence": sequence,
             "mime_type": CONTENT_TEXT_MIME,
+            "file_hash": file_hash,
         }
         return self._store(
-            content=content_text.encode("utf-8"),
+            content=content,
             metadata=metadata,
             kind_for_error="event_content_text",
         )
+
+    def _find_event_blob_by_hash(self, file_hash: str) -> str | None:
+        """Return one existing content-addressed blob for ``file_hash``.
+
+        The blob provider owns the indexed metadata lookup. A malformed or
+        failed response is an adapter error, never a reason to silently store
+        another copy of the payload.
+        """
+        result = self._blob_storage_service.search_blobs(
+            namespace=NAMESPACE,
+            metadata_filters={
+                "file_hash": file_hash,
+                "limit": 1,
+            },
+        )
+        if result.get("action_status") != "completed":
+            error = result.get("error") or "blob_storage_service returned non-completed status"
+            raise BlobAdapterError(
+                f"blob hash lookup failed: status={result.get('action_status')!r} error={error!r}",
+            )
+        data = result.get("data")
+        if not isinstance(data, dict):
+            raise BlobAdapterError(f"blob hash lookup returned malformed data: {data!r}")
+        files = data.get("files")
+        if not isinstance(files, list):
+            raise BlobAdapterError(f"blob hash lookup returned malformed files: {files!r}")
+        if not files:
+            return None
+        first = files[0]
+        blob_id = first.get("blob_id") if isinstance(first, dict) else None
+        if not isinstance(blob_id, str) or not blob_id:
+            raise BlobAdapterError(f"blob hash lookup returned malformed file row: {first!r}")
+        return blob_id
 
     def fetch_event_text(self, blob_id: str) -> str:
         """Retrieve a previously offloaded event's ``content_text`` by ``blob_id``.
@@ -124,8 +210,7 @@ class SessionLedgerBlobAdapter:
         if status != "completed":
             error = result.get("error") or "blob_storage_service returned non-completed status"
             raise BlobAdapterError(
-                f"blob retrieval failed for blob_id={blob_id!r}: "
-                f"status={status!r} error={error!r}",
+                f"blob retrieval failed for blob_id={blob_id!r}: status={status!r} error={error!r}",
             )
         data = result.get("data") or {}
         return _decode_blob_text(data.get("content"), blob_id)
@@ -197,9 +282,7 @@ class SessionLedgerBlobAdapter:
         status = result.get("action_status")
         if status != "completed":
             error = result.get("error") or "blob_storage_service returned non-completed status"
-            raise BlobAdapterError(
-                f"blob staging failed for {kind_for_error}: status={status!r} error={error!r}"
-            )
+            raise BlobAdapterError(f"blob staging failed for {kind_for_error}: status={status!r} error={error!r}")
         data = result.get("data") or {}
         blob_id_obj: object = data.get("blob_id")
         if blob_id_obj is None:
@@ -207,9 +290,7 @@ class SessionLedgerBlobAdapter:
             if isinstance(inner, dict):
                 blob_id_obj = inner.get("blob_id")
         if not isinstance(blob_id_obj, str) or not blob_id_obj:
-            raise BlobAdapterError(
-                f"blob_storage_service did not return a blob_id for {kind_for_error}: {data!r}"
-            )
+            raise BlobAdapterError(f"blob_storage_service did not return a blob_id for {kind_for_error}: {data!r}")
         return blob_id_obj
 
 

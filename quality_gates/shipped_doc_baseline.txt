@@ -166,7 +166,6 @@ macos-bizops	DEAD	plugins/default_thinking_plugin/src/default_thinking_plugin/jo
 macos-bizops	DEAD	plugins/default_thinking_plugin/src/default_thinking_plugin/joseki_run_store.py::workbench/2026-07-05_run_joseki_driver_design_spec.md	1
 macos-bizops	DEAD	plugins/external_postgres_plugin/knowledge_base/01_external_postgres_overview.md::workbench/2026-07-15_result_error_processing_architecture_deep_dive.md	1
 macos-bizops	DEAD	plugins/external_postgres_plugin/knowledge_base/01_external_postgres_overview.md::workbench/2026-08-09_sync_verb_d03_deferred_completion_doctrine_syncverb-doctrine.md	1
-macos-bizops	DEAD	plugins/external_postgres_plugin/src/external_postgres_plugin/export_containment.py::workbench/2026-07-15_architect_connector_rollout_rulings.md	1
 macos-bizops	DEAD	plugins/g_suite_plugin/knowledge_base/01_g_suite_overview.md::03_writing_plugins/PLUGIN_AUTHORING_TRAPS.md	1
 macos-bizops	DEAD	plugins/g_suite_plugin/knowledge_base/01_g_suite_overview.md::workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md	1
 macos-bizops	DEAD	plugins/github_midwife_plugin/claude_plugin/coordination-hooks/README.md::hooks/hooks.json	1
@@ -241,12 +240,10 @@ macos-bizops	DEAD	plugins/marketo_plugin/knowledge_base/01_marketo_overview.md::
 macos-bizops	DEAD	plugins/marketo_plugin/knowledge_base/01_marketo_overview.md::src/marketo_plugin/app_config.py	1
 macos-bizops	DEAD	plugins/marketo_plugin/knowledge_base/01_marketo_overview.md::src/marketo_plugin/constants.py	1
 macos-bizops	DEAD	plugins/marketo_plugin/knowledge_base/01_marketo_overview.md::src/marketo_plugin/errors.py	1
-macos-bizops	DEAD	plugins/marketo_plugin/knowledge_base/01_marketo_overview.md::src/marketo_plugin/export_containment.py	1
 macos-bizops	DEAD	plugins/marketo_plugin/knowledge_base/01_marketo_overview.md::src/marketo_plugin/http_client.py	1
 macos-bizops	DEAD	plugins/marketo_plugin/knowledge_base/01_marketo_overview.md::src/marketo_plugin/marketing_actions.py	1
 macos-bizops	DEAD	plugins/marketo_plugin/knowledge_base/01_marketo_overview.md::src/marketo_plugin/plugin.py	1
 macos-bizops	DEAD	plugins/marketo_plugin/knowledge_base/01_marketo_overview.md::workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md	1
-macos-bizops	DEAD	plugins/marketo_plugin/src/marketo_plugin/export_containment.py::workbench/2026-07-15_architect_connector_rollout_rulings.md	1
 macos-bizops	DEAD	plugins/salesforce_plugin/knowledge_base/01_salesforce_overview.md::src/salesforce_plugin/app_config.py	1
 macos-bizops	DEAD	plugins/salesforce_plugin/knowledge_base/01_salesforce_overview.md::src/salesforce_plugin/client.py	1
 macos-bizops	DEAD	plugins/salesforce_plugin/knowledge_base/01_salesforce_overview.md::src/salesforce_plugin/constants.py	1
@@ -254,7 +251,6 @@ macos-bizops	DEAD	plugins/salesforce_plugin/knowledge_base/01_salesforce_overvie
 macos-bizops	DEAD	plugins/salesforce_plugin/knowledge_base/01_salesforce_overview.md::src/salesforce_plugin/plugin.py	1
 macos-bizops	DEAD	plugins/salesforce_plugin/knowledge_base/01_salesforce_overview.md::src/salesforce_plugin/record_actions.py	1
 macos-bizops	DEAD	plugins/salesforce_plugin/knowledge_base/01_salesforce_overview.md::src/salesforce_plugin/soql_actions.py	1
-macos-bizops	DEAD	plugins/salesforce_plugin/src/salesforce_plugin/export_containment.py::workbench/2026-07-15_architect_connector_rollout_rulings.md	1
 macos-bizops	DEAD	plugins/session_bridge_plugin/src/session_bridge_plugin/plugin.py::workbench/2026-05-27_w4_hook_bridge_design.md	1
 macos-bizops	DEAD	plugins/snowflake_plugin/knowledge_base/01_snowflake_overview.md::src/snowflake_plugin/app_config.py	1
 macos-bizops	DEAD	plugins/snowflake_plugin/knowledge_base/01_snowflake_overview.md::src/snowflake_plugin/async_jobs.py	1
@@ -265,12 +261,10 @@ macos-bizops	DEAD	plugins/snowflake_plugin/knowledge_base/01_snowflake_overview.
 macos-bizops	DEAD	plugins/snowflake_plugin/knowledge_base/01_snowflake_overview.md::src/snowflake_plugin/query_actions.py	1
 macos-bizops	DEAD	plugins/snowflake_plugin/knowledge_base/01_snowflake_overview.md::src/snowflake_plugin/statement_guard.py	1
 macos-bizops	DEAD	plugins/snowflake_plugin/knowledge_base/01_snowflake_overview.md::workbench/2026-07-15_result_error_processing_architecture_deep_dive.md	1
-macos-bizops	DEAD	plugins/snowflake_plugin/src/snowflake_plugin/export_containment.py::workbench/2026-07-15_architect_connector_rollout_rulings.md	1
 macos-bizops	DEAD	plugins/zuora_plugin/knowledge_base/01_zuora_overview.md::src/zuora_plugin/app_config.py	1
 macos-bizops	DEAD	plugins/zuora_plugin/knowledge_base/01_zuora_overview.md::src/zuora_plugin/billing_actions.py	1
 macos-bizops	DEAD	plugins/zuora_plugin/knowledge_base/01_zuora_overview.md::src/zuora_plugin/constants.py	1
 macos-bizops	DEAD	plugins/zuora_plugin/knowledge_base/01_zuora_overview.md::src/zuora_plugin/errors.py	1
-macos-bizops	DEAD	plugins/zuora_plugin/knowledge_base/01_zuora_overview.md::src/zuora_plugin/export_containment.py	1
 macos-bizops	DEAD	plugins/zuora_plugin/knowledge_base/01_zuora_overview.md::src/zuora_plugin/http_client.py	1
 macos-bizops	DEAD	plugins/zuora_plugin/knowledge_base/01_zuora_overview.md::src/zuora_plugin/plugin.py	1
 macos-bizops	DEAD	plugins/zuora_plugin/knowledge_base/01_zuora_overview.md::tests/smoke_data_query.py	1
@@ -278,7 +272,6 @@ macos-bizops	DEAD	plugins/zuora_plugin/knowledge_base/01_zuora_overview.md::work
 macos-bizops	DEAD	plugins/zuora_plugin/knowledge_base/01_zuora_overview.md::workbench/2026-07-09_enterprise_connectors_design.md	1
 macos-bizops	DEAD	plugins/zuora_plugin/knowledge_base/01_zuora_overview.md::workbench/2026-07-15_result_error_processing_architecture_deep_dive.md	1
 macos-bizops	DEAD	plugins/zuora_plugin/knowledge_base/01_zuora_overview.md::workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md	1
-macos-bizops	DEAD	plugins/zuora_plugin/src/zuora_plugin/export_containment.py::workbench/2026-07-15_architect_connector_rollout_rulings.md	1
 macos_free_minimal	DEAD	RELEASE_NOTES.md::.claude-plugin/marketplace.json	1
 macos_free_minimal	DEAD	ananta/knowledge_base/coordinator_dispatch_discipline.md::knowledge_bases/agent_messaging_plugin/03_inter_agent_messaging.md	1
 macos_free_minimal	DEAD	ananta/knowledge_base/in_session_reload_ergonomics.md::plugins/audio_processing_plugin/knowledge_base/audio_analysis_overview.md	1
@@ -635,7 +628,6 @@ macos_samantha	DEAD	plugins/default_thinking_plugin/src/default_thinking_plugin/
 macos_samantha	DEAD	plugins/default_thinking_plugin/src/default_thinking_plugin/joseki_run_store.py::workbench/2026-07-05_run_joseki_driver_design_spec.md	1
 macos_samantha	DEAD	plugins/external_postgres_plugin/knowledge_base/01_external_postgres_overview.md::workbench/2026-07-15_result_error_processing_architecture_deep_dive.md	1
 macos_samantha	DEAD	plugins/external_postgres_plugin/knowledge_base/01_external_postgres_overview.md::workbench/2026-08-09_sync_verb_d03_deferred_completion_doctrine_syncverb-doctrine.md	1
-macos_samantha	DEAD	plugins/external_postgres_plugin/src/external_postgres_plugin/export_containment.py::workbench/2026-07-15_architect_connector_rollout_rulings.md	1
 macos_samantha	DEAD	plugins/g_suite_plugin/knowledge_base/01_g_suite_overview.md::03_writing_plugins/PLUGIN_AUTHORING_TRAPS.md	1
 macos_samantha	DEAD	plugins/g_suite_plugin/knowledge_base/01_g_suite_overview.md::workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md	1
 macos_samantha	DEAD	plugins/github_midwife_plugin/claude_plugin/coordination-hooks/README.md::hooks/hooks.json	1

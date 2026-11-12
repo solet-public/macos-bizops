@@ -57,12 +57,6 @@ _RENDER_TOKENS = {
     # Deliberately NOT a literal unrelated to the name above — a fixture that let the
     # two drift would stop modelling the derivation the ruling requires.
     "{{MARKETPLACE_NAME}}": "iris",
-    # The rendered controller label. The single-session render is the same launcher
-    # with the whole GIT_CONTROLLER_NAME line deleted, which is a hydration edit
-    # rather than a token value, so it is checked separately below rather than
-    # modelled as a second fixture value here. Neither render arms or exempts
-    # anything: the git-text gate that read this export was removed in 0.9.0.
-    "{{GIT_CONTROLLER_NAME}}": "Git-Controller",
     # Existing-install managed-artifact templates (design section 6.1).
     "{{SHELL_FILE_ZSH}}": "'/Users/example/Workspace/iris/client/iris.zsh'",
     "{{RUNTIME_DIR}}": "/Users/example/.ananta/runtime/iris",
@@ -311,7 +305,7 @@ def _check_generated_hook_surfaces() -> None:
     _check_rename_and_fleet_templates()
     _check_settings_hook_kb_guidance(settings)
     _check_marketplace_matches_settings(settings)
-    _check_git_controller_export()
+    _check_retired_controller_setting()
     _check_solet_name_export()
     _check_coordination_receipt_export()
     _check_bash_shell_export()
@@ -457,9 +451,7 @@ _PLUGIN_HOOKS_DIR = _TEMPLATES_DIR.parents[1] / "claude_plugin" / "coordination-
 
 def _shipped_hook_entrypoints() -> set[str]:
     """Every distinct script the shipped hooks.json actually registers."""
-    manifest = json.loads(
-        (_PLUGIN_HOOKS_DIR / "hooks.json").read_text(encoding="utf-8"),
-    )
+    manifest = json.loads((_PLUGIN_HOOKS_DIR / "hooks.json").read_text(encoding="utf-8"))
     scripts: set[str] = set()
     for groups in manifest["hooks"].values():
         for group in groups:
@@ -589,46 +581,28 @@ def _check_fleet_tmux_hosting(fleet: str) -> None:
     )
 
 
-def _check_git_controller_export() -> None:
-    """Every launcher exports the same GIT_CONTROLLER_NAME label, and the line can be deleted.
-
-    The git-text gate that read this export was removed in 0.9.0 (operator ruling
-    rul_e71e43be); no shipped hook reads the variable now, so it arms and exempts
-    nothing. The export survives as the operator's recorded choice of git-mutating
-    role, which `existing_install_operations.py` reads back from the launcher and
-    `setup_shell_operations.py` deletes when no name is chosen. This check pins that
-    surface and nothing more. Two failure shapes it catches: one launcher carrying the
-    recorded label and another not, so the choice reads differently depending on which
-    launcher started the session; and a single-session render that deletes the line but
-    leaves the launcher syntactically broken.
-    """
-    launchers = {
-        name: _render((_TEMPLATES_DIR / name).read_text(encoding="utf-8"))
-        for name in (
-            "claude_launcher.template",
-            "codex_launcher.template",
-            "fleet_functions.zsh.template",
-        )
-    }
-    exported = {name: f'GIT_CONTROLLER_NAME="{_RENDER_TOKENS["{{GIT_CONTROLLER_NAME}}"]}"' in body for name, body in launchers.items()}
-    _check(
-        "controller label: ALL launchers export the same GIT_CONTROLLER_NAME, so the recorded choice does not depend on which launcher started the session",
-        all(exported.values()),
-        f"exported per launcher: {exported} — a launcher without the export records no controller choice, and the managed refresh cannot read one back from it",
-    )
-    for name, body in launchers.items():
-        single_session = "\n".join(line for line in body.splitlines() if "GIT_CONTROLLER_NAME=" not in line)
+def _check_retired_controller_setting() -> None:
+    """All rendered launchers omit the assignment and clear stale inheritance."""
+    for name in (
+        "claude_launcher.template",
+        "codex_launcher.template",
+        "fleet_functions.zsh.template",
+    ):
+        body = _render((_TEMPLATES_DIR / name).read_text(encoding="utf-8"))
         _check(
-            f"controller label: {name} still parses as zsh with the line deleted (single-session render)",
-            subprocess.run(
-                ["zsh", "-n", "/dev/stdin"],
-                input=single_session,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            ).returncode
-            == 0,
-            "a single-session render is performed by DELETING the export line; if that breaks the launcher, hydration cannot produce a working single-session launcher",
+            f"retired setting: {name} has no assignment or placeholder",
+            "GIT_CONTROLLER_NAME=" not in body and "{{GIT_CONTROLLER_NAME}}" not in body,
+            body,
+        )
+        _check(
+            f"retired setting: {name} clears inherited caller values",
+            "unset GIT_CONTROLLER_NAME" in body,
+            body,
+        )
+        _check(
+            f"retired setting: {name} parses as zsh",
+            subprocess.run(["zsh", "-n", "/dev/stdin"], input=body, capture_output=True, text=True, timeout=10).returncode == 0,
+            body,
         )
 
 
@@ -769,6 +743,10 @@ def _check_settings_hook_kb_guidance(settings: str) -> None:
 
 def main() -> int:
     try:
+        for launcher in ("claude_launcher.template", "codex_launcher.template"):
+            rendered = _render((_TEMPLATES_DIR / launcher).read_text(encoding="utf-8"))
+            capture = 'export SOLET_LAUNCH_DIRECTORY="$PWD"'
+            _check(f"{launcher}: capture launch directory before cd", capture in rendered and rendered.index(capture) < rendered.index("\ncd "), "launch directory must be exported before entering the clone")
         _check_directory_is_flat()
         _check_file_map_matches_disk()
         _check_refresh_classes_match_disk_and_bundle()

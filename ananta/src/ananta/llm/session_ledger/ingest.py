@@ -135,7 +135,8 @@ def _is_known_external_id_collision(exc: LedgerRepositoryError) -> bool:
 
 
 def _upsert_event_or_dedup_known_collision(
-    upsert_do_nothing: Callable[..., bool], record: dict[str, object],
+    upsert_do_nothing: Callable[..., bool],
+    record: dict[str, object],
 ) -> bool:
     """``append_event``'s upsert call, wrapped: degrades the ONE known
     ``_STALE_EXTERNAL_ID_UNIQUE_CONSTRAINT`` violation to the same
@@ -176,11 +177,7 @@ class EventInsertResult:
 
 
 def _has_attachment_fields(normalized: NormalizedSessionEvent) -> bool:
-    return (
-        normalized.attachment_blob_upload is not None
-        or normalized.attachment_mime_type is not None
-        or normalized.attachment_filename is not None
-    )
+    return normalized.attachment_blob_upload is not None or normalized.attachment_mime_type is not None or normalized.attachment_filename is not None
 
 
 def _validate_message_event(normalized: NormalizedSessionEvent) -> None:
@@ -226,9 +223,7 @@ def _validate_attachment_event(normalized: NormalizedSessionEvent) -> None:
         raise ValueError("ATTACHMENT events require attachment_mime_type")
 
 
-_EVENT_SHAPE_VALIDATORS: dict[
-    EventType, Callable[[NormalizedSessionEvent], None]
-] = {
+_EVENT_SHAPE_VALIDATORS: dict[EventType, Callable[[NormalizedSessionEvent], None]] = {
     EventType.MESSAGE: _validate_message_event,
     EventType.TOOL_CALL: _validate_tool_call_event,
     EventType.TOOL_RESULT: _validate_tool_result_event,
@@ -405,7 +400,10 @@ def _insert_session_with_canonical_dispatch(
     if inserted:
         # New canonical: it is its own group head — record its kind.
         _attach_session_source_kind(
-            repo, canonical_id=session_id, source_kind=source_kind, now=now,
+            repo,
+            canonical_id=session_id,
+            source_kind=source_kind,
+            now=now,
         )
         return session_id
     canonical_row = _resolve_canonical_session(
@@ -414,21 +412,12 @@ def _insert_session_with_canonical_dispatch(
         external_session_id=clean_external_session_id,
     )
     if canonical_row is None:
-        raise RuntimeError(
-            "upsert_session canonical race: Phase 1 ON CONFLICT fired "
-            "but _resolve_canonical_session returned None for "
-            f"(vendor={vendor.value!r}, "
-            f"external_session_id={clean_external_session_id!r}). "
-            "Indicates schema/data anomaly — partial-unique constraint "
-            "and lookup query disagree."
-        )
+        raise RuntimeError(f"upsert_session canonical race: Phase 1 ON CONFLICT fired but _resolve_canonical_session returned None for (vendor={vendor.value!r}, external_session_id={clean_external_session_id!r}). Indicates schema/data anomaly — partial-unique constraint and lookup query disagree.")
     repo._write(
         TABLE_SESSION,
         {
             **base_record,
-            "canonical_external_session_id": str(
-                canonical_row["external_session_id"]
-            ),
+            "canonical_external_session_id": str(canonical_row["external_session_id"]),
         },
     )
     # Demoted sibling: contribute its source_kind to the canonical's group.
@@ -450,34 +439,28 @@ def _insert_session_with_canonical_dispatch(
 # row and written back. That read-then-write is NON-commutative, so it is safe
 # only when no two writers race the same session's row.
 #
-# THE REAL FENCE (Architect ruling 2026-06-21, code-grounded — supersedes this
-# file's earlier "pushed dispatch is single-caller" guess, which named the wrong
-# mechanism): the platform's action queue dispatches SERIALLY. ``ActionQueuePoller``
-# runs ONE ``_poll_loop``; ``_poll_once`` drains the claimed actions in a serial
-# ``for action: await self._process_action(action)`` loop; ``_process_action``
-# AWAITS ``run_in_executor(execute_action)`` to completion before advancing. The
-# write paths into a session's bounds are: ``upsert_session`` (importer-only) via
-# the lease-fenced pulling poll OR via ``ingest_raw_chunk`` — a SYNCHRONOUS
-# (``is_async=False``) ``@service_interface_process`` EDGE terminal whose whole
-# ``dispatch_pushed`` → ``upsert_session`` persist runs to completion inside that
-# one awaited call, so N concurrent shippers enqueue and drain ONE-AT-A-TIME;
+# THE REAL FENCE: registered ``ingest_raw_chunk`` admissions are drained by
+# AsyncJobManager's existing ``session_ledger_service`` serial owner, shared
+# with the selected ledger polls and repairs. The action queue admits each
+# durable job in order and returns promptly; the owner deque runs the complete
+# ``dispatch_pushed`` → ``upsert_session`` body before advancing to the next.
+# N concurrent shippers therefore never overlap push-path session upserts.
+# Direct internal service/importer callers retain their synchronous bodies and
+# must preserve their existing per-source write discipline. Pulling polls are
+# separately lease-fenced. Other writers retain their original safeguards:
 # ``append_event``'s ``last_event_at`` bump is additionally row-lock-safe (its
 # ``increment_and_return`` takes the session row lock first in the same txn);
 # ``inverted_bounds_repair`` is operator-gated + quiescent. The DB is
 # per-solet. So no two writers overlap on a session.
 #
-# ⚠ LOAD-BEARING: this safety holds ONLY while ``ingest_raw_chunk`` stays a
-# SYNCHRONOUS service-interface process whose persist runs INLINE before it
-# returns. Two ways it could break SILENTLY: (a) it is made ``is_async`` /
-# self-completing (guarded by ``ingest_raw_chunk_sync_dispatch_tripwire_smoke.py``);
-# (b) it is refactored to spawn the persist and return early (its synchronous
-# ``events_persisted`` / ``batch_id`` return contract is what forbids that — a
-# registry-flag tripwire would NOT catch a spawn-and-return-early refactor, so
-# keep the persist inline). Either reopens the RCW race — hitting NOT JUST
-# first/last_event_at but ALSO the COALESCE-keep snapshot cols below
-# (originator/recipient/summary_text). (M6.5 Bug 2 chose the SQL-atomic shape
-# specifically for concurrent-ingest safety; the serial-dispatch fence is its
-# replacement.)
+# ⚠ LOAD-BEARING: the ledger owner must remain a single FIFO writer and must
+# await each complete push body. Independent per-request workers or a body
+# that launches persistence and returns before it finishes reopen the RCW
+# race, including first/last_event_at and the COALESCE snapshot columns below.
+# ``ingest_raw_chunk_sync_dispatch_tripwire_smoke.py`` now parks the first real
+# write and proves queued admissions, serial owner order and merge semantics
+# against private PostgreSQL. The is_async declaration describes deferred
+# completion; the owner, rather than that flag, supplies the write fence.
 
 
 def _coalesce_new_wins(new_value: object, existing_value: object) -> object:
@@ -529,24 +512,16 @@ def _update_existing_session(
     Returns the session id.
     """
     session_id = str(existing["id"])
-    new_first = min(
-        _as_aware_utc(existing["first_event_at"]), _as_aware_utc(first_event_at)
-    )
-    new_last = max(
-        _as_aware_utc(existing["last_event_at"]), _as_aware_utc(last_event_at)
-    )
+    new_first = min(_as_aware_utc(existing["first_event_at"]), _as_aware_utc(first_event_at))
+    new_last = max(_as_aware_utc(existing["last_event_at"]), _as_aware_utc(last_event_at))
     repo._update(
         TABLE_SESSION,
         {"id": session_id},
         {
             "first_event_at": new_first,
             "last_event_at": new_last,
-            "vendor_session_label": _coalesce_new_wins(
-                clean_vendor_session_label, existing.get("vendor_session_label")
-            ),
-            "project_path": _coalesce_new_wins(
-                clean_project_path, existing.get("project_path")
-            ),
+            "vendor_session_label": _coalesce_new_wins(clean_vendor_session_label, existing.get("vendor_session_label")),
+            "project_path": _coalesce_new_wins(clean_project_path, existing.get("project_path")),
             "originator_session_label": _coalesce_keep(
                 existing.get("originator_session_label"),
                 clean_originator_session_label,
@@ -563,9 +538,7 @@ def _update_existing_session(
                 existing.get("recipient_agent_instance_id"),
                 clean_recipient_agent_instance_id,
             ),
-            "summary_text": _coalesce_keep(
-                existing.get("summary_text"), clean_summary_text_seed
-            ),
+            "summary_text": _coalesce_keep(existing.get("summary_text"), clean_summary_text_seed),
             "updated_at": now,
         },
     )
@@ -725,12 +698,12 @@ class SessionLedgerIngestMixin(SessionLedgerRepositoryBase):
         the UPDATE path is a Python read-compute-write of first/last_event_at +
         the COALESCE merges (``_update_existing_session``), which is non-
         commutative and therefore race-unsafe under concurrent writers to one
-        session. It is safe ONLY because the platform's action queue dispatches
-        SERIALLY and the push entrypoint ``ingest_raw_chunk`` is a SYNCHRONOUS
-        (``is_async=False``) ``@service_interface_process`` EDGE terminal that
-        runs to completion before the next action (pulling polls are separately
-        lease-fenced). If ``ingest_raw_chunk`` is ever made async/self-
-        completing, the race returns silently. Guarded by
+        session. Registered ``ingest_raw_chunk`` returns a persisted admission;
+        the existing serial ledger owner runs its complete body in FIFO order,
+        sharing the writer fence with selected polls and repairs. Pulling polls
+        remain lease-fenced, and direct internal callers retain their existing
+        synchronous write discipline. Parallel owner execution or a body that
+        returns before its persist finishes would reopen the race. Guarded by
         ``ingest_raw_chunk_sync_dispatch_tripwire_smoke.py`` — see the module
         comment above ``_update_existing_session``.
         """
@@ -751,7 +724,7 @@ class SessionLedgerIngestMixin(SessionLedgerRepositoryBase):
         # the single predicated write per branch carry no multi-write atomicity
         # that needs a transaction, and the dedupe race-closure is the
         # PG-internal partial-unique ON CONFLICT (txn-independent). Single-
-        # writer-per-session (serial-dispatch + lease fences) closes the
+        # writer-per-session (serial ledger owner + lease fences) closes the
         # existing-check → insert/update TOCTOU.
         existing_rows = self._query(
             TABLE_SESSION,
@@ -833,9 +806,7 @@ class SessionLedgerIngestMixin(SessionLedgerRepositoryBase):
         self._validate_event_shape(normalized)
         event_id = _new_id(ID_PREFIX_EVENT)
         now = self._clock()
-        content_text = (
-            None if content_blob_id is not None else _strip_nuls(normalized.content_text)
-        )
+        content_text = None if content_blob_id is not None else _strip_nuls(normalized.content_text)
         content_json_obj = _strip_nuls_in_json(normalized.content_json)
         usage_json_obj = _strip_nuls_in_json(normalized.usage_json)
         vendor_event_id = _strip_nuls(normalized.vendor_event_id)
@@ -880,7 +851,8 @@ class SessionLedgerIngestMixin(SessionLedgerRepositoryBase):
             "updated_at": now,
         }
         inserted = _upsert_event_or_dedup_known_collision(
-            self._upsert_do_nothing, record,
+            self._upsert_do_nothing,
+            record,
         )
         if inserted:
             with self._state.transactional() as txn:
@@ -1051,9 +1023,7 @@ class SessionLedgerIngestMixin(SessionLedgerRepositoryBase):
             raise LedgerRepositoryError(
                 f"_touch_session_counters: session {session_id} not found",
             )
-        new_last = max(
-            _as_aware_utc(rows[0]["last_event_at"]), _as_aware_utc(event_at)
-        )
+        new_last = max(_as_aware_utc(rows[0]["last_event_at"]), _as_aware_utc(event_at))
         txn.update_state(
             NAMESPACE,
             {"table": TABLE_SESSION, "filters": {"id": session_id}},

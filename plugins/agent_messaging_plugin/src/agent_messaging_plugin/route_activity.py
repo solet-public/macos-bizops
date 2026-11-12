@@ -74,6 +74,8 @@ INFRA_ROUTES: frozenset[str] = frozenset(
     {
         f"{_P}/open",
         f"{_P}/{{bridge_id}}/close",
+        # CLI timeout/interrupt/output teardown runs without another model turn.
+        f"{_P}/{{bridge_id}}/job/{{job_id}}/waiter/release",
         f"{_P}/{{bridge_id}}/events",
         f"{_P}/{{bridge_id}}/peer/register",
         # F1's sibling: the forwarder claims its standing role on open, on

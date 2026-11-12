@@ -1,48 +1,46 @@
 """External Postgres plugin entry point — the "super Datagrip" over foreign DBs.
 
-Query (and, per the operator's 2026-08-09 posture reversal + Amendment 1, write
-to) FOREIGN Postgres databases the operator registers as ``external_pg::<name>``
-address-book entries. Every read verb stays READ-ONLY, HARD via the psycopg3
-connection read-only characteristic (connection.py) — the developer-proof
-write-stopper. The one write verb opens a NON-read_only connection instead and
-performs no plugin-side access control of its own; the registered credential's
-server-side Postgres GRANTs are the entire control plane for what it can
-actually do (vendor RBAC, not a plugin re-implementation — see run_statement's
-own docstring). Every verb takes a connection NAME (never a DSN); the
-platform's own DB instance is refused role-independently, for every verb
-(connection.assert_foreign_target).
+Query, write, script, bulk-load, dump, restore and administer FOREIGN Postgres
+databases the operator registers as ``external_pg::<name>`` address-book
+entries. The registered credential's own server-side Postgres GRANTs are the
+only boundary (USER ruling rul_4c99a30d, 2026-11-06; operator ruling 2026-08-09
++ Amendment 1): no verb restricts its connection, refuses a statement by its
+leading keyword, or asks for confirmation. Every verb takes a connection
+NAME (never a DSN); the platform's own DB instance is refused
+role-independently, for every verb (connection.assert_foreign_target).
 
-Verbs (all EDGE):
+Verbs (all EDGE; knowledge_base/vendor_api_coverage.md maps them to the vendor):
   - list_schemas / list_tables / describe_table / test_connection / run_query /
-    export_query / run_statement — all on the D0.3 deferred-completion shape
-    (workbench/2026-08-09_sync_verb_d03_deferred_completion_doctrine_syncverb-doctrine.md):
-    the dispatch handler returns ``{"job_id", "status": "queued"}`` in
-    milliseconds; ``async_jobs.py``'s single background worker thread does the
-    real connect + query I/O and completes the job. run_query/export_query's
-    result — and run_statement's, when its statement produces one (e.g. a
-    RETURNING clause) — is always written to the caller-supplied
-    output_tsv_path when the job completes, never returned inline (default
-    500 rows, up to 1000/50,000 with an acknowledged override — see
-    query_actions.py for the full contract). run_statement is the write verb:
-    single-statement contract, explicit per-call commit semantics, no
-    statement-leader classification of any kind.
+    export_query / run_statement — the connector verbs.
+  - run_script (transactions and scripts), copy (COPY files), dump_database /
+    restore_database (pg_dump, pg_restore), activity (sessions, locks,
+    cancel, terminate) and statistics (sizes, counters, resets) — build 1 of
+    frq_37c141636f684f60a2c72e52885d039b.
   - list_connections — the registered external_pg::* connection names (still
     synchronous — a single address-book scan, not a foreign-DB round trip).
 
+Every verb except list_connections is on the D0.3 deferred-completion shape
+(workbench/2026-08-09_sync_verb_d03_deferred_completion_doctrine_syncverb-doctrine.md):
+the dispatch handler returns ``{"job_id", "status": "queued"}`` in
+milliseconds; ``async_jobs.py``'s single background worker thread does the
+real I/O and completes the job. Row results are written to caller-supplied,
+contained workspace files, never returned inline (query_actions.py).
+
 No plugin-owned vault keys (the per-connection password is chain-consumed through
 the address book's ``resolve_with_secrets``), so this plugin needs NO vault
-binding — only address_book_service (the connection registry). Blob storage is
-no longer used anywhere (bulk data lands as workspace TSV files; interactive
-overflows fail loud).
+binding — only address_book_service (the connection registry).
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 from ananta.core.actions.action_metadata import (
     ContextHandling,
@@ -55,45 +53,162 @@ from ananta.core.actions.action_metadata import (
 )
 from ananta.core.config.config_provider import ConfigProvider
 from ananta.core.domain.enums import ActionStatus, ProcessorPolicyCategory
-from ananta.core.plugins.plugin_base import PluginBase
+from ananta.core.plugins.plugin_base import OrchestratorProtocol, PluginBase
+from ananta.file_locations.addresses import path_addresses
+from ananta.file_locations.containment import Located, PathRefusedError, assert_path_allowed, derive_allowed_roots, location_advisories, location_session_id, retain_location_advisories
+from ananta.file_locations.documents import default_solet_home, documents_folder
+from ananta.file_locations.resolution import SoletTree, solet_tree_from_app_home
+from ananta.interfaces.address_book_service_interface import AddressBookServiceInterface
 from ananta.interfaces.edge_process_provider import (
     EdgeProcessDefinition,
     EdgeProcessProvider,
 )
 
-from . import async_jobs, connection, export_containment
-from .app_config import AppConfigLoader, ExternalPgConfigError
+from . import admin_actions, async_jobs, client_tools, connection, copy_actions
+from .app_config import AppConfigLoader, ExternalDsn, ExternalPgConfigError
+from .client_tools import ClientToolError, ToolSettings
 from .connection import ExternalPgGuardError
 from .constants import (
-    CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
+    CLIENT_TOOL_TIMEOUT_SECONDS_DEFAULT,
+    CONFIG_KEY_CLIENT_BIN_DIR,
+    CONFIG_KEY_CLIENT_TOOL_TIMEOUT_SECONDS,
     CONFIG_KEY_PLATFORM_PG_PORT,
     CONFIG_KEY_STATEMENT_TIMEOUT_MS,
     DEFAULT_ROW_LIMIT,
     ERROR_ADDRESS_BOOK_NOT_AVAILABLE,
     ERROR_API_ERROR,
+    ERROR_EXPORT_PATH_REFUSED,
     ERROR_INVALID_PARAMS,
     ERROR_NOT_CONFIGURED,
     EXPORT_ROW_CAP,
+    LIST_LIMIT_DEFAULT,
+    LIST_LIMIT_MAX,
     MAX_ROWS_HARD_CAP,
     PARAM_ACKNOWLEDGE_OVERRIDE,
     PARAM_ROW_LIMIT,
     PLATFORM_PG_PORT_DEFAULT,
     PLUGIN_NAME,
+    RESULT_TYPE_ACTIVITY,
+    RESULT_TYPE_COPY,
     RESULT_TYPE_DESCRIBE_TABLE,
+    RESULT_TYPE_DUMP_DATABASE,
     RESULT_TYPE_EXPORT_QUERY,
     RESULT_TYPE_LIST_CONNECTIONS,
     RESULT_TYPE_LIST_SCHEMAS,
     RESULT_TYPE_LIST_TABLES,
+    RESULT_TYPE_RESTORE_DATABASE,
     RESULT_TYPE_RUN_QUERY,
+    RESULT_TYPE_RUN_SCRIPT,
     RESULT_TYPE_RUN_STATEMENT,
+    RESULT_TYPE_STATISTICS,
     RESULT_TYPE_TEST_CONNECTION,
     STATEMENT_TIMEOUT_MS_DEFAULT,
 )
+from .script_actions import ScriptStatementError
 from .statement_guard import StatementGuardError
+
+_QUEUED_RETURN = ReturnValueSchema(
+    type=ParameterType.OBJECT,
+    description="Dispatch envelope — job_id + status: queued. The result arrives when the job completes.",
+    properties={
+        "job_id": ParameterMetadata(type=ParameterType.STRING, description="Job ID."),
+        "status": ParameterMetadata(type=ParameterType.STRING, description="Always 'queued'."),
+    },
+)
+_CONNECTION_PARAMETER = ParameterMetadata(
+    type=ParameterType.STRING,
+    required=True,
+    description="The registered connection name (from list_connections).",
+)
+_OPTION_TYPES = {
+    "bool": ParameterType.BOOLEAN,
+    "str": ParameterType.STRING,
+    "int": ParameterType.INTEGER,
+    "list": ParameterType.LIST,
+    "path": ParameterType.STRING,
+}
+_COPY_OPTION_TEXT = {
+    "format": "COPY FORMAT: text, csv or binary.",
+    "freeze": "COPY FREEZE (from_file): load rows already frozen.",
+    "delimiter": "COPY DELIMITER: the column separator character.",
+    "null": "COPY NULL: the string that represents a null value.",
+    "default": "COPY DEFAULT (from_file): the string that means a column's default.",
+    "header": "COPY HEADER: true, false, or match (from_file checks the header names).",
+    "quote": "COPY QUOTE (csv): the quoting character.",
+    "escape": "COPY ESCAPE (csv): the escape character.",
+    "force_quote": 'COPY FORCE_QUOTE (to_file, csv): column names to always quote, or ["*"].',
+    "force_not_null": 'COPY FORCE_NOT_NULL (from_file, csv): column names, or ["*"].',
+    "force_null": 'COPY FORCE_NULL (from_file, csv): column names, or ["*"].',
+    "on_error": "COPY ON_ERROR (from_file): stop or ignore rows that fail type conversion.",
+    "encoding": "COPY ENCODING: the file's encoding name.",
+    "log_verbosity": "COPY LOG_VERBOSITY: default, verbose or silent.",
+}
+
+
+def _option_parameters(spec: dict[str, str], program: str) -> dict[str, ParameterMetadata]:
+    """One optional parameter per documented client-program option (long flag, snake_case)."""
+    return {
+        name: ParameterMetadata(
+            type=_OPTION_TYPES[kind],
+            required=False,
+            description=(f"{program} --{name.replace('_', '-')}" + (" (one flag per list item)" if kind == "list" else "") + (" (a contained workspace file path)" if kind == "path" else "") + "."),
+        )
+        for name, kind in spec.items()
+    }
+
+
+def _paging_parameters() -> dict[str, ParameterMetadata]:
+    return {
+        "limit": ParameterMetadata(
+            type=ParameterType.INTEGER,
+            required=False,
+            description=(f"List operations: rows per page, 1 to {LIST_LIMIT_MAX} (default {LIST_LIMIT_DEFAULT})."),
+        ),
+        "offset": ParameterMetadata(
+            type=ParameterType.INTEGER,
+            required=False,
+            description="List operations: rows to skip; pass the previous page's next_offset.",
+        ),
+    }
+
+
+def _launch_directory(orchestrator: OrchestratorProtocol) -> Located[str | None]:
+    """Read this job's exact active A2 bridge capture, never process cwd."""
+    session_id = location_session_id()
+    manager = getattr(orchestrator, "plugin_manager", None)
+    if not session_id or manager is None:
+        return Located(None, ())
+    try:
+        messaging = manager.get_plugin("agent_messaging_plugin")
+        surface = getattr(messaging, "_platform_surface", None)
+        capture = surface.launch_directory_for_session(session_id) if surface is not None else None
+        if isinstance(capture, dict) and isinstance(capture.get("path"), str):
+            advisories = ("Launch directory uses the bridge client's cwd fallback; refresh the launcher.",) if capture.get("source") == "cwd_fallback" else ()
+            return Located(capture["path"], advisories)
+    except Exception:
+        return Located(None, ("Launch directory capture is unavailable; using path addresses and solet_home.",))
+    return Located(None, ())
+
+
+def _read_location_roots(orchestrator: OrchestratorProtocol | None) -> tuple[Located[tuple[Path, ...]], SoletTree]:
+    """Read live address inputs and assemble advisory-bearing roots."""
+    if orchestrator is None:
+        raise RuntimeError("orchestrator APP_HOME must be injected before file I/O")
+    tree = solet_tree_from_app_home(Path(orchestrator.APP_HOME))
+    try:
+        service = orchestrator.get_service("address_book_service")
+        addresses = path_addresses(cast(AddressBookServiceInterface, service)) if service is not None else Located((), ("Path address service is unavailable; using computed solet_home.",))
+    except Exception:
+        addresses = Located((), ("Path addresses could not be read; using computed solet_home.",))
+    launch = _launch_directory(orchestrator)
+    name = os.environ.get("SOLET_NAME", tree.repo_root.name)
+    home = default_solet_home(name, documents_folder(sys.platform, os.environ, Path.home()), tree, Path.home() / "Library/Application Support" / name / "Files")
+    roots = derive_allowed_roots(addresses.value, launch.value, tree, home.value)
+    return Located(roots.value, (*addresses.advisories, *launch.advisories, *home.advisories, *roots.advisories)), tree
 
 
 class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
-    """Read-only foreign-Postgres query plugin (the "super Datagrip")."""
+    """Foreign-Postgres plugin (the "super Datagrip"); vendor GRANTs are the only boundary."""
 
     name: str = PLUGIN_NAME
 
@@ -149,8 +264,7 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         if self.config_provider is None:
             raise ExternalPgConfigError(
                 ERROR_NOT_CONFIGURED,
-                "config_provider not bound — plugin.initialize() was never "
-                "called (boot/lifecycle fault)",
+                "config_provider not bound — plugin.initialize() was never called (boot/lifecycle fault)",
             )
         return self.config_provider
 
@@ -160,10 +274,7 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         self.logger = logging.getLogger(self.name)
         self._address_book_service = self.orchestrator_ref.get_service("address_book_service")
         if self._address_book_service is None:
-            raise RuntimeError(
-                f"{ERROR_ADDRESS_BOOK_NOT_AVAILABLE}: {self.name} requires "
-                "address_book_service as the connection registry"
-            )
+            raise RuntimeError(f"{ERROR_ADDRESS_BOOK_NOT_AVAILABLE}: {self.name} requires address_book_service as the connection registry")
         self._app_config_loader = AppConfigLoader(self._address_book_service)
         self.set_ready()
 
@@ -172,6 +283,8 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
     # ------------------------------------------------------------------
 
     def _success(self, data: dict[str, Any]) -> dict[str, Any]:
+        if location_advisories():
+            data = {**data, "advisories": [*data.get("advisories", []), *location_advisories()]}
         return {
             "action_status": ActionStatus.COMPLETED.value,
             "data": data,
@@ -211,8 +324,7 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         if timeout_ms <= 0:
             raise ExternalPgConfigError(
                 ERROR_NOT_CONFIGURED,
-                f"{CONFIG_KEY_STATEMENT_TIMEOUT_MS} must be > 0 (got {timeout_ms}); a "
-                "non-positive value would disable the statement-timeout DoS bound",
+                f"{CONFIG_KEY_STATEMENT_TIMEOUT_MS} must be > 0 (got {timeout_ms}); a non-positive value would disable the statement-timeout DoS bound",
             )
         return timeout_ms
 
@@ -240,53 +352,94 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         if not 1 <= port <= 65535:
             raise ExternalPgConfigError(
                 ERROR_NOT_CONFIGURED,
-                f"{CONFIG_KEY_PLATFORM_PG_PORT} must be in [1, 65535] (got {port}); an "
-                "out-of-range value would weaken the platform-DB containment guard's port arm",
+                f"{CONFIG_KEY_PLATFORM_PG_PORT} must be in [1, 65535] (got {port}); an out-of-range value would weaken the platform-DB containment guard's port arm",
             )
         return port
 
-    def _export_path_gate(self, output_tsv_path: str) -> str:
-        """Admit an export path via workspace-root containment; return the realpath.
+    def _location_roots(self) -> tuple[Located[tuple[Path, ...]], SoletTree]:
+        return _read_location_roots(self.orchestrator_ref)
 
-        Binds the operator's ``export_allowed_roots`` config (yaml default
-        ``[]`` = refuse-all; no hardcoded callsite default per authoring trap
-        #10) to the own-copy containment gate. A malformed config value is a
-        loud config fault, never a silent admit-all or refuse-all.
-        """
+    def _assert_path(self, path: str, *, suffix: str | None, param_name: str, reading: bool = False) -> str:
+        """The single binding to shared connector containment on every I/O."""
+        roots, tree = self._location_roots()
+        retain_location_advisories(roots.advisories)
+        try:
+            result = assert_path_allowed(path, roots, tree, suffix=suffix, param_name=param_name, plugin_name=self.name)
+            if reading and not Path(result.value).is_file():
+                raise PathRefusedError(f"{param_name} must name an existing regular file")
+            return result.value
+        except PathRefusedError as exc:
+            exc.code = ERROR_EXPORT_PATH_REFUSED
+            raise
+
+    def _export_path_gate(self, output_tsv_path: str) -> str:
+        self._config()
+        return self._assert_path(output_tsv_path, suffix=".tsv", param_name="output_tsv_path")
+
+    def _file_path_gate(self, path: str, param_name: str) -> str:
+        self._config()
+        return self._assert_path(path, suffix=None, param_name=param_name)
+
+    def _tool_settings(self) -> ToolSettings:
+        """Where pg_dump / pg_restore live and their run timeout — fail loud if invalid."""
         config = self._config()
-        raw_roots = config.get(CONFIG_KEY_EXPORT_ALLOWED_ROOTS)
-        roots: list[str] = []
-        if raw_roots is not None:
-            if not isinstance(raw_roots, list) or not all(
-                isinstance(entry, str) for entry in raw_roots
-            ):
-                raise ExternalPgConfigError(
-                    ERROR_NOT_CONFIGURED,
-                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory "
-                    "path strings",
-                )
-            roots = list(raw_roots)
-        return export_containment.assert_export_path_allowed(
-            output_tsv_path,
-            roots,
-            config_key=CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
-            plugin_name=self.name,
-        )
+        bin_dir = config.get(CONFIG_KEY_CLIENT_BIN_DIR, "")
+        if not isinstance(bin_dir, str):
+            raise ExternalPgConfigError(
+                ERROR_NOT_CONFIGURED,
+                f"{CONFIG_KEY_CLIENT_BIN_DIR} must be a directory path string",
+            )
+        raw = config.get(CONFIG_KEY_CLIENT_TOOL_TIMEOUT_SECONDS, CLIENT_TOOL_TIMEOUT_SECONDS_DEFAULT)
+        try:
+            timeout = int(str(raw))
+        except ValueError as exc:
+            raise ExternalPgConfigError(
+                ERROR_NOT_CONFIGURED,
+                f"{CONFIG_KEY_CLIENT_TOOL_TIMEOUT_SECONDS} must be a positive integer (got {raw!r})",
+            ) from exc
+        if timeout <= 0:
+            raise ExternalPgConfigError(
+                ERROR_NOT_CONFIGURED,
+                f"{CONFIG_KEY_CLIENT_TOOL_TIMEOUT_SECONDS} must be > 0 (got {timeout})",
+            )
+        return ToolSettings(bin_dir=bin_dir, timeout_seconds=timeout, platform_pg_port=self._platform_pg_port())
+
+    def _run_with_dsn(
+        self,
+        params: dict[str, Any],
+        action: Callable[[ExternalDsn], dict[str, Any]],
+        verb: str,
+    ) -> dict[str, Any]:
+        """Resolve a connection NAME to its platform-guarded target and run a client program.
+
+        Same envelope and typed, topology-safe errors as ``_run_on_connection``;
+        no psycopg connection is opened (pg_dump / pg_restore open their own).
+        """
+        if self._app_config_loader is None:
+            return self._error(ERROR_NOT_CONFIGURED, f"{self.name} is not ready")
+        raw_name = params.get("connection_name")
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            return self._error(ERROR_INVALID_PARAMS, "'connection_name' is required")
+        dsn: ExternalDsn | None = None
+        try:
+            dsn = self._app_config_loader.resolve(raw_name)
+            connection.assert_foreign_target(dsn, self._platform_pg_port())
+            outcome = self._success(action(dsn))
+        except Exception as exc:  # coded guards + client-program faults -> typed
+            code, message = self._classify_run_error(exc, verb)
+            outcome = self._error(code, message)
+        return outcome
 
     def _run_on_connection(
         self,
         params: dict[str, Any],
         action: Callable[[Any], dict[str, Any]],
         verb: str,
-        *,
-        read_only: bool = True,
     ) -> dict[str, Any]:
         """Resolve a connection NAME, open a hardened connection, run the action.
 
-        ``read_only`` defaults to ``True`` (every read verb); a write verb passes
-        ``read_only=False`` explicitly — the server's own GRANTs on the registered
-        credential then decide what the connection can actually do, never a
-        plugin-side check.
+        What the connection can do is decided by the server's own GRANTs on the
+        registered credential, never a plugin-side check.
 
         Error classification is TOPOLOGY-SAFE: connection/auth/permission classes
         return a generic fixed message; only the caller's-own-query classes carry
@@ -299,21 +452,22 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         if not isinstance(raw_name, str) or not raw_name.strip():
             return self._error(ERROR_INVALID_PARAMS, "'connection_name' is required")
         conn: Any = None
+        dsn: ExternalDsn | None = None
         try:
             dsn = self._app_config_loader.resolve(raw_name)
             conn = connection.connect(
                 dsn,
-                read_only=read_only,
                 statement_timeout_ms=self._statement_timeout_ms(),
                 platform_pg_port=self._platform_pg_port(),
             )
-            return self._success(action(conn))
+            outcome = self._success(action(conn))
         except Exception as exc:  # our coded guards + any driver fault -> typed
             code, message = self._classify_run_error(exc, verb)
-            return self._error(code, message)
+            outcome = self._error(code, message)
         finally:
             if conn is not None:
                 conn.close()
+        return outcome
 
     def _classify_run_error(self, exc: Exception, verb: str) -> tuple[str, str]:
         """Map a ``_run_on_connection`` exception to a typed, topology-safe (code, message).
@@ -328,7 +482,9 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
                 ExternalPgConfigError,
                 ExternalPgGuardError,
                 StatementGuardError,
-                export_containment.ExportPathRefusedError,
+                ScriptStatementError,
+                ClientToolError,
+                PathRefusedError,
             ),
         ):
             return exc.code, str(exc)
@@ -340,12 +496,18 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         return code, message
 
     def _dispatch_async(
-        self, action_name: str, params: dict[str, Any], state: dict[str, Any],
+        self,
+        action_name: str,
+        params: dict[str, Any],
+        state: dict[str, Any],
     ) -> dict[str, Any]:
         """D0.3 ms-scale dispatch: create the job, return immediately — no I/O here."""
         try:
             create_result = async_jobs.create_job(
-                self, action_name=action_name, params=params, state=state,
+                self,
+                action_name=action_name,
+                params=params,
+                state=state,
             )
         except ValueError as exc:
             return self._error(ERROR_INVALID_PARAMS, str(exc))
@@ -364,20 +526,19 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
     def get_edge_process_definitions(self) -> dict[str, EdgeProcessDefinition]:
         return {
             "run_query": _edge("run_query", RESULT_TYPE_RUN_QUERY),
-            "list_connections": _edge(
-                "list_connections", RESULT_TYPE_LIST_CONNECTIONS),
-            "list_schemas": _edge(
-                "list_schemas", RESULT_TYPE_LIST_SCHEMAS),
-            "list_tables": _edge(
-                "list_tables", RESULT_TYPE_LIST_TABLES),
-            "describe_table": _edge(
-                "describe_table", RESULT_TYPE_DESCRIBE_TABLE),
-            "export_query": _edge(
-                "export_query", RESULT_TYPE_EXPORT_QUERY),
-            "test_connection": _edge(
-                "test_connection", RESULT_TYPE_TEST_CONNECTION),
-            "run_statement": _edge(
-                "run_statement", RESULT_TYPE_RUN_STATEMENT),
+            "list_connections": _edge("list_connections", RESULT_TYPE_LIST_CONNECTIONS),
+            "list_schemas": _edge("list_schemas", RESULT_TYPE_LIST_SCHEMAS),
+            "list_tables": _edge("list_tables", RESULT_TYPE_LIST_TABLES),
+            "describe_table": _edge("describe_table", RESULT_TYPE_DESCRIBE_TABLE),
+            "export_query": _edge("export_query", RESULT_TYPE_EXPORT_QUERY),
+            "test_connection": _edge("test_connection", RESULT_TYPE_TEST_CONNECTION),
+            "run_statement": _edge("run_statement", RESULT_TYPE_RUN_STATEMENT),
+            "run_script": _edge("run_script", RESULT_TYPE_RUN_SCRIPT),
+            "copy": _edge("copy", RESULT_TYPE_COPY),
+            "dump_database": _edge("dump_database", RESULT_TYPE_DUMP_DATABASE),
+            "restore_database": _edge("restore_database", RESULT_TYPE_RESTORE_DATABASE),
+            "activity": _edge("activity", RESULT_TYPE_ACTIVITY),
+            "statistics": _edge("statistics", RESULT_TYPE_STATISTICS),
         }
 
     # ------------------------------------------------------------------
@@ -388,9 +549,10 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         name="run_query",
         display_name="External Postgres: Run Query",
         description=(
-            "Run ONE read-only SQL statement against a registered foreign Postgres connection "
-            "(by connection_name). Read leaders only (SELECT/WITH/EXPLAIN/SHOW/VALUES/TABLE); the "
-            "connection is read-only at the server, so writes/DDL are refused. Returns immediately "
+            "Run ONE SQL statement against a registered foreign Postgres connection "
+            "(by connection_name) and write its result rows to a TSV file; the transaction commits "
+            "after the file is written, so a data-modifying CTE takes effect. What the statement "
+            "may do is decided only by the registered role's own server-side GRANTs. Returns immediately "
             "with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch "
             "returning is NOT the same as the job finishing. When the job completes, the result is "
             "ALWAYS written to the caller-supplied output_tsv_path, never returned inline — this "
@@ -418,33 +580,22 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
             "sql": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description="A single read-only SQL statement.",
+                description="A single SQL statement whose result rows to write (any statement the role's GRANTs permit).",
             ),
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=(
-                    "ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."
-                ),
+                description=("ABSOLUTE .tsv destination path, contained under a registered path address."),
             ),
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
-                description=(
-                    "Must be exactly true, together with row_limit, to fetch more than the "
-                    f"default {DEFAULT_ROW_LIMIT} rows. Requires understanding why the default "
-                    "exists: avoiding exhausted rate limits/disk, and pulling all rows to filter "
-                    "client-side instead of writing a proper WHERE clause."
-                ),
+                description=(f"Must be exactly true, together with row_limit, to fetch more than the default {DEFAULT_ROW_LIMIT} rows. Requires understanding why the default exists: avoiding exhausted rate limits/disk, and pulling all rows to filter client-side instead of writing a proper WHERE clause."),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Explicit row ceiling, up to {MAX_ROWS_HARD_CAP}. Only honored together with "
-                    f"acknowledge_default_limit_override=true; refused (not clamped) above "
-                    f"{MAX_ROWS_HARD_CAP}."
-                ),
+                description=(f"Explicit row ceiling, up to {MAX_ROWS_HARD_CAP}. Only honored together with acknowledge_default_limit_override=true; refused (not clamped) above {MAX_ROWS_HARD_CAP}."),
             ),
         },
         output_type="object",
@@ -466,10 +617,7 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="list_connections",
         display_name="External Postgres: List Connections",
-        description=(
-            "List the registered foreign-Postgres connection names (external_pg::* address-book "
-            "entries). Names only — never hosts, users, or passwords. Use a name with the other verbs."
-        ),
+        description=("List the registered foreign-Postgres connection names (external_pg::* address-book entries). Names only — never hosts, users, or passwords. Use a name with the other verbs."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
         return_value_schema=ReturnValueSchema(
@@ -609,13 +757,13 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         name="export_query",
         display_name="External Postgres: Export Query",
         description=(
-            "The N>>500 route: run a read-only query against a registered foreign Postgres "
-            "connection and write the result as ONE tab-separated .tsv file at an ABSOLUTE "
+            "The N>>500 route: run one SQL statement against a registered foreign Postgres "
+            "connection, write the result as ONE tab-separated .tsv file at an ABSOLUTE "
             "output_tsv_path in the operator's workspace. Returns immediately with a job_id and "
             "status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the "
             "same as the job finishing. The path must lie under an operator-configured "
-            "export_allowed_roots entry (empty config refuses every export). Same read-only rules "
-            "and override mechanism as run_query, with a higher hard cap: this connection is an "
+            "registered path addresses entry (register a path address to authorize each export). Same commit-after-write "
+            "behaviour and override mechanism as run_query, with a higher hard cap: this connection is an "
             "arbitrary customer database, so there is no vendor-imposed row ceiling, only our own "
             f"policy. Defaults to {DEFAULT_ROW_LIMIT} rows absent an acknowledged override — for "
             "that common small/default case, run_query has an identical interface with a lower "
@@ -637,33 +785,22 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
             "sql": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description="A single read-only SQL statement.",
+                description="A single SQL statement whose result rows to write (any statement the role's GRANTs permit).",
             ),
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=(
-                    "ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."
-                ),
+                description=("ABSOLUTE .tsv destination path, contained under a registered path address."),
             ),
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
-                description=(
-                    "Must be exactly true, together with row_limit, to fetch more than the "
-                    f"default {DEFAULT_ROW_LIMIT} rows. Requires understanding why the default "
-                    "exists: avoiding exhausted rate limits/disk, and pulling all rows to filter "
-                    "client-side instead of writing a proper WHERE clause."
-                ),
+                description=(f"Must be exactly true, together with row_limit, to fetch more than the default {DEFAULT_ROW_LIMIT} rows. Requires understanding why the default exists: avoiding exhausted rate limits/disk, and pulling all rows to filter client-side instead of writing a proper WHERE clause."),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Explicit row ceiling, up to {EXPORT_ROW_CAP}. Only honored together with "
-                    f"acknowledge_default_limit_override=true; refused (not clamped) above "
-                    f"{EXPORT_ROW_CAP}."
-                ),
+                description=(f"Explicit row ceiling, up to {EXPORT_ROW_CAP}. Only honored together with acknowledge_default_limit_override=true; refused (not clamped) above {EXPORT_ROW_CAP}."),
             ),
         },
         output_type="object",
@@ -687,8 +824,9 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         display_name="External Postgres: Test Connection",
         description=(
             "Open a registered foreign Postgres connection and confirm it: the resolved host it "
-            "connected to, the server version, the current role, and the read-only flag (always "
-            "true). Use this to verify a connection points where you expect (the host you "
+            "connected to, the server version, the current role, and the server's own "
+            "transaction_read_only setting (true only on a hot standby or a role configured that "
+            "way). Use this to verify a connection points where you expect (the host you "
             "registered) before trusting it. Requires connection_name. Returns immediately with a "
             "job_id and status 'queued' — the confirmation is delivered when the job completes "
             "(D0.3 deferred-completion shape); the dispatch returning is NOT the same as the job "
@@ -723,13 +861,15 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
         display_name="External Postgres: Run Statement",
         description=(
             "Run ONE SQL statement against a registered foreign Postgres connection (by "
-            "connection_name) on a WRITE-CAPABLE (non-read-only) connection — INSERT/UPDATE/"
+            "connection_name) — INSERT/UPDATE/"
             "DELETE/DDL/anything, not just reads. What the statement is actually allowed to do "
             "is decided entirely by the registered credential's own server-side Postgres GRANTs "
             "— this verb performs no read/write classification or permission check of its own "
             "(vendor RBAC is the control plane, operator ruling 2026-08-09 + Amendment 1). "
             "Single-statement contract for v1 (an engineering convention for predictable commit "
-            "semantics, not a permission gate) — no multi-statement scripts. A statement with no "
+            "semantics, not a permission gate); run_script runs several statements in one "
+            "transaction. autocommit=true runs a command the server refuses inside a transaction "
+            "block (VACUUM, CREATE DATABASE, CREATE INDEX CONCURRENTLY, ALTER SYSTEM). A statement with no "
             "result set (the common INSERT/UPDATE/DELETE/DDL case, no RETURNING) commits and "
             "returns rowcount inline. A statement that DOES produce a result set (a RETURNING "
             "clause) routes through the SAME always-TSV export path as run_query: rows are never "
@@ -749,38 +889,27 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
             "sql": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=(
-                    "A single SQL statement — any statement the registered credential's own "
-                    "server-side GRANTs permit, not just reads."
-                ),
+                description=("A single SQL statement — any statement the registered credential's own server-side GRANTs permit, not just reads."),
             ),
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=False,
-                description=(
-                    "ABSOLUTE .tsv destination path, contained under an export_allowed_roots "
-                    "entry. Required ONLY if the statement produces a result set (e.g. a "
-                    "RETURNING clause) — omit it for a plain INSERT/UPDATE/DELETE/DDL with no "
-                    "RETURNING, which returns rowcount inline instead."
-                ),
+                description=("ABSOLUTE .tsv destination path, contained under a registered path address. Required ONLY if the statement produces a result set (e.g. a RETURNING clause) — omit it for a plain INSERT/UPDATE/DELETE/DDL with no RETURNING, which returns rowcount inline instead."),
             ),
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
-                description=(
-                    "Only relevant when the statement has a RETURNING clause: must be exactly "
-                    f"true, together with row_limit, to fetch more than the default "
-                    f"{DEFAULT_ROW_LIMIT} returned rows."
-                ),
+                description=(f"Only relevant when the statement has a RETURNING clause: must be exactly true, together with row_limit, to fetch more than the default {DEFAULT_ROW_LIMIT} returned rows."),
             ),
             PARAM_ROW_LIMIT: ParameterMetadata(
                 type=ParameterType.INTEGER,
                 required=False,
-                description=(
-                    f"Only relevant when the statement has a RETURNING clause: explicit row "
-                    f"ceiling on the RETURNING rows, up to {MAX_ROWS_HARD_CAP}. Only honored "
-                    "together with acknowledge_default_limit_override=true."
-                ),
+                description=(f"Only relevant when the statement has a RETURNING clause: explicit row ceiling on the RETURNING rows, up to {MAX_ROWS_HARD_CAP}. Only honored together with acknowledge_default_limit_override=true."),
+            ),
+            "autocommit": ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description=("true runs the statement outside a transaction block, for commands the server refuses inside one (VACUUM, CREATE DATABASE, CREATE INDEX CONCURRENTLY, ALTER SYSTEM). The server commits it as it runs. Default false."),
             ),
         },
         output_type="object",
@@ -798,6 +927,299 @@ class ExternalPostgresPlugin(PluginBase, EdgeProcessProvider):
     )
     def run_statement(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         return self._dispatch_async("run_statement", params, state)
+
+    @platform_process(
+        name="run_script",
+        display_name="External Postgres: Run Script",
+        description=(
+            "Run several SQL statements (a migration, a seed, any script) against a registered "
+            "foreign Postgres connection in ONE transaction, each statement inside its own "
+            "savepoint. on_error='rollback' (default) rolls the whole script back at the first "
+            "failure and reports external_pg.script_statement_failed naming the statement's "
+            "number, keyword and text; on_error='continue' rolls back only the failing statement "
+            "and commits the rest; commit=false runs everything then rolls back (a dry run). "
+            "Statements are split by a dollar-quote and comment aware parser, so function bodies "
+            "stay whole. The script must not contain BEGIN/COMMIT/ROLLBACK/SAVEPOINT (the verb "
+            "owns the transaction); commands the server refuses inside a transaction block "
+            "(VACUUM, CREATE DATABASE) belong in run_statement with autocommit=true. Each "
+            "statement reports its command tag and row count; rows are never returned (use "
+            "run_query). Vendor GRANTs alone decide what runs. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "connection_name": _CONNECTION_PARAMETER,
+            "sql": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="The script: one or more SQL statements separated by semicolons.",
+            ),
+            "on_error": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="rollback (default: undo the whole script) or continue (undo only the failing statement).",
+            ),
+            "commit": ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description="true (default) commits; false rolls back after running (a dry run).",
+            ),
+        },
+        output_type="object",
+        output_description="Job ID and status for async script tracking.",
+        return_value_schema=_QUEUED_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def run_script(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async("run_script", params, state)
+
+    @platform_process(
+        name="copy",
+        display_name="External Postgres: COPY Files",
+        description=(
+            "Bulk-move rows between a registered foreign Postgres connection and a file in the "
+            "operator's workspace with PostgreSQL COPY. operation from_file loads a CSV, text or "
+            "binary file into schema.table (optional columns, where filter) and commits; "
+            "operation to_file writes schema.table (optional columns) or a query to the file. "
+            "Every COPY option is a parameter: format, freeze, delimiter, null, default, header, "
+            "quote, escape, force_quote, force_not_null, force_null, on_error, encoding, "
+            "log_verbosity. The data streams over the connection (COPY FROM STDIN / TO STDOUT), "
+            "so path is an ABSOLUTE path under a registered path address. Vendor GRANTs alone "
+            "decide what is allowed. Returns a queued job; the result has rowcount and bytes."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "connection_name": _CONNECTION_PARAMETER,
+            "operation": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description=f"One of: {', '.join(copy_actions.OPERATIONS)}.",
+            ),
+            "path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="ABSOLUTE file path under a registered path address (read for from_file, written for to_file).",
+            ),
+            "schema": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="The table's schema (required for from_file, and for to_file without query).",
+            ),
+            "table": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="The table name (required for from_file, and for to_file without query).",
+            ),
+            "columns": ParameterMetadata(
+                type=ParameterType.LIST,
+                required=False,
+                description="Column names, in file order; omit for every column.",
+            ),
+            "query": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="to_file only: a query whose rows to write, instead of schema/table.",
+            ),
+            "where": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="from_file only: COPY FROM … WHERE condition; only matching rows load.",
+            ),
+            **{
+                name: ParameterMetadata(
+                    type=ParameterType.LIST if name.startswith("force_") else (ParameterType.BOOLEAN if name == "freeze" else ParameterType.STRING),
+                    required=False,
+                    description=_COPY_OPTION_TEXT[name],
+                )
+                for name in copy_actions.COPY_OPTIONS
+            },
+        },
+        output_type="object",
+        output_description="Job ID and status for async COPY tracking.",
+        return_value_schema=_QUEUED_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def copy(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async("copy", params, state)
+
+    @platform_process(
+        name="dump_database",
+        display_name="External Postgres: Dump Database",
+        description=(
+            "Back up a registered foreign Postgres database with pg_dump into the operator's "
+            "workspace. format plain (SQL script, the vendor default), custom, directory or tar; "
+            "output_path is an ABSOLUTE path under a registered path address. Every pg_dump "
+            "option is a parameter named after its long flag (schema, exclude_schema, table, "
+            "exclude_table_data, schema_only, data_only, clean, if_exists, create, no_owner, "
+            "no_privileges, compress, jobs, section, inserts, role and the rest). The password "
+            "reaches pg_dump through a private temporary password file only. pg_dump is found in "
+            "client_bin_dir, then PATH, then the standard PostgreSQL directories. Returns a "
+            "queued job; the result has output_path, format, bytes and pg_dump's messages."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "connection_name": _CONNECTION_PARAMETER,
+            "output_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="ABSOLUTE file (or, for format directory, new directory) path under a registered path address.",
+            ),
+            "format": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="plain (default), custom, directory or tar.",
+            ),
+            **_option_parameters(dict(client_tools.PG_DUMP_OPTIONS), "pg_dump"),
+        },
+        output_type="object",
+        output_description="Job ID and status for async dump tracking.",
+        return_value_schema=_QUEUED_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def dump_database(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async("dump_database", params, state)
+
+    @platform_process(
+        name="restore_database",
+        display_name="External Postgres: Restore Database",
+        description=(
+            "Restore a pg_dump archive from the operator's workspace into a registered foreign "
+            "Postgres connection (it can be a different server from the one dumped). Archives only "
+            "(custom, directory, tar; detected), restored through pg_restore, which runs no "
+            "client-side commands, with every restore option as a parameter (clean, if_exists, "
+            "create, data_only, schema_only, no_owner, no_privileges, single_transaction, "
+            "exit_on_error, jobs, schema, table, index, function, trigger, section, use_list, "
+            "transaction_size, role and the rest). A plain-text SQL file is refused "
+            "(external_pg.plain_sql_restore_refused): replaying it needs psql, whose backslash "
+            "meta-commands run on this host outside the database's grants; use run_script for "
+            "plain SQL. With create, the archive's own database name is platform-guarded first. "
+            "input_path is an ABSOLUTE path under a registered path address. Vendor GRANTs "
+            "alone decide what is created, replaced or dropped. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "connection_name": _CONNECTION_PARAMETER,
+            "input_path": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="ABSOLUTE dump file (or directory-format dump directory) under a registered path address.",
+            ),
+            "format": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="Optional check: plain, custom, directory or tar; refused if it differs from the detected format.",
+            ),
+            **_option_parameters(dict(client_tools.PG_RESTORE_OPTIONS), "pg_restore"),
+        },
+        output_type="object",
+        output_description="Job ID and status for async restore tracking.",
+        return_value_schema=_QUEUED_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def restore_database(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async("restore_database", params, state)
+
+    @platform_process(
+        name="activity",
+        display_name="External Postgres: Sessions and Locks",
+        description=(
+            "See and control what is running on a registered foreign Postgres server. operation "
+            "list reads pg_stat_activity (pid, database, user, application, client, state, waits, "
+            "timings, query; optional state and database filters); locks reads pg_locks with "
+            "pg_blocking_pids (optional granted filter); cancel calls pg_cancel_backend(pid); "
+            "terminate calls pg_terminate_backend(pid, timeout_ms). List operations page with "
+            "limit and offset and return next_offset when more rows exist. What the role sees "
+            "and may signal is its own privilege (pg_read_all_stats, pg_signal_backend). Returns "
+            "a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "connection_name": _CONNECTION_PARAMETER,
+            "operation": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description=f"One of: {', '.join(admin_actions.ACTIVITY_OPERATIONS)}.",
+            ),
+            "pid": ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description="cancel/terminate: the backend process id (from list).",
+            ),
+            "timeout_ms": ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description="terminate: milliseconds to wait for the backend to exit (0 = do not wait, the default).",
+            ),
+            "state": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="list: only sessions in this state (active, idle, idle in transaction, …).",
+            ),
+            "database": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="list: only sessions connected to this database.",
+            ),
+            "granted": ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description="locks: true for held locks only, false for awaited locks only.",
+            ),
+            **_paging_parameters(),
+        },
+        output_type="object",
+        output_description="Job ID and status for async activity tracking.",
+        return_value_schema=_QUEUED_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def activity(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async("activity", params, state)
+
+    @platform_process(
+        name="statistics",
+        display_name="External Postgres: Sizes and Statistics",
+        description=(
+            "Read and reset a registered foreign Postgres server's size and usage statistics. "
+            "operation database_sizes (pg_database_size per database the role may connect to); "
+            "relation_sizes (total, table and index bytes and estimated rows per table, largest "
+            "first, optional schema); table_stats (pg_stat_user_tables scans, tuples, dead "
+            "tuples, vacuum and analyze times); index_stats (pg_stat_user_indexes scans and "
+            "size); reset (pg_stat_reset for the current database); reset_table (one table's "
+            "counters, schema and table). List operations page with limit and offset and return "
+            "next_offset. Vendor privileges alone decide access. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "connection_name": _CONNECTION_PARAMETER,
+            "operation": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description=f"One of: {', '.join(admin_actions.STATISTICS_OPERATIONS)}.",
+            ),
+            "schema": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="relation_sizes/table_stats/index_stats: one schema only; reset_table: the table's schema.",
+            ),
+            "table": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="reset_table: the table whose counters to reset.",
+            ),
+            **_paging_parameters(),
+        },
+        output_type="object",
+        output_description="Job ID and status for async statistics tracking.",
+        return_value_schema=_QUEUED_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def statistics(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async("statistics", params, state)
 
 
 def _edge(

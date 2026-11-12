@@ -1,14 +1,14 @@
 {
   "process_key": "service_interface::repo_service::git_diff",
   "display_name": "Git Diff",
-  "description": "Return a READ-ONLY unified diff of the platform worktree, plus its --stat summary. Runs 'git diff' (the read-only git surface the GIT-CONTROLLER policy permits) with argv baked server-side: optional ref/commit to diff against, optional repo-root-confined path (rejected if it escapes root), and a staged flag (--cached). NEVER mutates the repo. The diff is size-capped with an explicit truncated marker plus diff_chars_total (the true length). Use to inspect the exact changes before proposing a patch or asking the operator to commit.",
-  "embedding_description": "Show a read-only unified git diff of the platform repository worktree, with a --stat summary. Optional ref, confined path filter, and staged/--cached mode. Size-bounded with a truncation marker. Use to review the exact line changes before a commit or patch proposal.",
+  "description": "Registered dispatch returns data.job_id and data.status=queued before repository preflight. Read service_interface::job_service::get_job by that exact id until terminal: job.result contains the complete original operation result and job.error retains failure information. Direct Python calls keep their full synchronous results. A bounded public descriptor is persisted; loss of the exclusive owner-memory body or an uncertain terminal write requires reconciliation without replay. Return a READ-ONLY unified diff of the platform worktree, plus its --stat summary. Runs 'git diff' (the read-only git surface the GIT-CONTROLLER policy permits) with argv baked server-side: optional ref/commit to diff against, optional repo-root-confined path (rejected if it escapes root), and a staged flag (--cached). NEVER mutates the repo. The diff is size-capped with an explicit truncated marker plus diff_chars_total (the true length). Use to inspect the exact changes before proposing a patch or asking the operator to commit.",
+  "embedding_description": "Submit Git Diff to the shared repository worker; retrieve the exact returned job id for its complete original result or error. Show a read-only unified git diff of the platform repository worktree, with a --stat summary. Optional ref, confined path filter, and staged/--cached mode. Size-bounded with a truncation marker. Use to review the exact line changes before a commit or patch proposal.",
   "result_processor_customizations": {
     "action_label": "Git diff read",
     "result_type": "repo_git_diff_result",
-    "result_description": "Object with 'diff' (bounded unified diff), 'truncated', 'diff_chars_total' (true length before cap), 'stat' (--stat summary).",
+    "result_description": "Submission: data.job_id and data.status. Terminal job.result: Object with 'diff' (bounded unified diff), 'truncated', 'diff_chars_total' (true length before cap), 'stat' (--stat summary).",
     "presentation_guidance": "Lead with the 'stat' summary, then the diff; if 'truncated' is true, note the cap against diff_chars_total and offer to diff a single path.",
-    "output_action_guidance": "Determine the appropriate next action based on the context and action result."
+    "output_action_guidance": "Keep the exact job id and retrieve job_service.get_job until terminal before consuming repository fields. Reconcile uncertain effects instead of resubmitting them. Determine the appropriate next action based on the context and action result."
   },
   "error_processor_customizations": {
     "action_context": "Running a read-only 'git diff' (optional ref/path, staged flag) over the platform worktree with server-fixed argv.",

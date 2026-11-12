@@ -6,11 +6,16 @@ import json
 import shutil
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 def prepare_claude_receipt_fixture(
-    target: Path, runtime: Any, *, plugin_root: Path, selector: str, command_outcome: Any,
+    target: Path,
+    runtime: Any,
+    *,
+    plugin_root: Path,
+    selector: str,
+    command_outcome: Any,
 ) -> None:
     """Materialize installer probe state from the plugin's shipped hook bytes."""
     cache_root = runtime.home / ".claude/plugins/cache/iris/coordination-hooks/0.8.2"
@@ -28,7 +33,11 @@ def prepare_claude_receipt_fixture(
     registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text(json.dumps({"plugins": {selector: [{"installPath": str(cache_root)}]}}), encoding="utf-8")
     runtime.responses[("/fixture/claude", "plugin", "list", "--json")] = command_outcome(
-        0, False, 1, json.dumps([{"id": selector, "enabled": True}]), "",
+        0,
+        False,
+        1,
+        json.dumps([{"id": selector, "enabled": True}]),
+        "",
     )
 
 
@@ -60,7 +69,7 @@ def run_receipt_surface_shape_regression(
     )
     born_surfaces = born_receipt["surfaces"]
     check(isinstance(born_surfaces, list), "born-clone receipt has surfaces")
-    born_checkout = next(surface for surface in born_surfaces if surface["kind"] == "checkout")
+    born_checkout = next(surface for surface in cast(list[dict[str, Any]], born_surfaces) if surface["kind"] == "checkout")
     check(
         born_checkout["hook_root"] == str(shipped_root.resolve()),
         "born-clone checkout receipt names the plugin-owned shipped hook root",
@@ -81,7 +90,7 @@ def run_receipt_surface_shape_regression(
     )
     checkout_surfaces = checkout_receipt["surfaces"]
     check(isinstance(checkout_surfaces, list), "development receipt has surfaces")
-    development_checkout = next(surface for surface in checkout_surfaces if surface["kind"] == "checkout")
+    development_checkout = next(surface for surface in cast(list[dict[str, Any]], checkout_surfaces) if surface["kind"] == "checkout")
     check(
         development_checkout["hook_root"] == str(checkout_root.resolve()),
         "existing checkout-root Claude hooks remain the development receipt surface",
@@ -130,16 +139,23 @@ def run_plugin_list_output_cap(
     interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
     profile = target / "profile"
     profile.mkdir(exist_ok=True)
-    publish_receipt(build_receipt(
-        solet_name="iris",
-        app_home=profile,
-        plugin_selector=selector,
-        default_hook_root=claude_root / "hooks",
-        installation_id="plugin-list-fixture",
-        surfaces=(ReceiptSurface(
-            "plugin_cache", claude_root / "hooks", interpreter, claude_root / "hooks/hooks.json",
-        ),),
-    ))
+    publish_receipt(
+        build_receipt(
+            solet_name="iris",
+            app_home=profile,
+            plugin_selector=selector,
+            default_hook_root=claude_root / "hooks",
+            installation_id="plugin-list-fixture",
+            surfaces=(
+                ReceiptSurface(
+                    "plugin_cache",
+                    claude_root / "hooks",
+                    interpreter,
+                    claude_root / "hooks/hooks.json",
+                ),
+            ),
+        )
+    )
     registry = runtime.home / ".claude/plugins/installed_plugins.json"
     registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text(
@@ -175,9 +191,7 @@ def run_plugin_list_output_cap(
     unfiltered_vector = ("/fixture/codex", "plugin", "list", "--json")
     runtime.responses[unfiltered_vector] = command_outcome(0, False, 1, oversized[:4096], "")
     production_vector = setup_plugin_operations.plugin_list_vector
-    setup_plugin_operations.plugin_list_vector = (
-        lambda _cli, _marketplace, _executable=None: unfiltered_vector
-    )
+    setup_plugin_operations.plugin_list_vector = lambda _cli, _marketplace, _executable=None: unfiltered_vector
     try:
         legacy = operation_handlers()[install_request.operation_ref](install_request, runtime)
     finally:
@@ -350,8 +364,7 @@ def run_genesis_profile_projection(
         "launchagent adapter apply succeeds",
     )
     check(
-        runtime.command_environments[-1].get("SOLET_OPERATION_REF")
-        == "genesis::autostart.install",
+        runtime.command_environments[-1].get("SOLET_OPERATION_REF") == "genesis::autostart.install",
         "launchagent apply transports its operation scope to genesis",
     )
 
@@ -381,8 +394,7 @@ def run_genesis_profile_projection(
             )
             invalid_launchagent_response = dispatch_request(invalid_launchagent_request, runtime)
             check(
-                invalid_launchagent_response["checkpoint_status"] == "blocked"
-                and invalid_launchagent_response["error_kind"] == "adapter_protocol_error",
+                invalid_launchagent_response["checkpoint_status"] == "blocked" and invalid_launchagent_response["error_kind"] == "adapter_protocol_error",
                 "launchagent adapter rejects malformed profile and autostart inputs",
             )
             check(
@@ -406,8 +418,7 @@ def run_genesis_profile_projection(
     )
     blocked = dispatch_request(missing_profile, runtime)
     check(
-        blocked["checkpoint_status"] == "blocked"
-        and blocked["error_kind"] == "adapter_protocol_error",
+        blocked["checkpoint_status"] == "blocked" and blocked["error_kind"] == "adapter_protocol_error",
         "genesis adapter rejects a request without the resolved autostart decision",
     )
 
@@ -442,6 +453,7 @@ def run_session_retrieval_envelope(
             },
             separators=(",", ":"),
         ),
+        "--wait",
     )
     qualification_payload: dict[str, Any] = {
         "target_identity_matched": True,
@@ -523,11 +535,7 @@ def _assert_public_evidence(
     for field in ("observed", "expected"):
         value = evidence_item.get(field)
         is_public_scalar = value is None or isinstance(value, bool | int | float | str)
-        is_unique_string_array = (
-            isinstance(value, list)
-            and all(isinstance(item, str) for item in value)
-            and value == sorted(set(value))
-        )
+        is_unique_string_array = isinstance(value, list) and all(isinstance(item, str) for item in value) and value == sorted(set(value))
         check(
             is_public_scalar or is_unique_string_array,
             f"{label} {field} uses the closed public evidence shape",
@@ -536,7 +544,7 @@ def _assert_public_evidence(
     check(True, f"{label} is accepted by the manager evidence validator")
     if not reject_dict:
         return
-    dict_observed = {**evidence_item, "observed": {"must": "remain rejected"}}
+    dict_observed: dict[str, Any] = {**evidence_item, "observed": {"must": "remain rejected"}}
     try:
         validate_evidence(dict_observed)
     except AdapterProtocolError:

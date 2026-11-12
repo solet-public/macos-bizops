@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Bridge-delivery payloads stay opaque to action template resolution.
+"""Delivery payloads stay opaque to action template resolution.
 
-``deliver_result`` and ``deliver_error`` relay structured output that is
-already produced by another action.  Template or execution-context placeholder
+Result, error and job-completion delivery relay structured output that is
+already produced by another action. Template or execution-context placeholder
 resolution must never inspect those envelopes: literal ``<<RESULT>>`` prose is
 data, not an instruction to the action processor.
 
@@ -16,8 +16,8 @@ from __future__ import annotations
 import json
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
@@ -25,6 +25,8 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src")
 
 from ananta.core.actions import action_processor as action_processor_module  # noqa: E402
 from ananta.core.actions.action_processor import ActionProcessor  # noqa: E402
+from ananta.core.actions.action_queue_poller import QueuedAction  # noqa: E402
+from ananta.core.state.job_completion_route import COMPLETION_DELIVERY_PROCESS_KEY  # noqa: E402
 
 from agent_messaging_plugin.platform_surface import (  # noqa: E402
     _DELIVER_ERROR_PROCESS_KEY,
@@ -32,7 +34,7 @@ from agent_messaging_plugin.platform_surface import (  # noqa: E402
 )
 
 _NORMAL_PROCESS_KEY = "service_interface::knowledge_service::search"
-_OPAQUE_PROCESS_KEYS = (_DELIVER_RESULT_PROCESS_KEY, _DELIVER_ERROR_PROCESS_KEY)
+_OPAQUE_PROCESS_KEYS = (_DELIVER_RESULT_PROCESS_KEY, _DELIVER_ERROR_PROCESS_KEY, COMPLETION_DELIVERY_PROCESS_KEY)
 _FAILURES: list[str] = []
 
 
@@ -88,11 +90,18 @@ def _processor(state_service: _CountingStateService) -> ActionProcessor:
     return processor
 
 
-def _action(process_key: str, arguments: dict[str, object]) -> SimpleNamespace:
-    return SimpleNamespace(
+@dataclass
+class _OpaqueAction(QueuedAction):
+    source_plugin: str | None = None
+
+
+def _action(process_key: str, arguments: dict[str, object]) -> _OpaqueAction:
+    return _OpaqueAction(
         id="ae-opaque-relay-smoke",
         process_key=process_key,
         parameters=json.dumps(arguments),
+        notes="owned opaque delivery fixture",
+        created_at="now",
         session_id="session-opaque-relay-smoke",
         flow_id="flow-opaque-relay-smoke",
         context_id=None,
@@ -100,40 +109,34 @@ def _action(process_key: str, arguments: dict[str, object]) -> SimpleNamespace:
     )
 
 
-def _resolve_arguments(
-    processor: ActionProcessor, action: SimpleNamespace
-) -> dict[str, object]:
+def _resolve_arguments(processor: ActionProcessor, action: _OpaqueAction) -> dict[str, object]:
     prepared = processor._prepare_arguments(action)
     if prepared is None:
         raise AssertionError("fixture parameters must parse")
     return processor._resolve_placeholders(prepared, action)
 
 
-def _opaque_payload(rows: int = 1) -> dict[str, object]:
-    message = (
-        "The peer quoted literal <<RESULT>> and <<<GLOBAL_VALUE>>> in a relay; "
-        "those bytes belong to the delivered result."
-    )
+def _opaque_payload(rows: int = 1, *, process_key: str = _DELIVER_RESULT_PROCESS_KEY) -> dict[str, object]:
+    message = "The peer quoted literal <<RESULT>> and <<<GLOBAL_VALUE>>> in a relay; those bytes belong to the delivered result."
+    payload = {"entries": [{"ordinal": row, "content": message, "metadata": {"kind": "peer_message"}} for row in range(rows)]}
+    context = {"RESULT": "incorrect-local-substitution"}
+    if process_key == COMPLETION_DELIVERY_PROCESS_KEY:
+        return {"name": "owned-opaque-role", "job_id": "owned-opaque-job", "provider_name": "owned.operation", "status": "completed", "payload": payload, "plugin_context": context}
     return {
-        "result_payload": {
-            "entries": [
-                {"ordinal": row, "content": message, "metadata": {"kind": "peer_message"}}
-                for row in range(rows)
-            ]
-        },
+        "error_payload" if process_key == _DELIVER_ERROR_PROCESS_KEY else "result_payload": payload,
         "source_process_key": "service_interface::knowledge_service::search",
         "bridge_id": "bridge-opaque-relay-smoke",
         # Deliberately makes <<RESULT>> resolvable on the pre-fix path.
-        "plugin_context": {"RESULT": "incorrect-local-substitution"},
+        "plugin_context": context,
     }
 
 
 def test_opaque_keys_preserve_literal_payloads() -> None:
-    """Both bridge-delivery keys must bypass templates and placeholders."""
+    """All delivery keys must bypass templates and placeholders."""
     for process_key in _OPAQUE_PROCESS_KEYS:
         state_service = _CountingStateService()
         processor = _processor(state_service)
-        expected = _opaque_payload()
+        expected = _opaque_payload(process_key=process_key)
         actual = _resolve_arguments(processor, _action(process_key, expected))
         _check(
             actual == expected,
@@ -188,7 +191,7 @@ def test_plugin_key_drift_is_detected() -> None:
     core_keys = getattr(action_processor_module, "_OPAQUE_RELAY_PROCESS_KEYS", frozenset())
     _check(
         core_keys == frozenset(_OPAQUE_PROCESS_KEYS),
-        "core opaque-relay set equals agent_messaging_plugin bridge-delivery constants",
+        "core opaque-relay set equals bridge-delivery and terminal-completion constants",
     )
 
 

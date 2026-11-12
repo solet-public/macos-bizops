@@ -1,20 +1,13 @@
 name: jira_plugin
 description: >
-  Jira Cloud connector — issues, JQL search, comments, transitions, and
-  attachments (blob-bridged) for the solet, peers, and plans. Full
-  read/write including delete_issue (ticket deletion is an acceptable-loss
-  class). Headless HTTP basic-auth against a dedicated scoped Atlassian
-  service account (account email + API token); the token is chain-consumed
-  from the address book entry "jira_site" via a vault:: reference — no OAuth,
-  no browser flow, no callback server. The API token EXPIRES (Atlassian
-  default 1yr, 1-365d configurable); the entry records expires_at and the
-  plugin warns loudly (jira.token_expiring) as expiry approaches rather than
-  surfacing a mystery 401.
-
-  Foreign-target invariant (SQL-lockdown honesty condition, umbrella design
-  §3): this plugin reaches ONLY the Atlassian site resolved from the
-  operator-registered "jira_site" address-book entry — no base_url/site
-  parameter on any verb. It never imports or touches the platform state DB.
+  Jira Cloud connector with multiple site bindings, API tokens and Atlassian
+  OAuth 2.0 (3LO). Legacy issue/JQL/comment/transition/attachment verbs and
+  complete typed projects, boards, sprints, backlog/ranking, versions and
+  worklogs families include writes and deletes under vendor permissions.
+  Every verb accepts an optional bound site selector and names its site.
+  Credentials remain vaulted; the original jira_site address-book binding is
+  retained as legacy. New sites are explicitly bound, never arbitrary per-call
+  request origins. This plugin never accesses the platform state database.
 optional: true
 
 implements:
@@ -36,11 +29,18 @@ config:
     description: >
       Per-request HTTP timeout for the Jira client, bounding hung calls.
 
-# Credentials live in the address book entry "jira_site": literals (base_url,
-# email, expires_at, scope_note) plus an api_token field that stores a
-# "vault::<solet>.default_address_book_plugin.jira_api_token" reference.
-# The secret lives in the RESOLVER's namespace so the address book reads it
-# under its own identity (resolve_with_secrets). It is chain-consumed — this
-# plugin neither declares nor reads that vault key directly (see
-# constants.VAULT_KEY_API_TOKEN), and it holds no plugin-owned runtime vault
-# keys of its own, so both VaultKeysProvider hooks return [].
+  oauth_state_ttl_seconds:
+    type: integer
+    required: false
+    default: 600
+    description: Pending OAuth consent lifetime in seconds.
+  token_refresh_skew_seconds:
+    type: integer
+    required: false
+    default: 60
+    description: Refresh an OAuth access token this many seconds before expiry.
+
+# The legacy jira_site credentials remain chain-consumed from the address book.
+# Additional site credentials, index and pending OAuth state use plugin-owned
+# vault keys, declared by get_declared_vault_keys. No raw credential process
+# parameters and no changes to the vault service contract.

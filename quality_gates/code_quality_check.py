@@ -59,6 +59,7 @@ import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
@@ -107,6 +108,8 @@ _SCHEMA_INIT_CHECK = _QUALITY_GATES_DIR / "schema_init_gate.py"
 _SCHEMA_INIT_ALLOWLIST = _QUALITY_GATES_DIR / "schema_init_allowlist.txt"
 _SMOKE_CONTRACT_LINT_CHECK = _QUALITY_GATES_DIR / "smoke_contract_lint_gate.py"
 _SMOKE_CONTRACT_LINT_ALLOWLIST = _QUALITY_GATES_DIR / "smoke_contract_lint_gate_allowlist.txt"
+_TEMP_DIRECTORY_CHECK = _QUALITY_GATES_DIR / "temp_directory_census.py"
+_TEMP_DIRECTORY_ALLOWLIST = _QUALITY_GATES_DIR / "temp_directory_dispositions.json"
 
 # Exit codes returned by the three wrapper scripts (see each script's
 # docstring): 0 = clean (or every finding allowlisted), 2 = one or more
@@ -701,6 +704,9 @@ _SMOKE_CONTRACT_LINT_GATE = _GateSpec(
 )
 
 
+_TEMP_DIRECTORY_GATE = _GateSpec(name="temp_directory_census", description="temporary-directory lifecycle census", script=_TEMP_DIRECTORY_CHECK, allowlist=_TEMP_DIRECTORY_ALLOWLIST)
+
+
 def _scope_roots(project_root: Path) -> list[Path]:
     """Resolve the declared quality-surface roots that exist in this checkout."""
     roots = [candidate for top in _PER_FILE_GATE_TOP_LEVEL if (candidate := project_root / top).exists()]
@@ -1160,40 +1166,6 @@ def _check_return_shape_gate(project_root: Path, venv_python: Path, results: _Ch
     )
 
 
-def _check_shipped_doc_gate(project_root: Path, venv_python: Path, results: _CheckResults) -> bool:
-    """Run the shipped-document gate (GTE-10). True iff non-allowlisted findings.
-
-    Tree-walking gate: no scope-path argv splicing — it derives its own file
-    set from the seed manifest rather than being handed one, because "what
-    ships" is a manifest question and not a checkout-walk question. Exit codes
-    follow the canonical _WRAPPER_OK / _WRAPPER_BLOCKING pattern.
-    """
-    artifacts = _resolve_gate_artifacts(project_root, _SHIPPED_DOC_GATE)
-    if artifacts is None:
-        return True
-    script, allowlist = artifacts
-
-    print(f"\n📊 {_SHIPPED_DOC_GATE.description.title()} Gate ({_SHIPPED_DOC_GATE.name})...")
-    argv = [str(venv_python), str(script), "--repo-root", str(project_root), "--allowlist", str(allowlist)]
-    try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=300)
-    except subprocess.TimeoutExpired:
-        print(f"❌ BLOCKING: {_SHIPPED_DOC_GATE.name} gate timed out after 300s")
-        return True
-    except FileNotFoundError as exc:
-        print(f"❌ BLOCKING: {_SHIPPED_DOC_GATE.name} gate cannot invoke: {exc}")
-        return True
-
-    return _interpret_tree_gate_result(
-        _SHIPPED_DOC_GATE,
-        result,
-        venv_python,
-        script,
-        allowlist,
-        results,
-    )
-
-
 def _check_bundle_license_gate(project_root: Path, venv_python: Path, results: _CheckResults) -> bool:
     """Run the blocking bundle-license gate. True iff findings remain."""
 
@@ -1226,68 +1198,26 @@ def _check_bundle_license_gate(project_root: Path, venv_python: Path, results: _
     )
 
 
-def _check_schema_init_gate(project_root: Path, venv_python: Path, results: _CheckResults) -> bool:
-    """Run the schema-init boot gate. True iff non-allowlisted findings.
-
-    Behavioral, tree-walking gate: no scope-path argv splicing, because a
-    change to a shared table builder can break a schema declared elsewhere
-    and the whole-tree boot is cheap. SOLET_NAME is passed through when the
-    caller exported it (the standing gate habit); the gate discloses when it
-    had to supply its own, since several plugins refuse to import without one.
-    """
-    artifacts = _resolve_gate_artifacts(project_root, _SCHEMA_INIT_GATE)
+def _check_reasoned_source_gate(project_root: Path, venv_python: Path, results: _CheckResults, *, gate: _GateSpec, timeout_seconds: int | None) -> bool:
+    """Run a reasoned whole-tree source gate with its existing invocation policy."""
+    artifacts = _resolve_gate_artifacts(project_root, gate)
     if artifacts is None:
         return True
     script, allowlist = artifacts
 
-    print(f"\n📊 {_SCHEMA_INIT_GATE.description.title()} Gate ({_SCHEMA_INIT_GATE.name})...")
+    print(f"\n📊 {gate.description.title()} Gate ({gate.name})...")
     argv = [str(venv_python), str(script), "--repo-root", str(project_root), "--allowlist", str(allowlist)]
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
-        print(f"❌ BLOCKING: {_SCHEMA_INIT_GATE.name} gate timed out after 300s")
+        print(f"❌ BLOCKING: {gate.name} gate timed out after {timeout_seconds}s")
         return True
     except FileNotFoundError as exc:
-        print(f"❌ BLOCKING: {_SCHEMA_INIT_GATE.name} gate cannot invoke: {exc}")
+        print(f"❌ BLOCKING: {gate.name} gate cannot invoke: {exc}")
         return True
 
     return _interpret_tree_gate_result(
-        _SCHEMA_INIT_GATE,
-        result,
-        venv_python,
-        script,
-        allowlist,
-        results,
-    )
-
-
-def _check_smoke_contract_lint_gate(project_root: Path, venv_python: Path, results: _CheckResults) -> bool:
-    """Run the shipped-smoke checkout-only contract lint gate (iss_59385149).
-
-    Tree-walking gate: no scope-path argv splicing — it reads this repo's own
-    ``shipped_smoke_contract.yaml`` (which locates ``gate_smokes.txt`` and
-    ``seed_manifest.yaml`` beside/above it) rather than being handed a file
-    set. Exit codes follow the canonical _WRAPPER_OK / _WRAPPER_BLOCKING
-    pattern.
-    """
-    artifacts = _resolve_gate_artifacts(project_root, _SMOKE_CONTRACT_LINT_GATE)
-    if artifacts is None:
-        return True
-    script, allowlist = artifacts
-
-    print(f"\n📊 {_SMOKE_CONTRACT_LINT_GATE.description.title()} Gate ({_SMOKE_CONTRACT_LINT_GATE.name})...")
-    argv = [str(venv_python), str(script), "--repo-root", str(project_root), "--allowlist", str(allowlist)]
-    try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
-    except subprocess.TimeoutExpired:
-        print(f"❌ BLOCKING: {_SMOKE_CONTRACT_LINT_GATE.name} gate timed out after 120s")
-        return True
-    except FileNotFoundError as exc:
-        print(f"❌ BLOCKING: {_SMOKE_CONTRACT_LINT_GATE.name} gate cannot invoke: {exc}")
-        return True
-
-    return _interpret_tree_gate_result(
-        _SMOKE_CONTRACT_LINT_GATE,
+        gate,
         result,
         venv_python,
         script,
@@ -1519,10 +1449,11 @@ _BLOCKING_GATE_CHECKS: tuple[tuple[str, Callable[..., bool]], ...] = (
     ("service_interface_ast", _check_service_interface_ast_gate),
     ("return_shape", _check_return_shape_gate),
     ("embedding_description_bound", _check_embedding_bound_gate),
-    ("shipped_doc", _check_shipped_doc_gate),
+    ("shipped_doc", partial(_check_reasoned_source_gate, gate=_SHIPPED_DOC_GATE, timeout_seconds=300)),
     ("bundle_license", _check_bundle_license_gate),
-    ("schema_init", _check_schema_init_gate),
-    ("smoke_contract_lint", _check_smoke_contract_lint_gate),
+    ("schema_init", partial(_check_reasoned_source_gate, gate=_SCHEMA_INIT_GATE, timeout_seconds=300)),
+    ("smoke_contract_lint", partial(_check_reasoned_source_gate, gate=_SMOKE_CONTRACT_LINT_GATE, timeout_seconds=120)),
+    ("temp_directory_census", partial(_check_reasoned_source_gate, gate=_TEMP_DIRECTORY_GATE, timeout_seconds=None)),
 )
 
 

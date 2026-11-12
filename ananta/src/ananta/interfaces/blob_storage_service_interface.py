@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import ClassVar
 
 from ananta.core.domain.types import ActionResult
@@ -18,9 +19,16 @@ class BlobStorageServiceInterface(ABC):
     INTERFACE_VERSION: ClassVar[str] = "1.0.0"
 
     @abstractmethod
-    def store_blob(
-        self, namespace: str, content: bytes, metadata: dict[str, object]
-    ) -> ActionResult:
+    def get_blob_store_root(self) -> Path | None:
+        """Physical shared filesystem root, or None for remote/in-memory storage.
+
+        A downloaded cache is not a shared store root. Callers must not use
+        it to coordinate filesystem mutation across processes.
+        """
+        ...
+
+    @abstractmethod
+    def store_blob(self, namespace: str, content: bytes, metadata: dict[str, object]) -> ActionResult:
         """Store blob with metadata, returns blob_id.
 
         Args:
@@ -87,9 +95,7 @@ class BlobStorageServiceInterface(ABC):
         ...
 
     @abstractmethod
-    def update_blob_metadata(
-        self, namespace: str, blob_id: str, metadata: dict[str, object]
-    ) -> ActionResult:
+    def update_blob_metadata(self, namespace: str, blob_id: str, metadata: dict[str, object]) -> ActionResult:
         """Update metadata for an existing blob.
 
         Args:
@@ -104,15 +110,17 @@ class BlobStorageServiceInterface(ABC):
 
     @abstractmethod
     def resolve_blob_path(self, blob_url: str) -> str | None:
-        """Resolve blob:// URL to filesystem path.
+        """Resolve a bare blob ID or blob:// URL to a local filesystem path.
 
         Utility method that doesn't require namespace isolation.
 
         Args:
-            blob_url: Blob URL in format blob://...
+            blob_url: Stored blob ID, either bare or prefixed with ``blob://``.
 
         Returns:
-            Filesystem path or None if not found
+            Filesystem path or None if missing or invalid. Filesystem-backed
+            storage refuses traversal and symlinks escaping its physical blob
+            root; remote storage may materialize the blob in a local cache.
         """
         ...
 

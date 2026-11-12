@@ -36,7 +36,7 @@ Exercises:
      allowed root; column order follows first appearance; nested objects
      serialize as JSON text; returns {path, columns, row_count, total_size,
      truncated}
-  14. red-first: export path OUTSIDE every allowed root -> ExportPathRefusedError,
+  14. red-first: export path OUTSIDE every allowed root -> PathRefusedError,
      no file written, the query never runs
   15. red-first: EMPTY export_allowed_roots -> refused naming the config key
   16. red-first: RELATIVE or BLANK configured root -> refused as misconfigured
@@ -54,30 +54,40 @@ Exits 0 on success, 1 on first failure.
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta/src"))
+import tempfile  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+from ananta.file_locations.containment import PathRefusedError, assert_path_allowed, derive_allowed_roots  # noqa: E402
+from ananta.file_locations.resolution import PathAddress, SoletTree  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "salesforce_plugin" / "src"))
 
 from salesforce_plugin import soql_actions  # noqa: E402
-from salesforce_plugin.constants import (  # noqa: E402
-    CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
-    DEFAULT_ROW_LIMIT,
-    PARAM_ACKNOWLEDGE_OVERRIDE,
-    PARAM_ROW_LIMIT,
-    SOQL_EXPORT_ROW_CAP,
-    SOQL_MAX_RECORDS_CAP,
-)
-from salesforce_plugin.export_containment import (  # noqa: E402
-    ExportPathRefusedError,
-    assert_export_path_allowed,
-)
+from salesforce_plugin.constants import DEFAULT_ROW_LIMIT, PARAM_ACKNOWLEDGE_OVERRIDE, PARAM_ROW_LIMIT, SOQL_EXPORT_ROW_CAP, SOQL_MAX_RECORDS_CAP  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
+
+
+_LOCATION_ROOT = Path(__file__).resolve().parents[3]
+_LOCATION_TREE = SoletTree(_LOCATION_ROOT, _LOCATION_ROOT / "profile")
+
+
+def _checked_path(path: str, directories: list[str], *, suffix: str | None = ".tsv", param_name: str = "output_tsv_path", reading: bool = False) -> str:
+    """Exercise real address-derived containment, never a mocked boundary."""
+    addresses = [PathAddress(f"project-{index}", Path(directory), frozenset(), frozenset(), datetime.now(UTC)) for index, directory in enumerate(directories)]
+    roots = derive_allowed_roots(addresses, None, _LOCATION_TREE, _LOCATION_ROOT.parent / "test-solet-files")
+    result = assert_path_allowed(path, roots, _LOCATION_TREE, suffix=suffix, param_name=param_name, plugin_name="test")
+    if reading and not Path(result.value).is_file():
+        raise PathRefusedError(f"{param_name} must name an existing regular file")
+    return result.value
 
 
 def _assert(label: str, cond: bool, msg: str = "") -> None:
@@ -94,12 +104,7 @@ def _gate_for(roots: list[str]) -> Any:
     """The REAL containment gate bound to the given allowed roots."""
 
     def gate(output_tsv_path: str) -> str:
-        return assert_export_path_allowed(
-            output_tsv_path,
-            roots,
-            config_key=CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
-            plugin_name="salesforce_plugin",
-        )
+        return _checked_path(output_tsv_path, roots, suffix=".tsv", param_name="output_tsv_path", reading=False)
 
     return gate
 
@@ -126,7 +131,9 @@ def test_soql_query_writes_tsv() -> None:
     with tempfile.TemporaryDirectory(prefix="sf_shape_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
         result = soql_actions.soql_query(
-            executor, {"query": "SELECT Id, Name FROM Account", "output_tsv_path": out_path}, _passthrough_gate,
+            executor,
+            {"query": "SELECT Id, Name FROM Account", "output_tsv_path": out_path},
+            _passthrough_gate,
         )
         _assert("row_count matches", result["row_count"] == 2)
         _assert("total_size carried", result["total_size"] == 2)
@@ -154,7 +161,9 @@ def test_query_file_written_and_cleaned_up() -> None:
     with tempfile.TemporaryDirectory(prefix="sf_filelife_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
         soql_actions.soql_query(
-            executor, {"query": "SELECT Id FROM Account", "output_tsv_path": out_path}, _passthrough_gate,
+            executor,
+            {"query": "SELECT Id FROM Account", "output_tsv_path": out_path},
+            _passthrough_gate,
         )
     _assert("query file cleaned up after the call", not Path(written_path).exists())
 
@@ -184,7 +193,8 @@ def test_max_query_limit_env_passthrough() -> None:
 
 def test_client_side_cap_defense_in_depth() -> None:
     executor = _executor_returning(
-        [{"attributes": {}, "Id": str(i)} for i in range(10)], total_size=10,
+        [{"attributes": {}, "Id": str(i)} for i in range(10)],
+        total_size=10,
     )
     with tempfile.TemporaryDirectory(prefix="sf_defense_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
@@ -215,7 +225,9 @@ def test_soql_query_default_stops_at_default() -> None:
     with tempfile.TemporaryDirectory(prefix="sf_sq_default_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
         result = soql_actions.soql_query(
-            executor, {"query": "SELECT Id FROM Account", "output_tsv_path": out_path}, _gate_for([workspace]),
+            executor,
+            {"query": "SELECT Id FROM Account", "output_tsv_path": out_path},
+            _gate_for([workspace]),
         )
         _assert(
             "soql_query default stops at DEFAULT_ROW_LIMIT",
@@ -228,7 +240,8 @@ def test_soql_query_default_stops_at_default() -> None:
 def test_soql_query_override_reaches_requested_count() -> None:
     requested = DEFAULT_ROW_LIMIT + 200
     executor = _executor_returning(
-        [{"attributes": {}, "Id": str(i)} for i in range(requested + 50)], total_size=requested + 50,
+        [{"attributes": {}, "Id": str(i)} for i in range(requested + 50)],
+        total_size=requested + 50,
     )
     with tempfile.TemporaryDirectory(prefix="sf_sq_override_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
@@ -325,7 +338,9 @@ def test_export_soql_default_stops_at_default() -> None:
     with tempfile.TemporaryDirectory(prefix="sf_eq_default_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
         result = soql_actions.export_soql(
-            executor, {"query": "SELECT Id FROM Account", "output_tsv_path": out_path}, _gate_for([workspace]),
+            executor,
+            {"query": "SELECT Id FROM Account", "output_tsv_path": out_path},
+            _gate_for([workspace]),
         )
         _assert(
             "export_soql default (no override) also stops at DEFAULT_ROW_LIMIT",
@@ -337,7 +352,8 @@ def test_export_soql_default_stops_at_default() -> None:
 def test_export_soql_override_reaches_requested_count() -> None:
     requested = 12_000
     executor = _executor_returning(
-        [{"attributes": {}, "Id": str(i)} for i in range(requested + 500)], total_size=requested + 500,
+        [{"attributes": {}, "Id": str(i)} for i in range(requested + 500)],
+        total_size=requested + 500,
     )
     with tempfile.TemporaryDirectory(prefix="sf_eq_override_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
@@ -436,8 +452,7 @@ def test_export_soql_to_workspace() -> None:
         )
         _assert(
             "default cap passed as the env override (no acknowledged override given)",
-            executor.run_json.call_args.kwargs.get("env_overrides")
-            == {"SF_ORG_MAX_QUERY_LIMIT": str(DEFAULT_ROW_LIMIT)},
+            executor.run_json.call_args.kwargs.get("env_overrides") == {"SF_ORG_MAX_QUERY_LIMIT": str(DEFAULT_ROW_LIMIT)},
         )
 
 
@@ -455,7 +470,7 @@ def test_export_refused_outside_root() -> None:
                 {"query": "SELECT Id FROM Account", "output_tsv_path": out_path},
                 _gate_for([workspace]),
             )
-        except ExportPathRefusedError as exc:
+        except PathRefusedError as exc:
             raised = exc
         _assert("outside-root path is refused", raised is not None)
         _assert("no file written on refusal", not Path(out_path).exists())
@@ -463,44 +478,27 @@ def test_export_refused_outside_root() -> None:
 
 
 def test_export_refused_empty_roots() -> None:
-    executor = MagicMock()
-    raised = None
-    try:
-        soql_actions.export_soql(
-            executor,
-            {"query": "SELECT Id FROM Account", "output_tsv_path": "/tmp/anywhere.tsv"},
-            _gate_for([]),
-        )
-    except ExportPathRefusedError as exc:
-        raised = exc
-    _assert("empty export_allowed_roots refuses (refuse-all default)", raised is not None)
-    _assert(
-        "refusal names the config key",
-        raised is not None and CONFIG_KEY_EXPORT_ALLOWED_ROOTS in str(raised),
-    )
+    with tempfile.TemporaryDirectory() as directory:
+        home = Path(directory).resolve() / "home"
+        roots = derive_allowed_roots([], None, _LOCATION_TREE, home)
+        result = assert_path_allowed(str(home / "Exports.nosync/out.tsv"), roots, _LOCATION_TREE, suffix=".tsv", param_name="output_tsv_path", plugin_name="test")
+        _assert("empty address book admits computed exports folder", result.value == str(home / "Exports.nosync/out.tsv"))
+        _assert("computed default carries an advisory", bool(result.advisories))
 
 
 def test_export_refused_misconfigured_roots() -> None:
-    executor = MagicMock()
-    cwd_relative_target = str(Path.cwd() / "relative-root" / "out.tsv")
-    for bad_roots, label in (
-        (["relative-root"], "relative configured root is refused"),
-        ([""], "blank configured root is refused"),
-    ):
-        raised = None
-        try:
-            soql_actions.export_soql(
-                executor,
-                {"query": "SELECT Id FROM Account", "output_tsv_path": cwd_relative_target},
-                _gate_for(bad_roots),
-            )
-        except ExportPathRefusedError as exc:
-            raised = exc
-        _assert(label, raised is not None)
-        _assert(
-            f"{label}: message names the offending entry as misconfigured",
-            raised is not None and "misconfigured" in str(raised),
-        )
+    with tempfile.TemporaryDirectory() as directory:
+        home = Path(directory).resolve() / "home"
+        for raw in ("relative-root", ""):
+            addresses = [PathAddress("malformed", Path(raw), frozenset(), frozenset(), datetime.now(UTC))]
+            roots = derive_allowed_roots(addresses, None, _LOCATION_TREE, home)
+            _assert("malformed address is disclosed", any("malformed" in message for message in roots.advisories))
+            raised = False
+            try:
+                assert_path_allowed(str(Path(directory).resolve() / "outside.tsv"), roots, _LOCATION_TREE, suffix=".tsv", param_name="output_tsv_path", plugin_name="test")
+            except PathRefusedError as exc:
+                raised = "path address" in str(exc)
+            _assert("malformed address never authorizes another folder", raised)
 
 
 def test_export_truncated_on_done_false_alone() -> None:
@@ -521,7 +519,9 @@ def test_export_truncated_on_done_false_alone() -> None:
 def test_export_truncated_when_org_reports_more() -> None:
     with tempfile.TemporaryDirectory(prefix="sf_root_") as workspace:
         executor = _executor_returning(
-            [{"attributes": {}, "Id": "001x1"}], total_size=99999, done=False,  # org reports more than fetched
+            [{"attributes": {}, "Id": "001x1"}],
+            total_size=99999,
+            done=False,  # org reports more than fetched
         )
         out_path = str(Path(workspace) / "partial.tsv")
         result = soql_actions.export_soql(
@@ -532,7 +532,24 @@ def test_export_truncated_when_org_reports_more() -> None:
         _assert("truncated True when total_size exceeds fetched rows", result["truncated"] is True)
 
 
+def test_address_root_replaces_config() -> None:
+    """A live address authorizes exports without a connector root setting."""
+    from salesforce_plugin.plugin import SalesforcePlugin
+
+    with tempfile.TemporaryDirectory() as directory:
+        plugin = SalesforcePlugin()
+        plugin.initialize({})
+        orchestrator = MagicMock()
+        orchestrator.APP_HOME = str(REPO_ROOT / "profile")
+        orchestrator.get_service.return_value.list_path_addresses.return_value = {"action_status": "completed", "data": {"addresses": [{"name": "project", "tags": [], "updated_at": "2026-11-08T00:00:00+00:00", "entries": [{"field_type": "path", "value": directory}]}]}}
+        orchestrator.plugin_manager.get_plugin.return_value = None
+        plugin.orchestrator_ref = orchestrator
+        path = str(Path(directory).resolve() / "out.tsv")
+        _assert("live path address authorizes export without connector config", plugin._export_path_gate(path) == path)
+
+
 def main() -> int:
+    test_address_root_replaces_config()
     print("\nsalesforce_plugin SOQL query/export/override smoke tests")
     print("=" * 58)
     test_soql_query_writes_tsv()

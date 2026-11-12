@@ -60,6 +60,7 @@ Exits 0 on success, 1 on first failure.
 
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 from typing import Any
@@ -123,9 +124,7 @@ def _paged_jql_client(all_issues: list[dict[str, Any]]) -> tuple[MagicMock, list
     responses: list[dict[str, Any]] = []
     served = {"i": 0}
 
-    def _search(
-        jql: str, maxResults: int, fields: list[str], json_result: bool, nextPageToken: str | None = None
-    ) -> dict[str, Any]:
+    def _search(jql: str, maxResults: int, fields: list[str], json_result: bool, nextPageToken: str | None = None) -> dict[str, Any]:
         start = served["i"]
         page = all_issues[start : start + maxResults]
         served["i"] += len(page)
@@ -170,9 +169,7 @@ def test_jql_row_shape() -> None:
 
 
 def test_jql_short_page_ends_pagination_truthfully() -> None:
-    client, _ = _paged_jql_client(
-        [_issue(f"EXAMPLE-{i}", "x", "Done", "Bob", "2026-07-01T00:00:00Z") for i in range(250)]
-    )
+    client, _ = _paged_jql_client([_issue(f"EXAMPLE-{i}", "x", "Done", "Bob", "2026-07-01T00:00:00Z") for i in range(250)])
     result = issue_actions.jql_search(client, {"jql": "project = EXAMPLE"})
     _assert("all 250 issues collected across pages", result["row_count"] == 250)
     _assert("short final page -> not truncated", result["truncated"] is False)
@@ -187,9 +184,7 @@ def test_jql_short_page_ends_pagination_truthfully() -> None:
 def test_jql_default_pages_internally_and_forwards_tokens() -> None:
     # RED MUTATION: hardcode nextPageToken to a stale/empty value on internal
     # calls 2+ and this drops to fewer than 5 calls / wrong row_count.
-    client, responses = _paged_jql_client(
-        [_issue(f"EXAMPLE-{i}", "x", "Done", "Bob", "2026-07-01T00:00:00Z") for i in range(550)]
-    )
+    client, responses = _paged_jql_client([_issue(f"EXAMPLE-{i}", "x", "Done", "Bob", "2026-07-01T00:00:00Z") for i in range(550)])
     result = issue_actions.jql_search(client, {"jql": "project = EXAMPLE"})
     calls = client.enhanced_search_issues.call_args_list
     _assert(f"5 internal calls to reach the {DEFAULT_ROW_LIMIT}-row default", len(calls) == 5)
@@ -208,9 +203,7 @@ def test_jql_default_pages_internally_and_forwards_tokens() -> None:
 def test_jql_target_reached_with_more_available_is_truncated() -> None:
     # This is the exact bug class fixed this session: stopping at the target
     # while the vendor still has more must report truncated=True, not False.
-    client, _ = _paged_jql_client(
-        [_issue(f"EXAMPLE-{i}", "x", "Done", "Bob", "2026-07-01T00:00:00Z") for i in range(600)]
-    )
+    client, _ = _paged_jql_client([_issue(f"EXAMPLE-{i}", "x", "Done", "Bob", "2026-07-01T00:00:00Z") for i in range(600)])
     client.approximate_issue_count.return_value = 600
     result = issue_actions.jql_search(client, {"jql": "project = EXAMPLE"})
     _assert("truncated=True when target reached but vendor has more", result["truncated"] is True)
@@ -222,9 +215,7 @@ def test_jql_target_reached_with_more_available_is_truncated() -> None:
 
 
 def test_jql_max_results_narrows_this_call() -> None:
-    client, _ = _paged_jql_client(
-        [_issue(f"EXAMPLE-{i}", "x", "Done", "Bob", "2026-07-01T00:00:00Z") for i in range(200)]
-    )
+    client, _ = _paged_jql_client([_issue(f"EXAMPLE-{i}", "x", "Done", "Bob", "2026-07-01T00:00:00Z") for i in range(200)])
     result = issue_actions.jql_search(client, {"jql": "project = EXAMPLE", "max_results": 50})
     _assert("max_results narrows row_count", result["row_count"] == 50)
     _assert("single internal call suffices", client.enhanced_search_issues.call_count == 1)
@@ -283,18 +274,14 @@ def test_resolve_effective_limit_pair_required_together() -> None:
 
 
 def test_resolve_effective_limit_raises_ceiling() -> None:
-    limit = issue_actions._resolve_effective_limit(
-        {"acknowledge_default_limit_override": True, "row_limit": 2000}, verb="jql_search"
-    )
+    limit = issue_actions._resolve_effective_limit({"acknowledge_default_limit_override": True, "row_limit": 2000}, verb="jql_search")
     _assert("an acknowledged override raises the ceiling", limit == 2000)
 
 
 def test_resolve_effective_limit_cap_refused_not_clamped() -> None:
     raised = False
     try:
-        issue_actions._resolve_effective_limit(
-            {"acknowledge_default_limit_override": True, "row_limit": ROW_LIMIT_CAP + 1}, verb="jql_search"
-        )
+        issue_actions._resolve_effective_limit({"acknowledge_default_limit_override": True, "row_limit": ROW_LIMIT_CAP + 1}, verb="jql_search")
     except ValueError:
         raised = True
     _assert(f"row_limit above the {ROW_LIMIT_CAP} cap is refused, not silently clamped", raised)
@@ -304,9 +291,7 @@ def test_resolve_effective_limit_invalid_row_limit() -> None:
     for bad in (0, -5, "abc", True):
         raised = False
         try:
-            issue_actions._resolve_effective_limit(
-                {"acknowledge_default_limit_override": True, "row_limit": bad}, verb="jql_search"
-            )
+            issue_actions._resolve_effective_limit({"acknowledge_default_limit_override": True, "row_limit": bad}, verb="jql_search")
         except ValueError:
             raised = True
         _assert(f"row_limit={bad!r} raises ValueError", raised)
@@ -335,9 +320,7 @@ def test_get_issue_parses_raw() -> None:
             "assignee": None,
             "reporter": {"displayName": "Carol"},
             "labels": ["backend", "urgent"],
-            "attachment": [
-                {"id": "att-1", "filename": "log.txt", "mimeType": "text/plain", "size": "42"}
-            ],
+            "attachment": [{"id": "att-1", "filename": "log.txt", "mimeType": "text/plain", "size": "42"}],
         },
     }
     result = issue_actions.get_issue(client, {"key": "EXAMPLE-9"})
@@ -491,7 +474,7 @@ def test_export_containment_module_is_gone() -> None:
     # RED-FIRST: this import must fail — the module is deleted, not orphaned.
     raised = False
     try:
-        import jira_plugin.export_containment  # noqa: F401
+        importlib.import_module("jira_plugin.export_containment")
     except ModuleNotFoundError:
         raised = True
     _assert("export_containment module no longer importable", raised)
@@ -501,7 +484,7 @@ def test_run_success_shape() -> None:
     plugin = JiraPlugin()
     ok = plugin._run(lambda: {"x": 1}, "v")
     _assert("success action_status", ok["action_status"] == "completed")
-    _assert("success carries data", ok["data"] == {"x": 1})
+    _assert("success carries data", ok["data"] == {"site": "legacy", "x": 1})
     _assert("success error is None", ok["error"] is None)
 
 

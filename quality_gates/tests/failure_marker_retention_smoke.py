@@ -9,7 +9,6 @@ import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -80,18 +79,15 @@ class FailureMarkerRetention(unittest.TestCase):
         self.assertLess(output.index("✗ first"), output.index("❌ second"))
         self.assertTrue(output.rstrip().endswith("last"))
 
-    def test_retry_print_keeps_marker(self) -> None:
+    def test_single_failure_print_keeps_marker(self) -> None:
         output = "\n".join(["FAIL early assertion", *["later-" + str(i) for i in range(20)]])
-        runtime = SimpleNamespace(select_supervisor=lambda factory: object())
         stream = io.StringIO()
-        with (
-            patch.object(run_smokes, "_scratch_runtime", return_value=runtime),
-            patch.object(run_smokes, "_run_serial_phase", return_value=({"fake.py": ("failed", output, 0.1, 1)}, 0.0)),
-            redirect_stdout(stream),
-        ):
-            final_failures, _retries, flaky, harness = run_smokes._retry_failures(Path("python"), ["fake.py"], {"fake.py": output})
+        failures: list[str] = []
+        with redirect_stdout(stream):
+            run_smokes._report_result("fake.py", "failed", output, 0.1, [], failures, [])
         printed = stream.getvalue()
-        self.assertEqual((final_failures, flaky, harness), (["fake.py"], [], []))
+        self.assertEqual(failures, ["fake.py"])
+        self.assertEqual(printed.count("FAIL early assertion"), 1)
         self.assertIn("FAIL early assertion", printed)
         self.assertIn("lines elided", printed)
 

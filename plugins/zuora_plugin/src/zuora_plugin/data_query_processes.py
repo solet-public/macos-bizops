@@ -2,7 +2,7 @@
 
 Same contract as ``workflow_processes``: EDGE, deferred completion, one vendor
 operation per job, vendor RBAC the only boundary. Downloads write to an
-absolute ``output_path`` under the operator's ``export_allowed_roots``.
+absolute ``output_path`` under the operator's ``registered path addresses``.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from .workflow_processes import QUEUED
 _QUEUED_NOTE: Final[str] = " Returns job_id/status queued at once; dispatch is not completion."
 _JOB_ID = ParameterMetadata(type=ParameterType.STRING, required=True, description="Data query job id.")
 _FILE_ID = ParameterMetadata(type=ParameterType.STRING, required=True, description="Zuora file id.")
-_OUTPUT_PATH = ParameterMetadata(type=ParameterType.STRING, required=True, description="Absolute destination path under an export_allowed_roots entry.")
+_OUTPUT_PATH = ParameterMetadata(type=ParameterType.STRING, required=True, description="Absolute destination path under a registered path address.")
 # Request headers the Data Queries reference documents on every route (submit adds Idempotency-Key).
 _QUERY_HEADERS: Final[dict[str, ParameterMetadata]] = {key: V1_HEADER_PARAMS[key] for key in ("zuora_entity_ids", "zuora_org_ids", "zuora_track_id")}
 _SUBMIT_HEADERS: Final[dict[str, ParameterMetadata]] = {"idempotency_key": IDEMPOTENT_HEADER_PARAMS["idempotency_key"], **_QUERY_HEADERS}

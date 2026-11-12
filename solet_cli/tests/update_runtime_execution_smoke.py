@@ -115,7 +115,11 @@ def _assert_preview(fixture: Fixture) -> str:
     _check(payload["dependency_actions"] == [[]], "closed environment plans no dependency action")
     limit = payload["rollback_limit"]
     _check((data(limit, "forward_only_boundary"), data(limit, "router_previous_is_code_only")) == (None, True), "rollback limit disclosed")
-    _check(all(data(row, "postcondition_now") == "verified" for row in cast(list[Any], payload["migrations_pre"])), "migrations verified now")
+    migrations = {data(row, "operation_id"): data(row, "postcondition_now") for row in cast(list[Any], payload["migrations_pre"])}
+    _check(
+        migrations == {"migration_solet_rename": "verified", "migration_export_root_containment": "pending"},
+        f"the saved-location migration is planned before runtime: {migrations}",
+    )
     fingerprint = cast(str, payload["runtime_approval_fingerprint"])
     _check(fingerprint.startswith("sha256:"), "runtime fingerprint rendered")
     return fingerprint
@@ -147,7 +151,7 @@ def _assert_runtime_advanced(fixture: Fixture, fingerprint: str) -> None:
         "dependencies_reconcile": "verified_by_probe",
         "migration_solet_rename": "verified_by_probe",
         "hydration_reconcile": "verified",
-        "migration_export_root_containment": "verified_by_probe",
+        "migration_export_root_containment": "verified",
         "autostart_reconcile": "verified",
         "lifecycle_restart_single_color": "verified",
         "runtime_readiness": "verified",
@@ -186,7 +190,10 @@ def _assert_hydrated(fixture: Fixture) -> None:
     porcelain = git(fixture.target, "status", "--porcelain", "--untracked-files=all")
     # iss_fa27466f: the refresh pins the bare hooks, so the installer's pin is the one tracked modification (``git`` strips).
     pin = "M plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks/hooks.json"
-    _check(porcelain == pin, f"the tracked tree carries only the installer pin; no ?? entry under the target after hydration: {porcelain!r}")
+    seed_path = "profile/config/plugins/default_address_book_plugin/entries.json"
+    _check(porcelain == f"{pin}\n?? {seed_path}", f"the tracked tree carries only the installer pin and the migration's exact pending address seed: {porcelain!r}")
+    seed = json.loads((fixture.target / seed_path).read_text())
+    _check({row["name"] for row in seed["entries"]} == {"solet_home", "solet_home_exports"}, "the saved-location migration preserves its two explicit pending registrations")
     record = fixture.record()
     operation_id = cast(str, fixture.journal()["operation_id"])
     root = backup_root(fixture.paths, record.instance_id, operation_id)
@@ -504,7 +511,10 @@ def _assert_fleet_launcher_refresh(root: Path) -> None:
     _check(applied.status == "promoted" and applied.exit_code == 0, f"update promoted: {applied.status} {applied.error_kind} {applied.message}")
     refreshed = fleet.read_text(encoding="utf-8")
     _check(refreshed.partition(_FLEET_MARKER)[2] == old.partition(_FLEET_MARKER)[2] and refreshed.count(_FLEET_MARKER) == 1, "role functions and everything below the marker are byte-identical")
-    _check('  GIT_CONTROLLER_NAME="Lead-Git" \\' in refreshed.splitlines() and "_tmux_host_for_fixture" in refreshed and "_tmux_host_for_fixture" not in old, "the operator's GIT_CONTROLLER_NAME is kept and the launcher now hosts each role in tmux")
+    _check(
+        '  GIT_CONTROLLER_NAME="Lead-Git" \\' not in refreshed.splitlines() and "_tmux_host_for_fixture" in refreshed and "_tmux_host_for_fixture" not in old,
+        "the retired controller assignment is removed and the launcher now hosts each role in tmux",
+    )
     _check(_clone_ignores_client(stale) and exclude.read_bytes().startswith(exclude_before), "the clone now ignores client/ and its other ignore lines are untouched")
     _check(all((stale.target / relative).read_text(encoding="utf-8") == text for relative, text in _CLIENT_FILES.items()), "the other untracked client files became ignored and were not touched, and the update still promoted")
     _assert_fleet_backups_and_digests(stale, cast(str, applied.data["operation_id"]), old, exclude_before)

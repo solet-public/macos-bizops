@@ -17,8 +17,7 @@ Exercises the Operator ord 90 contract on a REAL AccountStore:
      (and its default unless set_default), and a failed migration loses nothing
      and says so; a failed Gmail probe falls back to the Drive account email
   7. refresh never sends scopes; invalid_grant names the 7-day Testing-mode expiry
-  8. redaction: raw, percent-encoded and base64 token variants scrubbed from
-     results and error messages
+  8. results and error messages are returned as received
 
 Run:
     SOLET_NAME=<name> .venv/bin/python3 plugins/g_suite_plugin/tests/smoke_accounts.py
@@ -26,14 +25,13 @@ Run:
 
 from __future__ import annotations
 
-import base64
 import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
-from urllib.parse import quote, quote_plus
+from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "g_suite_plugin" / "src"))
@@ -51,8 +49,7 @@ from g_suite_plugin.oauth import oauth_client, service_factory  # noqa: E402
 from g_suite_plugin.oauth.oauth_client import GoogleTokens  # noqa: E402
 from g_suite_plugin.oauth.token_store import TokenStore, TokenStoreError  # noqa: E402
 from g_suite_plugin.plugin import GSuitePlugin  # noqa: E402
-from g_suite_plugin.redaction import REDACTED, redact_text  # noqa: E402
-from gsuite_fakes import CLIENT_SECRET, FakeVault, connect_accounts, fake_loader  # noqa: E402  # pyright: ignore[reportMissingImports]
+from gsuite_fakes import CLIENT_SECRET, FakeVault, connect_accounts, fake_loader, run_queued  # noqa: E402  # pyright: ignore[reportMissingImports]
 
 _passed = 0
 _failed: list[str] = []
@@ -147,10 +144,10 @@ def test_result_names_account() -> None:
 
     plugin._call_as_account = spy  # type: ignore[method-assign]
     plugin._require_factory = lambda: _profile_factory(seen)  # type: ignore[method-assign]
-    default_result = plugin.test_connection({}, {})
-    _assert("inline result names the default account", default_result["data"].get("account") == "work@corp.example", str(default_result))
-    alias_result = plugin.test_connection({"account": "home"}, {})
-    _assert("inline result names the selected account", alias_result["data"].get("account") == "home@gmail.com", str(alias_result))
+    default_result = run_queued(plugin, "test_connection", {})
+    _assert("job result names the default account", default_result["data"].get("account") == "work@corp.example", str(default_result))
+    alias_result = run_queued(plugin, "test_connection", {"account": "home"})
+    _assert("job result names the selected account", alias_result["data"].get("account") == "home@gmail.com", str(alias_result))
     _assert("consumer tier recorded for gmail.com", alias_result["data"].get("account_tier") == "consumer", str(alias_result))
 
 
@@ -171,7 +168,7 @@ def test_legacy_migration() -> None:
     again = plugin._require_accounts().resolve(None, plugin._probe_store)
     _assert("migration runs once (no second note)", again.note == "")
     with patch.object(account_processes, "revoke_token", return_value="revoked"):
-        result = plugin.disconnect_account({"account": "owner@corp.example"}, {})
+        result = run_queued(plugin, "disconnect_account", {"account": "owner@corp.example"})
     _assert("disconnect of migrated account succeeds", result["action_status"] == "completed", str(result))
     _assert("disconnect deletes legacy keys of a migrated account", VAULT_KEY_REFRESH_TOKEN not in vault.values)
 
@@ -190,14 +187,14 @@ def test_account_verbs() -> None:
     work_keys = [k for k in vault.values if account_key_base("work@corp.example") in k]
     revoked: list[str] = []
     with patch.object(account_processes, "revoke_token", side_effect=lambda token: revoked.append(token) or "revoked"):
-        result = plugin.disconnect_account({"account": "home@gmail.com"}, {})
+        result = run_queued(plugin, "disconnect_account", {"account": "home@gmail.com"})
     data = result["data"]
     _assert("disconnect revoked the account's refresh token", revoked == ["refresh-1-abcdefgh"], str(revoked))
     _assert("disconnect reports revoke + deletion", data["revoke_status"] == "revoked" and data["credentials_deleted"] is True, str(data))
     _assert("default moves to the remaining account", data["new_default"] == "work@corp.example", str(data))
     _assert("other account's keys untouched", all(k in vault.values for k in work_keys))
     _assert("removed account's keys gone", not any(account_key_base("home@gmail.com") in k for k in vault.values))
-    missing = plugin.disconnect_account({}, {})
+    missing = run_queued(plugin, "disconnect_account", {})
     _assert("disconnect without account -> invalid_params", missing["error"]["code"] == "gsuite.invalid_params")
 
 
@@ -249,7 +246,7 @@ def _active_account_factory() -> Any:
 
 def _unnamed_call(plugin: GSuitePlugin) -> dict[str, Any]:
     plugin._require_factory = _active_account_factory  # type: ignore[method-assign]
-    return plugin.test_connection({}, {})["data"]
+    return run_queued(plugin, "test_connection", {})["data"]
 
 
 def _defaults(plugin: GSuitePlugin) -> dict[str, bool]:
@@ -345,33 +342,20 @@ def test_refresh_and_reauth_message() -> None:
     _assert("credential facts survive a refresh", store.credential_facts()["account_tier"] == "consumer")
 
 
-def test_redaction() -> None:
-    secret = "ya29.A0Ab+cd/ef=gh"
-    variants = [
-        secret,
-        quote(secret, safe=""),
-        quote_plus(secret),
-        base64.b64encode(secret.encode()).decode(),
-        base64.urlsafe_b64encode(secret.encode()).decode().rstrip("="),
-    ]
-    text = " | ".join(variants)
-    scrubbed = redact_text(text, [secret])
-    _assert("every token variant redacted", all(v not in scrubbed for v in variants) and scrubbed.count(REDACTED) == len(variants), scrubbed)
+def test_results_as_received() -> None:
     plugin, _ = _plugin(["me@corp.example"])
-    leak = "access-0-abcdefgh"
 
-    def produce_leak() -> dict[str, Any]:
-        return {"echo": f"token={quote(leak, safe='')}", "nested": [base64.b64encode(leak.encode()).decode()]}
+    def produce_echo() -> dict[str, Any]:
+        return {"echo": "token=vendor-text", "nested": ["vendor-value"]}
 
-    result = plugin._run(produce_leak, "gmail_get_profile", {})
-    _assert("result payload redacted (percent + base64)", leak not in json.dumps(result) and base64.b64encode(leak.encode()).decode() not in json.dumps(result), json.dumps(result))
+    result = plugin._run(produce_echo, "gmail_get_profile", {})
+    _assert("result payload is returned as received", result["data"]["echo"] == "token=vendor-text" and result["data"]["nested"] == ["vendor-value"], json.dumps(result))
 
     def produce_error() -> dict[str, Any]:
-        raise RuntimeError(f"upstream echoed refresh-0-abcdefgh and {CLIENT_SECRET}")
+        raise RuntimeError("upstream failure text")
 
     failed = plugin._run(produce_error, "gmail_get_profile", {})
-    message = failed["error"]["message"]
-    _assert("error message redacts refresh token and client secret", "refresh-0-abcdefgh" not in message and CLIENT_SECRET not in message and REDACTED in message, message)
+    _assert("a failure is classified with its message", "upstream failure text" in failed["error"]["message"], str(failed))
 
 
 def main() -> int:
@@ -388,7 +372,7 @@ def main() -> int:
     test_connect_with_failed_legacy_migration_loses_nothing()
     test_probe_falls_back_when_gmail_is_not_granted()
     test_refresh_and_reauth_message()
-    test_redaction()
+    test_results_as_received()
     print()
     print(f"Results: {_passed} passed, {len(_failed)} failed")
     if _failed:

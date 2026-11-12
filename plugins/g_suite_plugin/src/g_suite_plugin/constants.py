@@ -67,6 +67,9 @@ OAUTH_CALLBACK_PATH: Final[str] = "/oauth/google/callback"
 # gsuite.missing_scope and every other verb works.
 GMAIL_MODIFY_SCOPE: Final[str] = "https://www.googleapis.com/auth/gmail.modify"
 GMAIL_FULL_MAILBOX_SCOPE: Final[str] = "https://mail.google.com/"
+# Gmail build 2: settings writes (vacation, filters, IMAP, POP, language,
+# send-as signatures, S/MIME, CSE) accept only gmail.settings.basic.
+GMAIL_SETTINGS_BASIC_SCOPE: Final[str] = "https://www.googleapis.com/auth/gmail.settings.basic"
 
 # Consumer Gmail addresses; any other Gmail address belongs to a Workspace domain.
 CONSUMER_GMAIL_DOMAINS: Final[frozenset[str]] = frozenset({"gmail.com", "googlemail.com"})
@@ -74,7 +77,35 @@ ACCOUNT_TIER_CONSUMER: Final[str] = "consumer"
 ACCOUNT_TIER_WORKSPACE_USER: Final[str] = "workspace_user"
 ACCOUNT_TIER_UNKNOWN: Final[str] = "unknown"
 
-# One consent set for the whole plugin (all five products), granted once at
+# Google Calendar (build 2, 2026-11-07): the narrowest Calendar scope each verb
+# needs (per-verb table: calendar_operations.OPERATIONS; enumeration recorded on
+# iss_3d1db44e). Read and write variants are both requested so a user who
+# unticks a write scope on Google's granular consent screen keeps the read verbs.
+# The broad .../auth/calendar scope is not requested.
+CALENDAR_SCOPE_CALENDARLIST_READONLY: Final[str] = "https://www.googleapis.com/auth/calendar.calendarlist.readonly"
+CALENDAR_SCOPE_CALENDARLIST: Final[str] = "https://www.googleapis.com/auth/calendar.calendarlist"
+CALENDAR_SCOPE_CALENDARS_READONLY: Final[str] = "https://www.googleapis.com/auth/calendar.calendars.readonly"
+CALENDAR_SCOPE_CALENDARS: Final[str] = "https://www.googleapis.com/auth/calendar.calendars"
+CALENDAR_SCOPE_EVENTS_READONLY: Final[str] = "https://www.googleapis.com/auth/calendar.events.readonly"
+CALENDAR_SCOPE_EVENTS: Final[str] = "https://www.googleapis.com/auth/calendar.events"
+CALENDAR_SCOPE_ACLS_READONLY: Final[str] = "https://www.googleapis.com/auth/calendar.acls.readonly"
+CALENDAR_SCOPE_ACLS: Final[str] = "https://www.googleapis.com/auth/calendar.acls"
+CALENDAR_SCOPE_SETTINGS_READONLY: Final[str] = "https://www.googleapis.com/auth/calendar.settings.readonly"
+CALENDAR_SCOPE_EVENTS_FREEBUSY: Final[str] = "https://www.googleapis.com/auth/calendar.events.freebusy"
+CALENDAR_OAUTH_SCOPES: Final[tuple[str, ...]] = (
+    CALENDAR_SCOPE_CALENDARLIST_READONLY,
+    CALENDAR_SCOPE_CALENDARLIST,
+    CALENDAR_SCOPE_CALENDARS_READONLY,
+    CALENDAR_SCOPE_CALENDARS,
+    CALENDAR_SCOPE_EVENTS_READONLY,
+    CALENDAR_SCOPE_EVENTS,
+    CALENDAR_SCOPE_ACLS_READONLY,
+    CALENDAR_SCOPE_ACLS,
+    CALENDAR_SCOPE_SETTINGS_READONLY,
+    CALENDAR_SCOPE_EVENTS_FREEBUSY,
+)
+
+# One consent set for the whole plugin, granted once at
 # connect time. Full read/write per operator decision (2026-07-08). Docs +
 # Slides scopes are included now so Phase 2 needs no re-consent.
 OAUTH_SCOPES: Final[tuple[str, ...]] = (
@@ -92,10 +123,12 @@ OAUTH_SCOPES: Final[tuple[str, ...]] = (
     "https://www.googleapis.com/auth/userinfo.profile",
     "https://www.googleapis.com/auth/directory.readonly",
     "https://www.googleapis.com/auth/tasks",
+    GMAIL_SETTINGS_BASIC_SCOPE,
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/presentations",
+    *CALENDAR_OAUTH_SCOPES,
 )
 
 # ---------------------------------------------------------------------------

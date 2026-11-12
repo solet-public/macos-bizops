@@ -33,9 +33,7 @@ from solet_manager.stage_activation import (  # noqa: E402
 )
 from solet_manager.transaction import Transaction, canonical_sha256  # noqa: E402
 
-_CONTRACTS = (
-    Path(__file__).resolve().parents[2] / "plugins" / "github_midwife_plugin" / "knowledge_base"
-)
+_CONTRACTS = Path(__file__).resolve().parents[2] / "plugins" / "github_midwife_plugin" / "knowledge_base"
 
 # Declared by the source revision, absent from the destination contract.
 _RETIRED = "__retired_by_destination__"
@@ -46,7 +44,7 @@ _CHECKS = 0
 
 def _check(condition: bool, message: str) -> None:
     global _CHECKS
-    _CHECKS += 1
+    _CHECKS += 1  # pyright: ignore[reportConstantRedefinition] -- Mutable smoke counter; preserve the fixture API.
     if not condition:
         raise AssertionError(f"red: {message}")
 
@@ -61,7 +59,6 @@ def _answers() -> dict[str, JsonValue]:
             "inference_model": "qwen",
             "coding_agents": ["codex"],
             "execution_topology": "solo",
-            "git_mutation_control": "single_session",
             "connector_configuration_timing": "configure_later",
             "autostart": "enabled",
             "session_sources": [],
@@ -149,14 +146,12 @@ def main() -> int:
     bundle = ContractBundle.load(source_revision="a" * 40, directory=_CONTRACTS)
     _check(
         _RETIRED not in bundle.operations and _KEPT in bundle.operations,
-        "fixture premise is wrong: the destination contract's operation set does "
-        "not distinguish the retired operation from the kept one",
+        "fixture premise is wrong: the destination contract's operation set does not distinguish the retired operation from the kept one",
     )
     source = _source_transaction(bundle)
     _check(
         source.stages[_STAGE] is CheckpointStatus.AWAITING_USER,
-        "the retired operation does not pin the source stage, so there is "
-        "nothing for this fixture to discriminate",
+        "the retired operation does not pin the source stage, so there is nothing for this fixture to discriminate",
     )
 
     reconciled = reconcile_contract_stage_probe_state(
@@ -171,22 +166,16 @@ def main() -> int:
     )
     _check(
         reconciled.stages[_STAGE] is not CheckpointStatus.AWAITING_USER,
-        f"{_RETIRED} still pins destination stage {_STAGE} at awaiting_user -- "
-        "a retired operation blocks a stage that can never clear it",
+        f"{_RETIRED} still pins destination stage {_STAGE} at awaiting_user -- a retired operation blocks a stage that can never clear it",
     )
     _check(
         reconciled.operation_statuses.get(_KEPT) is CheckpointStatus.VERIFIED,
         "reconciliation lost the kept operation's verified status",
     )
-    retired_attempts = [
-        attempt
-        for attempt in reconciled.operation_attempts
-        if attempt.get("operation_id") == _RETIRED
-    ]
+    retired_attempts = [attempt for attempt in reconciled.operation_attempts if attempt.get("operation_id") == _RETIRED]
     _check(
         len(retired_attempts) == 1,
-        "reconciliation discarded the retired operation's history; the prune "
-        "must drop the binding, never the attempt record",
+        "reconciliation discarded the retired operation's history; the prune must drop the binding, never the attempt record",
     )
     # Round-tripping is the shared repair constraint, and it only holds with
     # 1.56 in place -- without it the retained attempt above reads as corruption.

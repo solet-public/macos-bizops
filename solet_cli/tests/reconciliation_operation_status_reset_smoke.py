@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import runpy
 import shutil
 import sys
 import tempfile
 import uuid
 from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -40,6 +42,7 @@ _ACTIVE_DESTINATION_MIGRATION_IDS = frozenset(
         "macos-repository-setup-git-control-wording-from-a6cfa885-v1",
         "macos-repository-setup-git-control-wording-from-3bfd5670-v1",
         "macos-repository-setup-git-control-wording-from-50383f0b-v1",
+        "macos-repository-setup-git-control-wording-from-d7b0fcc9-v1",
         "macos-repository-setup-pgvector-package-postcondition-v1",
         "macos-repository-setup-pre-ram-preflight-pgvector-package-postcondition-v1",
         "macos-lm-studio-provisioning-to-pgvector-package-from-92634d2b-v1",
@@ -178,7 +181,7 @@ def _assert_grown_postconditions_reset(destination: ContractBundle) -> None:
                 )
 
 
-def main() -> int:
+def _historical_main() -> int:
     active_destination = ContractBundle.load(
         source_revision="candidate",
         directory=_CONTRACTS,
@@ -245,6 +248,15 @@ def main() -> int:
         )
     print(f"reconciliation_operation_status_reset_smoke: {_CHECKS}/{_CHECKS} checks passed")
     return 0
+
+
+def main() -> int:
+    """Measure the historical reset against its exact released destination."""
+    support = runpy.run_path(str(_ROOT / "plugins/github_midwife_plugin/tests/controller_setting_retirement_smoke.py"))
+    with tempfile.TemporaryDirectory(prefix="historical-reset-contract-") as directory:
+        historical = support["materialize_pre_retirement_contracts"](Path(directory))
+        with patch.dict(globals(), {"_CONTRACTS": historical}):
+            return _historical_main()
 
 
 if __name__ == "__main__":

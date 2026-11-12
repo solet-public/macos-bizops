@@ -133,7 +133,7 @@ class BillRunUsageProcesses:
     @platform_process(
         name="import_usage",
         display_name="Zuora: Import Usage",
-        description="Import a usage file (POST /v1/usage, multipart/form-data) from input_path under export_allowed_roots; Zuora answers with a checkImportStatus URL, only Completed means imported, and a failing record rolls the whole file back. The PRODUCT_RATE_PLAN_CHARGE_ID column needs x_zuora_wsdl_version 146 or higher."
+        description="Import a usage file (POST /v1/usage, multipart/form-data) from input_path under registered path addresses; Zuora answers with a checkImportStatus URL, only Completed means imported, and a failing record rolls the whole file back. The PRODUCT_RATE_PLAN_CHARGE_ID column needs x_zuora_wsdl_version 146 or higher."
         + QUEUED_NOTE,
         processor_policy_category=EDGE,
         parameters={"input_path": USAGE_INPUT, **IDEMPOTENT_HEADER_PARAMS, **WSDL_HEADER_PARAMS},

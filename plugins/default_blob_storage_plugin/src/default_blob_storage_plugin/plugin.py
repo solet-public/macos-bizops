@@ -34,9 +34,7 @@ from .providers.filesystem_provider import FilesystemProvider
 from .schema import get_blob_storage_schema
 
 
-class DefaultBlobStoragePlugin(
-    PluginBase, BlobStorageServiceInterface, StateAwarePlugin, EdgeProcessProvider
-):
+class DefaultBlobStoragePlugin(PluginBase, BlobStorageServiceInterface, StateAwarePlugin, EdgeProcessProvider):
     """Filesystem-based blob storage plugin.
 
     Implements BlobStorageServiceInterface for standardized blob storage operations.
@@ -44,9 +42,7 @@ class DefaultBlobStoragePlugin(
     """
 
     service_interfaces: tuple[type, ...] = (BlobStorageServiceInterface,)
-    supported_interface_versions: dict[type, str] = {
-        BlobStorageServiceInterface: BlobStorageServiceInterface.INTERFACE_VERSION
-    }
+    supported_interface_versions: dict[type, str] = {BlobStorageServiceInterface: BlobStorageServiceInterface.INTERFACE_VERSION}
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         super().__init__()
@@ -74,9 +70,7 @@ class DefaultBlobStoragePlugin(
 
         APP_HOME = getattr(self.orchestrator_ref, "APP_HOME", None)
         if not APP_HOME:
-            raise RuntimeError(
-                f"{self.name}: Application directory not configured - plugin cannot initialize"
-            )
+            raise RuntimeError(f"{self.name}: Application directory not configured - plugin cannot initialize")
 
         # Initialize configuration and logging
         self.config_provider = ConfigProvider(self.name, self.config)
@@ -90,9 +84,7 @@ class DefaultBlobStoragePlugin(
         # Request state_service via new service binding architecture
         state_service = self.orchestrator_ref.get_service("state_service")
         if not state_service:
-            raise RuntimeError(
-                f"{self.name}: state_service not available - check service_bindings.json"
-            )
+            raise RuntimeError(f"{self.name}: state_service not available - check service_bindings.json")
         # get_service returns object - cast to StateServiceProtocol after validation
         self.set_state_service(cast(StateServiceProtocol, state_service))
 
@@ -170,71 +162,39 @@ class DefaultBlobStoragePlugin(
             self.logger.debug(f"FILE_PLUGIN_INIT_START: {self.name} beginning initialization")
 
             # Get APP_HOME from orchestrator reference (set by framework)
-            self.logger.debug(
-                f"FILE_PLUGIN_ORCHESTRATOR_CHECK: {self.name} checking orchestrator reference"
-            )
+            self.logger.debug(f"FILE_PLUGIN_ORCHESTRATOR_CHECK: {self.name} checking orchestrator reference")
             if not self.orchestrator_ref:
-                raise RuntimeError(
-                    "Orchestrator reference not available - framework initialization failed"
-                )
+                raise RuntimeError("Orchestrator reference not available - framework initialization failed")
 
-            self.logger.debug(
-                f"FILE_PLUGIN_ORCHESTRATOR_OK: {self.name} orchestrator reference available"
-            )
+            self.logger.debug(f"FILE_PLUGIN_ORCHESTRATOR_OK: {self.name} orchestrator reference available")
             app_home = getattr(self.orchestrator_ref, "APP_HOME", None)
             if not app_home:
-                self.logger.critical(
-                    "FATAL: Application directory not configured. "
-                    "Blob storage plugin cannot proceed."
-                )
+                self.logger.critical("FATAL: Application directory not configured. Blob storage plugin cannot proceed.")
                 self.logger.critical("This indicates a critical system initialization failure.")
-                raise SystemExit(
-                    "FATAL: Application directory not configured - "
-                    "system terminating to prevent data corruption"
-                )
+                raise SystemExit("FATAL: Application directory not configured - system terminating to prevent data corruption")
             self.logger.debug(f"FILE_PLUGIN_APP_HOME: {self.name} using APP_HOME: {app_home}")
 
-            self.logger.debug(
-                f"FILE_PLUGIN_PROVIDER_CREATE: {self.name} creating FilesystemProvider"
-            )
+            self.logger.debug(f"FILE_PLUGIN_PROVIDER_CREATE: {self.name} creating FilesystemProvider")
             self.provider = FilesystemProvider(app_home, self.config, self.name)
-            self.logger.debug(
-                f"FILE_PLUGIN_PROVIDER_CREATED: {self.name} "
-                f"FilesystemProvider created successfully"
-            )
+            self.logger.debug(f"FILE_PLUGIN_PROVIDER_CREATED: {self.name} FilesystemProvider created successfully")
 
             # State service injection handled by framework service injection phase
-            self.logger.debug(
-                f"FILE_PLUGIN_STATE_CHECK: {self.name} checking state service availability"
-            )
+            self.logger.debug(f"FILE_PLUGIN_STATE_CHECK: {self.name} checking state service availability")
             if self.state_service and hasattr(self.provider, "set_state_service"):
-                self.logger.debug(
-                    f"FILE_PLUGIN_STATE_INJECT: {self.name} "
-                    f"injecting state service into provider"
-                )
+                self.logger.debug(f"FILE_PLUGIN_STATE_INJECT: {self.name} injecting state service into provider")
                 self.provider.set_state_service(self.state_service)
-                self.logger.debug(
-                    f"FILE_PLUGIN_STATE_INJECTED: {self.name} "
-                    f"state service injected successfully"
-                )
+                self.logger.debug(f"FILE_PLUGIN_STATE_INJECTED: {self.name} state service injected successfully")
                 # Schema is created via StateAwarePlugin.get_schema_definitions() by SchemaManager
             else:
-                self.logger.error(
-                    f"{self.name} state service not "
-                    f"available or provider lacks set_state_service method"
-                )
+                self.logger.error(f"{self.name} state service not available or provider lacks set_state_service method")
 
-            self.logger.debug(
-                f"FILE_PLUGIN_INIT_SUCCESS: {self.name} initialization completed successfully"
-            )
+            self.logger.debug(f"FILE_PLUGIN_INIT_SUCCESS: {self.name} initialization completed successfully")
 
         except Exception as e:
             self.logger.error(f"{self.name} initialization failed: {str(e)}")
             raise RuntimeError(f"Failed to initialize blob storage plugin: {str(e)}") from e
 
-    def take_action(
-        self, params: dict[str, Any], state: dict[str, Any]
-    ) -> dict[str, Any]:
+    def take_action(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         """Public action-dispatch surface declared by ``BlobStoragePluginProtocol``.
 
         The ``BlobStorageService`` proxy (``ananta/src/ananta/services/blob_storage_service/__init__.py``)
@@ -308,9 +268,7 @@ class DefaultBlobStoragePlugin(
         except Exception as e:
             return create_error_response_from_exception(e, action_name)
 
-    def _dispatch_action(
-        self, action_name: str, namespace: str, parameters: dict[str, Any]
-    ) -> ActionResult:
+    def _dispatch_action(self, action_name: str, namespace: str, parameters: dict[str, Any]) -> ActionResult:
         """Dispatch action to appropriate provider method."""
         # Action name aliases mapped to canonical names
         action_aliases: dict[str, str] = {
@@ -354,9 +312,7 @@ class DefaultBlobStoragePlugin(
         )
 
     # BlobStorageServiceInterface direct method implementations
-    def store_blob(
-        self, namespace: str, content: bytes, metadata: dict[str, object]
-    ) -> ActionResult:
+    def store_blob(self, namespace: str, content: bytes, metadata: dict[str, object]) -> ActionResult:
         """Store blob with metadata - direct interface implementation."""
         return self._run_action(
             "store_file",
@@ -398,11 +354,7 @@ class DefaultBlobStoragePlugin(
         if isinstance(mime_resolution, dict):
             return mime_resolution
         resolved_mime = mime_resolution
-        resolved_artifact_type = (
-            artifact_type
-            if artifact_type is not None
-            else resolved_mime.split(MIME_PRIMARY_CLASS_SEPARATOR, 1)[0]
-        )
+        resolved_artifact_type = artifact_type if artifact_type is not None else resolved_mime.split(MIME_PRIMARY_CLASS_SEPARATOR, 1)[0]
         merged_metadata = ingestion.build_metadata(
             metadata or {},
             resolved_filename,
@@ -456,9 +408,7 @@ class DefaultBlobStoragePlugin(
             },
         )
 
-    def update_blob_metadata(
-        self, namespace: str, blob_id: str, metadata: dict[str, object]
-    ) -> ActionResult:
+    def update_blob_metadata(self, namespace: str, blob_id: str, metadata: dict[str, object]) -> ActionResult:
         """Update blob metadata - direct interface implementation."""
         return self._run_action(
             "update_metadata",
@@ -469,17 +419,17 @@ class DefaultBlobStoragePlugin(
             },
         )
 
+    def get_blob_store_root(self) -> Path | None:
+        """Read the active provider's configured filesystem root."""
+        if self.provider is None:
+            raise RuntimeError("Blob provider is not initialized")
+        return self.provider.get_blob_store_root()
+
     def resolve_blob_path(self, blob_url: str) -> str | None:
-        """Resolve blob:// URL to filesystem path."""
-        if not blob_url.startswith("blob://"):
+        """Resolve a bare blob ID or blob:// URL through the storage provider."""
+        if self.provider is None:
             return None
-        # Remove blob:// prefix
-        relative_path = blob_url[7:]
-        blobs_dir = getattr(self.provider, "blobs_dir", None) if self.provider else None
-        if blobs_dir is not None:
-            full_path = blobs_dir / relative_path
-            return str(full_path) if full_path.exists() else None
-        return None
+        return self.provider.resolve_blob_path(blob_url)
 
     def file_command(self, command: str) -> ActionResult:
         """Execute Unix-style file commands on blob storage.
@@ -534,9 +484,7 @@ class DefaultBlobStoragePlugin(
             ],
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     def store_blob_action(
         self,
@@ -606,9 +554,7 @@ class DefaultBlobStoragePlugin(
             ],
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=False
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
     )
     def store_blob_from_file_action(
         self,
@@ -622,9 +568,7 @@ class DefaultBlobStoragePlugin(
         mime_type = cast(str | None, params.get("mime_type"))
         metadata = cast(dict[str, object], params.get("metadata", {}))
         artifact_type = cast(str | None, params.get("artifact_type"))
-        return self.store_blob_from_file(
-            namespace, file_path, filename, mime_type, metadata, artifact_type
-        )
+        return self.store_blob_from_file(namespace, file_path, filename, mime_type, metadata, artifact_type)
 
     # Text fields (display_name, description, embedding_description) are defined in
     # knowledge_base/processes/get_blob.json — the builder merges them at startup,
@@ -633,9 +577,7 @@ class DefaultBlobStoragePlugin(
         name="get_blob",
         parameters={
             "name": ParameterMetadata(
-                description=(
-                    "File identifier - can be filename (tremolo.wav), name (tremolo), or blob_id (bmd-xxx)"
-                ),
+                description=("File identifier - can be filename (tremolo.wav), name (tremolo), or blob_id (bmd-xxx)"),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -663,9 +605,7 @@ class DefaultBlobStoragePlugin(
                 "filename": "filename",
             }
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     def get_blob_action(
         self,
@@ -702,14 +642,16 @@ class DefaultBlobStoragePlugin(
         artifact_type = mime_type.split("/")[0] if "/" in mime_type else "file"
 
         # Return flat fields - blob_fields only supports top-level keys
-        return create_success_response({
-            "blob_id": blob_id,
-            "namespace": namespace,
-            "artifact_type": artifact_type,
-            "media_type": mime_type,
-            "filename": filename,
-            "size_bytes": size_bytes,
-        })
+        return create_success_response(
+            {
+                "blob_id": blob_id,
+                "namespace": namespace,
+                "artifact_type": artifact_type,
+                "media_type": mime_type,
+                "filename": filename,
+                "size_bytes": size_bytes,
+            }
+        )
 
     # Text fields (display_name, description, embedding_description) are defined in
     # knowledge_base/processes/delete_blob.json — the builder merges them at startup,
@@ -748,9 +690,7 @@ class DefaultBlobStoragePlugin(
             ],
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=False
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
     )
     def delete_blob_action(
         self,
@@ -799,9 +739,7 @@ class DefaultBlobStoragePlugin(
             ],
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     def search_blobs_action(
         self,
@@ -850,9 +788,7 @@ class DefaultBlobStoragePlugin(
             ],
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     def get_blob_metadata_action(
         self,
@@ -906,9 +842,7 @@ class DefaultBlobStoragePlugin(
             ],
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     def update_blob_metadata_action(
         self,
@@ -952,9 +886,7 @@ class DefaultBlobStoragePlugin(
             },
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     def file_command_action(
         self,
@@ -978,66 +910,42 @@ class DefaultBlobStoragePlugin(
         return {
             "store_blob": EdgeProcessDefinition(
                 name="store_blob",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             "store_blob_from_file": EdgeProcessDefinition(
                 name="store_blob_from_file",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=False
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=False),
             ),
             "get_blob": EdgeProcessDefinition(
                 name="get_blob",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             "delete_blob": EdgeProcessDefinition(
                 name="delete_blob",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             "search_blobs": EdgeProcessDefinition(
                 name="search_blobs",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             "get_blob_metadata": EdgeProcessDefinition(
                 name="get_blob_metadata",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             "update_blob_metadata": EdgeProcessDefinition(
                 name="update_blob_metadata",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             "file_command": EdgeProcessDefinition(
                 name="file_command",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
         }

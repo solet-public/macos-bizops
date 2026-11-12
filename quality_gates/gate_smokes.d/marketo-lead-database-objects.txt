@@ -1,4 +1,4 @@
 # marketo_plugin Lead Database object verbs (companies, opportunities, opportunity roles,
 # sales persons): hermetic MockTransport smoke covering registration, exact vendor paths,
-# pagination, compound-key role query, per-record write results, 401/403 and secret/token redaction.
+# pagination, compound-key role query, per-record write results and 401/403.
 plugins/marketo_plugin/tests/lead_database_objects_smoke.py

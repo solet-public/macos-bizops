@@ -103,6 +103,7 @@ from ananta.core.services.service_interface_decorator import (  # noqa: E402
     ServiceInterfaceActionMetadata,
 )
 from ananta.services.knowledge_service.interfaces.refresh import (  # noqa: E402
+    REFRESH_COMPLETION_SCHEMAS,
     KnowledgeRefreshAPI,
 )
 
@@ -110,10 +111,7 @@ _REFRESH_VERB = "service_interface::knowledge_service::refresh_plugin_process"
 # What a caller actually asks to refresh — a DIFFERENT process than the refreshing verb.
 _REFRESHED_KEY = "plugin::agent_messaging_plugin::peer_inbox"
 
-_IMPL_SOURCE = (
-    REPO_ROOT
-    / "plugins/default_knowledge_plugin/src/default_knowledge_plugin/kb_process_registry.py"
-)
+_IMPL_SOURCE = REPO_ROOT / "plugins/default_knowledge_plugin/src/default_knowledge_plugin/kb_process_registry.py"
 _IMPL_FUNCTION = "do_refresh_plugin_process"
 
 _PROCESSOR_SOURCE = REPO_ROOT / "ananta/src/ananta/core/actions/action_processor.py"
@@ -178,7 +176,11 @@ def _declared_return_fields(verb_name: str = _IMPL_FUNCTION) -> frozenset[str]:
     """
     verb: Any = getattr(KnowledgeRefreshAPI, verb_name.removeprefix("do_"))
     metadata: ServiceInterfaceActionMetadata = verb._service_interface_metadata  # noqa: SLF001
-    return frozenset(metadata.return_value_schema.properties)
+    assert metadata.is_async is True
+    assert frozenset(metadata.return_value_schema.properties) == {"job_id", "status"}
+    # Public dispatch declares its admission. The unchanged synchronous body
+    # and stored terminal result retain this separately declared full schema.
+    return frozenset(REFRESH_COMPLETION_SCHEMAS[verb_name.removeprefix("do_")].properties)
 
 
 def _find_function(source: Path, function_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
@@ -188,28 +190,17 @@ def _find_function(source: Path, function_name: str) -> ast.FunctionDef | ast.As
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name == function_name:
                 return node
-    raise AssertionError(
-        f"{function_name} not found in {source} — the fixture's anchor moved; "
-        "fix the fixture rather than deleting this check"
-    )
+    raise AssertionError(f"{function_name} not found in {source} — the fixture's anchor moved; fix the fixture rather than deleting this check")
 
 
 def _dict_returns(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.Dict]:
     """Every dict-literal `return` in the function, in source order."""
-    return [
-        stmt.value
-        for stmt in ast.walk(node)
-        if isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Dict)
-    ]
+    return [stmt.value for stmt in ast.walk(node) if isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.Dict)]
 
 
 def _string_keys(dict_node: ast.Dict) -> frozenset[str]:
     """The literal string keys of a dict node, ignoring `**splat` (a None key)."""
-    return frozenset(
-        key.value
-        for key in dict_node.keys
-        if isinstance(key, ast.Constant) and isinstance(key.value, str)
-    )
+    return frozenset(key.value for key in dict_node.keys if isinstance(key, ast.Constant) and isinstance(key.value, str))
 
 
 def _implementation_return_fields(function_name: str = _IMPL_FUNCTION) -> frozenset[str]:
@@ -224,10 +215,7 @@ def _implementation_return_fields(function_name: str = _IMPL_FUNCTION) -> frozen
     """
     returns = _dict_returns(_find_function(_IMPL_SOURCE, function_name))
     if not returns:
-        raise AssertionError(
-            f"{function_name} has no dict-literal return in {_IMPL_SOURCE} — "
-            "the fixture's anchor moved; fix the fixture rather than deleting this check"
-        )
+        raise AssertionError(f"{function_name} has no dict-literal return in {_IMPL_SOURCE} — the fixture's anchor moved; fix the fixture rather than deleting this check")
     return _string_keys(returns[-1])
 
 
@@ -253,10 +241,7 @@ def _plugin_return(*, partial: bool) -> dict[str, Any]:
     fields = _implementation_return_fields()
     unmapped = fields - values.keys()
     if unmapped:
-        raise AssertionError(
-            f"{_IMPL_FUNCTION} returns field(s) {sorted(unmapped)} the fixture has no value "
-            "for — extend `values` so the payload under test stays the REAL one (M5)"
-        )
+        raise AssertionError(f"{_IMPL_FUNCTION} returns field(s) {sorted(unmapped)} the fixture has no value for — extend `values` so the payload under test stays the REAL one (M5)")
     return {field: values[field] for field in fields}
 
 
@@ -275,10 +260,7 @@ def _envelope_injected_keys() -> frozenset[str]:
         # `**result` entry shows up as a None key.
         if any(key is None for key in dict_node.keys):
             return _string_keys(dict_node)
-    raise AssertionError(
-        "execute_action's success-envelope return not found in "
-        f"{_PROCESSOR_SOURCE} — the fixture's anchor moved"
-    )
+    raise AssertionError(f"execute_action's success-envelope return not found in {_PROCESSOR_SOURCE} — the fixture's anchor moved")
 
 
 def _envelope(plugin_result: dict[str, Any]) -> dict[str, Any]:
@@ -340,8 +322,7 @@ def test_real_refresh_result_satisfies_the_contract() -> None:
     invariant = _violation(_envelope(_plugin_return(partial=False)))
     _check(
         invariant is None,
-        "(b) a real refresh_plugin_process result satisfies the contract"
-        + _pending(invariant),
+        "(b) a real refresh_plugin_process result satisfies the contract" + _pending(invariant),
     )
 
 
@@ -380,8 +361,7 @@ def test_declared_contract_matches_the_implementation() -> None:
     implemented = _implementation_return_fields()
     _check(
         declared == implemented,
-        "(b) declared return_value_schema == implementation's return keys "
-        f"[declared={sorted(declared)} impl={sorted(implemented)}]",
+        f"(b) declared return_value_schema == implementation's return keys [declared={sorted(declared)} impl={sorted(implemented)}]",
     )
 
 
@@ -403,8 +383,7 @@ def test_plural_verbs_declared_contract_matches_too() -> None:
     implemented = _implementation_return_fields("do_refresh_plugin_processes")
     _check(
         declared == implemented,
-        "(b) PLURAL verb's declared schema == its implementation's return keys "
-        f"[declared={sorted(declared)} impl={sorted(implemented)}]",
+        f"(b) PLURAL verb's declared schema == its implementation's return keys [declared={sorted(declared)} impl={sorted(implemented)}]",
     )
 
 
@@ -417,8 +396,7 @@ def test_defect_is_exactly_the_process_key_invariant() -> None:
     invariant = _violation(_envelope(_plugin_return(partial=False)))
     _check(
         invariant in (None, "result_process_key_mismatch"),
-        "(b) the failure is the process_key invariant, not a bystander "
-        f"(observed {invariant!r})",
+        f"(b) the failure is the process_key invariant, not a bystander (observed {invariant!r})",
     )
 
 
@@ -434,10 +412,13 @@ def test_present_and_wrong_must_raise() -> None:
     a fix that removed the FIELD. MUTATION M2.
     """
     _check(
-        _violation({
-            "action_status": "completed",
-            "process_key": _UNREGISTERED_KEY,
-        }) == "result_process_key_mismatch",
+        _violation(
+            {
+                "action_status": "completed",
+                "process_key": _UNREGISTERED_KEY,
+            }
+        )
+        == "result_process_key_mismatch",
         "control: a present-and-wrong process_key RAISES — the invariant looks",
     )
 
@@ -445,10 +426,13 @@ def test_present_and_wrong_must_raise() -> None:
 def test_present_and_matching_must_pass() -> None:
     """A verb that legitimately echoes its OWN key is accepted. MUTATION M3."""
     _check(
-        _violation({
-            "action_status": "completed",
-            "process_key": _REFRESH_VERB,
-        }) is None,
+        _violation(
+            {
+                "action_status": "completed",
+                "process_key": _REFRESH_VERB,
+            }
+        )
+        is None,
         "control: a present-and-matching process_key passes",
     )
 
@@ -463,13 +447,15 @@ def test_absent_must_pass_through() -> None:
     rather than as a hardening.
     """
     _check(
-        _violation({
-            "action_status": "completed",
-            "updated_count": 1,
-            "process_keys": [_REFRESHED_KEY],
-        }) is None,
-        "control: an ABSENT process_key passes through (the plural verb's "
-        "accidental safety — NOT protection)",
+        _violation(
+            {
+                "action_status": "completed",
+                "updated_count": 1,
+                "process_keys": [_REFRESHED_KEY],
+            }
+        )
+        is None,
+        "control: an ABSENT process_key passes through (the plural verb's accidental safety — NOT protection)",
     )
 
 
@@ -482,16 +468,18 @@ def test_todays_unfixed_shape_still_violates() -> None:
     fix while the check no longer ran. MUTATION M2.
     """
     _check(
-        _violation({
-            "action_status": "completed",
-            "status": "success",
-            "plugin_name": "agent_messaging_plugin",
-            _OLD_KEY_FIELD: _REFRESHED_KEY,
-            "updated": True,
-            "errors": [],
-        }) == "result_process_key_mismatch",
-        "control: the PRE-fix shape is still rejected — the fix is what "
-        "changed, not the invariant",
+        _violation(
+            {
+                "action_status": "completed",
+                "status": "success",
+                "plugin_name": "agent_messaging_plugin",
+                _OLD_KEY_FIELD: _REFRESHED_KEY,
+                "updated": True,
+                "errors": [],
+            }
+        )
+        == "result_process_key_mismatch",
+        "control: the PRE-fix shape is still rejected — the fix is what changed, not the invariant",
     )
 
 
@@ -511,15 +499,13 @@ def test_injected_action_status_masks_the_plugin_status() -> None:
     injected = _envelope_injected_keys()
     _check(
         "action_status" in injected,
-        "control: execute_action still INJECTS action_status "
-        f"(read from source; injects {sorted(injected)}) — MUTATION M4",
+        f"control: execute_action still INJECTS action_status (read from source; injects {sorted(injected)}) — MUTATION M4",
     )
     partial = _envelope(_plugin_return(partial=True))
     without_injection = {k: v for k, v in partial.items() if k != "action_status"}
     _check(
         _violation(without_injection) == "result_status_not_completed",
-        "control: that injection is what passes the status check "
-        "(remove it and the partial path fails the STATUS invariant)",
+        "control: that injection is what passes the status check (remove it and the partial path fails the STATUS invariant)",
     )
 
 

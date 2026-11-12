@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any
 
 from ananta.core.domain.types import ActionResult
 from ananta.core.services.call_context import CallContext
+from ananta.interfaces.credential_contracts import MetadataRequest, MetadataResult, UseRequest, UseResult
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
     from ananta.interfaces.vault_service_interface import VaultServiceInterface
@@ -58,47 +59,86 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
 # protection. The Layer 3 helpers are concrete-impl-only (not in
 # `VaultServiceInterface` or `VaultServiceAPI`), so they're flagged
 # explicitly here for the smoke's per-layer enumeration.
-_LAYER_1_METHODS: frozenset[str] = frozenset({
-    "store", "retrieve", "delete", "list", "exists", "rotate", "rename",
-    "store_random", "status", "unlock", "lock",
-    "oauth_client_register", "oauth_client_revoke",
-    "oauth_client_list", "oauth_client_add_redirect_uri",
-})
+_LAYER_1_METHODS: frozenset[str] = frozenset(
+    {
+        "store",
+        "retrieve",
+        "use",
+        "metadata",
+        "delete",
+        "list",
+        "exists",
+        "rotate",
+        "rename",
+        "store_random",
+        "status",
+        "unlock",
+        "lock",
+        "oauth_client_register",
+        "oauth_client_revoke",
+        "oauth_client_list",
+        "oauth_client_add_redirect_uri",
+    }
+)
 
-_LAYER_2_ONLY_METHODS: frozenset[str] = frozenset({
-    "store_from_env", "store_from_file", "store_from_kv_file",
-    "store_from_keychain",
-    "ensure_encryption_keypair", "get_public_key",
-    "export_encrypted", "import_encrypted",
-    # W-VAULT-CALLER-ENFORCE (sub-2) — admin verbs promoted from
-    # plugin-process scope to service-interface scope.
-    "vault_init", "vault_create_recovery", "vault_rotate_passphrase",
-})
+_LAYER_2_ONLY_METHODS: frozenset[str] = frozenset(
+    {
+        "store_from_env",
+        "store_from_file",
+        "store_from_kv_file",
+        "store_from_keychain",
+        "ensure_encryption_keypair",
+        "get_public_key",
+        "export_encrypted",
+        "import_encrypted",
+        # W-VAULT-CALLER-ENFORCE (sub-2) — admin verbs promoted from
+        # plugin-process scope to service-interface scope.
+        "vault_init",
+        "vault_create_recovery",
+        "vault_rotate_passphrase",
+    }
+)
 
-_LAYER_3_HELPERS: frozenset[str] = frozenset({
-    "lookup_oauth_client", "verify_oauth_client_credentials",
-    "issue_oauth_refresh_token", "consume_oauth_refresh_token",
-    "record_oauth_client_token_use",
-})
+_LAYER_3_HELPERS: frozenset[str] = frozenset(
+    {
+        "lookup_oauth_client",
+        "verify_oauth_client_credentials",
+        "issue_oauth_refresh_token",
+        "consume_oauth_refresh_token",
+        "record_oauth_client_token_use",
+    }
+)
 
 # Methods that admin/operator principal kinds must be allowed to call;
 # enforcement is Tier 2 (W-VAULT-CALLER-ENFORCE). Listed here so the
 # parity smoke + spoofing-negative smoke know which surfaces to assert
 # on. Maintain in lockstep with `OPERATOR_ONLY_METHODS` in the
 # concrete vault plugins.
-OPERATOR_ONLY_METHODS: frozenset[str] = frozenset({
-    "unlock", "lock",
-    "store_from_env", "store_from_file", "store_from_kv_file", "store_from_keychain",
-    "ensure_encryption_keypair", "get_public_key",
-    "export_encrypted", "import_encrypted",
-    "oauth_client_register", "oauth_client_revoke", "oauth_client_list",
-    "oauth_client_add_redirect_uri",
-    "rename",
-    # W-VAULT-CALLER-ENFORCE (sub-2) — admin-only verbs promoted from
-    # plugin-process scope to service-interface scope (master plan §1.3:
-    # `service_interface::vault_service::*` is the ONLY entry surface).
-    "vault_init", "vault_create_recovery", "vault_rotate_passphrase",
-})
+OPERATOR_ONLY_METHODS: frozenset[str] = frozenset(
+    {
+        "unlock",
+        "lock",
+        "store_from_env",
+        "store_from_file",
+        "store_from_kv_file",
+        "store_from_keychain",
+        "ensure_encryption_keypair",
+        "get_public_key",
+        "export_encrypted",
+        "import_encrypted",
+        "oauth_client_register",
+        "oauth_client_revoke",
+        "oauth_client_list",
+        "oauth_client_add_redirect_uri",
+        "rename",
+        # W-VAULT-CALLER-ENFORCE (sub-2) — admin-only verbs promoted from
+        # plugin-process scope to service-interface scope (master plan §1.3:
+        # `service_interface::vault_service::*` is the ONLY entry surface).
+        "vault_init",
+        "vault_create_recovery",
+        "vault_rotate_passphrase",
+    }
+)
 
 
 class VaultServiceProxy:
@@ -128,8 +168,7 @@ class VaultServiceProxy:
     ) -> None:
         if not caller_plugin:
             raise ValueError(
-                "VaultServiceProxy requires a non-empty caller_plugin name; "
-                "the binding mechanism cannot be deferred to call time",
+                "VaultServiceProxy requires a non-empty caller_plugin name; the binding mechanism cannot be deferred to call time",
             )
         self._vault_service = vault_service
         self._caller_plugin = caller_plugin
@@ -157,11 +196,24 @@ class VaultServiceProxy:
         metadata: dict[str, str] | None = None,
     ) -> ActionResult:
         return self._vault_service.store(
-            key, value, tags, metadata, call_context=self._call_context,
+            key,
+            value,
+            tags,
+            metadata,
+            call_context=self._call_context,
         )
 
     def retrieve(self, key: str) -> ActionResult:
+        """Internal migration path; never registered as a session process."""
         return self._vault_service.retrieve(key, call_context=self._call_context)
+
+    def use(self, request: UseRequest) -> UseResult:
+        """Resolve and use a reference inside the provider under this caller."""
+        return self._vault_service.use(request, call_context=self._call_context)
+
+    def metadata(self, request: MetadataRequest) -> MetadataResult:
+        """Project approved metadata under the same bound caller context."""
+        return self._vault_service.metadata(request, call_context=self._call_context)
 
     def delete(self, key: str) -> ActionResult:
         return self._vault_service.delete(key, call_context=self._call_context)
@@ -174,12 +226,16 @@ class VaultServiceProxy:
 
     def rotate(self, key: str, new_value: str) -> ActionResult:
         return self._vault_service.rotate(
-            key, new_value, call_context=self._call_context,
+            key,
+            new_value,
+            call_context=self._call_context,
         )
 
     def rename(self, old_key: str, new_key: str) -> ActionResult:
         return self._vault_service.rename(
-            old_key, new_key, call_context=self._call_context,
+            old_key,
+            new_key,
+            call_context=self._call_context,
         )
 
     def store_random(
@@ -190,7 +246,11 @@ class VaultServiceProxy:
         metadata: dict[str, str] | None = None,
     ) -> ActionResult:
         return self._vault_service.store_random(
-            key, byte_length, tags, metadata, call_context=self._call_context,
+            key,
+            byte_length,
+            tags,
+            metadata,
+            call_context=self._call_context,
         )
 
     def status(self) -> ActionResult:
@@ -198,7 +258,8 @@ class VaultServiceProxy:
 
     def unlock(self, passphrase: str) -> ActionResult:
         return self._vault_service.unlock(
-            passphrase, call_context=self._call_context,
+            passphrase,
+            call_context=self._call_context,
         )
 
     def lock(self) -> ActionResult:
@@ -212,13 +273,17 @@ class VaultServiceProxy:
         grant_types: builtins.list[str] | None = None,
     ) -> ActionResult:
         return self._vault_service.oauth_client_register(
-            client_name, scopes, redirect_uris, grant_types,
+            client_name,
+            scopes,
+            redirect_uris,
+            grant_types,
             call_context=self._call_context,
         )
 
     def oauth_client_revoke(self, client_id: str) -> ActionResult:
         return self._vault_service.oauth_client_revoke(
-            client_id, call_context=self._call_context,
+            client_id,
+            call_context=self._call_context,
         )
 
     def oauth_client_list(self) -> ActionResult:
@@ -227,10 +292,14 @@ class VaultServiceProxy:
         )
 
     def oauth_client_add_redirect_uri(
-        self, client_id: str, redirect_uri: str,
+        self,
+        client_id: str,
+        redirect_uri: str,
     ) -> ActionResult:
         return self._vault_service.oauth_client_add_redirect_uri(
-            client_id, redirect_uri, call_context=self._call_context,
+            client_id,
+            redirect_uri,
+            call_context=self._call_context,
         )
 
     # ─────────────────────────────────────────────────────────────────────
@@ -245,7 +314,11 @@ class VaultServiceProxy:
         metadata: dict[str, str] | None = None,
     ) -> ActionResult:
         return self._vault_service.store_from_env(
-            key, env_var, tags, metadata, call_context=self._call_context,
+            key,
+            env_var,
+            tags,
+            metadata,
+            call_context=self._call_context,
         )
 
     def store_from_file(
@@ -257,7 +330,11 @@ class VaultServiceProxy:
         metadata: dict[str, str] | None = None,
     ) -> ActionResult:
         return self._vault_service.store_from_file(
-            key, file_path, strip, tags, metadata,
+            key,
+            file_path,
+            strip,
+            tags,
+            metadata,
             call_context=self._call_context,
         )
 
@@ -272,7 +349,13 @@ class VaultServiceProxy:
         metadata: dict[str, str] | None = None,
     ) -> ActionResult:
         return self._vault_service.store_from_kv_file(
-            key, file_path, field, format, strip, tags, metadata,
+            key,
+            file_path,
+            field,
+            format,
+            strip,
+            tags,
+            metadata,
             call_context=self._call_context,
         )
 
@@ -286,7 +369,12 @@ class VaultServiceProxy:
         metadata: dict[str, str] | None = None,
     ) -> ActionResult:
         return self._vault_service.store_from_keychain(
-            key, service, account, keychain, tags, metadata,
+            key,
+            service,
+            account,
+            keychain,
+            tags,
+            metadata,
             call_context=self._call_context,
         )
 
@@ -307,7 +395,9 @@ class VaultServiceProxy:
         recipient_identifier: str | None = None,
     ) -> ActionResult:
         return self._vault_service.export_encrypted(
-            secret_name, recipient_pubkey, recipient_identifier,
+            secret_name,
+            recipient_pubkey,
+            recipient_identifier,
             call_context=self._call_context,
         )
 
@@ -319,7 +409,10 @@ class VaultServiceProxy:
         overwrite: bool = False,
     ) -> ActionResult:
         return self._vault_service.import_encrypted(
-            name, ciphertext, sender_identifier, overwrite,
+            name,
+            ciphertext,
+            sender_identifier,
+            overwrite,
             call_context=self._call_context,
         )
 
@@ -332,19 +425,25 @@ class VaultServiceProxy:
 
     def vault_init(self, passphrase: str) -> ActionResult:
         return self._vault_service.vault_init(
-            passphrase, call_context=self._call_context,
+            passphrase,
+            call_context=self._call_context,
         )
 
     def vault_create_recovery(self, recovery_passphrase: str) -> ActionResult:
         return self._vault_service.vault_create_recovery(
-            recovery_passphrase, call_context=self._call_context,
+            recovery_passphrase,
+            call_context=self._call_context,
         )
 
     def vault_rotate_passphrase(
-        self, old_passphrase: str, new_passphrase: str,
+        self,
+        old_passphrase: str,
+        new_passphrase: str,
     ) -> ActionResult:
         return self._vault_service.vault_rotate_passphrase(
-            old_passphrase, new_passphrase, call_context=self._call_context,
+            old_passphrase,
+            new_passphrase,
+            call_context=self._call_context,
         )
 
     # ─────────────────────────────────────────────────────────────────────
@@ -356,14 +455,19 @@ class VaultServiceProxy:
 
     def lookup_oauth_client(self, client_id: str) -> dict[str, Any] | None:
         return self._vault_service.lookup_oauth_client(
-            client_id, call_context=self._call_context,
+            client_id,
+            call_context=self._call_context,
         )
 
     def verify_oauth_client_credentials(
-        self, client_id: str, client_secret: str,
+        self,
+        client_id: str,
+        client_secret: str,
     ) -> dict[str, Any] | None:
         return self._vault_service.verify_oauth_client_credentials(
-            client_id, client_secret, call_context=self._call_context,
+            client_id,
+            client_secret,
+            call_context=self._call_context,
         )
 
     def issue_oauth_refresh_token(
@@ -383,10 +487,12 @@ class VaultServiceProxy:
         )
 
     def consume_oauth_refresh_token(
-        self, cleartext: str,
+        self,
+        cleartext: str,
     ) -> dict[str, Any] | None:
         return self._vault_service.consume_oauth_refresh_token(
-            cleartext, call_context=self._call_context,
+            cleartext,
+            call_context=self._call_context,
         )
 
     def record_oauth_client_token_use(

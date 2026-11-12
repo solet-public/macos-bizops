@@ -47,6 +47,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from ananta.constants import CONTEXT_KEY_FLOW_ID, CONTEXT_KEY_SESSION_ID
+from ananta.file_locations.containment import job_location_session, location_session
 
 from . import bulk_actions, completion_templates, record_actions, soql_actions, typed_families
 from .client import SalesforceCliExecutor
@@ -103,6 +104,10 @@ ACTION_HANDLERS: dict[str, ActionHandler] = {
     "dashboards": (functools.partial(typed_families.run_family, "dashboards"), None),
     "rest_resources": (functools.partial(typed_families.run_family, "rest_resources"), None),
     "actions": (functools.partial(typed_families.run_family, "actions"), None),
+    # Build 5: a deploy reads its .zip under import roots; Files read under
+    # import roots and download under export roots.
+    "metadata": (functools.partial(typed_families.run_family, "metadata"), lambda plugin: plugin._zip_import_path_gate),  # noqa: SLF001
+    "content_files": (functools.partial(typed_families.run_family, "content_files"), lambda plugin: plugin._file_transfer_gates()),  # noqa: SLF001
 }
 
 
@@ -163,7 +168,7 @@ def create_job(
     session_id, flow_id = _validate_state_context(state)
     async_job_manager = _acquire_async_job_manager(plugin)
     ensure_worker_started(plugin)
-    return async_job_manager.create_job(
+    created = async_job_manager.create_job(
         plugin_name=PLUGIN_NAME,
         action_name=action_name,
         request_data={"notes": f"{PLUGIN_NAME}.{action_name}", **params},
@@ -173,19 +178,28 @@ def create_job(
             "completion_handlers": completion_templates.build_completion_handlers(action_name),
         },
     )
+    if action_name == "provision_cli" and created.get("action_status") == "completed":
+        job_id = created.get("data", {}).get("job_id")
+        if not isinstance(job_id, str) or not job_id:
+            raise RuntimeError("Provisioning job creation returned no canonical job id")
+        with plugin._worker_lock:
+            plugin._pending_provision_ids.append(job_id)
+    return created
 
 
 def _worker_loop(plugin: SalesforcePlugin) -> None:
     while True:
         try:
             _drain_queued_jobs(plugin)
-        except Exception:  # the loop must never die — a bad pass still yields the next one
-            logger.exception("%s async worker: drain pass failed", PLUGIN_NAME)
+        except Exception as exc:  # noqa: BLE001 — the loop must never die; a bad pass still yields the next one
+            # Type only: exception text and tracebacks can quote job data.
+            logger.error("%s async worker: drain pass failed (%s)", PLUGIN_NAME, type(exc).__name__)  # noqa: TRY400
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
 def _drain_queued_jobs(plugin: SalesforcePlugin) -> None:
     async_job_manager = _acquire_async_job_manager(plugin)
+    _drain_provision_jobs(plugin, async_job_manager)
     for action_name in ACTION_HANDLERS:
         listing = async_job_manager.list_jobs(
             status="queued",
@@ -201,7 +215,28 @@ def _drain_queued_jobs(plugin: SalesforcePlugin) -> None:
                 _process_job(plugin, async_job_manager, job_id, action_name)
 
 
-def _process_job(
+def _drain_provision_jobs(plugin: SalesforcePlugin, manager: Any) -> None:
+    """Preserve submission order without replaying a prior runtime's change."""
+    with plugin._worker_lock:
+        pending = tuple(plugin._pending_provision_ids)
+        plugin._pending_provision_ids.clear()
+    for job_id in pending:
+        current = manager.get_job(job_id)
+        if current.get("action_status") == "completed" and current.get("data", {}).get("job", {}).get("status") == "queued":
+            _process_job(plugin, manager, job_id, "provision_cli")
+
+
+def _process_job(plugin: SalesforcePlugin, async_job_manager: Any, job_id: str, action_name: str) -> None:
+    """Bind only this job's originating session; absent metadata is advisory."""
+    try:
+        record = async_job_manager.get_job(job_id)
+    except Exception:
+        record = None
+    with location_session(job_location_session(record)):
+        _process_job_in_context(plugin, async_job_manager, job_id, action_name)
+
+
+def _process_job_in_context(
     plugin: SalesforcePlugin,
     async_job_manager: Any,
     job_id: str,
@@ -223,13 +258,22 @@ def _process_job(
         )
         return
     params = payload_result.get("data", {}).get("payload", {})
+    if action_name == "provision_cli":
+        try:
+            outcome = plugin._provision_cli_now(params)  # noqa: SLF001 -- worker owns the extracted operation
+        except Exception as exc:
+            outcome = plugin._classify_and_log(exc, action_name)  # noqa: SLF001
+    else:
+        outcome = _execute_vendor_action(plugin, action_name, params)
+    if outcome.get("action_status") == "completed":
+        async_job_manager.update_job(job_id, {"status": "completed", "result": outcome.get("data") or {}})
+    else:
+        async_job_manager.update_job(job_id, {"status": "error", "error": outcome.get("error") or {}})
+
+
+def _execute_vendor_action(plugin: SalesforcePlugin, action_name: str, params: dict[str, Any]) -> dict[str, Any]:
     action_fn, gate_factory = ACTION_HANDLERS[action_name]
     if gate_factory is not None:
         gate = gate_factory(plugin)
-        outcome = plugin._run(lambda executor: action_fn(executor, params, gate), action_name)
-    else:
-        outcome = plugin._run(lambda executor: action_fn(executor, params), action_name)
-    if outcome.get("action_status") == "completed":
-        async_job_manager.update_job(job_id, {"status": "completed", "result": outcome.get("data", {})})
-    else:
-        async_job_manager.update_job(job_id, {"status": "error", "error": outcome.get("error", {})})
+        return plugin._run(lambda executor: action_fn(executor, params, gate), action_name)
+    return plugin._run(lambda executor: action_fn(executor, params), action_name)

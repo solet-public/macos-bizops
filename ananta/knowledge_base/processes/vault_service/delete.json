@@ -1,12 +1,12 @@
 {
   "process_key": "service_interface::vault_service::delete",
   "display_name": "Delete Secret",
-  "description": "Permanently delete a secret from the vault. This action is irreversible.",
-  "embedding_description": "Vault: delete a secret. Permanently erase a stored credential, password, OAuth client_secret, API key, refresh token, or bearer token from the vault by its key. Irreversible — no version history is retained after deletion. Requires the vault to be unlocked. Use when retiring an expired or leaked credential or cleaning up after a connector teardown.",
+  "description": "Returns an owned vault job receipt (job_id/status); read the exact job with job_service.get_job for its public terminal outcome. Permanently delete a secret from the vault. This action is irreversible.",
+  "embedding_description": "Vault: delete a secret. Permanently erase a stored credential, password, OAuth client_secret, API key, refresh token, or bearer token from the vault by its key. Irreversible — no version history is retained after deletion. Requires the vault to be unlocked. Use when retiring an expired or leaked credential or cleaning up after a connector teardown. Registered execution returns job_id/status; the complete public outcome is in job.result. Secret operands remain volatile and failures are sanitized; uncertain effects require reconciliation, never automatic replay.",
   "result_processor_customizations": {
     "action_label": "Secret deleted",
     "result_type": "secret_deleted",
-    "result_description": "Confirmation of permanent secret deletion. Contains key (identifier) and message (status). The secret value has been permanently erased.",
+    "result_description": "Queued vault job receipt. Completed public outcome: Confirmation of permanent secret deletion. Contains key (identifier) and message (status). The secret value has been permanently erased.",
     "presentation_guidance": "",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },

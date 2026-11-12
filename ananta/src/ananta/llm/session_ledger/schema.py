@@ -562,6 +562,10 @@ def _event_table() -> TableSchema:
                 columns=["imported_at"],
             ),
             IndexDefinition(
+                name="idx_event_content_blob_id",
+                columns=["content_blob_id"],
+            ),
+            IndexDefinition(
                 name="idx_event_actor_session_label",
                 columns=["actor_session_label", "event_at"],
                 where="actor_session_label IS NOT NULL",
@@ -951,6 +955,8 @@ def get_session_ledger_schema() -> SchemaDefinition:
 
     Registered from ``CoreSchemaDefinitions.get_all_core_schemas()`` (spec §12.6).
     """
+    from ananta.llm.session_ledger.session_failures import TABLE_SESSION_FAILURE, session_failure_table  # noqa: PLC0415
+
     return SchemaDefinition(
         namespace=NAMESPACE,
         version="1.0.0",
@@ -968,6 +974,7 @@ def get_session_ledger_schema() -> SchemaDefinition:
             TABLE_SUMMARY: _summary_table(),
             TABLE_DEPLOYMENT: _deployment_table(),
             TABLE_SESSION_SOURCE_KIND: _session_source_kind_table(),
+            TABLE_SESSION_FAILURE: session_failure_table(),
         },
     )
 

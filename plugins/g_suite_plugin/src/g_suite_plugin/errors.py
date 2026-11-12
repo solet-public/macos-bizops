@@ -2,7 +2,7 @@
 
 Messages carry Google's own ``reason`` and ``message`` parsed from the error
 body, and the missing-scope case names the scope and the reconnect step instead
-of an opaque 403. Callers redact the message before it leaves the plugin.
+of an opaque 403.
 """
 
 from __future__ import annotations

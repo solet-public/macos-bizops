@@ -6,7 +6,7 @@ Article Role: plugin_reference
 
 Article Tags: planning-stage:execution, evidence-category:capability-reference, domain:salesforce, domain:local-solet, domain:cloud-solet
 
-Embedding Description: Salesforce plugin reference — the one-time operator setup for connecting a Salesforce org via the operator's sf CLI login (standalone CLI bundle install, one browser login via sf org login web, two-field salesforce_org address-book registration with a pinned instance host), the verbs with argument shapes (SOQL query and queryAll, record get/describe/list/create/update/delete, test_connection, Bulk API v2 ingest submit/status/results/abort including hardDelete, the composite, tooling, bulk_jobs, reports, dashboards, rest_resources and actions families, and the generic authenticated request), typed sf.* errors with recovery when the CLI has no live session, and the full-CRUD-including-delete posture under full CLI delegation.
+Embedding Description: Salesforce plugin reference — the one-time operator setup for connecting a Salesforce org via the operator's sf CLI login (standalone CLI bundle install, one browser login via sf org login web, two-field salesforce_org address-book registration with a pinned instance host), the verbs with argument shapes (SOQL query and queryAll, record get/describe/list/create/update/delete, test_connection, Bulk API v2 ingest submit/status/results/abort including hardDelete, the composite, tooling, bulk_jobs, reports, dashboards, rest_resources, actions, metadata (deployRequest) and content_files (ContentVersion upload and verified download) families, and the generic authenticated request), typed sf.* errors with recovery when the CLI has no live session, and the full-CRUD-including-delete posture under full CLI delegation.
 
 A full read/write connector over the operator's Salesforce org. Executor:
 full CLI delegation — every verb shells out to the operator's `sf` CLI
@@ -40,14 +40,22 @@ clone, save and delete), `rest_resources` (limits, recent items, object info
 and describe, updated/deleted ids, records by external id including upsert
 and delete, relationship traversal, paged query and queryAll, explain, SOSL
 and parameterized search) and `actions` (invocable action discovery and
-invocation: Apex, flows, quick actions, email alerts and standard actions).
-`authenticated_request` reaches every other endpoint. Salesforce's own
+invocation: Apex, flows, quick actions, email alerts and standard actions),
+and from build 5: `metadata` (Metadata API deployments over the REST
+deployRequest resource, including check-only validation, destructive
+changes, cancel and quick deploy), `content_files` (Salesforce Files upload,
+size- and checksum-verified download, and ContentDocument delete), Tooling
+composite and apexCompileResults, Bulk parallel result pages, report
+instance delete, and sObject relationship update and delete.
+`authenticated_request` reaches every other REST endpoint. Salesforce's own
 permissions on the registered user are the only boundary (USER ruling
 `rul_4c99a30d`): the plugin adds no read-only mode, role request or
-confirmation prompt. The remaining typed gaps (Metadata API, Partner SOAP
-operations, Platform Event subscription, ContentVersion files) are listed in
-`plugins/salesforce_plugin/knowledge_base/vendor_api_coverage.md` and
-reachable now through `authenticated_request`.
+confirmation prompt. The remaining typed gaps are listed in
+`plugins/salesforce_plugin/knowledge_base/vendor_api_coverage.md`: SOAP-only
+calls (Partner merge, convertLead, undelete, emptyRecycleBin; Metadata
+retrieve, describeMetadata, listMetadata, readMetadata) need the access token
+in the SOAP SessionHeader, which this plugin never holds, and Platform Event
+subscription needs a streaming transport.
 
 ## Executor model — full CLI delegation, no token ever enters this process
 
@@ -74,7 +82,10 @@ Salesforce SDK dependency at all. Three CLI surfaces are in play:
   (e.g. an Account literally named "True Value Hardware"), not an escaping
   inconvenience a caller can quote around. `list_sobjects` also uses this
   surface (GET the global describe endpoint) because the stable `sobject
-  list` command returns bare object names with no `label` field.
+  list` command returns bare object names with no `label` field. A
+  ContentVersion download uses its `--stream-to-file` mode, which writes the
+  raw bytes and prints no status, so the download is kept only when it
+  matches the version's `ContentSize` and MD5 `Checksum`.
 - **File-based SOQL** — `soql_query` writes the query text to a tempfile and
   runs `data query --file <path>` (the operator's proven work-script
   pattern), keeping SOQL text out of the process argv `ps` would otherwise
@@ -174,7 +185,7 @@ that user's permissions, and its audit trail shows that user.
   org-side revocation turns the connector off until the next login — the
   fully-supported dormant state, not a breakage.
 
-## Verbs (built — 23 total)
+## Verbs (built — 25 total)
 
 | Verb | Args | Returns |
 |---|---|---|
@@ -187,17 +198,19 @@ that user's permissions, and its audit trail shows that user.
 | `create_record` | `sobject`, `fields` | `{id, success}` |
 | `update_record` | `sobject`, `id`, `fields` | `{success}` |
 | `delete_record` | `sobject`, `id` | `{success}` (permanent — see read/write posture) |
-| `bulk_ingest_submit` | `operation`, `sobject`, `csv_path`, `external_id_field?` | `{job_id, state, processed_records, failed_records, error_message}` — submits a Bulk v2 ingest job `--async`; `csv_path` is read-contained under `import_allowed_roots` |
+| `bulk_ingest_submit` | `operation`, `sobject`, `csv_path`, `external_id_field?` | `{job_id, state, processed_records, failed_records, error_message}` — submits a Bulk v2 ingest job `--async`; `csv_path` is read-contained under a saved location |
 | `bulk_job_status` | `job_id` | `{job_id, state, processed_records, failed_records, error_message}` — the poll target for a submitted job |
-| `bulk_job_results` | `job_id`, `successful_results_path`, `failed_results_path`, `unprocessed_results_path` | `{successful_results_path, failed_results_path, unprocessed_results_path}` — three CSVs written under `export_allowed_roots` |
+| `bulk_job_results` | `job_id`, `successful_results_path`, `failed_results_path`, `unprocessed_results_path` | `{successful_results_path, failed_results_path, unprocessed_results_path}` — three CSVs written under a saved location |
 | `bulk_job_abort` | `job_id` | `{job_id, state, processed_records, failed_records, error_message}` |
 | `composite` | `operation`, `body?`, `query?`, `headers?`, `sobject?`, `external_id_field?` | `{family, operation, method, status, headers, body, correlation_id, error_code?, failures?}` — composite, graph, batch, tree, collections_create/retrieve/retrieve_many/update/upsert/delete |
-| `tooling` | `operation`, `query?`, `body?`, `headers?`, `sobject?`, `id?`, `next_records_url?` | same shape plus `pagination.next_records_url` — query, query_more, search, execute_anonymous, run_tests_async/sync, completions, list_sobjects, sobject_info, describe, create/get/update/delete |
-| `bulk_jobs` | `operation`, `job_id?`, `query?`, `body?`, `headers?`, `output_csv_path?` | same shape; `query_results` writes one CSV page under `export_allowed_roots` and returns `output_csv_path`, `bytes_written`, `pagination.next_locator` — query_create/get/list/results/abort/delete, ingest_list/delete |
-| `reports` | `operation`, `report_id?`, `instance_id?`, `report_type?`, `query?`, `body?`, `headers?` | same shape plus `pagination.report_all_data` (false when a run returned only the vendor's first detail rows) — list, create, clone, describe, run, run_filtered, run_async, instances, instance_results, query, update, delete, report_types, describe_report_type |
+| `tooling` | `operation`, `query?`, `body?`, `headers?`, `sobject?`, `id?`, `next_records_url?` | same shape plus `pagination.next_records_url` — query, query_more, search, execute_anonymous, run_tests_async/sync, completions, list_sobjects, sobject_info, describe, create/get/update/delete, composite_resources, composite, apex_compile_results (API 68.0+, empty body) |
+| `bulk_jobs` | `operation`, `job_id?`, `query?`, `body?`, `headers?`, `output_csv_path?` | same shape; `query_results` writes one CSV page under a saved location and returns `output_csv_path`, `bytes_written`, `pagination.next_locator` — query_create/get/list/results/abort/delete, query_result_pages (`pagination.result_locators` for parallel pages) and query_result_pages_more (its `nextRecordsUrl`), ingest_list/delete |
+| `reports` | `operation`, `report_id?`, `instance_id?`, `report_type?`, `query?`, `body?`, `headers?` | same shape plus `pagination.report_all_data` (false when a run returned only the vendor's first detail rows) — list, create, clone, describe, run, run_filtered, run_async, instances, instance_results, instance_delete, query, update, delete, report_types, describe_report_type |
 | `dashboards` | `operation`, `dashboard_id?`, `query?`, `body?`, `headers?` | same shape — list, clone, describe, results, refresh, status, update, delete |
-| `rest_resources` | `operation`, `sobject?`, `external_id_field?`, `external_id?`, `id?`, `relationship?`, `next_records_url?`, `query?`, `body?`, `headers?` | same shape plus `pagination.next_records_url` — resources, limits, recent, describe_global, sobject_info, describe, updated, deleted, get/upsert/delete_by_external_id, relationship, query, query_all, query_more, explain, search, parameterized_search |
+| `rest_resources` | `operation`, `sobject?`, `external_id_field?`, `external_id?`, `id?`, `relationship?`, `next_records_url?`, `query?`, `body?`, `headers?` | same shape plus `pagination.next_records_url` — resources, limits, recent, describe_global, sobject_info, describe, updated, deleted, get/upsert/delete_by_external_id, relationship, relationship_update, relationship_delete, query, query_all, query_more, explain, search, parameterized_search |
 | `actions` | `operation`, `action_type?`, `action?`, `body?`, `headers?` | same shape; `failures` counts invocation results whose `isSuccess` is false — list, list_standard, list_custom, list_custom_type, describe_standard, describe_custom, invoke_standard, invoke_custom |
+| `metadata` | `operation`, `deploy_request_id?`, `zip_path?`, `query?`, `body?`, `headers?` | same shape; `failures` counts component and test errors of a Failed or SucceededPartial deployment — deploy (multipart `.zip` read under a saved location, `deployOptions`), deploy_status, deploy_cancel, deploy_quick |
+| `content_files` | `operation`, `content_version_id?`, `content_document_id?`, `file_path?`, `output_path?`, `body?`, `headers?` | same shape; a download adds `output_path`, `bytes_written`, `md5` and `integrity_advisory` when the vendor size or checksum was unreadable — upload (file read under a saved location becomes base64 `VersionData`), download (written under a saved location), delete_document |
 | `authenticated_request` | `method`, `path`, `query?`, `headers?`, `body?` | `{status, headers, body, correlation_id, nextRecordsUrl?}` — any other relative endpoint on the registered org |
 | `probe_cli` / `provision_cli` | — / `acknowledge_system_change` | local `sf` CLI diagnostic and consent-gated install |
 
@@ -206,10 +219,7 @@ caller's `output_tsv_path` — never records inline, at any size
 (business-data limits + data-export migration, 2026-08-02; the former
 inline-return/byte-cap branch is deleted, not lowered). Neither destination
 is platform blob storage (operator ruling 2026-07-15); the path must be
-absolute, end in `.tsv`, and lie under an operator-configured
-`export_allowed_roots` entry in this plugin's config — realpath +
-`commonpath` containment mirroring `ledger_allowed_roots`; the default `[]`
-REFUSES every write. Nested relationship objects serialize as JSON text in
+absolute, end in `.tsv`, and lie under a saved path address, the session launch folder or the solet home. The shared guard excludes the installation tree. Nested relationship objects serialize as JSON text in
 their cells. Each defaults to 500 records absent an acknowledged override;
 `soql_query`'s override ceiling is 1000, `export_soql`'s is 50000 (the
 N>>500 route). `acknowledge_default_limit_override=true` together with an
@@ -244,15 +254,14 @@ completes — two independent async layers, never conflate the two ids.
   boundary, the plugin adds none of its own. `external_id_field`
   is required if, and only if, `operation` is `upsert` — supplying it for any
   other operation is refused, not silently ignored. `csv_path` must be an
-  ABSOLUTE path already on disk, contained under an operator-configured
-  `import_allowed_roots` entry (empty by default = refuse every ingest).
+  ABSOLUTE path already on disk, contained under a saved path address, the session folder or solet home.
 - **`bulk_job_status`** is the poll target: `GET /jobs/ingest/{id}` via
   `run_rest`, an honest passthrough of the Salesforce job's `state`
   (`Open` → `UploadComplete` → `InProgress` → `JobComplete`/`Failed`/
   `Aborted`) plus processed/failed record counts.
 - **`bulk_job_results`** fetches the job's three result CSVs — successful,
   failed, and unprocessed records — and writes each to a caller-supplied
-  ABSOLUTE path under `export_allowed_roots` (the same config `export_soql`
+  ABSOLUTE path under a saved location (the same shared containment `export_soql`
   uses, admitted with a `.csv` suffix instead of `.tsv`). The CSV bodies come
   back via `run_rest`'s raw-text mode rather than JSON-decoded — the measured
   design choice over the CLI's own `sf data bulk results --job-id`, which
@@ -267,7 +276,7 @@ completes — two independent async layers, never conflate the two ids.
   `query` or `queryAll`), `query_get`, `query_list` and `ingest_list` (job
   lists, paged by `queryLocator`), `query_results` (`GET
   /jobs/query/{id}/results` with `locator` and `maxRecords`; each page is
-  written as a CSV under `export_allowed_roots`, never inline, and the
+  written as a CSV under a saved location, never inline, and the
   `Sforce-Locator` header comes back as `pagination.next_locator`),
   `query_abort`, `query_delete` and `ingest_delete`.
 
@@ -309,6 +318,11 @@ completion data with an `error_code`, adding `sf.bad_request` (400),
   redacted) `accessToken` field. Operators inspect the CLI's own session
   state via `sf org display --target-org <alias> --json` filtered to safe
   fields, same as always — never echoed raw.
+- **Results and log hygiene.** Results are not scanned. The connector returns
+  the vendor result as received; bulk results go to disk through
+  `output_path`. Audit and log lines are built only from method, path without
+  query values, status, duration and correlation id, so they never carry
+  headers, bodies or credential values.
 
 ## SQL-lockdown gate note
 
@@ -330,7 +344,8 @@ false positive the gate cannot resolve statically. One whole-file
 | `src/salesforce_plugin/soql_actions.py` | `soql_query` — file-based query, `SF_ORG_MAX_QUERY_LIMIT` env cap + client-side slice; no manual pagination (the CLI autofetches). |
 | `src/salesforce_plugin/record_actions.py` | `get_record`/`describe_sobject`/`delete_record` via stable ID-based commands; `create_record`/`update_record`/`list_sobjects` via `run_rest` (the `--values` mini-language's `stringToDictionary` parser has a proven correctness bug — see the executor model section above). |
 | `plugins/salesforce_plugin/src/salesforce_plugin/bulk_actions.py` | Bulk API v2 ingest — `bulk_ingest_submit` (`data <op> bulk --async`), `bulk_job_status`/`bulk_job_abort` (`run_rest` against `/jobs/ingest/{id}`), `bulk_job_results` (raw-text `run_rest` → three contained CSV writes). |
-| `plugins/salesforce_plugin/src/salesforce_plugin/import_containment.py` | Read-side mirror of `export_containment.py` for `bulk_ingest_submit`'s `csv_path` — `import_allowed_roots`, refuse-all default, plus an existence check (an ingest source must already be a real file). |
-| `plugins/salesforce_plugin/src/salesforce_plugin/request_actions.py` | `authenticated_request`: one forwarded call with redaction of credential echoes in raw, JSON-escaped, percent-encoded and base64 forms, plus the typed-only media proof for the CLI's header/body boundary. |
-| `plugins/salesforce_plugin/src/salesforce_plugin/typed_families.py` | The `composite`, `tooling`, `bulk_jobs`, `reports`, `dashboards`, `rest_resources` and `actions` operation tables (vendor method and path per operation), input checks, error-code mapping, failure counts and pagination hints. |
+| `ananta/src/ananta/file_locations/containment.py` | Shared read/write containment from saved path addresses, the session folder and solet home. Ingest inputs must already exist; the installation tree is excluded. |
+| `plugins/salesforce_plugin/src/salesforce_plugin/request_actions.py` | `authenticated_request`: one forwarded call returning the vendor result as received, an audit line built only from method, path without query values, status, duration and correlation id, plus the typed-only media proof for the CLI's header/body boundary. |
+| `plugins/salesforce_plugin/src/salesforce_plugin/transfers.py` | The local-file operations: the multipart Metadata deploy package (`saved locations`, `.zip`), the base64 ContentVersion upload and the `--stream-to-file` download proven against `ContentSize` and `Checksum` (`saved locations`). |
+| `plugins/salesforce_plugin/src/salesforce_plugin/typed_families.py` | The `composite`, `tooling`, `bulk_jobs`, `reports`, `dashboards`, `rest_resources`, `actions`, `metadata` and `content_files` operation tables (vendor method and path per operation), input checks, error-code mapping, failure counts and pagination hints. |
 | `src/salesforce_plugin/plugin.py` | The `SalesforcePlugin` EDGE provider — error mapping, EDGE registration. No retry wrapper: a CLI invocation either succeeds or fails classified, never a stale-session mid-flight fault to retry. |

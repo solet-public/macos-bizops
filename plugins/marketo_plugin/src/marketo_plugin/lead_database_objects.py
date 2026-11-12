@@ -28,10 +28,8 @@ worker). Reads write a workspace TSV like ``get_leads`` and page internally on
 ``nextPageToken``; writes and deletes return Marketo's own per-record
 ``result`` array plus tallies. Writes and deletes are first-class: the vendor
 Role decides what the API user may do, so no plugin-side permission prompt or
-read-only gate exists here. Every value the worker returns or writes is
-passed through the client's credential redaction, which covers raw,
-percent-encoded and base64 forms of the client secret and of every bearer
-token the client has minted.
+read-only gate exists here. Every value the worker returns or writes is the
+vendor's, as received.
 """
 
 from __future__ import annotations
@@ -282,7 +280,7 @@ def prepare(verb: str, params: dict[str, Any], path_gate: PathGate) -> dict[str,
 
 
 def execute(client: Any, request: dict[str, Any]) -> dict[str, Any]:
-    """Run one prepared Lead Database object request and redact its output."""
+    """Run one prepared Lead Database object request and return its output as received."""
     family = FAMILIES[request["family"]]
     operation = request["operation"]
     match operation:
@@ -296,7 +294,7 @@ def execute(client: Any, request: dict[str, Any]) -> dict[str, Any]:
             return _execute_get_members(client, request)
         case _:
             payload = client.post_json(_write_path(request), json=request["body"])
-            return client.redact(_batch_envelope(payload))
+            return _batch_envelope(payload)
 
 
 def _write_path(request: dict[str, Any]) -> str:
@@ -310,7 +308,7 @@ def _execute_describe(client: Any, family: ObjectFamily, request: dict[str, Any]
     results = payload.get("result")
     if not isinstance(results, list) or not results or not isinstance(results[0], dict):
         raise ValueError(f"Marketo {family.label} describe response omitted the object description")
-    description: dict[str, Any] = client.redact(results[0])
+    description: dict[str, Any] = results[0]
     fields = description.get("fields")
     if not isinstance(fields, list):
         raise ValueError(f"Marketo {family.label} describe response omitted the field list")
@@ -347,7 +345,7 @@ def _execute_get(client: Any, request: dict[str, Any]) -> dict[str, Any]:
         if fields:
             query["fields"] = ",".join(fields)
         records, truncated = _paginate_token_authoritative(client, collection_path, query, limit)
-    handle = _write_records_tsv(client.redact(records[:limit]), request["resolved_path"])
+    handle = _write_records_tsv(records[:limit], request["resolved_path"])
     handle["truncated"] = truncated or len(records) > limit
     return handle
 
@@ -356,7 +354,7 @@ def _execute_list_types(client: Any, request: dict[str, Any]) -> dict[str, Any]:
     names: list[str] | None = request.get("names")
     payload = client.get_json(CUSTOM_OBJECT_TYPES_PATH, params={"names": ",".join(names)} if names else None)
     page = payload.get("result")
-    types = client.redact(page if isinstance(page, list) else [])
+    types = page if isinstance(page, list) else []
     handle = _write_records_tsv(types, request["resolved_path"])
     handle["api_names"] = [entry.get("name") for entry in types if isinstance(entry, dict)]
     return handle
@@ -369,7 +367,7 @@ def _execute_get_members(client: Any, request: dict[str, Any]) -> dict[str, Any]
         query["fields"] = ",".join(fields)
     limit = request["effective_limit"]
     records, truncated = _paginate_token_authoritative(client, f"{request['base_path']}.json", query, limit)
-    handle = _write_records_tsv(client.redact(records[:limit]), request["resolved_path"])
+    handle = _write_records_tsv(records[:limit], request["resolved_path"])
     handle["truncated"] = truncated or len(records) > limit
     return handle
 

@@ -409,10 +409,10 @@ class Validation(Fixture):
                 run.assert_not_called()
 
 
-class Redaction(Fixture):
-    """Every credential echo is hidden in raw, JSON-escaped, percent-encoded and base64 forms."""
+class AsReceived(Fixture):
+    """The vendor result is returned as received; the audit line carries none of it."""
 
-    def test_issued_token_variants_are_redacted_in_every_family(self) -> None:
+    def test_vendor_echo_returned_as_received_in_every_family(self) -> None:
         token = "00DR0000000Ab12!AQ4AQ.build4/token+chars="
         raw = token.encode()
         variants = [token, json.dumps(token)[1:-1], quote(token, safe=""), quote_plus(token, safe=""), base64.b64encode(raw).decode(), base64.urlsafe_b64encode(raw).decode(), base64.b64encode(raw).decode().rstrip("=")]
@@ -428,10 +428,10 @@ class Redaction(Fixture):
                 self.respond(transcript(200, {"id": ACCOUNT_ID, "success": True, "detail": echo}))
                 with self.assertLogs(request_actions.logger, level="INFO") as audit:
                     result = self.run_family(family, {**params, "headers": {"X-Api-Token": token}})
-                rendered = json.dumps(result) + " ".join(audit.output)
+                logged = " ".join(audit.output)
                 for variant in variants:
-                    self.assertNotIn(variant, rendered)
-                self.assertEqual(result["body"]["detail"]["Name"], "kept")
+                    self.assertNotIn(variant, logged)
+                self.assertEqual(result["body"]["detail"], echo)
 
 
 class Wiring(unittest.TestCase):

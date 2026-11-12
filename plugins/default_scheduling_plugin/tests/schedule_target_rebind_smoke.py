@@ -8,7 +8,7 @@ is independently exercised by schedule_target_rebind_pg_smoke.py.
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -18,7 +18,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[3]
-for source in (ROOT / "ananta/src", ROOT / "plugins/default_scheduling_plugin/src"):
+for source in (ROOT, ROOT / "ananta/src", ROOT / "plugins/default_scheduling_plugin/src"):
     sys.path.insert(0, str(source))
 
 import default_scheduling_plugin  # noqa: E402
@@ -136,7 +136,7 @@ class FakeState:
             return {"action_status": "completed", "data": {"records": rows}}
 
     @contextmanager
-    def transactional(self) -> Iterator[StateTransaction]:
+    def transactional(self) -> Generator[StateTransaction]:
         with self.lock:
             before = deepcopy(self.tables)
             try:
@@ -149,6 +149,9 @@ class FakeState:
 def schedule(sid: str | None = None, *, kind: str = "recurring") -> ScheduleData:
     return ScheduleData(
         id=sid,
+        action_name="",
+        status="scheduled",
+        error_message=None,
         label="preserve label",
         type=kind,
         tags=["keep", "fixture"],
@@ -220,7 +223,7 @@ def _check_corrections(plugin: SchedulingPlugin, repo: ScheduleRepository, state
     state.fail_history = False
     check(rebind(plugin, sid, 1)["action_status"] == "completed", "same_target_correction")
     check(rebind(plugin, sid, 2, "old")["action_status"] == "completed", "rebind_reversal")
-    check(repo.load_schedule(sid).actions[0].parameters["name"] == "old", "reversal_readback")
+    check(cast(ScheduleData, repo.load_schedule(sid)).actions[0].parameters["name"] == "old", "reversal_readback")
     page = repo.history(sid, 2)
     check(len(page["events"]) == 2 and len(repo.history(sid, 2, page["next_cursor"])["events"]) == 2, "history_pagination")
     cleared = plugin.clear_scheduled_action({"schedule_id": sid}, {})
@@ -297,13 +300,13 @@ def check_recovery() -> None:
     plugin._scheduler_manager = SchedulerManager()
     plugin._scheduler_manager.initialize()
     plugin._load_persisted_schedules()
-    check(len(plugin._scheduler_manager.get_jobs()) == 1 and repo.load_schedule(sid).actions[0].parameters["content"] == TEXT, "recovered_error_restores")
+    check(len(plugin._scheduler_manager.get_jobs()) == 1 and cast(ScheduleData, repo.load_schedule(sid)).actions[0].parameters["content"] == TEXT, "recovered_error_restores")
 
 
 def _check_dispatch(memory: bool) -> None:
     plugin, repo, _ = fixture(memory=memory)
     sid = repo.save_schedule(schedule())
-    old = repo.load_schedule(sid).model_dump()
+    old = cast(ScheduleData, repo.load_schedule(sid)).model_dump()
     recorder = Recorder()
     plugin.set_action_factory(recorder)  # type: ignore[arg-type]
     check(rebind(plugin, sid, 0)["action_status"] == "completed", "callback_rebind_setup")
@@ -430,11 +433,11 @@ def check_shapes() -> None:
     plugin, repo, state = fixture()
     value = schedule()
     value.actions += [
-        ActionData(name="plugin::agent_messaging_plugin::send_peer_message", parameters={"peer_id": "fixture", "peer_agent_instance_id": "i"}),
-        ActionData(name="plugin::agent_messaging_plugin::send_peer_message", parameters={"peer_id": "fixture", "peer_agent_session_id": "s"}),
-        ActionData(name="plugin::agent_messaging_plugin::drive_session", parameters={"agent_instance_id": "d", "text": TEXT}),
-        ActionData(name="plugin::agent_messaging_plugin::send_peer_message", parameters={"peer_agent_instance_id": "i", "peer_agent_session_id": "s"}),
-        ActionData(name="service_interface::knowledge_service::search", parameters={"query": "not a destination"}),
+        ActionData(name="plugin::agent_messaging_plugin::send_peer_message", parameters={"peer_id": "fixture", "peer_agent_instance_id": "i"}, result_processor=None, result_processor_kind=None),
+        ActionData(name="plugin::agent_messaging_plugin::send_peer_message", parameters={"peer_id": "fixture", "peer_agent_session_id": "s"}, result_processor=None, result_processor_kind=None),
+        ActionData(name="plugin::agent_messaging_plugin::drive_session", parameters={"agent_instance_id": "d", "text": TEXT}, result_processor=None, result_processor_kind=None),
+        ActionData(name="plugin::agent_messaging_plugin::send_peer_message", parameters={"peer_agent_instance_id": "i", "peer_agent_session_id": "s"}, result_processor=None, result_processor_kind=None),
+        ActionData(name="service_interface::knowledge_service::search", parameters={"query": "not a destination"}, result_processor=None, result_processor_kind=None),
     ]
     sid = repo.save_schedule(value)
     check([target["kind"] for target in targets_for(value)] == ["role", "instance", "unknown", "instance", "ambiguous", "process"], "declared_destination_contracts")
@@ -456,10 +459,11 @@ def check_shapes() -> None:
     check([event["operation"] for event in repo.history("preexisting")["events"]] == ["observed_baseline", "rebind"], "observed_baseline_not_invented_creator")
     service = SchedulingService.__new__(SchedulingService)
     service._ensure_ready = lambda: plugin  # type: ignore[method-assign,return-value]
-    check(service.list_schedules()["data"]["count"] == 3, "public_list_owner_forwarding")
+    check(cast(dict[str, Any], service.list_schedules())["data"]["count"] == 3, "public_list_owner_forwarding")
     for name in ("list_schedules", "get_schedules_by_tag", "rebind_scheduled_action", "get_schedule_binding_history", "recover_scheduled_action"):
         public = getattr(SchedulingServiceAPI, name)._service_interface_metadata
-        edge = getattr(SchedulingPlugin, name)._platform_process_metadata
+        handler_name = {"list_schedules": "list_schedules_action", "get_schedules_by_tag": "get_schedules_by_tag_action"}.get(name, name)
+        edge = getattr(SchedulingPlugin, handler_name)._platform_process_metadata
         check(public.is_discoverable and set(public.parameters) - {"state"} == set(edge.parameters) and name in plugin.get_edge_process_definitions(), "public_registration_" + name)
 
 

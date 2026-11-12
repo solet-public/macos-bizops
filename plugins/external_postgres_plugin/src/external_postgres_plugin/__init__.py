@@ -1,1 +1,1 @@
-"""External Postgres plugin for Ananta — read-only "super Datagrip" over foreign Postgres databases."""
+"""External Postgres plugin for Ananta — a "super Datagrip" over foreign Postgres databases."""

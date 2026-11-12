@@ -12,7 +12,6 @@ the vendor's ingest SDK parses. No live account.
 
 from __future__ import annotations
 
-import base64
 import json
 import sys
 import unittest
@@ -20,7 +19,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
-from urllib.parse import quote, quote_from_bytes, quote_plus
+from urllib.parse import quote
 
 import httpx
 from cryptography.hazmat.primitives import serialization
@@ -63,8 +62,8 @@ class FamilyFixture(unittest.TestCase):
     def run_family(self, family: str, params: dict[str, Any], handler: Handler) -> dict[str, Any]:
         real = rest_client.perform_request
 
-        def with_transport(config: SnowflakeAccountConfig, request: dict[str, Any], *, timeout_seconds: int) -> dict[str, Any]:
-            return real(config, request, timeout_seconds=timeout_seconds, transport=httpx.MockTransport(handler))
+        def with_transport(config: SnowflakeAccountConfig, request: dict[str, Any], *, timeout_seconds: int, result_hints: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> dict[str, Any]:
+            return real(config, request, timeout_seconds=timeout_seconds, transport=httpx.MockTransport(handler), result_hints=result_hints)
 
         with patch.object(rest_client, "perform_request", with_transport):
             outcome = rest_families.run_family(family, self.plugin(), params)
@@ -466,57 +465,6 @@ class Transcripts(FamilyFixture):
         self.assertEqual(outcome["error"], {"code": "snowflake.api_error", "message": "Snowflake REST request failed; vendor state may have changed"})
 
 
-def forms(secret: str) -> dict[str, str]:
-    """Raw, percent-encoded and base64 spellings of one secret."""
-    raw = secret.encode()
-    out = {"raw": secret, "percent": quote_from_bytes(raw, safe=""), "form": quote_plus(secret, safe="")}
-    for name, encode in (("base64", base64.b64encode), ("base64url", base64.urlsafe_b64encode)):
-        encoded = encode(raw).decode()
-        out[name] = encoded
-        out[name + "_unpadded"] = encoded.rstrip("=")
-        out[name + "_percent"] = quote(encoded, safe="")
-    return out
-
-
-class Redaction(FamilyFixture):
-    def test_issued_jwt_and_vendor_token_variants_never_reach_result_or_hints(self) -> None:
-        token, redactor = rest_client.authentication(self.config)
-        issued = "vendor-issued-ingest+token/=="
-        jwt_forms = forms(token)
-        issued_forms = forms(issued)
-        every = {**{"jwt_" + key: value for key, value in jwt_forms.items()}, **{"issued_" + key: value for key, value in issued_forms.items()}}
-        body = {
-            "code": "390144",
-            "message": "echo " + " ".join(every.values()),
-            "resultHandler": "01b8-" + jwt_forms["base64url_unpadded"][:40],
-            "nextBeginMark": "1_" + jwt_forms["percent"],
-            "completeResult": "false",
-            "rangeEndTime": "2026-11-07T10:41:19.874Z " + issued_forms["base64"],
-            "access_token": issued,
-            "files": [{"path": value} for value in every.values()],
-        }
-        headers = {"Location": "/api/v2/results/x?t=" + jwt_forms["percent"], "Link": f'</api/v2/results/x?page=1&t={issued_forms["base64_percent"]}>; rel="next"', "X-Echo": jwt_forms["base64"]}
-        cases = (
-            ("table", obj("clone", body={"name": "ORDERS_COPY"})),
-            ("view", obj("get")),
-            ("sequence", obj("rename", query={"targetName": "X"})),
-            ("pipe", obj("insert_report")),
-            ("pipe", obj("load_history_scan", query={"startTimeInclusive": "2026-11-07T10:00:00Z"})),
-            ("pipe", obj("insert_files", body=FILES)),
-        )
-        for family, params in cases:
-            with self.subTest(family=family, operation=params["operation"]), patch.object(rest_client, "authentication", return_value=(token, redactor)):
-                data = self.run_family(family, params, lambda _: httpx.Response(202, json=body, headers=headers))
-                rendered = json.dumps(data)
-                for name, value in every.items():
-                    self.assertNotIn(value, rendered, name)
-                hint = data["pagination"]
-                self.assertIn("[REDACTED]", hint["location"])
-                self.assertIn("[REDACTED]", hint["links"]["next"])
-                self.assertIn("[REDACTED]", hint["next_begin_mark"])
-                self.assertIn("[REDACTED]", hint["next_start_time_inclusive"])
-
-
 class Plugin(FamilyFixture):
     def test_dispatch_refuses_before_job_and_queues_deletes_and_ingestion(self) -> None:
         plugin = self.plugin()
@@ -541,7 +489,7 @@ class Plugin(FamilyFixture):
         payload = obj("insert_files", body=FILES, query={"requestId": "ingest-9"})
         manager.get_job_payload.return_value = {"action_status": "completed", "data": {"payload": payload}}
         vendor = {"status": 200, "headers": {}, "body": {"requestId": "ingest-9", "responseCode": "SUCCESS"}, "body_encoding": "json", "correlation_id": "c-1"}
-        with patch.object(rest_client, "perform_request", return_value=dict(vendor)) as transport:
+        with patch.object(rest_client, "perform_request", return_value={**vendor, "_hints": {}}) as transport:
             async_jobs._process_job(plugin, manager, "job-1", "pipe")
         self.assertEqual(transport.call_args.args[1]["path"], f"{_INGEST}/insertFiles")
         manager.update_job.assert_called_with("job-1", {"status": "completed", "result": {**vendor, "family": "pipe", "operation": "insert_files", "method": "POST", "request_id": "ingest-9"}})

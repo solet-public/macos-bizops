@@ -5,6 +5,9 @@ Provides asynchronous job tracking and retrieval operations.
 
 import json
 import logging
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -52,6 +55,8 @@ A swept job must not be readable as a genuine worker-reported failure — the
 distinction is the difference between "the work failed" and "nobody ever came
 back to tell us", and the second must never be laundered into the first.
 """
+
+_REGISTERED_LATEST_FRONTIER: ContextVar[tuple[dict[str, Any] | None, ...]] = ContextVar("registered_latest_job_frontier", default=())
 
 
 def _payload_sequence(record: dict[str, Any]) -> int:
@@ -111,6 +116,18 @@ class JobService(JobServiceAPI):
         self.state_service = state_service
         self.async_job_manager = async_job_manager
         self.namespace = "core"
+
+    @contextmanager
+    def registered_read_frontier(self) -> Generator[None]:
+        """Capture a bounded frontier before this lookup's bookkeeping job exists."""
+        query: dict[str, object] = {"table": "job", "filters": {}, "order_by": [["created_at", "desc"], ["id", "desc"]], "limit": 1, "include_deleted": True}
+        rows = self._ordered_payload_rows(self.state_service.query_ordered(self.namespace, query))
+        frontier = self._validated_job_row(rows[0]) if rows else None
+        token = _REGISTERED_LATEST_FRONTIER.set((frontier,))
+        try:
+            yield
+        finally:
+            _REGISTERED_LATEST_FRONTIER.reset(token)
 
     def get_latest_job(
         self,
@@ -471,13 +488,38 @@ class JobService(JobServiceAPI):
         failed payload read must not be spelled the same way as "this job
         produced no payload".
         """
-        result = self.state_service.query_state(
+        result = self.state_service.query_ordered(
             self.namespace,
             {
                 "table": "job_payload",
-                "filters": {"job_id": job_id, "payload_type": payload_type},
+                "filters": {"job_id": job_id, "payload_type": payload_type, "sequence": {"op": "is_not_null"}},
+                "order_by": [["sequence", "desc"], ["id", "desc"]],
+                "limit": 1,
+                "include_deleted": True,
             },
         )
+        rows = self._ordered_payload_rows(result)
+        if not rows or _payload_sequence(rows[0]) < -1:
+            # NULL historically has score -1. Never let SQL DESC's default
+            # NULLS FIRST hide a real newer payload, or lose an all-NULL history.
+            null_result = self.state_service.query_ordered(
+                self.namespace,
+                {
+                    "table": "job_payload",
+                    "filters": {"job_id": job_id, "payload_type": payload_type, "sequence": {"op": "is_null"}},
+                    "order_by": [["sequence", "desc"], ["id", "desc"]],
+                    "limit": 1,
+                    "include_deleted": True,
+                },
+            )
+            null_rows = self._ordered_payload_rows(null_result)
+            if null_rows:
+                rows = null_rows
+        return _decode_json_object(rows[0].get("payload_data")) if rows else None
+
+    @staticmethod
+    def _ordered_payload_rows(result: Mapping[str, object]) -> list[dict[str, Any]]:
+        """Keep absent payloads distinct from failed/malformed store reads."""
         if result.get(KEY_ACTION_STATUS) != STATUS_COMPLETED:
             raise RuntimeError(f"payload query did not complete: {result.get('error')!r}")
         data_obj = result.get(KEY_DATA)
@@ -487,10 +529,7 @@ class JobService(JobServiceAPI):
         if not isinstance(records, list):
             raise RuntimeError(f"payload query returned malformed records: {records!r}")
         rows = [r for r in records if isinstance(r, dict)]
-        if not rows:
-            return None
-        latest = max(rows, key=lambda r: _payload_sequence(r))
-        return _decode_json_object(latest.get("payload_data"))
+        return rows
 
     def _query_job_by_id(self, job_id: str) -> dict[str, Any] | None:
         """The job row carrying ``job_id``, or None.
@@ -519,9 +558,24 @@ class JobService(JobServiceAPI):
     ) -> dict[str, Any] | None:
         """Return the newest matching job using bounded, tie-safe pages."""
         filters, provider_prefix = self._build_job_filters(plugin_name, action_name, status)
+        after: list[object] | None = None
+        frontier = _REGISTERED_LATEST_FRONTIER.get()
+        if frontier:
+            head = frontier[0]
+            if head is None:
+                return None
+            # Read the original frontier row's current status/outcome, while
+            # excluding the newly admitted lookup and concurrent newer jobs.
+            head_rows = self._read_jobs({**filters, "id": head["id"]})
+            if head_rows and (provider_prefix is None or head_rows[0]["provider_name"].startswith(provider_prefix)):
+                return self._attach_payloads(head_rows[0])
+            after = [head["created_at"], head["id"]]
+        return self._query_latest_pages(filters, provider_prefix, after)
+
+    def _query_latest_pages(self, filters: dict[str, object], provider_prefix: str | None, after: list[object] | None) -> dict[str, Any] | None:
+        """Walk existing bounded prefix pages strictly after an optional frontier."""
         order_by = [["created_at", "desc"], ["id", "desc"]]
         page_limit = 1 if provider_prefix is None else 100
-        after: list[object] | None = None
         page_count = 1 if provider_prefix is None else 100
         for _ in range(page_count):
             query: dict[str, object] = {
@@ -576,7 +630,10 @@ class JobService(JobServiceAPI):
         DB error can never masquerade as a valid "no job found". An empty list is
         returned ONLY for a valid completed result with zero matching rows.
         """
-        result = self.state_service.query_state(self.namespace, {"table": "job", "filters": filters})
+        query: dict[str, object] = {"table": "job", "filters": filters}
+        if "id" in filters:
+            query["limit"] = 1
+        result = self.state_service.query_state(self.namespace, query)
         if result.get(KEY_ACTION_STATUS) != STATUS_COMPLETED:
             raise RuntimeError(f"job query did not complete: {result.get('error')!r}")
         data_obj = result.get(KEY_DATA)

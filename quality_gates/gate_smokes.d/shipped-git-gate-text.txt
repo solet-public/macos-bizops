@@ -1,0 +1,2 @@
+# prb_9ac5b3b0 (chg_db5bda06): shipped seed text must not present the removed git gate or a Git-Controller role
+# as live. Offline; reads the seed manifest and chunks shipped knowledge-base files without embedding them.

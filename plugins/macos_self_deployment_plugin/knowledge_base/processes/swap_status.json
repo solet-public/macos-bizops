@@ -1,13 +1,14 @@
 {
   "process_key": "plugin::macos_self_deployment_plugin::swap_status",
   "display_name": "Read local blue-green swap status",
-  "description": "Read-only introspection of the local-blue-green router's current state. Plugin-namespace registration backing the service-interface verb service_interface::local_self_deployment_service::swap_status. Returns the router's status() payload (active_color, known colors, color → bridge_port mappings, drain entries with timestamps) plus the plugin's own swap-in-progress state. No side effects. Operator-invocable for diagnostic / pre-restart checks.",
-  "embedding_description": "Read local blue-green router state — which color is active, registered colors + bridge ports, drain entries (color → drain_until_timestamp) for colors winding down, plugin's swap_in_progress flag. Read-only diagnostic; used by operators before restart_with_manifest, by complete_swap to confirm registration, by swap_rollback to determine rollback window. No side effects.",
+  "description": "Plugin-action dispatch returns immediately with {job_id, status: queued}. A single plugin-owned worker performs the operation. Retain the exact job_id and poll service_interface::job_service::get_job until terminal before consuming the result. The former complete response envelope is stored in job.result (status-reader result for reconciliation); failures also retain job.error. Read-only introspection of the local-blue-green router's current state. Plugin-namespace registration backing the service-interface verb service_interface::local_self_deployment_service::swap_status. Returns the router's status() payload (active_color, known colors, color → bridge_port mappings, drain entries with timestamps) plus the plugin's own swap-in-progress state. No side effects. Operator-invocable for diagnostic / pre-restart checks. This plugin-action face is asynchronous. The public service_interface::local_self_deployment_service::swap_status face and the Python business method remain synchronous and retain their original result on the existing service executor path.",
+  "embedding_description": "Queue a router status snapshot on the plugin worker and return a job handle. Poll job_service.get_job for the original router status and local swap state in job.result.data. The separate public local_self_deployment_service face remains synchronous on its existing service executor.",
   "result_processor_customizations": {
-    "action_label": "blue-green swap status snapshot",
+    "action_label": "swap_status job queued",
     "result_type": "local_blue_green_swap_status",
-    "result_description": "active_color, known colors, color → bridge_port map, drain entries, swap_in_progress flag.",
-    "presentation_guidance": "Lead with active_color. Surface drain entries if any (operator may be in a swap window). Surface swap_in_progress=true if mid-cycle. Otherwise terse: just the active_color + registered colors."
+    "result_description": "Immediate receipt: job_id (string), status (queued). The original result described below is available only after job completion. active_color, known colors, color → bridge_port map, drain entries, swap_in_progress flag.",
+    "presentation_guidance": "Retain job_id; poll service_interface::job_service::get_job until completed/error/cancelled. Do not infer completion from the receipt. Read the former result from the terminal job. Lead with active_color. Surface drain entries if any (operator may be in a swap window). Surface swap_in_progress=true if mid-cycle. Otherwise terse: just the active_color + registered colors.",
+    "output_action_guidance": "Dependent steps must wait for terminal job.result and then consume job.result.data. Handle terminal errors before continuing."
   },
   "error_processor_customizations": {
     "action_context": "Read local blue-green swap status.",

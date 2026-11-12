@@ -46,6 +46,7 @@ from executable_hydration_plugin_list_support import (  # noqa: E402
     run_session_retrieval_envelope,
 )
 from executable_hydration_session_source_support import (  # noqa: E402
+    run_bridge_job_readback_checks,
     run_router_and_qualification_regressions,
     run_session_source_boot_registration_regression,
 )
@@ -249,6 +250,7 @@ class ControlledReadinessRuntime(FakeRuntime):
             "call",
             "service_interface::embedding_service::get_embedding_dimension",
             "{}",
+            "--wait",
         )
         if argv == health_vector:
             self.commands.append(argv)
@@ -576,7 +578,10 @@ def _shell_and_hook_counterexamples(target: Path, runtime: FakeRuntime) -> None:
     _check(".local/bin" in rendered_shell, "named launcher path rendered")
     for launcher_name in ("claude-iris", "codex-iris"):
         launcher = (target / "client" / "bin" / launcher_name).read_text(encoding="utf-8")
-        _check("GIT_CONTROLLER_NAME=" not in launcher, f"{launcher_name} solo render omits the gate")
+        _check(
+            "GIT_CONTROLLER_NAME=" not in launcher,
+            f"{launcher_name} render omits the retired setting",
+        )
     _check(
         "BEGIN SOLET iris" in (runtime.home / ".zshrc").read_text(encoding="utf-8"),
         "managed zsh block",
@@ -585,18 +590,30 @@ def _shell_and_hook_counterexamples(target: Path, runtime: FakeRuntime) -> None:
     _path_prepend_guard_counterexample(target)
     _fresh_zsh_path_is_unique(target, runtime)
     _shell_target_quoting_counterexample(target, runtime)
-    armed_raw = _raw_request(target, phase="apply", purpose=None, public_inputs={"git_controller_name": "Git-Controller", "selected_coding_agents": ["claude_code", "codex"]})
-    armed = AdapterRequest.from_dict(armed_raw)
-    operation_handlers()[armed.operation_ref](armed, runtime)
-    for launcher_name in ("claude-iris", "codex-iris"):
-        launcher = (target / "client" / "bin" / launcher_name).read_text(encoding="utf-8")
+    fleet_raw = _raw_request(
+        target,
+        phase="apply",
+        purpose=None,
+        public_inputs={
+            "execution_topology": "fleet",
+            "selected_coding_agents": ["claude_code", "codex"],
+        },
+    )
+    fleet = AdapterRequest.from_dict(fleet_raw)
+    operation_handlers()[fleet.operation_ref](fleet, runtime)
+    for path in (
+        target / "client/bin/claude-iris",
+        target / "client/bin/codex-iris",
+        target / "client/iris-fleet.zsh",
+    ):
+        launcher = path.read_text(encoding="utf-8")
         _check(
-            'GIT_CONTROLLER_NAME="Git-Controller"' in launcher,
-            f"{launcher_name} arms named controller",
+            "GIT_CONTROLLER_NAME=" not in launcher,
+            f"{path.name} contains no retired controller assignment",
         )
     _check(
-        (target / "client" / "iris-fleet.zsh").is_file(),
-        "designated controller renders fleet functions",
+        (target / "client/iris-fleet.zsh").is_file(),
+        "fleet topology renders fleet functions without a controller setting",
     )
 
 
@@ -1072,6 +1089,7 @@ def _adapter_and_doctor_red_boundary(target: Path, runtime: FakeRuntime) -> None
         "call",
         "service_interface::embedding_service::get_embedding_dimension",
         "{}",
+        "--wait",
     )
     latch_outcomes = [
         _controlled_readiness_latch_outcome(
@@ -1376,6 +1394,7 @@ def main() -> int:
         )
         solet.chmod(0o755)
         runtime = FakeRuntime(root)
+        run_bridge_job_readback_checks(target, FakeRuntime(target / "async-runtime"), _request(target))
         _hook_pin_recognizer_counterexamples(target)
         _protocol_counterexamples(target)
         _operation_counterexamples(target, runtime)

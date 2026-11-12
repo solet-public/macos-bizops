@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Final
 from ananta.core.actions.action_factory import UNKNOWN_ARGUMENTS_ERROR_CODE
 from ananta.core.domain.enums import ActionStatus
 from ananta.core.result_processing import ErrorProcessorKind, ResultProcessorKind
+from ananta.core.state.job_completion_route import BRIDGE_WAIT_ATTACHED_KEY
 
 from .constants import PLUGIN_NAME
 from .process_exposure import (
@@ -36,10 +37,13 @@ from .process_exposure import (
     filter_discovery_payload,
     is_valid_process_key_shape,
 )
+from .process_result_job_follow import follow_job_receipt, job_to_follow
 from .role_binding_store import list_roles_for_agent_instance
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
+
+    from ananta.core.state.async_job_manager import AsyncJobManager
 
     from .bridge_sessions import BridgeSessionManager
     from .models import BridgeSessionState
@@ -305,6 +309,7 @@ class PlatformSurface:
         blob_storage_service: Any | None = None,
         memory_service: Any | None = None,
         plugin_manager: Any | None = None,
+        async_job_manager: AsyncJobManager | None = None,
         export_policy: ProcessExportPolicy | None = None,
         max_message_chars: int = 120_000,
     ) -> None:
@@ -319,6 +324,7 @@ class PlatformSurface:
         self._blob_storage_service = blob_storage_service
         self._memory_service = memory_service
         self._plugin_manager = plugin_manager
+        self._async_job_manager = async_job_manager
         self._export_policy = export_policy or ProcessExportPolicy(enabled=False)
         self._max_message_chars = max_message_chars
         # B1 Finding-B: vault ``is_operator_equivalent`` lookup, wired post-vault
@@ -497,6 +503,7 @@ class PlatformSurface:
                 arguments=arguments,
                 reason=reason,
                 deliver_to_bridge=deliver_to_bridge,
+                bridge_wait_attached=ctx.get(BRIDGE_WAIT_ATTACHED_KEY) is True,
             )
         except Exception as exc:
             log_mcp_failure(
@@ -510,7 +517,7 @@ class PlatformSurface:
             )
             raise
 
-    def process_result(self, action_id: str) -> dict[str, Any]:
+    def process_result(self, action_id: str, *, follow_job: bool = True) -> dict[str, Any]:
         """Return the latest stored result for ``action_id``."""
         if not action_id:
             raise BridgeError(
@@ -541,7 +548,23 @@ class PlatformSurface:
             payload["result"] = latest.get("result_data") or {}
             payload["result_source"] = latest.get("result_source")
             payload["result_created_at"] = latest.get("created_at")
+        if job_id := job_to_follow(payload, follow_job):
+            return follow_job_receipt(payload, job_id, self._async_job_manager)
         return payload
+
+    def release_job_waiter(self, *, job_id: str, bridge_id: str) -> dict[str, object]:
+        """Release only this open bridge's durable waiter, without cancelling work."""
+        bridge = self._resolve_bridge(bridge_id)
+        if self._async_job_manager is None:
+            raise BridgeError(ERR_DEPENDENCIES_NOT_READY, "Async job manager is not available for waiter release")
+        try:
+            return self._async_job_manager.release_bridge_waiter(job_id, bridge_id=bridge.bridge_id, session_id=bridge.session_id)
+        except PermissionError as exc:
+            raise BridgeError("bridge.waiter_owner_mismatch", str(exc)) from exc
+        except ValueError as exc:
+            raise BridgeError("bridge.job_not_found", str(exc)) from exc
+        except RuntimeError as exc:
+            raise BridgeError("bridge.waiter_release_conflict", str(exc)) from exc
 
     # ------------------------------------------------------------------
     # download — blob retrieval
@@ -722,6 +745,7 @@ class PlatformSurface:
         arguments: dict[str, Any],
         reason: str,
         deliver_to_bridge: bool,
+        bridge_wait_attached: bool = False,
     ) -> dict[str, Any]:
         # Fire-and-forget dispatch — the result flows back through the
         # bridge-delivery dispatcher to deliver_result / deliver_error,
@@ -736,6 +760,7 @@ class PlatformSurface:
                 inference_vertex_role=self._resolve_originating_role(bridge),
                 operator_equivalent=self._resolve_operator_equivalent(bridge),
                 caller_attribution=self._resolve_caller_attribution(bridge),
+                bridge_wait_attached=bridge_wait_attached,
             ),
             priority=5,
         )
@@ -813,6 +838,18 @@ class PlatformSurface:
             bridge.agent_instance_id or "",
             purpose="inference_vertex_role",
         )
+
+    def launch_directory_for_session(self, session_id: str) -> dict[str, str] | None:
+        """Read an active bridge capture by the action's injected session id.
+
+        The action pipeline already carries bridge.session_id. Lookup here
+        avoids persisting a caller directory in flow trigger_data or a column.
+        A closed/missing bridge has no capture; callers advise and use home.
+        """
+        for bridge in self._bridge_manager.list_active():
+            if bridge.session_id == session_id:
+                return dict(bridge.launch_directory) if bridge.launch_directory is not None else None
+        return None
 
     def _resolve_caller_attribution(
         self,
@@ -914,6 +951,7 @@ class PlatformSurface:
         inference_vertex_role: str,
         operator_equivalent: bool,
         caller_attribution: CallerAttribution = CallerAttribution(),  # noqa: B008 — frozen+slots dataclass, immutable shared default
+        bridge_wait_attached: bool = False,
     ) -> dict[str, object]:
         """Build the per-call trigger_data carried through the flow service.
 
@@ -966,6 +1004,8 @@ class PlatformSurface:
         # roleless caller must leave the key absent rather than carry "".
         if caller_attribution.role:
             trigger[COMPLETION_ROUTE_ROLE_KEY] = caller_attribution.role
+        if bridge_wait_attached:
+            trigger[BRIDGE_WAIT_ATTACHED_KEY] = True
         if bridge.client_id:
             trigger["authenticated_principal"] = {
                 "client_id": bridge.client_id,

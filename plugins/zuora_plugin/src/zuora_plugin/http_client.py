@@ -13,8 +13,7 @@ See workbench/2026-08-09_sync_verb_d03_deferred_completion_doctrine_syncverb-doc
 
 The bearer token is cached in-memory and re-fetched ~30s before its recorded
 expiry (clock-skew margin) or on a fresh 401 (force re-fetch once). It is
-NEVER vaulted — only the client_secret (the durable credential) is a secret;
-the token is trivially re-mintable.
+NEVER vaulted.
 """
 
 from __future__ import annotations
@@ -24,8 +23,9 @@ from typing import Any
 
 import httpx
 
-from .app_config import ZuoraTenantConfig
-from .constants import TOKEN_REFRESH_MARGIN_SECONDS
+from .app_config import AppConfigError, ZuoraTenantConfig
+from .constants import ERROR_NOT_CONFIGURED, TOKEN_REFRESH_MARGIN_SECONDS
+from .errors import ZuoraServiceError, vendor_object
 
 # Plain int literals rather than ``httpx.codes.*`` — see errors.py's comment
 # on the same pyright false-positive with httpx's status-code stub typing.
@@ -48,7 +48,10 @@ class ZuoraClient:
     ) -> None:
         self._config = config
         self._timeout_seconds = timeout_seconds
-        self._http = httpx.Client(base_url=config.base_url, timeout=timeout_seconds)
+        try:
+            self._http = httpx.Client(base_url=config.base_url, timeout=timeout_seconds)
+        except (ValueError, httpx.InvalidURL):
+            raise AppConfigError(ERROR_NOT_CONFIGURED, "The registered Zuora base URL is invalid.") from None
         # Vendor-issued pre-signed result URLs (Data Query ``dataFile``) live off
         # the tenant host. They get their own client that never carries the bearer.
         self._presigned_http: httpx.Client | None = None
@@ -83,15 +86,6 @@ class ZuoraClient:
         if self._presigned_http is None:
             self._presigned_http = httpx.Client(timeout=self._timeout_seconds, follow_redirects=False)
         return self._presigned_http.get(url)
-
-    def credential_values(self) -> list[str]:
-        """The registered client id and secret plus the cached bearer ('' before the first mint).
-
-        Redaction input only: every typed verb and the generic request scrub
-        these values (raw, percent/form-encoded and base64) from results,
-        errors, audit lines and downloaded bytes.
-        """
-        return [self._config.client_id, self._config.client_secret, self._token or ""]
 
     def ensure_authenticated(self) -> None:
         """Mint (or reuse the cached) bearer token — used by test_connection to prove reachability."""
@@ -167,12 +161,18 @@ class ZuoraClient:
         )
         if response.status_code != _HTTP_OK:
             raise ZuoraAuthError("Zuora OAuth token request failed")
-        payload = response.json()
+        try:
+            payload = vendor_object(response)
+        except ZuoraServiceError:
+            raise ZuoraAuthError("Zuora returned an invalid OAuth token response.") from None
         token = payload.get("access_token")
         expires_in = payload.get("expires_in")
         if not isinstance(token, str) or not token:
             raise ZuoraAuthError("Zuora OAuth token response carried no access_token")
-        ttl = float(expires_in) if isinstance(expires_in, (int, float)) else 3600.0
+        try:
+            ttl = float(expires_in) if isinstance(expires_in, (int, float)) else 3600.0
+        except (ValueError, OverflowError):
+            raise ZuoraAuthError("Zuora returned an invalid OAuth token lifetime.") from None
         self._token = token
         self._expires_at_monotonic = time.monotonic() + max(0.0, ttl - TOKEN_REFRESH_MARGIN_SECONDS)
         return token

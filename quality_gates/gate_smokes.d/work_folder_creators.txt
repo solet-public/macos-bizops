@@ -1,0 +1,1 @@
+# CLI work folders: lane provisioning, release terminal evidence, nested assembly and smoke scratch.

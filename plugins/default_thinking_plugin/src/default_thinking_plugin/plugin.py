@@ -35,6 +35,7 @@ from ananta.core.plans.transitions import (
 )
 from ananta.core.plans.windowing import build_plan_window
 from ananta.core.plugins.plugin_base import ServicePlugin
+from ananta.core.state.registered_job_operations import serial_thinking_provider
 from ananta.error_handling import FrameworkError
 from ananta.interfaces.inference_service_interface import InferenceRequest
 from ananta.interfaces.thinking_provider_interface import ThinkingProvider
@@ -224,7 +225,9 @@ def _extract_completion_text(result: object) -> str:
 
 
 def _decode_blob_content(
-    raw_content: object, spec_id: str, blob_id: str,
+    raw_content: object,
+    spec_id: str,
+    blob_id: str,
 ) -> str:
     """Decode blob retrieve_blob ``content`` field into a UTF-8 string.
 
@@ -241,25 +244,20 @@ def _decode_blob_content(
                 return bytes.fromhex(raw_content).decode("utf-8")
             except ValueError as exc:
                 raise FrameworkError(
-                    message=(
-                        f"Pipeline Spec {spec_id!r}: blob {blob_id} "
-                        f"hex-decoding failed: {exc}"
-                    ),
+                    message=(f"Pipeline Spec {spec_id!r}: blob {blob_id} hex-decoding failed: {exc}"),
                     error_code=ErrorCode.INTERNAL_ERROR,
                 ) from exc
         if raw_content.strip():
             return raw_content
     raise FrameworkError(
-        message=(
-            f"Pipeline Spec {spec_id!r}: blob {blob_id} returned "
-            f"empty or invalid content"
-        ),
+        message=(f"Pipeline Spec {spec_id!r}: blob {blob_id} returned empty or invalid content"),
         error_code=ErrorCode.INTERNAL_ERROR,
     )
 
 
 def _parse_pipeline_spec_response(
-    content: str, spec_id: str,
+    content: str,
+    spec_id: str,
 ) -> dict[str, Any]:
     """Parse a Pipeline Spec model response as a JSON object.
 
@@ -278,24 +276,19 @@ def _parse_pipeline_spec_response(
     if body.startswith("```"):
         first_newline = body.find("\n")
         if first_newline != -1:
-            body = body[first_newline + 1:]
+            body = body[first_newline + 1 :]
         if body.endswith("```"):
-            body = body[: -3].rstrip()
+            body = body[:-3].rstrip()
     try:
         parsed = json.loads(body)
     except json.JSONDecodeError as exc:
         raise FrameworkError(
-            message=(
-                f"Pipeline Spec {spec_id!r} JSON failed to parse: {exc}"
-            ),
+            message=(f"Pipeline Spec {spec_id!r} JSON failed to parse: {exc}"),
             error_code=ErrorCode.PARAMETER_ERROR,
         ) from exc
     if not isinstance(parsed, dict):
         raise FrameworkError(
-            message=(
-                f"Pipeline Spec {spec_id!r} JSON must be an object, "
-                f"got {type(parsed).__name__}"
-            ),
+            message=(f"Pipeline Spec {spec_id!r} JSON must be an object, got {type(parsed).__name__}"),
             error_code=ErrorCode.PARAMETER_ERROR,
         )
     return parsed
@@ -338,7 +331,12 @@ class _RunWbsRegistrarAdapter:
         self._plugin = plugin
 
     def register(
-        self, *, content: str, wbs_id: str, manifest_id: str, session_id: str,
+        self,
+        *,
+        content: str,
+        wbs_id: str,
+        manifest_id: str,
+        session_id: str,
     ) -> dict[str, Any]:
         return self._plugin.register_authored_work_breakdown_structure(
             content=content,
@@ -414,7 +412,9 @@ class _PluginStateStore:
         updates: dict[str, object],
     ) -> dict[str, Any]:
         result = self._state_service.update_state(
-            namespace=namespace, query=query, updates=updates,
+            namespace=namespace,
+            query=query,
+            updates=updates,
         )
         return result if isinstance(result, dict) else {}
 
@@ -443,7 +443,8 @@ class _PluginFocusManager:
 
     def defocus_by_label(self, label: str) -> None:
         self._plugin._defocus_documents_by_label(  # noqa: SLF001
-            label, self._memory,
+            label,
+            self._memory,
         )
 
     def get_focused(self) -> list[dict[str, Any]]:
@@ -502,7 +503,8 @@ class _PluginProcessSchemaLookup:
         self._plugin = plugin
 
     def get_arg_properties(
-        self, process_key: str,
+        self,
+        process_key: str,
     ) -> dict[str, dict[str, object]]:
         try:
             discovery = self._plugin._get_discovery_service()  # noqa: SLF001
@@ -521,11 +523,7 @@ class _PluginProcessSchemaLookup:
         # object level. Without this fold the required-argument checks can
         # never fire (they read a key that is structurally absent). New
         # dicts, not mutations: the registry owns the originals.
-        return {
-            name: {**prop, "required": name in required_names}
-            for name, prop in arg_props.items()
-            if isinstance(prop, dict)
-        }
+        return {name: {**prop, "required": name in required_names} for name, prop in arg_props.items() if isinstance(prop, dict)}
 
     def key_exists(self, process_key: str) -> bool:
         """True when the key resolves in the LIVE process registry.
@@ -538,6 +536,7 @@ class _PluginProcessSchemaLookup:
         return discovery.get_process_by_key(process_key) is not None
 
 
+@serial_thinking_provider
 class DefaultThinkingPlugin(ServicePlugin):
     """Structured reasoning plugin using local LLM.
 
@@ -604,11 +603,7 @@ class DefaultThinkingPlugin(ServicePlugin):
                 "system_prompt_path": {
                     "type": "string",
                     "title": "System Prompt Path",
-                    "description": (
-                        "Profile-relative path to an OPERATOR OVERRIDE of the reasoning "
-                        "system prompt. Optional -- when no file exists here, the plugin "
-                        "uses its own shipped default prompt instead of running empty."
-                    ),
+                    "description": ("Profile-relative path to an OPERATOR OVERRIDE of the reasoning system prompt. Optional -- when no file exists here, the plugin uses its own shipped default prompt instead of running empty."),
                     "default": defaults["system_prompt_path"],
                 },
             },
@@ -710,10 +705,7 @@ class DefaultThinkingPlugin(ServicePlugin):
             prompt = shipped_path.read_text(encoding="utf-8").rstrip("\n")
             self.logger.debug(f"Loaded shipped default system prompt: {len(prompt)} chars")
             return prompt
-        self.logger.warning(
-            f"System prompt not found at either {override_path} or the shipped default "
-            f"{shipped_path}, using empty"
-        )
+        self.logger.warning(f"System prompt not found at either {override_path} or the shipped default {shipped_path}, using empty")
         return ""
 
     async def start_services(self) -> ActionResult:
@@ -791,11 +783,7 @@ class DefaultThinkingPlugin(ServicePlugin):
         typed ``inference_unusable``. There is no fallback model path in
         this plugin.
         """
-        service = (
-            self.orchestrator_ref.get_service("inference_service")
-            if self.orchestrator_ref
-            else None
-        )
+        service = self.orchestrator_ref.get_service("inference_service") if self.orchestrator_ref else None
         if service is None:
             raise FrameworkError(
                 message="inference_service not available for thinking completion",
@@ -818,11 +806,7 @@ class DefaultThinkingPlugin(ServicePlugin):
         completion = _extract_completion_text(result)
         if not completion:
             raise FrameworkError(
-                message=(
-                    f"inference_service returned no usable completion for "
-                    f"{purpose!r} — the provider envelope carried an error, "
-                    f"a non-completed status, or empty text"
-                ),
+                message=(f"inference_service returned no usable completion for {purpose!r} — the provider envelope carried an error, a non-completed status, or empty text"),
                 error_code=ErrorCode.INFERENCE_UNUSABLE,
             )
         return completion
@@ -1000,7 +984,8 @@ class DefaultThinkingPlugin(ServicePlugin):
 
         # Route reasoning through the platform inference service
         completion = self._generate_thinking_completion(
-            messages, purpose="thinking_task_create",
+            messages,
+            purpose="thinking_task_create",
         )
 
         # Store OUTPUT event
@@ -1050,7 +1035,8 @@ class DefaultThinkingPlugin(ServicePlugin):
 
         # Route reasoning through the platform inference service
         completion = self._generate_thinking_completion(
-            messages, purpose="thinking_task_continue",
+            messages,
+            purpose="thinking_task_continue",
         )
 
         # Store OUTPUT event
@@ -1587,7 +1573,8 @@ class DefaultThinkingPlugin(ServicePlugin):
                 return kb_content
             self.logger.error(
                 "PLAN_ADVANCE: KB read failed (kb_path=%s, plan_id=%s). Falling back to focused memory content.",
-                kb_path, plan_id,
+                kb_path,
+                plan_id,
             )
         else:
             self.logger.error(
@@ -1597,7 +1584,9 @@ class DefaultThinkingPlugin(ServicePlugin):
         return str(existing_plan.get("content", ""))
 
     def advance_current_plan_step(
-        self, *, session_id: str,
+        self,
+        *,
+        session_id: str,
     ) -> dict[str, Any] | None:
         """Platform-owned plan marker advancement (two-tier).
 
@@ -1675,7 +1664,8 @@ class DefaultThinkingPlugin(ServicePlugin):
 
         advanced_parsed = parse(advanced_content)
         self.set_presented_plan_cursor(
-            session_id, plan_cursor(plan_id, advanced_parsed),
+            session_id,
+            plan_cursor(plan_id, advanced_parsed),
         )
         raw_plan_text = render_plan_steps(advanced_parsed)
 
@@ -1897,11 +1887,7 @@ class DefaultThinkingPlugin(ServicePlugin):
                 self._safe_unfocus(old_id, memory_service)
             if self._try_focus(memory_id, memory_service):
                 return True
-        raise RuntimeError(
-            f"Focus buffer full: cannot focus artifact {memory_id} after "
-            f"evicting {len(evictable_ids)} non-plan item(s). "
-            f"{len(focused_items)} item(s) remain focused."
-        )
+        raise RuntimeError(f"Focus buffer full: cannot focus artifact {memory_id} after evicting {len(evictable_ids)} non-plan item(s). {len(focused_items)} item(s) remain focused.")
 
     def _try_focus(self, memory_id: str, memory_service: Any) -> bool:
         """Attempt to focus a memory, returning False on failure."""
@@ -1912,7 +1898,11 @@ class DefaultThinkingPlugin(ServicePlugin):
             return False
 
     def update_plan(
-        self, task_id: str, status_update: str, *, session_id: str,
+        self,
+        task_id: str,
+        status_update: str,
+        *,
+        session_id: str,
     ) -> dict[str, Any]:
         """Report progress and get updated plan reasoning."""
         if not status_update:
@@ -1990,7 +1980,10 @@ class DefaultThinkingPlugin(ServicePlugin):
         return plan_dict, is_focused
 
     def list_plans(
-        self, status: str | None = None, *, session_id: str,
+        self,
+        status: str | None = None,
+        *,
+        session_id: str,
     ) -> dict[str, Any]:
         """List plans with optional status filter.
 
@@ -2314,7 +2307,9 @@ class DefaultThinkingPlugin(ServicePlugin):
         return memory_id
 
     def _defocus_documents_by_label(
-        self, label: str, memory_service: Any,
+        self,
+        label: str,
+        memory_service: Any,
     ) -> None:
         """Defocus and forget the session's focused documents matching a label.
 
@@ -2472,7 +2467,8 @@ class DefaultThinkingPlugin(ServicePlugin):
     ) -> dict[str, Any]:
         """Revise an existing Work Manifest document."""
         return self._artifact_authoring_service(session_id).patch_work_manifest(
-            manifest_id, content,
+            manifest_id,
+            content,
         )
 
     def create_authored_artifact(
@@ -2495,10 +2491,14 @@ class DefaultThinkingPlugin(ServicePlugin):
         authoring = self._artifact_authoring_service(session_id)
         if artifact_type == "pipeline_spec":
             spec_id, manifest_id = authoring.derive_authored_ids(
-                artifact_type, content,
+                artifact_type,
+                content,
             )
             return self._create_pipeline_spec(
-                spec_id, manifest_id, content, session_id=session_id,
+                spec_id,
+                manifest_id,
+                content,
+                session_id=session_id,
             )
         return authoring.create_authored_artifact(
             artifact_type,
@@ -2517,7 +2517,9 @@ class DefaultThinkingPlugin(ServicePlugin):
         content = self._artifact_authoring_service(
             session_id,
         ).invoke_pipeline_spec_authoring(
-            spec_id, manifest_id, content,
+            spec_id,
+            manifest_id,
+            content,
         )
         spec_dict = _parse_pipeline_spec_response(content, spec_id)
         style_family = str(
@@ -2570,7 +2572,9 @@ class DefaultThinkingPlugin(ServicePlugin):
         )
         self.logger.info(
             "Pipeline Spec %s stored as blob %s (namespace %s, %d bytes)",
-            spec_id, blob_id, blob_namespace,
+            spec_id,
+            blob_id,
+            blob_namespace,
             len(json.dumps(spec_dict)),
         )
         return {
@@ -2739,18 +2743,11 @@ class DefaultThinkingPlugin(ServicePlugin):
         lc_map = self._build_lc_map(spec_dict.get("layer_configs", []))
         pg_map = self._build_pg_map(spec_dict.get("parameter_groups", []))
         raw_ma = spec_dict.get("modulation_assignments", [])
-        errors = (
-            self._validate_layer_config_shapes(discovery, lc_map, schema)
-            + self._validate_parameter_group_shapes(discovery, pg_map, schema)
-            + (self._validate_modulation_assignment_shapes(discovery, raw_ma) if isinstance(raw_ma, list) else [])
-        )
+        errors = self._validate_layer_config_shapes(discovery, lc_map, schema) + self._validate_parameter_group_shapes(discovery, pg_map, schema) + (self._validate_modulation_assignment_shapes(discovery, raw_ma) if isinstance(raw_ma, list) else [])
         if errors:
             bullet_list = "\n".join(f"  - {e}" for e in errors)
             raise FrameworkError(
-                message=(
-                    f"PipelineSpec {spec_id!r} failed shape validation "
-                    f"({len(errors)} error(s)):\n{bullet_list}"
-                ),
+                message=(f"PipelineSpec {spec_id!r} failed shape validation ({len(errors)} error(s)):\n{bullet_list}"),
                 error_code=ErrorCode.PARAMETER_ERROR,
             )
 
@@ -2800,7 +2797,10 @@ class DefaultThinkingPlugin(ServicePlugin):
         ``authored_validation``).
         """
         report = validate_authored_wbs(
-            content, wbs_id, phase_number, _PluginProcessSchemaLookup(self),
+            content,
+            wbs_id,
+            phase_number,
+            _PluginProcessSchemaLookup(self),
         )
         return {
             "valid": report.valid,
@@ -2827,16 +2827,15 @@ class DefaultThinkingPlugin(ServicePlugin):
         ``provenance='authored_by_value'``.
         """
         report = validate_authored_wbs(
-            content, wbs_id, phase_number, _PluginProcessSchemaLookup(self),
+            content,
+            wbs_id,
+            phase_number,
+            _PluginProcessSchemaLookup(self),
         )
         if not report.valid:
             bullet_list = "\n".join(f"  - {e}" for e in report.errors)
             raise FrameworkError(
-                message=(
-                    f"Authored WBS {wbs_id!r} failed validation "
-                    f"({len(report.errors)} error(s)) — nothing was stored:\n"
-                    f"{bullet_list}"
-                ),
+                message=(f"Authored WBS {wbs_id!r} failed validation ({len(report.errors)} error(s)) — nothing was stored:\n{bullet_list}"),
                 error_code=ErrorCode.PARAMETER_ERROR,
             )
         return self._wbs_authoring_service(session_id).store_authored_wbs(
@@ -2859,7 +2858,9 @@ class DefaultThinkingPlugin(ServicePlugin):
         validation machinery (see ``authored_validation``).
         """
         report = validate_authored_joseki_card(
-            content, _PluginProcessSchemaLookup(self), joseki_key,
+            content,
+            _PluginProcessSchemaLookup(self),
+            joseki_key,
         )
         return {
             "valid": report.valid,
@@ -2881,16 +2882,13 @@ class DefaultThinkingPlugin(ServicePlugin):
         at state 'draft'.
         """
         report = validate_authored_joseki_card(
-            content, _PluginProcessSchemaLookup(self),
+            content,
+            _PluginProcessSchemaLookup(self),
         )
         if not report.valid:
             bullet_list = "\n".join(f"  - {e}" for e in report.errors)
             raise FrameworkError(
-                message=(
-                    f"Authored joseki card failed validation "
-                    f"({len(report.errors)} error(s)) — nothing was stored:\n"
-                    f"{bullet_list}"
-                ),
+                message=(f"Authored joseki card failed validation ({len(report.errors)} error(s)) — nothing was stored:\n{bullet_list}"),
                 error_code=ErrorCode.PARAMETER_ERROR,
             )
         registrar = AuthoredJosekiRegistrar(
@@ -2899,7 +2897,8 @@ class DefaultThinkingPlugin(ServicePlugin):
             namespace=NAMESPACE,
         )
         return registrar.register(
-            joseki_key=parse_joseki_key(content), content=content,
+            joseki_key=parse_joseki_key(content),
+            content=content,
         )
 
     def get_joseki_run_gateway(self) -> JosekiRunGateway:
@@ -2940,7 +2939,9 @@ class DefaultThinkingPlugin(ServicePlugin):
     ) -> dict[str, Any]:
         """Execute a registered joseki card platform-side (Track A driver)."""
         return self._joseki_run_engine().run_joseki(
-            joseki_key=joseki_key, bindings=bindings, label=label,
+            joseki_key=joseki_key,
+            bindings=bindings,
+            label=label,
         )
 
     def complete_joseki_run(self, wbs_id: str) -> dict[str, Any]:
@@ -2959,17 +2960,16 @@ class DefaultThinkingPlugin(ServicePlugin):
     ) -> dict[str, Any]:
         """Bounded run listing (status/joseki_key filters)."""
         return self._joseki_run_engine().list_joseki_runs(
-            status=status, joseki_key=joseki_key, limit=limit,
+            status=status,
+            joseki_key=joseki_key,
+            limit=limit,
         )
 
     def reconcile_joseki_runs(self) -> dict[str, Any]:
         """Sweep every running run once (EDGE_SINK cron-sibling shape)."""
         engine = self._joseki_run_engine()
         listing = engine.list_joseki_runs(status="running", limit=100)
-        results = [
-            engine.reconcile_run(run_id=str(run["run_id"]))
-            for run in listing.get("runs", [])
-        ]
+        results = [engine.reconcile_run(run_id=str(run["run_id"])) for run in listing.get("runs", [])]
         return {"swept": len(results), "results": results}
 
     def _authored_joseki_lifecycle(self) -> AuthoredJosekiLifecycle:
@@ -2985,7 +2985,9 @@ class DefaultThinkingPlugin(ServicePlugin):
             card_reader=_PluginJosekiCardReader(self),
             card_writer=_PluginJosekiCardWriter(self),
             validate=lambda content, expected: validate_authored_joseki_card(
-                content, _PluginProcessSchemaLookup(self), expected,
+                content,
+                _PluginProcessSchemaLookup(self),
+                expected,
             ),
             now=lambda: datetime.datetime.now(datetime.UTC),
             namespace=NAMESPACE,
@@ -3020,7 +3022,8 @@ class DefaultThinkingPlugin(ServicePlugin):
         same predicated update (the §4.3 proven gate: ≥1 recorded run).
         """
         return self._authored_joseki_lifecycle().record_run(
-            joseki_key=joseki_key, wbs_id=wbs_id,
+            joseki_key=joseki_key,
+            wbs_id=wbs_id,
         )
 
     def get_authored_joseki(self, joseki_key: str) -> dict[str, Any]:
@@ -3101,7 +3104,8 @@ class DefaultThinkingPlugin(ServicePlugin):
         )
 
     def _artifact_authoring_service(
-        self, session_id: str,
+        self,
+        session_id: str,
     ) -> ArtifactAuthoringService:
         """Per-call, session-bound artifact authoring service (JOS-02)."""
         return ArtifactAuthoringService(
@@ -3122,13 +3126,19 @@ class DefaultThinkingPlugin(ServicePlugin):
         )
 
     def start_wbs_execution(
-        self, wbs_id: str, *, session_id: str,
+        self,
+        wbs_id: str,
+        *,
+        session_id: str,
     ) -> dict[str, Any]:
         """Start or resume a pull-mode WBS execution session (idempotent)."""
         return self._pull_execution_service(session_id).start_wbs_execution(wbs_id)
 
     def get_next_wbs_step(
-        self, wbs_id: str, *, session_id: str,
+        self,
+        wbs_id: str,
+        *,
+        session_id: str,
     ) -> dict[str, Any]:
         """Return the pull-mode envelope for the next unexecuted step."""
         return self._pull_execution_service(session_id).get_next_wbs_step(wbs_id)
@@ -3155,7 +3165,10 @@ class DefaultThinkingPlugin(ServicePlugin):
         )
 
     def advance_wbs_execution(
-        self, wbs_id: str, *, session_id: str,
+        self,
+        wbs_id: str,
+        *,
+        session_id: str,
     ) -> dict[str, Any]:
         """Q15 advance evaluation (auto_safe / agent_review / complete)."""
         return self._pull_execution_service(session_id).advance_wbs_execution(wbs_id)
@@ -3229,19 +3242,22 @@ class DefaultThinkingPlugin(ServicePlugin):
         if wbs_id != canonical_wbs_id:
             self.logger.warning(
                 "WBS ID override: model passed %r, derived %r from %s phase %d",
-                wbs_id, canonical_wbs_id, manifest_id, phase_number,
+                wbs_id,
+                canonical_wbs_id,
+                manifest_id,
+                phase_number,
             )
         try:
             spec_dict = self._resolve_pipeline_spec_argument(
-                pipeline_spec_id, pipeline_spec,
+                pipeline_spec_id,
+                pipeline_spec,
             )
         except FrameworkError:
             if pipeline_spec_id is None:
                 raise
             spec_dict = self._load_pipeline_spec_by_manifest(manifest_id)
             self.logger.warning(
-                "generate_section_stem_wbs: pipeline_spec_id %r not found; "
-                "resolved by manifest_id %r instead",
+                "generate_section_stem_wbs: pipeline_spec_id %r not found; resolved by manifest_id %r instead",
                 pipeline_spec_id,
                 manifest_id,
             )
@@ -3265,10 +3281,7 @@ class DefaultThinkingPlugin(ServicePlugin):
         """Resolve pipeline_spec_id or pipeline_spec into a dict."""
         if pipeline_spec is not None and pipeline_spec_id:
             raise FrameworkError(
-                message=(
-                    "Provide either pipeline_spec_id or pipeline_spec, "
-                    "not both"
-                ),
+                message=("Provide either pipeline_spec_id or pipeline_spec, not both"),
                 error_code=ErrorCode.PARAMETER_ERROR,
             )
         if pipeline_spec is not None:
@@ -3276,9 +3289,7 @@ class DefaultThinkingPlugin(ServicePlugin):
         if pipeline_spec_id:
             return self._load_pipeline_spec_artifact(pipeline_spec_id)
         raise FrameworkError(
-            message=(
-                "Either pipeline_spec_id or pipeline_spec is required"
-            ),
+            message=("Either pipeline_spec_id or pipeline_spec is required"),
             error_code=ErrorCode.PARAMETER_ERROR,
         )
 
@@ -3314,13 +3325,7 @@ class DefaultThinkingPlugin(ServicePlugin):
             )
         if not blocks:
             return ""
-        header = (
-            "\n\n# Available Pipeline Schemas\n\n"
-            "Pick the schema whose `style_family` matches this work, "
-            "then copy its `schema_id` into your spec's `schema_id` "
-            "field exactly. Use only the arc names and layer_type keys "
-            "the chosen schema declares.\n"
-        )
+        header = "\n\n# Available Pipeline Schemas\n\nPick the schema whose `style_family` matches this work, then copy its `schema_id` into your spec's `schema_id` field exactly. Use only the arc names and layer_type keys the chosen schema declares.\n"
         return header + "".join(blocks)
 
     def _require_blob_storage_service(self) -> Any:
@@ -3357,10 +3362,7 @@ class DefaultThinkingPlugin(ServicePlugin):
         blob_id = str(record.get("blob_id", ""))
         if not blob_id:
             raise FrameworkError(
-                message=(
-                    f"Pipeline Spec {spec_id!r} has no blob_id in "
-                    f"its state record"
-                ),
+                message=(f"Pipeline Spec {spec_id!r} has no blob_id in its state record"),
                 error_code=ErrorCode.PARAMETER_ERROR,
             )
         blob_service = self._require_blob_storage_service()
@@ -3381,9 +3383,7 @@ class DefaultThinkingPlugin(ServicePlugin):
         records = result.get("data", {}).get("records") or []
         if not records:
             raise FrameworkError(
-                message=(
-                    f"No Pipeline Spec found for manifest {manifest_id!r}"
-                ),
+                message=(f"No Pipeline Spec found for manifest {manifest_id!r}"),
                 error_code=ErrorCode.PARAMETER_ERROR,
             )
         record = records[-1]
@@ -3391,10 +3391,7 @@ class DefaultThinkingPlugin(ServicePlugin):
         blob_id = str(record.get("blob_id", ""))
         if not blob_id:
             raise FrameworkError(
-                message=(
-                    f"Pipeline Spec {spec_id!r} for manifest {manifest_id!r} "
-                    f"has no blob_id"
-                ),
+                message=(f"Pipeline Spec {spec_id!r} for manifest {manifest_id!r} has no blob_id"),
                 error_code=ErrorCode.PARAMETER_ERROR,
             )
         blob_service = self._require_blob_storage_service()
@@ -3417,19 +3414,13 @@ class DefaultThinkingPlugin(ServicePlugin):
             schema_path = kb_root / "03_templates" / "pipeline_schema.json"
             if not schema_path.is_file():
                 raise FrameworkError(
-                    message=(
-                        f"pipeline_schema.json not found at "
-                        f"{schema_path} for style_family {style_family!r}"
-                    ),
+                    message=(f"pipeline_schema.json not found at {schema_path} for style_family {style_family!r}"),
                     error_code=ErrorCode.PARAMETER_ERROR,
                 )
             schema: dict[str, Any] = json.loads(schema_path.read_text())
             return schema
         raise FrameworkError(
-            message=(
-                f"Knowledge base {style_family!r} not found — cannot load "
-                "pipeline schema"
-            ),
+            message=(f"Knowledge base {style_family!r} not found — cannot load pipeline schema"),
             error_code=ErrorCode.PARAMETER_ERROR,
         )
 
@@ -3485,7 +3476,6 @@ class DefaultThinkingPlugin(ServicePlugin):
             focus_manager=_PluginFocusManager(self, session_id),
         )
 
-
     def graft_work_breakdown_structure_segment(
         self,
         wbs_id: str,
@@ -3521,7 +3511,8 @@ class DefaultThinkingPlugin(ServicePlugin):
 
         # Read WBS content from the focused WBS document (authoritative).
         wbs_content, actual_wbs_id = self._read_wbs_content_for_graft(
-            wbs_id, session_id,
+            wbs_id,
+            session_id,
         )
         projected_segment = _project_next_work_item(wbs_content, wbs_id=actual_wbs_id)
 
@@ -3876,14 +3867,12 @@ class DefaultThinkingPlugin(ServicePlugin):
             rel_path = str(match.relative_to(kb_root))
             try:
                 result = knowledge_service.read_file(
-                    name=kb_name, path=rel_path,
+                    name=kb_name,
+                    path=rel_path,
                 )
             except FileNotFoundError:
                 continue
-            content = (
-                result.get("content", "")
-                if isinstance(result, dict) else ""
-            )
+            content = result.get("content", "") if isinstance(result, dict) else ""
             if isinstance(content, str) and content.strip():
                 return str(strip_article_metadata_preamble(content)).strip()
         return ""
@@ -3900,8 +3889,10 @@ class DefaultThinkingPlugin(ServicePlugin):
                 continue
             target_kb, _, target_title = filename.partition(sep)
             result = self._find_article_by_title(
-                knowledge_service, kb_roots,
-                target_kb.strip(), target_title.strip(),
+                knowledge_service,
+                kb_roots,
+                target_kb.strip(),
+                target_title.strip(),
             )
             if result:
                 return result
@@ -3932,7 +3923,9 @@ class DefaultThinkingPlugin(ServicePlugin):
             return ""
         self.logger.info(
             "SUPPORT_ARTICLE_LOOKUP: resolved %s by explicit KB prefix → %s/%s",
-            filename, kb_name, rel_path,
+            filename,
+            kb_name,
+            rel_path,
         )
         return str(strip_article_metadata_preamble(content)).strip()
 
@@ -3973,7 +3966,9 @@ class DefaultThinkingPlugin(ServicePlugin):
             if isinstance(content, str) and content.strip():
                 self.logger.info(
                     "SUPPORT_ARTICLE_LOOKUP: resolved '%s' by title match → %s/%s",
-                    target_title, kb_name, rel_path,
+                    target_title,
+                    kb_name,
+                    rel_path,
                 )
                 return str(strip_article_metadata_preamble(content)).strip()
         except FileNotFoundError:
@@ -4001,7 +3996,11 @@ class DefaultThinkingPlugin(ServicePlugin):
                     continue
                 if first_line == title_line:
                     content = self._read_kb_file_content(
-                        knowledge_service, kb_name, kb_root, md_file, target_title,
+                        knowledge_service,
+                        kb_name,
+                        kb_root,
+                        md_file,
+                        target_title,
                     )
                     if content:
                         return content
@@ -4129,9 +4128,7 @@ class DefaultThinkingPlugin(ServicePlugin):
 
     _PLANNING_RESULT_PROCESSOR_TARGET = "service_interface::thinking_service::process_planning_results"
     _PURPOSE_PLAYBOOK_PLANNING = "playbook_planning"
-    _RESUME_PROCESS_KEY = (
-        "service_interface::thinking_service::resume_thinking_completion"
-    )
+    _RESUME_PROCESS_KEY = "service_interface::thinking_service::resume_thinking_completion"
 
     def process_planning_results(
         self,
@@ -4170,7 +4167,9 @@ class DefaultThinkingPlugin(ServicePlugin):
         # INF-02 session-PRIMARY routing: forwarded/deferred → this turn ends
         # awaiting the resume continuation; provider_fallback → sync below.
         routed = self._route_planning_completion(
-            messages, planning_context_id, playbook_id,
+            messages,
+            planning_context_id,
+            playbook_id,
         )
         if routed is not None:
             return routed
@@ -4178,10 +4177,13 @@ class DefaultThinkingPlugin(ServicePlugin):
         # Operator-enabled provider fallback: the bound provider serves the
         # completion synchronously (the pre-INF-02 path).
         completion = self._generate_thinking_completion(
-            messages, purpose=self._PURPOSE_PLAYBOOK_PLANNING,
+            messages,
+            purpose=self._PURPOSE_PLAYBOOK_PLANNING,
         )
         return self._continue_planning_with_completion(
-            completion, planning_context_id, playbook_id,
+            completion,
+            planning_context_id,
+            playbook_id,
             session_id=str(state.get("session_id") or ""),
         )
 
@@ -4201,11 +4203,7 @@ class DefaultThinkingPlugin(ServicePlugin):
         ``provider_fallback`` → the operator explicitly opted the bound
         provider in — the caller runs its own synchronous path.
         """
-        service = (
-            self.orchestrator_ref.get_service("inference_service")
-            if self.orchestrator_ref
-            else None
-        )
+        service = self.orchestrator_ref.get_service("inference_service") if self.orchestrator_ref else None
         if service is None:
             raise FrameworkError(
                 message="inference_service not available for planning completion",
@@ -4225,8 +4223,10 @@ class DefaultThinkingPlugin(ServicePlugin):
             return None
         request_id = str(verdict.get("request_id") or "")
         self.logger.info(
-            "Planning VERTEX awaiting completion (routing=%s request=%s "
-            "playbook=%s)", routing, request_id, playbook_id,
+            "Planning VERTEX awaiting completion (routing=%s request=%s playbook=%s)",
+            routing,
+            request_id,
+            playbook_id,
         )
         return {
             "action_status": ActionStatus.COMPLETED.value,
@@ -4263,28 +4263,25 @@ class DefaultThinkingPlugin(ServicePlugin):
                 error_code=ErrorCode.PARAMETER_ERROR,
             )
         row = self._load_served_planning_request(request_id)
-        completion, planning_context_id, playbook_id = (
-            self._extract_resume_fields(row, request_id)
-        )
+        completion, planning_context_id, playbook_id = self._extract_resume_fields(row, request_id)
         self.logger.info(
-            "Planning VERTEX resuming from served completion %s "
-            "(playbook=%s)", request_id, playbook_id,
+            "Planning VERTEX resuming from served completion %s (playbook=%s)",
+            request_id,
+            playbook_id,
         )
         # The resume action fires in the ORIGINATING flow (INF-02 completion
         # routing preserves session identity — JOS-02 V-8), so state carries
         # the planning session.
         return self._continue_planning_with_completion(
-            completion, planning_context_id, playbook_id,
+            completion,
+            planning_context_id,
+            playbook_id,
             session_id=str(state.get("session_id") or ""),
         )
 
     def _load_served_planning_request(self, request_id: str) -> dict[str, Any]:
         """Fetch the durable request row; typed rejection unless served + ours."""
-        service = (
-            self.orchestrator_ref.get_service("inference_service")
-            if self.orchestrator_ref
-            else None
-        )
+        service = self.orchestrator_ref.get_service("inference_service") if self.orchestrator_ref else None
         if service is None:
             raise FrameworkError(
                 message="inference_service not available for completion resume",
@@ -4300,16 +4297,15 @@ class DefaultThinkingPlugin(ServicePlugin):
         purpose = str(row.get("purpose") or "")
         if status != "served" or purpose != self._PURPOSE_PLAYBOOK_PLANNING:
             raise FrameworkError(
-                message=(
-                    f"completion request {request_id} not resumable: "
-                    f"status={status!r} purpose={purpose!r}"
-                ),
+                message=(f"completion request {request_id} not resumable: status={status!r} purpose={purpose!r}"),
                 error_code=ErrorCode.PARAMETER_ERROR,
             )
         return dict(row)
 
     def _extract_resume_fields(
-        self, row: dict[str, Any], request_id: str,
+        self,
+        row: dict[str, Any],
+        request_id: str,
     ) -> tuple[str, str, str]:
         """(completion, planning_context_id, playbook_id) — typed if incomplete."""
         correlation = json.loads(str(row.get("correlation") or "{}"))
@@ -4318,10 +4314,7 @@ class DefaultThinkingPlugin(ServicePlugin):
         completion = str(row.get("result_text") or "")
         if not planning_context_id or not playbook_id or not completion:
             raise FrameworkError(
-                message=(
-                    f"completion request {request_id} row is incomplete "
-                    "(missing correlation ids or result_text)"
-                ),
+                message=(f"completion request {request_id} row is incomplete (missing correlation ids or result_text)"),
                 error_code=ErrorCode.PARAMETER_ERROR,
             )
         return completion, planning_context_id, playbook_id

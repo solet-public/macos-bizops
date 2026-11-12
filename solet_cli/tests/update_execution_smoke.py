@@ -26,7 +26,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 sys.path[:0] = [str(_ROOT / "solet_cli" / "src"), str(_ROOT / "solet_setup_contracts" / "src")]
 import solet_manager.update_execution as execution  # noqa: E402
-from _step5_support import bundle_digest, bundle_document, bundle_files, candidate_tree_files, scrubbed_git_environment  # noqa: E402
+from _step5_support import Release, bundle_digest, bundle_document, bundle_files, candidate_tree_files, scrubbed_git_environment  # noqa: E402
 from solet_manager._existing_install_inspection_metadata import InstalledUpdateDescriptor  # noqa: E402
 from solet_manager.errors import (  # noqa: E402
     InventoryChannelDescriptorMisbindingError,
@@ -75,18 +75,7 @@ from solet_manager.update_runtime_plan import RuntimeSeams  # noqa: E402
 ORIGIN_ID = "123e4567-e89b-12d3-a456-426614174001"
 CANONICAL = "https://github.com/example/seed.git"
 # Bound per fixture: the digest of the transition bundle sealed into the candidate.
-CONTRACT = "sha256:" + "e" * 64
-
-
-@dataclass(frozen=True)
-class Release:
-    commit: str
-    tree: str
-    provenance: bytes
-    seed_id: str
-    manifest: str
-    source_commit: str
-    tag: str
+_contract_digest = "sha256:" + "e" * 64
 
 
 @dataclass(frozen=True)
@@ -169,7 +158,7 @@ def _descriptor(candidate: Release) -> bytes:
             "source_commit": candidate.source_commit,
             "source_date": "2026-09-16T00:00:00+00:00",
         },
-        "existing_install_contract": {"flow_id": "existing-install", "flow_schema_version": 1, "bundle_digest": CONTRACT},
+        "existing_install_contract": {"flow_id": "existing-install", "flow_schema_version": 1, "bundle_digest": _contract_digest},
         "allowed_repository_migrations": [],
     }
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
@@ -188,7 +177,7 @@ def _installed(candidate: Release, descriptor: bytes) -> InstalledUpdateDescript
         candidate.seed_id,
         ORIGIN_ID,
         candidate.manifest,
-        ExistingInstallContractIdentity("existing-install", 1, CONTRACT),
+        ExistingInstallContractIdentity("existing-install", 1, _contract_digest),
         "catalog",
         "1" * 64,
         "seed",
@@ -217,7 +206,7 @@ def _enroll(paths: ManagerPaths, target: Path, baseline: Release, *, descriptor_
         ReleaseIdentity(CANONICAL, baseline.commit, baseline.tree, baseline.tag),
         None,
         None,
-        ContractIdentities(CONTRACT, None, None, None, None),
+        ContractIdentities(_contract_digest, None, None, None, None),
         "sha256:" + "4" * 64,
         None,
         "opr_" + "5" * 32,
@@ -231,7 +220,7 @@ def _enroll(paths: ManagerPaths, target: Path, baseline: Release, *, descriptor_
 
 
 def _fixture(root: Path, *, misbound: bool = False) -> Fixture:
-    global CONTRACT
+    global _contract_digest
     source = root / "source"
     source.mkdir()
     _git(source, "init", "--quiet", "-b", "main")
@@ -239,7 +228,7 @@ def _fixture(root: Path, *, misbound: bool = False) -> Fixture:
     _git(source, "config", "user.email", "fixture@example.invalid")
     baseline = _seal(source, "a" * 40, "b" * 64, "r1", {".gitignore": "local.cfg\n*.log\n", "README.md": "release n\n"})
     files = bundle_files(bundle_document(baseline))
-    CONTRACT = bundle_digest(files)
+    _contract_digest = bundle_digest(files)
     tree = {str(k): (v.decode() if isinstance(v, bytes) else v) for k, v in candidate_tree_files(files).items()}
     tree["local.cfg"] = "candidate config\n"
     candidate = _seal(source, "c" * 40, "d" * 64, "r2", tree)
@@ -258,7 +247,7 @@ def _fixture(root: Path, *, misbound: bool = False) -> Fixture:
         directory.mkdir(parents=True, mode=0o700)
     descriptor = _descriptor(candidate)
     installed = _installed(candidate, descriptor)
-    _enroll(paths, target, baseline, descriptor_digest=CONTRACT if misbound else "sha256:" + "3" * 64)
+    _enroll(paths, target, baseline, descriptor_digest=_contract_digest if misbound else "sha256:" + "3" * 64)
     request = UpdateRequest("fixture", paths, descriptor_loader=lambda channel, tracker: installed, transport_url=str(source), runtime_seams=_host_seams(root))
     return Fixture(root, source, target, paths, baseline, candidate, installed.metadata.channel_identity.descriptor_digest, request)
 
@@ -407,8 +396,8 @@ def _assert_axis_split(record: InstanceInventoryRecordV2, fixture: Fixture) -> N
 def _assert_identity_axes(record: InstanceInventoryRecordV2, fixture: Fixture, operation_id: str) -> None:
     assert record.active_operation == ActiveOperation(MaintenanceOperationKind.UPDATE, operation_id)
     assert record.channel == ChannelIdentity("stable", fixture.descriptor_digest, CANONICAL)
-    assert record.channel.descriptor_digest != CONTRACT
-    assert record.contract_identities == ContractIdentities(CONTRACT, None, CONTRACT, None, None)
+    assert record.channel.descriptor_digest != _contract_digest
+    assert record.contract_identities == ContractIdentities(_contract_digest, None, _contract_digest, None, None)
     assert record.observed_provenance.provenance_sha256 == "sha256:" + hashlib.sha256(fixture.candidate.provenance).hexdigest()
     assert record.last_verified_operation_id == "opr_" + "5" * 32
     assert record.last_verified_at == "2026-09-18T00:00:00Z"
@@ -532,7 +521,9 @@ def _assert_inherited_git_isolation() -> None:
             else:
                 source += f"result = fixture._fixture(Path({str(fixture_root)!r}))\nassert fixture._git(result.target, 'rev-parse', 'HEAD') == result.baseline.commit\nprint('INIT_AND_CLONE_REACHED')\n"
             child = subprocess.run((sys.executable, "-c", source), env=_fixture_env() | hostile, cwd=_ROOT, check=False, capture_output=True, text=True)
-            assert _git_snapshot(foreign) == before, ("FOREIGN_CONFIG_AND_HEAD_UNCHANGED", number, child.stdout, child.stderr)
+            after = _git_snapshot(foreign)
+            changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
+            assert not changed, ("FOREIGN_CONFIG_AND_HEAD_UNCHANGED", number, changed, child.stdout, child.stderr)
             assert child.returncode == 0 and "REACHED" in child.stdout, ("FIXTURE_INIT_AND_CLONE_VALID_SETUP", child.stdout, child.stderr)
 
 

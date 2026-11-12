@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import runpy
 from types import ModuleType
 from typing import cast
 
@@ -253,7 +254,7 @@ def _check_no_rewrite_sources(bridges: tuple[ContractReconciliation, ...]) -> No
     """
     for digest, count, label in (
         (_R64_BRIDGE_SOURCE_DIGEST, 8, "the eight r64 bridges from 19350a8d declare no answer rewrite"),
-        (_GIT_CONTROL_SOURCE_DIGEST, 4, "the four Git-control wording bridges from ce20096b declare no answer rewrite"),
+        (_GIT_CONTROL_SOURCE_DIGEST, 5, "the five Git-control wording bridges from ce20096b declare no answer rewrite"),
         (_CODEX_OPTIONAL_SOURCE_DIGEST, 4, "the four Codex-optional bridges from ca8c9b24 preserve recorded answers"),
     ):
         cohort = tuple(item for item in bridges if item.source_digest == digest)
@@ -782,6 +783,12 @@ def _run_reconciliation_chain_regressions() -> None:
     )
 
 
+def _portable_pre_retirement_contracts(directory: Path) -> Path:
+    """Use exact preceding bytes for the three historical bridge families."""
+    support = runpy.run_path(str(_ROOT / "plugins/github_midwife_plugin/tests/controller_setting_retirement_smoke.py"))
+    return cast(Path, support["materialize_pre_retirement_contracts"](directory))
+
+
 def _run_lm_studio_source_pins() -> None:
     # Actual persisted revision/digest pairs from r25, r26 and r27 ladder
     # resume receipts; two releases share bytes but have different revisions.
@@ -790,10 +797,11 @@ def _run_lm_studio_source_pins() -> None:
         ("2b9eb9573ce136362ad566ea4ba38e5ebc55205e", "sha256:ce6d9d88fd77b2feeab964e2cd2f75e4d0ca6149634b0bcfac520cd047d720bb"),
         ("73af1c9de0b3132ce9f59abce20e2de19ced18c9", "sha256:515ab65fcf6d82756b3ffc6bf42f782ddc33b69907b5d32a372b019bea6a8e72"),
     )
-    active_destination = contract_digest(_ROOT / _CONTRACT_PATH)
+    with tempfile.TemporaryDirectory(prefix="historical-lm-contract-") as raw:
+        active_destination = contract_digest(_portable_pre_retirement_contracts(Path(raw)))
     _check(
         active_destination == _RAM_PREFLIGHT_DESTINATION_DIGEST,
-        "LM Studio source bridges target the unmodified active candidate bundle",
+        "LM Studio source bridges retain their unmodified historical destination bundle",
     )
     declarations = load_contract_reconciliations(manifest_path=_RECONCILIATION_MANIFEST)
     for revision, digest in sources:
@@ -877,30 +885,31 @@ def _run_stable_r43_r48_source_bridges() -> None:
     """Setup-incomplete solets from stable r43 and r48 reconcile to the active contract (iss_3e524749)."""
 
     declarations = load_contract_reconciliations(manifest_path=_RECONCILIATION_MANIFEST)
-    destination = ContractBundle.load(
-        source_revision=_RAM_PREFLIGHT_SOURCE_COMMIT,
-        directory=_ROOT / _CONTRACT_PATH,
-        expected_digest=_RAM_PREFLIGHT_DESTINATION_DIGEST,
-    )
-    for label, commit, revision, digest in _STABLE_SOURCE_BRIDGES:
-        with tempfile.TemporaryDirectory() as raw:
-            transaction = _stable_source_transaction(Path(raw), label, commit, revision, digest)
-            identity = (transaction.flow_id, revision, digest)
-            candidates = reconciliation_chain_module.identity_reconciliation_candidates(identity, declarations)
-            matches = reconciliation_chain_module.destination_reconciliation_candidates(candidates, destination.contract_digest)
-            _check(
-                len(matches) == 1,
-                f"stable {label} source {digest[:15]} has one declared bridge to the active contract",
-            )
-            _check_stable_source_bridge(label, transaction, matches[0], destination)
-            changed = replace(transaction, flow_source_revision="f" * 40)
-            _check(
-                not reconciliation_chain_module.identity_reconciliation_candidates(
-                    (changed.flow_id, changed.flow_source_revision, changed.flow_contract_digest),
-                    declarations,
-                ),
-                f"stable {label} digest with an unknown source revision is still refused",
-            )
+    with tempfile.TemporaryDirectory(prefix="historical-stable-contract-") as historical:
+        destination = ContractBundle.load(
+            source_revision=_RAM_PREFLIGHT_SOURCE_COMMIT,
+            directory=_portable_pre_retirement_contracts(Path(historical)),
+            expected_digest=_RAM_PREFLIGHT_DESTINATION_DIGEST,
+        )
+        for label, commit, revision, digest in _STABLE_SOURCE_BRIDGES:
+            with tempfile.TemporaryDirectory() as raw:
+                transaction = _stable_source_transaction(Path(raw), label, commit, revision, digest)
+                identity = (transaction.flow_id, revision, digest)
+                candidates = reconciliation_chain_module.identity_reconciliation_candidates(identity, declarations)
+                matches = reconciliation_chain_module.destination_reconciliation_candidates(candidates, destination.contract_digest)
+                _check(
+                    len(matches) == 1,
+                    f"stable {label} source {digest[:15]} has one declared bridge to the active contract",
+                )
+                _check_stable_source_bridge(label, transaction, matches[0], destination)
+                changed = replace(transaction, flow_source_revision="f" * 40)
+                _check(
+                    not reconciliation_chain_module.identity_reconciliation_candidates(
+                        (changed.flow_id, changed.flow_source_revision, changed.flow_contract_digest),
+                        declarations,
+                    ),
+                    f"stable {label} digest with an unknown source revision is still refused",
+                )
 
 
 def _run_ram_preflight_reconciliation_regression() -> None:
@@ -917,14 +926,15 @@ def _run_ram_preflight_reconciliation_regression() -> None:
             directory=source_path,
             expected_digest=_RAM_PREFLIGHT_SOURCE_DIGEST,
         )
+        historical = _portable_pre_retirement_contracts(root / "historical-destination")
         destination = ContractBundle.load(
             source_revision=_RAM_PREFLIGHT_SOURCE_COMMIT,
-            directory=_ROOT / _CONTRACT_PATH,
+            directory=historical,
             expected_digest=_RAM_PREFLIGHT_DESTINATION_DIGEST,
         )
         _check(
             destination.contract_digest == _RAM_PREFLIGHT_DESTINATION_DIGEST,
-            "RAM preflight destination pin is computed from unmodified active bundle bytes",
+            "RAM preflight destination pin is computed from the unchanged historical bundle bytes",
         )
         answers = _r20_answers(root / "target", session_sources=[])
         answers["flow_source_revision"] = source.source_revision

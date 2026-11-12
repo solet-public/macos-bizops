@@ -765,9 +765,6 @@
               "operator_effort": "Simplest operating model.",
               "performance": "Parallel work must be done sequentially."
             },
-            "followup_decision_refs": [
-              "git_mutation_control"
-            ],
             "activates": {}
           },
           "fleet": {
@@ -781,9 +778,6 @@
               "operator_effort": "Requires tmux and lifecycle monitoring.",
               "performance": "Parallel review and implementation lanes reduce elapsed time."
             },
-            "followup_decision_refs": [
-              "git_mutation_control"
-            ],
             "activates": {
               "component_refs": [
                 "tmux"
@@ -796,54 +790,6 @@
               ],
               "probe_refs": [
                 "fleet_spawn_and_receive_valid"
-              ]
-            }
-          }
-        }
-      },
-      "review_required": true
-    },
-    "git_mutation_control": {
-      "title": "Git mutation control",
-      "prompt": "How should Git mutations be controlled in this deployment?",
-      "description": "Choose Git work in a single session or record one designated controller role; ask explicitly in both topologies. Repository-owned controls govern Git mutations.",
-      "selection_mode": "single",
-      "required": true,
-      "resolution_stage_ref": "decision_review",
-      "recommended_option_refs": [
-        "single_session",
-        "designated_controller"
-      ],
-      "option_source": {
-        "mode": "static",
-        "options": {
-          "single_session": {
-            "label": "Single session",
-            "description": "Do not export a controller name; Git work stays in the single session under repository-owned controls.",
-            "availability": "supported",
-            "implications": {
-              "cost": "No additional controller session is required.",
-              "privacy": "No additional Git-controller identity is exported to workers.",
-              "security": "Repository-owned controls govern Git mutations; omitting the controller name grants no exemption.",
-              "operator_effort": "Git work stays in the one operator-controlled session.",
-              "performance": "Git work is handled by the single session."
-            },
-            "activates": {}
-          },
-          "designated_controller": {
-            "label": "Designated controller",
-            "description": "Export the chosen Git-controller role name as a recorded coordination choice; repository-owned controls govern Git mutations.",
-            "availability": "supported",
-            "implications": {
-              "cost": "A dedicated controller session is needed for Git mutations.",
-              "privacy": "The controller role name is propagated to managed workers.",
-              "security": "The exported role name does not enforce Git permissions; repository-owned controls govern mutations.",
-              "operator_effort": "The controller must be provisioned before it can land work.",
-              "performance": "Implementation can proceed in parallel while Git mutation remains serialized."
-            },
-            "activates": {
-              "input_refs": [
-                "git_controller_name"
               ]
             }
           }
@@ -1599,15 +1545,6 @@
       "value_type": "path",
       "sensitive": false,
       "prompt_timing": "initial_review",
-      "storage": "answer_file"
-    },
-    "git_controller_name": {
-      "label": "Git controller role name",
-      "description": "The one role allowed to mutate Git in this deployment when designated-controller mode is chosen.",
-      "value_type": "string",
-      "sensitive": false,
-      "prompt_timing": "before_stage",
-      "default": "Git-Controller",
       "storage": "answer_file"
     },
     "lm_studio_base_url": {
@@ -3447,10 +3384,11 @@
       "consent_refs": [
         "shell_modification_consent"
       ],
-      "input_refs": [
-        "git_controller_name"
-      ],
+      "input_refs": [],
       "parameters": {
+        "execution_topology": {
+          "decision_ref": "execution_topology"
+        },
         "selected_coding_agents": {
           "decision_ref": "coding_agents"
         }

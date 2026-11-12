@@ -1,0 +1,5 @@
+# Connector log hygiene by structural omission (prb_ec4bac80, iss_4eab9455): one failing request
+# per connector family that logs, captured through real logging; no Authorization value, body,
+# query value or configured credential literal in plain or percent-encoded form. Hermetic.
+# Lives with zuora_plugin: only the macos-bizops bundle ships the five connectors it imports.
+plugins/zuora_plugin/tests/connector_log_hygiene_smoke.py

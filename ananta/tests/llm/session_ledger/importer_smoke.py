@@ -1063,7 +1063,7 @@ def test_advisory_drain() -> None:
         fixture._write_jsonl(path, [fixture._line_user_text(), {"type": "synthetic-unknown-line-type"}, {"type": "synthetic-unknown-line-type"}, fixture._line_assistant_text_and_two_tool_uses()])
         plugin = fixture._make_plugin()
         importer, repo, _ = runtime_importer(plugin, str(root))
-        expected = (UnknownLineAdvisory("runtime-source", fixture._SID, "synthetic-unknown-line-type", 2),)
+        expected = (UnknownLineAdvisory("runtime-source", fixture._SID, "synthetic-unknown-line-type", 1),)
         with patch("ananta.services.session_ledger_service.poll_drain.logger.info") as log, patch("ananta.llm.session_ledger.poll_advisories.logger.warning") as warning:
             run_importer_poll_drain(importer, cast(SummaryExecutor, SimpleNamespace(submit=lambda _fn: False)))
             completions = [call.args[1] for call in log.call_args_list if call.args[0] == "ledger poll DRAIN complete: %s"]
@@ -1107,7 +1107,9 @@ def main() -> int:
         for label in _failed:
             print(f"  FAILED: {label}")
         return 1
-    return 0
+    from importer_parse_failures_smoke import main as parse_failures_main
+
+    return parse_failures_main()
 
 
 if __name__ == "__main__":

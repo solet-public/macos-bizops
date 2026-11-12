@@ -74,6 +74,18 @@ def save_memory(state_service: Any, memory: dict[str, Any]) -> str:
     return extract_generated_id(result, record)
 
 
+def update_memory_strength(state_service: Any, memory_id: str, strength: float) -> int:
+    """Update only the derived field; never resurrect a deleted/archived row."""
+    result = state_service.update_state(
+        NAMESPACE,
+        {"table": "memory", "filters": {"id": memory_id, "status": "active"}},
+        {"strength": strength},
+    )
+    if result.get("action_status") != ActionStatus.COMPLETED.value:
+        raise FrameworkError(message=f"Failed to update memory strength: {result.get('error')}", error_code="memory.storage_error")
+    return int(result["data"]["result"]["updated"])
+
+
 def persist_memory_record(state_service: Any, record: dict[str, Any]) -> dict[str, Any]:
     """Persist memory record using appropriate method."""
     if "id" in record and record.get("id"):
@@ -161,9 +173,7 @@ def get_all_memories(
     # Pushing this filter into SQL is the recorded follow-up, not this fix.
     result = state_service.read_state(
         namespace=NAMESPACE,
-        query={"table": "memory", "filters": filters, "unbounded": True}
-        if filters
-        else {"table": "memory", "unbounded": True},
+        query={"table": "memory", "filters": filters, "unbounded": True} if filters else {"table": "memory", "unbounded": True},
     )
 
     rows = _read_records(result, op="read all memories")
@@ -219,9 +229,7 @@ def get_all_memorizations(
     # crosses it.
     result = state_service.read_state(
         namespace=NAMESPACE,
-        query={"table": "memorization", "filters": filters, "unbounded": True}
-        if filters
-        else {"table": "memorization", "unbounded": True},
+        query={"table": "memorization", "filters": filters, "unbounded": True} if filters else {"table": "memorization", "unbounded": True},
     )
 
     rows = _read_records(result, op="read all memorizations")

@@ -106,6 +106,20 @@ _HARDENED_GIT_ENV = {
 }
 _BLOCK_KINDS = frozenset({"managed_block", "rendered_whole"})
 _PLIST_KINDS = frozenset({"launchd_plist"})
+_CONTROLLER_RETIREMENT_ARTIFACTS = frozenset(
+    {
+        "retired_controller_claude_launcher",
+        "retired_controller_codex_launcher",
+        "retired_controller_fleet_launcher",
+        "retired_controller_shell_environment",
+    }
+)
+# Only complete assignment lines emitted by the old launchers, or a plain
+# environment export. Comments, unset commands, and other shell commands stay.
+_CONTROLLER_ASSIGNMENT = re.compile(
+    r"""^[ \t]*(?:export[ \t]+)?GIT_CONTROLLER_NAME=(?:"[^"\r\n]*"|'[^'\r\n]*'|[A-Za-z0-9_.:/-]*)(?:[ \t]+\\)?[ \t]*(?:\r?\n|$)""",
+    re.MULTILINE,
+)
 
 
 def operation_handlers() -> dict[str, Handler]:
@@ -263,13 +277,16 @@ def _artifact_evidence(state: ArtifactState) -> JsonObject:
         "stamped_digest": state.stamped_digest or "none",
         "state": state.state,
     }
+    retirement = state.artifact_id in _CONTROLLER_RETIREMENT_ARTIFACTS
+    if retirement:
+        facts["verification_scope"] = "retired_controller_assignments"
     return evidence(
         evidence_id=f"artifact.{state.artifact_id}",
         kind="managed_artifact",
         status="blocked" if state.conflict else ("verified" if state.action == "none" else "pending"),
         summary=f"managed artifact {state.artifact_id} is {state.state}",
         observed=[f"{key}={value}" for key, value in sorted(facts.items())],
-        expected="stamped_current",
+        expected="retired_controller_assignments_absent" if retirement else "stamped_current",
         source=state.destination,
     )
 
@@ -311,10 +328,58 @@ def _artifact_state(artifact: ArtifactDeclaration, destination: str, context: _C
     path = Path(destination)
     existing, digest = _read_managed(path)
     mode = file_mode(path, 0o644)
+    if artifact.artifact_id in _CONTROLLER_RETIREMENT_ARTIFACTS:
+        return _controller_retirement_state(artifact, destination, existing, digest, mode)
     if artifact.kind == "managed_block":
         comparison = None if existing is None else _normalize_newlines(existing)
         return _managed_block_state(artifact, destination, comparison, digest, mode, context)
     return _whole_file_state(artifact, destination, existing, digest, mode, context)
+
+
+def _controller_retirement_state(
+    artifact: ArtifactDeclaration,
+    destination: str,
+    existing: str | None,
+    digest: str | None,
+    mode: int,
+) -> ArtifactState:
+    """Retire the assignment and clear inherited values in one planned file.
+
+    These rendered-file declarations are removal-only: no missing file is
+    created and no template is rendered over operator content. The ordinary
+    Manager hydration stage backs up the exact original before this action.
+    """
+    outcome = _Outcome(artifact, destination, existing, digest, mode)
+    cleaned = None if existing is None else _retire_controller_assignments(existing)
+    if cleaned == existing:
+        return outcome.state("verified", "none", None, None, None)
+    return outcome.state("legacy_matched", "render_whole", None, None, cleaned)
+
+
+def _retire_controller_assignments(text: str) -> str:
+    """Keep every other line, including continued environment prefixes, exact.
+
+    A standalone export becomes an unset in place. Inside an exec prefix the
+    unset belongs before the whole command: placing it among the continued
+    assignments would give SOLET_NAME and AGENT_* to unset instead of exec.
+    Matching only the retired lines also makes already-cleared files no-ops.
+    """
+    lines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if _CONTROLLER_ASSIGNMENT.fullmatch(line) is None:
+            lines.append(line)
+            continue
+        start = len(lines)
+        while start and lines[start - 1].rstrip("\r\n").endswith("\\"):
+            start -= 1
+        first = lines[start] if start < len(lines) else line
+        indent = first[: len(first) - len(first.lstrip(" \t"))]
+        ending = line[len(line.rstrip("\r\n")) :]
+        if start < len(lines) and not ending:
+            ending = first[len(first.rstrip("\r\n")) :]
+        if not start or lines[start - 1].strip() != "unset GIT_CONTROLLER_NAME":
+            lines.insert(start, indent + "unset GIT_CONTROLLER_NAME" + ending)
+    return "".join(lines)
 
 
 class _Outcome:
@@ -394,27 +459,30 @@ def _whole_file_state(artifact: ArtifactDeclaration, destination: str, existing:
     return _unstamped_whole_state(outcome, existing, candidate, context)
 
 
-_CONTROLLER_LINE = re.compile(r'^[ \t]*GIT_CONTROLLER_NAME="([^"\n]*)" \\\r?$', re.MULTILINE)
-
-
-def _section_state(artifact: ArtifactDeclaration, destination: str, existing: str | None, digest: str | None, mode: int, context: _Context) -> ArtifactState:
+def _section_state(
+    artifact: ArtifactDeclaration,
+    destination: str,
+    existing: str | None,
+    digest: str | None,
+    mode: int,
+    context: _Context,
+) -> ArtifactState:
     """Refresh only the launcher section of a file the operator also writes into.
 
     The section is the text above the first line starting with ``section_end``; only its comparison view is newline-normalized.
     The refreshed head keeps a CRLF style when the saved head uses CRLF throughout, and the original operator tail is composed unchanged.
-    The one operator-chosen value inside the section, the ``GIT_CONTROLLER_NAME`` line, is read from the file and rendered back unchanged,
-    so a section that differs from a known render only in that value still matches it.  A missing file is not created; a section that
-    matches no known render, or that has lost its marker or its controller line, is reported and left in place without blocking the update.
+    Retired controller assignments are excluded from comparison and from old
+    template renders. A missing file is not created; an unknown section is
+    left for the separate removal-only artifact to clear just that assignment.
     """
     outcome = _Outcome(artifact, destination, existing, digest, mode)
     if existing is None:
         return outcome.state("absent", "none", None, None, None)
     split = _split_section(existing, cast(str, artifact.section_end))
-    controller = None if split is None else _CONTROLLER_LINE.search(split[0])
-    if split is None or controller is None:
+    if split is None:
         return outcome.state("unknown_origin", "none", None, None, None)
     head, tail = split
-    values = {"{{GIT_CONTROLLER_NAME}}": controller.group(1)}
+    values: dict[str, str] = {}
     candidate_head = _render_section(artifact, _template_bytes(context.request.target, artifact.template_ref), artifact.template_digest, context, values, stamped=True)
     if candidate_head is None:
         raise RuntimeError(f"{artifact.artifact_id}: the candidate template has no line starting {artifact.section_end!r}")
@@ -428,7 +496,7 @@ def _section_state(artifact: ArtifactDeclaration, destination: str, existing: st
 def _older_section_state(outcome: _Outcome, head: str, refreshed: str, values: dict[str, str], context: _Context) -> ArtifactState:
     """A section that is not the candidate's: a previous render is replaced, anything else is reported and left."""
     artifact = outcome.artifact
-    comparison_head = _normalize_newlines(head)
+    comparison_head = _normalize_newlines(_CONTROLLER_ASSIGNMENT.sub("", head))
     stamped = stamped_digest(comparison_head, cast(str, artifact.stamp), artifact.template_ref)
     if stamped is not None:
         previous = _template_bytes_by_digest(artifact, stamped, context)
@@ -442,9 +510,18 @@ def _older_section_state(outcome: _Outcome, head: str, refreshed: str, values: d
     return outcome.state("unknown_origin", "none", None, None, None)
 
 
-def _render_section(artifact: ArtifactDeclaration, template_bytes: bytes, digest: str, context: _Context, values: dict[str, str], *, stamped: bool) -> str | None:
+def _render_section(
+    artifact: ArtifactDeclaration,
+    template_bytes: bytes,
+    digest: str,
+    context: _Context,
+    values: dict[str, str],
+    *,
+    stamped: bool,
+) -> str | None:
     """The launcher section of one render of the template, or ``None`` when that template has no section marker."""
-    rendered = _whole_render(artifact, template_bytes, digest, context, stamped=stamped, extra_values=values)
+    cleaned = _CONTROLLER_ASSIGNMENT.sub("", template_bytes.decode("utf-8")).encode("utf-8")
+    rendered = _whole_render(artifact, cleaned, digest, context, stamped=stamped, extra_values=values)
     part = _split_section(rendered, cast(str, artifact.section_end))
     return None if part is None else part[0]
 

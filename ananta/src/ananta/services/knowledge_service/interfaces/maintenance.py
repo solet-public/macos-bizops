@@ -26,6 +26,7 @@ from ananta.core.actions.action_metadata import (
 )
 from ananta.core.domain.enums import ProcessorPolicyCategory
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.registered_job_operations import registered_job_return_schema
 
 
 class KnowledgeMaintenanceAPI(ABC):
@@ -33,79 +34,64 @@ class KnowledgeMaintenanceAPI(ABC):
 
     @service_interface_process(
         name="purge_orphaned_chunks",
+        is_async=True,
         provider="knowledge_service",
         is_discoverable=True,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "confirm": ParameterMetadata(
-                description=(
-                    "When False (default), runs a dry-run that returns the orphan "
-                    "count + a sample of 10 IDs. When True, performs the batched "
-                    "hard-delete."
-                ),
+                description=("When False (default), runs a dry-run that returns the orphan count + a sample of 10 IDs. When True, performs the batched hard-delete."),
                 required=False,
                 type=ParameterType.BOOLEAN,
                 default=False,
             ),
             "batch_size": ParameterMetadata(
-                description=(
-                    "Rows per transaction batch when confirm=True. Bounded so a "
-                    "single batch's transaction stays short. Default 5000."
-                ),
+                description=("Rows per transaction batch when confirm=True. Bounded so a single batch's transaction stays short. Default 5000."),
                 required=False,
                 type=ParameterType.INTEGER,
                 default=5000,
             ),
             "max_batches": ParameterMetadata(
-                description=(
-                    "When set, caps the run at this many batches. Useful for "
-                    "operator-controlled chunked cleanup across maintenance windows."
-                ),
+                description=("When set, caps the run at this many batches. Useful for operator-controlled chunked cleanup across maintenance windows."),
                 required=False,
                 type=ParameterType.INTEGER,
                 default=None,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=(
-                "Orphan-purge result. Per W5.P §4.6: operator-fired only — NEVER "
-                "auto-fired on spawn path. Modes: dry_run / completed."
-            ),
-            type=ParameterType.OBJECT,
-            properties={
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="'dry_run' or 'completed'.",
-                ),
-                "orphan_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=(
-                        "On dry_run: total orphans found. On completed: orphans "
-                        "actually deleted (may be < total if max_batches bounded)."
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Orphan-purge result. Per W5.P §4.6: operator-fired only — NEVER auto-fired on spawn path. Modes: dry_run / completed."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="'dry_run' or 'completed'.",
                     ),
-                ),
-                "sample_ids": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="On dry_run only: first 10 orphan IDs for inspection.",
-                ),
-                "batches_run": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="On completed only: number of batches actually run.",
-                ),
-                "active_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Count of memory IDs referenced by active install records.",
-                ),
-                "total_chunk_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Total knowledge:official chunks (active + orphan).",
-                ),
-            },
+                    "orphan_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("On dry_run: total orphans found. On completed: orphans actually deleted (may be < total if max_batches bounded)."),
+                    ),
+                    "sample_ids": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="On dry_run only: first 10 orphan IDs for inspection.",
+                    ),
+                    "batches_run": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="On completed only: number of batches actually run.",
+                    ),
+                    "active_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Count of memory IDs referenced by active install records.",
+                    ),
+                    "total_chunk_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Total knowledge:official chunks (active + orphan).",
+                    ),
+                },
+            )
         ),
-        result_processor_customizations=MergeResultProcessorCustomizations(
-        ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        ),
+        result_processor_customizations=MergeResultProcessorCustomizations(),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def purge_orphaned_chunks(

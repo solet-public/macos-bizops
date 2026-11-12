@@ -18,13 +18,15 @@ only the worker thread does, preserving the plugin's original effective
 concurrency of one.
   - soql_query                                      — read (always writes output_tsv_path)
   - export_soql                                     — read (full result as a workspace TSV,
-    absolute output_tsv_path contained under export_allowed_roots; refuse-all when unset)
+    absolute output_tsv_path contained under registered path addresses; defaults include solet_home)
   - get_record / describe_sobject / list_sobjects   — read
   - create_record / update_record / delete_record   — write
   - bulk_ingest_submit / bulk_job_*                 — Bulk API 2.0 ingest, hardDelete included
   - composite / tooling / bulk_jobs / reports /     — typed families (typed_families.py):
-    dashboards / rest_resources / actions             reads, writes and deletes alike;
-                                                      Salesforce permissions decide each operation
+    dashboards / rest_resources / actions /           reads, writes and deletes alike;
+    metadata / content_files                          Salesforce permissions decide each operation;
+                                                      metadata and content_files move contained
+                                                      local files (transfers.py)
   - authenticated_request                           — any other endpoint
   - test_connection                                 — diagnostic
   - probe_cli                                       — offline local CLI diagnostic
@@ -44,10 +46,14 @@ session for this process to detect and re-mint.
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import threading
+from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 from ananta.core.actions.action_metadata import (
     ContextHandling,
@@ -59,27 +65,31 @@ from ananta.core.actions.action_metadata import (
     platform_process,
 )
 from ananta.core.domain.enums import ActionStatus, ProcessorPolicyCategory
-from ananta.core.plugins.plugin_base import PluginBase
+from ananta.core.plugins.plugin_base import OrchestratorProtocol, PluginBase
+from ananta.file_locations.addresses import path_addresses
+from ananta.file_locations.containment import Located, PathRefusedError, assert_path_allowed, derive_allowed_roots, location_advisories, location_session_id, retain_location_advisories
+from ananta.file_locations.documents import default_solet_home, documents_folder
+from ananta.file_locations.resolution import SoletTree, solet_tree_from_app_home
+from ananta.interfaces.address_book_service_interface import AddressBookServiceInterface
 from ananta.interfaces.edge_process_provider import (
     EdgeProcessDefinition,
     EdgeProcessProvider,
 )
 
-from . import async_jobs, export_containment, import_containment, typed_families
+from . import async_jobs, transfers, typed_families
 from .app_config import AppConfigError, AppConfigLoader
 from .client import SalesforceCliExecutor
 from .constants import (
     BULK_INGEST_OPERATIONS,
     CONFIG_KEY_API_VERSION,
-    CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
-    CONFIG_KEY_IMPORT_ALLOWED_ROOTS,
     CONFIG_KEY_SF_CLI_PATH,
-    CSV_SUFFIX,
     DEFAULT_API_VERSION,
     DEFAULT_ROW_LIMIT,
     DEFAULT_SF_CLI_PATH,
     ERROR_ADDRESS_BOOK_NOT_AVAILABLE,
     ERROR_API_ERROR,
+    ERROR_EXPORT_PATH_REFUSED,
+    ERROR_IMPORT_PATH_REFUSED,
     ERROR_INVALID_PARAMS,
     ERROR_NOT_CONFIGURED,
     ERROR_PROVISION_CONSENT_REQUIRED,
@@ -95,6 +105,7 @@ from .constants import (
     RESULT_TYPE_BULK_JOB_STATUS,
     RESULT_TYPE_BULK_JOBS,
     RESULT_TYPE_COMPOSITE,
+    RESULT_TYPE_CONTENT_FILES,
     RESULT_TYPE_CREATE_RECORD,
     RESULT_TYPE_DASHBOARDS,
     RESULT_TYPE_DELETE_RECORD,
@@ -102,6 +113,7 @@ from .constants import (
     RESULT_TYPE_EXPORT_SOQL,
     RESULT_TYPE_GET_RECORD,
     RESULT_TYPE_LIST_SOBJECTS,
+    RESULT_TYPE_METADATA,
     RESULT_TYPE_PROBE_CLI,
     RESULT_TYPE_PROVISION_CLI,
     RESULT_TYPE_REPORTS,
@@ -119,7 +131,7 @@ _PATH_PARAMETER_TEXT: dict[str, str] = {
     "sobject": "sObject API name in the path, e.g. Account, Invoice__c, Order_Event__e, or a Tooling type such as ApexClass.",
     "external_id_field": "External ID field API name, e.g. External_Id__c.",
     "external_id": "External ID value of the record; percent-encoded into the path.",
-    "next_records_url": "nextRecordsUrl from a query result, for query_more.",
+    "next_records_url": "nextRecordsUrl from a previous result, followed verbatim: a query page for query_more, or a resultPages response for query_result_pages_more.",
     "id": "15- or 18-character record id.",
     "relationship": "Relationship name to traverse from the record, e.g. Contacts or Owner.",
     "job_id": "Bulk API 2.0 job id from query_create, query_list or bulk_ingest_submit.",
@@ -129,6 +141,15 @@ _PATH_PARAMETER_TEXT: dict[str, str] = {
     "dashboard_id": "15- or 18-character dashboard id (01Z...).",
     "action_type": "Custom invocable action type from list_custom, e.g. apex, flow, quickAction or emailAlert.",
     "action": "Invocable action name, e.g. chatterPost, a flow API name or Account.NewCase.",
+    "deploy_request_id": "Metadata deployRequest id (0Af...) from deploy; for deploy_quick, the id of a successful checkOnly validation.",
+    "content_version_id": "15- or 18-character ContentVersion id (068...) to download.",
+    "content_document_id": "15- or 18-character ContentDocument id (069...); deleting it deletes the file and all its versions.",
+}
+
+_LOCAL_PATH_TEXT: dict[str, str] = {
+    "zip_path": "ABSOLUTE path of the .zip deploy package (package.xml plus component directories, optional destructiveChanges.xml), contained under a registered path address.",
+    "file_path": "ABSOLUTE path of the file to upload as VersionData, contained under a registered path address.",
+    "output_path": "ABSOLUTE destination for the downloaded file, contained under a registered path address; its parent directory must exist.",
 }
 
 _FAMILY_RETURN = ReturnValueSchema(
@@ -158,8 +179,45 @@ def _family_parameters(family: str) -> dict[str, ParameterMetadata]:
     for key in typed_families.path_parameters(family):
         parameters[key] = ParameterMetadata(type=ParameterType.STRING, required=False, description=_PATH_PARAMETER_TEXT[key])
     if typed_families.writes_csv(family):
-        parameters["output_csv_path"] = ParameterMetadata(type=ParameterType.STRING, required=False, description="ABSOLUTE .csv destination for query_results, contained under an export_allowed_roots entry.")
+        parameters["output_csv_path"] = ParameterMetadata(type=ParameterType.STRING, required=False, description="ABSOLUTE .csv destination for query_results, contained under a registered path address.")
+    for key in typed_families.local_paths(family):
+        parameters[key] = ParameterMetadata(type=ParameterType.STRING, required=False, description=_LOCAL_PATH_TEXT[key])
     return parameters
+
+
+def _launch_directory(orchestrator: OrchestratorProtocol) -> Located[str | None]:
+    """Read this job's exact active A2 bridge capture, never process cwd."""
+    session_id = location_session_id()
+    manager = getattr(orchestrator, "plugin_manager", None)
+    if not session_id or manager is None:
+        return Located(None, ())
+    try:
+        messaging = manager.get_plugin("agent_messaging_plugin")
+        surface = getattr(messaging, "_platform_surface", None)
+        capture = surface.launch_directory_for_session(session_id) if surface is not None else None
+        if isinstance(capture, dict) and isinstance(capture.get("path"), str):
+            advisories = ("Launch directory uses the bridge client's cwd fallback; refresh the launcher.",) if capture.get("source") == "cwd_fallback" else ()
+            return Located(capture["path"], advisories)
+    except Exception:
+        return Located(None, ("Launch directory capture is unavailable; using path addresses and solet_home.",))
+    return Located(None, ())
+
+
+def _read_location_roots(orchestrator: OrchestratorProtocol | None) -> tuple[Located[tuple[Path, ...]], SoletTree]:
+    """Read live address inputs and assemble advisory-bearing roots."""
+    if orchestrator is None:
+        raise RuntimeError("orchestrator APP_HOME must be injected before file I/O")
+    tree = solet_tree_from_app_home(Path(orchestrator.APP_HOME))
+    try:
+        service = orchestrator.get_service("address_book_service")
+        addresses = path_addresses(cast(AddressBookServiceInterface, service)) if service is not None else Located((), ("Path address service is unavailable; using computed solet_home.",))
+    except Exception:
+        addresses = Located((), ("Path addresses could not be read; using computed solet_home.",))
+    launch = _launch_directory(orchestrator)
+    name = os.environ.get("SOLET_NAME", tree.repo_root.name)
+    home = default_solet_home(name, documents_folder(sys.platform, os.environ, Path.home()), tree, Path.home() / "Library/Application Support" / name / "Files")
+    roots = derive_allowed_roots(addresses.value, launch.value, tree, home.value)
+    return Located(roots.value, (*addresses.advisories, *launch.advisories, *home.advisories, *roots.advisories)), tree
 
 
 class SalesforcePlugin(PluginBase, EdgeProcessProvider):
@@ -185,6 +243,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         self._async_job_manager: Any | None = None
         self._worker_thread: threading.Thread | None = None
         self._worker_lock = threading.Lock()
+        self._pending_provision_ids: deque[str] = deque()
 
     # ------------------------------------------------------------------
     # VaultKeysProvider — no plugin-owned vault keys
@@ -248,73 +307,40 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             raise RuntimeError(ERROR_ADDRESS_BOOK_NOT_AVAILABLE)
         return self._cli_executor
 
-    def _export_path_gate(self, output_tsv_path: str) -> str:
-        """Admit an export path via workspace-root containment; return the realpath.
+    def _location_roots(self) -> tuple[Located[tuple[Path, ...]], SoletTree]:
+        return _read_location_roots(self.orchestrator_ref)
 
-        Binds the operator's ``export_allowed_roots`` config (yaml default
-        ``[]`` = refuse-all; no hardcoded callsite default per authoring trap
-        #10) to the own-copy containment gate. A malformed config value is a
-        loud config fault, never a silent admit-all or refuse-all.
-        """
-        raw_roots = self._load_plugin_config().get(CONFIG_KEY_EXPORT_ALLOWED_ROOTS)
-        roots: list[str] = []
-        if raw_roots is not None:
-            if not isinstance(raw_roots, list) or not all(isinstance(entry, str) for entry in raw_roots):
-                raise SalesforceServiceError(
-                    ERROR_NOT_CONFIGURED,
-                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory path strings",
-                )
-            roots = list(raw_roots)
-        return export_containment.assert_export_path_allowed(
-            output_tsv_path,
-            roots,
-            config_key=CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
-            plugin_name=self.name,
-        )
+    def _assert_path(self, path: str, *, suffix: str | None, param_name: str, reading: bool = False) -> str:
+        """The single binding to shared connector containment on every I/O."""
+        roots, tree = self._location_roots()
+        retain_location_advisories(roots.advisories)
+        try:
+            result = assert_path_allowed(path, roots, tree, suffix=suffix, param_name=param_name, plugin_name=self.name)
+            if reading and not Path(result.value).is_file():
+                raise PathRefusedError(f"{param_name} must name an existing regular file")
+            return result.value
+        except PathRefusedError as exc:
+            exc.code = ERROR_IMPORT_PATH_REFUSED if reading else ERROR_EXPORT_PATH_REFUSED
+            raise
+
+    def _export_path_gate(self, output_tsv_path: str) -> str:
+        return self._assert_path(output_tsv_path, suffix=".tsv", param_name="output_tsv_path")
 
     def _csv_export_path_gate(self, output_csv_path: str) -> str:
-        """Admit a bulk_job_results output path — same export_allowed_roots gate, .csv suffix."""
-        raw_roots = self._load_plugin_config().get(CONFIG_KEY_EXPORT_ALLOWED_ROOTS)
-        roots: list[str] = []
-        if raw_roots is not None:
-            if not isinstance(raw_roots, list) or not all(isinstance(entry, str) for entry in raw_roots):
-                raise SalesforceServiceError(
-                    ERROR_NOT_CONFIGURED,
-                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory path strings",
-                )
-            roots = list(raw_roots)
-        return export_containment.assert_export_path_allowed(
-            output_csv_path,
-            roots,
-            config_key=CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
-            plugin_name=self.name,
-            required_suffix=CSV_SUFFIX,
-        )
+        return self._assert_path(output_csv_path, suffix=".csv", param_name="output_csv_path")
 
     def _import_path_gate(self, csv_path: str) -> str:
-        """Admit a bulk_ingest_submit csv_path via workspace-root containment; return the realpath.
+        return self._assert_path(csv_path, suffix=".csv", param_name="csv_path", reading=True)
 
-        Binds the operator's ``import_allowed_roots`` config (yaml default
-        ``[]`` = refuse-all) to the read-side containment gate — the mirror
-        of ``_export_path_gate`` for Bulk v2 ingest input files.
-        """
-        raw_roots = self._load_plugin_config().get(CONFIG_KEY_IMPORT_ALLOWED_ROOTS)
-        roots: list[str] = []
-        if raw_roots is not None:
-            if not isinstance(raw_roots, list) or not all(isinstance(entry, str) for entry in raw_roots):
-                raise SalesforceServiceError(
-                    ERROR_NOT_CONFIGURED,
-                    f"{CONFIG_KEY_IMPORT_ALLOWED_ROOTS} must be a list of directory path strings",
-                )
-            roots = list(raw_roots)
-        return import_containment.assert_import_path_allowed(
-            csv_path,
-            roots,
-            config_key=CONFIG_KEY_IMPORT_ALLOWED_ROOTS,
-            plugin_name=self.name,
-        )
+    def _zip_import_path_gate(self, zip_path: str) -> str:
+        return self._assert_path(zip_path, suffix=".zip", param_name="zip_path", reading=True)
+
+    def _file_transfer_gates(self) -> transfers.TransferGates:
+        return transfers.TransferGates(read=lambda path: self._assert_path(path, suffix=None, param_name="file_path", reading=True), write=lambda path: self._assert_path(path, suffix=None, param_name="output_path"))
 
     def _success(self, data: dict[str, Any]) -> dict[str, Any]:
+        if location_advisories():
+            data = {**data, "advisories": [*data.get("advisories", []), *location_advisories()]}
         return {
             "action_status": ActionStatus.COMPLETED.value,
             "data": data,
@@ -344,7 +370,8 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         transparently inside every invocation, so there is no mid-flight
         session for this process to detect and re-mint — a fault here is
         either a classified REST-level rejection or a CLI-level fault
-        (``SalesforceServiceError``), never a stale token.
+        (``SalesforceServiceError``), never a stale token. Results and
+        messages are returned as received.
         """
         executor = self._require_executor()
         try:
@@ -355,8 +382,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             return self._error(ERROR_NOT_CONFIGURED, str(exc))
         except (
             SalesforceServiceError,
-            export_containment.ExportPathRefusedError,
-            import_containment.ImportPathRefusedError,
+            PathRefusedError,
         ) as exc:
             return self._error(exc.code, str(exc))
         except Exception as exc:  # noqa: BLE001 — topology-safety boundary, classified below
@@ -460,6 +486,8 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             "dashboards": _edge("dashboards", RESULT_TYPE_DASHBOARDS, retryable=False),
             "rest_resources": _edge("rest_resources", RESULT_TYPE_REST_RESOURCES, retryable=False),
             "actions": _edge("actions", RESULT_TYPE_ACTIONS, retryable=False),
+            "metadata": _edge("metadata", RESULT_TYPE_METADATA, retryable=False),
+            "content_files": _edge("content_files", RESULT_TYPE_CONTENT_FILES, retryable=False),
         }
 
     # ------------------------------------------------------------------
@@ -548,7 +576,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="provision_cli",
         display_name="Salesforce: Provision CLI",
-        description=("Provision the local sf formula only after explicit system-change acknowledgement, then bind the verified absolute executable path into salesforce_plugin config. A compliant executable is never reinstalled; this does not log in to Salesforce."),
+        description=("Queue local sf provisioning after explicit system-change acknowledgement. The existing worker probes and binds the verified executable; read its job result for the provisioning verdict. A compliant executable is never reinstalled; this does not log in to Salesforce."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "acknowledge_system_change": ParameterMetadata(
@@ -557,22 +585,17 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
                 description="Must be true before this process may install sf or update its executable binding.",
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Provisioning verdict with no secret or Salesforce-org data.",
-            properties={
-                "provisioned": ParameterMetadata(type=ParameterType.BOOLEAN, description="True only when Homebrew installed sf."),
-                "reason": ParameterMetadata(type=ParameterType.STRING, description="Whether sf was installed or an existing executable was bound."),
-                "executable_path": ParameterMetadata(type=ParameterType.STRING, description="Verified absolute sf executable path."),
-                "version": ParameterMetadata(type=ParameterType.STRING, description="Verified local sf version string."),
-                "configuration_boundary": ParameterMetadata(type=ParameterType.STRING, description="States the config update boundary; no restart or reload is hidden."),
-            },
-        ),
+        return_value_schema=_FAMILY_RETURN,
+        is_async=True,
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def provision_cli(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        """Provision and bind sf through one consent-gated, probe-first path."""
+        """Queue provisioning; the existing Salesforce worker probes and binds sf."""
+        return self._dispatch_async("provision_cli", params, state)
+
+    def _provision_cli_now(self, params: dict[str, Any]) -> dict[str, Any]:
+        """The unchanged consent-gated operation, executed by the job worker."""
 
         acknowledge = params.get("acknowledge_system_change") is True
         try:
@@ -653,7 +676,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=("ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."),
+                description=("ABSOLUTE .tsv destination path, contained under a registered path address."),
             ),
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
@@ -691,7 +714,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             "file at an ABSOLUTE output_tsv_path in the operator's workspace. Returns immediately "
             "with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch "
             "returning is NOT the same as the job finishing. The path must lie "
-            "under an operator-configured export_allowed_roots entry (empty config refuses every "
+            "under an registered path address (register a path address to authorize each "
             "export). Nested relationship objects are serialized as JSON text in their cells. Same "
             "read rules and override mechanism as soql_query, with a higher hard cap: this verb "
             "never runs SOQL inside Apex, so the 50,000-record Apex governor limit does not apply; the "
@@ -714,7 +737,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=("ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."),
+                description=("ABSOLUTE .tsv destination path, contained under a registered path address."),
             ),
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
@@ -929,8 +952,8 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             "completes. The Salesforce job is submitted with --async and NEVER waited on inline — "
             "a bulk job can run minutes, well past this connector's per-call subprocess bound — so "
             "poll bulk_job_status with the delivered job_id to track it to completion. csv_path "
-            "must be an ABSOLUTE path contained under an operator-configured import_allowed_roots "
-            "entry (empty config refuses every ingest). external_id_field is required when, and "
+            "must be an ABSOLUTE path contained under an registered path address "
+            "entry (register a path address to authorize each ingest). external_id_field is required when, and "
             "only when, operation is 'upsert'."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
@@ -944,7 +967,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             "csv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=("ABSOLUTE path to the ingest CSV, contained under an import_allowed_roots entry."),
+                description=("ABSOLUTE path to the ingest CSV, contained under a registered path address."),
             ),
             "external_id_field": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -1005,7 +1028,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         description=(
             "Fetch a completed Bulk API v2 ingest job's three result CSVs (successful, failed, "
             "unprocessed records) and write each to a caller-supplied ABSOLUTE path, contained "
-            "under an operator-configured export_allowed_roots entry (empty config refuses every "
+            "under an registered path address (register a path address to authorize each "
             "write) — never returned inline. Call this only after bulk_job_status reports the job "
             "reached JobComplete (or Failed/Aborted, which can still carry partial results). "
             "Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) "
@@ -1116,8 +1139,10 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         description=(
             "Use the Salesforce Tooling API on the registered org: query and query_more, search, "
             "execute_anonymous (anonymous Apex), run_tests_async, run_tests_sync, completions, "
-            "list_sobjects, sobject_info, describe, and Tooling record create, get, update and delete (ApexClass, "
-            "ApexTrigger, TraceFlag and other Tooling types). Salesforce permissions decide each "
+            "list_sobjects, sobject_info, describe, Tooling record create, get, update and delete (ApexClass, "
+            "ApexTrigger, TraceFlag and other Tooling types), composite_resources and composite (up to 25 "
+            "Tooling subrequests in one call) and apex_compile_results (API 68.0 and later, so set the plugin "
+            "api_version to 68.0 or above; empty body). Salesforce permissions decide each "
             "operation, including Apex execution and deletes. Returns a queued job."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
@@ -1134,10 +1159,12 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         display_name="Salesforce: Bulk API 2.0 Jobs",
         description=(
             "Manage Salesforce Bulk API 2.0 jobs on the registered org: query jobs (query_create "
-            "with operation query or queryAll, query_get, query_list, query_results, query_abort, "
-            "query_delete) and ingest jobs (ingest_list, ingest_delete). query_results writes one "
-            "CSV page to an ABSOLUTE output_csv_path under export_allowed_roots and returns the "
-            "next locator. Salesforce permissions decide each operation. Returns a queued job."
+            "with operation query or queryAll, query_get, query_list, query_results, query_result_pages, "
+            "query_result_pages_more, query_abort, query_delete) and ingest jobs (ingest_list, ingest_delete). query_results writes one "
+            "CSV page to an ABSOLUTE output_csv_path under registered path addresses and returns the "
+            "next locator; query_result_pages returns up to five page locators for parallel downloads and "
+            "query_result_pages_more follows its nextRecordsUrl. "
+            "Salesforce permissions decide each operation. Returns a queued job."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters=_family_parameters("bulk_jobs"),
@@ -1154,7 +1181,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         description=(
             "Use the Salesforce Reports REST API on the registered org: list, create, clone, describe, "
             "run (synchronous, includeDetails), run_filtered (with reportMetadata filters), run_async, "
-            "instances, instance_results, query (run unsaved metadata), update, delete, report_types and "
+            "instances, instance_results, instance_delete, query (run unsaved metadata), update, delete, report_types and "
             "describe_report_type. Reads, writes and deletes alike; Salesforce permissions decide each "
             "operation. Returns a queued job."
         ),
@@ -1187,7 +1214,8 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             "Use Salesforce REST API resources beyond record CRUD on the registered org: resources, "
             "limits, recent, describe_global, sobject_info, describe, updated and deleted record ids, "
             "get_by_external_id, upsert_by_external_id, delete_by_external_id, relationship traversal, "
-            "query, query_all, query_more, explain, search and parameterized_search. Reads, writes and "
+            "relationship_update, relationship_delete, query, query_all, query_more, explain, search and "
+            "parameterized_search. Reads, writes and "
             "deletes alike; Salesforce permissions decide each operation. Returns a queued job."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
@@ -1216,6 +1244,47 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
     )
     def actions(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         return self._dispatch_family("actions", params, state)
+
+    @platform_process(
+        name="metadata",
+        display_name="Salesforce: Metadata Deploy",
+        description=(
+            "Deploy Salesforce metadata to the registered org through the Metadata REST API: deploy "
+            "(a .zip package at an ABSOLUTE zip_path under registered path addresses, with deployOptions such "
+            "as checkOnly, testLevel, runTests, rollbackOnError, purgeOnDelete; destructiveChanges.xml in "
+            "the package deletes components), deploy_status (includeDetails), deploy_cancel and "
+            "deploy_quick (quick-deploy a validated deployment). Salesforce permissions decide each "
+            "deployment. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("metadata"),
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def metadata(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("metadata", params, state)
+
+    @platform_process(
+        name="content_files",
+        display_name="Salesforce: Files (ContentVersion)",
+        description=(
+            "Move Salesforce Files on the registered org: upload (a local file at an ABSOLUTE file_path "
+            "under registered path addresses becomes a new ContentVersion; body PathOnClient, Title, "
+            "ContentDocumentId for a new version of an existing file, FirstPublishLocationId), download "
+            "(a ContentVersion's VersionData to an ABSOLUTE output_path under registered path addresses, kept "
+            "only when it matches the version's ContentSize and Checksum) and delete_document (the "
+            "ContentDocument and all its versions). Salesforce permissions decide each operation. Returns a "
+            "queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters=_family_parameters("content_files"),
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def content_files(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_family("content_files", params, state)
 
 
 def _edge(

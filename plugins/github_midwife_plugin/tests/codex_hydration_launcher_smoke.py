@@ -19,7 +19,6 @@ MARKETPLACE_TEMPLATE = TEMPLATE_DIR / "codex_marketplace_json.template"
 TOKENS = {
     "{{SOLET_NAME}}": "iris",
     "{{MARKETPLACE_NAME}}": "iris",
-    "{{GIT_CONTROLLER_NAME}}": "Git-Controller",
 }
 
 
@@ -103,7 +102,7 @@ print -r -- "role=$AGENT_ROLE" >>"$CODEX_MARKER"
 print -r -- "session=$AGENT_SESSION_ID" >>"$CODEX_MARKER"
 print -r -- "wake_cli=$AGENT_WAKE_CLI" >>"$CODEX_MARKER"
 print -r -- "transport=$FLEET_TRANSPORT" >>"$CODEX_MARKER"
-print -r -- "git_controller=$GIT_CONTROLLER_NAME" >>"$CODEX_MARKER"
+print -r -- "git_controller=${GIT_CONTROLLER_NAME-unset}" >>"$CODEX_MARKER"
 """,
     )
 
@@ -117,6 +116,7 @@ print -r -- "git_controller=$GIT_CONTROLLER_NAME" >>"$CODEX_MARKER"
             "WATCH_MODE": watch_mode,
             "XDG_RUNTIME_DIR": str(runtime_dir),
             "iris_FLEET_TRANSPORT": transport,
+            "GIT_CONTROLLER_NAME": "stale-caller-setting",
         }
     )
     proc = subprocess.run(  # noqa: S603
@@ -146,7 +146,7 @@ def check_source_contract(res: Results) -> None:
         'export AGENT_SESSION_LABEL="$role"',
         'export AGENT_ROLE="$role"',
         'export AGENT_WAKE_CLI="{{SOLET_NAME}}"',
-        '--agent-id codex',
+        "--agent-id codex",
         '--role "$AGENT_ROLE"',
         '--exit-with-parent "$$"',
         '"watch": "armed"',
@@ -155,8 +155,7 @@ def check_source_contract(res: Results) -> None:
         res.check(required in source, f"launcher carries {required}")
     res.check(
         source.count("--no-spool") == 0,
-        "--no-spool is never passed (CDX-06, 2026-08-24: inbox_consumer.py "
-        "is now the Stop handler that drains the wake-hook spool)",
+        "--no-spool is never passed (CDX-06, 2026-08-24: inbox_consumer.py is now the Stop handler that drains the wake-hook spool)",
         str(source.count("--no-spool")),
     )
     for forbidden in ("nohup", "disown", "setsid", "--dangerously-", "mcp_servers"):
@@ -191,8 +190,7 @@ def check_watch_launch(res: Results, work: Path) -> None:
     res.check("--exit-with-parent " in watch_argv_line, "watcher is parent-bound", watch)
     res.check(
         watch_argv_line.split().count("--no-spool") == 0,
-        "watcher does NOT receive --no-spool (CDX-06, 2026-08-24: "
-        "inbox_consumer.py drains the wake-hook spool as a Stop hook)",
+        "watcher does NOT receive --no-spool (CDX-06, 2026-08-24: inbox_consumer.py drains the wake-hook spool as a Stop hook)",
         watch_argv_line,
     )
     res.check(_line_value(codex, "identity=") == "codex", "Codex inherits stock identity")
@@ -201,8 +199,8 @@ def check_watch_launch(res: Results, work: Path) -> None:
     res.check(_line_value(codex, "wake_cli=") == "iris", "Codex inherits wake CLI")
     res.check(_line_value(codex, "transport=") == "watch", "Codex inherits watch transport")
     res.check(
-        _line_value(codex, "git_controller=") == "Git-Controller",
-        "Codex inherits the configured controller role",
+        _line_value(codex, "git_controller=") == "unset",
+        "Codex clears a retired setting inherited from the caller",
     )
     res.check(
         _line_value(watch, "session=") == _line_value(codex, "session="),
@@ -251,8 +249,7 @@ def check_marketplace(res: Results, work: Path) -> None:
     res.check(plugin["name"] == "coordination-hooks", "Codex marketplace names the plugin")
     res.check(plugin["source"]["source"] == "local", "Codex marketplace uses local source")
     res.check(
-        plugin["source"]["path"]
-        == "./plugins/github_midwife_plugin/codex_plugin/coordination-hooks",
+        plugin["source"]["path"] == "./plugins/github_midwife_plugin/codex_plugin/coordination-hooks",
         "Codex marketplace resolves to the shipped Codex plugin bytes",
     )
     res.check(plugin["policy"]["installation"] == "AVAILABLE", "plugin remains operator-installable")

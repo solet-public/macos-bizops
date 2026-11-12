@@ -6,8 +6,8 @@
   "result_processor_customizations": {
     "action_label": "Zuora debit memo written off",
     "result_type": "zuora_write_off_debit_memo_result",
-    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
-    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body as received).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically."
   },
   "error_processor_customizations": {
     "action_context": "Write off a debit memo (PUT /v1/debit-memos/{debitMemoKey}/write-off): Zuora creates a credit memo and applies it to the debit memo; needs the enhanced write-off permission. Body may set amount, items, memoDate and reasonCode.",

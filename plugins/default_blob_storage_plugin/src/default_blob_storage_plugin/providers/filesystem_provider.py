@@ -49,22 +49,30 @@ class FilesystemProvider(BlobStorageServiceInterface):
     def set_state_service(self, state_service: StateServiceProtocol) -> None:
         self.state_service = state_service
 
+    def get_blob_store_root(self) -> Path:
+        """Return the configured physical root shared by filesystem consumers."""
+        return self.blobs_dir.resolve(strict=True)
+
     def resolve_blob_path(self, blob_url: str) -> str | None:
-        """Resolve blob:// URL to filesystem path."""
-        if not blob_url.startswith("blob://"):
+        """Resolve a bare blob ID or blob:// URL inside the physical blob root."""
+        blob_id = blob_url.removeprefix("blob://")
+        if blob_id in {"", ".", ".."} or Path(blob_id).name != blob_id:
             return None
-        full_path = self.blobs_dir / blob_url[7:]
-        return str(full_path) if full_path.exists() else None
+        try:
+            root = self.blobs_dir.resolve()
+            full_path = (root / blob_id).resolve()
+            if full_path.is_relative_to(root) and full_path.is_file():
+                return str(full_path)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return None
 
     def file_command(
         self,
         command: str,  # pyright: ignore[reportUnusedParameter]  # noqa: ARG002
     ) -> ActionResult:
         """Execute Unix-style file commands - implemented at plugin level."""
-        raise NotImplementedError(
-            "file_command is a user-facing command implemented at the plugin level, "
-            "not at the provider level. Use DefaultBlobStoragePlugin.file_command() instead."
-        )
+        raise NotImplementedError("file_command is a user-facing command implemented at the plugin level, not at the provider level. Use DefaultBlobStoragePlugin.file_command() instead.")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -81,9 +89,7 @@ class FilesystemProvider(BlobStorageServiceInterface):
                     return part.strip().split(":", 1)[1]
         return "NO_JOB_ID"
 
-    def _write_blob_file(
-        self, content: bytes, generated_id: str, log_prefix: str
-    ) -> tuple[Path, Exception | None]:
+    def _write_blob_file(self, content: bytes, generated_id: str, log_prefix: str) -> tuple[Path, Exception | None]:
         logger = logging.getLogger(__name__)
         blob_path = self._get_blob_path(generated_id)
         logger.debug("%s BLOB_PATH: %s", log_prefix, blob_path)
@@ -113,9 +119,7 @@ class FilesystemProvider(BlobStorageServiceInterface):
     # BlobStorageServiceInterface implementation
     # ------------------------------------------------------------------
 
-    def store_blob(
-        self, namespace: str, content: bytes, metadata: dict[str, Any]
-    ) -> ActionResult:
+    def store_blob(self, namespace: str, content: bytes, metadata: dict[str, Any]) -> ActionResult:
         """Store blob with metadata using state service for ID generation."""
         log_prefix = f"[BLOB_STORE {self._extract_job_context(metadata)}]"
         logger = logging.getLogger(__name__)
@@ -124,7 +128,10 @@ class FilesystemProvider(BlobStorageServiceInterface):
             content_size = len(content)
             logger.debug(
                 "%s ENTRY: content_size=%d, metadata_keys=%s, tags=%s",
-                log_prefix, content_size, list(metadata.keys()), metadata.get("tags", "NONE"),
+                log_prefix,
+                content_size,
+                list(metadata.keys()),
+                metadata.get("tags", "NONE"),
             )
             validate_file_content(content, self.max_file_size)
             validate_file_metadata(metadata)
@@ -136,12 +143,8 @@ class FilesystemProvider(BlobStorageServiceInterface):
                     "State service not available for metadata storage",
                 )
 
-            schema_metadata, normalized_metadata = metadata_prep.prepare_metadata_for_storage(
-                metadata, content_size, log_prefix
-            )
-            generated_id, error_response = state_ops.store_metadata_with_conflict_check(
-                self.state_service, self.plugin_name, namespace, schema_metadata, log_prefix
-            )
+            schema_metadata, normalized_metadata = metadata_prep.prepare_metadata_for_storage(metadata, content_size, log_prefix)
+            generated_id, error_response = state_ops.store_metadata_with_conflict_check(self.state_service, self.plugin_name, namespace, schema_metadata, log_prefix)
             if error_response:
                 return error_response
             assert generated_id is not None
@@ -154,18 +157,18 @@ class FilesystemProvider(BlobStorageServiceInterface):
                 )
                 raise blob_error
 
-            update_error = state_ops.update_blob_id_in_metadata(
-                self.state_service, self.plugin_name, generated_id, blob_path, log_prefix
-            )
+            update_error = state_ops.update_blob_id_in_metadata(self.state_service, self.plugin_name, generated_id, blob_path, log_prefix)
             if update_error:
                 return update_error
 
             logger.debug("%s SUCCESS: Stored with state-generated ID=%s", log_prefix, generated_id)
-            relative_path = (
-                f"data/plugin_data/default_blob_storage_plugin/blobs/{generated_id}"
-            )
+            relative_path = f"data/plugin_data/default_blob_storage_plugin/blobs/{generated_id}"
             return create_success_response(
-                {"blob_id": generated_id, "file_path": relative_path, "metadata": normalized_metadata}
+                {
+                    "blob_id": generated_id,
+                    "file_path": relative_path,
+                    "metadata": normalized_metadata,
+                }
             )
 
         except BlobValidationError as e:
@@ -173,6 +176,7 @@ class FilesystemProvider(BlobStorageServiceInterface):
             return create_error_response(e.error_code, e.message)
         except Exception as e:
             import traceback
+
             logger.error("%s EXCEPTION: %s - %s", log_prefix, type(e).__name__, e)
             logger.error("%s TRACEBACK: %s", log_prefix, traceback.format_exc())
             return create_error_response_from_exception(e, "store_file")
@@ -187,42 +191,36 @@ class FilesystemProvider(BlobStorageServiceInterface):
                     "State service not available for metadata retrieval",
                 )
 
-            metadata = state_ops.find_metadata_by_blob_id(
-                self.state_service, self.plugin_name, blob_id
-            )
+            metadata = state_ops.find_metadata_by_blob_id(self.state_service, self.plugin_name, blob_id)
             actual_namespace = metadata.get("plugin_namespace", "") if metadata else ""
 
             if not metadata:
-                return create_error_response(
-                    BlobStorageErrorCode.BLOB_NOT_FOUND.value, f"Blob not found: {blob_id}"
-                )
+                return create_error_response(BlobStorageErrorCode.BLOB_NOT_FOUND.value, f"Blob not found: {blob_id}")
 
             blob_path = self._get_blob_path(blob_id)
             if not blob_path.exists():
-                return create_error_response(
-                    BlobStorageErrorCode.BLOB_NOT_FOUND.value, f"Blob not found: {blob_id}"
-                )
+                return create_error_response(BlobStorageErrorCode.BLOB_NOT_FOUND.value, f"Blob not found: {blob_id}")
 
             with open(blob_path, "rb") as f:
                 content = f.read()
 
             filename = metadata.get("filename") or metadata.get("original_name") or blob_id
-            return create_success_response({
-                "blob_id": blob_id,
-                "content": content.hex(),
-                "metadata": metadata,
-                "namespace": actual_namespace,
-                "filename": filename,
-            })
+            return create_success_response(
+                {
+                    "blob_id": blob_id,
+                    "content": content.hex(),
+                    "metadata": metadata,
+                    "namespace": actual_namespace,
+                    "filename": filename,
+                }
+            )
 
         except BlobValidationError as e:
             return create_error_response(e.error_code, e.message)
         except Exception as e:
             return create_error_response_from_exception(e, "retrieve_blob")
 
-    def update_blob_metadata(
-        self, namespace: str, blob_id: str, metadata: dict[str, Any]
-    ) -> ActionResult:
+    def update_blob_metadata(self, namespace: str, blob_id: str, metadata: dict[str, Any]) -> ActionResult:
         try:
             validate_blob_id_format(blob_id)
             validate_file_metadata(metadata)
@@ -233,13 +231,9 @@ class FilesystemProvider(BlobStorageServiceInterface):
                     "State service not available for metadata update",
                 )
 
-            existing_metadata = state_ops.get_metadata_from_state(
-                self.state_service, self.plugin_name, namespace, blob_id
-            )
+            existing_metadata = state_ops.get_metadata_from_state(self.state_service, self.plugin_name, namespace, blob_id)
             if not existing_metadata:
-                return create_error_response(
-                    BlobStorageErrorCode.BLOB_NOT_FOUND.value, f"Blob not found: {blob_id}"
-                )
+                return create_error_response(BlobStorageErrorCode.BLOB_NOT_FOUND.value, f"Blob not found: {blob_id}")
 
             updated_metadata = {**existing_metadata, **metadata}
             normalized_metadata = normalize_metadata(updated_metadata)
@@ -268,6 +262,7 @@ class FilesystemProvider(BlobStorageServiceInterface):
             return create_error_response_from_exception(e, "update_blob_metadata")
 
     def delete_blob(self, namespace: str, blob_id: str) -> ActionResult:
+        """Retire metadata before unlink; failures never leave live missing bytes."""
         try:
             validate_blob_id_format(blob_id)
 
@@ -277,13 +272,9 @@ class FilesystemProvider(BlobStorageServiceInterface):
                     "State service not available for metadata deletion",
                 )
 
-            metadata = state_ops.get_metadata_from_state(
-                self.state_service, self.plugin_name, namespace, blob_id
-            )
+            metadata = state_ops.get_metadata_from_state(self.state_service, self.plugin_name, namespace, blob_id)
             if not metadata:
-                return create_error_response(
-                    BlobStorageErrorCode.BLOB_NOT_FOUND.value, f"Blob not found: {blob_id}"
-                )
+                return create_error_response(BlobStorageErrorCode.BLOB_NOT_FOUND.value, f"Blob not found: {blob_id}")
 
             blob_path = self._get_blob_path(blob_id)
             if not blob_path.exists():
@@ -292,17 +283,13 @@ class FilesystemProvider(BlobStorageServiceInterface):
                     f"Blob not found at path: {blob_path}",
                 )
 
-            blob_path.unlink(missing_ok=True)
+            retirement_error = self._retire_blob_metadata(self.state_service, namespace, blob_id)
+            if retirement_error is not None:
+                return retirement_error
 
-            delete_result = self.state_service.delete_records(
-                namespace=self.plugin_name,
-                query={
-                    "table": "metadata",
-                    "filters": {"blob_id": blob_id, "plugin_namespace": namespace},
-                },
-            )
-            if delete_result.get("action_status") != "completed":
-                pass  # Blob already deleted; metadata orphan is non-fatal
+            # A failed unlink now leaves only retired metadata and leftover bytes.
+            # Ledger reclaim can retry that unlink without another metadata write.
+            blob_path.unlink()
 
             return create_success_response({"blob_id": blob_id, "deleted": True})
 
@@ -310,6 +297,21 @@ class FilesystemProvider(BlobStorageServiceInterface):
             return create_error_response(e.error_code, e.message)
         except Exception as e:
             return create_error_response_from_exception(e, "delete_blob")
+
+    def _retire_blob_metadata(self, state: StateServiceProtocol, namespace: str, blob_id: str) -> ActionResult | None:
+        try:
+            result = state.delete_records(
+                namespace=self.plugin_name,
+                query={"table": "metadata", "filters": {"blob_id": blob_id, "plugin_namespace": namespace}, "soft_delete": True},
+            )
+        except Exception as exc:
+            return create_error_response(BlobStorageErrorCode.METADATA_STORAGE_ERROR.value, f"Metadata retirement failed; file preserved: {exc}")
+        data = result.get("data")
+        outcome = data.get("result") if isinstance(data, dict) else None
+        deleted = outcome.get("deleted") if isinstance(outcome, dict) else None
+        if result.get("action_status") != "completed" or type(deleted) is not int or deleted < 1:
+            return create_error_response(BlobStorageErrorCode.METADATA_STORAGE_ERROR.value, f"Metadata retirement unconfirmed; file preserved: {result}")
+        return None
 
     def search_blobs(self, namespace: str, metadata_filters: dict[str, Any]) -> ActionResult:
         try:
@@ -321,19 +323,27 @@ class FilesystemProvider(BlobStorageServiceInterface):
                     "State service not available for metadata search",
                 )
 
-            records = state_ops.fetch_namespace_records(
-                self.state_service, self.plugin_name, namespace
-            )
+            if "file_hash" in metadata_filters:
+                records = state_ops.fetch_records_by_file_hash(
+                    self.state_service,
+                    self.plugin_name,
+                    namespace,
+                    str(metadata_filters["file_hash"]),
+                )
+            else:
+                records = state_ops.fetch_namespace_records(self.state_service, self.plugin_name, namespace)
             all_files = search_filters.collect_matching_files(records, metadata_filters)
 
             limit = metadata_filters.get("limit", 100)
             offset = metadata_filters.get("offset", 0)
-            return create_success_response({
-                "files": all_files[offset : offset + limit],
-                "total_count": len(all_files),
-                "limit": limit,
-                "offset": offset,
-            })
+            return create_success_response(
+                {
+                    "files": all_files[offset : offset + limit],
+                    "total_count": len(all_files),
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
 
         except BlobValidationError as e:
             return create_error_response(e.error_code, e.message)
@@ -350,9 +360,7 @@ class FilesystemProvider(BlobStorageServiceInterface):
                     "State service not available for metadata retrieval",
                 )
 
-            metadata = state_ops.get_metadata_from_state(
-                self.state_service, self.plugin_name, namespace, blob_id
-            )
+            metadata = state_ops.get_metadata_from_state(self.state_service, self.plugin_name, namespace, blob_id)
             if not metadata:
                 return create_error_response(
                     BlobStorageErrorCode.BLOB_NOT_FOUND.value,
@@ -366,18 +374,14 @@ class FilesystemProvider(BlobStorageServiceInterface):
                     f"Blob metadata exists for {blob_id} but its file is missing on disk",
                 )
 
-            return create_success_response(
-                {"blob_id": blob_id, "metadata": metadata, "resolved_path": resolved_path}
-            )
+            return create_success_response({"blob_id": blob_id, "metadata": metadata, "resolved_path": resolved_path})
 
         except BlobValidationError as e:
             return create_error_response(e.error_code, e.message)
         except Exception as e:
             return create_error_response_from_exception(e, "get_blob_metadata")
 
-    def update_metadata(
-        self, namespace: str, blob_id: str, metadata: dict[str, Any]
-    ) -> ActionResult:
+    def update_metadata(self, namespace: str, blob_id: str, metadata: dict[str, Any]) -> ActionResult:
         return self.update_blob_metadata(namespace, blob_id, metadata)
 
     def get_metadata(self, namespace: str, blob_id: str) -> ActionResult:

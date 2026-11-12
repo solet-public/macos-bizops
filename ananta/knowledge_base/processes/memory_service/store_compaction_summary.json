@@ -1,12 +1,12 @@
 {
   "process_key": "service_interface::memory_service::store_compaction_summary",
   "display_name": "Store Compaction Summary",
-  "description": "Store a compaction summary from context management. Called when conversation history is compacted to preserve key information as a long-term memory. Not typically user-invoked.",
+  "description": "Return a queued owned-job receipt (data.job_id and data.status). Read the exact id through job_service.get_job for the complete former response in job.result or the typed failure in job.error. Admission retains payload references locally; uncertain effects require reconciliation and must never be replayed automatically.\n\nStore a compaction summary from context management. Called when conversation history is compacted to preserve key information as a long-term memory. Not typically user-invoked.",
   "embedding_description": "",
   "result_processor_customizations": {
     "action_label": "Store Compaction Summary",
     "result_type": "compaction_stored",
-    "result_description": "Confirmation that compaction summary was stored as a memory",
+    "result_description": "The complete memory-operation response from the exact admitted job; the immediate response is a queued job receipt.",
     "presentation_guidance": "",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },
@@ -14,5 +14,6 @@
     "action_context": "Storing a context compaction summary as a long-term memory",
     "error_interpretation": "EmbeddingError: failed to generate embedding for summary. DatabaseError: failed to persist memory to storage.",
     "recovery_guidance": "For embedding errors: verify embedding service is available. For database errors: verify state and vector storage are accessible."
-  }
+  },
+  "is_async": true
 }

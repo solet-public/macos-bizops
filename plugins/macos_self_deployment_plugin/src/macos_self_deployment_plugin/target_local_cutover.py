@@ -54,9 +54,7 @@ __all__ = [
     "run_target_local_cutover",
 ]
 
-_ATTEST_PROCESS_KEY: Final[str] = (
-    "service_interface::local_self_deployment_service::attest_runtime_code"
-)
+_ATTEST_PROCESS_KEY: Final[str] = "service_interface::local_self_deployment_service::attest_runtime_code"
 _ATTEST_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
@@ -95,8 +93,7 @@ def run_target_local_cutover(request: object) -> dict[str, object]:
     dependencies = _build_target_local_dependencies(target)
     if request.name != dependencies.solet_name:
         raise TargetLocalConstructionError(
-            "request name does not match the refreshed target root manifest: "
-            f"request={request.name!r}, target={dependencies.solet_name!r}",
+            f"request name does not match the refreshed target root manifest: request={request.name!r}, target={dependencies.solet_name!r}",
         )
     controller = _controller_from_dependencies(dependencies)
     outcome = controller.cutover(
@@ -272,7 +269,7 @@ def _run_target_attestation(target: Path, solet_name: str) -> subprocess.Complet
     )
     try:
         completed = subprocess.run(
-            [str(bridge), "call", _ATTEST_PROCESS_KEY, payload],
+            [str(bridge), "call", _ATTEST_PROCESS_KEY, payload, "--wait"],
             cwd=target,
             env=environment,
             capture_output=True,
@@ -288,8 +285,7 @@ def _run_target_attestation(target: Path, solet_name: str) -> subprocess.Complet
         ) from exc
     if completed.returncode != 0:
         raise TargetLocalConstructionError(
-            "target-local attestation bridge exited non-zero: "
-            f"code={completed.returncode}, stderr={completed.stderr[-512:]!r}",
+            f"target-local attestation bridge exited non-zero: code={completed.returncode}, stderr={completed.stderr[-512:]!r}",
         )
     return completed
 
@@ -309,6 +305,8 @@ def _attestation_data(completed: subprocess.CompletedProcess[str]) -> dict[str, 
         raw = json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
         raise TargetLocalConstructionError("target-local attestation returned invalid JSON") from exc
+    if isinstance(raw, dict) and "id" in raw:
+        raw = _attestation_job_envelope(raw)
     if not isinstance(raw, dict) or raw.get("status") != "success":
         raise TargetLocalConstructionError(
             f"target-local attestation was not successful: {completed.stdout[-512:]!r}",
@@ -320,6 +318,21 @@ def _attestation_data(completed: subprocess.CompletedProcess[str]) -> dict[str, 
     if not isinstance(data, dict):
         raise TargetLocalConstructionError("target-local attestation has no data object")
     return data
+
+
+def _attestation_job_envelope(job: dict[str, object]) -> dict[str, object]:
+    """Restore the attestation envelope only after an error-free terminal job.
+
+    --wait returns the finished get_job record rather than an action envelope.
+    Validate both the job and its original action before interpreting data as
+    runtime identity; the synchronous parser keeps its existing status contract.
+    """
+    result = job.get("result")
+    if job.get("status") != "completed" or job.get("error") or not isinstance(result, dict):
+        raise TargetLocalConstructionError(f"target-local attestation job did not complete: {job}")
+    if result.get("success") is False or result.get("error") or result.get("action_status", "completed") != "completed":
+        raise TargetLocalConstructionError(f"target-local attestation action failed: {result}")
+    return {"status": "success", "result": result}
 
 
 def _required_text(payload: dict[str, object], key: str) -> str:

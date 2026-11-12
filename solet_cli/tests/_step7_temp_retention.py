@@ -1,11 +1,8 @@
-"""Step7 fixture storage, filesystem readback and best-effort next-mint retention.
+"""Step7 cache publication and serialization with registered lifecycle ownership.
 
-Completed caches live in HOME/.ananta/runtime/step7; disposable scratch stays
-in tempfile. Only direct directories are candidates. Stable access retains young
-entries, the exact current key and one previous warm key. Legacy recovery has
-no warm-key exemption. Git lookups, HOME, temp roots and clocks are fresh at
-access, never bound at import time. Removal races and unsupported symlink-resistant
-removal are advisory; this is neither a live-reader lease nor killed-exit cleanup.
+Cache keys are regenerable work folders bound to their full commit and builder
+digest. The native register owns retirement; access never deletes other keys
+or legacy scratch based on timestamps.
 """
 
 from __future__ import annotations
@@ -17,11 +14,9 @@ import importlib
 import json
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -46,111 +41,13 @@ __all__ = [
     "_release_from_json",
     "_release_json",
     "_seed_key",
-    "_temp_housekeeping",
     "checks_by_id",
     "clone_tree",
     "fixture_bytes",
     "make_offline",
     "porcelain",
-    "prune_sources",
-    "report_advisory",
     "tree_snapshot",
 ]
-
-_TEMP_RETENTION_SECONDS = 24 * 60 * 60
-_TEMP_PREFIXES = ("step7-cache-", "step7-source-")
-_LEGACY_ATTEMPTED: set[Path] = set()
-
-
-def _temp_directories(parent: Path, errors: list[str]) -> list[tuple[Path, os.stat_result]]:
-    """Read direct directories without following candidate symlinks."""
-    entries: list[tuple[Path, os.stat_result]] = []
-    try:
-        children = list(parent.iterdir())
-    except OSError as exc:
-        errors.append(f"enumerate: {exc}")
-        return entries
-    for child in children:
-        try:
-            metadata = child.lstat()
-            if stat.S_ISDIR(metadata.st_mode):
-                entries.append((child, metadata))
-        except OSError as exc:
-            errors.append(f"stat {child.name}: {exc}")
-    return entries
-
-
-def _previous_cache(entries: list[tuple[Path, os.stat_result]], commit: str, previous_commit: str | None) -> str | None:
-    """Prefer the first parent's warm key, otherwise the MRU different commit."""
-    caches = [(path, metadata) for path, metadata in entries if path.name.startswith("step7-cache-")]
-    previous = [(path, metadata) for path, metadata in caches if previous_commit is not None and path.name.startswith(f"step7-cache-{previous_commit[:12]}-")]
-    fallback = [(path, metadata) for path, metadata in caches if not path.name.startswith(f"step7-cache-{commit[:12]}-")]
-    chosen = previous or fallback
-    return max(chosen, key=lambda row: (row[1].st_mtime, row[0].name))[0].name if chosen else None
-
-
-def _temp_expired(path: Path, metadata: os.stat_result, protected: set[str], now: float) -> bool:
-    return all((path.name.startswith(_TEMP_PREFIXES), stat.S_ISDIR(metadata.st_mode), path.name not in protected, now - metadata.st_mtime >= _TEMP_RETENTION_SECONDS))
-
-
-def _remove_expired(entries: list[tuple[Path, os.stat_result]], protected: set[str], now: float, errors: list[str]) -> None:
-    """Recheck age, protection and identity; rmtree never traverses inner symlinks."""
-    if not shutil.rmtree.avoids_symlink_attacks:
-        errors.append("symlink-resistant removal unavailable; deletion skipped")
-        return
-    for path, metadata in entries:
-        if not _temp_expired(path, metadata, protected, now):
-            continue
-        try:
-            fresh = path.lstat()
-            if (fresh.st_dev, fresh.st_ino) != (metadata.st_dev, metadata.st_ino):
-                errors.append(f"changed identity: {path.name}")
-                continue
-            if _temp_expired(path, fresh, protected, now):
-                shutil.rmtree(path)
-        except OSError as exc:
-            errors.append(f"remove {path.name}: {exc}")
-
-
-def _prune_temp(parent: Path, current: str, commit: str, previous_commit: str | None, now: float, errors: list[str]) -> None:
-    entries = _temp_directories(parent, errors)
-    previous = _previous_cache(entries, commit, previous_commit)
-    protected = {current}
-    if previous is not None:
-        protected.add(previous)
-    _remove_expired(entries, protected, now, errors)
-
-
-def report_advisory(errors: list[str]) -> None:
-    """Aggregate housekeeping errors into one compact stderr line per access."""
-    if errors:
-        print("step7 prune advisory: " + "; ".join(" ".join(error.splitlines()) for error in errors), file=sys.stderr)
-
-
-def _recover_legacy(parent: Path, now: float, errors: list[str]) -> None:
-    """Attempt only this visited temp root once per process; later processes retry.
-
-    No warm keys protect legacy data: the cache now lives elsewhere. The same
-    24-hour inactivity and identity/mode/age rechecks preserve refreshed entries.
-    Mark before enumeration so advisory failures cannot cause repeated scans.
-    """
-    if parent in _LEGACY_ATTEMPTED:
-        return
-    _LEGACY_ATTEMPTED.add(parent)
-    _remove_expired(_temp_directories(parent, errors), set(), now, errors)
-
-
-def prune_sources() -> None:
-    """Independently retire inactive temp scratch before a source mint.
-
-    Scratch remains disposable in tempfile with normal atexit cleanup. Cache
-    reuse never needs another digest/predecessor lookup merely to prune scratch.
-    """
-    errors: list[str] = []
-    entries = _temp_directories(Path(tempfile.gettempdir()).resolve(), errors)
-    _remove_expired([(path, metadata) for path, metadata in entries if path.name.startswith("step7-source-")], set(), time.time(), errors)
-    report_advisory(errors)
-
 
 _ROOT = Path(__file__).resolve().parents[2]
 PROFILE = "macos-bizops"
@@ -178,52 +75,20 @@ def _builder_digest() -> str:
     return digest.hexdigest()[:8]
 
 
-def _temp_housekeeping(parent: Path, root: Path, commit: str, *, refresh: bool = False) -> None:
-    """Pass fresh lookup and clock values to retention, then refresh only this key.
-
-    A failed predecessor lookup uses the helper's MRU different-commit fallback.
-    Refresh shares the sweep's advisory list, so one access emits at most one
-    line even when both pruning and refresh fail. Neither failure refuses a hit.
-    The retention helper is part of the builder digest because it now owns
-    cache publication, key selection and release serialization as well as
-    housekeeping. Same-HEAD edits to moved code must invalidate completed keys.
-    """
-    errors: list[str] = []
-    previous_commit: str | None = None
-    try:
-        previous_commit = git(_ROOT, "rev-parse", "HEAD^1")
-    except (OSError, subprocess.SubprocessError) as exc:
-        errors.append(f"previous commit unavailable; using warm fallback: {exc}")
-    _prune_temp(parent, root.name, commit, previous_commit, time.time(), errors)  # noqa: SLF001
-    _recover_legacy(Path(tempfile.gettempdir()).resolve(), time.time(), errors)
-    if refresh:
-        try:
-            os.utime(root, follow_symlinks=False)
-        except OSError as exc:
-            errors.append(f"refresh {root.name}: {exc}")
-    report_advisory(errors)
-
-
 def _cache_root() -> Path:
-    """The per-user, per-HEAD cross-process cache: the assembled seed and every sealed source are built once per
-    checkout commit on this host and reused by every smoke process (the registered battery runs the Step-7 smokes
-    twelve-wide, and rebuilding a ~4,000-file seed per process is what pushed them past the gate budget).  Keyed by
-    the commit ``assemble()`` reads, support code and loaded factory Python source, so a different tree, or a builder
-    that reads other bytes, never reuses an entry (iss_ae6a4b13: an entry built by an older builder under the same
-    ``HEAD`` carried a working-tree hook and turned the settled control red for every later run); entries are completed
-    by an atomic rename. Each access prunes direct cache/scratch directories inactive for 24 hours, retaining the
-    exact current key and one previous warm key; hits refresh the current root. Pruning errors are advisory.
-    Unvisited temp roots and killed scratch without a later mint are outside this next-mint recovery rule.
-    Completed keys live in HOME/.ananta/runtime/step7; temp legacy recovery has
-    no warm-key exemption and is attempted once per visited parent per process.
-    Scratch remains in tempfile and has an independent source-only mint sweep.
-    Inside one key the seed, one sealed-r1 base per ``.gitattributes`` knob and each source variant are entries,
-    and every copy from one to the next (and into scratch) is a copy-on-write ``clone_tree`` (prb_8e1e8cae)."""
+    """Register the stable commit/builder cache before any build or reuse.
+
+    Registration outages are advisory and retain a pending sidecar through the
+    WF7 client. No predecessor, legacy or inactivity prune runs on access.
+    """
+    from ananta.work_folders import register_work_folder  # noqa: PLC0415
+
     parent = (Path.home() / ".ananta" / "runtime" / "step7").resolve()
     commit = _head_commit()
-    root = parent / f"step7-cache-{commit[:12]}-{_builder_digest()}"
+    digest = _builder_digest()
+    root = parent / f"step7-cache-{commit[:12]}-{digest}"
     root.mkdir(parents=True, exist_ok=True)
-    _temp_housekeeping(parent, root, commit, refresh=True)
+    register_work_folder(root, purpose="step7_cache", bound=f"cache_key:{commit}:{digest}", harvest="regenerable")
     return root
 
 

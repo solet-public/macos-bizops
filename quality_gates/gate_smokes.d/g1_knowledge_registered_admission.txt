@@ -1,0 +1,4 @@
+# Real Knowledge owner admission and serialized provider lifecycle.
+plugins/default_knowledge_plugin/tests/g1_knowledge_registered_admission_smoke.py
+plugins/default_knowledge_plugin/tests/startup_search_concurrency_smoke.py
+plugins/default_knowledge_plugin/tests/w5p_orphan_invariant_smoke.py

@@ -71,7 +71,7 @@ def parameters(verb: str) -> dict[str, ParameterMetadata]:
     method, _, paged = ENDPOINTS[verb]
     fields = {**_identity_parameters(verb), **_folder_parameters(verb), **_token_parameters(verb)}
     if method == "GET":
-        fields["output_tsv_path"] = _parameter(ParameterType.STRING, "Absolute .tsv path under export_allowed_roots; parent directory must exist.", True)
+        fields["output_tsv_path"] = _parameter(ParameterType.STRING, "Absolute .tsv path under registered path addresses; parent directory must exist.", True)
     if paged:
         fields["offset"] = _parameter(ParameterType.INTEGER, "Vendor initial nonnegative offset, default 0; also accepts next_offset from a truncated export.")
         fields["max_return"] = _parameter(ParameterType.INTEGER, f"Vendor maxReturn, 1 through {ASSET_PAGE_CAP}; default {ASSET_PAGE_CAP} per internal page.")

@@ -1,7 +1,7 @@
 {
   "process_key": "service_interface::knowledge_service::browse",
   "display_name": "Browse Knowledge Base",
-  "description": "List directory contents of a knowledge base. Returns file names, types, and sizes.",
+  "description": "List directory contents of a knowledge base. Returns file names, types, and sizes. Registered calls return a queued job_id/status receipt. Read that exact job with service_interface::job_service::get_job until terminal; job.result contains the complete operation result and job.error retains any failure. In-process calls return the complete result synchronously.",
   "embedding_description": "Navigate a knowledge base's file tree: list the entries inside one of its directories, returning each entry's name, type, and size. Read-only; it does not open file contents or change anything. Use to explore a KB's folder layout or see which files live under a path before reading or editing one.",
   "result_processor_customizations": {
     "action_label": "Knowledge base browsed",

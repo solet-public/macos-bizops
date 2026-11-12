@@ -322,120 +322,21 @@ class _QueueFreePeerReads:
         )
 
 
-class BridgeClient(_QueueFreePeerReads):
-    """One-shot synchronous client over a solet's bridge HTTP surface."""
+class _JobHttp(Protocol):
+    """The HTTP and process calls used by the born-async job lifecycle."""
 
-    def __init__(
-        self,
-        base_url: str,
-        *,
-        transport: httpx.BaseTransport | None = None,
-        request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
-        caller_agent_session_id: str = "",
-    ) -> None:
-        self._client = httpx.Client(
-            base_url=base_url.rstrip("/"),
-            timeout=request_timeout_s,
-            transport=transport,
-        )
-        self._bridge_id: str | None = None
-        self._caller_agent_session_id = caller_agent_session_id
+    def _require_bridge(self) -> str: ...
 
-    def __enter__(self) -> BridgeClient:
-        self.open()
-        return self
+    def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]: ...
 
-    def __exit__(
-        self,
-        _exc_type: type[BaseException] | None,
-        _exc: BaseException | None,
-        _tb: TracebackType | None,
-    ) -> None:
-        self.close()
+    def call_and_wait(self, process_key: str, arguments: dict[str, Any], *, reason: str | None = None, poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S, bridge_wait_attached: bool = False) -> dict[str, Any]: ...
 
-    def open(self) -> str:
-        """Open a bridge session and remember its id.
 
-        ``caller_agent_session_id`` rides the open body as ATTRIBUTION ONLY: the
-        server stores the opaque key on its in-memory bridge state and resolves
-        it against the peer registry when stamping a send's sender, so a
-        CLI-originated message is attributed to the session that ran the command
-        instead of ``System (Scheduler)`` (§34.6). It is NOT a registration —
-        registering this one-shot bridge under the caller's identity would sweep
-        the caller's own registry row by ``session_label`` and then delete it
-        again at close, black-holing the session's receive path.
-        """
-        body: dict[str, Any] = {"parent_pid": os.getpid()}
-        if self._caller_agent_session_id:
-            body["caller_agent_session_id"] = self._caller_agent_session_id
-        payload = self._post(f"{API_PREFIX}/open", body)
-        bridge_id = payload.get("bridge_id")
-        if not isinstance(bridge_id, str):
-            raise BridgeCallError(f"bridge open returned no bridge_id: {payload!r}")
-        self._bridge_id = bridge_id
-        return bridge_id
-
-    def close(self) -> None:
-        """Close the bridge (best-effort) and dispose the HTTP client.
-
-        Teardown never masks a result already obtained by the caller, so an
-        HTTP error while closing is swallowed — the httpx client is closed
-        regardless.
-        """
-        bridge_id, self._bridge_id = self._bridge_id, None
-        try:
-            if bridge_id is not None:
-                self._post(f"{API_PREFIX}/{bridge_id}/close", {})
-        except httpx.HTTPError:
-            pass
-        finally:
-            self._client.close()
-
-    def call_and_wait(
-        self,
-        process_key: str,
-        arguments: dict[str, Any],
-        *,
-        reason: str | None = None,
-        poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
-    ) -> dict[str, Any]:
-        """Dispatch a process and poll until its result payload is available."""
-        dispatch = self.process_call(process_key, arguments, reason=reason)
-        action_id = dispatch.get("action_id")
-        if not isinstance(action_id, str):
-            raise BridgeCallError(
-                f"process_call returned no action_id: {dispatch!r}",
-            )
-        return self.wait_for_result(action_id, poll_timeout_s=poll_timeout_s)
-
-    def wait_for_result(
-        self,
-        action_id: str,
-        *,
-        poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
-    ) -> dict[str, Any]:
-        """Poll until the action is terminal and its completed result is stored.
-
-        The action-event row is marked completed immediately before the result
-        row is written. A snapshot in that narrow window has
-        ``status=completed`` but no ``result`` key; treating it as terminal
-        makes ``solet-bridge call`` nondeterministically omit successful output.
-        """
-        deadline = time.monotonic() + poll_timeout_s
-        while True:
-            payload = self.process_result(action_id)
-            status = str(payload.get("status", ""))
-            completed_result_pending = status == "completed" and "result" not in payload
-            if status not in NON_TERMINAL_STATUSES and not completed_result_pending:
-                return payload
-            if time.monotonic() >= deadline:
-                raise BridgeResultTimeoutError(
-                    f"action {action_id} still '{status}' after {poll_timeout_s:.0f}s",
-                )
-            time.sleep(POLL_INTERVAL_S)
+class _JobWaiter:
+    """Poll and release a born-async job on the same originating bridge."""
 
     def await_job(
-        self,
+        self: _JobHttp,
         job_id: str,
         *,
         job_timeout_s: float = DEFAULT_JOB_TIMEOUT_S,
@@ -479,17 +380,142 @@ class BridgeClient(_QueueFreePeerReads):
                 )
             time.sleep(JOB_POLL_INTERVAL_S)
 
+    def release_job_waiter(self: _JobHttp, job_id: str) -> dict[str, Any]:
+        """One owner-authenticated release attempt, without retry or cancellation."""
+        return self._post(f"{API_PREFIX}/{self._require_bridge()}/job/{quote(job_id, safe='')}/waiter/release", {})
+
+
+class BridgeClient(_QueueFreePeerReads, _JobWaiter):
+    """One-shot synchronous client over a solet's bridge HTTP surface."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        transport: httpx.BaseTransport | None = None,
+        request_timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
+        caller_agent_session_id: str = "",
+    ) -> None:
+        self._client = httpx.Client(
+            base_url=base_url.rstrip("/"),
+            timeout=request_timeout_s,
+            transport=transport,
+        )
+        self._bridge_id: str | None = None
+        self._caller_agent_session_id = caller_agent_session_id
+
+    def __enter__(self) -> BridgeClient:
+        self.open()
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _tb: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    def open(self) -> str:
+        """Open a bridge session and remember its id.
+
+        ``caller_agent_session_id`` rides the open body as ATTRIBUTION ONLY: the
+        server stores the opaque key on its in-memory bridge state and resolves
+        it against the peer registry when stamping a send's sender, so a
+        CLI-originated message is attributed to the session that ran the command
+        instead of ``System (Scheduler)`` (§34.6). It is NOT a registration —
+        registering this one-shot bridge under the caller's identity would sweep
+        the caller's own registry row by ``session_label`` and then delete it
+        again at close, black-holing the session's receive path.
+        """
+        body: dict[str, Any] = {"parent_pid": os.getpid()}
+        # Main-seat R2 (2026-11-08) reverses the 2026-07-15 no-session-cwd
+        # ruling: caller directories are location inputs, held only in memory.
+        launch_directory = os.environ.get("SOLET_LAUNCH_DIRECTORY")
+        body["launch_directory"] = {"path": launch_directory if launch_directory is not None else os.getcwd(), "source": "launcher" if launch_directory is not None else "cwd_fallback"}
+        if self._caller_agent_session_id:
+            body["caller_agent_session_id"] = self._caller_agent_session_id
+        payload = self._post(f"{API_PREFIX}/open", body)
+        bridge_id = payload.get("bridge_id")
+        if not isinstance(bridge_id, str):
+            raise BridgeCallError(f"bridge open returned no bridge_id: {payload!r}")
+        self._bridge_id = bridge_id
+        return bridge_id
+
+    def close(self) -> None:
+        """Close the bridge (best-effort) and dispose the HTTP client.
+
+        Teardown never masks a result already obtained by the caller, so an
+        HTTP error while closing is swallowed — the httpx client is closed
+        regardless.
+        """
+        bridge_id, self._bridge_id = self._bridge_id, None
+        try:
+            if bridge_id is not None:
+                self._post(f"{API_PREFIX}/{bridge_id}/close", {})
+        except httpx.HTTPError:
+            pass
+        finally:
+            self._client.close()
+
+    def call_and_wait(
+        self,
+        process_key: str,
+        arguments: dict[str, Any],
+        *,
+        reason: str | None = None,
+        poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
+        bridge_wait_attached: bool = False,
+    ) -> dict[str, Any]:
+        """Dispatch a process and poll until its result payload is available."""
+        dispatch = self.process_call(process_key, arguments, reason=reason, bridge_wait_attached=bridge_wait_attached)
+        action_id = dispatch.get("action_id")
+        if not isinstance(action_id, str):
+            raise BridgeCallError(
+                f"process_call returned no action_id: {dispatch!r}",
+            )
+        return self.wait_for_result(action_id, poll_timeout_s=poll_timeout_s)
+
+    def wait_for_result(
+        self,
+        action_id: str,
+        *,
+        poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
+    ) -> dict[str, Any]:
+        """Poll until the action is terminal and its completed result is stored.
+
+        The action-event row is marked completed immediately before the result
+        row is written. A snapshot in that narrow window has
+        ``status=completed`` but no ``result`` key; treating it as terminal
+        makes ``solet-bridge call`` nondeterministically omit successful output.
+        """
+        deadline = time.monotonic() + poll_timeout_s
+        while True:
+            payload = self.process_result(action_id)
+            status = str(payload.get("status", ""))
+            completed_result_pending = status == "completed" and "result" not in payload
+            if status not in NON_TERMINAL_STATUSES and not completed_result_pending:
+                return payload
+            if time.monotonic() >= deadline:
+                raise BridgeResultTimeoutError(
+                    f"action {action_id} still '{status}' after {poll_timeout_s:.0f}s",
+                )
+            time.sleep(POLL_INTERVAL_S)
+
     def process_call(
         self,
         process_key: str,
         arguments: dict[str, Any],
         *,
         reason: str | None = None,
+        bridge_wait_attached: bool = False,
     ) -> dict[str, Any]:
         """Zero-inference dispatch; returns the correlation envelope."""
         body: dict[str, Any] = {"process_key": process_key, "arguments": arguments}
         if reason is not None:
             body["reason"] = reason
+        if bridge_wait_attached:
+            body["bridge_wait_attached"] = True
         return self._post(f"{API_PREFIX}/{self._require_bridge()}/process/call", body)
 
     def process_result(self, action_id: str) -> dict[str, Any]:

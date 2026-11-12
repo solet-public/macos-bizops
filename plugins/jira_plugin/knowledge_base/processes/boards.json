@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::jira_plugin::boards",
+  "display_name": "Jira: Boards",
+  "description": "Run the complete Jira boards API family on one bound site. Vendor RBAC controls reads, writes and deletes. Choose operation; path/query/body use vendor field names and preserve every optional field. Returns job_id/status queued; completion includes site, HTTP status, native response and next_query. Operations: createBoard, deleteBoard, deleteBoardProperty, getAllBoards, getAllQuickFilters, getAllSprints, getAllVersions, getApproximateIssueCountForBacklog, getApproximateIssueCountForBoard, getBoard, getBoardByFilterId, getBoardIssuesForEpic, getBoardIssuesForEpicJSIS, getBoardIssuesForSprint, getBoardIssuesForSprintJSIS, getBoardProperty, getBoardPropertyKeys, getConfiguration, getEpics, getFeaturesForBoard, getIssuesForBacklog, getIssuesForBacklogJSIS, getIssuesForBoard, getIssuesForBoardJSIS, getIssuesWithoutEpicForBoard, getIssuesWithoutEpicForBoardJSIS, getProjects, getProjectsFull, getQuickFilter, getReportsForBoard, moveIssuesToBoard, setBoardProperty, toggleFeatures. Exact shapes: vendor_operations.json, derived from the linked Atlassian OpenAPI specifications. Spec correction: Atlassian Software OpenAPI types getAllBoards.type and getAllSprints.state as empty objects, but the vendor parameter prose lists scrum/kanban/simple and future/active/closed values. Scalar, comma-separated and list forms are accepted and sent as comma-separated filters. Software fields item schemas are likewise empty objects while the prose describes field names; string/comma-separated/list-of-string forms are accepted. Evidence: https://developer.atlassian.com/cloud/jira/software/rest/api-group-board/ and https://developer.atlassian.com/cloud/jira/software/rest/api-group-sprint/ plus the pinned Software specification (sha256 4e108d54b99064475c6ba0f986cce46dcace81336e034b58a5400b93174b927a). These are explicit advisory corrections; the original inventory is preserved. body_json is an alternative JSON text parameter for scalar/array/null property values; mutually exclusive with body.",
+  "embedding_description": "Work with Jira boards on a selected Atlassian site, including the complete vendor lifecycle, mutations and deletes where available. Select a documented operation and pass vendor path, query and body fields; queued completion reports the site, native response and pagination for follow-up.",
+  "result_processor_customizations": {
+    "action_label": "Jira boards queued",
+    "result_type": "jira_boards_result",
+    "result_description": "Queued job_id/status and site; completion includes site, operation, status, response and next_query.",
+    "presentation_guidance": "Queued does not prove the vendor applied a write. Report vendor results and errors; follow next_query or native cursor for another page."
+  },
+  "error_processor_customizations": {
+    "action_context": "Jira boards operation",
+    "error_interpretation": "jira.invalid_params for invalid vendor shapes; auth_failed/permission_denied/not_found/conflict/rate_limited for vendor status; unknown_site for missing binding.",
+    "recovery_guidance": "Verify site and vendor permissions, correct fields and honor Retry-After. Do not retry mutations without checking their result.",
+    "retryable": false
+  }
+}

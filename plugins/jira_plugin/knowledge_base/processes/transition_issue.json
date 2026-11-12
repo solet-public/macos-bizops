@@ -1,7 +1,7 @@
 {
   "process_key": "plugin::jira_plugin::transition_issue",
   "display_name": "Jira: Transition Issue",
-  "description": "Move a Jira issue through a workflow transition (by transition id from list_transitions), optionally adding a comment. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the transition being applied; the new status is delivered when the job completes. Write action.",
+  "description": "Move a Jira issue through a workflow transition (by transition id from list_transitions), optionally adding a comment. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the transition being applied; the new status is delivered when the job completes. Write action. Optional site selects a bound Atlassian site; omitted uses the default. Queued and completed results identify the site.",
   "embedding_description": "Apply a chosen workflow transition id to an existing Jira issue, moving the ticket from its current status to the transition's target status and optionally posting a comment during the move. Executes in the background after an immediate job_id acknowledgment; the resulting status is confirmed once applied. The workflow-state write for a selected transition.",
   "result_processor_customizations": {
     "action_label": "Jira issue transition queued",

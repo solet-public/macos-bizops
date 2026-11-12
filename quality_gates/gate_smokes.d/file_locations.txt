@@ -1,0 +1,4 @@
+# File locations A1: resolver, path lifecycle and hydration.
+ananta/tests/file_locations/resolution_smoke.py
+plugins/default_address_book_plugin/tests/path_address_resolution_smoke.py
+plugins/github_midwife_plugin/tests/solet_home_hydration_smoke.py

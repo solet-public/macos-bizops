@@ -1,12 +1,12 @@
 {
   "process_key": "service_interface::memory_service::memory_stats",
   "display_name": "Memory Statistics",
-  "description": "Get statistics about long-term memories: total count, breakdown by type (episodic, semantic), by status (active, archived), and strength distribution. Use this when user asks 'how many memories', 'memory stats', or 'memory statistics'.",
+  "description": "Return a queued owned-job receipt (data.job_id and data.status). Read the exact id through job_service.get_job for the complete former response in job.result or the typed failure in job.error. Admission retains payload references locally; uncertain effects require reconciliation and must never be replayed automatically.\n\nGet statistics about long-term memories: total count, breakdown by type (episodic, semantic), by status (active, archived), and strength distribution. Use this when user asks 'how many memories', 'memory stats', or 'memory statistics'.",
   "embedding_description": "",
   "result_processor_customizations": {
     "action_label": "Memory Statistics",
     "result_type": "memory_statistics",
-    "result_description": "Statistics about long-term memories including total count, breakdown by type and status, and strength distribution",
+    "result_description": "The complete memory-operation response from the exact admitted job; the immediate response is a queued job receipt.",
     "presentation_guidance": "",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },
@@ -14,5 +14,6 @@
     "action_context": "Retrieving statistics about the long-term memory store",
     "error_interpretation": "DatabaseError: failed to query memory statistics from storage.",
     "recovery_guidance": "For database errors: verify state and vector storage are accessible."
-  }
+  },
+  "is_async": true
 }

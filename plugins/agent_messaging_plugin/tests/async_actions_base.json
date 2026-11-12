@@ -1,0 +1,60 @@
+{
+  "base_commit": "a0c1d06dba9e525ba89143146b73fc19ce1d14c5",
+  "outputs": {
+    "agent_messaging_plugin.reconcile_ledger_tmux.error": {
+      "action_status": "error",
+      "error": "fixture transport failure"
+    },
+    "agent_messaging_plugin.reconcile_ledger_tmux.success": {
+      "action_status": "completed",
+      "actions": [],
+      "data": {
+        "advisories": [],
+        "atomic_snapshot": false,
+        "complete": true,
+        "ended_at": "<time>",
+        "ledger_sources": [
+          {
+            "complete": true,
+            "continuation": null,
+            "ended_at": "<time>",
+            "host": "tmux",
+            "rows_read": 0,
+            "started_at": "<time>",
+            "status": "ok"
+          },
+          {
+            "complete": true,
+            "continuation": null,
+            "ended_at": "<time>",
+            "host": "operator",
+            "rows_read": 0,
+            "started_at": "<time>",
+            "status": "ok"
+          }
+        ],
+        "limits": {
+          "ledger_rows": 500,
+          "native_rows": 2000,
+          "output_bytes": 262144,
+          "timeout_seconds": 5
+        },
+        "native_source": {
+          "complete": true,
+          "detail": "",
+          "ended_at": "<time>",
+          "panes": [],
+          "rejected_rows": [],
+          "returncode": 0,
+          "started_at": "<time>",
+          "status": "ok"
+        },
+        "observations": [],
+        "started_at": "<time>"
+      },
+      "error": null,
+      "timestamp": "<time>"
+    }
+  },
+  "public_service": {}
+}

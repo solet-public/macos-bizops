@@ -1,0 +1,1 @@
+# not shipped: quality_gates/tests/temp_directory_census_smoke.py requires plugins/seed_factory_plugin/src/seed_factory_plugin; fixture_build_tooling for the shared detector and production census.

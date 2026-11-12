@@ -98,6 +98,10 @@ mcp__<server-name>__process_result(action_id="act-...")
   → the structured payload, or an in-progress / error status
 ```
 
+For a job receipt, a finished job returns its result or error; a running job
+returns its status and `next_read`. The HTTP route follows a job only with
+`?follow_job=true`; the CLI does not send that parameter and waits itself.
+
 ### Bridge-delivery EDGE_SINK pair
 
 The result/error route uses the plugin's own EDGE_SINK pair:

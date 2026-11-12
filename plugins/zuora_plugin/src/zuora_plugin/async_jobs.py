@@ -25,7 +25,9 @@ in-memory bearer-token cache (``ZuoraClient._token`` / unlocked
 check-then-set, mirroring the doctrine's named marketo/salesforce caution)
 was never built for.
 
-ONE worker thread, never more, by design: ``FlowManager._sequence_cache`` is
+Dispatch may read cached credential metadata for error scrubbing; it never
+resolves or mints authentication or performs client I/O. ONE worker thread,
+never more, by design: ``FlowManager._sequence_cache`` is
 an unlocked ``dict`` (doctrine §2) — two callers submitting completion
 actions into the SAME flow concurrently can lose an update. A single worker
 thread keeps this plugin safe the same way it keeps comfyui and
@@ -48,6 +50,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from ananta.constants import CONTEXT_KEY_FLOW_ID, CONTEXT_KEY_SESSION_ID
+from ananta.file_locations.containment import job_location_session, location_session
 
 from . import billing_actions, completion_templates, request_actions
 from .constants import ERROR_API_ERROR, PLUGIN_NAME
@@ -167,8 +170,8 @@ def _worker_loop(plugin: ZuoraPlugin) -> None:
     while True:
         try:
             _drain_queued_jobs(plugin)
-        except Exception:  # the loop must never die — a bad pass still yields the next one
-            logger.exception("%s async worker: drain pass failed", PLUGIN_NAME)
+        except Exception:  # never render an unknown exception/payload into the audit log
+            logger.error("Zuora async worker: drain pass failed.")
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
@@ -189,7 +192,17 @@ def _drain_queued_jobs(plugin: ZuoraPlugin) -> None:
                 _process_job(plugin, async_job_manager, job_id, action_name)
 
 
-def _process_job(
+def _process_job(plugin: ZuoraPlugin, async_job_manager: Any, job_id: str, action_name: str) -> None:
+    """Bind only this job's originating session; absent metadata is advisory."""
+    try:
+        record = async_job_manager.get_job(job_id)
+    except Exception:
+        record = None
+    with location_session(job_location_session(record)):
+        _process_job_in_context(plugin, async_job_manager, job_id, action_name)
+
+
+def _process_job_in_context(
     plugin: ZuoraPlugin,
     async_job_manager: Any,
     job_id: str,
@@ -197,28 +210,23 @@ def _process_job(
 ) -> None:
     """Run one job's real Zuora REST I/O and complete it. Runs on the ONE worker thread only."""
     async_job_manager.update_job(job_id, {"status": "processing"})
-    payload_result = async_job_manager.get_job_payload(job_id, "request")
+    try:
+        payload_result = async_job_manager.get_job_payload(job_id, "request")
+    except Exception:
+        payload_result = {"action_status": "error"}
     if payload_result.get("action_status") != "completed":
-        async_job_manager.update_job(
-            job_id,
-            {
-                "status": "error",
-                "error": {
-                    "code": ERROR_API_ERROR,
-                    "message": "could not load the job's request payload",
-                },
-            },
-        )
-        return
-    params = payload_result.get("data", {}).get("payload", {})
-    action_fn, needs_export_gate = ACTION_HANDLERS[action_name]
-    if needs_export_gate:
-        outcome = plugin._run(
-            lambda client: action_fn(client, params, plugin._export_path_gate),
-            action_name,
-        )
+        outcome = plugin._error(ERROR_API_ERROR, "could not load the job's request payload")
     else:
-        outcome = plugin._run(lambda client: action_fn(client, params), action_name)
+        params = payload_result.get("data", {}).get("payload", {})
+        action_fn, needs_export_gate = ACTION_HANDLERS[action_name]
+        if needs_export_gate:
+            outcome = plugin._run(
+                lambda client: action_fn(client, params, plugin._export_path_gate),
+                action_name,
+                params,
+            )
+        else:
+            outcome = plugin._run(lambda client: action_fn(client, params), action_name, params)
     if outcome.get("action_status") == "completed":
         async_job_manager.update_job(job_id, {"status": "completed", "result": outcome.get("data", {})})
     else:

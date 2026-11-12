@@ -1,14 +1,14 @@
 {
   "process_key": "plugin::postgres_state_management_plugin::execute_sql",
   "display_name": "Execute SQL (Postgres)",
-  "description": "Execute raw SQL query on PostgreSQL database. Use with caution - supports parameterized queries.",
-  "embedding_description": "Execute raw SQL against the PostgreSQL state database with optional parameters. Use for advanced queries not supported by the read/write API. Requires valid SQL and permissions. Returns records and count; use cautiously.",
+  "description": "Admit raw PostgreSQL query execution through the owned job worker. Returns data.job_id and data.status; read the exact job id with job_service.get_job for the complete records/count response or typed failure.",
+  "embedding_description": "Execute parameterized SQL on PostgreSQL through one owned job operation shared with state_service.execute_sql. The registered endpoint returns an AsyncJobManager receipt before SQL runs. Use job_service.get_job with the canonical id; job.result contains the complete original ActionResult with records and count and job.error retains failures. Direct internal execute_sql remains synchronous.",
   "result_processor_customizations": {
     "action_label": "Execute SQL",
     "result_type": "sql_results",
-    "result_description": "Raw SQL query execution results with records and count",
+    "result_description": "Completed SQL job outcome containing the original records/count response; initial dispatch returns only a job receipt",
     "presentation_guidance": "",
-    "output_action_guidance": "Determine the appropriate next action based on the context and action result."
+    "output_action_guidance": "Retain data.job_id and read service_interface::job_service::get_job until terminal. Read records from job.result.data and handle job.error before continuing."
   },
   "error_processor_customizations": {
     "action_context": "Executing raw SQL query on PostgreSQL database",

@@ -1,0 +1,1 @@
+# Born-async musical synthesis: owned SF2, real dispatch and job lifecycle.

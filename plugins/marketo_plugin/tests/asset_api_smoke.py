@@ -3,13 +3,12 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import sys
 import unittest
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote, quote_plus
+from urllib.parse import parse_qs
 
 import httpx
 
@@ -17,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins/marketo_plugin/src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from lead_database_objects_smoke import SECRET, STATE, _VendorTranscriptCase  # noqa: E402  # pyright: ignore[reportMissingImports]
+from lead_database_objects_smoke import STATE, _VendorTranscriptCase  # noqa: E402  # pyright: ignore[reportMissingImports]
 from marketo_plugin import asset_api, asset_process_metadata, completion_templates  # noqa: E402
 from marketo_plugin.constants import CHECK_SETUP_UNVERIFIED_WRITE_VERBS  # noqa: E402
 from marketo_plugin.plugin import MarketoPlugin  # noqa: E402
@@ -239,29 +238,6 @@ class AssetApiTests(_VendorTranscriptCase):
             result, _ = self._run_job("delete_asset_folder", {"folder_id": 416, "folder_type": "Folder"})
             self.assertEqual(result["status"], "error")
             self.assertEqual(result["error"]["code"], code)
-
-    def test_redaction_covers_all_issued_tokens_and_encoded_forms_in_exports_and_errors(self) -> None:
-        secrets = [SECRET, "minted-token-1", "minted-token-2"]
-        variants = [variant for secret in secrets for variant in (secret, quote(secret, safe=""), quote_plus(secret), base64.b64encode(secret.encode()).decode(), base64.urlsafe_b64encode(secret.encode()).decode().rstrip("="))]
-        text = " | ".join(variants)
-
-        def vendor(_: httpx.Request) -> httpx.Response:
-            if self.mints == 1:
-                return httpx.Response(200, json={"success": False, "errors": [{"code": "602", "message": "Expired"}]})
-            payload = _envelope([_folder(name=text)])
-            payload["warnings"] = [text]
-            return httpx.Response(200, json=payload)
-
-        self.vendor = vendor
-        result, _ = self._run_job("get_asset_folder", {"folder_id": 416, "folder_type": "Folder", "output_tsv_path": self._tsv("safe.tsv")})
-        self.assertEqual(self.mints, 2)
-        exported = json.dumps(result) + Path(result["result"]["path"]).read_text()
-        for variant in variants:
-            self.assertNotIn(variant, exported)
-        self.vendor = lambda _: httpx.Response(200, json={"success": False, "errors": [{"code": "1003", "message": text}]})
-        result, _ = self._run_job("delete_asset_folder", {"folder_id": 416, "folder_type": "Folder"})
-        for variant in variants:
-            self.assertNotIn(variant, json.dumps(result))
 
     def test_asset_completion_has_vendor_envelope_guidance_and_write_permissions_stay_unverified(self) -> None:
         for verb in asset_api.ENDPOINTS:

@@ -3,7 +3,7 @@
 
 Coverage:
 
-* All 12 tables register under namespace ``session_ledger``.
+* All 13 tables register under namespace ``session_ledger``.
 * Every protected standard field (id, namespace, created_at, updated_at,
   created_by, updated_by, is_deleted) is auto-injected by SchemaStandardizer
   and survives the standardization pass on every business table.
@@ -45,6 +45,7 @@ from ananta.llm.session_ledger.schema import (  # noqa: E402
     TABLE_TOOL_CALL,
     get_session_ledger_schema,
 )
+from ananta.llm.session_ledger.session_failures import TABLE_SESSION_FAILURE  # noqa: E402
 from ananta.types.column_types import ColumnType  # noqa: E402
 from ananta.types.schema_standardizer import SchemaStandardizer  # noqa: E402
 from ananta.types.schema_types import (  # noqa: E402
@@ -68,6 +69,7 @@ def _check(condition: object, label: str) -> None:
 
 
 _EXPECTED_TABLES = {
+    TABLE_SESSION_FAILURE,
     TABLE_SOURCE,
     TABLE_SOURCE_CURSOR,
     TABLE_IMPORT_BATCH,
@@ -88,7 +90,7 @@ _PROTECTED = SchemaStandardizer.PROTECTED_STANDARD_FIELDS
 def test_namespace_and_table_set() -> None:
     schema = get_session_ledger_schema()
     _check(schema.namespace == NAMESPACE, "namespace is session_ledger")
-    _check(set(schema.tables.keys()) == _EXPECTED_TABLES, "all 12 tables registered")
+    _check(set(schema.tables.keys()) == _EXPECTED_TABLES, "all 13 tables registered")
     _check(schema.version == "1.0.0", "version is 1.0.0")
 
 

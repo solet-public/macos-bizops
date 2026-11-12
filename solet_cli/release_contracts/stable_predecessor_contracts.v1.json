@@ -56,6 +56,10 @@
     {
       "flow_source_revision": "50383f0be56e771183be362300144c975c586ddf",
       "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
+    },
+    {
+      "flow_source_revision": "d7b0fcc9b15cba1110dcc13568022c0d85700e8a",
+      "flow_contract_digest": "sha256:ce20096b3746db9363af96eb0416dd65d2bee96dac615e06c1d6f4d5e5bfd148"
     }
   ]
 }

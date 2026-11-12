@@ -61,6 +61,7 @@ from ananta.core.actions.action_metadata import (
 from ananta.core.domain.enums import ProcessorPolicyCategory
 from ananta.core.services.call_context import CallContext
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.async_job_manager import registered_job_return_schema
 from ananta.llm.session_ledger.types import (
     IngestSourceKind,
     SessionsOrderBy,
@@ -83,6 +84,7 @@ class SessionLedgerReadAPI(ABC):
     """
 
     @service_interface_process(
+        is_async=True,
         name="session_usage_totals",
         provider=_PROVIDER,
         is_discoverable=True,
@@ -93,20 +95,22 @@ class SessionLedgerReadAPI(ABC):
             "until": ParameterMetadata(type=ParameterType.STRING, required=False, description="Inclusive ISO-8601 event window upper bound."),
             "vendor": ParameterMetadata(type=ParameterType.STRING, required=False, description="Harness vendor; required for bounded window enumeration without ids."),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Usage totals with unknown models retained and incomplete walks disclosed.",
-            properties={
-                "sessions": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="One eligible sibling per resolved runtime, with proven Codex UUID as runtime_session_id. event_count/usage_event_count cover all qualifying window records on a complete walk; capped walks return observed counts with partial status and advisories. Codex tokens are latest cumulative minus pre-window baseline, never summed snapshots. Includes by_model, event bounds, adapter/adapter_notes, last_poll_at, meter and sibling_rows_resolved.",
-                ),
-                "status": ParameterMetadata(type=ParameterType.STRING, description="complete, partial, or unknown:bounded."),
-                "not_found": ParameterMetadata(type=ParameterType.LIST, description="Requested ids with no live row or proven alias. Unlabelled Codex rows retain exact-id reads with an identity advisory."),
-                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Counted unavailable-data and bounded-walk notices."),
-                "overflow": ParameterMetadata(type=ParameterType.BOOLEAN, description="Enumeration proved a 201st distinct resolved runtime; aliases do not count twice."),
-                "sessions_at_least": ParameterMetadata(type=ParameterType.INTEGER, description="Observed lower bound, never an exact overflow count."),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Usage totals with unknown models retained and incomplete walks disclosed.",
+                properties={
+                    "sessions": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="One eligible sibling per resolved runtime, with proven Codex UUID as runtime_session_id. event_count/usage_event_count cover all qualifying window records on a complete walk; capped walks return observed counts with partial status and advisories. Codex tokens are latest cumulative minus pre-window baseline, never summed snapshots. Includes by_model, event bounds, adapter/adapter_notes, last_poll_at, meter and sibling_rows_resolved.",
+                    ),
+                    "status": ParameterMetadata(type=ParameterType.STRING, description="complete, partial, or unknown:bounded."),
+                    "not_found": ParameterMetadata(type=ParameterType.LIST, description="Requested ids with no live row or proven alias. Unlabelled Codex rows retain exact-id reads with an identity advisory."),
+                    "advisories": ParameterMetadata(type=ParameterType.LIST, description="Counted unavailable-data and bounded-walk notices."),
+                    "overflow": ParameterMetadata(type=ParameterType.BOOLEAN, description="Enumeration proved a 201st distinct resolved runtime; aliases do not count twice."),
+                    "sessions_at_least": ParameterMetadata(type=ParameterType.INTEGER, description="Observed lower bound, never an exact overflow count."),
+                },
+            )
         ),
     )
     @abstractmethod
@@ -121,30 +125,33 @@ class SessionLedgerReadAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="list_sources",
         is_discoverable=True,
         provider=_PROVIDER,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Registered ingest sources joined with their plugin descriptors.",
-            type=ParameterType.OBJECT,
-            properties={
-                "sources": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=(
-                        "List of entries each carrying descriptor fields "
-                        "(source_kind, vendor, supported_modes, "
-                        "default_lease_ttl_seconds, default_pulling_root_uri) "
-                        "plus DB-row fields (source_id, root_uri, "
-                        "account_label, enabled, config_json). Loaded "
-                        "plugins with no registered row surface "
-                        "descriptor-only (DB fields null); registered rows "
-                        "with no loaded plugin surface DB-only (descriptor "
-                        "fields null)."
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Registered ingest sources joined with their plugin descriptors.",
+                type=ParameterType.OBJECT,
+                properties={
+                    "sources": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=(
+                            "List of entries each carrying descriptor fields "
+                            "(source_kind, vendor, supported_modes, "
+                            "default_lease_ttl_seconds, default_pulling_root_uri) "
+                            "plus DB-row fields (source_id, root_uri, "
+                            "account_label, enabled, config_json). Loaded "
+                            "plugins with no registered row surface "
+                            "descriptor-only (DB fields null); registered rows "
+                            "with no loaded plugin surface DB-only (descriptor "
+                            "fields null)."
+                        ),
                     ),
-                ),
-            },
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="List Session Sources",
@@ -158,48 +165,51 @@ class SessionLedgerReadAPI(ABC):
         """Return ingest source descriptors joined with their DB-registered rows."""
 
     @service_interface_process(
+        is_async=True,
         name="census",
         is_discoverable=True,
         provider=_PROVIDER,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description=("SQL-aggregated read-only inventory of the entire ledger: per source counts, batch health, normalized root_uri, and an order-independent row-identity fingerprint, plus corpus totals and the duplicate-source-group count."),
-            type=ParameterType.OBJECT,
-            properties={
-                "sources": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=("One entry per live source: {source_id, source_kind, root_uri, normalized_root_uri, session_count, canonical_count, sibling_count, event_count, tool_call_count, row_identity_fingerprint, owned_running_batches, unclaimed_route_batches, oldest_running_batch_age_seconds}."),
-                ),
-                "source_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of live source rows.",
-                ),
-                "duplicate_source_groups": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Count of (source_kind, normalized root_uri) keys with more than one live row (the dedup invariant: must be 0)."),
-                ),
-                "total_sessions": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Live sessions across all sources.",
-                ),
-                "total_events": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Live events across all sources.",
-                ),
-                "total_tool_calls": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Live tool calls across all sources.",
-                ),
-                "total_owned_running_batches": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Lease-owned running batches (must be 0 after a synchronous ingest).",
-                ),
-                "total_unclaimed_route_batches": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Unclaimed route batches (orphans once the legacy push survivor is swept).",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("SQL-aggregated read-only inventory of the entire ledger: per source counts, batch health, normalized root_uri, and an order-independent row-identity fingerprint, plus corpus totals and the duplicate-source-group count."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "sources": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("One entry per live source: {source_id, source_kind, root_uri, normalized_root_uri, session_count, canonical_count, sibling_count, event_count, tool_call_count, row_identity_fingerprint, owned_running_batches, unclaimed_route_batches, oldest_running_batch_age_seconds}."),
+                    ),
+                    "source_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Number of live source rows.",
+                    ),
+                    "duplicate_source_groups": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Count of (source_kind, normalized root_uri) keys with more than one live row (the dedup invariant: must be 0)."),
+                    ),
+                    "total_sessions": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Live sessions across all sources.",
+                    ),
+                    "total_events": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Live events across all sources.",
+                    ),
+                    "total_tool_calls": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Live tool calls across all sources.",
+                    ),
+                    "total_owned_running_batches": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Lease-owned running batches (must be 0 after a synchronous ingest).",
+                    ),
+                    "total_unclaimed_route_batches": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Unclaimed route batches (orphans once the legacy push survivor is swept).",
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Ledger Census",
@@ -213,6 +223,7 @@ class SessionLedgerReadAPI(ABC):
         """Return a whole-ledger SQL-aggregated read-only inventory."""
 
     @service_interface_process(
+        is_async=True,
         name="corpus_counts",
         display_name="Ledger Corpus Counts",
         description="Count all nondeleted event rows owned by the session ledger in one scalar StateManagementInterface count. The scope includes events from every source and canonical or sibling session, including events from disabled sources. It returns a fixed-size response with UTC observation bounds. A failed or malformed count is reported as unavailable with an advisory, never as zero. COUNT database work still grows with the matching corpus.",
@@ -221,18 +232,20 @@ class SessionLedgerReadAPI(ABC):
         provider=_PROVIDER,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="One scalar count of nondeleted session-ledger events across all sources and canonical/sibling sessions.",
-            properties={
-                "schema_version": ParameterMetadata(type=ParameterType.INTEGER, description="Response schema version, currently 1."),
-                "scope": ParameterMetadata(type=ParameterType.STRING, description="Fixed event-row scope, including all sources and sibling sessions."),
-                "observed_from": ParameterMetadata(type=ParameterType.STRING, description="UTC instant immediately before the scalar count."),
-                "observed_until": ParameterMetadata(type=ParameterType.STRING, description="UTC instant immediately after the scalar count."),
-                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Exact nonnegative row count when complete; null when unavailable."),
-                "complete": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the exact scalar count was available."),
-                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Bounded notices for an unavailable scalar count."),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="One scalar count of nondeleted session-ledger events across all sources and canonical/sibling sessions.",
+                properties={
+                    "schema_version": ParameterMetadata(type=ParameterType.INTEGER, description="Response schema version, currently 1."),
+                    "scope": ParameterMetadata(type=ParameterType.STRING, description="Fixed event-row scope, including all sources and sibling sessions."),
+                    "observed_from": ParameterMetadata(type=ParameterType.STRING, description="UTC instant immediately before the scalar count."),
+                    "observed_until": ParameterMetadata(type=ParameterType.STRING, description="UTC instant immediately after the scalar count."),
+                    "count": ParameterMetadata(type=ParameterType.INTEGER, description="Exact nonnegative row count when complete; null when unavailable."),
+                    "complete": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the exact scalar count was available."),
+                    "advisories": ParameterMetadata(type=ParameterType.LIST, description="Bounded notices for an unavailable scalar count."),
+                },
+            )
         ),
     )
     @abstractmethod
@@ -240,6 +253,7 @@ class SessionLedgerReadAPI(ABC):
         """Return a fixed-size scalar count of the live event corpus."""
 
     @service_interface_process(
+        is_async=True,
         name="list_sessions",
         is_discoverable=True,
         provider=_PROVIDER,
@@ -319,15 +333,17 @@ class SessionLedgerReadAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Ingested sessions, ordered per order_by (default last_event_at DESC).",
-            type=ParameterType.OBJECT,
-            properties={
-                "sessions": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="List of session row dicts.",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Ingested sessions, ordered per order_by (default last_event_at DESC).",
+                type=ParameterType.OBJECT,
+                properties={
+                    "sessions": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="List of session row dicts.",
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="List Sessions",
@@ -353,20 +369,23 @@ class SessionLedgerReadAPI(ABC):
         """Paginated session list with structured filters + ordering (M17 §2.2)."""
 
     @service_interface_process(
+        is_async=True,
         name="list_active_sessions",
         is_discoverable=True,
         provider=_PROVIDER,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Sessions whose lease has not expired.",
-            type=ParameterType.OBJECT,
-            properties={
-                "sessions": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="List of active session rows joined to lease.",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Sessions whose lease has not expired.",
+                type=ParameterType.OBJECT,
+                properties={
+                    "sessions": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="List of active session rows joined to lease.",
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="List Active Sessions",
@@ -488,6 +507,7 @@ class SessionLedgerReadAPI(ABC):
         """Tool-call projection query."""
 
     @service_interface_process(
+        is_async=True,
         name="list_canonical_contributors",
         is_discoverable=True,
         provider=_PROVIDER,
@@ -499,31 +519,33 @@ class SessionLedgerReadAPI(ABC):
                 required=True,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=("Per-source contributor rows for a canonical session's logical conversation (W5.B §3.3)."),
-            type=ParameterType.OBJECT,
-            properties={
-                "canonical_session_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=("Canonical row's ledger session id (les-...). None when the canonical row has been soft-deleted (orphaned-canonical case); inspect ``orphaned_canonical`` to discriminate."),
-                ),
-                "canonical_external_session_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=("Shared vendor external_session_id (the dedupe key value). Always present even when the canonical ledger row is orphaned, because siblings carry the same external_session_id as the canonical."),
-                ),
-                "vendor": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=("SourceVendor enum value, uniform across every contributor in the (vendor, external_session_id) group."),
-                ),
-                "orphaned_canonical": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description=("True iff no contributor has ``is_canonical=True`` (the canonical row is soft-deleted while siblings remain). Operator detects the anomaly via this flag rather than scanning the contributors list."),
-                ),
-                "contributors": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=("Per-source-row entries: {session_id, source_id, source_kind, first_event_at, last_event_at, contributed_event_count, is_canonical}. Canonical first (when present), then siblings ordered by source_kind ASC."),
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Per-source contributor rows for a canonical session's logical conversation (W5.B §3.3)."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "canonical_session_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=("Canonical row's ledger session id (les-...). None when the canonical row has been soft-deleted (orphaned-canonical case); inspect ``orphaned_canonical`` to discriminate."),
+                    ),
+                    "canonical_external_session_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=("Shared vendor external_session_id (the dedupe key value). Always present even when the canonical ledger row is orphaned, because siblings carry the same external_session_id as the canonical."),
+                    ),
+                    "vendor": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=("SourceVendor enum value, uniform across every contributor in the (vendor, external_session_id) group."),
+                    ),
+                    "orphaned_canonical": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description=("True iff no contributor has ``is_canonical=True`` (the canonical row is soft-deleted while siblings remain). Operator detects the anomaly via this flag rather than scanning the contributors list."),
+                    ),
+                    "contributors": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("Per-source-row entries: {session_id, source_id, source_kind, first_event_at, last_event_at, contributed_event_count, is_canonical}. Canonical first (when present), then siblings ordered by source_kind ASC."),
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="List Canonical Contributors",
@@ -541,6 +563,7 @@ class SessionLedgerQualificationAPI(ABC):
     """Bounded setup qualification backed by the authoritative manager journal."""
 
     @service_interface_process(
+        is_async=True,
         name="qualify_selected_sources",
         is_discoverable=True,
         provider=_PROVIDER,
@@ -562,31 +585,33 @@ class SessionLedgerQualificationAPI(ABC):
                 required=True,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=("Bounded per-source setup facts from the manager transaction and source-local ledger observations; never returns answer or event content."),
-            type=ParameterType.OBJECT,
-            properties={
-                "record_source": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Authoritative record provenance; currently manager_transaction.",
-                ),
-                "target_identity_matched": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="Whether transaction target/name matches the doctor request.",
-                ),
-                "answers_fingerprint_matched": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="Whether the loaded answers fingerprint matches the doctor request.",
-                ),
-                "qualification_reason": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Null on trusted proof, otherwise a bounded negative reason.",
-                ),
-                "sources": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=("At most codex_local and claude_code_local rows: selected, consented, registered, backfill_count, retrieval_ok. Empty when answers are untrusted."),
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Bounded per-source setup facts from the manager transaction and source-local ledger observations; never returns answer or event content."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "record_source": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Authoritative record provenance; currently manager_transaction.",
+                    ),
+                    "target_identity_matched": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="Whether transaction target/name matches the doctor request.",
+                    ),
+                    "answers_fingerprint_matched": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="Whether the loaded answers fingerprint matches the doctor request.",
+                    ),
+                    "qualification_reason": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Null on trusted proof, otherwise a bounded negative reason.",
+                    ),
+                    "sources": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("At most codex_local and claude_code_local rows: selected, consented, registered, backfill_count, retrieval_ok. Empty when answers are untrusted."),
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Qualify Selected Session Sources",
@@ -680,6 +705,7 @@ class SessionLedgerIngestAPI(ABC):
     # ------------------------------------------------------------------
 
     @service_interface_process(
+        is_async=True,
         name="register_source",
         is_discoverable=True,
         provider=_PROVIDER,
@@ -706,19 +732,21 @@ class SessionLedgerIngestAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Source row id, plus an outcome token discriminating new INSERT from idempotent hit.",
-            type=ParameterType.OBJECT,
-            properties={
-                "source_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Source id (src-...); newly minted on 'registered', existing on 'existed'.",
-                ),
-                "outcome": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=("'registered' when a new row was inserted; 'existed' when an existing row matched (source_kind, root_uri). Field name avoids 'action' / 'status' so it doesn't collide with the platform's result-contract validator (matches ensure_periodic_poll_schedule precedent)."),
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Source row id, plus an outcome token discriminating new INSERT from idempotent hit.",
+                type=ParameterType.OBJECT,
+                properties={
+                    "source_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Source id (src-...); newly minted on 'registered', existing on 'existed'.",
+                    ),
+                    "outcome": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=("'registered' when a new row was inserted; 'existed' when an existing row matched (source_kind, root_uri). Field name avoids 'action' / 'status' so it doesn't collide with the platform's result-contract validator (matches ensure_periodic_poll_schedule precedent)."),
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Register Ledger Source",
@@ -755,6 +783,7 @@ class SessionLedgerIngestAPI(ABC):
 
     @service_interface_process(
         name="ingest_raw_chunk",
+        is_async=True,
         is_discoverable=False,  # M1: operator-bridge only. M5: also ingest bridge.
         provider=_PROVIDER,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
@@ -775,19 +804,21 @@ class SessionLedgerIngestAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Per-chunk import report.",
-            type=ParameterType.OBJECT,
-            properties={
-                "events_persisted": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Clean events written.",
-                ),
-                "batch_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Id of the push batch this chunk was written under.",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Per-chunk import report.",
+                type=ParameterType.OBJECT,
+                properties={
+                    "events_persisted": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Clean events written.",
+                    ),
+                    "batch_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Id of the push batch this chunk was written under.",
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Ingest Raw Chunk",
@@ -804,14 +835,74 @@ class SessionLedgerIngestAPI(ABC):
         *,
         source_id: str | None = None,
     ) -> dict[str, Any]:
-        """Push one chunk through the persistence pipeline.
+        """Admit one pushed chunk to the serial ledger owner worker.
 
-        When ``source_id`` is given the push binds to that row and returns its
-        real ``batch_id`` (A2 export bind); otherwise the legacy
-        first-enabled-by-kind resolve-or-create path runs.
+        Registered dispatch returns ``{job_id, status: queued}`` after the
+        request is durable. Read that exact id through ``job_service.get_job``
+        for completion or a typed error; admission does not confirm ingestion.
+        The terminal result contains ``events_persisted`` and the real
+        ``batch_id``. A failed or uncertain job requires inspection before
+        retry because some ledger effects may already have committed.
+
+        Direct Python calls retain the complete synchronous result. With
+        ``source_id`` the push binds to that row (A2 export bind); otherwise
+        first-enabled-by-kind resolve-or-create runs on the owner worker.
         """
 
     @service_interface_process(
+        is_async=True,
+        name="reclaim_orphan_event_text_blobs",
+        is_discoverable=False,
+        provider=_PROVIDER,
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "confirm": ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description="False previews counts without mutation; True irreversibly deletes eligible orphan event-text blobs.",
+            )
+        },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Operator reclaim counts: confirmed, scanned_count, candidate_count, candidate_bytes, deleted_count, deleted_bytes, ambiguous_count, skipped_locked, excluded_count.",
+                properties={
+                    "confirmed": ParameterMetadata(type=ParameterType.BOOLEAN),
+                    **{
+                        name: ParameterMetadata(type=ParameterType.INTEGER)
+                        for name in (
+                            "scanned_count",
+                            "candidate_count",
+                            "candidate_bytes",
+                            "deleted_count",
+                            "deleted_bytes",
+                            "ambiguous_count",
+                            "skipped_locked",
+                            "excluded_count",
+                        )
+                    },
+                },
+            )
+        ),
+        result_processor_customizations=MergeResultProcessorCustomizations(
+            action_label="Reclaim Orphan Event Text",
+            result_type="ledger_event_text_reclaim",
+            result_description="Queued job receipt; inspect the job for reclaim counts.",
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def reclaim_orphan_event_text_blobs(
+        self,
+        confirm: bool = False,
+        *,
+        call_context: CallContext | None = None,
+    ) -> dict[str, Any]:
+        """Dry-run-default, irreversible confirmed reclaim of old orphan text."""
+
+    @service_interface_process(
+        is_async=True,
         name="backfill_export_blob_identity",
         is_discoverable=False,  # operator maintenance verb, not model-discoverable
         provider=_PROVIDER,
@@ -823,51 +914,53 @@ class SessionLedgerIngestAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=("Dry-run preview (confirmed=false) or executed counts (confirmed=true) for the export-blob content-digest backfill."),
-            type=ParameterType.OBJECT,
-            properties={
-                "confirmed": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="Whether mutations were executed.",
-                ),
-                "sources_scanned": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Live export sources examined.",
-                ),
-                "blobs_needing_key": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Dry-run: blobs not yet content-keyed.",
-                ),
-                "sources_needing_repoint": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Dry-run: sources whose blob has a content twin.",
-                ),
-                "orphan_blobs_candidate": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Dry-run: tagged export blobs no live source references.",
-                ),
-                "blobs_keyed": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Confirmed: blobs assigned a content-digest external_id.",
-                ),
-                "sources_repointed": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Confirmed: sources repointed onto a content twin.",
-                ),
-                "export_blobs_deleted": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Confirmed: orphan export blobs reclaimed.",
-                ),
-                "skipped": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Confirmed: sources already content-keyed (no-op).",
-                ),
-                "error_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Confirmed: always 0 (any failure raises instead).",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Dry-run preview (confirmed=false) or executed counts (confirmed=true) for the export-blob content-digest backfill."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "confirmed": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="Whether mutations were executed.",
+                    ),
+                    "sources_scanned": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Live export sources examined.",
+                    ),
+                    "blobs_needing_key": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Dry-run: blobs not yet content-keyed.",
+                    ),
+                    "sources_needing_repoint": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Dry-run: sources whose blob has a content twin.",
+                    ),
+                    "orphan_blobs_candidate": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Dry-run: tagged export blobs no live source references.",
+                    ),
+                    "blobs_keyed": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Confirmed: blobs assigned a content-digest external_id.",
+                    ),
+                    "sources_repointed": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Confirmed: sources repointed onto a content twin.",
+                    ),
+                    "export_blobs_deleted": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Confirmed: orphan export blobs reclaimed.",
+                    ),
+                    "skipped": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Confirmed: sources already content-keyed (no-op).",
+                    ),
+                    "error_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Confirmed: always 0 (any failure raises instead).",
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Backfill Export Blob Identity",
@@ -1041,6 +1134,7 @@ class SessionLedgerPollingDriverAPI(ABC):
         """
 
     @service_interface_process(
+        is_async=True,
         name="poll_source",
         is_discoverable=False,  # operator-bridge + in-process callers (export kickoff, repair)
         provider=_PROVIDER,
@@ -1052,27 +1146,29 @@ class SessionLedgerPollingDriverAPI(ABC):
                 required=True,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=("One importer poll pass over exactly the named source. Raises (LedgerPollError) on a missing/deleted/disabled source, a non-pulling source, lease contention, or any source-pass failure — a single failure channel, never a silent zero."),
-            type=ParameterType.OBJECT,
-            properties={
-                "sources_polled": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Always 1 on success (the named source).",
-                ),
-                "sessions_seen": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="External sessions yielded by discover_sessions().",
-                ),
-                "events_persisted": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Clean events written.",
-                ),
-                "batches_failed": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Always 0 on success (failure raises instead).",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("One importer poll pass over exactly the named source. Raises (LedgerPollError) on a missing/deleted/disabled source, a non-pulling source, lease contention, or any source-pass failure — a single failure channel, never a silent zero."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "sources_polled": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Always 1 on success (the named source).",
+                    ),
+                    "sessions_seen": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="External sessions yielded by discover_sessions().",
+                    ),
+                    "events_persisted": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Clean events written.",
+                    ),
+                    "batches_failed": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Always 0 on success (failure raises instead).",
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Poll Ledger Source",
@@ -1159,6 +1255,7 @@ class SessionLedgerPollingDriverAPI(ABC):
         """
 
     @service_interface_process(
+        is_async=True,
         name="reset_ingest_state",
         is_discoverable=False,  # operator-only; not model-discoverable
         provider=_PROVIDER,
@@ -1179,51 +1276,53 @@ class SessionLedgerPollingDriverAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=("Non-destructive cursor-reset outcome. The reset clears every source's ``__source_cursor`` rows so the next poll replays + the ``(session_id, external_id)`` upsert reconverges; no content is deleted."),
-            type=ParameterType.OBJECT,
-            properties={
-                "confirmed": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when the cursor reset actually ran.",
-                ),
-                "action": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=("Always ``cursor_reset_replay`` — names the non-destructive replay-and-reconverge semantics."),
-                ),
-                "content_preserved": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description=("Always True — content tables (session/event/tool_call/attachment/import_batch) and leases are never deleted."),
-                ),
-                "sources_total": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of sources processed (all sources).",
-                ),
-                "active_cursor_count_before": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Total active ``__source_cursor`` rows across all sources at the start of the call — the cursors that were (confirm) / would be (dry-run) cleared."),
-                ),
-                "deleted_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Total cursor rows cleared across all sources. Zero on the dry-run path; equals ``active_cursor_count_before`` on a confirmed run."),
-                ),
-                "per_source": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=("Per-source breakdown; each entry carries {source_id, active_cursor_count_before, deleted_count}."),
-                ),
-                "preserved_content": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=("Dry-run path only — live row counts of the content tables the reset PRESERVES; each entry carries {table, rows_preserved}."),
-                ),
-                "null_external_id_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Dry-run path only — count of live events still carrying a NULL ``external_id``. A confirmed reset is REFUSED while this is > 0 (a re-walk would duplicate those legacy rows); run ``backfill_event_external_ids`` first."),
-                ),
-                "precondition_met": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description=("Dry-run path only — True iff ``null_external_id_count`` is 0, i.e. a confirmed reset is safe to run now."),
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Non-destructive cursor-reset outcome. The reset clears every source's ``__source_cursor`` rows so the next poll replays + the ``(session_id, external_id)`` upsert reconverges; no content is deleted."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "confirmed": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="True when the cursor reset actually ran.",
+                    ),
+                    "action": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=("Always ``cursor_reset_replay`` — names the non-destructive replay-and-reconverge semantics."),
+                    ),
+                    "content_preserved": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description=("Always True — content tables (session/event/tool_call/attachment/import_batch) and leases are never deleted."),
+                    ),
+                    "sources_total": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Number of sources processed (all sources).",
+                    ),
+                    "active_cursor_count_before": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Total active ``__source_cursor`` rows across all sources at the start of the call — the cursors that were (confirm) / would be (dry-run) cleared."),
+                    ),
+                    "deleted_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Total cursor rows cleared across all sources. Zero on the dry-run path; equals ``active_cursor_count_before`` on a confirmed run."),
+                    ),
+                    "per_source": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("Per-source breakdown; each entry carries {source_id, active_cursor_count_before, deleted_count}."),
+                    ),
+                    "preserved_content": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("Dry-run path only — live row counts of the content tables the reset PRESERVES; each entry carries {table, rows_preserved}."),
+                    ),
+                    "null_external_id_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Dry-run path only — count of live events still carrying a NULL ``external_id``. A confirmed reset is REFUSED while this is > 0 (a re-walk would duplicate those legacy rows); run ``backfill_event_external_ids`` first."),
+                    ),
+                    "precondition_met": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description=("Dry-run path only — True iff ``null_external_id_count`` is 0, i.e. a confirmed reset is safe to run now."),
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Reset Ledger Ingest State",
@@ -1267,6 +1366,7 @@ class SessionLedgerPollingDriverAPI(ABC):
         """
 
     @service_interface_process(
+        is_async=True,
         name="reset_source_cursor",
         is_discoverable=False,  # operator-only; not model-discoverable
         provider=_PROVIDER,
@@ -1290,35 +1390,37 @@ class SessionLedgerPollingDriverAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Cursor-reset outcome.",
-            type=ParameterType.OBJECT,
-            properties={
-                "confirmed": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when the hard-delete actually ran.",
-                ),
-                "deleted_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Number of ``__source_cursor`` rows hard-deleted. Zero on dry-run paths and on idempotent reruns."),
-                ),
-                "source_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Echo of the supplied source id.",
-                ),
-                "active_cursor_count_before": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Active cursor row count at the start of the verb call (dry-run path only — included so the operator can size the reset before confirming)."),
-                ),
-                "null_external_id_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Dry-run path only — count of live events still carrying a NULL ``external_id``. A confirmed reset is REFUSED while this is > 0 (a re-walk would duplicate those legacy rows); run ``backfill_event_external_ids`` first."),
-                ),
-                "precondition_met": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description=("Dry-run path only — True iff ``null_external_id_count`` is 0, i.e. a confirmed reset is safe to run now."),
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Cursor-reset outcome.",
+                type=ParameterType.OBJECT,
+                properties={
+                    "confirmed": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="True when the hard-delete actually ran.",
+                    ),
+                    "deleted_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Number of ``__source_cursor`` rows hard-deleted. Zero on dry-run paths and on idempotent reruns."),
+                    ),
+                    "source_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Echo of the supplied source id.",
+                    ),
+                    "active_cursor_count_before": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Active cursor row count at the start of the verb call (dry-run path only — included so the operator can size the reset before confirming)."),
+                    ),
+                    "null_external_id_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Dry-run path only — count of live events still carrying a NULL ``external_id``. A confirmed reset is REFUSED while this is > 0 (a re-walk would duplicate those legacy rows); run ``backfill_event_external_ids`` first."),
+                    ),
+                    "precondition_met": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description=("Dry-run path only — True iff ``null_external_id_count`` is 0, i.e. a confirmed reset is safe to run now."),
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Reset Source Cursor",
@@ -1375,6 +1477,7 @@ class SessionLedgerCanonicalPointerRepairAPI(ABC):
     """
 
     @service_interface_process(
+        is_async=True,
         name="lift_canonical_pointer_for_duplicate_sessions",
         is_discoverable=False,  # operator-only; not model-discoverable
         provider=_PROVIDER,
@@ -1396,31 +1499,33 @@ class SessionLedgerCanonicalPointerRepairAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=("Lift result for duplicate canonical (vendor, external_session_id) groups."),
-            type=ParameterType.OBJECT,
-            properties={
-                "confirmed": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when the lift actually ran.",
-                ),
-                "duplicate_group_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Number of (vendor, external_session_id) groups with ≥ 2 rows where ``canonical_external_session_id IS NULL AND is_deleted = 0``, at start of the verb call."),
-                ),
-                "demoted_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Number of sibling rows demoted from canonical-NULL to canonical-pointer (one less than the per-group row count, summed across groups)."),
-                ),
-                "pause_tag": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Importer-poll tag that was cleared and re-ensured.",
-                ),
-                "resume_outcome": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=("Outcome of the finally-block ``ensure_periodic_poll_schedule`` re-ensure: ``created`` / ``normalized`` / ``skipped`` (``skipped`` only on dry-run paths that never paused)."),
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Lift result for duplicate canonical (vendor, external_session_id) groups."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "confirmed": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="True when the lift actually ran.",
+                    ),
+                    "duplicate_group_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Number of (vendor, external_session_id) groups with ≥ 2 rows where ``canonical_external_session_id IS NULL AND is_deleted = 0``, at start of the verb call."),
+                    ),
+                    "demoted_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Number of sibling rows demoted from canonical-NULL to canonical-pointer (one less than the per-group row count, summed across groups)."),
+                    ),
+                    "pause_tag": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Importer-poll tag that was cleared and re-ensured.",
+                    ),
+                    "resume_outcome": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=("Outcome of the finally-block ``ensure_periodic_poll_schedule`` re-ensure: ``created`` / ``normalized`` / ``skipped`` (``skipped`` only on dry-run paths that never paused)."),
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Lift Canonical Pointer For Duplicate Sessions",
@@ -1468,6 +1573,7 @@ class SessionLedgerInvertedBoundsRepairAPI(ABC):
     """
 
     @service_interface_process(
+        is_async=True,
         name="backfill_first_last_event_at_repair",
         is_discoverable=False,  # operator-only; not model-discoverable
         provider=_PROVIDER,
@@ -1489,31 +1595,33 @@ class SessionLedgerInvertedBoundsRepairAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Backfill repair result for inverted-bound sessions.",
-            type=ParameterType.OBJECT,
-            properties={
-                "confirmed": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when the repair actually ran.",
-                ),
-                "inverted_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Number of ``__session`` rows whose ``last_event_at < first_event_at`` at start of the verb call."),
-                ),
-                "repaired_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Number of sessions actually repaired. Lower than ``inverted_count`` when some inverted rows had zero ``__event`` rows (no event-side data to compute MIN/MAX from); those are left in place and surfaced via WARN-level log entries."),
-                ),
-                "pause_tag": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Importer-poll tag that was cleared and re-ensured.",
-                ),
-                "resume_outcome": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=("Outcome of the finally-block ``ensure_periodic_poll_schedule`` re-ensure: one of ``created`` / ``normalized`` / ``skipped`` (``skipped`` only on dry-run paths that never paused)."),
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Backfill repair result for inverted-bound sessions.",
+                type=ParameterType.OBJECT,
+                properties={
+                    "confirmed": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="True when the repair actually ran.",
+                    ),
+                    "inverted_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Number of ``__session`` rows whose ``last_event_at < first_event_at`` at start of the verb call."),
+                    ),
+                    "repaired_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Number of sessions actually repaired. Lower than ``inverted_count`` when some inverted rows had zero ``__event`` rows (no event-side data to compute MIN/MAX from); those are left in place and surfaced via WARN-level log entries."),
+                    ),
+                    "pause_tag": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Importer-poll tag that was cleared and re-ensured.",
+                    ),
+                    "resume_outcome": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=("Outcome of the finally-block ``ensure_periodic_poll_schedule`` re-ensure: one of ``created`` / ``normalized`` / ``skipped`` (``skipped`` only on dry-run paths that never paused)."),
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Backfill Repair Inverted Event-At Bounds",
@@ -1555,6 +1663,7 @@ class SessionLedgerInvertedBoundsRepairAPI(ABC):
         """
 
     @service_interface_process(
+        is_async=True,
         name="backfill_summary_embedding_vector_ids",
         is_discoverable=False,  # operator-only; not model-discoverable
         provider=_PROVIDER,
@@ -1566,27 +1675,29 @@ class SessionLedgerInvertedBoundsRepairAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=("Backfill result for ``__summary`` rows whose ``embedding_vector_id`` was written as the pgvector internal id instead of the deterministic external_id."),
-            type=ParameterType.OBJECT,
-            properties={
-                "confirmed": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when the repair actually ran.",
-                ),
-                "updated_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Number of ``__summary`` rows whose ``embedding_vector_id`` was rewritten from a pgvector internal id (``emb-...``) to the matching deterministic external_id."),
-                ),
-                "skipped_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Number of rows STILL carrying an internal ``emb-`` pointer at completion. The repair recomputes ``external_id`` ledger-side from each row's own ``session_id`` + ``chunk_index``, so a row is left in place (and WARN-logged) only when it lacks those columns."),
-                ),
-                "total_rows_now_correct": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Total active ``__summary`` rows whose ``embedding_vector_id`` is now in the canonical external_id shape (i.e. addressable by the ANN search join)."),
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Backfill result for ``__summary`` rows whose ``embedding_vector_id`` was written as the pgvector internal id instead of the deterministic external_id."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "confirmed": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="True when the repair actually ran.",
+                    ),
+                    "updated_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Number of ``__summary`` rows whose ``embedding_vector_id`` was rewritten from a pgvector internal id (``emb-...``) to the matching deterministic external_id."),
+                    ),
+                    "skipped_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Number of rows STILL carrying an internal ``emb-`` pointer at completion. The repair recomputes ``external_id`` ledger-side from each row's own ``session_id`` + ``chunk_index``, so a row is left in place (and WARN-logged) only when it lacks those columns."),
+                    ),
+                    "total_rows_now_correct": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Total active ``__summary`` rows whose ``embedding_vector_id`` is now in the canonical external_id shape (i.e. addressable by the ANN search join)."),
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Backfill Summary Embedding Vector IDs",
@@ -1618,6 +1729,7 @@ class SessionLedgerInvertedBoundsRepairAPI(ABC):
         """
 
     @service_interface_process(
+        is_async=True,
         name="backfill_orphan_running_batches_for_source",
         is_discoverable=False,  # operator-only; not model-discoverable
         provider=_PROVIDER,
@@ -1644,40 +1756,42 @@ class SessionLedgerInvertedBoundsRepairAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Orphan-batch repair result for one source.",
-            type=ParameterType.OBJECT,
-            properties={
-                "confirmed": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when the repair actually ran.",
-                ),
-                "repaired_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=(
-                        "Net reduction in RUNNING batches for the source "
-                        "(``total_orphan_count_before - untouched_count``), "
-                        "measured from a post-repair recount. In the "
-                        "single-writer case these are exactly the stale "
-                        "rows this repair marked failed with "
-                        "``error_kind='orphan_repair'``; the post-state "
-                        "count also absorbs any a separate owner completed "
-                        "out of RUNNING mid-repair."
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Orphan-batch repair result for one source.",
+                type=ParameterType.OBJECT,
+                properties={
+                    "confirmed": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="True when the repair actually ran.",
                     ),
-                ),
-                "untouched_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Number of batch rows STILL RUNNING for the source after the repair — primarily those within the stale-grace window (``started_at`` >= ``now - stale_threshold_seconds``), left in place."),
-                ),
-                "total_orphan_count_before": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Total running batch count for the source at the start of the verb call. Invariant: ``total_orphan_count_before == repaired_count + untouched_count``."),
-                ),
-                "source_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Echo of the supplied source id.",
-                ),
-            },
+                    "repaired_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=(
+                            "Net reduction in RUNNING batches for the source "
+                            "(``total_orphan_count_before - untouched_count``), "
+                            "measured from a post-repair recount. In the "
+                            "single-writer case these are exactly the stale "
+                            "rows this repair marked failed with "
+                            "``error_kind='orphan_repair'``; the post-state "
+                            "count also absorbs any a separate owner completed "
+                            "out of RUNNING mid-repair."
+                        ),
+                    ),
+                    "untouched_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Number of batch rows STILL RUNNING for the source after the repair — primarily those within the stale-grace window (``started_at`` >= ``now - stale_threshold_seconds``), left in place."),
+                    ),
+                    "total_orphan_count_before": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Total running batch count for the source at the start of the verb call. Invariant: ``total_orphan_count_before == repaired_count + untouched_count``."),
+                    ),
+                    "source_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Echo of the supplied source id.",
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Backfill Orphan Running Batches for Source",
@@ -1716,6 +1830,7 @@ class SessionLedgerInvertedBoundsRepairAPI(ABC):
         """
 
     @service_interface_process(
+        is_async=True,
         name="retire_duplicate_source",
         is_discoverable=False,  # operator-only; not model-discoverable
         provider=_PROVIDER,
@@ -1737,39 +1852,41 @@ class SessionLedgerInvertedBoundsRepairAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Duplicate-source retirement outcome.",
-            type=ParameterType.OBJECT,
-            properties={
-                "confirmed": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when the re-point + soft-delete actually ran.",
-                ),
-                "winner_source_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Echo of the supplied winner id.",
-                ),
-                "loser_source_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Echo of the supplied loser id.",
-                ),
-                "children_to_move": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description=("Dry-run path only — per-table live row count currently referencing the loser (session/import_batch/source_cursor/active_lease)."),
-                ),
-                "loser_enabled": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description=("Dry-run path only — the loser's current ``enabled`` flag. Must be ``false`` before ``confirm=True`` will proceed."),
-                ),
-                "children_moved": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description=("Confirmed path only — per-table rows-affected by the re-point."),
-                ),
-                "loser_retired": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description=("Confirmed path only — True iff the loser source row was soft-deleted (False only on an already-deleted row, which is otherwise unreachable given the verb's own not-found check)."),
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Duplicate-source retirement outcome.",
+                type=ParameterType.OBJECT,
+                properties={
+                    "confirmed": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="True when the re-point + soft-delete actually ran.",
+                    ),
+                    "winner_source_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Echo of the supplied winner id.",
+                    ),
+                    "loser_source_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Echo of the supplied loser id.",
+                    ),
+                    "children_to_move": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description=("Dry-run path only — per-table live row count currently referencing the loser (session/import_batch/source_cursor/active_lease)."),
+                    ),
+                    "loser_enabled": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description=("Dry-run path only — the loser's current ``enabled`` flag. Must be ``false`` before ``confirm=True`` will proceed."),
+                    ),
+                    "children_moved": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description=("Confirmed path only — per-table rows-affected by the re-point."),
+                    ),
+                    "loser_retired": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description=("Confirmed path only — True iff the loser source row was soft-deleted (False only on an already-deleted row, which is otherwise unreachable given the verb's own not-found check)."),
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Retire Duplicate Source",
@@ -1826,24 +1943,27 @@ class SessionLedgerEventSourceDenormBackfillAPI(ABC):
     """
 
     @service_interface_process(
+        is_async=True,
         name="backfill_event_source_denormalization",
         is_discoverable=False,  # operator-only; not model-discoverable
         provider=_PROVIDER,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description=("Counts from the one-shot event source-denormalization backfill."),
-            type=ParameterType.OBJECT,
-            properties={
-                "sessions_scanned": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of __session rows visited (id-keyset paged).",
-                ),
-                "events_denormalized": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Number of __event rows whose NULL session_vendor + source_kind were filled this run (0 on a converged ledger — re-run to confirm completeness)."),
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Counts from the one-shot event source-denormalization backfill."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "sessions_scanned": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Number of __session rows visited (id-keyset paged).",
+                    ),
+                    "events_denormalized": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Number of __event rows whose NULL session_vendor + source_kind were filled this run (0 on a converged ledger — re-run to confirm completeness)."),
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Backfill Event Source Denormalization",
@@ -1878,28 +1998,31 @@ class SessionLedgerEventExternalIdBackfillAPI(ABC):
     """
 
     @service_interface_process(
+        is_async=True,
         name="backfill_event_external_ids",
         is_discoverable=False,  # operator-only; not model-discoverable
         provider=_PROVIDER,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Counts from the one-shot external_id backfill.",
-            type=ParameterType.OBJECT,
-            properties={
-                "sessions_scanned": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of __session rows visited (id-keyset paged).",
-                ),
-                "events_stamped": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Number of __event rows whose NULL external_id was stamped this run (0 on a converged ledger — re-run to confirm completeness)."),
-                ),
-                "collisions_skipped": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Number of legacy null rows whose derived id already belonged to a live-window duplicate; left NULL (the operator disposes of them before the slice-2b NOT-NULL)."),
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Counts from the one-shot external_id backfill.",
+                type=ParameterType.OBJECT,
+                properties={
+                    "sessions_scanned": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Number of __session rows visited (id-keyset paged).",
+                    ),
+                    "events_stamped": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Number of __event rows whose NULL external_id was stamped this run (0 on a converged ledger — re-run to confirm completeness)."),
+                    ),
+                    "collisions_skipped": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Number of legacy null rows whose derived id already belonged to a live-window duplicate; left NULL (the operator disposes of them before the slice-2b NOT-NULL)."),
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Backfill Event External IDs",
@@ -1936,24 +2059,27 @@ class SessionLedgerSessionSourceKindBackfillAPI(ABC):
     """
 
     @service_interface_process(
+        is_async=True,
         name="backfill_session_source_kinds",
         is_discoverable=False,  # operator-only; not model-discoverable
         provider=_PROVIDER,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description=("Counts from the one-shot session_source_kind junction backfill."),
-            type=ParameterType.OBJECT,
-            properties={
-                "sessions_scanned": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of __session rows visited (id-keyset paged).",
-                ),
-                "junction_rows_written": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Number of NEW (canonical_session_id, source_kind) pairs inserted this run (0 on a converged ledger — re-run to confirm completeness)."),
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Counts from the one-shot session_source_kind junction backfill."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "sessions_scanned": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Number of __session rows visited (id-keyset paged).",
+                    ),
+                    "junction_rows_written": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Number of NEW (canonical_session_id, source_kind) pairs inserted this run (0 on a converged ledger — re-run to confirm completeness)."),
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Backfill Session Source Kind Junction",
@@ -1981,6 +2107,7 @@ class SessionLedgerSummarizeAPI(ABC):
     """
 
     @service_interface_process(
+        is_async=True,
         name="lift_codex_stage1_summaries",
         is_discoverable=False,  # operator-only; not model-discoverable
         provider=_PROVIDER,
@@ -2002,35 +2129,37 @@ class SessionLedgerSummarizeAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=("Codex stage1 summary-lift outcome — G8 race-mitigated one-shot rewrite pass."),
-            type=ParameterType.OBJECT,
-            properties={
-                "confirmed": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when the rewrite actually ran.",
-                ),
-                "stage1_row_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("``stage1_outputs`` rows considered (``selected_for_phase2 = 1``)."),
-                ),
-                "candidate_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Stage1 rows that match an existing ``__session`` row by ``external_session_id = thread_id``. The candidate-set is the universe the lift operates on."),
-                ),
-                "lifted_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Sessions actually rewritten this call. On ``confirm=False`` this is 0 (dry-run)."),
-                ),
-                "pause_tag": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="M6 summarize cron tag cleared + re-ensured.",
-                ),
-                "resume_outcome": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=("Outcome of the finally-block ``ensure_periodic_summarize_schedule`` re-ensure: one of ``created`` / ``normalized`` / ``skipped``."),
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Codex stage1 summary-lift outcome — G8 race-mitigated one-shot rewrite pass."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "confirmed": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="True when the rewrite actually ran.",
+                    ),
+                    "stage1_row_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("``stage1_outputs`` rows considered (``selected_for_phase2 = 1``)."),
+                    ),
+                    "candidate_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Stage1 rows that match an existing ``__session`` row by ``external_session_id = thread_id``. The candidate-set is the universe the lift operates on."),
+                    ),
+                    "lifted_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Sessions actually rewritten this call. On ``confirm=False`` this is 0 (dry-run)."),
+                    ),
+                    "pause_tag": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="M6 summarize cron tag cleared + re-ensured.",
+                    ),
+                    "resume_outcome": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=("Outcome of the finally-block ``ensure_periodic_summarize_schedule`` re-ensure: one of ``created`` / ``normalized`` / ``skipped``."),
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Lift Codex Stage1 Summaries Into Ledger",
@@ -2416,6 +2545,7 @@ class SessionLedgerSearchAPI(ABC):
     """
 
     @service_interface_process(
+        is_async=True,
         name="push_session_summary_chunk",
         is_discoverable=False,  # caller-side summarizer surface; not LLM-discoverable
         provider=_PROVIDER,
@@ -2442,23 +2572,25 @@ class SessionLedgerSearchAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Summary persistence + embedding-store confirmation.",
-            type=ParameterType.OBJECT,
-            properties={
-                "summary_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="New summary row id (sum-...).",
-                ),
-                "embedding_vector_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Reference into the vector store for this summary.",
-                ),
-                "chunk_index": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Echo of the caller-supplied chunk_index.",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Summary persistence + embedding-store confirmation.",
+                type=ParameterType.OBJECT,
+                properties={
+                    "summary_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="New summary row id (sum-...).",
+                    ),
+                    "embedding_vector_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Reference into the vector store for this summary.",
+                    ),
+                    "chunk_index": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Echo of the caller-supplied chunk_index.",
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Push Session Summary Chunk",
@@ -2478,6 +2610,7 @@ class SessionLedgerSearchAPI(ABC):
         """Embed + store-vector + insert one summary chunk row."""
 
     @service_interface_process(
+        is_async=True,
         name="search_sessions",
         is_discoverable=True,
         provider=_PROVIDER,
@@ -2509,20 +2642,22 @@ class SessionLedgerSearchAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=("Top-k summary chunks joined to their sessions, ordered by similarity score descending."),
-            type=ParameterType.OBJECT,
-            properties={
-                "results": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=(
-                        "Per-match envelope: {session_id, chunk_index, summary_text, score, session, "
-                        "last_ingested_at, ingestion_freshness}. last_ingested_at is the source's newest "
-                        "completed import (ISO-8601 UTC, null when none has completed); ingestion_freshness "
-                        "is fresh within the five-minute ingestion cadence, lagging beyond it, or unknown."
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Top-k summary chunks joined to their sessions, ordered by similarity score descending."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "results": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=(
+                            "Per-match envelope: {session_id, chunk_index, summary_text, score, session, "
+                            "last_ingested_at, ingestion_freshness}. last_ingested_at is the source's newest "
+                            "completed import (ISO-8601 UTC, null when none has completed); ingestion_freshness "
+                            "is fresh within the five-minute ingestion cadence, lagging beyond it, or unknown."
+                        ),
                     ),
-                ),
-            },
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Search Session Ledger",
@@ -2648,6 +2783,7 @@ class SessionLedgerSearchAPI(ABC):
         """
 
     @service_interface_process(
+        is_async=True,
         name="search_event_content",
         is_discoverable=True,
         provider=_PROVIDER,
@@ -2664,15 +2800,17 @@ class SessionLedgerSearchAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=("Top-k event chunks joined to their ``__event`` rows, ordered by similarity score descending."),
-            type=ParameterType.OBJECT,
-            properties={
-                "results": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=("Per-match envelope: {event_id, session_id, sequence, event_at, role, content_text, vendor, source_kind, chunk_index, score}."),
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Top-k event chunks joined to their ``__event`` rows, ordered by similarity score descending."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "results": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("Per-match envelope: {event_id, session_id, sequence, event_at, role, content_text, vendor, source_kind, chunk_index, score}."),
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Search Session Ledger Event Content",
@@ -2700,60 +2838,63 @@ class SessionLedgerSearchAPI(ABC):
         """
 
     @service_interface_process(
+        is_async=True,
         name="event_embedding_coverage",
         is_discoverable=True,
         provider=_PROVIDER,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description=("LED-01 event-embedding coverage: drain frontier + embedded-chunk count; a deterministic 'is the backfill caught up?' read with no full-corpus scan."),
-            type=ParameterType.OBJECT,
-            properties={
-                "caught_up": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when the drain cursor has reached the newest in-scope event (a frontier signal, not per-row proof).",
-                ),
-                "cursor_imported_at": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Drain frontier: imported_at at/before which every embeddable event is embedded; None if never advanced.",
-                ),
-                "newest_in_scope_imported_at": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="imported_at of the newest embeddable event (SQL scope legs); None when nothing is in scope.",
-                ),
-                "embedded_chunk_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Live vectors in the session_ledger_event namespace (CHUNKS, not events); 0 when nothing embedded.",
-                ),
-                "sweep_checkpoint": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Running or pending policy/reconciliation sweep (generation, target, previous, after, status, failed_count); None when no sweep is pending.",
-                ),
-                "remaining_candidate_events_past_cursor": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="In-scope candidate EVENTS that arrived after the drain cursor (a COUNT; chunk counts are only known after tokenizing).",
-                ),
-                "remaining_candidate_events_past_sweep": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="In-scope candidate events the pending sweep has still to walk; None when no sweep is pending.",
-                ),
-                "drain_progress": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="The current or last drain fire's per-page record: start, update time, elapsed and paused time, pages and counts.",
-                ),
-                "candidates_scanned_per_hour": ParameterMetadata(
-                    type=ParameterType.FLOAT,
-                    description="Measured candidate scan rate of that fire; None before a page completes.",
-                ),
-                "events_embedded_per_hour": ParameterMetadata(
-                    type=ParameterType.FLOAT,
-                    description="Measured embedding rate of that fire; None before a page completes.",
-                ),
-                "estimated_hours_remaining": ParameterMetadata(
-                    type=ParameterType.FLOAT,
-                    description="Remaining candidates (past the sweep, else past the cursor) divided by the measured scan rate; None when the rate is unknown.",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("LED-01 event-embedding coverage: drain frontier + embedded-chunk count; a deterministic 'is the backfill caught up?' read with no full-corpus scan."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "caught_up": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="True when the drain cursor has reached the newest in-scope event (a frontier signal, not per-row proof).",
+                    ),
+                    "cursor_imported_at": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Drain frontier: imported_at at/before which every embeddable event is embedded; None if never advanced.",
+                    ),
+                    "newest_in_scope_imported_at": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="imported_at of the newest embeddable event (SQL scope legs); None when nothing is in scope.",
+                    ),
+                    "embedded_chunk_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Live vectors in the session_ledger_event namespace (CHUNKS, not events); 0 when nothing embedded.",
+                    ),
+                    "sweep_checkpoint": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Running or pending policy/reconciliation sweep (generation, target, previous, after, status, failed_count); None when no sweep is pending.",
+                    ),
+                    "remaining_candidate_events_past_cursor": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="In-scope candidate EVENTS that arrived after the drain cursor (a COUNT; chunk counts are only known after tokenizing).",
+                    ),
+                    "remaining_candidate_events_past_sweep": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="In-scope candidate events the pending sweep has still to walk; None when no sweep is pending.",
+                    ),
+                    "drain_progress": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="The current or last drain fire's per-page record: start, update time, elapsed and paused time, pages and counts.",
+                    ),
+                    "candidates_scanned_per_hour": ParameterMetadata(
+                        type=ParameterType.FLOAT,
+                        description="Measured candidate scan rate of that fire; None before a page completes.",
+                    ),
+                    "events_embedded_per_hour": ParameterMetadata(
+                        type=ParameterType.FLOAT,
+                        description="Measured embedding rate of that fire; None before a page completes.",
+                    ),
+                    "estimated_hours_remaining": ParameterMetadata(
+                        type=ParameterType.FLOAT,
+                        description="Remaining candidates (past the sweep, else past the cursor) divided by the measured scan rate; None when the rate is unknown.",
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Ledger Event-Embedding Coverage",
@@ -2773,6 +2914,7 @@ class SessionLedgerSearchAPI(ABC):
         """
 
     @service_interface_process(
+        is_async=True,
         name="embed_missing_event_content",
         is_discoverable=False,  # operator/maintenance producer; cron rides it later
         provider=_PROVIDER,
@@ -2785,47 +2927,49 @@ class SessionLedgerSearchAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=("Batch disposition: how far the newest-first candidate walk got and what it embedded."),
-            type=ParameterType.OBJECT,
-            properties={
-                "candidates_scanned": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Candidate rows read from ``__event`` this call.",
-                ),
-                "events_embedded": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Events newly embedded this call.",
-                ),
-                "chunks_stored": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Vector rows written across embedded events.",
-                ),
-                "events_skipped_existing": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Candidates already embedded (chunk-0 present).",
-                ),
-                "events_skipped_filtered": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Candidates dropped by the Python scope leg (reasoning subtype / blank content)."),
-                ),
-                "events_truncated": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description=("Embedded events whose chunk list hit the per-event bound (tail dropped, logged)."),
-                ),
-                "events_failed": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Events skipped after failing to embed (a WARNING names each).",
-                ),
-                "exhausted": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description=("True when the candidate walk reached the end of the corpus this call; false means more work remains — call again."),
-                ),
-                "batch_limit": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Echo of the applied (clamped) batch limit.",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Batch disposition: how far the newest-first candidate walk got and what it embedded."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "candidates_scanned": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Candidate rows read from ``__event`` this call.",
+                    ),
+                    "events_embedded": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Events newly embedded this call.",
+                    ),
+                    "chunks_stored": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Vector rows written across embedded events.",
+                    ),
+                    "events_skipped_existing": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Candidates already embedded (chunk-0 present).",
+                    ),
+                    "events_skipped_filtered": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Candidates dropped by the Python scope leg (reasoning subtype / blank content)."),
+                    ),
+                    "events_truncated": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description=("Embedded events whose chunk list hit the per-event bound (tail dropped, logged)."),
+                    ),
+                    "events_failed": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Events skipped after failing to embed (a WARNING names each).",
+                    ),
+                    "exhausted": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description=("True when the candidate walk reached the end of the corpus this call; false means more work remains — call again."),
+                    ),
+                    "batch_limit": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Echo of the applied (clamped) batch limit.",
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Embed Missing Event Content",

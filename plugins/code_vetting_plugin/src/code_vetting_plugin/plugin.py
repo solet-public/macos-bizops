@@ -3,7 +3,8 @@
 Two EDGE ``@platform_process`` verbs expose the **deterministic** layer of the
 suite (A0 R6): ``vet_codebase`` runs the full L1 scanner pipeline;
 ``scan_quality_guidelines`` runs the platform quality-gate toolchain (advisory,
-R5). Both return fast with a bounded metrics summary + a bounded markdown report.
+R5). Both return a job handle; the completed job retains the bounded metrics
+summary and markdown report.
 The minutes-long L2 critic / L3 inference-verify stages are **not** verbs (they
 would blow the action-queue fast-return contract) — they are joseki-dispatched
 agent sessions (W3-C).
@@ -45,6 +46,7 @@ from ananta.interfaces.memory_service_interface import MemoryServiceInterface
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
 from ananta.types.schema_types import SchemaDefinition
 
+from .async_jobs import AsyncJobs
 from .live_state import get_vetting_runs_schema, read_recent_runs, read_vetting_run
 from .metrics import persist_run_sync
 from .models import ContextProfile, Finding, Layer
@@ -129,9 +131,7 @@ def _run_target(
     )
 
 
-def _foreign_inventory(
-    tree: TargetTree, foreign: bool
-) -> tuple[str | None, int | None, str]:
+def _foreign_inventory(tree: TargetTree, foreign: bool) -> tuple[str | None, int | None, str]:
     if foreign:
         return tree.enumeration, len(tree.all_files()), "foreign"
     return None, None, "self"
@@ -157,16 +157,10 @@ def locate_worktree_root(app_home: Path) -> Path:
     for candidate in (anchor, *anchor.parents):
         if (candidate / "quality_gates").is_dir() and (candidate / ".git").exists():
             return candidate
-    raise RuntimeError(
-        f"{_PLUGIN_NAME}: could not locate the git worktree root from app_home "
-        f"{anchor} — no ancestor carries both quality_gates/ and .git. The vetting "
-        "verbs require the platform git worktree (local-profile only)."
-    )
+    raise RuntimeError(f"{_PLUGIN_NAME}: could not locate the git worktree root from app_home {anchor} — no ancestor carries both quality_gates/ and .git. The vetting verbs require the platform git worktree (local-profile only).")
 
 
-def _collect_quality_gates(
-    tree: TargetTree, run_id: str
-) -> tuple[list[Finding], list[CoverageRecord], L1ReportData]:
+def _collect_quality_gates(tree: TargetTree, run_id: str) -> tuple[list[Finding], list[CoverageRecord], L1ReportData]:
     """Run ONLY the platform quality-gate toolchain (the ``scan_quality_guidelines`` surface).
 
     Includes the rebuilt dead-code scanner (R9-A, replacing the old vulture stub this surface always
@@ -188,11 +182,7 @@ def _bound_report(report: str) -> str:
     """Cap the rendered report; append an explicit truncation marker (no silent cap)."""
     if len(report) <= _REPORT_CHAR_CAP:
         return report
-    return (
-        f"{report[:_REPORT_CHAR_CAP]}\n\n"
-        f"… report truncated at {_REPORT_CHAR_CAP} chars — run the L1 CLI "
-        "(`python -m code_vetting_plugin.l1_cli`) for the full findings register."
-    )
+    return f"{report[:_REPORT_CHAR_CAP]}\n\n… report truncated at {_REPORT_CHAR_CAP} chars — run the L1 CLI (`python -m code_vetting_plugin.l1_cli`) for the full findings register."
 
 
 def _vetting_data_schema() -> ReturnValueSchema:
@@ -201,16 +191,12 @@ def _vetting_data_schema() -> ReturnValueSchema:
         type=ParameterType.OBJECT,
         description="One deterministic vetting run: a bounded metrics summary plus a bounded markdown report.",
         properties={
+            "job_id": ParameterMetadata(type=ParameterType.STRING, description="Queued job; read its result with job_service.get_job."),
+            "status": ParameterMetadata(type=ParameterType.STRING, description="queued; the remaining fields belong to the completed job result."),
             "run_id": ParameterMetadata(type=ParameterType.STRING, description="Unique run id (vr-<tag>-<ref>-<stamp>)."),
             "target": ParameterMetadata(
                 type=ParameterType.OBJECT,
-                description=(
-                    "What was examined: {repo, ref, scope}; a foreign run also carries "
-                    "the bounded source_role_partition and technology_fingerprint "
-                    "(scoped declarations/topology plus deterministic capability needs; "
-                    "routing is not execution). ref is empty in walk-enumeration mode "
-                    "(no invented provenance)."
-                ),
+                description=("What was examined: {repo, ref, scope}; a foreign run also carries the bounded source_role_partition and technology_fingerprint (scoped declarations/topology plus deterministic capability needs; routing is not execution). ref is empty in walk-enumeration mode (no invented provenance)."),
             ),
             "target_class": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -323,7 +309,7 @@ _PERSIST_PARAM = ParameterMetadata(
     description=(
         "Opt-in (default false) to PERSIST this run to the vetting_runs trail so get_vetting_run can read "
         "it back by run_id (the joseki's payload-by-run_id seam). Default-off keeps the bare verb a pure "
-        "read-through with byte-identical output; when true the return payload is UNCHANGED (persist is a "
+        "scan with byte-identical completed job data; when true that data is UNCHANGED (persist is a "
         "side-effect) and the run is written under substrate 'heuristic' (L1-only, no inference), bounded by "
         "the same retention as the driver's trail. Self-anchored deterministic runs; no effect on the report."
     ),
@@ -379,11 +365,7 @@ def _vetting_run_record_schema() -> ReturnValueSchema:
             "run_id": ParameterMetadata(type=ParameterType.STRING, description="Unique run id (the read key)."),
             "target": ParameterMetadata(
                 type=ParameterType.OBJECT,
-                description=(
-                    "What was examined: {repo, ref, scope}; persisted foreign runs "
-                    "also carry the bounded source_role_partition and "
-                    "technology_fingerprint in this existing JSON object."
-                ),
+                description=("What was examined: {repo, ref, scope}; persisted foreign runs also carry the bounded source_role_partition and technology_fingerprint in this existing JSON object."),
             ),
             "started": ParameterMetadata(type=ParameterType.STRING, description="ISO-8601 UTC run start."),
             "finished": ParameterMetadata(type=ParameterType.STRING, description="ISO-8601 UTC run finish."),
@@ -395,7 +377,10 @@ def _vetting_run_record_schema() -> ReturnValueSchema:
             "survival_rate": ParameterMetadata(type=ParameterType.FLOAT, description="L2->L3 precision proxy; null when nothing was verified."),
             "coverage_gaps": ParameterMetadata(type=ParameterType.LIST, description="Scanners that could not run, each with its reason."),
             "allowlist_delta": ParameterMetadata(type=ParameterType.OBJECT, description="Tracked-debt burn-down snapshot."),
-            "structural_metrics": ParameterMetadata(type=ParameterType.OBJECT, description="R8-1: per-run complexity/length/params/nesting distribution + aggregates + worst-offenders + the repeated-literal table (magic-string candidates) + the named nested-loop pattern class (nested_loops[] {file,line,language,depth} capped, nested_loops_total = the true pre-cap count, nested_loop_languages[] + nested_loop_files_examined = the class's own denominator, narrower than files_parsed because the detector is language-limited); null when the structural-metrics scanner did not run."),
+            "structural_metrics": ParameterMetadata(
+                type=ParameterType.OBJECT,
+                description="R8-1: per-run complexity/length/params/nesting distribution + aggregates + worst-offenders + the repeated-literal table (magic-string candidates) + the named nested-loop pattern class (nested_loops[] {file,line,language,depth} capped, nested_loops_total = the true pre-cap count, nested_loop_languages[] + nested_loop_files_examined = the class's own denominator, narrower than files_parsed because the detector is language-limited); null when the structural-metrics scanner did not run.",
+            ),
             "dead_symbols": ParameterMetadata(type=ParameterType.OBJECT, description="R9-A: candidate-dead-symbols payload (60%-confidence family — L2 targeting evidence, the test_reach pattern); null when the dead-code scanner did not run."),
             "report": ParameterMetadata(type=ParameterType.STRING, description="The severity-ranked markdown report text for this run; null for a metrics-only subset run."),
         },
@@ -435,6 +420,7 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
         # W3C-3: the single-slot lease for the daily self-vet (the slot IS the lease — a fire while a run is
         # in-flight is skipped-busy). A lightweight semaphore holder; the scan runs on a daemon thread.
         self._vet_executor = SingleSlotVetExecutor()
+        self._jobs = AsyncJobs(self.name)
 
     def prepare_for_readiness(self) -> None:
         """Anchor the scan target at the git worktree (via APP_HOME), then mark ready."""
@@ -471,11 +457,7 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
         resolved = raw.resolve()
         own = worktree.resolve()
         if resolved == own or own in resolved.parents or resolved in own.parents:
-            raise TargetValidationError(
-                f"target_path {resolved} resolves inside/around the platform's own worktree ({own}) "
-                "— self-vet is the default for our own tree; call vet_codebase with no "
-                "target_path to scan it."
-            )
+            raise TargetValidationError(f"target_path {resolved} resolves inside/around the platform's own worktree ({own}) — self-vet is the default for our own tree; call vet_codebase with no target_path to scan it.")
         return resolved, True
 
     @staticmethod
@@ -538,9 +520,7 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
         )
         file_count = len(tree.all_files())
         stacks = detect_stacks(tree)
-        report_enumeration, report_file_count, target_class = _foreign_inventory(
-            tree, foreign
-        )
+        report_enumeration, report_file_count, target_class = _foreign_inventory(tree, foreign)
         report = ReportRenderer().render(
             run_id=run_id,
             target=target,
@@ -671,17 +651,24 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
 
     @platform_process(
         name="vet_codebase",
+        is_async=True,
         is_discoverable=True,
         context_handling=ContextHandling.NONE,
         parameters=_vet_codebase_params(),
         output_type="object",
-        output_description="Deterministic L1 vetting run: bounded metrics summary + bounded markdown report.",
+        output_description="Queued job handle; the completed result contains the deterministic L1 metrics and report.",
         return_value_schema=_vetting_data_schema(),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type=_VET_RESULT_TYPE),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
     )
     def vet_codebase(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Validate local selectors and enqueue the deterministic scan."""
+        if not params.get("target_path") and "role_overrides" in params:
+            return self._error_envelope("invalid_role_overrides", "role_overrides are supported only for foreign targets")
+        return self._jobs.submit(self, "vet_codebase", params, state, self._vet_codebase_now)
+
+    def _vet_codebase_now(self, params: dict[str, Any]) -> dict[str, Any]:
         """Run the full deterministic L1 scanner pipeline over the target; return fast.
 
         Default (no ``target_path``) is a self-vet of the platform's own worktree, byte-compatible
@@ -696,15 +683,10 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
         default-off, sandbox-preferred (R7-4). Returns a bounded metrics summary + a
         bounded markdown report.
         """
-        del state
         scope = str(params.get("scope") or "whole-tree self-vet")
         target_path_raw = params.get("target_path")
         target_path = str(target_path_raw).strip() if target_path_raw and str(target_path_raw).strip() else None
-        role_overrides = (
-            params["role_overrides"]
-            if "role_overrides" in params
-            else _ROLE_OVERRIDES_ABSENT
-        )
+        role_overrides = params["role_overrides"] if "role_overrides" in params else _ROLE_OVERRIDES_ABSENT
         execute_target_toolchain = bool(params.get("execute_target_toolchain"))
         persist = bool(params.get("persist"))
         self.logger.info(
@@ -735,17 +717,22 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
 
     @platform_process(
         name="scan_quality_guidelines",
+        is_async=True,
         is_discoverable=True,
         context_handling=ContextHandling.NONE,
         parameters=_scope_param("platform quality surface"),
         output_type="object",
-        output_description="Platform quality-gate toolchain run (advisory): bounded metrics summary + bounded report.",
+        output_description="Queued job handle; the completed result contains the advisory quality-gate metrics and report.",
         return_value_schema=_vetting_data_schema(),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type=_SCAN_RESULT_TYPE),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
     )
     def scan_quality_guidelines(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Enqueue the advisory quality-gate scan and return its job id."""
+        return self._jobs.submit(self, "scan_quality_guidelines", params, state, self._scan_quality_guidelines_now)
+
+    def _scan_quality_guidelines_now(self, params: dict[str, Any]) -> dict[str, Any]:
         """Run the platform quality-gate toolchain over the worktree (ADVISORY, R5).
 
         The ``code_quality`` aggregate (ruff / pyright-strict / the radon + god-class
@@ -754,7 +741,6 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
         findings preserved as visible tracked debt but non-blocking. ADVISORY only:
         Git-Controller's canonical gate run stays the sole commit authority (R5).
         """
-        del state
         scope = str(params.get("scope") or "platform quality surface")
         self.logger.info("%s.scan_quality_guidelines scope=%s", _PLUGIN_NAME, scope)
         return self._envelope(self._run(_collect_quality_gates, scope=scope, tag="gates"))
@@ -797,9 +783,7 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
         """The bound platform state service; fail-loud if unbound (get_vetting_run reads the trail through it)."""
         service = self.orchestrator_ref.get_service("state_service") if self.orchestrator_ref else None
         if not isinstance(service, StateServiceProtocol):
-            raise RuntimeError(
-                f"{_PLUGIN_NAME}: get_vetting_run requires the platform state_service, but it is unbound."
-            )
+            raise RuntimeError(f"{_PLUGIN_NAME}: get_vetting_run requires the platform state_service, but it is unbound.")
         return service
 
     @platform_process(
@@ -844,12 +828,7 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
         (never a live interrupt). Silent on a clean/improved run (the caller gates on ``is_regression``)."""
         new_counts = run["counts_by_severity"]
         old_counts = _counts_of(prior)
-        content = (
-            f"Code-vetting scheduled self-vet REGRESSION on run {run['run_id']}: "
-            f"blocker {new_counts.get('blocker', 0)} / high {new_counts.get('high', 0)} "
-            f"(prior blocker {old_counts.get('blocker', 0)} / high {old_counts.get('high', 0)}). "
-            "Read get_vetting_run on the run_id for the finding detail."
-        )
+        content = f"Code-vetting scheduled self-vet REGRESSION on run {run['run_id']}: blocker {new_counts.get('blocker', 0)} / high {new_counts.get('high', 0)} (prior blocker {old_counts.get('blocker', 0)} / high {old_counts.get('high', 0)}). Read get_vetting_run on the run_id for the finding detail."
         self._memory_service().remember(content=content, tags=[REGRESSION_MEMORY_TAG])
 
     def _memory_service(self) -> MemoryServiceInterface:
@@ -857,9 +836,7 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
         the BACKGROUND job ONLY (runtime), never in the verb's L1 import closure (R6); fail-loud if unbound."""
         service = self.orchestrator_ref.get_service("memory_service") if self.orchestrator_ref else None
         if not isinstance(service, MemoryServiceInterface):
-            raise RuntimeError(
-                f"{_PLUGIN_NAME}: the scheduled self-vet regression note requires memory_service, but it is unbound."
-            )
+            raise RuntimeError(f"{_PLUGIN_NAME}: the scheduled self-vet regression note requires memory_service, but it is unbound.")
         return service
 
     # --- W3-B B3c: the inference-dispatch SEAM (STAGED — NOT reached by either verb) ---
@@ -880,11 +857,7 @@ class CodeVettingPlugin(PluginBase, EdgeProcessProvider):
 
         service = self.orchestrator_ref.get_service("inference_service") if self.orchestrator_ref else None
         if not isinstance(service, InferenceCompleter):
-            raise RuntimeError(
-                f"{_PLUGIN_NAME}: the LOCAL/PRIVACY inference substrate requires the platform "
-                "inference_service (local models), but it is unbound / declared-vacant. Use the "
-                "SUBSCRIPTION substrate, or bind a local inference provider."
-            )
+            raise RuntimeError(f"{_PLUGIN_NAME}: the LOCAL/PRIVACY inference substrate requires the platform inference_service (local models), but it is unbound / declared-vacant. Use the SUBSCRIPTION substrate, or bind a local inference provider.")
         return service
 
     def build_local_skeptic_transport(self) -> LocalInferenceSkepticTransport:

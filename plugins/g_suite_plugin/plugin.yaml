@@ -1,6 +1,6 @@
 name: g_suite_plugin
 description: >
-  Google Workspace — Gmail, Drive, Sheets, Docs, Slides — for the solet,
+  Google Workspace — Gmail, Calendar, Drive, Sheets, Docs, Slides — for the solet,
   peers, and plans. Enterprise single-account user-OAuth 2.0 with PKCE via the
   official Google client libraries. The OAuth app is configured as "Internal"
   (locked to one Workspace org). Refresh/access tokens live in vault; app

@@ -29,11 +29,13 @@ from ananta.core.domain.types import ActionResult
 from ananta.core.plugins.decorators import service_lifecycle
 from ananta.core.plugins.plugin_base import ServicePlugin
 from ananta.core.plugins.plugin_contracts import ActionStatus
+from ananta.core.state.registered_job_operations import OwnedOperation
 from ananta.error_handling import FrameworkError
 from ananta.interfaces.memory_service_interface import MemoryServiceInterface
 from ananta.logging_setup import configure_plugin_logging
 from ananta.types.schema_types import SchemaDefinition
 
+from .async_jobs import JOB_RETURN_SCHEMA, REGISTERED_MEMORY_OPERATIONS, AsyncJobs, run_memory_action
 from .backend import ACTRMemoryBackend
 from .constants import (
     CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
@@ -193,6 +195,7 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         # Merged operator config (yaml defaults + profile overrides), captured in
         # initialize() and bound to config_provider in prepare_for_readiness().
         self._operator_config: dict[str, object] = {}
+        self._jobs = AsyncJobs()
 
     def initialize(self, config: dict[str, object]) -> None:
         """Re-capture the merged operator config, defensively.
@@ -318,7 +321,16 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         else:
             self.logger.debug("scheduling_service acquired from orchestrator")
 
+        self._jobs.bind_serial_api(self)
         self.set_ready()
+
+    def admit_registered_operation(self, action_name: str, parameters: dict[str, Any], state: dict[str, Any], *, operation: OwnedOperation | None = None) -> dict[str, Any] | None:
+        """Admit the actual bound MemoryService wrapper without entering its body."""
+        if action_name not in REGISTERED_MEMORY_OPERATIONS:
+            return None
+        if operation is None:
+            raise FrameworkError("Memory admission requires the captured service callable")
+        return self._jobs.submit(self, action_name, parameters, state, operation)
 
     def _resolve_export_allowed_roots(self) -> list[str]:
         """Read + validate export_allowed_roots from operator config.
@@ -444,15 +456,10 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             ),
         },
         output_type="object",
-        output_description="Memory creation result with memory_id",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Memory creation result with memory_id",
-            properties={
-                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the created memory"),
-                "message": ParameterMetadata(type=ParameterType.STRING, description="Success message"),
-            },
-        ),
+        output_description="Queued job receipt; job.result contains memory_id and message",
+        return_value_schema=JOB_RETURN_SCHEMA,
+        is_async=True,
+        is_long_running=True,
         summary="Store a new piece of knowledge in long-term memory",
         requires_result_processor=True,
     )
@@ -461,11 +468,19 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         params: dict[str, Any],
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        """Store a new episodic memory."""
+        """Queue memory creation; the library remember method remains synchronous."""
+        self._get_backend()
+        if not params.get("content", "").strip():
+            raise FrameworkError(message="Content is required", error_code="memory.validation_error")
+        request = {**params, "session_id": state.get("session_id")}
+        return self._jobs.submit(self, "remember_action", request, state, self._remember_now)
+
+    def _remember_now(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Run the original memory operation on this plugin's serial job worker."""
         content = params.get("content", "")
         tags = params.get("tags", [])
         source_file = params.get("source_file")
-        session_id = state.get("session_id")
+        session_id = params.get("session_id")
 
         service = self._get_backend()
         result = service.remember(
@@ -527,15 +542,10 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
             ),
         },
         output_type="object",
-        output_description="Search results with memories ranked by combined similarity and strength",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Search results with matching memories",
-            properties={
-                "memories": ParameterMetadata(type=ParameterType.LIST, description="List of matching memories"),
-                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories returned"),
-            },
-        ),
+        output_description="Queued job receipt; job.result contains ranked memories and count",
+        return_value_schema=JOB_RETURN_SCHEMA,
+        is_async=True,
+        is_long_running=True,
         summary="Search for relevant memories using semantic similarity and activation strength",
         requires_result_processor=True,
     )
@@ -544,7 +554,14 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         params: dict[str, Any],
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        """Search memories with strength-weighted ranking."""
+        """Queue recall; the library recall method remains synchronous."""
+        self._get_backend()
+        if not params.get("query", "").strip():
+            raise FrameworkError(message="Query is required", error_code="memory.validation_error")
+        return self._jobs.submit(self, "recall_action", params, state, self._recall_now)
+
+    def _recall_now(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Search memories with strength-weighted ranking on the job worker."""
         query = params.get("query", "")
         top_k = params.get("top_k", 5)
         memory_type = params.get("memory_type", "all")
@@ -1025,54 +1042,18 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         },
         output_type="object",
         output_description="Ingestion result with memory count",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Ingestion result with memory count",
-            properties={
-                "path": ParameterMetadata(type=ParameterType.STRING, description="Path that was ingested"),
-                "memories_created": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories created"),
-                "files_skipped": ParameterMetadata(type=ParameterType.INTEGER, description="Number of files skipped"),
-                "memorized": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether added to memorization queue"),
-                "message": ParameterMetadata(type=ParameterType.STRING, description="Summary message"),
-            },
-        ),
+        return_value_schema=JOB_RETURN_SCHEMA,
         summary="Ingest knowledge from documents into long-term memory",
         requires_result_processor=True,
+        is_async=True,
     )
     def learn_action(
         self,
         params: dict[str, Any],
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        """Ingest knowledge from files."""
-        path = params.get("path", "")
-        pattern = params.get("pattern", "*.md")
-        recursive = params.get("recursive", True)
-        memorize = params.get("memorize", False)
-        tags = params.get("tags", [])
-
-        service = self._get_backend()
-        result = service.learn(
-            path=path,
-            pattern=pattern,
-            recursive=recursive,
-            memorize=memorize,
-            tags=tags,
-        )
-
-        if "error" in result:
-            return self._build_response(
-                ActionStatus.ERROR.value,
-                {},
-                {
-                    "type": "plugin_error",
-                    "code": ErrorCode.OPERATION_FAILED,
-                    "message": result["error"],
-                    "plugin_name": PLUGIN_NAME,
-                },
-            )
-
-        return self._build_response(ActionStatus.COMPLETED.value, result)
+        """Persist the request and return the canonical queued job handle."""
+        return self._jobs.submit(self, "learn_action", params, state, lambda request: run_memory_action(self, "learn_action", request))
 
     # ─────────────────────────────────────────────────────────────────────────
     # LIFECYCLE ACTIONS
@@ -1404,42 +1385,17 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         },
         output_type="object",
         output_description="Import result with counts",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Import result",
-            properties={
-                "imported_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories imported"),
-                "skipped_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories skipped"),
-                "message": ParameterMetadata(type=ParameterType.STRING, description="Success message"),
-            },
-        ),
+        return_value_schema=JOB_RETURN_SCHEMA,
         summary="Import memories from a JSON backup file",
+        is_async=True,
     )
     def import_memories_action(
         self,
         params: dict[str, Any],
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        """Import memories from file."""
-        del state  # Unused - state not needed for import
-        file_path = params.get("file_path", "")
-
-        service = self._get_backend()
-        result = service.import_memories(file_path=file_path)
-
-        if "error" in result:
-            return self._build_response(
-                ActionStatus.ERROR.value,
-                {},
-                {
-                    "type": "plugin_error",
-                    "code": ErrorCode.OPERATION_FAILED,
-                    "message": result["error"],
-                    "plugin_name": PLUGIN_NAME,
-                },
-            )
-
-        return self._build_response(ActionStatus.COMPLETED.value, result)
+        """Persist the request and return the canonical queued job handle."""
+        return self._jobs.submit(self, "import_memories_action", params, state, lambda request: run_memory_action(self, "import_memories_action", request))
 
     # Text fields (display_name, description, embedding_description) are defined in
     # knowledge_base/processes/purge_memories_action.json — the builder merges them at startup,
@@ -1455,44 +1411,18 @@ class ACTRMemoryPlugin(ServicePlugin, MemoryServiceInterface):
         },
         output_type="object",
         output_description="Purge result with deletion counts",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Purge result with deletion counts",
-            properties={
-                "deleted_memories": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories deleted"),
-                "deleted_memorizations": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memorizations deleted"),
-                "deleted_vectors": ParameterMetadata(type=ParameterType.INTEGER, description="Number of vectors deleted"),
-                "purged": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether purge was executed"),
-            },
-        ),
+        return_value_schema=JOB_RETURN_SCHEMA,
         summary="Permanently delete all memories from the system",
         requires_result_processor=True,
+        is_async=True,
     )
     def purge_memories_action(
         self,
         params: dict[str, Any],
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        """Purge all memories - action handler."""
-        del state  # Unused - state not needed for purge
-        confirm = params.get("confirm", False)
-
-        service = self._get_backend()
-        result = service.purge_memories(confirm=confirm)
-
-        if "error" in result:
-            return self._build_response(
-                ActionStatus.ERROR.value,
-                {},
-                {
-                    "type": "plugin_error",
-                    "code": ErrorCode.OPERATION_FAILED,
-                    "message": result["error"],
-                    "plugin_name": PLUGIN_NAME,
-                },
-            )
-
-        return self._build_response(ActionStatus.COMPLETED.value, result)
+        """Persist the request and return the canonical queued job handle."""
+        return self._jobs.submit(self, "purge_memories_action", params, state, lambda request: run_memory_action(self, "purge_memories_action", request))
 
     # ─────────────────────────────────────────────────────────────────────────
     # SCHEDULING SETUP

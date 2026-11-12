@@ -29,7 +29,7 @@ Exercises:
   13. bulk_export — writes a TSV at the caller's absolute path under the
      allowed root; column order follows first appearance; nested objects
      serialize as JSON text; returns {path, columns, row_count, total_size, truncated}
-  14. red-first: export path OUTSIDE every allowed root -> ExportPathRefusedError,
+  14. red-first: export path OUTSIDE every allowed root -> PathRefusedError,
       no file written, the query never runs
   15. red-first: EMPTY export_allowed_roots -> refused naming the config key
   16. A non-2xx response raises ZuoraResponseError carrying is_query correctly
@@ -44,33 +44,42 @@ Exits 0 on success, 1 on first failure.
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
 
-import httpx
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta/src"))
+import tempfile  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+import httpx  # noqa: E402
+from ananta.file_locations.containment import PathRefusedError, assert_path_allowed, derive_allowed_roots  # noqa: E402
+from ananta.file_locations.resolution import PathAddress, SoletTree  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "zuora_plugin" / "src"))
 
 from zuora_plugin import billing_actions  # noqa: E402
 from zuora_plugin.billing_actions import ZuoraResponseError  # noqa: E402
-from zuora_plugin.constants import (  # noqa: E402
-    BULK_EXPORT_ROW_CAP,
-    CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
-    DATA_QUERY_MAX_ROWS_CAP,
-    DEFAULT_ROW_LIMIT,
-    PARAM_ACKNOWLEDGE_OVERRIDE,
-    PARAM_ROW_LIMIT,
-)
-from zuora_plugin.export_containment import (  # noqa: E402
-    ExportPathRefusedError,
-    assert_export_path_allowed,
-)
+from zuora_plugin.constants import BULK_EXPORT_ROW_CAP, DATA_QUERY_MAX_ROWS_CAP, DEFAULT_ROW_LIMIT, PARAM_ACKNOWLEDGE_OVERRIDE, PARAM_ROW_LIMIT  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
+
+
+_LOCATION_ROOT = Path(__file__).resolve().parents[3]
+_LOCATION_TREE = SoletTree(_LOCATION_ROOT, _LOCATION_ROOT / "profile")
+
+
+def _checked_path(path: str, directories: list[str], *, suffix: str | None = ".tsv", param_name: str = "output_tsv_path", reading: bool = False) -> str:
+    """Exercise real address-derived containment, never a mocked boundary."""
+    addresses = [PathAddress(f"project-{index}", Path(directory), frozenset(), frozenset(), datetime.now(UTC)) for index, directory in enumerate(directories)]
+    roots = derive_allowed_roots(addresses, None, _LOCATION_TREE, _LOCATION_ROOT.parent / "test-solet-files")
+    result = assert_path_allowed(path, roots, _LOCATION_TREE, suffix=suffix, param_name=param_name, plugin_name="test")
+    if reading and not Path(result.value).is_file():
+        raise PathRefusedError(f"{param_name} must name an existing regular file")
+    return result.value
 
 
 def _assert(label: str, cond: bool, msg: str = "") -> None:
@@ -85,9 +94,7 @@ def _assert(label: str, cond: bool, msg: str = "") -> None:
 
 def _gate_for(roots: list[str]) -> Any:
     def gate(output_tsv_path: str) -> str:
-        return assert_export_path_allowed(
-            output_tsv_path, roots, config_key=CONFIG_KEY_EXPORT_ALLOWED_ROOTS, plugin_name="zuora_plugin",
-        )
+        return _checked_path(output_tsv_path, roots, suffix=".tsv", param_name="output_tsv_path", reading=False)
 
     return gate
 
@@ -115,7 +122,9 @@ def test_data_query_writes_tsv() -> None:
     with tempfile.TemporaryDirectory(prefix="zuora_shape_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
         result = billing_actions.data_query(
-            client, {"zoql": "SELECT Id, Name FROM Account", "output_tsv_path": out_path}, _passthrough_gate,
+            client,
+            {"zoql": "SELECT Id, Name FROM Account", "output_tsv_path": out_path},
+            _passthrough_gate,
         )
         _assert("row_count matches", result["row_count"] == 2)
         _assert("not truncated", result["truncated"] is False)
@@ -266,7 +275,7 @@ def test_export_path_outside_allowed_root_refused() -> None:
         raised = False
         try:
             billing_actions.bulk_export(client, {"zoql": "SELECT Id FROM Account", "output_tsv_path": out_path}, gate)
-        except ExportPathRefusedError:
+        except PathRefusedError:
             raised = True
         _assert("outside-root path refused", raised)
         _assert("query never runs when the path is refused", client.post.call_count == 0)
@@ -274,15 +283,12 @@ def test_export_path_outside_allowed_root_refused() -> None:
 
 
 def test_empty_allowed_roots_refused() -> None:
-    gate = _gate_for([])
-    client = MagicMock()
-    raised: ExportPathRefusedError | None = None
-    try:
-        billing_actions.bulk_export(client, {"zoql": "SELECT Id FROM Account", "output_tsv_path": "/tmp/x.tsv"}, gate)
-    except ExportPathRefusedError as exc:
-        raised = exc
-    _assert("empty export_allowed_roots refuses", raised is not None)
-    _assert("refusal names the config key", raised is not None and CONFIG_KEY_EXPORT_ALLOWED_ROOTS in str(raised))
+    with tempfile.TemporaryDirectory() as directory:
+        home = Path(directory).resolve() / "home"
+        roots = derive_allowed_roots([], None, _LOCATION_TREE, home)
+        result = assert_path_allowed(str(home / "Exports.nosync/out.tsv"), roots, _LOCATION_TREE, suffix=".tsv", param_name="output_tsv_path", plugin_name="test")
+        _assert("empty address book admits computed exports folder", result.value == str(home / "Exports.nosync/out.tsv"))
+        _assert("computed default carries an advisory", bool(result.advisories))
 
 
 def test_non_2xx_raises_with_is_query_flag() -> None:
@@ -297,7 +303,24 @@ def test_non_2xx_raises_with_is_query_flag() -> None:
     _assert("is_query True for data_query", raised is not None and raised.is_query is True)
 
 
+def test_address_root_replaces_config() -> None:
+    """A live address authorizes exports without a connector root setting."""
+    from zuora_plugin.plugin import ZuoraPlugin
+
+    with tempfile.TemporaryDirectory() as directory:
+        plugin = ZuoraPlugin()
+        plugin.initialize({})
+        orchestrator = MagicMock()
+        orchestrator.APP_HOME = str(REPO_ROOT / "profile")
+        orchestrator.get_service.return_value.list_path_addresses.return_value = {"action_status": "completed", "data": {"addresses": [{"name": "project", "tags": [], "updated_at": "2026-11-08T00:00:00+00:00", "entries": [{"field_type": "path", "value": directory}]}]}}
+        orchestrator.plugin_manager.get_plugin.return_value = None
+        plugin.orchestrator_ref = orchestrator
+        path = str(Path(directory).resolve() / "out.tsv")
+        _assert("live path address authorizes export without connector config", plugin._export_path_gate(path) == path)
+
+
 def main() -> int:
+    test_address_root_replaces_config()
     print("\nzuora_plugin Data Query + bulk export + queryMore smoke tests")
     print("=" * 47)
     test_data_query_writes_tsv()

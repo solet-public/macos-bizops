@@ -19,7 +19,9 @@ description: >
   refund, collect, reverse, write off, cancel, delete, files, items, parts),
   typed Bill Runs (create, read, post, cancel, delete, email) and Usage
   (import, create, read, correct, delete, rate detail), ZOQL data query and
-  bulk export, typed object create/update and billing reads, and a generic
+  bulk export, typed legacy Catalog (products, rate plans, charges, charge
+  definitions and catalog groups: create, read, correct, clear, delete and
+  reversible membership), typed object create/update and billing reads, and a generic
   authenticated request verb
   for any other tenant path. Reads, writes and deletes are first-class.
   REST API (no official Zuora SDK, no CLI) via a plain

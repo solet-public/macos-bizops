@@ -138,7 +138,7 @@ Kills a dead or hung worker process and spawns a fresh one in its place — dist
 Syncs the local `.md`-per-fact memory projection with the canonical `memory_service` store. As of the maintenance-verbs M1 slice, `.claude/hooks/memory_passthrough/sync.py {hydrate|drain}` composes the steps below into one Bash invocation each — prefer it over the manual sequence unless debugging a step in isolation.
 
 **Hydrate** (regenerate the local projection from canonical truth):
-1. `service_interface::memory_service::export_memories` with `tags=["agent_memory", "agent_memory:origin:<this checkout's origin tag>"]` and `file_path` inside the operator-configured `export_allowed_roots` (an out-of-root path is refused loud, not silently redirected).
+1. `service_interface::memory_service::export_memories` with `tags=["agent_memory", "agent_memory:origin:<this checkout's origin tag>"]` and `file_path` inside the configured agent-memory spool roots (the internal spool allowlist still applies).
 2. `python3 .claude/hooks/memory_passthrough/hydrate_render.py <that file_path>`.
 3. On solet-down (the export call fails): **stop, do nothing else.** The last projection stays untouched — never a partial write.
 

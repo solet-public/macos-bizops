@@ -1,12 +1,12 @@
 {
   "process_key": "service_interface::memory_service::purge_memories",
   "display_name": "Purge All Memories",
-  "description": "DESTRUCTIVE: Permanently delete all memories and memorizations from the system. This operation cannot be undone. Deletes all episodic memories, semantic memories, memorization queue entries, and their associated vector embeddings. Use only for testing or complete system reset.",
+  "description": "Return a queued owned-job receipt (data.job_id and data.status). Read the exact id through job_service.get_job for the complete former response in job.result or the typed failure in job.error. Admission retains payload references locally; uncertain effects require reconciliation and must never be replayed automatically.\n\nDESTRUCTIVE: Permanently delete all memories and memorizations from the system. This operation cannot be undone. Deletes all episodic memories, semantic memories, memorization queue entries, and their associated vector embeddings. Use only for testing or complete system reset.",
   "embedding_description": "Purge all memories from the system. Delete all stored memories. Clear entire memory system. Wipe all episodic and semantic memories. Reset memory to fresh state. Remove all remembered information and memorizations. Destroy all vector embeddings. Complete memory system reset for testing.",
   "result_processor_customizations": {
     "action_label": "Purge Memories",
     "result_type": "memory_purge",
-    "result_description": "Results of memory system purge operation",
+    "result_description": "The complete memory-operation response from the exact admitted job; the immediate response is a queued job receipt.",
     "presentation_guidance": "",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },
@@ -14,5 +14,6 @@
     "action_context": "Purging all memories from the system",
     "error_interpretation": "DatabaseError: failed to delete memory records. VectorStoreError: failed to delete vector embeddings.",
     "recovery_guidance": "For database errors: verify state storage is accessible. For vector store errors: verify vector storage is accessible. Note: partial purge may have occurred if error happened mid-operation."
-  }
+  },
+  "is_async": true
 }

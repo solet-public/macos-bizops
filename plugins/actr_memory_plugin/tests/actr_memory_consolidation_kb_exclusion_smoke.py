@@ -43,7 +43,8 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(
-    0, str(REPO_ROOT / "plugins" / "actr_memory_plugin" / "src"),
+    0,
+    str(REPO_ROOT / "plugins" / "actr_memory_plugin" / "src"),
 )
 
 # Pre-load config_manager (via importlib so the import sorter can't reorder it
@@ -53,7 +54,9 @@ sys.path.insert(
 importlib.import_module("ananta.core.config.config_manager")
 from actr_memory_plugin.backend import (  # noqa: E402
     EPISODIC_CONSOLIDATION_THRESHOLD,
+    NAMESPACE,
     ACTRMemoryBackend,
+    get_memory,
 )
 
 _passed = 0
@@ -86,9 +89,7 @@ def _memory(mid: str, *, tags: list[str], content: str) -> dict[str, Any]:
 
 def _filter(memories: list[dict[str, Any]]) -> set[str]:
     backend = object.__new__(ACTRMemoryBackend)  # method uses no instance state
-    candidates = backend._filter_consolidation_candidates(
-        memories, EPISODIC_CONSOLIDATION_THRESHOLD, _CUTOFF, _NOW
-    )
+    candidates = backend._filter_consolidation_candidates(memories, EPISODIC_CONSOLIDATION_THRESHOLD, _CUTOFF, _NOW)
     return {m["id"] for m in candidates}
 
 
@@ -115,6 +116,21 @@ def test_knowledge_official_excluded_from_consolidation() -> None:
         "m-tool" not in candidate_ids,
         "pre-existing tool_use exclusion still holds",
     )
+
+
+def verify_consolidation_effects(harness: Any) -> None:
+    """Use the real nested remember/forget path over an owned weak-memory cluster."""
+    ids = [harness.memory.remember(content=f"owned weak cluster {index}", tags=["owned-cluster"], embed=False)["memory_id"] for index in range(3)]
+    for memory_id in ids:
+        result = harness.state.update_state(NAMESPACE, {"table": "memory", "filters": {"id": memory_id}}, {"created_at": "2020-01-01T00:00:00+00:00", "retrieval_times": "[]"})
+        assert result["action_status"] == "completed"
+    outcome = harness.run("consolidate", {"strength_threshold": 999.0, "min_age_days": 1})["result"]
+    assert outcome["consolidations"] and outcome["consolidations"][0]["action"] == "consolidated"
+    sources = [get_memory(harness.state, memory_id) for memory_id in ids]
+    assert all(source and source["status"] == "archived" for source in sources)
+    successor = get_memory(harness.state, outcome["consolidations"][0]["new_memory_id"])
+    assert successor and successor["memory_type"] == "semantic_l1" and set(successor["source_memory_ids"]) == set(ids)
+    print("PASS nested consolidation creates semantic successor and archives all source rows")
 
 
 def main() -> int:

@@ -2,8 +2,7 @@
 
 Same contract as ``account_processes``: EDGE, deferred completion, one vendor
 operation from ``payment_actions`` per job, vendor RBAC the only boundary.
-Card, bank-account, gateway-token and wallet-token values are redacted from
-every echo.
+Results are returned as received.
 """
 
 from __future__ import annotations
@@ -67,7 +66,7 @@ class PaymentProcesses:
     @platform_process(
         name="create_payment_method",
         display_name="Zuora: Create Payment Method",
-        description="Create a payment method (POST /v1/payment-methods): card, card reference, bank debit (ACH, SEPA, Bacs, BECS and others), PayPal, Apple Pay, Google Pay or Amazon Pay, on an account (accountKey) or orphaned; card and bank values are redacted." + QUEUED_NOTE,
+        description="Create a payment method (POST /v1/payment-methods): card, card reference, bank debit (ACH, SEPA, Bacs, BECS and others), PayPal, Apple Pay, Google Pay or Amazon Pay, on an account (accountKey) or orphaned." + QUEUED_NOTE,
         processor_policy_category=EDGE,
         parameters={"body": body("The payment-method document: type, accountKey, cardNumber/expirationMonth/expirationYear/securityCode, bank fields, tokens, mandateInfo, makeDefault, gatewayOptions and the rest."), **IDEMPOTENT_HEADER_PARAMS},
         return_value_schema=QUEUED,
@@ -80,7 +79,7 @@ class PaymentProcesses:
     @platform_process(
         name="decrypt_payment_method",
         display_name="Zuora: Create Payment Method From Encrypted Token",
-        description="Create an Apple Pay or Google Pay payment method from the wallet's encrypted token (POST /v1/payment-methods/decryption), optionally processing a payment; body needs integrationType, merchantID and paymentToken, which is redacted." + QUEUED_NOTE,
+        description="Create an Apple Pay or Google Pay payment method from the wallet's encrypted token (POST /v1/payment-methods/decryption), optionally processing a payment; body needs integrationType, merchantID and paymentToken." + QUEUED_NOTE,
         processor_policy_category=EDGE,
         parameters={"body": body("integrationType, merchantID, paymentToken (required), accountID, invoiceId, paymentGateway, processPayment, cardHolderInfo and MIT profile fields."), **IDEMPOTENT_HEADER_PARAMS},
         return_value_schema=QUEUED,
@@ -119,7 +118,7 @@ class PaymentProcesses:
     @platform_process(
         name="update_payment_method",
         display_name="Zuora: Update Payment Method",
-        description="Correct or clear a payment method's fields (PUT /v1/payment-methods/{payment-method-id}): holder info, expiry, mandate, retry rule, gateway; send only the fields to change. A security code is redacted." + QUEUED_NOTE,
+        description="Correct or clear a payment method's fields (PUT /v1/payment-methods/{payment-method-id}): holder info, expiry, mandate, retry rule, gateway; send only the fields to change." + QUEUED_NOTE,
         processor_policy_category=EDGE,
         parameters={"payment_method_id": PAYMENT_METHOD_ID, "body": body("Fields to change: accountHolderInfo, accountKey, expirationMonth, expirationYear, securityCode, mandateInfo, maxConsecutivePaymentFailures, paymentRetryWindow, useDefaultRetryRule, authGateway, gatewayOptions."), **V1_HEADER_PARAMS},
         return_value_schema=QUEUED,

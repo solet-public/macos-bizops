@@ -36,10 +36,7 @@ def _normalize_result_processor_kind(raw: object) -> str | None:
         except ValueError as exc:
             allowed = sorted(k.value for k in ResultProcessorKind)
             raise FrameworkError(
-                message=(
-                    f"Invalid result_processor_kind {raw!r}; "
-                    f"allowed values: {allowed}"
-                ),
+                message=(f"Invalid result_processor_kind {raw!r}; allowed values: {allowed}"),
                 error_code="action_recorder.invalid_result_processor_kind",
                 details={"result_processor_kind": raw, "allowed": allowed},
             ) from exc
@@ -67,10 +64,7 @@ def _normalize_error_processor_kind(raw: object) -> str | None:
         except ValueError as exc:
             allowed = sorted(k.value for k in ErrorProcessorKind)
             raise FrameworkError(
-                message=(
-                    f"Invalid error_processor_kind {raw!r}; "
-                    f"allowed values: {allowed}"
-                ),
+                message=(f"Invalid error_processor_kind {raw!r}; allowed values: {allowed}"),
                 error_code="action_recorder.invalid_error_processor_kind",
                 details={"error_processor_kind": raw, "allowed": allowed},
             ) from exc
@@ -137,15 +131,9 @@ class ActionEventRecorder(IActionEventRecorder):
             "process_key": action.get("process_key"),
             "parameters": serialized_parameters,
             "notes": normalized_notes,
-            "result_processor": (
-                json.dumps(action.get("result_processor"))
-                if action.get("result_processor")
-                else None
-            ),
+            "result_processor": (json.dumps(action.get("result_processor")) if action.get("result_processor") else None),
             "result_processor_target": action.get("result_processor_target"),
-            "error_processor": (
-                json.dumps(action.get("error_processor")) if action.get("error_processor") else None
-            ),
+            "error_processor": (json.dumps(action.get("error_processor")) if action.get("error_processor") else None),
             "result_processor_kind": _normalize_result_processor_kind(
                 action.get("result_processor_kind"),
             ),
@@ -289,10 +277,7 @@ class ActionEventRecorder(IActionEventRecorder):
         # Normalize to catch empty strings, "None", whitespace, etc.
         normalized = normalize_session_id(session_id_raw)
         if session_id_raw and not normalized:
-            logger.error(
-                f"Normalized invalid session_id '{session_id_raw}' to None - "
-                "this may indicate a propagation issue upstream"
-            )
+            logger.error(f"Normalized invalid session_id '{session_id_raw}' to None - this may indicate a propagation issue upstream")
         return normalized
 
     def _validate_parent_id(self, parent_id_raw: object) -> str | None:
@@ -367,13 +352,12 @@ class ActionEventRecorder(IActionEventRecorder):
         depth = self.calculate_action_depth(parent_id)
 
         action_name = self._validate_action_name(action.get("name", "temp_name_will_be_replaced"))
-        action_data = self._build_action_data(
-            action, sequence, depth, action_name, flow_id, session_id, context_id
-        )
+        action_data = self._build_action_data(action, sequence, depth, action_name, flow_id, session_id, context_id)
+        # The builder describes the intended queued action. Keep its stored row
+        # unavailable until the flow token and queued status publish together.
+        action_data["status"] = "processing"
 
-        result = self.state_service.write_state(
-            namespace="core", data={"table": "action_events", "record": action_data}
-        )
+        result = self.state_service.write_state(namespace="core", data={"table": "action_events", "record": action_data})
 
         self._validate_storage_result(result)
         generated_id = self._extract_generated_id(result)
@@ -400,10 +384,7 @@ class ActionEventRecorder(IActionEventRecorder):
         parent_token_id = get_current_parent_token_id()
 
         # Debug: Log parent token propagation
-        logger.debug(
-            f"FRG_TOKEN_CREATE: action_id={action_id}, process_key={process_key}, "
-            f"parent_token_id={parent_token_id}"
-        )
+        logger.debug(f"FRG_TOKEN_CREATE: action_id={action_id}, process_key={process_key}, parent_token_id={parent_token_id}")
 
         token_id = self._flow_runtime_graph.create_token(
             flow_id=flow_id,
@@ -417,12 +398,21 @@ class ActionEventRecorder(IActionEventRecorder):
         self._update_action_token_id(action_id, token_id)
 
     def _update_action_token_id(self, action_id: str, token_id: str) -> None:
-        """Set flow_token_id on action record after token creation."""
-        self.state_service.update_state(
+        """Publish the token and make the action claimable in one update."""
+        result = self.state_service.update_state(
             namespace="core",
-            query={"table": "action_events", "filters": {"id": action_id}},
-            updates={"flow_token_id": token_id},
+            query={"table": "action_events", "filters": {"id": action_id, "status": "processing"}},
+            updates={"flow_token_id": token_id, "status": "queued"},
         )
+        self._validate_storage_result(result)
+        data = result.get("data")
+        inner = data.get("result") if isinstance(data, dict) else None
+        if not isinstance(inner, dict) or inner.get("updated") != 1:
+            raise FrameworkError(
+                message=f"Action {action_id} could not publish its flow token",
+                error_code="action_recorder.token_publication_failed",
+                details={"action_id": action_id, "token_id": token_id, "result": result},
+            )
 
     def update_action_completion(self, action_id: str, result: dict[str, object]) -> None:
         raw_id = action_id
@@ -470,9 +460,7 @@ class ActionEventRecorder(IActionEventRecorder):
 
         raw_parent_id = parent_id
 
-        result = self.state_service.read_state(
-            namespace="core", query={"table": "action_events", "filters": {"id": raw_parent_id}}
-        )
+        result = self.state_service.read_state(namespace="core", query={"table": "action_events", "filters": {"id": raw_parent_id}})
 
         if result:
             parent_depth = result.get("depth", 0)
@@ -494,14 +482,10 @@ class ActionEventRecorder(IActionEventRecorder):
     def get_action_status(self, action_id: str) -> str | None:
         raw_id = action_id
 
-        result = self.state_service.read_state(
-            namespace="core", query={"table": "action_events", "filters": {"id": raw_id}}
-        )
+        result = self.state_service.read_state(namespace="core", query={"table": "action_events", "filters": {"id": raw_id}})
 
         if result:
             status = result.get("status")
-            return (
-                status if isinstance(status, str) else (str(status) if status is not None else None)
-            )
+            return status if isinstance(status, str) else (str(status) if status is not None else None)
 
         return None

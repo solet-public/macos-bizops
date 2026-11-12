@@ -1,13 +1,13 @@
 {
   "process_key": "service_interface::quality_service::list_smoke_proofs",
   "display_name": "List Smoke Proofs",
-  "description": "List current smoke proof projections without modifying history. Results and mutations use the shared library; immutable observations cannot be rewritten.",
-  "embedding_description": "List current smoke proof projections without modifying history. Uses the shared platform-smoke-proof/v1 producer with immutable Git input identities and explicit evidence. Current and historical results disclose reuse, skips, failures, unknown inputs and delegated commissioning; no caller-provided shell command is executed.",
+  "description": "Registered dispatch returns data.job_id and data.status=queued before operation preflight. Read service_interface::job_service::get_job by that exact id until terminal: job.result is the complete original operation response and job.error retains a failure. Direct internal Python calls keep their complete synchronous results. Admission persists a bounded descriptor; loss of its owner-memory body requires reconciliation without automatic replay. List current smoke proof projections without modifying history. Results and mutations use the shared library; immutable observations cannot be rewritten.",
+  "embedding_description": "List Smoke Proofs through an owned quality-service worker. Registered dispatch returns a canonical job id before registry, Git, hash, proof or campaign preflight. Retrieve its exact id for the original result or error; internal calls stay synchronous and uncertain effects are never replayed.",
   "result_processor_customizations": {
     "action_label": "List current smoke proof projections without modifying history.",
     "result_type": "list_smoke_proofs_result",
-    "result_description": "List current smoke proof projections without modifying history.",
-    "output_action_guidance": "Read the returned evidence and explicit uncertainty before choosing the next action."
+    "result_description": "Submission: data.job_id and data.status. Terminal job.result: List current smoke proof projections without modifying history.",
+    "output_action_guidance": "Keep the exact job id. Retrieve job_service.get_job until terminal before consuming operation fields; do not repeat effects after owner loss or an uncertain terminal write. Read the returned evidence and explicit uncertainty before choosing the next action."
   },
   "error_processor_customizations": {
     "action_context": "List current smoke proof projections without modifying history.",

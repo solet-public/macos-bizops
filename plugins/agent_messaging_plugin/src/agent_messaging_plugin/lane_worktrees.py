@@ -19,7 +19,10 @@ from typing import Any, Literal
 
 from ananta.interfaces.state_management_interface import StateManagementInterface
 from ananta.services.state_service.bounded_read import PagedReadError
+from ananta.work_folders import advisory as work_folder_advisory
+from ananta.work_folders import register_work_folder
 
+from .custody_store import LocalEntry, read_entry
 from .lane_worktree_evidence import (
     CUSTODY_BUILD_OUTPUT,
     CUSTODY_CURRENT_MASTER,
@@ -30,12 +33,10 @@ from .lane_worktree_evidence import (
     CUSTODY_VERIFIED_PACKET,
     CandidateCustody,
     FinalEntry,
-    LocalEntry,
     PacketCustody,
     RegisterCustody,
     RetirementCustodyContext,
     candidate_packet,
-    read_entry,
 )
 from .schema import (
     LIFECYCLE_IDLE,
@@ -287,6 +288,7 @@ def provision_lane_worktree(
     *,
     run: GitRun = subprocess.run,
     environment: Mapping[str, str] | None = None,
+    unit_id: str | None = None,
 ) -> Path:
     """Create one branch/worktree from the integration head and link its venv.
 
@@ -336,6 +338,17 @@ def provision_lane_worktree(
             environment=environment,
         )
         created = True
+        instance = worktree.branch.rsplit("/", 1)[-1]
+        if unit_id is None:
+            work_folder_advisory(f"lane {instance} has no Unit binding; binding worktree to its session")
+        register_work_folder(
+            worktree.path,
+            purpose="lane_worktree",
+            bound=f"unit:{unit_id}" if unit_id else f"session:{instance}",
+            harvest="custody_packet",
+            owner=instance,
+            environment=environment,
+        )
         (worktree.path / ".venv").symlink_to(shared_venv, target_is_directory=True)
     except (OSError, LaneWorktreeError) as exc:
         if created:

@@ -54,6 +54,7 @@ EXPECTED_VERBS_BY_ABC: dict[str, set[str]] = {
         "ingest_raw_chunk",
         "get_import_status",
         "backfill_export_blob_identity",
+        "reclaim_orphan_event_text_blobs",
         "clear_session_label",
         "list_session_label_clears",
         "set_source_enabled",

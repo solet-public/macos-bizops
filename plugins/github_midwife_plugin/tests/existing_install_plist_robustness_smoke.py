@@ -40,7 +40,7 @@ from github_midwife_plugin.setup_adapter import dispatch_request  # noqa: E402
 from solet_manager.adapter_validation import public_string  # noqa: E402
 
 _NAME = base._NAME  # noqa: SLF001 -- the fixture's solet name
-_CHECKS = 0
+_checks = 0
 _RENAME = "existing::migration.solet_rename"
 _AUTOSTART = "existing::autostart.reconcile"
 _HYDRATION = "existing::hydration.reconcile"
@@ -49,8 +49,8 @@ _REPAIRS: list[str] = []
 
 
 def _check(condition: object, label: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    global _checks
+    _checks += 1
     if not condition:
         raise AssertionError(label)
 
@@ -242,7 +242,7 @@ _READ_SITES: frozenset[tuple[str, str]] = frozenset(
         ("existing_install_migrations.py", "_apply_text_renames"),
         ("existing_install_migrations.py", "_claude_json_servers"),
         ("existing_install_migrations.py", "_apply_claude_json"),
-        ("existing_install_migrations.py", "_connector_roots"),
+        ("existing_install_migrations.py", "_validate_connector_text"),
         ("existing_install_migrations.py", "_cache_root"),
         ("existing_install_migrations.py", "read_json"),
         ("existing_install_plugin_transitions.py", "_require_regular"),
@@ -254,13 +254,7 @@ _READ_SITES: frozenset[tuple[str, str]] = frozenset(
 def _read_site_callers(path: Path) -> set[tuple[str, str]]:
     """``(file, function)`` for every function in ``path`` that calls ``read_text`` or ``read_json`` by name."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    return {
-        (path.name, function.name)
-        for function in ast.walk(tree)
-        if isinstance(function, ast.FunctionDef)
-        for call in ast.walk(function)
-        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in {"read_text", "read_json"}
-    }
+    return {(path.name, function.name) for function in ast.walk(tree) if isinstance(function, ast.FunctionDef) for call in ast.walk(function) if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in {"read_text", "read_json"}}
 
 
 def _check_read_site_census() -> None:
@@ -273,7 +267,7 @@ def _check_read_site_census() -> None:
     found: set[tuple[str, str]] = set()
     for name in ("existing_install_migrations.py", "existing_install_plugin_transitions.py", "existing_install_operations.py"):
         found |= _read_site_callers(package / name)
-    _check(found == _READ_SITES, f"the read_text/read_json callers are exactly the listed ones: new {sorted(found - _READ_SITES)}, gone {sorted(_READ_SITES - found)}")
+    _check(frozenset(found) == _READ_SITES, f"the read_text/read_json callers are exactly the listed ones: new {sorted(found - _READ_SITES)}, gone {sorted(_READ_SITES - found)}")
     handlers = existing_install_operations.operation_handlers()
     _check(len(handlers) == 6 and all(hasattr(handler, "__wrapped__") for handler in handlers.values()), "every existing:: handler is wrapped to block on a file that is not text")
 
@@ -309,7 +303,7 @@ def main() -> int:
         _check_every_read_site_blocks(root / "h")
         _check_read_site_census()
     _check_repairs_are_public()
-    print(f"existing_install_plist_robustness_smoke: ok ({_CHECKS} checks)")
+    print(f"existing_install_plist_robustness_smoke: ok ({_checks} checks)")
     return 0
 
 

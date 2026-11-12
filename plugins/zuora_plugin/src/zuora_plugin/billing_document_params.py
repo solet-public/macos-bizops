@@ -26,8 +26,8 @@ PART_ID: Final[ParameterMetadata] = text("Credit memo part id.", required=True)
 JOB_ID: Final[ParameterMetadata] = text("Job id Zuora returned when the job was created.", required=True)
 BILL_RUN_ID: Final[ParameterMetadata] = text("Bill run id.", required=True)
 USAGE_ID: Final[ParameterMetadata] = text("Usage record id.", required=True)
-PDF_INPUT: Final[ParameterMetadata] = text("ABSOLUTE path of the .pdf file to upload, under an export_allowed_roots entry; Zuora takes up to 4 MB.", required=True)
-USAGE_INPUT: Final[ParameterMetadata] = text("ABSOLUTE path of the usage file (.csv, .xls, .xlsx or .zip in Zuora's usage template) under an export_allowed_roots entry.", required=True)
+PDF_INPUT: Final[ParameterMetadata] = text("ABSOLUTE path of the .pdf file to upload, under a registered path address; Zuora takes up to 4 MB.", required=True)
+USAGE_INPUT: Final[ParameterMetadata] = text("ABSOLUTE path of the usage file (.csv, .xls, .xlsx or .zip in Zuora's usage template) under a registered path address.", required=True)
 WSDL_HEADER_PARAMS: Final[dict[str, ParameterMetadata]] = {
     "x_zuora_wsdl_version": text("X-Zuora-WSDL-Version header: the WSDL version whose usage fields are used; 146 or higher selects the product rate plan charge fields."),
 }

@@ -6,5 +6,6 @@ plugins/zuora_plugin/tests/smoke_query_jobs_files.py
 plugins/zuora_plugin/tests/smoke_commerce.py
 plugins/zuora_plugin/tests/smoke_payments_objects.py
 plugins/zuora_plugin/tests/smoke_billing_documents.py
+plugins/zuora_plugin/tests/smoke_catalog.py
 # Build 1's generic request smoke was never registered; same shape, same plugin.
 plugins/zuora_plugin/tests/smoke_request.py

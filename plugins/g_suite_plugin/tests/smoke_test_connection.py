@@ -12,7 +12,7 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "g_suite_plugin" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from g_suite_plugin.plugin import GSuitePlugin  # noqa: E402
-from gsuite_fakes import FakeVault, connect_accounts  # noqa: E402  # pyright: ignore[reportMissingImports]
+from gsuite_fakes import FakeVault, connect_accounts, run_queued  # noqa: E402  # pyright: ignore[reportMissingImports]
 
 
 def main() -> int:
@@ -28,7 +28,7 @@ def main() -> int:
     plugin._require_factory = lambda: SimpleNamespace(  # type: ignore[method-assign]  # noqa: SLF001
         gmail=lambda: SimpleNamespace(users=lambda: SimpleNamespace(getProfile=get_profile))
     )
-    result = plugin.test_connection({}, {})
+    result = run_queued(plugin, "test_connection", {})
     assert result["action_status"] == "completed", result
     data = result["data"]
     assert data["account_identity"] == "operator@example.com" and data["harmless_read_ok"] is True, result
@@ -44,7 +44,7 @@ def main() -> int:
     PluginRegistrationValidator().validate_edge_process_provider("g_suite_plugin", plugin, discover_actions(plugin))
 
     connect_accounts(plugin, [], FakeVault())
-    disconnected = plugin.test_connection({}, {})
+    disconnected = run_queued(plugin, "test_connection", {})
     assert disconnected["error"]["code"] == "gsuite.not_connected", disconnected
     print("PASS bounded Google connection qualifier and EDGE registration")
     return 0

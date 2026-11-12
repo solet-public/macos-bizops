@@ -1,16 +1,16 @@
 {
   "process_key": "plugin::zuora_plugin::update_payment_method",
   "display_name": "Zuora: Update Payment Method",
-  "description": "Correct or clear a payment method's fields (PUT /v1/payment-methods/{payment-method-id}): holder info, expiry, mandate, retry rule, gateway; send only the fields to change. A security code is redacted. Returns job_id/status queued at once; dispatch is not completion.",
+  "description": "Correct or clear a payment method's fields (PUT /v1/payment-methods/{payment-method-id}): holder info, expiry, mandate, retry rule, gateway; send only the fields to change. Returns job_id/status queued at once; dispatch is not completion.",
   "embedding_description": "Change details on an existing Zuora payment method, such as a new card expiry date, cardholder address, mandate information or the consecutive-failure retry rule. Use to fix or clear instrument metadata without creating a new payment method.",
   "result_processor_customizations": {
     "action_label": "Zuora payment method updated",
     "result_type": "zuora_update_payment_method_result",
-    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
-    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body as received).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically."
   },
   "error_processor_customizations": {
-    "action_context": "Correct or clear a payment method's fields (PUT /v1/payment-methods/{payment-method-id}): holder info, expiry, mandate, retry rule, gateway; send only the fields to change. A security code is redacted.",
+    "action_context": "Correct or clear a payment method's fields (PUT /v1/payment-methods/{payment-method-id}): holder info, expiry, mandate, retry rule, gateway; send only the fields to change.",
     "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape: a bad identifier, header value or query pairing, a body missing a required field, or an unreadable upload file. zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.validation_failed is a vendor 4xx or an HTTP 200 carrying success false, with Zuora's reasons. zuora.object_not_found, zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
     "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the needed Payments or Payment Methods permission or enable the vendor feature the reason names (for example Invoice Settlement). Read current vendor state with the matching get or list verb before retrying a write; pass an idempotency_key where offered. Back off on rate limits."
   }

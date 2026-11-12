@@ -1,17 +1,18 @@
 {
   "process_key": "plugin::g_suite_plugin::test_connection",
   "display_name": "Google Workspace: Test Connection",
-  "description": "Verify one connected Google account (the default, or the one named by `account`) using Gmail's minimal profile endpoint. Returns the account identity, its recorded tier, the scopes Google granted and any default scope the grant lacks (missing_default_scopes; null when the grant predates scope recording). This does not list Drive files or return third-party content.",
+  "description": "Verify one connected Google account (the default, or the one named by `account`) using Gmail's minimal profile endpoint. Runs as a background job: an unknown or missing account is refused at once; otherwise dispatch returns a job_id immediately and the verdict arrives via a follow-up message once the profile read completes (read it any time with service_interface::job_service::get_job). The verdict holds the account identity, its recorded tier, the scopes Google granted and any default scope the grant lacks (missing_default_scopes; null when the grant predates scope recording). This does not list Drive files or return third-party content.",
   "embedding_description": "Confirm that Google Workspace OAuth is currently usable through Gmail's minimal profile endpoint before relying on Gmail, Drive, Docs, Sheets, or Slides operations. The bounded result identifies only the connected account and whether that harmless profile read succeeded; it neither lists Drive content nor returns third-party records.",
   "result_processor_customizations": {
-    "action_label": "Google Workspace connection checked",
+    "action_label": "Google Workspace connection check started",
     "result_type": "g_suite_test_connection_result",
-    "result_description": "Bounded verdict: account, account_identity, harmless_read_ok, account_tier, granted_scopes, missing_default_scopes.",
-    "presentation_guidance": "Report only the connection verdict and account identity; do not infer access to a broader Workspace corpus."
+    "result_description": "Job queued for the connection check (job_id, status queued); the finished job's result is the bounded verdict: account, account_identity, harmless_read_ok, account_tier, granted_scopes, missing_default_scopes. Completion is delivered automatically.",
+    "presentation_guidance": "Say the connection check is running. When the verdict arrives, report only the verdict and account identity; do not infer access to a broader Workspace corpus.",
+    "output_action_guidance": "Return exactly one action using the active IO plugin's post_message (process_key: plugin::<io_plugin>::post_message). Use the provided session_id. Keep the message short and friendly. Do NOT invent process identifiers (no present_result, no status actions)."
   },
   "error_processor_customizations": {
     "action_context": "Verify the connected Google Workspace account with a minimal profile read.",
-    "error_interpretation": "gsuite.not_connected means OAuth linking has not completed. gsuite.unknown_account means the `account` argument names no connected account (the message lists them). gsuite.auth_expired means the refresh token was rejected (for a Testing-mode OAuth app, Google expires it after 7 days). gsuite.permission_denied means the account cannot perform the minimal Gmail profile read.",
+    "error_interpretation": "At dispatch: gsuite.not_connected means OAuth linking has not completed; gsuite.unknown_account means the `account` argument names no connected account (the message lists them). In the finished job: gsuite.auth_expired means the refresh token was rejected (for a Testing-mode OAuth app, Google expires it after 7 days); gsuite.permission_denied means the account cannot perform the minimal Gmail profile read. gsuite.invalid_params at dispatch can also mean the session_id/flow_id context is missing. gsuite.api_error at dispatch means the job could not be queued (AsyncJobManager unavailable or job creation failed).",
     "recovery_guidance": "Run connect_account to link an account, then retry the bounded connection check."
   }
 }

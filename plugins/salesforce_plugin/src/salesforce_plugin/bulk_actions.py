@@ -27,7 +27,7 @@ alternative — **the measured, recorded decision** (2026-08-24 plan WP3): the
 CLI command writes into its own resolved cwd, which is not this plugin's
 containment boundary; REST-raw + our own contained file write keeps every
 byte this verb writes inside the same realpath+commonpath gate
-(`export_containment.py`) that already governs `export_soql`, with no
+(`ananta.file_locations.containment`) that already governs `export_soql`, with no
 CLI-cwd side channel to reason about.
 """
 
@@ -42,9 +42,9 @@ from .constants import BULK_INGEST_HARD_DELETE_OPERATION, BULK_INGEST_OPERATIONS
 from .errors import SalesforceCliCallError
 
 # path_gate(path) -> realpath-resolved path, or raises a *PathRefusedError.
-# Injected by the plugin: the import gate (import_allowed_roots) for
+# Injected by the plugin: the import gate (registered path addresses) for
 # bulk_ingest_submit's csv_path, the CSV-suffixed export gate
-# (export_allowed_roots) for bulk_job_results' three output paths.
+# (registered path addresses) for bulk_job_results' three output paths.
 PathGate = Callable[[str], str]
 
 
@@ -55,8 +55,7 @@ def bulk_ingest_submit(
 ) -> dict[str, Any]:
     """Submit a Bulk v2 ingest job (insert/update/upsert/delete/hardDelete) from a CSV file.
 
-    `csv_path` must be contained under an operator-configured
-    `import_allowed_roots` entry (`path_gate`, refuse-all default).
+    `csv_path` must be contained under a live path address (`path_gate`, with solet-home defaults).
     `external_id_field` is required iff `operation == "upsert"` and rejected
     otherwise — fail loud on a mismatched pair rather than silently ignoring
     an extra param (mirrors `soql_actions._resolve_effective_limit`'s
@@ -112,7 +111,7 @@ def bulk_job_results(
     """Fetch a completed Bulk v2 ingest job's three result CSVs, write each under containment.
 
     Each of the three caller-supplied paths is admitted independently via
-    `path_gate` (the CSV-suffixed `export_allowed_roots` gate) before any
+    `path_gate` (the CSV-suffixed `registered path addresses` gate) before any
     network call is made — a refused path never dispatches its REST call.
     """
     job_id = _require_str(params, "job_id")

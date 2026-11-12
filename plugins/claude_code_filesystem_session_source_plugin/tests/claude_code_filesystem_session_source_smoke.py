@@ -43,6 +43,7 @@ import json
 import os
 import sys
 import tempfile
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,7 @@ sys.path.insert(
 )
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "tests" / "llm" / "session_ledger"))
 
+from ananta.core.config.config_provider import ConfigProvider  # noqa: E402
 from ananta.llm.session_ledger.types import (  # noqa: E402
     EventType,
     ExternalSessionRef,
@@ -87,22 +89,10 @@ def _check(condition: object, label: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-class _StubConfigProvider:
-    def __init__(self, values: dict[str, object]) -> None:
-        self._values = values
-
-    def get(self, name: str, default: object | None = None) -> object:
-        if name in self._values:
-            return self._values[name]
-        return default
-
-
 def _make_plugin() -> ClaudeCodeFilesystemSessionSourcePlugin:
     plugin = ClaudeCodeFilesystemSessionSourcePlugin()
     # P1.1.E: root is threaded per-call as root_uri; only glob stays in config.
-    plugin.set_config_provider(  # type: ignore[arg-type]
-        _StubConfigProvider({"glob": "*.jsonl"})
-    )
+    plugin.set_config_provider(ConfigProvider(plugin.name, {"glob": "*.jsonl"}))
     plugin.prepare_for_readiness()
     return plugin
 
@@ -311,7 +301,7 @@ def test_parser_skips_thinking_blocks_in_isolation() -> None:
 
 def test_parser_advises_on_unknown_block_kind() -> None:
     """Exercise the actual filesystem poll report, retaining strict known blocks."""
-    import importer_smoke as runtime
+    import importer_smoke as runtime  # pyright: ignore[reportMissingImports]
     from ananta.llm.session_ledger.types import UnknownLineAdvisory
 
     line: dict[str, Any] = {
@@ -403,7 +393,7 @@ def test_normalize_tool_result_round_trips_parent_link() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _write_jsonl(target: Path, lines: list[dict[str, object]]) -> None:
+def _write_jsonl(target: Path, lines: Sequence[Mapping[str, object]]) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("w", encoding="utf-8") as fh:
         for line in lines:
@@ -438,8 +428,9 @@ def test_discover_and_read_events_in_tmpdir() -> None:
         _check(len(raw_events) == 5, f"flattened to 5 raw events (got {len(raw_events)})")
         # event_read_cursor must carry the per-file byte offset
         last_cursor = plugin.event_read_cursor(str(root), ref, raw_events[-1])
+        byte_offset = last_cursor.get("byte_offset")
         _check(
-            isinstance(last_cursor.get("byte_offset"), int) and last_cursor["byte_offset"] > 0,
+            isinstance(byte_offset, int) and byte_offset > 0,
             "event_read_cursor returns positive byte_offset after a full read",
         )
 
@@ -624,7 +615,7 @@ def _poll_case(root: Path, kind: str, plugin_name: str, fixture_name: str) -> An
     from types import SimpleNamespace
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta" / "tests" / "llm" / "session_ledger"))
-    import importer_smoke as runtime
+    import importer_smoke as runtime  # pyright: ignore[reportMissingImports]
     from ananta.llm.session_ledger import types
     from ananta.llm.session_ledger.poll_budget import COMPLETED_VERSION_KEY, DiscoveryBudgetYield
 
@@ -711,7 +702,7 @@ def _poll_assert_events(case: Any) -> None:
     The expected stream is an uninterrupted read of the identical real inputs."""
     from collections import Counter
 
-    from ananta.llm.session_ledger.importer import _event_external_id
+    from ananta.llm.session_ledger.importer_persistence import _event_external_id
 
     assert Counter(map(repr, case.observed)) == Counter(map(repr, case.expected)), "whole-session restart preserves exact vendor events, usage and model data"
     rows = [row.record for row in case.state.upserts if row.table == "event"]
@@ -1065,7 +1056,7 @@ def test_unknown_failed_persistence() -> None:
     """A read-ahead known line must not checkpoint past an unpersisted event."""
     from unittest.mock import patch
 
-    import importer_smoke as runtime
+    import importer_smoke as runtime  # pyright: ignore[reportMissingImports]
     from ananta.llm.session_ledger.importer import SessionLedgerImporter
     from ananta.llm.session_ledger.repository import LedgerRepositoryError
     from ananta.llm.session_ledger.types import CursorScope
@@ -1094,7 +1085,7 @@ def test_unknown_failed_persistence() -> None:
     _check(True, "persistence failure leaves complete suffix reachable")
 
 
-def _assert_oversized_unknown_append(importer: Any, repo: Any, importer_mod: Any, path: Path, unknown: dict[str, object]) -> None:
+def _assert_oversized_unknown_append(importer: Any, repo: Any, importer_mod: Any, path: Path, unknown: Mapping[str, object]) -> None:
     """Append eligibility must resume beyond both previously consumed unknowns."""
     from unittest.mock import patch
 
@@ -1122,7 +1113,7 @@ def test_oversized_unknown_offsets() -> None:
     """
     from unittest.mock import patch
 
-    import importer_smoke as runtime
+    import importer_smoke as runtime  # pyright: ignore[reportMissingImports]
     from ananta.llm.session_ledger import filesystem_poll as policy
     from ananta.llm.session_ledger import importer as importer_mod
     from ananta.llm.session_ledger.types import CursorScope, UnknownLineAdvisory
@@ -1142,7 +1133,7 @@ def test_oversized_unknown_offsets() -> None:
                     first = [call.args[1] for call in log.call_args_list if call.args[0] == "ledger oversized DRAIN complete: unknown_line_advisories=%s"]
                 cursor = repo.cursors["runtime-source", CursorScope.EVENT_READ, _SID]
                 assert cursor.get("byte_offset") == path.stat().st_size, "OVERSIZED_CONSUMED_UNKNOWN_EOF"
-                assert first == [(UnknownLineAdvisory("runtime-source", _SID, "synthetic-unknown-line-type", 2),)], "OVERSIZED_EXACT_INITIAL_ADVISORY"
+                assert first == [(UnknownLineAdvisory("runtime-source", _SID, "synthetic-unknown-line-type", 1),)], "OVERSIZED_EXACT_INITIAL_ADVISORY"
                 _assert_oversized_unknown_append(importer, repo, importer_mod, path, unknown)
     _check(True, "oversized unknown suffix and unknown-only reads checkpoint consumed bytes")
 

@@ -126,3 +126,12 @@ extensions are: new runtimes arrive in the sweep for free through the ledger's
 `agent_runtime`; a new produced-work fact arrives for free through the
 register's own verb; and a wake-on-stall, if it is ever wanted, is a third
 component that consumes the sweep's verdict and owns its own rails.
+
+## Sweep job receipts
+
+`sweep_fleet_stall` and `sweep_fleet_stall_cron` persist a job request and return
+`data: {job_id, status: queued}`. Read the exact job through
+`service_interface::job_service::get_job` until terminal. `job.result.data`
+contains the original sweep report or cron summary; failures retain the
+original envelope in `job.result` and the error in `job.error`. The completed
+sweep continues to write its existing status/history records.

@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::external_postgres_plugin::statistics",
+  "display_name": "External Postgres: Sizes and Statistics",
+  "description": "Read and reset a registered foreign Postgres server's size and usage statistics. operation database_sizes (pg_database_size per database the role may connect to); relation_sizes (total, table and index bytes and estimated rows per table, largest first, optional schema); table_stats (pg_stat_user_tables scans, tuples, dead tuples, vacuum and analyze times); index_stats (pg_stat_user_indexes scans and size); reset (pg_stat_reset for the current database); reset_table (one table's counters, schema and table). List operations page with limit and offset and return next_offset. Vendor privileges alone decide access. Returns a queued job.",
+  "embedding_description": "Measure how big an external Postgres database, its tables and its indexes are, and read table and index usage statistics: sequential and index scans, live and dead tuples, last vacuum and analyze times. Find the largest tables or unused indexes, and reset the statistics counters for a database or one table.",
+  "result_processor_customizations": {
+    "action_label": "Foreign Postgres statistics request queued",
+    "result_type": "external_postgres_statistics_result",
+    "result_description": "Dispatch envelope: job_id (string) and status ('queued'). The outcome arrives when the job completes: the read operations return {operation, rows, returned, limit, offset, next_offset}, one object per row with the vendor's column names (sizes in bytes); reset returns {operation, reset}; reset_table returns {operation, reset, schema, table}.",
+    "presentation_guidance": "This call only confirms the job was queued. Once delivered, present sizes in human units (MB, GB) alongside bytes, highlight the largest relations, dead-tuple build-up and indexes with zero scans, and offer the next page when next_offset is set. For a reset, confirm the counters were cleared."
+  },
+  "error_processor_customizations": {
+    "action_context": "Read or reset size and usage statistics on a registered foreign Postgres server.",
+    "error_interpretation": "external_pg.invalid_params: an unknown operation, a limit outside 1 to 1000, a negative offset, an empty schema filter, a reset_table without schema and table, or a reset_table naming a relation that does not exist. external_pg.permission_denied: the role may not reset statistics (pg_stat_reset needs superuser or an explicit EXECUTE grant). external_pg.connection_unknown: no connection registered under that name.",
+    "recovery_guidance": "external_pg.invalid_params: use one of database_sizes, relation_sizes, table_stats, index_stats, reset or reset_table with the parameters it takes. external_pg.permission_denied on reset: ask the operator to GRANT EXECUTE on the reset function to the registered role. A null size_bytes means the role lacks CONNECT on that database."
+  }
+}

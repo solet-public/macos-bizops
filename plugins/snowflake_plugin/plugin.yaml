@@ -2,10 +2,11 @@ name: snowflake_plugin
 description: >
   Snowflake warehouse connector — queries and statements, warehouse/database/schema
   introspection, and full-result export to workspace .tsv files (contained
-  under export_allowed_roots). Executor: snowflake-connector-python. The same
+  under registered path addresses). Executor: snowflake-connector-python. The same
   key pair also signs Snowflake REST calls: the generic request verb and the
   typed sql_api, task, stream, dynamic_table, database, schema, warehouse,
   stage, table, view, sequence and pipe (with Snowpipe ingestion) families.
+  stage_files adds contained PUT/GET, LIST/REMOVE, COPY INTO and COPY FILES.
   Auth: key-pair (RSA JWT) as the operator's own Snowflake user, resolved from
   the address book entry "snowflake_account" via chain-consumed vault::
   references — no PAT, no browser flow, no callback server.
@@ -38,18 +39,6 @@ config:
     default: 30
     description: >
       Per-connection login timeout (seconds) for the JWT key-pair handshake.
-  export_allowed_roots:
-    type: list
-    required: false
-    default: []
-    description: >
-      Absolute workspace directories export_query may write TSV files under
-      (realpath + commonpath containment, mirroring ledger_allowed_roots).
-      Empty by default = REFUSE-ALL: every export is refused until the operator
-      opts workspace roots in here (operator ruling 2026-07-15 — bulk query
-      data lands in the operator's own workspace, never context or platform
-      blob storage). Prefer the exact export directories over broad parents.
-
 # Credentials live in the address book entry "snowflake_account": literals
 # (account, user, warehouse, database, schema, role, auth_method) plus a
 # private_key field that stores a

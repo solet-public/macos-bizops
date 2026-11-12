@@ -18,9 +18,9 @@ Contract shared by every typed verb:
   registered tenant. Callers never supply a host or URL.
 * A non-2xx response is a typed job error: 403 keeps the vendor's
   permission-denied detail (``zuora.permission_denied``); other classes use
-  :func:`errors.classify_zuora_response`. Every message and every success body
-  is redacted for the registered client id/secret, the minted bearer and any
-  caller-supplied secret field, in raw, percent/form-encoded and base64 forms.
+  :func:`errors.classify_zuora_response`. Messages and success bodies are
+  returned as received; the audit line is built only from method, path
+  without query values, status, duration and correlation id.
 * One vendor call per operation. A 401 re-mints the bearer once (Zuora
   rejected the call before running it); nothing else is retried or replayed.
 * The v1 billing routes can answer HTTP 200 with ``success: false``; an
@@ -39,14 +39,14 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Final, Literal, Protocol
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote
 from uuid import uuid4
 
 import httpx
 
 from . import request_actions
-from .constants import ERROR_PERMISSION_DENIED, ERROR_VALIDATION_FAILED, PLUGIN_NAME
-from .errors import ZuoraServiceError, classify_zuora_response, vendor_detail
+from .constants import ERROR_API_ERROR, ERROR_PERMISSION_DENIED, ERROR_VALIDATION_FAILED, PLUGIN_NAME
+from .errors import ZuoraServiceError, classify_zuora_response, vendor_detail, vendor_url
 from .http_client import ZuoraClient
 
 logger = logging.getLogger(PLUGIN_NAME)
@@ -62,7 +62,7 @@ Paging = Literal["none", "page_number", "single_page", "cursor", "next_link"]
 
 
 class PathGate(Protocol):
-    """The plugin's export_allowed_roots containment gate (``ZuoraPlugin._export_path_gate``)."""
+    """The plugin's registered path addresses containment gate (``ZuoraPlugin._export_path_gate``)."""
 
     def __call__(self, output_tsv_path: str, *, param_name: str = ..., suffix: str | None = ...) -> str: ...
 
@@ -88,7 +88,6 @@ class RawBody:
 
 
 BodyBuilder = Callable[[dict[str, Any], PathGate], Any]
-SecretFinder = Callable[[dict[str, Any]], list[str]]
 QueryCheck = Callable[[dict[str, Any]], None]
 QueryBuilder = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -103,7 +102,6 @@ class Operation:
     path_fields: Mapping[str, Field] = field(default_factory=dict[str, Field])
     query_fields: Mapping[str, Field] = field(default_factory=dict[str, Field])
     body: BodyBuilder | None = None
-    secrets: SecretFinder | None = None
     paging: Paging = "none"
     json_output: bool = False
     is_query: bool = False
@@ -112,9 +110,6 @@ class Operation:
     envelope: bool = False
     query_builder: QueryBuilder | None = None
     raw_content_type: str | None = None
-    # Top-level result keys the verb exists to return (e.g. a payment session ``token``):
-    # exempt from secret-key-name redaction; credential-value variants are still scrubbed.
-    revealed_keys: frozenset[str] = frozenset()
 
     @property
     def retryable(self) -> bool:
@@ -224,7 +219,10 @@ _VALIDATORS: Final[dict[str, Callable[[str, Field, Any], Any]]] = {
 
 def _int_value(name: str, value: Any, *, minimum: int, maximum: int | None) -> int:
     if isinstance(value, str) and value.isdigit():
-        value = int(value)
+        try:
+            value = int(value)
+        except ValueError:
+            raise ValueError(f"{name} must be an integer of at least {minimum}") from None
     if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
         raise ValueError(f"{name} must be an integer of at least {minimum}")
     if maximum is not None and value > maximum:
@@ -264,7 +262,10 @@ def build_path(op: Operation, params: dict[str, Any]) -> str:
         value = params.get(name)
         if value is None:
             raise ValueError(f"{name} is required")
-        segments[name] = quote(str(coerce(name, spec, value)), safe="")
+        segment = str(coerce(name, spec, value))
+        if segment in {".", ".."}:
+            raise ValueError(f"{name} must identify a resource, never a dot path segment")
+        segments[name] = quote(segment, safe="")
     return op.path.format(**segments)
 
 
@@ -359,7 +360,7 @@ def contained_output(gate: PathGate, path: Any, *, suffix: str | None) -> str:
 
 
 def write_file(resolved: str, content: bytes) -> dict[str, Any]:
-    """Write downloaded bytes to an already-contained path; return the handle the caller relays."""
+    """Write the bytes as received to an already-contained path; return the handle the caller relays."""
     with open(resolved, "wb") as handle:
         handle.write(content)
     return {"path": resolved, "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
@@ -370,8 +371,8 @@ def write_file(resolved: str, content: bytes) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def raise_for_vendor_error(op: Operation, response: httpx.Response, secrets: list[str]) -> None:
-    """Map a non-2xx response to a typed, redacted job error."""
+def raise_for_vendor_error(op: Operation, response: httpx.Response) -> None:
+    """Map a non-2xx response to a typed job error."""
     if not response.is_error:
         return
     if response.status_code == _HTTP_FORBIDDEN:
@@ -380,10 +381,10 @@ def raise_for_vendor_error(op: Operation, response: httpx.Response, secrets: lis
         code, message = ERROR_PERMISSION_DENIED, f"{message}: {detail}" if detail else f"{message}."
     else:
         code, message = classify_zuora_response(response, is_query=op.is_query)
-    raise ZuoraServiceError(code, str(request_actions.redact(message, secrets)))
+    raise ZuoraServiceError(code, message)
 
 
-def raise_for_unsuccessful_envelope(op: Operation, response: httpx.Response, secrets: list[str]) -> None:
+def raise_for_unsuccessful_envelope(op: Operation, response: httpx.Response) -> None:
     """A v1 route's HTTP 200 carrying ``success: false`` (``Success`` on the object routes) is a vendor refusal, not a completion."""
     if not op.envelope:
         return
@@ -391,7 +392,7 @@ def raise_for_unsuccessful_envelope(op: Operation, response: httpx.Response, sec
     if isinstance(body, dict) and (body.get("success") is False or body.get("Success") is False):
         detail = vendor_detail(response)
         message = f"Zuora reported success false (status {response.status_code})"
-        raise ZuoraServiceError(ERROR_VALIDATION_FAILED, str(request_actions.redact(f"{message}: {detail}" if detail else f"{message}.", secrets)))
+        raise ZuoraServiceError(ERROR_VALIDATION_FAILED, f"{message}: {detail}" if detail else f"{message}.")
 
 
 def response_body(response: httpx.Response) -> Any:
@@ -404,13 +405,16 @@ def response_body(response: httpx.Response) -> Any:
         return response.text
 
 
-def call(op: Operation, client: ZuoraClient, params: dict[str, Any], gate: PathGate) -> tuple[httpx.Response, list[str], dict[str, Any]]:
-    """Validate, send one vendor request, map errors; return the response, secrets and query."""
+def call(op: Operation, client: ZuoraClient, params: dict[str, Any], gate: PathGate) -> tuple[httpx.Response, dict[str, Any]]:
+    """Validate, send one vendor request, map errors; return the response and its metadata.
+
+    The audit line is built only from method, path without query values,
+    status, duration and correlation id.
+    """
     path = build_path(op, params)
     query = build_query(op, params)
     headers = collect(op.header_fields, params)
     body = op.body(params, gate) if op.body is not None else None
-    secrets = [*request_actions.secret_values(body), *(op.secrets(params) if op.secrets is not None else [])]
     if isinstance(body, RawBody):
         headers["Content-Type"] = body.content_type
         body = body.content
@@ -422,41 +426,34 @@ def call(op: Operation, client: ZuoraClient, params: dict[str, Any], gate: PathG
         response = client.send(op.method, path, params=query or None, json=None if content is not None else body, content=content, headers=headers or None)
         status = response.status_code
     finally:
-        secrets.extend(client.credential_values())
-        logger.info(
-            "zuora.%s method=%s path=%s status=%s duration_ms=%.3f correlation_id=%s",
-            op.name,
-            op.method,
-            request_actions.redact(request_actions.audit_path(path, query), secrets),
-            status,
-            (time.monotonic() - started) * 1000,
-            correlation_id,
-        )
-    raise_for_vendor_error(op, response, secrets)
-    raise_for_unsuccessful_envelope(op, response, secrets)
-    return response, secrets, {"operation": op.name, "method": op.method, "path": path, "status": response.status_code, "correlation_id": correlation_id}
+        # Built after the call: OAuth may have minted a bearer even when the send raised.
+        audit = f"zuora.{op.name} method={op.method} path={request_actions.audit_path(path, query)} status={status} duration_ms={(time.monotonic() - started) * 1000:.3f} correlation_id={correlation_id}"
+        logger.info("%s", audit)
+    raise_for_vendor_error(op, response)
+    raise_for_unsuccessful_envelope(op, response)
+    return response, {"operation": op.name, "method": op.method, "path": path, "status": response.status_code, "correlation_id": correlation_id}
 
 
 def execute(op: Operation, client: ZuoraClient, params: dict[str, Any], gate: PathGate) -> dict[str, Any]:
-    """Run one typed operation; return its redacted vendor body and paging hints."""
+    """Run one typed operation; return its vendor body as received and its paging hints."""
     wants_file = op.json_output and params.get("output_path") is not None
     resolved = contained_output(gate, params["output_path"], suffix=JSON_SUFFIX) if wants_file else None
-    response, secrets, result = call(op, client, params, gate)
-    body = _redacted_body(op, response_body(response), secrets)
-    if op.paging != "none":
-        result["pagination"] = _PAGERS[op.paging](params, body)
-    if resolved is not None:
-        rendered = json.dumps(body, indent=2, sort_keys=True).encode("utf-8")
-        return {**result, "file": write_file(resolved, rendered)}
-    return {**result, "data": body}
+    response, meta = call(op, client, params, gate)
+    raw = response_body(response)
+    pagination = _vendor_pagination(op, params, raw) if op.paging != "none" else None
+    finished: dict[str, Any] = {**meta, **({"pagination": pagination} if pagination is not None else {})}
+    if resolved is None:
+        return {**finished, "data": raw}
+    rendered = json.dumps(raw, indent=2, sort_keys=True).encode("utf-8")
+    return {**finished, "file": write_file(resolved, rendered)}
 
 
-def _redacted_body(op: Operation, raw: Any, secrets: list[str]) -> Any:
-    """Redact the vendor body; ``revealed_keys`` skip key-name redaction but keep value scrubbing."""
-    body = request_actions.redact(raw, secrets)
-    if isinstance(raw, dict) and isinstance(body, dict):
-        body.update({key: request_actions.redact(raw[key], secrets) for key in op.revealed_keys if key in raw})
-    return body
+def _vendor_pagination(op: Operation, params: dict[str, Any], raw: Any) -> dict[str, Any]:
+    """Interpret raw vendor controls without allowing parser text to escape."""
+    try:
+        return _PAGERS[op.paging](params, raw)
+    except Exception:
+        raise ZuoraServiceError(ERROR_API_ERROR, "Zuora returned invalid pagination data.") from None
 
 
 def _page_size(params: dict[str, Any]) -> int | None:
@@ -476,13 +473,18 @@ def _pagination(params: dict[str, Any], body: Any) -> dict[str, Any]:
     if isinstance(body, dict) and "pagination" not in body:
         link = body.get("nextPage")
         return {"page": current, "next_page": _link_page(link, current) if isinstance(link, str) and link else None, "vendor": link}
+    return _workflow_pagination(body, current)
+
+
+def _workflow_pagination(body: Any, current: int) -> dict[str, Any]:
     vendor = body.get("pagination") if isinstance(body, dict) else None
+    _checked_link(vendor.get("next_page") if isinstance(vendor, dict) else None)
     more = isinstance(vendor, dict) and bool(vendor.get("next_page"))
     return {"page": current, "next_page": current + 1 if more else None, "vendor": vendor}
 
 
 def _link_page(link: str, current: int) -> int:
-    values = parse_qs(urlsplit(link).query).get("page", [])
+    values = parse_qs(vendor_url(link).query).get("page", [])
     return int(values[0]) if values and values[0].isdigit() else current + 1
 
 
@@ -522,6 +524,7 @@ def _cursor_page(params: dict[str, Any], body: Any) -> dict[str, Any]:
     """
     found: dict[str, Any] = body if isinstance(body, dict) else {}
     vendor = next((found[key] for key in _CURSOR_KEYS if isinstance(found.get(key), str) and found[key]), None)
+    _checked_link(vendor)
     records = next((found[key] for key in _RECORD_KEYS if isinstance(found.get(key), list)), [])
     limit = _page_size(params)
     short = limit is not None and len(records) < limit
@@ -543,12 +546,18 @@ def _next_link(_params: dict[str, Any], body: Any) -> dict[str, Any]:
     link = body.get("nextPage") if isinstance(body, dict) else None
     if not isinstance(link, str) or not link:
         return {"next_path": None, "vendor": None, "hint": "Zuora sent no nextPage link: this is the whole list."}
-    parts = urlsplit(link)
+    parts = vendor_url(link)
     return {
         "next_path": parts.path + (f"?{parts.query}" if parts.query else ""),
         "vendor": link,
         "hint": "Zuora documents no page parameter on this route: fetch next_path with the request verb (method GET).",
     }
+
+
+def _checked_link(value: Any) -> None:
+    """Validate URL-shaped continuations without treating opaque cursors as URLs."""
+    if isinstance(value, str) and value.startswith(("http://", "https://", "/")):
+        vendor_url(value)
 
 
 _PAGERS: Final[dict[str, Callable[[dict[str, Any], Any], dict[str, Any]]]] = {"page_number": _pagination, "single_page": _single_page, "cursor": _cursor_page, "next_link": _next_link}

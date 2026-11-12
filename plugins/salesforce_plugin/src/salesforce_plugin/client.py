@@ -42,6 +42,7 @@ from .constants import (
     CLI_RESPONSE_HEADER_NAMES,
     DEFAULT_API_VERSION,
     DEFAULT_SF_CLI_PATH,
+    ERROR_API_ERROR,
     ERROR_AUTH_FAILED,
     ERROR_NOT_CONFIGURED,
     ERROR_PROVISION_CONSENT_REQUIRED,
@@ -180,7 +181,7 @@ class SalesforceCliExecutor:
         method: str,
         path: str,
         *,
-        body: dict[str, Any] | str | None = None,
+        body: dict[str, Any] | str | bytes | None = None,
         raw_response: bool = False,
         headers: Mapping[str, str] | None = None,
         structured_response: bool = False,
@@ -226,6 +227,25 @@ class SalesforceCliExecutor:
         if raw_response:
             return _parse_rest_response_raw(completed, target_org)
         return _parse_rest_response(completed, target_org)
+
+    def stream_rest(self, method: str, path: str, output_path: str, *, headers: Mapping[str, str] | None = None) -> None:
+        """Run `sf api request rest <path> --stream-to-file <output_path>`.
+
+        The CLI pipes the response bytes to the file unchanged, so binary
+        bodies (ContentVersion ``VersionData``) survive, which the text
+        ``--include`` transcript cannot carry. The CLI prints no status or
+        headers in this mode, so the caller proves the written bytes against
+        vendor metadata (size and checksum) before keeping them. A non-zero
+        exit is a failed download; its text is not echoed because it can name
+        the org host.
+        """
+        target_org = self._ensure_verified()
+        argv = [self._sf_cli_path, "api", "request", "rest", path, "--method", method, "--target-org", target_org, "--stream-to-file", output_path]
+        for name, value in (headers or {}).items():
+            argv += ["--header", f"{name}:{value}"]
+        completed = self._invoke(argv, {"NO_COLOR": "1", "FORCE_COLOR": "0"}, target_org, decode_errors="replace")
+        if completed.returncode != 0:
+            raise SalesforceServiceError(ERROR_API_ERROR, "The sf CLI did not complete the download; no file was kept.")
 
     def _ensure_verified(self) -> str:
         if self._target_org is None:
@@ -447,7 +467,7 @@ def _included_body(lines: list[str]) -> tuple[dict[str, str], str, bool]:
 
 
 def _printed_body_value(text: str) -> Any:
-    """Decode only a selected body; retain a separate value for secret detection."""
+    """Decode only a selected body; an undecodable body stays text."""
     text = text.removesuffix("\n").removesuffix("\r")
     try:
         return json.loads(text)
@@ -464,11 +484,10 @@ def _parse_included_response(transcript: str) -> dict[str, Any]:
     decoded = _printed_body_value(text)
     result = {"statusCode": status, "headers": headers, "body": decoded if proven else transcript}
     if not proven:
-        result["body_advisory"] = "The printed header/body boundary is uncertain. The body preserves the entire credential-redacted printed text; status is unknown if no HTTP status line was printed."
+        result["body_advisory"] = "The printed header/body boundary is uncertain. The body preserves the entire printed text; status is unknown if no HTTP status line was printed."
         result["transcript"] = transcript
-        # This is used only to discover credential values for redaction, never
-        # to interpret or shorten the public uncertain body.
-        result["_redaction_context"] = decoded
+        # In-process only: the typed-boundary proof reads it; never returned.
+        result["_decoded_body"] = decoded
     if "\ufffd" in transcript:
         result["encoding_advisory"] = "The CLI transcript contains Unicode replacement characters; original response bytes are unavailable."
     return result
@@ -538,7 +557,11 @@ def _extract_org_display_fields(result: Any, target_org: str, login_hint: str) -
 def _require_pinned_host(instance_url: str, pinned_host: str) -> None:
     # The invariant guard: never talk to an org other than the registered one,
     # no matter what the local CLI alias cache resolves to.
-    host = (urlparse(instance_url).hostname or "").lower()
+    try:
+        host = (urlparse(instance_url).hostname or "").lower()
+    except ValueError:
+        # urlparse quotes the netloc in its message; the CLI's value is never echoed.
+        raise SalesforceServiceError(ERROR_NOT_CONFIGURED, "sf CLI org display returned an instanceUrl that is not a valid URL — refusing to connect. Re-run: sf org login web.") from None
     expected = pinned_host.strip().lower()
     if host != expected:
         raise SalesforceServiceError(
@@ -548,23 +571,23 @@ def _require_pinned_host(instance_url: str, pinned_host: str) -> None:
 
 
 @contextmanager
-def _json_body_file(body: dict[str, Any] | str | None) -> Generator[str | None]:
+def _json_body_file(body: dict[str, Any] | str | bytes | None) -> Generator[str | None]:
     """Write `body` to a tempfile as JSON for the call, then clean it up.
 
     File-based (never a shell-joined argv string) so arbitrary field values —
     quotes, braces, unicode — round-trip exactly via `json.dump`/`json.load`,
-    with no custom quoting grammar to get wrong.
+    with no custom quoting grammar to get wrong. A ``bytes`` body (a
+    multipart Metadata deploy package) is written unchanged; the CLI reads
+    ``--body @file`` as raw bytes.
     """
     if body is None:
         yield None
         return
     fd, path = tempfile.mkstemp(suffix=".json", prefix="salesforce_plugin_body_")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            if isinstance(body, str):
-                handle.write(body)
-            else:
-                json.dump(body, handle)
+        text = body if isinstance(body, (str, bytes)) else json.dumps(body)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(text if isinstance(text, bytes) else text.encode("utf-8"))
         yield path
     finally:
         os.unlink(path)

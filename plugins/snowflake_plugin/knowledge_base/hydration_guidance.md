@@ -25,3 +25,9 @@ Full step-by-step detail lives in this plugin's own overview article (`plugins/s
 5. If the plugin is not in the live manifest, add it via the blue-green manifest deploy (this also auto-ingests the plugin's knowledge base). Then verify with `test_connection` — it echoes the resolved role, so the vendor authorization boundary is visible immediately.
 
 On decline: stop, leave the plugin dormant. `snowflake.not_configured` on every verb is the fully-supported steady state, not a broken one.
+
+## Stage-file workspace
+
+For `stage_files` PUT/GET, save the workspace folder as a path address. Both directions use the saved folders, the session launch folder and solet home, with the installation tree excluded. GET needs an existing destination directory; COPY INTO results need a contained `.tsv` output path. This protects local filesystem access; Snowflake role grants alone authorize vendor writes/deletes.
+PUT OVERWRITE corrects files, REMOVE retires them, and PUT can recreate them.
+See `01_snowflake_overview.md` for the parameter/result contract and partial effects.

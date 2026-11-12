@@ -1,0 +1,2 @@
+# One merged-tree proof covers the complete registry through real CLI/HTTP admission.
+# not shipped: plugins/agent_messaging_plugin/tests/bridge_wait_registered_callers_smoke.py requires plugins/default_knowledge_plugin/tools for existing result-consumer fixtures (fixture_build_tooling)

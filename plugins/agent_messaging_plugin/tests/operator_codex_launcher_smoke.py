@@ -59,14 +59,22 @@ SESSION = "ases-operator-smoke"
 HOST = "operator-codex-" + "b" * 32
 CLAUDE_HOST = "Operator-Claude-Smoke"
 REQUEST = registration.OperatorCodexRegistration(
-    host_ref=HOST, agent_id="codex", agent_instance_id=INSTANCE,
-    agent_session_id=SESSION, session_label="Operator-Smoke", parent_pid=701,
+    host_ref=HOST,
+    agent_id="codex",
+    agent_instance_id=INSTANCE,
+    agent_session_id=SESSION,
+    session_label="Operator-Smoke",
+    parent_pid=701,
     watcher_declared=True,
 )
 METADATA = {"model": "gpt-5.6-sol", "effort": "low", "lane_repo_root": "/tmp"}
 CLAUDE_REQUEST = registration.OperatorClaudeRegistration(
-    host_ref=CLAUDE_HOST, agent_id="claude_code", agent_instance_id=INSTANCE,
-    agent_session_id=SESSION, session_label=CLAUDE_HOST, parent_pid=701,
+    host_ref=CLAUDE_HOST,
+    agent_id="claude_code",
+    agent_instance_id=INSTANCE,
+    agent_session_id=SESSION,
+    session_label=CLAUDE_HOST,
+    parent_pid=701,
     watcher_declared=True,
 )
 
@@ -79,11 +87,14 @@ def _probe(argv: list[str]) -> str:
     if "list-panes" in argv:
         return "700\t0\t/tmp"
     values = {
-        "AGENT_INSTANCE_ID": INSTANCE, "AGENT_SESSION_ID": SESSION,
-        "AGENT_SESSION_LABEL": "Operator-Smoke", "FLEET_TRANSPORT": "watch",
+        "AGENT_INSTANCE_ID": INSTANCE,
+        "AGENT_SESSION_ID": SESSION,
+        "AGENT_SESSION_LABEL": "Operator-Smoke",
+        "FLEET_TRANSPORT": "watch",
         "SOLET_NAME": os.environ["SOLET_NAME"],
         "OPERATOR_CODEX_MODEL": METADATA["model"],
-        "OPERATOR_CODEX_EFFORT": METADATA["effort"], "OPERATOR_CODEX_CWD": "/tmp",
+        "OPERATOR_CODEX_EFFORT": METADATA["effort"],
+        "OPERATOR_CODEX_CWD": "/tmp",
     }
     return f"{argv[-1]}={values[argv[-1]]}"
 
@@ -106,17 +117,27 @@ def _claude_probe(argv: list[str]) -> str:
 
 def _client(state: RealShapeState) -> TestClient:
     manager = BridgeSessionManager(
-        session_id_factory=lambda _: "agc-operator-smoke", idle_timeout_s=60,
-        max_pending_events=10, long_poll_timeout_s=1,
+        session_id_factory=lambda _: "agc-operator-smoke",
+        idle_timeout_s=60,
+        max_pending_events=10,
+        long_poll_timeout_s=1,
     )
-    registry = PeerRegistry(bindings_store=open_store(
-        get_peer_binding_schema(), namespace=PEER_BINDING_NAMESPACE, backend="in_memory",
-    ))
+    registry = PeerRegistry(
+        bindings_store=open_store(
+            get_peer_binding_schema(),
+            namespace=PEER_BINDING_NAMESPACE,
+            backend="in_memory",
+        )
+    )
     app = FastAPI()
     register_routes(
-        app, bridge_manager=manager, peer_registry=registry,
-        platform_surface=cast("Any", object()), agent_messaging_service=object(),
-        config={}, state_service=state,
+        app,
+        bridge_manager=manager,
+        peer_registry=registry,
+        platform_surface=cast("Any", object()),
+        agent_messaging_service=object(),
+        config={},
+        state_service=state,
     )
     return TestClient(app)
 
@@ -141,7 +162,7 @@ class RegistrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             wrapper = Path(directory) / "tmux-probe"
             socket = str(Path(directory) / "socket")
-            wrapper.write_text(f"#!/bin/sh\nexec {shlex.quote(tmux)} -S {shlex.quote(socket)} \"$@\"\n")
+            wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(tmux)} -S {shlex.quote(socket)} "$@"\n')
             wrapper.chmod(0o700)
             command = [str(wrapper)]
             subprocess.run([*command, "new-session", "-d", "-s", HOST, "-e", f"AGENT_INSTANCE_ID={INSTANCE}", "-e", "PROBE=a=b c", "sleep 30"], check=True, capture_output=True, timeout=10)
@@ -237,10 +258,18 @@ class RegistrationTests(unittest.TestCase):
 
     def test_existing_worker_cannot_be_adopted(self) -> None:
         state = cast("StateManagementInterface", RealShapeState())
-        insert_managed_session(state, ManagedSessionSpec(
-            agent_instance_id=INSTANCE, lane_id="worker", assignment=fixture_assignment(), work_class="analysis_deliverable",
-            budget_line="budget", host="tmux", agent_runtime="codex",
-        ))
+        insert_managed_session(
+            state,
+            ManagedSessionSpec(
+                agent_instance_id=INSTANCE,
+                lane_id="worker",
+                assignment=fixture_assignment(),
+                work_class="analysis_deliverable",
+                budget_line="budget",
+                host="tmux",
+                agent_runtime="codex",
+            ),
+        )
         before = dict(read_managed_session(state, INSTANCE))
         with patch.object(registration, "qualify_operator_codex_host", return_value=METADATA), self.assertRaises(registration.OperatorHostQualificationError):
             registration.register_operator_codex_host(state, REQUEST)
@@ -257,8 +286,12 @@ class RegistrationTests(unittest.TestCase):
         client = BridgeClient("http://127.0.0.1:1")
         with patch.object(client, "_require_bridge", return_value="agc-smoke"), patch.object(client, "_post_or_reject", return_value={"status": "registered"}), self.assertRaises(BridgeCallError):
             client.peer_register(
-                agent_id="codex", agent_instance_id=INSTANCE, agent_session_id=SESSION,
-                session_label="Operator-Smoke", watcher_declared=True, operator_tmux_host=HOST,
+                agent_id="codex",
+                agent_instance_id=INSTANCE,
+                agent_session_id=SESSION,
+                session_label="Operator-Smoke",
+                watcher_declared=True,
+                operator_tmux_host=HOST,
             )
         client.close()
 
@@ -266,8 +299,11 @@ class RegistrationTests(unittest.TestCase):
 class LauncherTests(unittest.TestCase):
     def spec(self) -> launcher.LaunchSpec:
         return launcher.LaunchSpec(
-            role="Operator-Smoke", solet="smoke", cwd=Path("/tmp"),
-            bridge_cli=Path("/bin/bridge"), codex_binary=Path("/bin/codex"),
+            role="Operator-Smoke",
+            solet="smoke",
+            cwd=Path("/tmp"),
+            bridge_cli=Path("/bin/bridge"),
+            codex_binary=Path("/bin/codex"),
             codex_args=("-m", "gpt-5.6-sol", "-c", 'model_reasoning_effort="low"'),
         )
 
@@ -276,14 +312,21 @@ class LauncherTests(unittest.TestCase):
 
     def test_new_identity_and_explicit_settings(self) -> None:
         model, effort = launcher._explicit_model_effort(self.spec().codex_args)
-        with patch.object(launcher, "resolve_operator_target", return_value=self.target()):
+        with (
+            patch.dict(os.environ, {"GIT_CONTROLLER_NAME": "stale-caller-setting"}),
+            patch.object(launcher, "resolve_operator_target", return_value=self.target()),
+        ):
             env = launcher._launch_environment(
-                self.spec(), instance_id=INSTANCE, session_id=SESSION, model=model, effort=effort,
+                self.spec(),
+                instance_id=INSTANCE,
+                session_id=SESSION,
+                model=model,
+                effort=effort,
             )
         self.assertEqual(env["AGENT_INSTANCE_ID"], INSTANCE)
         self.assertEqual(env["AGENT_SESSION_ID"], SESSION)
         self.assertEqual(env["AGENT_ROLE"], "Operator-Smoke")
-        self.assertEqual(env["GIT_CONTROLLER_NAME"], "Git-Controller")
+        self.assertNotIn("GIT_CONTROLLER_NAME", env)
         self.assertTrue(Path(env["AGENT_WAKE_CLI"]).is_absolute())
         with self.assertRaises(launcher.OperatorLaunchError):
             launcher._explicit_model_effort(("-m", "gpt-5.6-sol"))
@@ -297,18 +340,29 @@ class LauncherTests(unittest.TestCase):
             bridge.chmod(0o700)
             spec = dataclasses.replace(self.spec(), bridge_cli=bridge)
             target = self.target(bridge)
-            with patch.dict(os.environ, {"PATH": "/usr/bin"}), patch.object(
-                launcher, "resolve_operator_target", return_value=target,
+            with (
+                patch.dict(os.environ, {"PATH": "/usr/bin"}),
+                patch.object(
+                    launcher,
+                    "resolve_operator_target",
+                    return_value=target,
+                ),
             ):
                 environment = launcher._launch_environment(
-                    spec, instance_id=INSTANCE, session_id=SESSION,
-                    model="gpt-5.6-sol", effort="low",
+                    spec,
+                    instance_id=INSTANCE,
+                    session_id=SESSION,
+                    model="gpt-5.6-sol",
+                    effort="low",
                 )
             self.assertEqual(environment["AGENT_WAKE_CLI"], str(bridge))
             self.assertEqual(environment["PATH"].split(os.pathsep)[0], str(bridge_dir))
             resolved = subprocess.run(
-                ["/bin/sh", "-c", "command -v solet-bridge"], env=environment,
-                check=True, capture_output=True, text=True,
+                ["/bin/sh", "-c", "command -v solet-bridge"],
+                env=environment,
+                check=True,
+                capture_output=True,
+                text=True,
             )
             self.assertEqual(resolved.stdout.strip(), str(bridge))
 
@@ -320,14 +374,39 @@ class LauncherTests(unittest.TestCase):
         self.assertNotIn("old-thread", command)
         self.assertNotIn("old-role", command)
 
+    def test_pane_command_clears_inherited_controller_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bridge, codex = root / "bridge", root / "codex"
+            bridge.write_text("#!/bin/sh\nexit 0\n")
+            codex.write_text('#!/bin/sh\nif [ "${GIT_CONTROLLER_NAME+x}" = x ]; then echo inherited; else echo missing; fi\n')
+            for path in (bridge, codex):
+                path.chmod(0o700)
+            spec = dataclasses.replace(self.spec(), bridge_cli=bridge, codex_binary=codex)
+            command = launcher._pane_command(spec, HOST, root / "watch.log")
+            completed = subprocess.run(
+                ["/bin/sh", "-c", command],
+                env={**os.environ, "GIT_CONTROLLER_NAME": "stale-parent"},
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertEqual((completed.returncode, completed.stdout.strip()), (0, "missing"), completed.stderr)
+
     def test_owned_options_precede_and_preserve_caller_separator(self) -> None:
         overrides = _codex_config_overrides(
-            config={"mcp_servers": {"smoke": {}}}, solet_name="smoke", transport="mcp",
-            agent_instance_id=INSTANCE, agent_session_id=SESSION,
-            label="Operator-Smoke", solet_bin="/bin/bridge",
+            config={"mcp_servers": {"smoke": {}}},
+            solet_name="smoke",
+            transport="mcp",
+            agent_instance_id=INSTANCE,
+            agent_session_id=SESSION,
+            label="Operator-Smoke",
+            solet_bin="/bin/bridge",
         )
         self.assertIn(
-            "features.apps=false", overrides,
+            "features.apps=false",
+            overrides,
             "managed Codex excludes account-level Codex Apps connector",
         )
         self.assertEqual(
@@ -351,7 +430,7 @@ class LauncherTests(unittest.TestCase):
         )
         argv = launcher._codex_argv(spec)
         separator = argv.index("--")
-        self.assertEqual(argv[separator + 1:], [prompt])
+        self.assertEqual(argv[separator + 1 :], [prompt])
         self.assertLess(argv.index("--cd"), separator)
         self.assertLess(argv.index("mcp_servers.smoke.enabled=false"), separator)
         self.assertEqual(argv[1:5], list(spec.codex_args[:4]))
@@ -366,7 +445,9 @@ class LauncherTests(unittest.TestCase):
                 executable.chmod(0o700)
             prompt = "-literal $prompt `without shell`"
             spec = dataclasses.replace(
-                self.spec(), bridge_cli=bridge, codex_binary=codex,
+                self.spec(),
+                bridge_cli=bridge,
+                codex_binary=codex,
                 codex_args=("-m", "qwen3-coder", "-c", 'model_reasoning_effort="low"', "--", prompt),
             )
             calls: list[list[str]] = []
@@ -376,9 +457,15 @@ class LauncherTests(unittest.TestCase):
                 return "--operator-tmux-host" if argv[1] == "watch" else "Codex CLI"
 
             target = self.target(bridge)
-            with patch.object(launcher.shutil, "which", return_value="tmux"), patch.object(
-                launcher, "_checked", side_effect=checked,
-            ), patch.object(launcher, "resolve_operator_target", return_value=target):
+            with (
+                patch.object(launcher.shutil, "which", return_value="tmux"),
+                patch.object(
+                    launcher,
+                    "_checked",
+                    side_effect=checked,
+                ),
+                patch.object(launcher, "resolve_operator_target", return_value=target),
+            ):
                 launcher._preflight(spec)
             expected = launcher._codex_argv(spec)
             separator = expected.index("--")
@@ -395,16 +482,25 @@ class LauncherTests(unittest.TestCase):
         for caller_tail in prompts:
             with self.subTest(caller_tail=caller_tail):
                 spec = dataclasses.replace(
-                    self.spec(), codex_binary=Path(codex),
+                    self.spec(),
+                    codex_binary=Path(codex),
                     codex_args=(
-                        "-m", "qwen3-coder", "-c", 'model_reasoning_effort="low"', *caller_tail,
+                        "-m",
+                        "qwen3-coder",
+                        "-c",
+                        'model_reasoning_effort="low"',
+                        *caller_tail,
                     ),
                 )
                 argv = launcher._codex_argv(spec)
                 separator = argv.index("--") if "--" in argv else len(argv)
                 probe = [*argv[:separator], "--help", *argv[separator:]]
                 result = subprocess.run(
-                    probe, capture_output=True, text=True, timeout=10, check=False,
+                    probe,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("Codex CLI", result.stdout)
@@ -412,7 +508,9 @@ class LauncherTests(unittest.TestCase):
     def test_ephemeral_watcher_registers_without_claiming_a_role(self) -> None:
         regular = launcher._pane_command(self.spec(), HOST, Path("/tmp/watch.log"))
         ephemeral = launcher._pane_command(
-            dataclasses.replace(self.spec(), claim_role=False), HOST, Path("/tmp/watch.log"),
+            dataclasses.replace(self.spec(), claim_role=False),
+            HOST,
+            Path("/tmp/watch.log"),
         )
         self.assertNotIn("--no-claim", regular)
         watcher, codex = ephemeral.split(" & exec ", 1)
@@ -432,6 +530,7 @@ class LauncherTests(unittest.TestCase):
 
     def test_failed_arm_stops_only_its_new_host_and_retains_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+
             def identity_result(argv: list[str]) -> subprocess.CompletedProcess[str]:
                 if "has-session" in argv:
                     return subprocess.CompletedProcess(argv, 1, "", "")
@@ -439,7 +538,15 @@ class LauncherTests(unittest.TestCase):
                 instance = json.loads(receipt.read_text())["environment"]["AGENT_INSTANCE_ID"]
                 return subprocess.CompletedProcess(argv, 0, "AGENT_INSTANCE_ID=" + instance + "\n", "")
 
-            with patch.object(launcher, "_preflight", return_value=("tmux", "gpt-5.6-sol", "low")), patch.object(Path, "home", return_value=Path(directory)), patch.object(launcher, "_run", side_effect=identity_result), patch.object(launcher, "_checked", return_value="") as mutate, patch.object(launcher, "_wait_for_arm", side_effect=launcher.OperatorLaunchError("arm failed")), patch.object(launcher, "resolve_operator_target", return_value=self.target()), self.assertRaises(launcher.OperatorLaunchError):
+            with (
+                patch.object(launcher, "_preflight", return_value=("tmux", "gpt-5.6-sol", "low")),
+                patch.object(Path, "home", return_value=Path(directory)),
+                patch.object(launcher, "_run", side_effect=identity_result),
+                patch.object(launcher, "_checked", return_value="") as mutate,
+                patch.object(launcher, "_wait_for_arm", side_effect=launcher.OperatorLaunchError("arm failed")),
+                patch.object(launcher, "resolve_operator_target", return_value=self.target()),
+                self.assertRaises(launcher.OperatorLaunchError),
+            ):
                 launcher.launch(self.spec())
             self.assertEqual(mutate.call_count, 2)
             self.assertIn("new-session", mutate.call_args_list[0].args[0])

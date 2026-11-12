@@ -112,13 +112,6 @@ quality_gates/tests/private_test_pg_live_smoke.py
 quality_gates/tests/run_smokes_host_lock_smoke.py
 quality_gates/tests/run_smokes_battery_containment_smoke.py
 
-# The full battery re-runs a first-time failure ONCE, alone, under the host lock
-# (cap: 3 first-time failures) and is green only as passed_with_retries with a
-# FLAKY line per retried smoke (chg_9b5ec5f8). Drives the real runner over
-# fixture registers; killing mutations: cap off, retry skipped/unlocked, a
-# retried smoke recorded as plain passed, a focused register that retries.
-quality_gates/tests/run_smokes_battery_retry_smoke.py
-
 # gates-cluster-A5 part 1 (2026-09-20, chg_5ef930ca): the shared "battery ran
 # under measurable host contention" signal, addressing iss_35dbc06e/342,
 # iss_dfca317c/357, iss_c35292ca/358, iss_cf3a897d/756, iss_0ecb55dc/760 —
@@ -1511,14 +1504,14 @@ plugins/g_suite_plugin/tests/smoke_async_jobs.py
 # disconnect), list/set-default/disconnect (revoke patched), the OAuth
 # callback storing tier + granted scopes, the opt-in full mailbox scope,
 # scope-free refresh, the 7-day Testing-mode invalid_grant message, and
-# raw/percent/base64 token redaction. Hermetic: no network, no Keychain.
+# results and error messages returned as received. Hermetic: no network, no Keychain.
 plugins/g_suite_plugin/tests/smoke_accounts.py
 # g_suite_plugin Gmail build 1 (2026-11-07): all 32 Gmail verbs through the
 # REAL google-api-python-client built from its bundled Gmail v1 discovery
 # document over a recording httplib2 stand-in (exact method/path/query/body
 # per users.messages/threads/labels/drafts/history/getProfile method,
 # real-shaped envelopes and paging, real 400/401/403/404/429 error bodies
-# classified and redacted through the plugin), plus the three registration
+# classified through the plugin), plus the three registration
 # artifacts and the optional account argument per verb. Hermetic.
 plugins/g_suite_plugin/tests/smoke_gmail_transcripts.py
 
@@ -5511,6 +5504,7 @@ solet_cli/tests/update_runtime_execution_smoke.py
 solet_cli/tests/update_backup_action_keying_smoke.py
 solet_cli/tests/existing_install_router_cutover_smoke.py
 plugins/github_midwife_plugin/tests/existing_install_operations_smoke.py
+plugins/github_midwife_plugin/tests/controller_setting_retirement_smoke.py
 plugins/github_midwife_plugin/tests/existing_install_repair_text_smoke.py
 
 # Every shipped contract/flow JSON or YAML under plugins/*/knowledge_base/ and
@@ -6077,3 +6071,18 @@ plugins/codex_filesystem_session_source_plugin/tests/codex_local_opt_in_smoke.py
 
 # Drive, People and Tasks complete vendor method/account/media transcripts
 plugins/g_suite_plugin/tests/smoke_workspace_transcripts.py
+
+# Snowflake build 5: connector stage files, containment and byte round trip.
+plugins/snowflake_plugin/tests/smoke_stage_files.py
+plugins/snowflake_plugin/tests/test_request.py
+# Jira multi-site/OAuth and complete typed planning-family transcripts.
+plugins/jira_plugin/tests/smoke_sites.py
+plugins/jira_plugin/tests/smoke_families.py
+
+# Address-derived connector containment and originating-session capture.
+ananta/tests/file_locations/containment_smoke.py
+
+# Credential output boundaries: public resolver retirement and sealed helper reads
+ananta/tests/secrets_output_boundaries_smoke.py
+
+plugins/platform_health_plugin/tests/main_seat_heartbeat_smoke.py

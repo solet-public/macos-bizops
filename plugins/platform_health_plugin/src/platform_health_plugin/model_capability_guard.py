@@ -21,7 +21,7 @@ second copy that could drift:
   ``agent_messaging_plugin`` is not a bound service (see
   ``host_disk_guard``'s module docstring), so it is resolved through
   ``orchestrator.plugin_manager.get_plugin`` and its public
-  ``@platform_process`` methods are called as ``method(params=..., state=...)``.
+  worker-only synchronous refresh implementation is called as ``method(params=..., state=...)``; dispatched checks enqueue their complete guard pass.
   Resolution failure raises: a guard that cannot reach the refresh must not
   report ``ok``.
 * :func:`ensure_model_capability_guard_schedule` — idempotent install of the
@@ -278,7 +278,7 @@ def run_refresh(orchestrator: object, *, state: dict[str, Any]) -> RefreshOutcom
     back as ``RefreshOutcome.failure`` (logged at ERROR with the traceback) so
     the caller alerts on it instead of losing it."""
     plugin = _resolve_agent_messaging_plugin(orchestrator)
-    method = plugin.refresh_model_capability_catalog  # type: ignore[attr-defined]
+    method = plugin.refresh_model_capability_catalog_sync  # type: ignore[attr-defined]
     try:
         result = method(params={"trigger": REFRESH_TRIGGER}, state=state)
     except Exception as exc:  # noqa: BLE001 -- turned into a critical alert and logged with the traceback, never dropped

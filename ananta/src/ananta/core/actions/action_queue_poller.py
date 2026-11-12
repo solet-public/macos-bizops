@@ -498,6 +498,23 @@ class ActionQueuePoller:
         # WARNING log line, which carries the action_id and both timestamps.
         self.total_double_executions_detected = 0
         self.last_poll_time: datetime | None = None
+        bind_completion = getattr(self.action_processor, "bind_registered_completion_handler", None)
+        if callable(bind_completion):
+            bind_completion(self._complete_registered_job)
+
+    def _complete_registered_job(self, action_id: str, status: str, result: dict[str, object] | None, error: dict[str, object] | None) -> None:
+        """Route a committed owner outcome through the original action exactly once."""
+        lookup = self.state_service.query_state("core", {"table": "action_events", "filters": {"id": action_id}, "limit": 1})
+        record = self._first_record(lookup)
+        if record is None:
+            raise RuntimeError(f"Owned completion cannot read its original action {action_id}")
+        token_id = self._opt_str(record, "flow_token_id")
+        if status == "completed":
+            self._mark_action_completed(action_id, {"success": True, "action_status": "completed", **(result or {})}, token_id, owned_job_completion=True)
+        else:
+            detail = error or (result or {}).get("error") or {"message": "Owned operation failed"}
+            message = detail.get("message", str(detail)) if isinstance(detail, dict) else str(detail)
+            self._mark_action_failed(action_id, str(message), token_id, error_detail=_typed_error_detail(detail), owned_job_completion=True)
 
     def _cleanup_pending_attachments(self, flow_id: str) -> None:
         """Clean up pending attachments when a flow completes."""
@@ -1074,6 +1091,7 @@ class ActionQueuePoller:
         started = time.monotonic()
         try:
             await self._dispatch_claimed(action)
+            await self._wait_owned_deploy_outcome(action)
         except Exception:
             # The failure write itself raised. In the loop that reaches
             # ``_poll_loop``'s handler; nothing awaits this task, so say it here.
@@ -1092,6 +1110,22 @@ class ActionQueuePoller:
             action.process_key,
             time.monotonic() - started,
         )
+
+    async def _wait_owned_deploy_outcome(self, action: QueuedAction) -> None:
+        """Keep the existing deploy slot through its exact owner's terminal write."""
+        if not action.flow_token_id:
+            return
+        warned = False
+        while True:
+            try:
+                job = await measured_lane.run_blocking(self._linked_job_for_token, action.flow_token_id)
+                if job is None or job.get("status") in {"completed", "error", "cancelled"}:
+                    return
+            except Exception:
+                if not warned:
+                    logger.warning("DEPLOY_OWNER_UNMEASURED: retaining action %s until its owner outcome can be read", action.id, exc_info=True)
+                    warned = True
+            await asyncio.sleep(self.poll_interval)
 
     def _running_deploy(self) -> _DetachedDeploy | None:
         """The deploy still running off the loop, or ``None``."""
@@ -2048,6 +2082,8 @@ class ActionQueuePoller:
     def _retrieve_action_details(
         self,
         action_id: str,
+        *,
+        parse_parameters: bool = True,
     ) -> (
         tuple[
             str,
@@ -2089,7 +2125,7 @@ class ActionQueuePoller:
             return None
 
         process_key = self._validate_process_key(action_id, record.get("process_key"))
-        parameters = self._parse_action_parameters(record.get("parameters"))
+        parameters = self._parse_action_parameters(record.get("parameters")) if parse_parameters else None
         return (
             process_key,
             self._opt_str(record, "notes"),
@@ -2205,14 +2241,13 @@ class ActionQueuePoller:
 
         Skips for:
         - self-completing processes that submit their own completion actions
-        - async processes whose user-visible completion is handled by AsyncJobManager
+        Owned jobs defer at completion by their actual token link, independently
+        of the registration metadata.
         """
         if not process_key:
             return False
 
         if self._handles_own_completion(process_key):
-            return True
-        if self._is_async_process(process_key):
             return True
         return False
 
@@ -3263,12 +3298,20 @@ class ActionQueuePoller:
             # Non-fatal: log and continue
             logger.error(f"Failed to record tool use for {action.process_key}: {e}")
 
+    def _owned_job_receipt_token(self, flow_token_id: str | None, *, owned_job_completion: bool) -> str | None:
+        """Identify a receipt route without inspecting the original action body."""
+        if owned_job_completion or not flow_token_id:
+            return None
+        return flow_token_id if self._token_has_linked_jobs(flow_token_id) else None
+
     def _mark_action_completed(
         self,
         action_id: str,
         result: dict[str, object],
         flow_token_id: str | None = None,
         on_status_written: Callable[[], None] | None = None,
+        *,
+        owned_job_completion: bool = False,
     ) -> None:
         """
         Mark action as successfully completed with pure database-first result storage and template processing.
@@ -3283,10 +3326,16 @@ class ActionQueuePoller:
         """
 
         # Step 1: Update action status to completed
-        self._update_action_status_to_completed(action_id, on_status_written)
+        if not owned_job_completion:
+            self._update_action_status_to_completed(action_id, on_status_written)
+
+        # An admitted receipt needs only routing headers. Decoding the original
+        # caller-sized body here would put worker preparation back on the
+        # serial dispatch path. Terminal completion retains its full decode.
+        receipt_token_id = self._owned_job_receipt_token(flow_token_id, owned_job_completion=owned_job_completion)
 
         # Step 2: Get action details for result processing
-        action_details = self._retrieve_action_details(action_id)
+        action_details = self._retrieve_action_details(action_id, parse_parameters=False) if receipt_token_id else self._retrieve_action_details(action_id)
         if not action_details:
             return
 
@@ -3308,7 +3357,12 @@ class ActionQueuePoller:
         logger.debug(f"ACTION COMPLETED: {process_key} (id={action_id})")
 
         # Step 3: Store the result data in core__action_results table
-        self._store_action_result(action_id, result, process_key)
+        if not owned_job_completion:
+            self._store_action_result(action_id, result, process_key)
+            if receipt_token_id:
+                self._submit_returned_actions(result, notes, session_id, flow_id, context_id)
+                self._flow_runtime_graph.update_token_state(receipt_token_id, TokenState.WAITING_JOB)
+                return
 
         # Step 3.5: Extract attachments if blob_fields configured
         # This populates _pending_attachments and injects available_attachments
@@ -3344,7 +3398,6 @@ class ActionQueuePoller:
             flow_token_id=flow_token_id,
             actions_submitted=actions_submitted,
         )
-
         # Step 6: FRG token completion
         # Generic gate: if the result carries blocks_continuation=True,
         # mark the token as failed to prevent automatic plan advancement.
@@ -3355,17 +3408,21 @@ class ActionQueuePoller:
         if blocked:
             logger.info(f"BLOCKED: {process_key} (id={action_id}) — result blocks_continuation={result.get('blocks_continuation', False)}, dispatch_outcome={dispatch_outcome}")
 
-        # A linked job owns token resolution, even after its terminal commit.
-        # Its completion routing may still be in flight on the worker.
-        if flow_token_id:
-            if self._token_has_linked_jobs(flow_token_id):
-                # A fast worker may have resolved it already; FRG transitions are monotonic.
-                self._flow_runtime_graph.update_token_state(flow_token_id, TokenState.WAITING_JOB)
-            else:
-                # No job owns this token - complete it here
-                # Default to "completed" if service didn't explicitly set action_status
-                result_summary = {"action_status": result.get("action_status", "completed")}
-                self._flow_runtime_graph.complete_token(flow_token_id, success=not blocked, result_summary=result_summary)
+        if owned_job_completion and not blocked:
+            # AsyncJobManager resolves successful owners after this route.
+            return
+        self._complete_action_token(flow_token_id, blocked, result, owned_job_completion=owned_job_completion)
+
+    def _complete_action_token(self, flow_token_id: str | None, blocked: bool, result: dict[str, object], *, owned_job_completion: bool = False) -> None:
+        """Owners retain success resolution; a guarded outcome fails the token."""
+        if not flow_token_id:
+            return
+        if not owned_job_completion and self._token_has_linked_jobs(flow_token_id):
+            # A fast worker may have completed already; FRG is monotonic.
+            self._flow_runtime_graph.update_token_state(flow_token_id, TokenState.WAITING_JOB)
+        else:
+            result_summary = {"action_status": result.get("action_status", "completed")}
+            self._flow_runtime_graph.complete_token(flow_token_id, success=not blocked, result_summary=result_summary)
 
     def _maybe_dispatch_result_processing(
         self,
@@ -3642,6 +3699,8 @@ class ActionQueuePoller:
         canonical_schema: dict[str, object] | None = None,
         error_detail: Mapping[str, object] | None = None,
         expected_status: ActionStatus = ActionStatus.PROCESSING,
+        *,
+        owned_job_completion: bool = False,
     ) -> None:
         """Mark action as failed with error message and invoke error_processor if present.
 
@@ -3659,7 +3718,8 @@ class ActionQueuePoller:
         failures genuinely have no typing to carry. The parameter ADDS typing
         where typing exists; it never invents it.
         """
-        self._update_action_status_to_failed(action_id, error_message, expected_status)
+        if not owned_job_completion:
+            self._update_action_status_to_failed(action_id, error_message, expected_status)
 
         details = self._retrieve_failed_action_details(action_id)
         if not details:
@@ -3693,7 +3753,8 @@ class ActionQueuePoller:
             "error": stored_error,
             "data": None,
         }
-        self._store_action_result(action_id, error_result, process_key)
+        if not owned_job_completion:
+            self._store_action_result(action_id, error_result, process_key)
 
         # Process error_processor template if present
         self._process_error_processor_template(
@@ -3745,7 +3806,7 @@ class ActionQueuePoller:
             )
 
         # FRG token failure handling
-        if flow_token_id:
+        if flow_token_id and not owned_job_completion:
             self._flow_runtime_graph.complete_token(flow_token_id, success=False, result_summary={"error": error_message})
 
     def _inject_ids_into_template(
@@ -3856,6 +3917,10 @@ class ActionQueuePoller:
 
     def _token_has_linked_jobs(self, token_id: str) -> bool:
         """Leave resolution to the job worker, including the terminal-commit race."""
+        return self._linked_job_for_token(token_id) is not None
+
+    def _linked_job_for_token(self, token_id: str) -> dict[str, object] | None:
+        """An indexed ownership read cannot turn a store failure into no owner."""
         result = self.state_service.query_state(
             "core",
             {
@@ -3864,7 +3929,13 @@ class ActionQueuePoller:
                 "limit": 1,
             },
         )
-        return len(self._query_records(result)) > 0
+        if result.get("action_status") not in _COMPLETED_READ_STATUSES:
+            raise RuntimeError(f"Could not read job ownership for token {token_id}: {result.get('error')!r}")
+        data = result.get("data")
+        records = data.get("records") if isinstance(data, dict) else None
+        if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
+            raise RuntimeError(f"Malformed job ownership read for token {token_id}")
+        return records[0] if records else None
 
     def get_metrics(self) -> dict[str, object]:
         """Get polling metrics for monitoring"""

@@ -30,7 +30,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 from typing import cast
 
@@ -42,8 +41,11 @@ _EXAMPLE_MANIFEST = _ROOT / "release_manifest.example.json"
 _checks = 0
 
 sys.path.insert(0, str(_REPOSITORY / "solet_cli" / "src"))
+sys.path.insert(0, str(_REPOSITORY))
 
 from solet_manager.cli import run  # noqa: E402
+
+from solet_cli.homebrew.scripts.render_release_payload import _render  # noqa: E402
 
 
 def _check(condition: object, label: str) -> None:
@@ -91,11 +93,7 @@ def _render_valid_payload(
     result = _run_renderer(metadata_path, output)
     _check(result.returncode == 0, f"release payload render failed: {result.stderr}")
     formula = (output / "Formula" / "solet.rb").read_text(encoding="utf-8")
-    lock_value: object = json.loads(
-        (output / "solet_cli" / "homebrew" / "seed.lock.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    lock_value: object = json.loads((output / "solet_cli" / "homebrew" / "seed.lock.json").read_text(encoding="utf-8"))
     _check(isinstance(lock_value, dict), "rendered seed lock is an object")
     return formula, cast(dict[str, object], lock_value), output
 
@@ -109,10 +107,32 @@ def _check_example_metadata_renders(root: Path) -> None:
         f"unmodified release metadata example renders: {result.stderr}",
     )
     _check(
-        (output / "Formula" / "solet.rb").is_file()
-        and (output / "solet_cli" / "homebrew" / "seed.lock.json").is_file(),
+        (output / "Formula" / "solet.rb").is_file() and (output / "solet_cli" / "homebrew" / "seed.lock.json").is_file(),
         "unmodified release metadata example produces the renderer outputs",
     )
+
+
+def _check_render_marker_boundary(root: Path) -> None:
+    template = root / "marker.template"
+    destination = root / "marker.txt"
+    template.write_text("value={{DATA}}", encoding="utf-8")
+    value = json.dumps({"outer": {"inner": 1}}, separators=(",", ":"))
+    _render(template, destination, {"DATA": value})
+    _check(
+        destination.read_text(encoding="utf-8") == f"value={value}",
+        "JSON closing braces in a substitution render unchanged",
+    )
+
+    template.write_text("value={{MISSING}}", encoding="utf-8")
+    try:
+        _render(template, root / "missing.txt", {"DATA": value})
+    except SystemExit as exc:
+        _check(
+            str(exc) == f"unresolved release marker in {template}",
+            "a missing template substitution keeps the unresolved-marker refusal",
+        )
+    else:
+        raise AssertionError("a missing template substitution must refuse")
 
 
 def _check_named_seed_catalog(
@@ -188,9 +208,7 @@ def _check_formula_install_shape(formula: str, lock: dict[str, object]) -> None:
     )
     _check_python_candidate_selection(formula)
     _check(
-        "virtualenv_create(libexec" in formula
-        and "build_isolation: false" in formula
-        and "bin.install_symlink" in formula,
+        "virtualenv_create(libexec" in formula and "build_isolation: false" in formula and "bin.install_symlink" in formula,
         "formula owns a closed virtualenv and public manager wrapper",
     )
     _check(
@@ -242,9 +260,7 @@ def _check_release_manifest_receipt(formula: str) -> None:
 def _check_seeds_symlink_shape(formula: str, lock: dict[str, object]) -> None:
     lock_marker = '(libexec/"share"/"solet"/"seed.lock.json").write <<~\'JSON\'\n'
     lock_at = formula.find(lock_marker)
-    seeds_at = formula.find(
-        'install_symlink Pathname(__dir__).parent/"solet_cli"/"homebrew"/"seeds" => "seeds"'
-    )
+    seeds_at = formula.find('install_symlink Pathname(__dir__).parent/"solet_cli"/"homebrew"/"seeds" => "seeds"')
     _check(lock_at != -1, "formula writes the reviewed default lock inside the sandbox")
     lock_end = formula.find("    JSON\n", lock_at + len(lock_marker))
     embedded: object | None = None
@@ -252,8 +268,7 @@ def _check_seeds_symlink_shape(formula: str, lock: dict[str, object]) -> None:
         embedded = json.loads(formula[lock_at + len(lock_marker) : lock_end])
     _check(embedded == lock, "formula's embedded default lock matches the rendered lock")
     _check(
-        '.install Pathname(__dir__).parent/"solet_cli"/"homebrew"/"seed.lock.json"'
-        not in formula,
+        '.install Pathname(__dir__).parent/"solet_cli"/"homebrew"/"seed.lock.json"' not in formula,
         "formula does not read the tap checkout inside Homebrew's build sandbox",
     )
     _check(seeds_at != -1, "formula symlinks the discoverable seed set from the tap directory")
@@ -269,14 +284,11 @@ def _check_rendered_identity(
     metadata: dict[str, object],
 ) -> None:
     _check(
-        lock["commit"] == metadata["seed_commit"]
-        and lock["repository"] == metadata["seed_repository"]
-        and lock["profile"] == metadata["seed_profile"] == "macos-bizops",
+        lock["commit"] == metadata["seed_commit"] and lock["repository"] == metadata["seed_repository"] and lock["profile"] == metadata["seed_profile"] == "macos-bizops",
         "seed lock carries reviewed identity",
     )
     _check(
-        metadata["release_archive_sha256"] == lock["archive_sha256"]
-        and str(metadata["release_archive_sha256"]) in formula,
+        metadata["release_archive_sha256"] == lock["archive_sha256"] and str(metadata["release_archive_sha256"]) in formula,
         "one sealed archive checksum drives formula and seed lock",
     )
     _check(
@@ -284,9 +296,7 @@ def _check_rendered_identity(
         "formula carries the independently validated manager release URL",
     )
     _check(
-        "solet-public/homebrew-tap" in str(metadata["manager_url"])
-        and "https://github.com/solet-public/macos-bizops.git"
-        == metadata["seed_repository"],
+        "solet-public/homebrew-tap" in str(metadata["manager_url"]) and "https://github.com/solet-public/macos-bizops.git" == metadata["seed_repository"],
         "public manager host and seed repository are independent identities",
     )
 
@@ -306,8 +316,7 @@ def _expect_refused(
         f"{label} is refused: {result.stderr}",
     )
     _check(
-        not (output / "Formula" / "solet.rb").exists()
-        and not (output / "solet_cli" / "homebrew" / "seed.lock.json").exists(),
+        not (output / "Formula" / "solet.rb").exists() and not (output / "solet_cli" / "homebrew" / "seed.lock.json").exists(),
         f"{label} writes no renderer outputs",
     )
 
@@ -368,11 +377,9 @@ def _check_seed_lock_digest_refusal(root: Path, metadata: dict[str, object]) -> 
     (fixture / "Formula").mkdir()
     renderer = fixture / "scripts" / "render_release_payload.py"
     renderer.write_bytes(_RENDERER.read_bytes())
-    (fixture / "seed.lock.json.template").write_bytes(
-        (_ROOT / "seed.lock.json.template").read_bytes()
-    )
+    (fixture / "seed.lock.json.template").write_bytes((_ROOT / "seed.lock.json.template").read_bytes())
     formula_template = _ROOT / "Formula" / "solet.rb.template"
-    tampered_template = (fixture / "Formula" / "solet.rb.template")
+    tampered_template = fixture / "Formula" / "solet.rb.template"
     template_text = formula_template.read_text(encoding="utf-8")
     digest_placeholder = '"seed_lock_sha256": "{{EXISTING_INSTALL_SEED_LOCK_SHA256}}"'
     _check(
@@ -389,13 +396,11 @@ def _check_seed_lock_digest_refusal(root: Path, metadata: dict[str, object]) -> 
     _write_metadata(metadata_path, metadata)
     result = _run_renderer(metadata_path, output, renderer=renderer)
     _check(
-        result.returncode != 0
-        and "does not match sha256 of the rendered seed.lock.json" in result.stderr,
+        result.returncode != 0 and "does not match sha256 of the rendered seed.lock.json" in result.stderr,
         f"renderer refuses a Formula digest tampered from the emitted lock: {result.stderr}",
     )
     _check(
-        (output / "Formula" / "solet.rb").is_file()
-        and (output / "solet_cli" / "homebrew" / "seed.lock.json").is_file(),
+        (output / "Formula" / "solet.rb").is_file() and (output / "solet_cli" / "homebrew" / "seed.lock.json").is_file(),
         "tampered digest is checked after the actual payload files are rendered",
     )
 
@@ -407,13 +412,11 @@ def _check_independent_manager_identities(
     cases = (
         (
             "independent-manager-tag",
-            "https://github.com/solet-public/macos-bizops/releases/download/"
-            "release-OTHER/solet-0.1.0.tar.gz",
+            "https://github.com/solet-public/macos-bizops/releases/download/release-OTHER/solet-0.1.0.tar.gz",
         ),
         (
             "independent-manager-repository",
-            "https://github.com/solet-public/other/releases/download/"
-            "release-2026-08-21/solet-0.1.0.tar.gz",
+            "https://github.com/solet-public/other/releases/download/release-2026-08-21/solet-0.1.0.tar.gz",
         ),
     )
     for label, manager_url in cases:
@@ -455,15 +458,11 @@ def _check_pip_bootstrap(formula: str, code: str) -> None:
     rebind = code.find(_PIP_REBIND)
     first_install = code.find(".pip_install")
     _check(
-        -1 < create < stage < bootstrap < rebind < first_install
-        and "venv_python = libexec/\"bin/python\"" in code
-        and "= virtualenv_create(libexec, python)" not in code,
+        -1 < create < stage < bootstrap < rebind < first_install and 'venv_python = libexec/"bin/python"' in code and "= virtualenv_create(libexec, python)" not in code,
         "pip is bootstrapped into the venv by the venv's own interpreter before the installer is rebound and before any resource installs",
     )
     _check(
-        'venv.pip_install resources.reject { |r| r.name == "pip" }' in code
-        and code.count(".pip_install") == code.count("venv.pip_install")
-        and '"-m", "pip"' not in code,
+        'venv.pip_install resources.reject { |r| r.name == "pip" }' in code and code.count(".pip_install") == code.count("venv.pip_install") and '"-m", "pip"' not in code,
         "every install goes through the rebound venv (its own pip), none through the base interpreter's pip",
     )
 
@@ -480,21 +479,16 @@ def _check_python_candidate_selection(formula: str) -> None:
     )
     install = formula.split("  def install", 1)[1].split("\n  end\n", 1)[0]
     code = "\n".join(line for line in _without_odie_message(install).splitlines() if not line.lstrip().startswith("#"))
-    probe = install.find('PYTHON_CANDIDATES.map { |candidate| Pathname(candidate) }.find do |candidate|')
+    probe = install.find("PYTHON_CANDIDATES.map { |candidate| Pathname(candidate) }.find do |candidate|")
     odie = install.find("odie ")
     venv = install.find("virtualenv_create(libexec, python)")
     _check(
-        -1 < probe < odie < venv
-        and 'quiet_system(candidate, "-c", "import sys; sys.exit(sys.version_info[:2] != (3, 13))")' in install
-        and "popen_read" not in code
-        and "unless python" in install[probe:odie],
+        -1 < probe < odie < venv and 'quiet_system(candidate, "-c", "import sys; sys.exit(sys.version_info[:2] != (3, 13))")' in install and "popen_read" not in code and "unless python" in install[probe:odie],
         "install takes the first candidate reporting 3.13, odies when none does, then builds the venv on it",
     )
     odie_messages = _ODIE_MESSAGE.findall(install)
     _check(
-        len(odie_messages) == 1
-        and "No Python 3.13 found" in odie_messages[0]
-        and "HOMEBREW_NO_INSTALL_UPGRADE=1 brew install python@3.13 #{full_name}" in odie_messages[0],
+        len(odie_messages) == 1 and "No Python 3.13 found" in odie_messages[0] and "HOMEBREW_NO_INSTALL_UPGRADE=1 brew install python@3.13 #{full_name}" in odie_messages[0],
         "the odie names the exact guarded install command for this formula's own tap",
     )
     _check_install_shell_outs(code)
@@ -504,9 +498,7 @@ def _check_python_candidate_selection(formula: str) -> None:
 def _check_install_shell_outs(code: str) -> None:
     without_bootstrap = code.replace(_PIP_BOOTSTRAP, "", 1)
     _check(
-        re.search(r"\b(?:safe_system|system|exec)\b|%x|\bbrew\b", without_bootstrap) is None
-        and code.count("quiet_system(") == 1
-        and code.count(_PIP_BOOTSTRAP) == 1,
+        re.search(r"\b(?:safe_system|system|exec)\b|%x|\bbrew\b", without_bootstrap) is None and code.count("quiet_system(") == 1 and code.count(_PIP_BOOTSTRAP) == 1,
         "install never shells out to brew, so it cannot install or upgrade Python itself; its one system call is the pip bootstrap",
     )
 
@@ -518,10 +510,7 @@ def _homebrew_python() -> Path:
         # (or a constrained gate PATH) without Homebrew cannot exercise the
         # formula-install leg at all, and that is an environment fact about
         # the runner, not a defect in the payload under test.
-        print(
-            "SKIP  formula-install checks: no `brew` on PATH to provide "
-            "python@3.13, the Formula's first interpreter candidate"
-        )
+        print("SKIP  formula-install checks: no `brew` on PATH to provide python@3.13, the Formula's first interpreter candidate")
         raise SystemExit(77)
     result = subprocess.run(
         [brew, "--prefix", "python@3.13"],
@@ -531,14 +520,12 @@ def _homebrew_python() -> Path:
     )
     _check(
         result.returncode == 0,
-        "host prerequisite missing: install Homebrew's python@3.13, the "
-        f"Formula's first interpreter candidate: {result.stderr.strip()}",
+        f"host prerequisite missing: install Homebrew's python@3.13, the Formula's first interpreter candidate: {result.stderr.strip()}",
     )
     python = Path(result.stdout.strip()) / "bin" / "python3.13"
     _check(
         python.is_file(),
-        "host prerequisite missing: the Homebrew python@3.13 "
-        f"executable is absent: {python}",
+        f"host prerequisite missing: the Homebrew python@3.13 executable is absent: {python}",
     )
     return python
 
@@ -553,10 +540,7 @@ _RESOURCE_BLOCK = re.compile(
 
 def _parse_pinned_resources(formula: str) -> dict[str, tuple[str, str]]:
     """Every ``resource "name" do url ... sha256 ... end`` block, by name."""
-    return {
-        match.group("name"): (match.group("url"), match.group("sha256"))
-        for match in _RESOURCE_BLOCK.finditer(formula)
-    }
+    return {match.group("name"): (match.group("url"), match.group("sha256")) for match in _RESOURCE_BLOCK.finditer(formula)}
 
 
 def _assert_resources_declared_before_manager_install(formula: str) -> None:
@@ -574,8 +558,7 @@ def _assert_resources_declared_before_manager_install(formula: str) -> None:
     )
     _check(manager_at != -1, "Formula installs the manager with build_isolation: false")
     _check(
-        resources_at != -1 and contracts_at != -1 and manager_at != -1
-        and resources_at < contracts_at < manager_at,
+        resources_at != -1 and contracts_at != -1 and manager_at != -1 and resources_at < contracts_at < manager_at,
         "resources install before shared contracts, which install before the manager",
     )
 
@@ -592,35 +575,6 @@ def _no_user_site_env() -> dict[str, str]:
     environment = os.environ.copy()
     environment["PYTHONNOUSERSITE"] = "1"
     return environment
-
-
-def _run_with_contention_retry(
-    args: list[str],
-    *,
-    attempts: int = 3,
-    env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    """Retry a subprocess that touches the shared system Homebrew python@3.13
-    prefix (venv creation, pip install against it) under a bounded backoff.
-
-    Under quality_gates/run_smokes.py's own full-battery concurrency (up to
-    ``_DEFAULT_JOBS`` parallel smoke subprocesses), this call's two heaviest
-    steps have been observed to fail nondeterministically while passing
-    cleanly every time in isolation (iss_469b680c) -- real contention on a
-    genuinely shared host resource, not a defect in what is being asserted.
-    This retries only the transient subprocess step itself; every assertion
-    in this file still evaluates the final (successful or failed) result,
-    so a real, reproducible failure still fails loudly here.
-    """
-    last: subprocess.CompletedProcess[str] | None = None
-    for attempt in range(attempts):
-        last = subprocess.run(args, check=False, capture_output=True, text=True, env=env)
-        if last.returncode == 0:
-            return last
-        if attempt < attempts - 1:
-            time.sleep(1.5 * (attempt + 1))
-    assert last is not None  # attempts >= 1 guarantees at least one run
-    return last
 
 
 _PINNED_WHEELS_DIR = Path(__file__).resolve().parent / "fixtures" / "pinned_wheels"
@@ -644,7 +598,8 @@ def _sha256_of(path: Path) -> str:
 
 
 def _install_pinned_build_resources(
-    venv_python: Path, resources: dict[str, tuple[str, str]],
+    venv_python: Path,
+    resources: dict[str, tuple[str, str]],
 ) -> None:
     """Provision the venv with the Formula's pinned setuptools/wheel/packaging,
     from the vendored, hash-verified local wheels — mirrors what the real
@@ -662,22 +617,26 @@ def _install_pinned_build_resources(
         actual_sha256 = _sha256_of(wheel_path)
         _check(
             actual_sha256 == pinned_sha256,
-            f"vendored {wheel_filename} sha256 matches the Formula's pinned "
-            f"resource {name!r} (expected {pinned_sha256}, got {actual_sha256} — "
-            "the Formula's pin moved without the vendored fixture being updated)",
+            f"vendored {wheel_filename} sha256 matches the Formula's pinned resource {name!r} (expected {pinned_sha256}, got {actual_sha256} — the Formula's pin moved without the vendored fixture being updated)",
         )
     # The Formula's bootstrap: the venv's interpreter runs pip from the pinned wheel itself.
     pip_wheel = _PINNED_WHEELS_DIR / _PINNED_WHEEL_FILENAMES["pip"]
-    booted = _run_with_contention_retry(
+    booted = subprocess.run(
         [str(venv_python), str(pip_wheel / "pip"), "install", "--no-index", "--no-deps", "--ignore-installed", str(pip_wheel)],
+        check=False,
+        capture_output=True,
+        text=True,
     )
     _check(booted.returncode == 0, f"pinned pip bootstraps into the venv from its own wheel: {booted.stderr}")
     own_pip = subprocess.run(
         [str(venv_python), "-c", "import pip, sys; print(pip.__file__.startswith(sys.prefix))"],
-        check=False, capture_output=True, text=True, env=_no_user_site_env(),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=_no_user_site_env(),
     )
     _check(own_pip.stdout.strip() == "True", f"the venv's -m pip is its own bootstrapped pip, not the base's: {own_pip.stdout}{own_pip.stderr}")
-    installed_resources = _run_with_contention_retry(
+    installed_resources = subprocess.run(
         [
             str(venv_python),
             "-m",
@@ -689,6 +648,9 @@ def _install_pinned_build_resources(
             "--no-deps",
             *(name for name in _PINNED_WHEEL_FILENAMES if name != "pip"),
         ],
+        check=False,
+        capture_output=True,
+        text=True,
     )
     _check(
         installed_resources.returncode == 0,
@@ -699,7 +661,7 @@ def _install_pinned_build_resources(
 def _check_no_index_formula_install(root: Path, formula: str) -> None:
     python = _homebrew_python()
     venv = root / "formula-venv"
-    created = _run_with_contention_retry(
+    created = subprocess.run(
         [
             str(python),
             "-m",
@@ -707,7 +669,10 @@ def _check_no_index_formula_install(root: Path, formula: str) -> None:
             "--system-site-packages",
             "--without-pip",
             str(venv),
-        ]
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
     )
     _check(created.returncode == 0, f"Homebrew Python virtualenv failed: {created.stderr}")
     venv_python = venv / "bin" / "python3.13"
@@ -727,9 +692,7 @@ def _check_no_index_formula_install(root: Path, formula: str) -> None:
     )
     _check(
         before.returncode != 0,
-        "RED control: setuptools is absent from a clean venv before the "
-        "pinned resources are installed (if this is green, the probe is "
-        "not measuring what this Formula actually provides)",
+        "RED control: setuptools is absent from a clean venv before the pinned resources are installed (if this is green, the probe is not measuring what this Formula actually provides)",
     )
 
     resources = _parse_pinned_resources(formula)
@@ -757,7 +720,11 @@ def _check_no_index_formula_install(root: Path, formula: str) -> None:
 
     environment = os.environ.copy()
     environment.update({"PIP_NO_INDEX": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1"})
-    installed = _run_with_contention_retry(
+    manager_source = root / "manager-source"
+    manager_source.mkdir()
+    shutil.copy2(_REPOSITORY / "solet_cli" / "pyproject.toml", manager_source / "pyproject.toml")
+    shutil.copytree(_REPOSITORY / "solet_cli" / "src", manager_source / "src")
+    installed = subprocess.run(
         [
             str(venv_python),
             "-m",
@@ -769,8 +736,11 @@ def _check_no_index_formula_install(root: Path, formula: str) -> None:
             "--no-compile",
             "--no-build-isolation",
             str(_REPOSITORY / "solet_setup_contracts"),
-            str(_REPOSITORY / "solet_cli"),
+            str(manager_source),
         ],
+        check=False,
+        capture_output=True,
+        text=True,
         env=environment,
     )
     _check(installed.returncode == 0, f"no-index manager install failed: {installed.stderr}")
@@ -823,9 +793,7 @@ def _check_packaged_flow_dry_run(root: Path) -> None:
         ]
     )
     _check(
-        result.kind == "create_preview"
-        and result.status == "preview_ready"
-        and int(result.exit_code) == 0,
+        result.kind == "create_preview" and result.status == "preview_ready" and int(result.exit_code) == 0,
         "packaged macos-bizops flow reaches a successful dry-run frontier",
     )
     _check(
@@ -840,10 +808,9 @@ def main() -> int:
     metadata = cast(dict[str, object], metadata_value)
     with tempfile.TemporaryDirectory() as raw:
         _check_example_metadata_renders(Path(raw))
-    metadata["manager_url"] = (
-        "https://github.com/solet-public/homebrew-tap/releases/download/"
-        "manager-v0.1.0-r0/solet-0.1.0.tar.gz"
-    )
+    with tempfile.TemporaryDirectory() as raw:
+        _check_render_marker_boundary(Path(raw))
+    metadata["manager_url"] = "https://github.com/solet-public/homebrew-tap/releases/download/manager-v0.1.0-r0/solet-0.1.0.tar.gz"
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         formula, lock, output = _render_valid_payload(root, metadata)

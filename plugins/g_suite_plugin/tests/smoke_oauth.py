@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "g_suite_plugin" / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from g_suite_plugin.constants import (  # noqa: E402
     VAULT_KEY_ACCESS_TOKEN,
@@ -47,6 +48,7 @@ from g_suite_plugin.oauth.token_store import (  # noqa: E402
     _build_access_envelope,
 )
 from g_suite_plugin.plugin import GSuitePlugin  # noqa: E402
+from gsuite_fakes import run_queued  # noqa: E402  # pyright: ignore[reportMissingImports]
 
 _passed = 0
 _failed: list[str] = []
@@ -205,7 +207,7 @@ def _start_interface_host(config: dict[str, object], params: dict[str, object]) 
     plugin._token_store = MagicMock(spec=TokenStore)
     plugin._app_config_loader = MagicMock(spec=AppConfigLoader)
     with patch.object(plugin._oauth_server, "start", return_value=8765) as start:
-        result = plugin.start_interface(params, {})
+        result = run_queued(plugin, "start_interface", params)
     _assert(
         "start_interface host probe completed",
         result.get("action_status") == "completed",

@@ -1,9 +1,47 @@
 """Address Book Service Interface - Address registry with one-to-many entries."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import ClassVar
 
 from ananta.core.domain.types import ActionResult
+from ananta.interfaces.credential_contracts import OperationStatus, VaultReference
+
+
+@dataclass(frozen=True, slots=True)
+class PublicAddressField:
+    """A literal public configuration field; never a resolved vault record."""
+
+    field_type: str
+    description: str
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class AddressCredentialReference:
+    """A configuration field's existing reference, without its credential."""
+
+    field_type: str
+    description: str
+    reference: VaultReference
+
+
+@dataclass(frozen=True, slots=True)
+class AddressMetadata:
+    """Public configuration and explicit references are separate typed fields."""
+
+    name: str
+    public_fields: tuple[PublicAddressField, ...]
+    credential_references: tuple[AddressCredentialReference, ...]
+    unprojected_fields: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AddressMetadataResult:
+    """Public metadata outcome without a mixed provider/error payload."""
+
+    status: OperationStatus
+    metadata: AddressMetadata | None = None
 
 
 class AddressBookServiceInterface(ABC):
@@ -21,6 +59,11 @@ class AddressBookServiceInterface(ABC):
     """
 
     INTERFACE_VERSION: ClassVar[str] = "1.0.0"
+
+    @abstractmethod
+    def metadata(self, name: str) -> AddressMetadataResult:
+        """Project public fields/references using ordinary resolution only."""
+        ...
 
     @abstractmethod
     def register(
@@ -162,6 +205,15 @@ class AddressBookServiceInterface(ABC):
 
         Returns:
             ActionResult with list of matching addresses (without entries)
+        """
+        ...
+
+    @abstractmethod
+    def list_path_addresses(self) -> ActionResult:
+        """Return every live path address with tags, entries and updated_at.
+
+        Internal service read, without a limit or paging. It does not strengthen
+        memories and cannot silently drop a twenty-first location.
         """
         ...
 

@@ -68,25 +68,6 @@ REST_PROTECTED_HEADERS: Final[frozenset[str]] = frozenset(
         "x-snowflake-authorization-token-type",
     }
 )
-REST_SECRET_FIELDS: Final[frozenset[str]] = frozenset(
-    {
-        "authorization",
-        "proxy_authorization",
-        "cookie",
-        "set_cookie",
-        "password",
-        "private_key",
-        "private_key_der",
-        "access_token",
-        "refresh_token",
-        "token",
-        "jwt",
-        # stage.yaml Credentials: an external stage body carries cloud secrets.
-        "aws_secret_key",
-        "aws_token",
-        "azure_sas_token",
-    }
-)
 
 # ---------------------------------------------------------------------------
 # Credentials — ONE address-book entry: "snowflake_account". Single-account v1
@@ -165,7 +146,6 @@ PARAM_ROW_LIMIT: Final[str] = "row_limit"
 # realpath+commonpath containment under the operator-configured roots.
 # ---------------------------------------------------------------------------
 TSV_SUFFIX: Final[str] = ".tsv"
-CONFIG_KEY_EXPORT_ALLOWED_ROOTS: Final[str] = "export_allowed_roots"
 
 # ---------------------------------------------------------------------------
 # Error codes — snowflake.* surfaced to callers; the *_NOT_AVAILABLE codes are
@@ -201,6 +181,7 @@ GENERIC_MESSAGE_WAREHOUSE_SUSPENDED: Final[str] = "the configured warehouse is s
 # Result types
 # ---------------------------------------------------------------------------
 RESULT_TYPE_RUN_QUERY: Final[str] = "snowflake_run_query_result"
+RESULT_TYPE_STAGE_FILES: Final[str] = "snowflake_stage_files_result"
 RESULT_TYPE_RUN_STATEMENT: Final[str] = "snowflake_run_statement_result"
 RESULT_TYPE_LIST_DATABASES: Final[str] = "snowflake_list_databases_result"
 RESULT_TYPE_LIST_SCHEMAS: Final[str] = "snowflake_list_schemas_result"

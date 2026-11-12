@@ -860,7 +860,7 @@ def solet_call(
 ) -> CommandOutcome:
     cli = request.target / ".venv/bin/solet-bridge"
     return runtime.run(
-        (str(cli), "call", process_key, json.dumps(arguments, separators=(",", ":"))),
+        (str(cli), "call", process_key, json.dumps(arguments, separators=(",", ":")), "--wait"),
         timeout_seconds=min(request.timeout_seconds, 60),
         cwd=request.target,
         extra_env={"SOLET_NAME": request.name},
@@ -899,15 +899,36 @@ def _solet_success_payload(outcome: CommandOutcome) -> JsonObject | None:
     return cast(JsonObject, data)
 
 
-def _solet_result(outcome: CommandOutcome) -> JsonObject | None:
+def _solet_result(outcome: CommandOutcome, *, flatten_job_data: bool = False) -> JsonObject | None:
     if not outcome.ok:
         return None
     try:
         raw: object = json.loads(outcome.stdout)
     except json.JSONDecodeError:
         return None
+    if isinstance(raw, dict) and "id" in raw:
+        return _finished_solet_job(cast(JsonObject, raw), flatten_job_data=flatten_job_data)
     outer = raw.get("result") if isinstance(raw, dict) else None
     return cast(JsonObject, outer) if isinstance(outer, dict) else None
+
+
+def _finished_solet_job(job: JsonObject, *, flatten_job_data: bool) -> JsonObject | None:
+    """Decode the same completed job record used by the registered deploy caller.
+
+    Restore processor success metadata only after validating the job and its
+    original result. Ledger jobs retain bare fields; plugin-owner jobs retain
+    ActionResult data. The doctor's flat service view projects owner data only
+    here, leaving its existing synchronous-envelope checks unchanged.
+    """
+    payload = job.get("result")
+    if job.get("status") != "completed" or job.get("error") or not isinstance(payload, dict):
+        return None
+    if payload.get("success") is False or payload.get("error") or payload.get("action_status", "completed") != "completed":
+        return None
+    data = payload.get("data")
+    if flatten_job_data and isinstance(data, dict):
+        payload = {**payload, **data}
+    return {"success": True, "action_status": "completed", **payload}
 
 
 def _verified(request: AdapterRequest, evidence_id: str, summary: str, source: str) -> JsonObject:

@@ -1,15 +1,19 @@
 {
   "name": "test_learn_with_memorize",
-  "description": "Verify learning with immediate addition to spaced repetition memorization queue",
+  "description": "Verify learning with immediate addition to spaced repetition memorization queue Submit returns a queued job receipt; the registered http_jobs_smoke asserts terminal result and error through JobService.",
   "process_key": "plugin::actr_memory_plugin::learn_action",
   "arguments": {
     "params": {
       "path": "/tmp/important_facts.md",
       "memorize": true,
-      "tags": ["critical", "must-remember"]
+      "tags": [
+        "critical",
+        "must-remember"
+      ]
     },
     "state": {
-      "session_id": "test-session-072"
+      "session_id": "test-session-072",
+      "flow_id": "test-flow-test_learn_with_memorize"
     }
   },
   "timeout_seconds": 60

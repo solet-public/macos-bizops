@@ -110,31 +110,15 @@ it on its own receipt (``contention`` key) so a later reader can tell "this
 red co-occurred with real host contention" from "this is a clean regression"
 without re-running anything.
 
-Flaky-leg retry (2026-10-11, chg_9b5ec5f8): in the full registered battery
-only, every smoke that failed is re-run ONCE, alone, under the host lock, after
-the pooled and serial phases (``_retry_failures``; policy constants beside
-``_SKIP_EXIT_CODE``). A smoke that fails first and passes its retry is reported
-on a ``FLAKY`` line and in the receipt's ``retries`` list, and a run that is
-green only through retries ends with receipt result ``passed_with_retries``,
-never ``passed``. A failed retry, or more than three first-time failures
-(nothing is retried then), leaves the run red exactly as before. A focused
-``--register`` run never retries. This complements the fixture fixes tracked
-under iss_a36d6dac; it does not replace them.
-
 Full-battery receipts also carry ``summary``: the actual process exit code
-(null on interruption), result, final verdict counts, ordered retried/flaky
-names and final failed/missing names. These observations establish no base
-parity or pre-existing-red classification. ``repeat_flaky`` is a nonblocking
-advisory comparing only this receipt with its immediate ``reauthorized_from``:
-available history includes prior digest/campaign and the ordered intersection;
-missing or malformed prior detail is explicitly unavailable. Prior evidence
-is retained unchanged, with no receipt-tree search or fleet-history claim.
+(null on interruption), result, final verdict counts and failed/missing names.
+Each failed smoke is reported once and leaves the battery red.
 
 No execution deadline (2026-10-21, chg_61fb25cd): ``_wait_for_smoke`` hands
 each started smoke to the owned-process collector ``smoke_process.py``, which
 drains both output streams until the smoke's natural exit. Every
 ``SMOKE_PROCESS_ATTENTION_SECONDS`` it prints an ``ATTENTION`` observation to
-stderr; attention never stops, retries or fails a smoke. The supervisor, which
+stderr; attention never stops or fails a smoke. The supervisor, which
 also owns the start-rate fuse and interrupt handling, terminates the smoke's
 whole session once: after its natural exit (releasing descendants that still
 hold its pipes), on explicit owner cancellation (battery interruption or a
@@ -144,9 +128,8 @@ never passed. A smoke's own exit 124 (a timeout wrapper's status) is a
 harness defect to file, never a test verdict: it is reported ``HARNESS``
 with a ``HARNESS-DEFECT:`` line and on the summary's ``harness:`` line, its
 row is recorded ``not_run``, and it never changes the exit code, is never
-counted as failed and is never retried. That holds for a first run, a retry
-and a cancelled smoke alike, and a retry that exits 124 does not clear the
-genuine first failure it was retrying. Every structured result carries the
+counted as failed. That holds for a normal run and a cancelled smoke alike.
+Every structured result carries the
 same ordered ``harness_defects`` list, always present and empty when there
 was none: the full-battery receipt, the ``--results-output`` campaign file
 and the proof engine's run. Each defect is collected as it is classified, so
@@ -162,7 +145,6 @@ option, and argparse refuses it. The historical per-entry rows
 
 Exit codes:
   0 - every listed smoke passed (skips, if any, did not trip --fail-on-skip);
-      a smoke that failed first and passed its one retry counts as passed;
       harness defects (exit 124) are disclosed advisories and never change it
   1 - one or more smokes failed (an owner-cancelled smoke included), is a
       missing path, or (only with --fail-on-skip) one or more smokes skipped
@@ -208,7 +190,7 @@ import battery_admission  # noqa: E402
 import contention_signal  # noqa: E402
 import host_load  # noqa: E402
 from battery_summary import SmokeResult as _SmokeResult  # noqa: E402
-from battery_summary import build_summary, repeat_flaky_advisory  # noqa: E402
+from battery_summary import build_summary  # noqa: E402
 from gate_smoke_register import RegisterRow  # noqa: E402
 from gate_smoke_register import load as _load_effective_register  # noqa: E402
 
@@ -342,23 +324,8 @@ _SKIP_EXIT_CODE = 77
 # harness defect to file, never a test verdict (rul_a8eed648 Clarification
 # 3). It is disclosed loudly and listed in every structured result's
 # ``harness_defects``. Its row stays ``not_run`` because no test outcome was observed.
-# It is never counted as failed and never retried. This holds on every path:
-# first run, retry and cancellation. A retry that exits 124 does not clear
-# the genuine first failure it was retrying.
+# It is never counted as failed. This holds on every path, including cancellation.
 _HARNESS_DEFECT_EXIT_CODE = 124
-
-# Flaky-leg policy (full registered battery only; a focused --register never
-# retries). A smoke that failed is re-run exactly ONCE, alone, under the host
-# lock, after the pooled and serial phases (``_retry_failures`` makes one
-# ``_run_serial_phase`` call and has no loop, so "once" is structural, not a
-# tunable). More than ``_MAX_FIRST_FAILURES_TO_RETRY`` first-time failures is
-# a regression, not a flake: nothing is retried and the run is red as before.
-# Every retried smoke is reported loudly (FLAKY line, receipt ``retries``) with
-# its first failure's last ``_FIRST_FAILURE_TAIL_LINES`` output lines; a run
-# that only passes through retries is ``passed_with_retries``, never ``passed``.
-_MAX_FIRST_FAILURES_TO_RETRY = 3
-_FIRST_FAILURE_TAIL_LINES = 40
-_RESULT_PASSED_WITH_RETRIES = "passed_with_retries"
 
 # Worker-pool width. Smokes are subprocess-bound (the pool threads just wait on
 # children), so this is really "how many smoke processes share the host at
@@ -509,14 +476,9 @@ def _receipt_verdict(verdict: _Verdict) -> _ReceiptVerdict:
     return "not_run" if verdict == "harness" else verdict
 
 
-def _retry_receipt_verdict(verdict: _Verdict) -> _ReceiptVerdict:
-    """Only a passed retry clears a failure; a harness retry stays unmeasured."""
-    return _receipt_verdict(verdict) if verdict in ("passed", "harness") else "failed"
-
-
 def _initial_smoke_results(entries: list[str]) -> dict[str, _SmokeResult]:
     """Keep register order and disclose entries with no completed observation."""
-    return {entry: _SmokeResult(smoke=entry, verdict="not_run", seconds=None, retried=False, output_tail="", output_truncated=False, output_ref=f"#/smoke_results/{index}/output_tail", exit_code=None) for index, entry in enumerate(entries)}
+    return {entry: _SmokeResult(smoke=entry, verdict="not_run", seconds=None, output_tail="", output_truncated=False, output_ref=f"#/smoke_results/{index}/output_tail", exit_code=None) for index, entry in enumerate(entries)}
 
 
 def _output_tail(output: str) -> tuple[str, bool]:
@@ -532,7 +494,6 @@ def _record_smoke_result(
     output: str,
     elapsed: float | None,
     *,
-    retried: bool = False,
     exit_code: int | None = None,
 ) -> None:
     """Correct final verdict/tail and sum measured attempts, rounded to 0.1s."""
@@ -541,13 +502,12 @@ def _record_smoke_result(
     from quality_gates.smoke_proof import SmokeObservations as _ProofObservations
 
     if isinstance(results, _ProofObservations):
-        results.record_attempt(entry, verdict, output, elapsed, retried, exit_code)
+        results.record_attempt(entry, verdict, output, elapsed, exit_code)
     row = results[entry]
     previous = row["seconds"] or 0.0
     row["exit_code"] = exit_code
     row["verdict"] = verdict
     row["seconds"] = round(previous + elapsed, 1) if elapsed is not None else None
-    row["retried"] = retried
     row["output_tail"], row["output_truncated"] = _output_tail(output)
 
 
@@ -756,11 +716,6 @@ class _BatteryReceipt:
         """Attach this battery's contention snapshot; written out by ``finish``."""
         self._receipt["contention"] = contention
 
-    def record_retries(self, retries: list[dict[str, object]]) -> None:
-        """Attach every retried smoke's first failure and retry outcome; a run with none gets no key."""
-        if retries:
-            self._receipt["retries"] = retries
-
     def record_harness_defects(self, smokes: list[str]) -> None:
         """Attach the smokes whose exit 124 is a harness defect to file; an empty list says none was observed."""
         self._receipt["harness_defects"] = list(smokes)
@@ -779,7 +734,6 @@ class _BatteryReceipt:
         self._receipt["result"] = result
         summary = build_summary(self._results, result, exit_code)
         self._receipt["summary"] = summary
-        self._receipt["repeat_flaky"] = repeat_flaky_advisory(self._receipt.get("reauthorized_from"), summary["flaky_smokes"])
         _write_receipt(self.path, self._receipt)
 
     def close(self) -> None:
@@ -1266,13 +1220,10 @@ def _report_result(
     skipped: list[str],
     failures: list[str],
     harness: list[str],
-    first_failures: dict[str, str] | None = None,
 ) -> None:
     """Print one smoke's verdict line (serial runner's exact format).
 
-    A harness defect is listed in ``harness`` only: never a failure, so it
-    is never retried. ``first_failures``, when given, collects each failed
-    smoke's full output so the retry step can quote its first failure.
+    A harness defect is listed in ``harness`` only, never as a failure.
     """
     label = {"passed": "ok", "skipped": "SKIP", "failed": "FAIL", "harness": "HARNESS"}[verdict]
     print(f"  {label:7} {entry}  ({elapsed:.1f}s)")
@@ -1282,8 +1233,6 @@ def _report_result(
                 print(f"    {line}")
         return
     {"skipped": skipped, "failed": failures, "harness": harness}[verdict].append(entry)
-    if verdict == "failed" and first_failures is not None:
-        first_failures[entry] = output
     tail = "\n    ".join(_failure_excerpt(output) if verdict == "failed" else output.strip().splitlines()[-12:])
     print(f"    {tail}")
 
@@ -1398,7 +1347,6 @@ def _run_suite(
     jobs: int,
     serial_only: frozenset[str],
     *,
-    first_failures: dict[str, str] | None = None,
     smoke_results: dict[str, _SmokeResult] | None = None,
     harness: list[str] | None = None,
 ) -> tuple[list[str], list[str], list[str], list[str], float]:
@@ -1417,9 +1365,8 @@ def _run_suite(
     ``host_lock_wait_seconds`` is this battery's own wait to acquire that lock
     (0.0 when the register has no ``_SERIAL_ONLY`` member) — half of the
     contention signal ``main()`` records on the battery receipt.
-    ``first_failures``, when given, is filled with each failed smoke's output
-    for the retry step. ``harness`` lists exit-124 harness defects, which
-    are neither failures nor retried; when given, that list is extended as
+    ``harness`` lists exit-124 harness defects, which are neither passes nor
+    failures; when given, that list is extended as
     each defect is reported, so an interrupted caller keeps what was observed.
     """
     skipped: list[str] = []
@@ -1453,7 +1400,6 @@ def _run_suite(
             failures,
             missing,
             harness,
-            first_failures,
             smoke_results=smoke_results,
         )
     return skipped, failures, missing, harness, host_lock_wait_seconds
@@ -1468,7 +1414,6 @@ def _walk_register(
     failures: list[str],
     missing: list[str],
     harness: list[str],
-    first_failures: dict[str, str] | None = None,
     *,
     smoke_results: dict[str, _SmokeResult] | None = None,
 ) -> None:
@@ -1487,85 +1432,20 @@ def _walk_register(
             future, index = futures[entry]
             verdict, output, elapsed, exit_code = future.result()[index]
         _record_smoke_result(smoke_results, entry, _receipt_verdict(verdict), output, elapsed, exit_code=exit_code)
-        _report_result(entry, verdict, output, elapsed, skipped, failures, harness, first_failures)
+        _report_result(entry, verdict, output, elapsed, skipped, failures, harness)
 
 
-def _tail(output: str, lines: int) -> str:
-    return "\n".join(output.strip().splitlines()[-lines:])
-
-
-def _retry_failures(
-    python: Path,
-    failures: list[str],
-    first_failures: dict[str, str],
-    *,
-    smoke_results: dict[str, _SmokeResult] | None = None,
-    harness: list[str] | None = None,
-) -> tuple[list[str], list[dict[str, object]], list[str], list[str]]:
-    """Re-run each first-time failure ONCE, alone, under the host lock.
-
-    Returns ``(final_failures, retries, flaky, harness)``: the smokes that are
-    still red (all of ``failures`` when the cap is exceeded), one receipt
-    record per retried smoke, the smokes that failed first but passed on
-    retry, and ``harness`` (a new list when none is given) extended by each
-    retry that exited 124 as it is classified. A failure is retried only after
-    its first attempt reached its terminal state; attention never retries.
-    Only a ``passed`` retry clears a failure; a retry that fails, is
-    cancelled or reports a skip leaves it red. A retry that exits 124 is a
-    harness defect: its row is recorded not_run and it is listed in
-    ``harness``, while the genuine first failure stays in its retry record
-    and is not cleared.
-    """
-    harness = [] if harness is None else harness
-    if not failures:
-        return [], [], [], harness
-    if len(failures) > _MAX_FIRST_FAILURES_TO_RETRY:
-        print(f"\nretry skipped: {len(failures)} first-time failures exceed the cap of {_MAX_FIRST_FAILURES_TO_RETRY}")
-        return list(failures), [], [], harness
-    print(f"\nretrying {len(failures)} failed smoke(s) once, alone, under the host lock: {', '.join(failures)}")
-    supervisor = _scratch_runtime().select_supervisor(lambda: _SmokeProcessSupervisor(_MAX_SMOKE_STARTS_PER_WINDOW, _SMOKE_START_WINDOW_SECONDS))
-    results, _lock_wait_seconds = _run_serial_phase(python, failures, supervisor)
-    final_failures: list[str] = []
-    retries: list[dict[str, object]] = []
-    flaky: list[tuple[str, float]] = []
-    for entry in failures:
-        verdict, output, elapsed, exit_code = results[entry]
-        _record_smoke_result(smoke_results, entry, _retry_receipt_verdict(verdict), output, elapsed, retried=True, exit_code=exit_code)
-        label = {"passed": "ok", "harness": "HARNESS"}.get(verdict, "FAIL")
-        print(f"  {label:7} {entry}  (retry, {elapsed:.1f}s)")
-        if verdict == "harness":
-            harness.append(entry)
-        if verdict == "passed":
-            flaky.append((entry, elapsed))
-        else:
-            final_failures.append(entry)
-            print("    " + "\n    ".join(_failure_excerpt(output) if verdict == "failed" else output.strip().splitlines()[-12:]))
-        retries.append(
-            {
-                "smoke": entry,
-                "first_exit_or_verdict": "failed",
-                "first_failure_tail": _tail(first_failures[entry], _FIRST_FAILURE_TAIL_LINES),
-                "retry_verdict": verdict,
-                "retry_seconds": round(elapsed, 1),
-            }
-        )
-    for entry, elapsed in flaky:
-        print(f"FLAKY    {entry}  failed first (failed), passed on retry ({elapsed:.1f}s)")
-    return final_failures, retries, [entry for entry, _elapsed in flaky], harness
-
-
-def _run_suite_with_retry(
+def _run_suite_with_environment(
     entries: list[str],
     args: argparse.Namespace,
     serial_only: frozenset[str],
     *,
-    retry: bool,
     smoke_results: dict[str, _SmokeResult] | None = None,
     harness: list[str] | None = None,
-) -> tuple[list[str], list[str], list[str], list[str], float, list[dict[str, object]], list[str]]:
-    """Admit this battery before either phase, retaining its ticket through retries."""
+) -> tuple[list[str], list[str], list[str], list[str], float]:
+    """Admit this battery before running each selected smoke once."""
     with battery_admission.admit(args.jobs, getattr(args, "priority", None)):
-        return _run_admitted_suite(entries, args, serial_only, retry=retry, smoke_results=smoke_results, harness=harness)
+        return _run_admitted_suite(entries, args, serial_only, smoke_results=smoke_results, harness=harness)
 
 
 def _run_admitted_suite(
@@ -1573,17 +1453,10 @@ def _run_admitted_suite(
     args: argparse.Namespace,
     serial_only: frozenset[str],
     *,
-    retry: bool,
     smoke_results: dict[str, _SmokeResult] | None = None,
     harness: list[str] | None = None,
-) -> tuple[list[str], list[str], list[str], list[str], float, list[dict[str, object]], list[str]]:
-    """Run the suite; for the full battery (``retry``), re-run first-time failures once.
-
-    Returns ``_run_suite``'s five values with ``failures`` replaced by the
-    FINAL failure list, plus the retry records and the flaky smokes. A given
-    ``harness`` list collects every first-run and retry harness defect as it
-    is classified, so the caller still holds them if the battery is interrupted.
-    """
+) -> tuple[list[str], list[str], list[str], list[str], float]:
+    """Run selected smokes with a private import environment."""
     python = _venv_python()
     try:
         from quality_gates.smoke_import_environment import SmokeImportEnvironment
@@ -1591,14 +1464,14 @@ def _run_admitted_suite(
         detail = f"import environment helper unavailable: {exc}"
         print(f"ADVISORY run_smokes UNKNOWN_ORIGIN_ADVISES_AND_RUNS: {detail}", file=sys.stderr)
         args.import_environment = {"state": "advisory", "private": False, "runner_root": str(_REPO_ROOT), "interpreter": str(python), "advisory": detail}
-        return _run_selected_suite(python, entries, args, serial_only, retry=retry, smoke_results=smoke_results, harness=harness)
+        return _run_selected_suite(python, entries, args, serial_only, smoke_results=smoke_results, harness=harness)
     scratch = _scratch_runtime().environment().get("TMPDIR")
     environment = SmokeImportEnvironment(_REPO_ROOT, python, Path(scratch) if scratch else None)
     try:
         with environment, _scratch_runtime().abort_on_error():
             python = environment.python
             try:
-                return _run_selected_suite(python, entries, args, serial_only, retry=retry, smoke_results=smoke_results, harness=harness)
+                return _run_selected_suite(python, entries, args, serial_only, smoke_results=smoke_results, harness=harness)
             finally:
                 _quiesce_smoke_children()
     finally:
@@ -1621,25 +1494,11 @@ def _run_selected_suite(
     args: argparse.Namespace,
     serial_only: frozenset[str],
     *,
-    retry: bool,
     smoke_results: dict[str, _SmokeResult] | None = None,
     harness: list[str] | None = None,
-) -> tuple[list[str], list[str], list[str], list[str], float, list[dict[str, object]], list[str]]:
-    """Keep initial and retry phases on the same selected interpreter and harness list."""
-    first_failures: dict[str, str] = {}
-    skipped, failures, missing, harness, host_lock_wait_seconds = _run_suite(python, entries, args.jobs, serial_only, first_failures=first_failures, smoke_results=smoke_results, harness=harness)
-    retries: list[dict[str, object]] = []
-    flaky: list[str] = []
-    if retry:
-        failures, retries, flaky, harness = _retry_failures(python, failures, first_failures, smoke_results=smoke_results, harness=harness)
-    return skipped, failures, missing, harness, host_lock_wait_seconds, retries, flaky
-
-
-def _battery_result(exit_code: int, flaky: list[str]) -> str:
-    """The receipt's final value: a retry-assisted pass is never plain ``passed``."""
-    if exit_code != 0:
-        return "failed"
-    return _RESULT_PASSED_WITH_RETRIES if flaky else "passed"
+) -> tuple[list[str], list[str], list[str], list[str], float]:
+    """Run each selected smoke once on the chosen interpreter."""
+    return _run_suite(python, entries, args.jobs, serial_only, smoke_results=smoke_results, harness=harness)
 
 
 def _summarize(
@@ -1649,7 +1508,6 @@ def _summarize(
     missing: list[str],
     *,
     fail_on_skip: bool,
-    flaky: list[str],
     harness: list[str],
 ) -> int:
     """Print the aggregate verdict; return the process exit code.
@@ -1659,20 +1517,23 @@ def _summarize(
     (``fail_on_skip``); everything else about the reporting is unconditional.
     Harness defects are neither passes nor failures: they are disclosed as an
     advisory to file and leave the exit code to the measured test outcomes.
-    A genuine failure whose one retry hit a harness defect is listed under
-    both: the failure was not cleared, and its retry was not measured.
     """
     passed = total - len({*skipped, *failures, *missing, *harness})
     print(f"\nsmokes: {passed}/{total} passed, {len(skipped)}/{total} skipped")
-    for label, names in (("skipped", skipped), ("missing", missing), ("failed", failures), ("flaky", flaky)):
+    for label, names in (("skipped", skipped), ("missing", missing), ("failed", failures)):
         if names:
             print(f"{label}: {len(names)} ({', '.join(names)})")
     if harness:
-        print(f"harness: {len(harness)} ({', '.join(harness)}) -- ADVISORY: exit {_HARNESS_DEFECT_EXIT_CODE} is a harness defect to file, not a test verdict, and is never retried; a genuine failure it was retrying is not cleared")
+        print(f"harness: {len(harness)} ({', '.join(harness)}) -- ADVISORY: exit {_HARNESS_DEFECT_EXIT_CODE} is a harness defect to file, not a test verdict")
     blocking_skips = fail_on_skip and bool(skipped)
     if blocking_skips:
         print("--fail-on-skip: skips above are treated as failures for this run.")
     return 1 if (failures or missing or blocking_skips) else 0
+
+
+def _battery_result(exit_code: int) -> str:
+    """Translate the single battery exit status into its receipt result."""
+    return "passed" if exit_code == 0 else "failed"
 
 
 def _receipt_for_full_battery(args: argparse.Namespace) -> _BatteryReceipt | None:
@@ -1746,7 +1607,7 @@ def main() -> int:
     harness: list[str] = []
     try:
         with host_load.HostLoadMonitor() as load_monitor, _scratch_runtime()(_SmokeProcessSupervisor(_MAX_SMOKE_STARTS_PER_WINDOW, _SMOKE_START_WINDOW_SECONDS), _terminate_process_group):
-            skipped, failures, missing, harness, host_lock_wait_seconds, retries, flaky = _run_suite_with_retry(entries, args, serial_only, retry=receipt is not None, smoke_results=smoke_results, harness=harness)
+            skipped, failures, missing, harness, host_lock_wait_seconds = _run_suite_with_environment(entries, args, serial_only, smoke_results=smoke_results, harness=harness)
         concurrent_at_finish = contention_signal.count_concurrent_live_batteries(receipt_dir, exclude_path=exclude_path)
         contention = contention_signal.measure(
             concurrent_live_batteries_start=concurrent_at_start,
@@ -1757,14 +1618,12 @@ def main() -> int:
         print(contention.render())
         if receipt is not None:
             receipt.record_contention(contention.as_dict())
-            receipt.record_retries(retries)
         result = _summarize(
             len(entries),
             skipped,
             failures,
             missing,
             fail_on_skip=args.fail_on_skip,
-            flaky=flaky,
             harness=harness,
         )
     except BaseException:
@@ -1772,8 +1631,9 @@ def main() -> int:
         campaign_results(args.results_output, smoke_results, "interrupted", None, sys.modules[__name__], harness=harness)
         raise
     else:
-        _finish_receipt(receipt, _battery_result(result, flaky), smoke_results, harness, getattr(args, "import_environment", None), exit_code=result)
-        campaign_results(args.results_output, smoke_results, _battery_result(result, flaky), result, sys.modules[__name__], harness=harness)
+        verdict = _battery_result(result)
+        _finish_receipt(receipt, verdict, smoke_results, harness, getattr(args, "import_environment", None), exit_code=result)
+        campaign_results(args.results_output, smoke_results, verdict, result, sys.modules[__name__], harness=harness)
         return result
     finally:
         _close_receipt(receipt)

@@ -1,18 +1,18 @@
 {
   "process_key": "service_interface::vector_service::store_vectors",
   "display_name": "Store Vectors",
-  "description": "Store vector embeddings with metadata for semantic search.",
+  "description": "Store vector embeddings with metadata for semantic search. Registered calls return one queued job receipt; read that exact job for the complete operation result.",
   "embedding_description": "",
   "result_processor_customizations": {
-    "action_label": "Vectors stored",
-    "result_type": "vectors_stored",
-    "result_description": "Storage confirmation with count of vectors stored, namespace, and any IDs that were assigned or updated",
+    "action_label": "Vector operation queued",
+    "result_type": "vector_operation_queued",
+    "result_description": "Admission receipt with job_id and status. The complete original vector operation envelope is in job.result; typed failures are in job.error.",
     "presentation_guidance": "",
-    "output_action_guidance": "Determine the appropriate next action based on the context and action result."
+    "output_action_guidance": "Retain data.job_id and retrieve that exact id with service_interface::job_service::get_job until completed or error before consuming vectors, counts or search results."
   },
   "error_processor_customizations": {
     "action_context": "Stores vector embeddings with metadata into a namespace for later similarity search retrieval",
     "error_interpretation": "ValidationError with 'vectors': malformed vector data or missing required fields (id, embedding). ValidationError with 'dimension': vector dimensions don't match namespace. NamespaceError: namespace doesn't exist or can't be created. StorageError: database connection or write failure.",
-    "recovery_guidance": "For dimension errors: verify embedding model output matches namespace configuration. For validation errors: check vector data format includes 'id' and 'embedding' fields. For storage errors: retry or check database status."
+    "recovery_guidance": "For dimension errors: verify embedding model output matches namespace configuration. For validation errors: check vector data format includes 'id' and 'embedding' fields. For storage errors: retry or check database status. A timeout or lost worker does not authorize retrying uncertain effects; reconcile the exact job and observed namespace state without replay."
   }
 }

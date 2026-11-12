@@ -1,13 +1,14 @@
 {
   "name": "test_purge_no_confirm",
-  "description": "Verify that purge without confirmation flag is rejected as a safety measure",
+  "description": "Verify that purge without confirmation flag is rejected as a safety measure Submit returns a queued job receipt; the registered http_jobs_smoke asserts terminal result and error through JobService.",
   "process_key": "plugin::actr_memory_plugin::purge_memories_action",
   "arguments": {
     "params": {
       "confirm": false
     },
     "state": {
-      "session_id": "test-session-104"
+      "session_id": "test-session-104",
+      "flow_id": "test-flow-test_purge_no_confirm"
     }
   },
   "timeout_seconds": 30

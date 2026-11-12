@@ -1,0 +1,3874 @@
+{
+  "families": {
+    "agile_issues": {
+      "estimateIssueForBoard": {
+        "body": {
+          "additionalProperties": false,
+          "properties": {
+            "value": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "body_required": true,
+        "method": "PUT",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "issueIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "boardId",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/issue/{issueIdOrKey}/estimation",
+        "summary": "Estimate issue for board"
+      },
+      "getIssue": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "issueIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "schema": {
+              "items": {
+                "additionalProperties": false,
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "updateHistory",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/issue/{issueIdOrKey}",
+        "summary": "Get issue"
+      },
+      "getIssueEstimationForBoard": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "issueIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "boardId",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/issue/{issueIdOrKey}/estimation",
+        "summary": "Get issue estimation for board"
+      },
+      "rankIssues": {
+        "body": {
+          "additionalProperties": false,
+          "properties": {
+            "issues": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "rankAfterIssue": {
+              "type": "string"
+            },
+            "rankBeforeIssue": {
+              "type": "string"
+            },
+            "rankCustomFieldId": {
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "body_required": true,
+        "method": "PUT",
+        "parameters": [],
+        "path": "/rest/agile/1.0/issue/rank",
+        "summary": "Rank issues"
+      }
+    },
+    "backlog": {
+      "moveIssuesToBacklog": {
+        "body": {
+          "additionalProperties": false,
+          "properties": {
+            "issues": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [],
+        "path": "/rest/agile/1.0/backlog/issue",
+        "summary": "Move issues to backlog"
+      },
+      "moveIssuesToBacklogForBoard": {
+        "body": {
+          "additionalProperties": false,
+          "properties": {
+            "issues": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "rankAfterIssue": {
+              "type": "string"
+            },
+            "rankBeforeIssue": {
+              "type": "string"
+            },
+            "rankCustomFieldId": {
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/backlog/{boardId}/issue",
+        "summary": "Move issues to backlog for board"
+      }
+    },
+    "boards": {
+      "createBoard": {
+        "body": {
+          "additionalProperties": false,
+          "properties": {
+            "filterId": {
+              "type": "integer"
+            },
+            "location": {
+              "additionalProperties": false,
+              "properties": {
+                "projectKeyOrId": {
+                  "type": "string"
+                },
+                "type": {
+                  "enum": [
+                    "project",
+                    "user"
+                  ],
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "kanban",
+                "scrum",
+                "agility"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [],
+        "path": "/rest/agile/1.0/board",
+        "summary": "Create board"
+      },
+      "deleteBoard": {
+        "body": {},
+        "body_required": false,
+        "method": "DELETE",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}",
+        "summary": "Delete board"
+      },
+      "deleteBoardProperty": {
+        "body": {},
+        "body_required": false,
+        "method": "DELETE",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "propertyKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/properties/{propertyKey}",
+        "summary": "Delete board property"
+      },
+      "getAllBoards": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "schema": {
+              "additionalProperties": false,
+              "type": "object"
+            }
+          },
+          {
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "projectKeyOrId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "accountIdLocation",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "projectLocation",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "includePrivate",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "negateLocationFiltering",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "orderBy",
+            "schema": {
+              "enum": [
+                "name",
+                "-name",
+                "+name"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "projectTypeLocation",
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "filterId",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board",
+        "summary": "Get all boards"
+      },
+      "getAllQuickFilters": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/quickfilter",
+        "summary": "Get all quick filters"
+      },
+      "getAllSprints": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "schema": {
+              "additionalProperties": false,
+              "type": "object"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/sprint",
+        "summary": "Get all sprints"
+      },
+      "getAllVersions": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "released",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/version",
+        "summary": "Get all versions"
+      },
+      "getApproximateIssueCountForBacklog": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "jql",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/software/1.0/board/{boardId}/backlog/approximate-count",
+        "summary": "Get approximate issue count for backlog"
+      },
+      "getApproximateIssueCountForBoard": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "jql",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/software/1.0/board/{boardId}/issue/approximate-count",
+        "summary": "Get approximate issue count for board"
+      },
+      "getBoard": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}",
+        "summary": "Get board"
+      },
+      "getBoardByFilterId": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "filterId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/filter/{filterId}",
+        "summary": "Get board by filter id"
+      },
+      "getBoardIssuesForEpic": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "epicId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "jql",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "validateQuery",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "schema": {
+              "items": {
+                "additionalProperties": false,
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/epic/{epicId}/issue",
+        "summary": "Get board issues for epic"
+      },
+      "getBoardIssuesForEpicJSIS": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "epicId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "nextPageToken",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reconcileIssues",
+            "schema": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "jql",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "validateQuery",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "schema": {
+              "items": {
+                "additionalProperties": false,
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/software/1.0/board/{boardId}/epic/{epicId}/issue",
+        "summary": "Get board issues for epic (enhanced)"
+      },
+      "getBoardIssuesForSprint": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sprintId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "jql",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "validateQuery",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "schema": {
+              "items": {
+                "additionalProperties": false,
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/sprint/{sprintId}/issue",
+        "summary": "Get board issues for sprint"
+      },
+      "getBoardIssuesForSprintJSIS": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sprintId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "nextPageToken",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reconcileIssues",
+            "schema": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "jql",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "validateQuery",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "schema": {
+              "items": {
+                "additionalProperties": false,
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/software/1.0/board/{boardId}/sprint/{sprintId}/issue",
+        "summary": "Get board issues for sprint (enhanced)"
+      },
+      "getBoardProperty": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "propertyKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/properties/{propertyKey}",
+        "summary": "Get board property"
+      },
+      "getBoardPropertyKeys": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/properties",
+        "summary": "Get board property keys"
+      },
+      "getConfiguration": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/configuration",
+        "summary": "Get configuration"
+      },
+      "getEpics": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "done",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/epic",
+        "summary": "Get epics"
+      },
+      "getFeaturesForBoard": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/features",
+        "summary": "Get features for board"
+      },
+      "getIssuesForBacklog": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "jql",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "validateQuery",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "schema": {
+              "items": {
+                "additionalProperties": false,
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/backlog",
+        "summary": "Get issues for backlog"
+      },
+      "getIssuesForBacklogJSIS": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "nextPageToken",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reconcileIssues",
+            "schema": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "jql",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "validateQuery",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "schema": {
+              "items": {
+                "additionalProperties": false,
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/software/1.0/board/{boardId}/backlog",
+        "summary": "Get issues for backlog (enhanced)"
+      },
+      "getIssuesForBoard": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "jql",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "validateQuery",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "schema": {
+              "items": {
+                "additionalProperties": false,
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/issue",
+        "summary": "Get issues for board"
+      },
+      "getIssuesForBoardJSIS": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "nextPageToken",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reconcileIssues",
+            "schema": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "jql",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "validateQuery",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "schema": {
+              "items": {
+                "additionalProperties": false,
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/software/1.0/board/{boardId}/issue",
+        "summary": "Get issues for board (enhanced)"
+      },
+      "getIssuesWithoutEpicForBoard": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "jql",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "validateQuery",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "schema": {
+              "items": {
+                "additionalProperties": false,
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/epic/none/issue",
+        "summary": "Get issues without epic for board"
+      },
+      "getIssuesWithoutEpicForBoardJSIS": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "nextPageToken",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reconcileIssues",
+            "schema": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "jql",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "validateQuery",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "schema": {
+              "items": {
+                "additionalProperties": false,
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/software/1.0/board/{boardId}/epic/none/issue",
+        "summary": "Get issues without epic for board (enhanced)"
+      },
+      "getProjects": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/project",
+        "summary": "Get projects"
+      },
+      "getProjectsFull": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/project/full",
+        "summary": "Get projects full"
+      },
+      "getQuickFilter": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "quickFilterId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/quickfilter/{quickFilterId}",
+        "summary": "Get quick filter"
+      },
+      "getReportsForBoard": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/reports",
+        "summary": "Get reports for board"
+      },
+      "moveIssuesToBoard": {
+        "body": {
+          "additionalProperties": false,
+          "properties": {
+            "issues": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "rankAfterIssue": {
+              "type": "string"
+            },
+            "rankBeforeIssue": {
+              "type": "string"
+            },
+            "rankCustomFieldId": {
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/issue",
+        "summary": "Move issues to board"
+      },
+      "setBoardProperty": {
+        "body": {},
+        "body_required": true,
+        "method": "PUT",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "propertyKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/properties/{propertyKey}",
+        "summary": "Set board property"
+      },
+      "toggleFeatures": {
+        "body": {
+          "additionalProperties": false,
+          "properties": {
+            "boardId": {
+              "type": "integer"
+            },
+            "enabling": {
+              "type": "boolean"
+            },
+            "feature": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "body_required": true,
+        "method": "PUT",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "boardId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/board/{boardId}/features",
+        "summary": "Toggle features"
+      }
+    },
+    "projects": {
+      "archiveProject": {
+        "body": {},
+        "body_required": false,
+        "method": "POST",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/project/{projectIdOrKey}/archive",
+        "summary": "Archive project"
+      },
+      "createProject": {
+        "body": {
+          "$ref": "#/components/schemas/CreateProjectDetails"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [],
+        "path": "/rest/api/3/project",
+        "summary": "Create project"
+      },
+      "deleteProject": {
+        "body": {},
+        "body_required": false,
+        "method": "DELETE",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "enableUndo",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "path": "/rest/api/3/project/{projectIdOrKey}",
+        "summary": "Delete project"
+      },
+      "deleteProjectAsynchronously": {
+        "body": {},
+        "body_required": false,
+        "method": "POST",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/project/{projectIdOrKey}/delete",
+        "summary": "Delete project asynchronously"
+      },
+      "getAllProjects": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "recent",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "properties",
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          }
+        ],
+        "path": "/rest/api/3/project",
+        "summary": "Get all projects"
+      },
+      "getAllStatuses": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/project/{projectIdOrKey}/statuses",
+        "summary": "Get all statuses for project"
+      },
+      "getHierarchy": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/api/3/project/{projectId}/hierarchy",
+        "summary": "Get project issue type hierarchy"
+      },
+      "getNotificationSchemeForProject": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectKeyOrId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/project/{projectKeyOrId}/notificationscheme",
+        "summary": "Get project notification scheme"
+      },
+      "getProject": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "properties",
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          }
+        ],
+        "path": "/rest/api/3/project/{projectIdOrKey}",
+        "summary": "Get project"
+      },
+      "getRecent": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "properties",
+            "schema": {
+              "items": {
+                "$ref": "#/components/schemas/StringList"
+              },
+              "type": "array"
+            }
+          }
+        ],
+        "path": "/rest/api/3/project/recent",
+        "summary": "Get recent projects"
+      },
+      "restore": {
+        "body": {},
+        "body_required": false,
+        "method": "POST",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/project/{projectIdOrKey}/restore",
+        "summary": "Restore deleted or archived project"
+      },
+      "searchProjects": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "maximum": 100,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "orderBy",
+            "schema": {
+              "enum": [
+                "category",
+                "-category",
+                "+category",
+                "key",
+                "-key",
+                "+key",
+                "name",
+                "-name",
+                "+name",
+                "owner",
+                "-owner",
+                "+owner",
+                "issueCount",
+                "-issueCount",
+                "+issueCount",
+                "lastIssueUpdatedDate",
+                "-lastIssueUpdatedDate",
+                "+lastIssueUpdatedDate",
+                "archivedDate",
+                "+archivedDate",
+                "-archivedDate",
+                "deletedDate",
+                "+deletedDate",
+                "-deletedDate"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "id",
+            "schema": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "keys",
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "typeKey",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "categoryId",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "action",
+            "schema": {
+              "enum": [
+                "view",
+                "browse",
+                "edit",
+                "create"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "items": {
+                "enum": [
+                  "live",
+                  "archived",
+                  "deleted"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "properties",
+            "schema": {
+              "items": {
+                "$ref": "#/components/schemas/StringList"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "propertyQuery",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/project/search",
+        "summary": "Get projects paginated"
+      },
+      "updateProject": {
+        "body": {
+          "$ref": "#/components/schemas/UpdateProjectDetails"
+        },
+        "body_required": true,
+        "method": "PUT",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/project/{projectIdOrKey}",
+        "summary": "Update project"
+      }
+    },
+    "sprints": {
+      "createSprint": {
+        "body": {
+          "additionalProperties": false,
+          "properties": {
+            "endDate": {
+              "type": "string"
+            },
+            "goal": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "originBoardId": {
+              "type": "integer"
+            },
+            "startDate": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [],
+        "path": "/rest/agile/1.0/sprint",
+        "summary": "Create sprint"
+      },
+      "deleteProperty": {
+        "body": {},
+        "body_required": false,
+        "method": "DELETE",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sprintId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "propertyKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/sprint/{sprintId}/properties/{propertyKey}",
+        "summary": "Delete property"
+      },
+      "deleteSprint": {
+        "body": {},
+        "body_required": false,
+        "method": "DELETE",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sprintId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/sprint/{sprintId}",
+        "summary": "Delete sprint"
+      },
+      "getIssuesForSprint": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sprintId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "jql",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "validateQuery",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "schema": {
+              "items": {
+                "additionalProperties": false,
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/sprint/{sprintId}/issue",
+        "summary": "Get issues for sprint"
+      },
+      "getIssuesForSprintJSIS": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sprintId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "nextPageToken",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reconcileIssues",
+            "schema": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "jql",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "validateQuery",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "schema": {
+              "items": {
+                "additionalProperties": false,
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/software/1.0/sprint/{sprintId}/issue",
+        "summary": "Get issues for sprint (enhanced)"
+      },
+      "getPropertiesKeys": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sprintId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/sprint/{sprintId}/properties",
+        "summary": "Get properties keys"
+      },
+      "getProperty": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sprintId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "propertyKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/sprint/{sprintId}/properties/{propertyKey}",
+        "summary": "Get property"
+      },
+      "getSprint": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sprintId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/sprint/{sprintId}",
+        "summary": "Get sprint"
+      },
+      "moveIssuesToSprintAndRank": {
+        "body": {
+          "additionalProperties": false,
+          "properties": {
+            "issues": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "rankAfterIssue": {
+              "type": "string"
+            },
+            "rankBeforeIssue": {
+              "type": "string"
+            },
+            "rankCustomFieldId": {
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sprintId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/sprint/{sprintId}/issue",
+        "summary": "Move issues to sprint and rank"
+      },
+      "partiallyUpdateSprint": {
+        "body": {
+          "additionalProperties": false,
+          "properties": {
+            "completeDate": {
+              "type": "string"
+            },
+            "createdDate": {
+              "type": "string"
+            },
+            "endDate": {
+              "type": "string"
+            },
+            "goal": {
+              "type": "string"
+            },
+            "id": {
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "originBoardId": {
+              "type": "integer"
+            },
+            "self": {
+              "type": "string"
+            },
+            "startDate": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sprintId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/sprint/{sprintId}",
+        "summary": "Partially update sprint"
+      },
+      "setProperty": {
+        "body": {},
+        "body_required": true,
+        "method": "PUT",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sprintId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "propertyKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/sprint/{sprintId}/properties/{propertyKey}",
+        "summary": "Set property"
+      },
+      "swapSprint": {
+        "body": {
+          "additionalProperties": false,
+          "properties": {
+            "sprintToSwapWith": {
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sprintId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/sprint/{sprintId}/swap",
+        "summary": "Swap sprint"
+      },
+      "updateSprint": {
+        "body": {
+          "additionalProperties": false,
+          "properties": {
+            "completeDate": {
+              "type": "string"
+            },
+            "createdDate": {
+              "type": "string"
+            },
+            "endDate": {
+              "type": "string"
+            },
+            "goal": {
+              "type": "string"
+            },
+            "id": {
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "originBoardId": {
+              "type": "integer"
+            },
+            "self": {
+              "type": "string"
+            },
+            "startDate": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "body_required": true,
+        "method": "PUT",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sprintId",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/agile/1.0/sprint/{sprintId}",
+        "summary": "Update sprint"
+      }
+    },
+    "versions": {
+      "createRelatedWork": {
+        "body": {
+          "$ref": "#/components/schemas/VersionRelatedWork"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/version/{id}/relatedwork",
+        "summary": "Create related work"
+      },
+      "createVersion": {
+        "body": {
+          "$ref": "#/components/schemas/Version"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [],
+        "path": "/rest/api/3/version",
+        "summary": "Create version"
+      },
+      "deleteAndReplaceVersion": {
+        "body": {
+          "$ref": "#/components/schemas/DeleteAndReplaceVersionBean"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/version/{id}/removeAndSwap",
+        "summary": "Delete and replace version"
+      },
+      "deleteRelatedWork": {
+        "body": {},
+        "body_required": false,
+        "method": "DELETE",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "versionId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "relatedWorkId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/version/{versionId}/relatedwork/{relatedWorkId}",
+        "summary": "Delete related work"
+      },
+      "deleteVersion": {
+        "body": {},
+        "body_required": false,
+        "method": "DELETE",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "moveFixIssuesTo",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "moveAffectedIssuesTo",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/version/{id}",
+        "summary": "Delete version"
+      },
+      "getProjectVersions": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/project/{projectIdOrKey}/versions",
+        "summary": "Get project versions"
+      },
+      "getProjectVersionsPaginated": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "projectIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "orderBy",
+            "schema": {
+              "enum": [
+                "description",
+                "-description",
+                "+description",
+                "name",
+                "-name",
+                "+name",
+                "releaseDate",
+                "-releaseDate",
+                "+releaseDate",
+                "sequence",
+                "-sequence",
+                "+sequence",
+                "startDate",
+                "-startDate",
+                "+startDate"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/project/{projectIdOrKey}/version",
+        "summary": "Get project versions paginated"
+      },
+      "getRelatedWork": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/version/{id}/relatedwork",
+        "summary": "Get related work"
+      },
+      "getVersion": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/version/{id}",
+        "summary": "Get version"
+      },
+      "getVersionRelatedIssues": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/version/{id}/relatedIssueCounts",
+        "summary": "Get version's related issues count"
+      },
+      "getVersionUnresolvedIssues": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/version/{id}/unresolvedIssueCount",
+        "summary": "Get version's unresolved issues count"
+      },
+      "mergeVersions": {
+        "body": {},
+        "body_required": false,
+        "method": "PUT",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "moveIssuesTo",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/version/{id}/mergeto/{moveIssuesTo}",
+        "summary": "Merge versions"
+      },
+      "moveVersion": {
+        "body": {
+          "$ref": "#/components/schemas/VersionMoveBean"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/version/{id}/move",
+        "summary": "Move version"
+      },
+      "updateRelatedWork": {
+        "body": {
+          "$ref": "#/components/schemas/VersionRelatedWork"
+        },
+        "body_required": true,
+        "method": "PUT",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/version/{id}/relatedwork",
+        "summary": "Update related work"
+      },
+      "updateVersion": {
+        "body": {
+          "$ref": "#/components/schemas/Version"
+        },
+        "body_required": true,
+        "method": "PUT",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/version/{id}",
+        "summary": "Update version"
+      }
+    },
+    "worklogs": {
+      "addWorklog": {
+        "body": {
+          "$ref": "#/components/schemas/Worklog"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "issueIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "notifyUsers",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "adjustEstimate",
+            "schema": {
+              "enum": [
+                "new",
+                "leave",
+                "manual",
+                "auto"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "newEstimate",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reduceBy",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "overrideEditableFlag",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "path": "/rest/api/3/issue/{issueIdOrKey}/worklog",
+        "summary": "Add worklog"
+      },
+      "bulkDeleteWorklogs": {
+        "body": {
+          "$ref": "#/components/schemas/WorklogIdsRequestBean"
+        },
+        "body_required": true,
+        "method": "DELETE",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "issueIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "adjustEstimate",
+            "schema": {
+              "enum": [
+                "leave",
+                "auto"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "overrideEditableFlag",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "path": "/rest/api/3/issue/{issueIdOrKey}/worklog",
+        "summary": "Bulk delete worklogs"
+      },
+      "bulkMoveWorklogs": {
+        "body": {
+          "$ref": "#/components/schemas/WorklogsMoveRequestBean"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "issueIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "adjustEstimate",
+            "schema": {
+              "enum": [
+                "leave",
+                "auto"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "overrideEditableFlag",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "path": "/rest/api/3/issue/{issueIdOrKey}/worklog/move",
+        "summary": "Bulk move worklogs"
+      },
+      "deleteWorklog": {
+        "body": {},
+        "body_required": false,
+        "method": "DELETE",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "issueIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "notifyUsers",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "adjustEstimate",
+            "schema": {
+              "enum": [
+                "new",
+                "leave",
+                "manual",
+                "auto"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "newEstimate",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "increaseBy",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "overrideEditableFlag",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "path": "/rest/api/3/issue/{issueIdOrKey}/worklog/{id}",
+        "summary": "Delete worklog"
+      },
+      "getIdsOfWorklogsDeletedSince": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "path": "/rest/api/3/worklog/deleted",
+        "summary": "Get IDs of deleted worklogs"
+      },
+      "getIdsOfWorklogsModifiedSince": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "since",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/worklog/updated",
+        "summary": "Get IDs of updated worklogs"
+      },
+      "getIssueWorklog": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "issueIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "startAt",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "maxResults",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "startedAfter",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "startedBefore",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/issue/{issueIdOrKey}/worklog",
+        "summary": "Get issue worklogs"
+      },
+      "getWorklog": {
+        "body": {},
+        "body_required": false,
+        "method": "GET",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "issueIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/issue/{issueIdOrKey}/worklog/{id}",
+        "summary": "Get worklog"
+      },
+      "getWorklogsForIds": {
+        "body": {
+          "$ref": "#/components/schemas/WorklogIdsRequestBean"
+        },
+        "body_required": true,
+        "method": "POST",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "path": "/rest/api/3/worklog/list",
+        "summary": "Get worklogs"
+      },
+      "updateWorklog": {
+        "body": {
+          "$ref": "#/components/schemas/Worklog"
+        },
+        "body_required": true,
+        "method": "PUT",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "issueIdOrKey",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "notifyUsers",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "adjustEstimate",
+            "schema": {
+              "enum": [
+                "new",
+                "leave",
+                "manual",
+                "auto"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "newEstimate",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expand",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "overrideEditableFlag",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "path": "/rest/api/3/issue/{issueIdOrKey}/worklog/{id}",
+        "summary": "Update worklog"
+      }
+    }
+  },
+  "schemas": {
+    "AvatarUrlsBean": {
+      "additionalProperties": false,
+      "properties": {
+        "16x16": {
+          "type": "string"
+        },
+        "24x24": {
+          "type": "string"
+        },
+        "32x32": {
+          "type": "string"
+        },
+        "48x48": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "CreateProjectDetails": {
+      "additionalProperties": false,
+      "properties": {
+        "assigneeType": {
+          "enum": [
+            "PROJECT_LEAD",
+            "UNASSIGNED"
+          ],
+          "type": "string"
+        },
+        "avatarId": {
+          "type": "integer"
+        },
+        "categoryId": {
+          "type": "integer"
+        },
+        "description": {
+          "type": "string"
+        },
+        "fieldConfigurationScheme": {
+          "type": "integer"
+        },
+        "fieldScheme": {
+          "type": "integer"
+        },
+        "issueSecurityScheme": {
+          "type": "integer"
+        },
+        "issueTypeScheme": {
+          "type": "integer"
+        },
+        "issueTypeScreenScheme": {
+          "type": "integer"
+        },
+        "key": {
+          "type": "string"
+        },
+        "lead": {
+          "type": "string"
+        },
+        "leadAccountId": {
+          "maxLength": 128,
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notificationScheme": {
+          "type": "integer"
+        },
+        "permissionScheme": {
+          "type": "integer"
+        },
+        "projectTemplateKey": {
+          "enum": [
+            "com.pyxis.greenhopper.jira:gh-simplified-agility-kanban",
+            "com.pyxis.greenhopper.jira:gh-simplified-agility-scrum",
+            "com.pyxis.greenhopper.jira:gh-simplified-basic",
+            "com.pyxis.greenhopper.jira:gh-simplified-kanban-classic",
+            "com.pyxis.greenhopper.jira:gh-simplified-scrum-classic",
+            "com.pyxis.greenhopper.jira:gh-cross-team-template",
+            "com.pyxis.greenhopper.jira:gh-cross-team-planning-template",
+            "com.atlassian.servicedesk:simplified-it-service-management",
+            "com.atlassian.servicedesk:simplified-it-service-management-basic",
+            "com.atlassian.servicedesk:simplified-it-service-management-operations",
+            "com.atlassian.servicedesk:simplified-internal-service-desk",
+            "com.atlassian.servicedesk:simplified-external-service-desk",
+            "com.atlassian.servicedesk:simplified-hr-service-desk",
+            "com.atlassian.servicedesk:simplified-facilities-service-desk",
+            "com.atlassian.servicedesk:simplified-legal-service-desk",
+            "com.atlassian.servicedesk:simplified-marketing-service-desk",
+            "com.atlassian.servicedesk:simplified-finance-service-desk",
+            "com.atlassian.servicedesk:simplified-analytics-service-desk",
+            "com.atlassian.servicedesk:simplified-design-service-desk",
+            "com.atlassian.servicedesk:simplified-sales-service-desk",
+            "com.atlassian.servicedesk:simplified-halp-service-desk",
+            "com.atlassian.servicedesk:next-gen-it-service-desk",
+            "com.atlassian.servicedesk:next-gen-hr-service-desk",
+            "com.atlassian.servicedesk:next-gen-legal-service-desk",
+            "com.atlassian.servicedesk:next-gen-marketing-service-desk",
+            "com.atlassian.servicedesk:next-gen-facilities-service-desk",
+            "com.atlassian.servicedesk:next-gen-analytics-service-desk",
+            "com.atlassian.servicedesk:next-gen-finance-service-desk",
+            "com.atlassian.servicedesk:next-gen-design-service-desk",
+            "com.atlassian.servicedesk:next-gen-sales-service-desk",
+            "com.atlassian.servicedesk:company-managed-blank-service-project",
+            "com.atlassian.servicedesk:company-managed-general-service-project",
+            "com.atlassian.servicedesk:team-managed-general-service-project",
+            "com.atlassian.jira-core-project-templates:jira-core-simplified-content-management",
+            "com.atlassian.jira-core-project-templates:jira-core-simplified-document-approval",
+            "com.atlassian.jira-core-project-templates:jira-core-simplified-lead-tracking",
+            "com.atlassian.jira-core-project-templates:jira-core-simplified-process-control",
+            "com.atlassian.jira-core-project-templates:jira-core-simplified-procurement",
+            "com.atlassian.jira-core-project-templates:jira-core-simplified-project-management",
+            "com.atlassian.jira-core-project-templates:jira-core-simplified-recruitment",
+            "com.atlassian.jira-core-project-templates:jira-core-simplified-task-",
+            "com.atlassian.jcs:customer-service-management"
+          ],
+          "type": "string"
+        },
+        "projectTypeKey": {
+          "enum": [
+            "software",
+            "service_desk",
+            "business",
+            "customer_service"
+          ],
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "workflowScheme": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "key",
+        "name"
+      ],
+      "type": "object"
+    },
+    "CustomFieldReplacement": {
+      "additionalProperties": false,
+      "properties": {
+        "customFieldId": {
+          "type": "integer"
+        },
+        "moveTo": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "DeleteAndReplaceVersionBean": {
+      "additionalProperties": false,
+      "properties": {
+        "customFieldReplacementList": {
+          "items": {
+            "$ref": "#/components/schemas/CustomFieldReplacement"
+          },
+          "type": "array"
+        },
+        "moveAffectedIssuesTo": {
+          "type": "integer"
+        },
+        "moveFixIssuesTo": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "EntityProperty": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "value": {}
+      },
+      "type": "object"
+    },
+    "SimpleLink": {
+      "additionalProperties": false,
+      "properties": {
+        "href": {
+          "type": "string"
+        },
+        "iconClass": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "styleClass": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "weight": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "StringList": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "UpdateProjectDetails": {
+      "additionalProperties": false,
+      "properties": {
+        "assigneeType": {
+          "enum": [
+            "PROJECT_LEAD",
+            "UNASSIGNED"
+          ],
+          "type": "string"
+        },
+        "avatarId": {
+          "type": "integer"
+        },
+        "categoryId": {
+          "type": "integer"
+        },
+        "description": {
+          "type": "string"
+        },
+        "issueSecurityScheme": {
+          "type": "integer"
+        },
+        "key": {
+          "type": "string"
+        },
+        "lead": {
+          "type": "string"
+        },
+        "leadAccountId": {
+          "maxLength": 128,
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "notificationScheme": {
+          "type": "integer"
+        },
+        "permissionScheme": {
+          "type": "integer"
+        },
+        "releasedProjectKeys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "UserDetails": {
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "maxLength": 128,
+          "type": "string"
+        },
+        "accountType": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "active": {
+          "readOnly": true,
+          "type": "boolean"
+        },
+        "avatarUrls": {
+          "allOf": [
+            {
+              "$ref": "#/components/schemas/AvatarUrlsBean"
+            }
+          ],
+          "readOnly": true
+        },
+        "displayName": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "emailAddress": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "key": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "name": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "self": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "timeZone": {
+          "readOnly": true,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Version": {
+      "additionalProperties": false,
+      "properties": {
+        "approvers": {
+          "items": {
+            "$ref": "#/components/schemas/VersionApprover"
+          },
+          "readOnly": true,
+          "type": "array"
+        },
+        "archived": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        },
+        "driver": {
+          "type": "string"
+        },
+        "expand": {
+          "type": "string"
+        },
+        "id": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "issuesStatusForFixVersion": {
+          "allOf": [
+            {
+              "$ref": "#/components/schemas/VersionIssuesStatus"
+            }
+          ],
+          "readOnly": true
+        },
+        "moveUnfixedIssuesTo": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "operations": {
+          "items": {
+            "$ref": "#/components/schemas/SimpleLink"
+          },
+          "readOnly": true,
+          "type": "array"
+        },
+        "overdue": {
+          "readOnly": true,
+          "type": "boolean"
+        },
+        "project": {
+          "type": "string"
+        },
+        "projectId": {
+          "type": "integer"
+        },
+        "releaseDate": {
+          "type": "string"
+        },
+        "released": {
+          "type": "boolean"
+        },
+        "self": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "startDate": {
+          "type": "string"
+        },
+        "userReleaseDate": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "userStartDate": {
+          "readOnly": true,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "VersionApprover": {
+      "additionalProperties": true,
+      "properties": {
+        "accountId": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "declineReason": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "description": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "status": {
+          "readOnly": true,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "VersionIssuesStatus": {
+      "additionalProperties": true,
+      "properties": {
+        "done": {
+          "readOnly": true,
+          "type": "integer"
+        },
+        "inProgress": {
+          "readOnly": true,
+          "type": "integer"
+        },
+        "toDo": {
+          "readOnly": true,
+          "type": "integer"
+        },
+        "unmapped": {
+          "readOnly": true,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "VersionMoveBean": {
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "type": "string"
+        },
+        "position": {
+          "enum": [
+            "Earlier",
+            "Later",
+            "First",
+            "Last"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "VersionRelatedWork": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "issueId": {
+          "readOnly": true,
+          "type": "integer"
+        },
+        "relatedWorkId": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "category"
+      ],
+      "type": "object"
+    },
+    "Visibility": {
+      "additionalProperties": true,
+      "properties": {
+        "identifier": {
+          "nullable": true,
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "group",
+            "role"
+          ],
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Worklog": {
+      "additionalProperties": true,
+      "properties": {
+        "author": {
+          "allOf": [
+            {
+              "$ref": "#/components/schemas/UserDetails"
+            }
+          ],
+          "readOnly": true
+        },
+        "comment": {},
+        "created": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "id": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "issueId": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "properties": {
+          "items": {
+            "$ref": "#/components/schemas/EntityProperty"
+          },
+          "type": "array"
+        },
+        "self": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "started": {
+          "type": "string"
+        },
+        "timeSpent": {
+          "type": "string"
+        },
+        "timeSpentSeconds": {
+          "type": "integer"
+        },
+        "updateAuthor": {
+          "allOf": [
+            {
+              "$ref": "#/components/schemas/UserDetails"
+            }
+          ],
+          "readOnly": true
+        },
+        "updated": {
+          "readOnly": true,
+          "type": "string"
+        },
+        "visibility": {
+          "allOf": [
+            {
+              "$ref": "#/components/schemas/Visibility"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "WorklogIdsRequestBean": {
+      "additionalProperties": false,
+      "properties": {
+        "ids": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "ids"
+      ],
+      "type": "object"
+    },
+    "WorklogsMoveRequestBean": {
+      "additionalProperties": false,
+      "properties": {
+        "ids": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "issueIdOrKey": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "sources": {
+    "platform": {
+      "license": {
+        "attribution": "Atlassian Jira Cloud REST API OpenAPI request definitions; request-only projection with prose-backed corrections external to this inventory.",
+        "name": "Apache 2.0",
+        "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
+      },
+      "observed": "2026-11-07",
+      "sha256": "e75a52daf7eb0b44470c43649684d5843a70b372ea42762d2feb8e6fa60ffe2a",
+      "url": "https://dac-static.atlassian.com/cloud/jira/platform/swagger-v3.v3.json"
+    },
+    "software": {
+      "license": {
+        "attribution": "Atlassian Jira Cloud REST API OpenAPI request definitions; request-only projection with prose-backed corrections external to this inventory.",
+        "name": "Apache 2.0",
+        "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
+      },
+      "observed": "2026-11-07",
+      "sha256": "4e108d54b99064475c6ba0f986cce46dcace81336e034b58a5400b93174b927a",
+      "url": "https://dac-static.atlassian.com/cloud/jira/software/swagger.v3.json"
+    }
+  }
+}

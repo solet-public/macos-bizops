@@ -15,16 +15,15 @@ removes the account's transactions and sets its status to Cancelled. Zuora
 refuses the delete for an account in a split-owner subscription or an owner
 transfer; that refusal is reported with the vendor's reasons.
 
-Payment-instrument values a caller embeds in a create body (card
-number, security code, bank account, wallet tokens) are redacted from every
-vendor echo, error and audit line.
+No audit line is built from a request body, so a payment instrument a caller
+embeds in a create body never reaches a log line.
 """
 
 from __future__ import annotations
 
 from typing import Final
 
-from .commerce_fields import ACCOUNT_KEY, IDEMPOTENT_HEADERS, V1_HEADERS, payment_secrets, vendor_body
+from .commerce_fields import ACCOUNT_KEY, IDEMPOTENT_HEADERS, V1_HEADERS, vendor_body
 from .typed_operations import Field, Operation
 
 ACCOUNT_OPERATIONS: Final[tuple[Operation, ...]] = (
@@ -34,7 +33,6 @@ ACCOUNT_OPERATIONS: Final[tuple[Operation, ...]] = (
         "/v1/accounts",
         header_fields=IDEMPOTENT_HEADERS,
         body=vendor_body("billToContact", "currency", "name"),
-        secrets=payment_secrets,
         envelope=True,
     ),
     Operation("delete_account", "DELETE", "/v1/accounts/{account_key}", path_fields=ACCOUNT_KEY, header_fields=V1_HEADERS, envelope=True),

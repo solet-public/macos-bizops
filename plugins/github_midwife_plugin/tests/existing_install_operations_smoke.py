@@ -13,7 +13,7 @@ carries the transition bundle and templates.  Legs:
 - the rename migration: fresh pre-boundary fixture applies and verifies;
   already-migrated fixture is verified by probe with byte-identical files;
   "Claude Code running" blocks with ``coding_agent_running``;
-- export-root containment is probe-only when unset;
+- export-root migration preserves the union as pending addresses, without changing configs;
 - the plugin cache refresh compares the cache copy against shipped hooks, and is current only when the hooks are
   pinned and the receipt reads back (iss_fa27466f);
 - the bootstrap dependency route accepts a declared closure, plans exactly the
@@ -94,8 +94,7 @@ class FakeRuntime:
             return CommandOutcome(0, False, 1, "", "")
         return CommandOutcome(0 if argv[2].rsplit("/", 1)[1] in self.launchctl_loaded else 113, False, 1, "", "")
 
-    @staticmethod
-    def _claude(argv: tuple[str, ...], output_limit: int) -> CommandOutcome:
+    def _claude(self, argv: tuple[str, ...], output_limit: int) -> CommandOutcome:
         if argv[1:3] == ("plugin", "list"):
             return bounded_command_outcome(returncode=0, timed_out=False, duration_ms=1, stdout=json.dumps([{"id": f"coordination-hooks@{_NAME}", "enabled": True}]), stderr="", output_limit=output_limit)
         return CommandOutcome(0, False, 1, "", "")
@@ -504,6 +503,7 @@ _FLEET_STAMP = "# rendered-from: {TEMPLATE_REF}@{TEMPLATE_DIGEST}"
 _FLEET_MARKER = "# One function per role the operator chose in Step 4a."
 _R56_FLEET = _PLUGIN_ROOT / "tests" / "fixtures" / "hydration_predecessors" / "fleet_functions_r56.fixture"
 _R58_FLEET = _R56_FLEET.with_name("fleet_functions_r58.fixture")
+_BEFORE_RETIREMENT_FLEET = _PLUGIN_ROOT / "tests/fixtures/fleet_functions_before_controller_retirement.zsh"
 _EXCLUDE_TEMPLATE = "clone_exclude_block.template"
 _ROLE_FUNCTIONS = "\nclaude-iris-lead() { _claude_for_iris Lead }\nclaude-iris-restart-lead() {\n  tmux kill-session -t =Lead 2>/dev/null\n  _claude_for_iris Lead\n}\n"
 
@@ -573,10 +573,21 @@ def _fleet_target(root: Path) -> Path:
     _git(target, "add", "-A")
     _git(target, "commit", "--quiet", "-m", "r58 predecessor")
     r58 = _git(target, "rev-parse", "HEAD")
+    (templates / _FLEET_TEMPLATE).write_bytes(_BEFORE_RETIREMENT_FLEET.read_bytes())
+    _git(target, "add", "-A")
+    _git(target, "commit", "--quiet", "-m", "controller retirement predecessor")
+    before_retirement = _git(target, "rev-parse", "HEAD")
     for name in (_FLEET_TEMPLATE, _EXCLUDE_TEMPLATE):
         (templates / name).write_bytes((_TEMPLATES / name).read_bytes())
-    bundle = _bundle(predecessor, artifacts=[_exclude_artifact(), _fleet_artifact([sha256_bytes(path.read_bytes()) for path in (_R56_FLEET, _R58_FLEET)])])
+    bundle = _bundle(
+        predecessor,
+        artifacts=[
+            _exclude_artifact(),
+            _fleet_artifact([sha256_bytes(path.read_bytes()) for path in (_R56_FLEET, _R58_FLEET, _BEFORE_RETIREMENT_FLEET)]),
+        ],
+    )
     bundle["supported_predecessors"].append({**bundle["supported_predecessors"][0], "commit": r58})
+    bundle["supported_predecessors"].append({**bundle["supported_predecessors"][0], "commit": before_retirement})
     (target / "plugins/github_midwife_plugin/knowledge_base/existing_install_flow.json").write_text(json.dumps(bundle, indent=2))
     _git(target, "add", "-A")
     _git(target, "commit", "--quiet", "-m", "candidate")
@@ -588,7 +599,10 @@ def _check_fleet_declared() -> None:
     rows = json.loads((_KB / "existing_install_flow.json").read_text())["managed_artifacts"]
     shipped = {row["artifact_id"]: row for row in rows}
     _check(shipped.get("clone_exclude_block") == _exclude_artifact(), "declared record: the clone's local ignore file as a managed block")
-    _check(shipped.get("fleet_launcher") == _fleet_artifact([sha256_bytes(path.read_bytes()) for path in (_R56_FLEET, _R58_FLEET)]), "declared record: the fleet launcher, refreshed above the role-function line, r56 and r58 digests as previous")
+    _check(
+        shipped.get("fleet_launcher") == _fleet_artifact([sha256_bytes(path.read_bytes()) for path in (_R56_FLEET, _R58_FLEET, _BEFORE_RETIREMENT_FLEET)]),
+        "declared record: the fleet launcher, refreshed above the role-function line, r56 and r58 digests as previous",
+    )
     _check([row["artifact_id"] for row in rows].index("clone_exclude_block") < [row["artifact_id"] for row in rows].index("fleet_launcher"), "the exclude block is written before the file it ignores")
     _check(b"_tmux_host_for_" not in _R56_FLEET.read_bytes() and b"_tmux_host_for_" in (_TEMPLATES / _FLEET_TEMPLATE).read_bytes(), "the r56 fixture is the launcher without tmux hosting and the shipped template is not")
     _check((_R56_FLEET.read_bytes().count(_FLEET_MARKER.encode()), (_TEMPLATES / _FLEET_TEMPLATE).read_bytes().count(_FLEET_MARKER.encode())) == (1, 1), "the section marker occurs once in the r56 and the shipped template")
@@ -598,7 +612,7 @@ def _check_fleet_refresh(root: Path) -> None:
     """Exercise absent, released and edited launchers through the installer.
 
     Both released stamps must refresh to the candidate template. Operator role
-    functions and controller choices survive; edited launcher sections stay put.
+    functions survive; edited launcher sections stay put.
     """
     target = _fleet_target(root)
     runtime = FakeRuntime(root / "home")
@@ -612,7 +626,7 @@ def _check_fleet_refresh(root: Path) -> None:
     _apply(target, runtime, ref, "fleet_launcher")
     _check((fleet.exists(), len(runtime.writes)) == (False, writes), "no fleet file: apply creates nothing")
     _check_fleet_legacy_replaced(target, runtime, fleet, ref, current, previous)
-    for source in (_R56_FLEET, _R58_FLEET):
+    for source in (_R56_FLEET, _R58_FLEET, _BEFORE_RETIREMENT_FLEET):
         _check_fleet_stamped_previous(target, runtime, fleet, ref, current, source.read_bytes())
     _check_fleet_edited_is_left(target, runtime, fleet, ref, current, previous)
 
@@ -632,9 +646,15 @@ def _check_fleet_legacy_replaced(target: Path, runtime: FakeRuntime, fleet: Path
     _check(_apply(target, runtime, ref, "fleet_launcher")["checkpoint_status"] == "applied", "apply succeeds")
     refreshed = fleet.read_text()
     _check(refreshed == _refreshed(_fleet_render(current, _digest(_FLEET_TEMPLATE), "Lead-Git"), original), "the launcher section is the stamped candidate render, the operator's tail is unchanged")
-    _check("this variable does not enforce Git permissions" in refreshed and "arming boundary" not in refreshed, "the real installer renders the revised Git-control explanation")
+    _check(
+        "GIT_CONTROLLER_NAME=" not in refreshed and "arming boundary" not in refreshed,
+        "the real installer removes the retired setting and its description",
+    )
     _check(refreshed.count(_FLEET_MARKER) == 1 and refreshed.partition(_FLEET_MARKER)[2] == original.partition(_FLEET_MARKER)[2], "role functions and everything below the marker are byte-identical")
-    _check(controller_line in refreshed.splitlines() and "_tmux_host_for_iris" in refreshed, "the operator's GIT_CONTROLLER_NAME line is unchanged and the launcher now hosts each role in tmux")
+    _check(
+        controller_line not in refreshed.splitlines() and "_tmux_host_for_iris" in refreshed,
+        "the retired assignment is gone and the launcher now hosts each role in tmux",
+    )
     _check(fleet.stat().st_mode & 0o777 == 0o640, "the file mode survives the refresh")
     again = _probe(target, runtime, ref, "fleet_launcher", purpose="post_apply")
     _check((again["checkpoint_status"], _state(again, "fleet_launcher")["state"], _state(again, "fleet_launcher")["expected_sha256"]) == ("verified", "stamped_current", sha256_bytes(refreshed.encode())), "post-apply the launcher reads back as stamped current")
@@ -661,7 +681,7 @@ def _check_fleet_stamped_previous(target: Path, runtime: FakeRuntime, fleet: Pat
     """Refresh a declared predecessor stamp without changing operator content.
 
     The same production path handles both released generations. A blank
-    controller choice remains a recognizable legacy render after refresh.
+    retired assignment remains a recognizable legacy render before refresh.
     """
     previous_digest = sha256_bytes(previous)
     original = _fleet_render(previous, previous_digest, "Git-Controller") + _ROLE_FUNCTIONS
@@ -680,10 +700,21 @@ def _check_fleet_edited_is_left(target: Path, runtime: FakeRuntime, fleet: Path,
     r56_text = _fleet_render(previous, None, "Lead-Git")
     current_text = _fleet_render(current, _digest(_FLEET_TEMPLATE), "Lead-Git")
     for label, edited, expected in (
-        ("unstamped edit of the r56 launcher section", r56_text.replace("_claude_for_iris() {", "export MY_EDIT=1\n_claude_for_iris() {", 1) + _ROLE_FUNCTIONS, "unknown_origin"),
-        ("stamped edit of the current launcher section", current_text.replace("_claude_for_iris() {", "export MY_EDIT=1\n_claude_for_iris() {", 1) + _ROLE_FUNCTIONS, "locally_modified"),
-        ("launcher whose marker line was deleted", r56_text.replace(_FLEET_MARKER, "# roles") + _ROLE_FUNCTIONS, "unknown_origin"),
-        ("launcher whose controller line was deleted", "\n".join(line for line in r56_text.splitlines() if "GIT_CONTROLLER_NAME=" not in line) + "\n" + _ROLE_FUNCTIONS, "unknown_origin"),
+        (
+            "unstamped edit of the r56 launcher section",
+            r56_text.replace("_claude_for_iris() {", "export MY_EDIT=1\n_claude_for_iris() {", 1) + _ROLE_FUNCTIONS,
+            "unknown_origin",
+        ),
+        (
+            "stamped edit of the current launcher section",
+            current_text.replace("_claude_for_iris() {", "export MY_EDIT=1\n_claude_for_iris() {", 1) + _ROLE_FUNCTIONS,
+            "locally_modified",
+        ),
+        (
+            "launcher whose marker line was deleted",
+            r56_text.replace(_FLEET_MARKER, "# roles") + _ROLE_FUNCTIONS,
+            "unknown_origin",
+        ),
     ):
         fleet.write_text(edited)
         writes = len(runtime.writes)
@@ -779,21 +810,26 @@ def _check_export_root_and_cache(root: Path) -> None:
 
 def _check_export_root(root: Path, target: Path, runtime: FakeRuntime) -> None:
     ref = "existing::migration.export_root_containment"
-    unset = cast(dict[str, Any], dispatch_request(_request(target, ref), runtime))
-    operator_action = any("operator_action_required=" in fact for item in unset["evidence"] for fact in item["observed"])
-    _check((unset["checkpoint_status"], operator_action) == ("verified", True), "export root unset is probe-only with operator action evidence")
     (target / "plugins" / "jira_plugin").mkdir()
     (target / "plugins" / "salesforce_plugin").mkdir()
     config = target / "profile" / "config" / "plugins"
     config.mkdir(parents=True)
     (config / "jira_plugin.json").write_text(json.dumps({"export_allowed_roots": [str(root / "work")]}))
+    (config / "salesforce_plugin.json").write_text(json.dumps({"export_allowed_roots": [str(root / "other")], "import_allowed_roots": [str(root / "imports")]}))
     (root / "work").mkdir()
+    before = {path: path.read_bytes() for path in config.glob("*.json")}
     pending = cast(dict[str, Any], dispatch_request(_request(target, ref), runtime))
     planned = [action["target"] for action in pending["planned_actions"]]
-    _check((pending["checkpoint_status"], planned) == ("pending", [str(config / "salesforce_plugin.json")]), "a connector lacking the chosen root is planned exactly")
+    seed = config / "default_address_book_plugin/entries.json"
+    _check(pending["checkpoint_status"] == "pending" and str(seed) in planned, "disagreeing roots plan their union in the pending address marker")
     applied = cast(dict[str, Any], dispatch_request(_request(target, ref, phase="apply"), runtime))
-    propagated = json.loads((config / "salesforce_plugin.json").read_text())["export_allowed_roots"]
-    _check((applied["checkpoint_status"], propagated) == ("applied", [str(root / "work")]), "root propagated to the missing connector only")
+    entries = json.loads(seed.read_text())["entries"]
+    paths = {entry["entries"][0]["value"] for entry in entries}
+    _check(applied["checkpoint_status"] == "applied" and all(str(root / folder) in paths for folder in ("work", "other", "imports")), "export and Salesforce import roots are all carried")
+    _check({path: path.read_bytes() for path in before} == before, "every connector config remains byte-identical")
+    marker = seed.read_bytes()
+    dispatch_request(_request(target, ref, phase="apply"), runtime)
+    _check(seed.read_bytes() == marker, "a second migration leaves the pending marker byte-identical")
 
 
 def _check_plugin_cache(target: Path, runtime: FakeRuntime) -> None:

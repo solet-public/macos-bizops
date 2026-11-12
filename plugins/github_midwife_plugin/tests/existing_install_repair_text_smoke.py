@@ -2,9 +2,8 @@
 
 Hermetic, on the same fake runtime and Git target as ``existing_install_operations_smoke``:
 
-- ``export_root_ambiguous`` names each installed connector with the roots it holds, prints ``(none)`` for one that holds
-  none, and stays inside the 512 characters ``result()`` cuts a repair at, ellipsizing entries rather than dropping a
-  connector or the remedy;
+- disagreeing export roots are carried as a union, with one advisory per odd
+  root so even long listings retain every connector and folder;
 - a refused ``claude plugin uninstall`` / ``install`` / ``marketplace add`` carries the exit code (or the timeout) and
   the CLI's stderr, with secret-shaped text removed, because the Manager refuses a whole envelope that carries it;
 - ``coding_agent_running`` says when ``pgrep`` could not answer, and why, instead of saying a process is running.
@@ -32,7 +31,7 @@ from github_midwife_plugin.setup_adapter_contract import REPAIR_LIMIT  # noqa: E
 from github_midwife_plugin.setup_adapter_runtime import CommandOutcome, bounded_command_outcome, describe_outcome  # noqa: E402
 from solet_manager.adapter_validation import public_string  # noqa: E402
 
-_CHECKS = 0
+_checks = 0
 _NAME = base._NAME  # noqa: SLF001
 _EXPORT = "existing::migration.export_root_containment"
 _RENAME = "existing::migration.solet_rename"
@@ -40,8 +39,8 @@ _CACHE = "existing::runtime.plugin_cache_refresh"
 
 
 def _check(condition: object, label: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    global _checks
+    _checks += 1
     if not condition:
         raise AssertionError(label)
 
@@ -72,12 +71,6 @@ def _dispatch(target: Path, runtime: _Runtime, ref: str, *, phase: str = "probe"
     return cast(dict[str, Any], dispatch_request(_request(target, ref, phase=phase), runtime))
 
 
-def _ambiguous_repair(target: Path, runtime: _Runtime) -> str:
-    refused = _dispatch(target, runtime, _EXPORT)
-    _check(refused["checkpoint_status"] == "blocked" and refused["error_kind"] == "export_root_ambiguous", f"disagreeing connectors refuse as export_root_ambiguous: {refused['checkpoint_status']} {refused['error_kind']}")
-    return cast(str, refused["repair"])
-
-
 def _check_export_root(root: Path) -> None:
     target, _ = base._target(root)  # noqa: SLF001
     runtime = _Runtime(root / "home")
@@ -88,19 +81,33 @@ def _check_export_root(root: Path) -> None:
     for plugin, roots in (("jira_plugin", [work]), ("salesforce_plugin", [work, stale])):
         (target / "plugins" / plugin).mkdir()
         (config / f"{plugin}.json").write_text(json.dumps({"export_allowed_roots": roots}))
-    repair = _ambiguous_repair(target, runtime)
-    _check(f"salesforce_plugin={work}, {stale}; jira_plugin={work}." in repair, f"the refusal names both connectors and their roots, in the connector roster's order: {repair}")
-    _check("profile/config/plugins/<plugin>.json" in repair and f"solet-manager update {_NAME} --dry-run" in repair, f"the refusal names the files to edit and the command to run again: {repair[-260:]}")
+    preview = _dispatch(target, runtime, _EXPORT)
+    _check(preview["checkpoint_status"] == "pending" and preview["error_kind"] is None, "disagreeing connectors plan a union without refusal")
+    notes = json.dumps(preview["evidence"])
+    _check(work in notes and stale in notes and "missing" in notes, "each missing folder has an advisory naming it")
     empty = next(plugin for plugin in BUSINESS_CONNECTOR_PLUGINS if plugin not in ("jira_plugin", "salesforce_plugin"))
     (target / "plugins" / empty).mkdir()
-    _check(f"{empty}=(none)" in _ambiguous_repair(target, runtime), "a connector holding no root prints (none)")
+    _check(_dispatch(target, runtime, _EXPORT)["checkpoint_status"] == "pending", "a connector holding no root does not block the union")
+    _check_long_roots(target, runtime, config)
+
+
+def _check_long_roots(target: Path, runtime: _Runtime, config: Path) -> None:
     for plugin in BUSINESS_CONNECTOR_PLUGINS:
         (target / "plugins" / plugin).mkdir(exist_ok=True)
         (config / f"{plugin}.json").write_text(json.dumps({"export_allowed_roots": [f"/{plugin}/{'a' * 300}", f"/{plugin}/{'b' * 300}"]}))
-    long_repair = _ambiguous_repair(target, runtime)
-    _check(len(long_repair) <= REPAIR_LIMIT, f"seven connectors with 300-character roots stay inside the {REPAIR_LIMIT}-character cap result() cuts at: {len(long_repair)}")
-    _check(all(f"{plugin}=" in long_repair for plugin in BUSINESS_CONNECTOR_PLUGINS) and "…" in long_repair, f"an over-long listing ellipsizes each entry and still names every connector: {long_repair}")
-    _check(long_repair.endswith("--dry-run again."), f"and keeps the remedy, which result() would otherwise cut off: {long_repair[-120:]}")
+    before = {path: path.read_bytes() for path in config.glob("*.json")}
+    carried = _dispatch(target, runtime, _EXPORT, phase="apply")
+    entries = json.loads((config / "default_address_book_plugin/entries.json").read_text())["entries"]
+    migrated = [entry for entry in entries if "migrated" in entry.get("tags", [])]
+    _check(carried["checkpoint_status"] == "applied" and len(migrated) == 14, "all fourteen long roots are preserved without an ambiguity refusal")
+    _check_long_root_evidence(migrated, carried)
+    _check({path: path.read_bytes() for path in before} == before, "long-root migration leaves all configs byte-identical")
+
+
+def _check_long_root_evidence(migrated: list[dict[str, Any]], carried: dict[str, Any]) -> None:
+    _check(all(sum(f"from:{plugin}" in entry["tags"] for entry in migrated) == 2 for plugin in BUSINESS_CONNECTOR_PLUGINS), "every connector has both source-tagged saved folders")
+    observed = json.dumps(carried["evidence"])
+    _check(all(f"/{plugin}/{'a' * 300}" in observed and f"/{plugin}/{'b' * 300}" in observed for plugin in BUSINESS_CONNECTOR_PLUGINS), "separate advisory evidence retains every long root instead of truncating a combined repair")
 
 
 def _check_coding_agent_state(root: Path) -> None:
@@ -265,9 +272,7 @@ def test_hostile_git_environment_isolation() -> None:
         )
         after_config = config.read_bytes()
         print(
-            "sentinel_config_sha256_before="
-            f"{hashlib.sha256(before_config).hexdigest()} "
-            f"after={hashlib.sha256(after_config).hexdigest()}",
+            f"sentinel_config_sha256_before={hashlib.sha256(before_config).hexdigest()} after={hashlib.sha256(after_config).hexdigest()}",
             flush=True,
         )
         _check(after_config == before_config, "hostile GIT_DIR leaves scratch Git config byte-identical")
@@ -296,7 +301,7 @@ def main() -> int:
         _check_marketplace_refusals(root / "marketplace")
         _check_manager_validator(root / "validator")
     test_hostile_git_environment_isolation()
-    print(f"existing_install_repair_text_smoke OK: {_CHECKS} checks passed")
+    print(f"existing_install_repair_text_smoke OK: {_checks} checks passed")
     return 0
 
 

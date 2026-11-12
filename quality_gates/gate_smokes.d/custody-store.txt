@@ -1,0 +1,3 @@
+# One shared custody store; no shipped hook changes.
+plugins/agent_messaging_plugin/tests/custody_store_smoke.py
+plugins/github_midwife_plugin/tests/hook_common_identity_smoke.py

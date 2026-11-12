@@ -14,14 +14,14 @@ raise ``ValueError`` (-> external_pg.invalid_params); guard violations raise
 ``StatementGuardError``; psycopg errors propagate to the plugin's
 ``classify_pg_error``.
 
-``run_statement`` is this module's WRITE verb (operator ruling 2026-08-09 +
-Amendment 1, "vendor RBAC is the control plane"): it opens on a connection the
-caller built with ``read_only=False`` (connection.py) and performs NO statement
-classification of any kind — ``assert_single_statement`` (a SHAPE check, exactly
-one statement) is the only guard it reuses; ``assert_read_statement`` (the
-read/write ACCESS-CONTROL decision) never appears on this path. What the
-statement is actually allowed to do is decided entirely by the server-side
-Postgres GRANTs on the registered credential.
+No verb here classifies a statement as a read or a write (USER ruling
+rul_4c99a30d; operator ruling 2026-08-09 + Amendment 1, "vendor RBAC is the
+control plane"). ``assert_single_statement`` is a SHAPE check (exactly one
+statement); what the statement may do is decided entirely by the server-side
+Postgres GRANTs on the registered credential. ``run_query`` and
+``export_query`` commit after the TSV is written, so a data-modifying CTE does
+what it says; ``run_statement`` commits per call, or runs in autocommit mode
+for commands that refuse a transaction block.
 
 This module is S2-exempt (whole-file): its ``information_schema`` SELECTs and the
 caller's own ``run_query``/``export_query``/``run_statement`` text target the
@@ -46,39 +46,45 @@ from .constants import (
     PARAM_ACKNOWLEDGE_OVERRIDE,
     PARAM_ROW_LIMIT,
 )
-from .statement_guard import assert_read_statement, assert_single_statement
+from .statement_guard import assert_single_statement
 
 # path_gate(output_tsv_path) -> realpath-resolved path to write, or raises
-# ExportPathRefusedError. Injected by the plugin, which binds the operator's
-# export_allowed_roots config (export_containment.assert_export_path_allowed).
+# PathRefusedError. Injected by the plugin, which binds the operator's
+# registered path addresses config (ananta.file_locations.containment.assert_path_allowed).
 PathGate = Callable[[str], str]
 
 _SYSTEM_SCHEMAS = ("pg_catalog", "information_schema", "pg_toast")
 
 
 def run_query(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
-    """Run one read-only statement; write the result to output_tsv_path, return a handle.
+    """Run one statement; write its rows to output_tsv_path, commit, return a handle.
 
     Defaults to DEFAULT_ROW_LIMIT rows; an acknowledged override may request
     up to MAX_ROWS_HARD_CAP. For pulls beyond that ceiling, use export_query
     (up to EXPORT_ROW_CAP with the same override).
     """
     effective_limit = _resolve_effective_limit(
-        params, default=DEFAULT_ROW_LIMIT, hard_cap=MAX_ROWS_HARD_CAP, verb="run_query",
+        params,
+        default=DEFAULT_ROW_LIMIT,
+        hard_cap=MAX_ROWS_HARD_CAP,
+        verb="run_query",
     )
     sql = _require_str(params, "sql")
     output_tsv_path = _require_str(params, "output_tsv_path")
     assert_single_statement(sql)
-    assert_read_statement(sql)
     return _execute_and_write_tsv(conn, sql, effective_limit, path_gate, output_tsv_path)
 
 
 def run_statement(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
-    """Run ONE statement on a non-read_only connection; server GRANTs decide what it can do.
+    """Run ONE statement; the server's GRANTs decide what it can do.
 
-    Single-statement contract (:func:`assert_single_statement` — SHAPE only, never
-    :func:`assert_read_statement`; no statement-leader classification exists on
-    this path, by design — see the module docstring's Amendment 1 note). Commit
+    Single-statement contract (:func:`assert_single_statement` — SHAPE only; no
+    statement-leader classification exists on this path, by design — see the
+    module docstring). ``autocommit=true`` runs the statement outside a
+    transaction block, for the commands the server refuses inside one (VACUUM,
+    CREATE DATABASE, CREATE INDEX CONCURRENTLY, ALTER SYSTEM); the statement is
+    then committed by the server as it runs, so the rollback below cannot undo
+    it and the caller must pass output_tsv_path if it returns rows. Commit
     semantics are explicit and per-call: a statement with no result set (the
     common INSERT/UPDATE/DELETE/DDL case) commits and returns ``rowcount``
     inline. A statement that DOES produce a result set (a RETURNING clause) is
@@ -93,34 +99,23 @@ def run_statement(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dic
     """
     sql = _require_str(params, "sql")
     assert_single_statement(sql)
-    output_tsv_path = params.get("output_tsv_path")
-    resolved_path: str | None = None
-    if isinstance(output_tsv_path, str) and output_tsv_path.strip():
-        resolved_path = path_gate(output_tsv_path)
-        parent_dir = os.path.dirname(resolved_path)
-        if not os.path.isdir(parent_dir):
-            raise ValueError(
-                f"the parent directory of output_tsv_path does not exist ({parent_dir}); "
-                "create it first — this verb writes one file, it does not create directories"
-            )
+    resolved_path = _optional_output_path(params, path_gate)
     effective_limit = _resolve_effective_limit(
-        params, default=DEFAULT_ROW_LIMIT, hard_cap=MAX_ROWS_HARD_CAP, verb="run_statement",
+        params,
+        default=DEFAULT_ROW_LIMIT,
+        hard_cap=MAX_ROWS_HARD_CAP,
+        verb="run_statement",
     )
+    autocommit = _apply_autocommit(conn, params)
     with conn.cursor() as cur:
         cur.execute(sql)
-        has_result_set = cur.description is not None
-        if not has_result_set:
+        if cur.description is None:
             rowcount = cur.rowcount
             conn.commit()
-            return {"rowcount": rowcount, "has_result_set": False}
+            return {"rowcount": rowcount, "has_result_set": False, "autocommit": autocommit}
         if resolved_path is None:
             conn.rollback()
-            raise ValueError(
-                "the statement produced a result set (e.g. a RETURNING clause) but no "
-                "output_tsv_path was supplied; rows are never returned inline — pass "
-                "output_tsv_path to receive them as a TSV, the same always-export contract "
-                "as run_query"
-            )
+            raise _missing_output_path(autocommit)
         columns = [d.name for d in cur.description]
         rows = cur.fetchmany(effective_limit)
         rowcount = cur.rowcount
@@ -131,6 +126,7 @@ def run_statement(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dic
     return {
         "rowcount": rowcount,
         "has_result_set": True,
+        "autocommit": autocommit,
         "path": resolved_path,
         "row_count": len(row_lists),
         "columns": columns,
@@ -138,12 +134,38 @@ def run_statement(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dic
     }
 
 
+def _optional_output_path(params: dict[str, Any], path_gate: PathGate) -> str | None:
+    """run_statement's optional TSV path: gated and its directory checked BEFORE executing."""
+    output_tsv_path = params.get("output_tsv_path")
+    if not isinstance(output_tsv_path, str) or not output_tsv_path.strip():
+        return None
+    resolved_path = path_gate(output_tsv_path)
+    parent_dir = os.path.dirname(resolved_path)
+    if not os.path.isdir(parent_dir):
+        raise ValueError(f"the parent directory of output_tsv_path does not exist ({parent_dir}); create it first — this verb writes one file, it does not create directories")
+    return resolved_path
+
+
+def _apply_autocommit(conn: Any, params: dict[str, Any]) -> bool:
+    """Put the connection in autocommit mode when asked (before any statement runs)."""
+    autocommit = params.get("autocommit", False)
+    if not isinstance(autocommit, bool):
+        raise ValueError("'autocommit' must be a boolean")
+    if autocommit:
+        conn.autocommit = True
+    return autocommit
+
+
+def _missing_output_path(autocommit: bool) -> ValueError:
+    committed_note = " The statement already ran in autocommit mode, so the server has committed it." if autocommit else " The statement was rolled back."
+    return ValueError("the statement produced a result set (e.g. a RETURNING clause) but no output_tsv_path was supplied; rows are never returned inline — pass output_tsv_path to receive them as a TSV, the same always-export contract as run_query." + committed_note)
+
+
 def list_schemas(conn: Any, params: dict[str, Any]) -> dict[str, Any]:
     """List non-system schemas."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT schema_name FROM information_schema.schemata "
-            "WHERE schema_name <> ALL(%s) ORDER BY schema_name",
+            "SELECT schema_name FROM information_schema.schemata WHERE schema_name <> ALL(%s) ORDER BY schema_name",
             (list(_SYSTEM_SCHEMAS),),
         )
         rows = cur.fetchall()
@@ -155,8 +177,7 @@ def list_tables(conn: Any, params: dict[str, Any]) -> dict[str, Any]:
     schema = _require_str(params, "schema")
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT table_name, table_type FROM information_schema.tables "
-            "WHERE table_schema = %s ORDER BY table_name",
+            "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = %s ORDER BY table_name",
             (schema,),
         )
         rows = cur.fetchall()
@@ -169,9 +190,7 @@ def describe_table(conn: Any, params: dict[str, Any]) -> dict[str, Any]:
     table = _require_str(params, "table")
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT column_name, data_type, is_nullable, column_default "
-            "FROM information_schema.columns WHERE table_schema = %s AND table_name = %s "
-            "ORDER BY ordinal_position",
+            "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position",
             (schema, table),
         )
         rows = cur.fetchall()
@@ -199,9 +218,7 @@ def test_connection(conn: Any, params: dict[str, Any]) -> dict[str, Any]:
     verb — the §2.4 topology-safety rule governs ERROR paths only.
     """
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT version(), current_user, current_setting('transaction_read_only')"
-        )
+        cur.execute("SELECT version(), current_user, current_setting('transaction_read_only')")
         row = cur.fetchone()
     version = _as_str(row[0]) if row else ""
     user = _as_str(row[1]) if row else ""
@@ -216,7 +233,7 @@ def test_connection(conn: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def export_query(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
-    """Export a read-only query's result as a workspace TSV — the N>>500 route.
+    """Export one statement's rows as a workspace TSV, then commit — the N>>500 route.
 
     Same caller-supplied-path destination and override mechanism as
     run_query; only the override's hard cap differs (EXPORT_ROW_CAP, not
@@ -226,12 +243,14 @@ def export_query(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dict
     statement executes, so a refused path never sends the query.
     """
     effective_limit = _resolve_effective_limit(
-        params, default=DEFAULT_ROW_LIMIT, hard_cap=EXPORT_ROW_CAP, verb="export_query",
+        params,
+        default=DEFAULT_ROW_LIMIT,
+        hard_cap=EXPORT_ROW_CAP,
+        verb="export_query",
     )
     sql = _require_str(params, "sql")
     output_tsv_path = _require_str(params, "output_tsv_path")
     assert_single_statement(sql)
-    assert_read_statement(sql)
     return _execute_and_write_tsv(conn, sql, effective_limit, path_gate, output_tsv_path)
 
 
@@ -241,7 +260,11 @@ def export_query(conn: Any, params: dict[str, Any], path_gate: PathGate) -> dict
 
 
 def _resolve_effective_limit(
-    params: dict[str, Any], *, default: int, hard_cap: int, verb: str,
+    params: dict[str, Any],
+    *,
+    default: int,
+    hard_cap: int,
+    verb: str,
 ) -> int:
     """Resolve the effective fetch ceiling from the §5 override pair.
 
@@ -256,43 +279,40 @@ def _resolve_effective_limit(
     override_present = override is True
     row_limit_present = row_limit is not None
     if override_present != row_limit_present:
-        raise ValueError(
-            f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be "
-            f"given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, "
-            f"{PARAM_ROW_LIMIT}={row_limit!r}"
-        )
+        raise ValueError(f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, {PARAM_ROW_LIMIT}={row_limit!r}")
     if not override_present:
         return default
     if not isinstance(row_limit, int) or isinstance(row_limit, bool) or row_limit < 1:
         raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}' must be a positive integer")
     if row_limit > hard_cap:
-        raise ValueError(
-            f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of "
-            f"{hard_cap}; refusing rather than silently clamping"
-        )
+        raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of {hard_cap}; refusing rather than silently clamping")
     return row_limit
 
 
 def _execute_and_write_tsv(
-    conn: Any, sql: str, cap: int, path_gate: PathGate, output_tsv_path: str,
+    conn: Any,
+    sql: str,
+    cap: int,
+    path_gate: PathGate,
+    output_tsv_path: str,
 ) -> dict[str, Any]:
-    """Admit the path, fetch up to ``cap`` rows, write a TSV, return a handle.
+    """Admit the path, fetch up to ``cap`` rows, write a TSV, commit, return a handle.
 
     The containment gate runs BEFORE the statement executes, so a refused
     path never sends the query. ``fetchmany(cap)`` bounds the fetch at the
-    cursor/network level — never fetch-everything-then-truncate.
+    cursor/network level — never fetch-everything-then-truncate. The commit
+    comes AFTER the file is written: a statement that writes (a
+    data-modifying CTE) is never committed while its rows are lost.
     """
     resolved_path = path_gate(output_tsv_path)
     parent_dir = os.path.dirname(resolved_path)
     if not os.path.isdir(parent_dir):
-        raise ValueError(
-            f"the parent directory of output_tsv_path does not exist ({parent_dir}); "
-            "create it first — this verb writes one file, it does not create directories"
-        )
+        raise ValueError(f"the parent directory of output_tsv_path does not exist ({parent_dir}); create it first — this verb writes one file, it does not create directories")
     columns, rows = _execute_fetch(conn, sql, cap)
     row_lists = [_row_to_list(r) for r in rows]
     with open(resolved_path, "wb") as handle:
         handle.write(_to_tsv(columns, row_lists))
+    conn.commit()
     return {
         "path": resolved_path,
         "row_count": len(row_lists),

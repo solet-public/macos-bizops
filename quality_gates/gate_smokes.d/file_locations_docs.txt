@@ -1,0 +1,4 @@
+# Build C: protected-folder advisory, platform contract and adopter wording.
+ananta/tests/file_locations/documents_platform_smoke.py
+ananta/tests/file_locations/protected_folder_advisory_smoke.py
+plugins/github_midwife_plugin/tests/file_locations_docs_smoke.py

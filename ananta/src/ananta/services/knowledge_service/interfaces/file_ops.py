@@ -17,6 +17,7 @@ from ananta.core.actions.action_metadata import (
     ReturnValueSchema,
 )
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.registered_job_operations import registered_job_return_schema
 
 
 class KnowledgeFileOpsAPI(ABC):
@@ -24,6 +25,7 @@ class KnowledgeFileOpsAPI(ABC):
 
     @service_interface_process(
         name="browse",
+        is_async=True,
         is_discoverable=True,
         provider="knowledge_service",
         parameters={
@@ -39,19 +41,16 @@ class KnowledgeFileOpsAPI(ABC):
                 default="",
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Directory listing", type=ParameterType.OBJECT
-        ),
-        result_processor_customizations=MergeResultProcessorCustomizations(
-        ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(description="Directory listing", type=ParameterType.OBJECT)),
+        result_processor_customizations=MergeResultProcessorCustomizations(),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def browse(self, name: str, path: str = "") -> dict[str, Any]: ...
 
     @service_interface_process(
         name="read_file",
+        is_async=True,
         is_discoverable=True,
         provider="knowledge_service",
         parameters={
@@ -66,19 +65,16 @@ class KnowledgeFileOpsAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="File contents", type=ParameterType.OBJECT
-        ),
-        result_processor_customizations=MergeResultProcessorCustomizations(
-        ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(description="File contents", type=ParameterType.OBJECT)),
+        result_processor_customizations=MergeResultProcessorCustomizations(),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def read_file(self, name: str, path: str) -> dict[str, Any]: ...
 
     @service_interface_process(
         name="edit_file",
+        is_async=True,
         is_discoverable=True,
         provider="knowledge_service",
         parameters={
@@ -99,32 +95,28 @@ class KnowledgeFileOpsAPI(ABC):
             ),
             "expected_content_hash": ParameterMetadata(
                 description=(
-                    "Optional optimistic-concurrency precondition: the "
-                    "content_sha256 that read_file returned for the version you "
-                    "are editing. When supplied it must match the file's current "
-                    "hash or the edit fails loud (re-read and reapply). Required "
-                    "by knowledge bases whose write posture forbids blind overwrites."
+                    "Optional optimistic-concurrency precondition: the content_sha256 that read_file returned for the version you are editing. When supplied it must match the file's current hash or the edit fails loud (re-read and reapply). Required by knowledge bases whose write posture forbids blind overwrites."
                 ),
                 required=False,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Edit result", type=ParameterType.OBJECT
-        ),
-        result_processor_customizations=MergeResultProcessorCustomizations(
-        ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(description="Edit result", type=ParameterType.OBJECT)),
+        result_processor_customizations=MergeResultProcessorCustomizations(),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def edit_file(
-        self, name: str, path: str, content: str,
+        self,
+        name: str,
+        path: str,
+        content: str,
         expected_content_hash: str | None = None,
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
         name="create_file",
+        is_async=True,
         is_discoverable=True,
         provider="knowledge_service",
         parameters={
@@ -144,19 +136,16 @@ class KnowledgeFileOpsAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Create result", type=ParameterType.OBJECT
-        ),
-        result_processor_customizations=MergeResultProcessorCustomizations(
-        ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(description="Create result", type=ParameterType.OBJECT)),
+        result_processor_customizations=MergeResultProcessorCustomizations(),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def create_file(self, name: str, path: str, content: str) -> dict[str, Any]: ...
 
     @service_interface_process(
         name="delete_file",
+        is_async=True,
         is_discoverable=True,
         provider="knowledge_service",
         parameters={
@@ -171,19 +160,16 @@ class KnowledgeFileOpsAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Delete result", type=ParameterType.OBJECT
-        ),
-        result_processor_customizations=MergeResultProcessorCustomizations(
-        ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(description="Delete result", type=ParameterType.OBJECT)),
+        result_processor_customizations=MergeResultProcessorCustomizations(),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def delete_file(self, name: str, path: str) -> dict[str, Any]: ...
 
     @service_interface_process(
         name="archive_file",
+        is_async=True,
         is_discoverable=True,
         provider="knowledge_service",
         parameters={
@@ -198,24 +184,19 @@ class KnowledgeFileOpsAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "superseded_by": ParameterMetadata(
-                description=(
-                    "Optional relative path (or identifier) of the successor "
-                    "document; when given, the archived doc's §4 block gains "
-                    "Superseded_by and Status: superseded."
-                ),
+                description=("Optional relative path (or identifier) of the successor document; when given, the archived doc's §4 block gains Superseded_by and Status: superseded."),
                 required=False,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Archive result", type=ParameterType.OBJECT
-        ),
-        result_processor_customizations=MergeResultProcessorCustomizations(
-        ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(description="Archive result", type=ParameterType.OBJECT)),
+        result_processor_customizations=MergeResultProcessorCustomizations(),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def archive_file(
-        self, name: str, path: str, superseded_by: str | None = None,
+        self,
+        name: str,
+        path: str,
+        superseded_by: str | None = None,
     ) -> dict[str, Any]: ...

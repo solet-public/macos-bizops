@@ -106,10 +106,7 @@ class _FakeActionFactory:
         action_definition: dict[str, object],
         context: dict[str, object] | None = None,
     ) -> str:
-        if (
-            self._raise_on_delivery
-            and action_definition.get("process_key") == COMPLETION_DELIVERY_PROCESS_KEY
-        ):
+        if self._raise_on_delivery and action_definition.get("process_key") == COMPLETION_DELIVERY_PROCESS_KEY:
             raise RuntimeError("smoke: delivery submission failed")
         self.calls.append(action_definition)
         return "ae-smoke-fake-action-id"
@@ -139,14 +136,23 @@ class _FakeStateService(JobState):
         trigger: dict[str, object] = {"source_namespace": "agent_messaging_plugin"}
         if route_role is not None:
             trigger[COMPLETION_ROUTE_ROLE_KEY] = route_role
-        self.rows["flows"] = [{
-            "id": "flow-smoke-1", "trigger_type": "bridge_process_call",
-            "trigger_data": json.dumps(trigger),
-        }]
-        self.rows["job"] = [{
-            "id": f"job-{index}", "status": "queued", "metadata": _metadata(),
-            "provider_name": _PROVIDER, "flow_token_id": flow_token_id,
-        } for index in range(1, 8)]
+        self.rows["flows"] = [
+            {
+                "id": "flow-smoke-1",
+                "trigger_type": "bridge_process_call",
+                "trigger_data": json.dumps(trigger),
+            }
+        ]
+        self.rows["job"] = [
+            {
+                "id": f"job-{index}",
+                "status": "queued",
+                "metadata": _metadata(),
+                "provider_name": _PROVIDER,
+                "flow_token_id": flow_token_id,
+            }
+            for index in range(1, 8)
+        ]
 
 
 def _metadata() -> dict[str, object]:
@@ -318,6 +324,22 @@ def test_cancelled_is_terminal_but_never_routes() -> None:
     )
 
 
+def test_delivery_jobs_never_schedule_another_delivery() -> None:
+    """A terminal delivery remains readable without recursively delivering itself."""
+    for name in ("deliver_job_completion", "deliver_result", "deliver_error"):
+        for status in ("completed", "error"):
+            manager, state, factory, frg = _make_manager(route_role=_ROLE)
+            state.rows["job"][0]["provider_name"] = f"agent_messaging_plugin.{name}"
+            result = manager.update_job("job-1", {"status": status, "result": {"delivered": True}})
+            _check(result["action_status"] == "completed", f"{name}/{status}: terminal outcome committed")
+            _check(not factory.submitted(COMPLETION_DELIVERY_PROCESS_KEY), f"{name}/{status}: delivery must not schedule another delivery")
+            _check(state.rows["job"][0]["status"] == status and frg.complete_token_calls == [_TOKEN], f"{name}/{status}: terminal readback and token preserved")
+    manager, state, factory, _frg = _make_manager(route_role=_ROLE)
+    state.rows["job"][0]["provider_name"] = "another_owner.deliver_result"
+    manager.update_job("job-1", {"status": "completed"})
+    _check(len(factory.submitted(COMPLETION_DELIVERY_PROCESS_KEY)) == 1, "unselected owner with the same method name retains role routing")
+
+
 def main() -> int:
     print("Lane W: job completion role routing")
     test_routed_flow_replaces_the_continuation()
@@ -327,6 +349,7 @@ def main() -> int:
     test_failed_delivery_falls_back_loudly()
     test_non_terminal_status_never_routes()
     test_cancelled_is_terminal_but_never_routes()
+    test_delivery_jobs_never_schedule_another_delivery()
 
     print()
     if _failures:

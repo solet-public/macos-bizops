@@ -197,7 +197,6 @@ def _observation(row: Mapping[str, Any], result: Mapping[str, Any], request: Map
         "complete": bool(attempts) and result.get("verdict") != "not_run",
         "identity_complete": row["identity_complete"] and (result.get("import_environment") or {}).get("state") == "verified",
         "attempt_count": len(attempts),
-        "retried": result.get("retried", False),
         "skipped": skipped,
         "harness_defect": result.get("harness_defect"),
         "partial": TRUNCATED_OUTPUT_MARKER in output,
@@ -413,10 +412,10 @@ class SmokeObservations(dict[str, Any]):
         super().__init__(initial)
         self.attempts: dict[str, list[dict[str, object]]] = {entry: [] for entry in entries}
 
-    def record_attempt(self, entry: str, verdict: str, output: str, elapsed: float | None, retried: bool, exit_code: int | None) -> None:
+    def record_attempt(self, entry: str, verdict: str, output: str, elapsed: float | None, exit_code: int | None) -> None:
         from datetime import UTC, datetime
 
-        attempt: dict[str, object] = {"smoke": entry, "verdict": verdict, "exit_code": exit_code, "output": output, "seconds": elapsed, "retried": retried, "recorded_at": datetime.now(UTC).isoformat()}
+        attempt: dict[str, object] = {"smoke": entry, "verdict": verdict, "exit_code": exit_code, "output": output, "seconds": elapsed, "recorded_at": datetime.now(UTC).isoformat()}
         attempt["raw_attempt_path"] = SmokePassStore().retain_attempt(attempt, principal=f"local-uid:{os.getuid()}")
         self.attempts[entry].append(attempt)
 
@@ -438,8 +437,8 @@ _PROOF_RUN_LOCK = threading.Lock()
 def execute_registered(entries: list[str], runner: Any) -> dict[str, Any]:
     """Run registered misses through the real runner, including explicit empty.
 
-    Focused runs do not retry or consume full-battery receipts. Serial host
-    exclusion and the private import environment are retained; each smoke runs
+    Focused runs do not consume full-battery receipts. Serial host exclusion
+    and the private import environment are retained; each smoke runs
     to its natural exit with no execution deadline. Every attempt's retained
     output is returned, with omitted earlier bytes disclosed.
     """
@@ -454,10 +453,10 @@ def execute_registered(entries: list[str], runner: Any) -> dict[str, Any]:
     serial_only = runner._read_serial_only(runner._DEFAULT_SERIAL_ONLY)
     concurrent_at_start = runner.contention_signal.count_concurrent_live_batteries(runner._receipt_directory())
     with runner.host_load.HostLoadMonitor() as load_monitor, _PROOF_RUN_LOCK, runner._scratch_runtime()(runner._SmokeProcessSupervisor(runner._MAX_SMOKE_STARTS_PER_WINDOW, runner._SMOKE_START_WINDOW_SECONDS), runner._terminate_process_group):
-        skipped, failures, missing, harness, waited, _retries, flaky = runner._run_suite_with_retry(entries, args, serial_only, retry=False, smoke_results=results)
+        skipped, failures, missing, harness, waited = runner._run_suite_with_environment(entries, args, serial_only, smoke_results=results)
     concurrent_at_finish = runner.contention_signal.count_concurrent_live_batteries(runner._receipt_directory())
     contention = runner.contention_signal.measure(concurrent_live_batteries_start=concurrent_at_start, concurrent_live_batteries_finish=concurrent_at_finish, host_lock_wait_seconds=waited, host_load=load_monitor.snapshot()).as_dict()
-    code = runner._summarize(len(entries), skipped, failures, missing, fail_on_skip=False, flaky=flaky, harness=harness)
+    code = runner._summarize(len(entries), skipped, failures, missing, fail_on_skip=False, harness=harness)
     observed = {entry: {**dict(row), "attempts": results.attempts[entry]} for entry, row in results.items()}
     return {"status": "completed", "exit_code": code, "smoke_results": observed, "selected_count": len(entries), "host_lock_wait_seconds": waited, "contention": contention, "harness_defects": harness, "import_environment": getattr(args, "import_environment", None)}
 

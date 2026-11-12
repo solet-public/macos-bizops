@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::g_suite_plugin::gmail_get_cse_identity",
+  "display_name": "Gmail: Get CSE Identity",
+  "description": "Read one client-side encryption identity and its key pair ids (users.settings.cse.identities.get). Reads with the default gmail.modify scope. Workspace only: a consumer account is refused naming its tier. Runs as a background job: returns a job_id at once and the result arrives as a follow-up message. Optional account (email or alias) picks the connected Google account; the result names the account used. Parameters: account, cse_email_address. Optional API query parameters on this verb: fields (partial response), pretty_print (JSON formatting), quota_user (quota attribution, at most 40 characters), xgafv (Google $.xgafv error format: 1 or 2), alt (json only; proto/media are rejected before a request because settings results are typed JSON).",
+  "embedding_description": "Look up the Gmail client-side encryption identity for one email address of a Workspace user and see which key pair it uses to encrypt and which to sign messages. Enterprise-grade feature, not available for personal Gmail.",
+  "result_processor_customizations": {
+    "action_label": "Gmail: Get CSE Identity queued",
+    "result_type": "g_suite_gmail_get_cse_identity_result",
+    "result_description": "Job queued; completion is delivered automatically and names the account used.",
+    "presentation_guidance": "",
+    "output_action_guidance": "Return exactly one action using the active IO plugin's post_message (process_key: plugin::<io_plugin>::post_message). Use the provided session_id. Keep the message short and friendly. Do NOT invent process identifiers (no present_result, no status actions)."
+  },
+  "error_processor_customizations": {
+    "action_context": "Dispatch a background Gmail job: Gmail: Get CSE Identity.",
+    "error_interpretation": "gsuite.not_connected: no Google account linked. gsuite.unknown_account: the account argument names no connected account (the message lists them). gsuite.workspace_only: the verb is a Google Workspace feature and the account is a consumer Gmail account (the message names the tier). gsuite.invalid_params: a parameter broke a rule (the message names it) or Google rejected the request (400). gsuite.missing_scope: the account's grant lacks the scope this call needs (the message names gmail.settings.basic and the reconnect step, or gmail.settings.sharing and the service-account requirement). gsuite.auth_expired: Google rejected the token (Testing-mode OAuth apps expire refresh tokens after 7 days). gsuite.not_found: the id or address does not exist in this account. gsuite.rate_limited: Gmail quota hit. gsuite.permission_denied: Google refused for another reason.",
+    "recovery_guidance": "Follow the message: reconnect with connect_account for auth_expired or missing_scope on gmail.settings.basic, use a Workspace account for workspace_only, ask a Workspace administrator for a domain-wide-delegation service account for gmail.settings.sharing, pick a listed account for unknown_account, fix the named parameter for invalid_params, retry later for rate_limited."
+  }
+}

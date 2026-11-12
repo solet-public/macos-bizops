@@ -71,9 +71,9 @@ class AppConfigLoader:
             )
         self._address_book = address_book_service
 
-    def load(self) -> JiraAppConfig:
+    def load(self, entry_name: str = ADDRESS_BOOK_ENTRY_NAME) -> JiraAppConfig:
         """Return the resolved Jira site config (vault reference swapped)."""
-        result = self._address_book.resolve_with_secrets(name=ADDRESS_BOOK_ENTRY_NAME)
+        result = self._address_book.resolve_with_secrets(name=entry_name)
         entries = self._extract_entries(result)
         return self._build_config(entries)
 
@@ -113,11 +113,7 @@ class AppConfigLoader:
         if missing:
             raise AppConfigError(
                 ERROR_ADDRESS_BOOK_ENTRY_INCOMPLETE,
-                (
-                    f"Address book entry '{ADDRESS_BOOK_ENTRY_NAME}' is missing "
-                    f"field_type values: {missing}. Register with base_url, email, "
-                    "api_token (vault-ref), and expires_at (ISO-8601)."
-                ),
+                (f"Address book entry '{ADDRESS_BOOK_ENTRY_NAME}' is missing field_type values: {missing}. Register with base_url, email, api_token (vault-ref), and expires_at (ISO-8601)."),
             )
         return JiraAppConfig(
             base_url=base_url,
@@ -141,11 +137,7 @@ def _parse_expires_at(raw: str) -> datetime:
     except ValueError as exc:
         raise AppConfigError(
             ERROR_EXPIRES_AT_INVALID,
-            (
-                f"Address book entry '{ADDRESS_BOOK_ENTRY_NAME}' field "
-                f"'{ADDRESS_BOOK_FIELD_EXPIRES_AT}' value {raw!r} is not ISO-8601 "
-                "(expected e.g. '2027-01-15T00:00:00Z')."
-            ),
+            (f"Address book entry '{ADDRESS_BOOK_ENTRY_NAME}' field '{ADDRESS_BOOK_FIELD_EXPIRES_AT}' value {raw!r} is not ISO-8601 (expected e.g. '2027-01-15T00:00:00Z')."),
         ) from exc
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
@@ -180,6 +172,6 @@ def _missing_entry_message() -> str:
         '"value": "<token-expiry-ISO-8601>"}},\n'
         f'      {{"field_type": "{ADDRESS_BOOK_FIELD_SCOPE_NOTE}", '
         '"value": "<fixed-at-creation scope note>"}}\n'
-        '    ]\n'
-        '  }'
+        "    ]\n"
+        "  }"
     )

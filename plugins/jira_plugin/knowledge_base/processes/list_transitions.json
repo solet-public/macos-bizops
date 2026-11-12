@@ -1,7 +1,7 @@
 {
   "process_key": "plugin::jira_plugin::list_transitions",
   "display_name": "Jira: List Transitions",
-  "description": "List the workflow transitions available from a Jira issue's current status (id/name/to_status). Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the list finishing; the available transitions are delivered when the job completes. Read action.",
+  "description": "List the workflow transitions available from a Jira issue's current status (id/name/to_status). Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the list finishing; the available transitions are delivered when the job completes. Read action. Optional site selects a bound Atlassian site; omitted uses the default. Queued and completed results identify the site.",
   "embedding_description": "Discover which workflow moves are currently available for a Jira issue, given its present state and project workflow -- each transition's id, name, and target status. Returns a job_id right away and lands the options list once the background lookup completes. Call it to choose a transition id before moving an issue.",
   "result_processor_customizations": {
     "action_label": "Jira transitions listing queued",

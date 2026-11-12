@@ -12,7 +12,9 @@ Embedding Description: Operator-facing pitch and setup steps for connecting a so
 
 With `jira_plugin` installed but no site registered, every Jira verb returns `jira.not_configured` — the plugin is present and harmless, but does nothing. Connecting it lets the solet read and act on a Jira Cloud site: issue reads and JQL search, plus — because this connector is full read/write (operator-ratified) — creating, updating, transitioning, commenting on, and **permanently deleting** issues.
 
-Auth is one Atlassian API token — either the operator's own token (actions are then attributed to the operator's Jira user; the sanctioned personal-token path) or a dedicated service account's. No browser flow, no callback server. If the operator already uses a Jira CLI with a stored token, that same token works here. Ask before doing any of it: "This solet can read and modify your Jira site as you — including creating, transitioning, and permanently deleting issues under your username. That needs one Atlassian API token (about 2 minutes to mint, or reuse an existing one if you know its expiry). Want to set this up now, or later?"
+Auth is one Atlassian API token — either the operator's own token (actions are then attributed to the operator's Jira user; the sanctioned personal-token path) or a dedicated service account's. The original API-token setup remains available. Additional sites can also use
+Atlassian OAuth 2.0 (3LO) with a registered app and redirect URI; see the overview
+and `sites`/`oauth` process articles for binding and consent lifecycles. If the operator already uses a Jira CLI with a stored token, that same token works here. Ask before doing any of it: "This solet can read and modify your Jira site as you — including creating, transitioning, and permanently deleting issues under your username. That needs one Atlassian API token (about 2 minutes to mint, or reuse an existing one if you know its expiry). Want to set this up now, or later?"
 
 ## Setup
 

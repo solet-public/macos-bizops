@@ -1,17 +1,18 @@
 {
   "process_key": "plugin::g_suite_plugin::sheets_export",
   "display_name": "Sheets: Export",
-  "description": "Export a Google Sheets spreadsheet to csv or xlsx into blob storage and return its sheet_blob_key. Requires a connected account.",
-  "embedding_description": "Export a Google Sheets spreadsheet through Drive into platform blob storage as CSV for the default tab or XLSX for the complete multi-tab workbook. Returns a sheet blob key for email attachments or downstream plugins. Use this when a Google-native spreadsheet must become a portable file.",
+  "description": "Export a Google Sheets spreadsheet to csv or xlsx into blob storage and return its sheet_blob_key. Runs as a background job: a missing id or unsupported format is refused at once; otherwise dispatch returns a job_id immediately, and the sheet_blob_key (with namespace, filename and the account used) arrives via a follow-up message once the export completes (read it any time with service_interface::job_service::get_job). Requires a connected account.",
+  "embedding_description": "Export a Google Sheets spreadsheet through Drive into platform blob storage as CSV for the default tab or XLSX for the complete multi-tab workbook. Completion delivers a sheet blob key for email attachments or downstream plugins. Use this when a Google-native spreadsheet must become a portable file.",
   "result_processor_customizations": {
-    "action_label": "Spreadsheet exported to blob",
+    "action_label": "Spreadsheet export started",
     "result_type": "g_suite_sheets_export_result",
-    "result_description": "Dict with sheet_blob_key (a blob-storage reference to the exported bytes).",
-    "presentation_guidance": "Confirm the export and format used. The sheet_blob_key references potentially sensitive corporate content — surface it for downstream use but do not treat it as public."
+    "result_description": "Job queued for the export (job_id, status queued); the finished job's result is sheet_blob_key (a blob-storage reference to the exported bytes), namespace, filename and account. Completion is delivered automatically.",
+    "presentation_guidance": "Say the export is running. Once it completes: confirm the export and format used. The sheet_blob_key references potentially sensitive corporate content — surface it for downstream use but do not treat it as public.",
+    "output_action_guidance": "Return exactly one action using the active IO plugin's post_message (process_key: plugin::<io_plugin>::post_message). Use the provided session_id. Keep the message short and friendly. Do NOT invent process identifiers (no present_result, no status actions)."
   },
   "error_processor_customizations": {
     "action_context": "Export a Google Sheets spreadsheet into blob storage.",
-    "error_interpretation": "gsuite.invalid_params: missing id, or format is not csv/xlsx. gsuite.not_found: the id does not exist. gsuite.not_connected: no account linked.",
-    "recovery_guidance": "gsuite.invalid_params: pass format as csv or xlsx. gsuite.not_found: the spreadsheet may have been deleted. gsuite.not_connected: run connect_account."
+    "error_interpretation": "At dispatch: gsuite.invalid_params: missing id or format is not csv/xlsx. gsuite.not_connected: no account linked. gsuite.unknown_account: `account` names no connected account. In the finished job: gsuite.not_found: the id does not exist; gsuite.permission_denied, gsuite.rate_limited or gsuite.auth_expired: Google refused the export. gsuite.invalid_params at dispatch can also mean the session_id/flow_id context is missing. gsuite.api_error at dispatch means the job could not be queued (AsyncJobManager unavailable or job creation failed).",
+    "recovery_guidance": "gsuite.invalid_params: pass format as csv or xlsx. gsuite.not_found: the spreadsheet may have been deleted. gsuite.not_connected: run connect_account. gsuite.api_error at dispatch: retry once platform startup has completed."
   }
 }

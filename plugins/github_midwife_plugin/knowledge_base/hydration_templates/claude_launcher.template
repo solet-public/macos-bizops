@@ -14,6 +14,8 @@ label="${1:-Operator}"
 model="$2"
 effort="$3"
 
+# Capture the user's folder before entering the clone for project settings.
+export SOLET_LAUNCH_DIRECTORY="$PWD"
 cd {{CLONE_DIR_ZSH}} || exit 1
 
 typeset -a extra_flags
@@ -70,34 +72,24 @@ esac
 # re-points to this same session across reconnects instead of going stale.
 # Wake CLI: names the coordination CLI for the coordination-hooks plugin's
 # Stop-hook waiter ($AGENT_WAKE_CLI wake); harmless when that plugin is absent.
-# Git controller: records the ONE role the operator chose as the git-mutating
-# role in this deployment directory. It is a recorded choice only: the
-# coordination-hooks git gate that read it was removed in 0.9.0 (operator
-# ruling rul_e71e43be), so exporting it arms nothing and deleting it exempts
-# nothing; git control is the repository's own responsibility (rul_d8893e33).
-# A solo deployment may delete this line (see TEMPLATE_VARS.md). Keep it
-# identical in this launcher and in {{SOLET_NAME}}-fleet.zsh so the recorded
-# choice does not diverge between launchers.
 # Solet name: NOT part of the neutral AGENT_* fleet-identity family
 # above (that family is deliberately unprefixed per the 2026-07-28 ruling in
 # agent_messaging_plugin/env_contract.py) — this is the separate variable
 # naming which solet this shell talks to. Several plugins resolve it at
 # module-import time for scoped vault keys, and quality_gates/run_smokes.py
-# (the Git-Controller gate path) fails loudly without it, so a session
+# (the quality gate path) fails loudly without it, so a session
 # launched without this export cannot run gate scripts without the caller
 # setting it by hand. launch.template (the daemon launcher) already exports
-# it; keep both launchers in lockstep the same way the git-controller export
-# above is kept in lockstep with the fleet script.
+# it; keep the session launchers in lockstep.
 # Shell: the Bash tool snapshots the shell named by SHELL, and lanes started
 # with --setting-sources project ignore a user-settings SHELL, so the launcher
 # exports it for the claude process. An existing clone receives this line only
-# after hydration Step 2 is re-run. Keep the SHELL line before the
-# GIT_CONTROLLER_NAME line: a solo clone deletes that line and must keep SHELL.
+# after hydration Step 2 is re-run.
+unset GIT_CONTROLLER_NAME
 SOLET_NAME="{{SOLET_NAME}}" \
 AGENT_SESSION_LABEL="$label" \
 AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
 AGENT_WAKE_CLI="{{SOLET_NAME}}" \
 AGENT_COORDINATION_RECEIPT_PATH="{{CLONE_DIR}}/profile/data/coordination-hooks/claude/installation.v1.json" \
 SHELL=/bin/bash \
-GIT_CONTROLLER_NAME="{{GIT_CONTROLLER_NAME}}" \
 exec claude --name "$label" "${extra_flags[@]}"

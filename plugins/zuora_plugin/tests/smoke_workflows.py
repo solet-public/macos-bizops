@@ -11,29 +11,35 @@ Run: SOLET_NAME=<name> .venv/bin/python plugins/zuora_plugin/tests/smoke_workflo
 
 from __future__ import annotations
 
-import base64
-import json
 import sys
-import tempfile
-import unittest
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch
-from urllib.parse import parse_qs, quote
+from unittest.mock import NonCallableMagicMock
 
-import httpx
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta/src"))
+import base64  # noqa: E402
+import json  # noqa: E402
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
+from collections.abc import Callable  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock, patch  # noqa: E402
+from urllib.parse import parse_qs, quote  # noqa: E402
+
+import httpx  # noqa: E402
+from ananta.file_locations.containment import PathRefusedError  # noqa: E402
+from ananta.file_locations.resolution import SoletTree  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "zuora_plugin" / "src"))
 
 from ananta.core.plugins.action_discovery import discover_actions  # noqa: E402
 from ananta.core.process_registry.plugin_registration_validator import PluginRegistrationValidator  # noqa: E402
+from finish_support import finished  # noqa: E402  # pyright: ignore[reportMissingImports]
 from zuora_plugin import async_jobs, typed_verbs, workflow_actions  # noqa: E402
 from zuora_plugin.app_config import ZuoraTenantConfig  # noqa: E402
-from zuora_plugin.constants import REQUEST_REDACTION  # noqa: E402
 from zuora_plugin.errors import ZuoraServiceError  # noqa: E402
-from zuora_plugin.export_containment import ExportPathRefusedError  # noqa: E402
 from zuora_plugin.http_client import ZuoraClient  # noqa: E402
 from zuora_plugin.plugin import ZuoraPlugin  # noqa: E402
 from zuora_plugin.typed_operations import PathGate, execute  # noqa: E402
@@ -47,6 +53,23 @@ _HEADERS = {"Zuora-Request-Id": "req-7f3a", "RateLimit-Limit": "100", "RateLimit
 _OPS = {op.name: op for op in workflow_actions.OPERATIONS}
 
 Handler = Callable[[httpx.Request], httpx.Response]
+
+
+_LOCATION_ROOT = Path(__file__).resolve().parents[3]
+_LOCATION_TREE = SoletTree(_LOCATION_ROOT, _LOCATION_ROOT / "profile")
+
+
+def _bind_locations(plugin: Any, directories: list[str]) -> NonCallableMagicMock:
+    """Supply a live address-book service through the production binding."""
+    orchestrator = NonCallableMagicMock()
+    orchestrator.APP_HOME = str(_LOCATION_TREE.app_home)
+    orchestrator.plugin_manager.get_plugin.return_value = None
+    orchestrator.get_service.return_value.list_path_addresses.return_value = {
+        "action_status": "completed",
+        "data": {"addresses": [{"name": f"project-{index}", "tags": [], "updated_at": datetime.now(UTC).isoformat(), "entries": [{"field_type": "path", "value": directory}]} for index, directory in enumerate(directories)]},
+    }
+    plugin.orchestrator_ref = orchestrator
+    return orchestrator
 
 
 def vendor_json(status: int, body: Any) -> httpx.Response:
@@ -80,7 +103,8 @@ class TenantCase(unittest.TestCase):
         self.addCleanup(self.workspace.cleanup)
         self.root = Path(self.workspace.name)
         self.plugin = ZuoraPlugin()
-        self.plugin.initialize({"export_allowed_roots": [str(self.root)]})
+        self.plugin.initialize({})
+        _bind_locations(self.plugin, [str(self.root)])
         self.token_mints = 0
         self.requests: list[httpx.Request] = []
 
@@ -109,6 +133,10 @@ class TenantCase(unittest.TestCase):
     def run_op(self, name: str, client: ZuoraClient, params: dict[str, Any]) -> dict[str, Any]:
         return execute(_OPS[name], client, params, self.gate)
 
+    def finish_op(self, name: str, client: ZuoraClient, params: dict[str, Any]) -> dict[str, Any]:
+        """The published envelope: the operation, then the plugin's one finish step."""
+        return finished(client, lambda c: self.run_op(name, c, params), params, name=name)
+
     def refuse(self, name: str, params: dict[str, Any]) -> None:
         """Dispatch and worker both refuse the input; no OAuth mint and no vendor request happen."""
         before = (self.token_mints, len(self.requests))
@@ -127,7 +155,7 @@ class RegistrationTests(unittest.TestCase):
         actions = {action.name: action for action in discover_actions(plugin)}
         PluginRegistrationValidator().validate_edge_process_provider("zuora_plugin", plugin, list(actions.values()))
         edges = plugin.get_edge_process_definitions()
-        self.assertEqual(len(typed_verbs.TYPED_HANDLERS), 217)
+        self.assertEqual(len(typed_verbs.TYPED_HANDLERS), 245)
         for name, retryable in typed_verbs.TYPED_RETRYABLE.items():
             with self.subTest(verb=name):
                 self.assertIn(name, actions)
@@ -204,9 +232,9 @@ class DefinitionLifecycleTests(TenantCase):
         client = self.client(lambda _: vendor_json(200, {"workflow": {"id": 5}, "tasks": [], "linkages": []}))
         self.assertEqual(self.run_op("export_workflow", client, {"workflow_id": "5"})["data"]["workflow"]["id"], 5)
         self.requests.clear()
-        with self.assertRaises(ExportPathRefusedError):
+        with self.assertRaises(PathRefusedError):
             self.run_op("export_workflow", client, {"workflow_id": 5, "output_path": "/elsewhere/workflow.json"})
-        with self.assertRaises(ExportPathRefusedError):
+        with self.assertRaises(PathRefusedError):
             self.run_op("export_workflow", client, {"workflow_id": 5, "output_path": str(self.root / "workflow.txt")})
         self.assertEqual(self.requests, [])
 
@@ -350,8 +378,8 @@ class RunAndTaskTests(TenantCase):
         self.refuse("get_workflow_usage", {"start_date": "2026-10-01", "end_date": "2026-10-31", "metrics": "cpu"})
 
 
-class AuthAndRedactionTests(TenantCase):
-    def test_auth_provider_lifecycle_redacts_caller_credentials_in_every_form(self) -> None:
+class AuthTests(TenantCase):
+    def test_auth_provider_lifecycle_returns_vendor_results_as_received(self) -> None:
         password = "callout pass/+?é"
         variants = [password, quote(password, safe=""), base64.b64encode(password.encode()).decode(), base64.urlsafe_b64encode(password.encode()).decode().rstrip("=")]
 
@@ -366,40 +394,18 @@ class AuthAndRedactionTests(TenantCase):
 
         client = self.client(vendor)
         with self.assertLogs("zuora_plugin", level="INFO") as audit:
-            created = self.run_op("create_workflow_auth_provider", client, {"name": "billing-basic", "service_name": "billing", "auth_type": "basic_auth", "credentials": {"username": "svc", "password": password}})
-            with self.assertRaises(ZuoraServiceError) as rejected:
-                self.run_op("update_workflow_auth_provider", client, {"provider_id": "ap-1", "active": False, "credentials": {"password": password}})
-            deleted = self.run_op("delete_workflow_auth_provider", client, {"provider_id": "ap-1"})
-        rendered = json.dumps(created) + str(rejected.exception) + " ".join(audit.output)
+            created = self.finish_op("create_workflow_auth_provider", client, {"name": "billing-basic", "service_name": "billing", "auth_type": "basic_auth", "credentials": {"username": "svc", "password": password}})["data"]
+            rejected = self.finish_op("update_workflow_auth_provider", client, {"provider_id": "ap-1", "active": False, "credentials": {"password": password}})["error"]
+            deleted = self.finish_op("delete_workflow_auth_provider", client, {"provider_id": "ap-1"})["data"]
+        # The audit line is built without the request body, so the sent password never reaches it.
         for variant in variants:
-            self.assertNotIn(variant, rendered)
+            self.assertNotIn(variant, " ".join(audit.output))
         self.assertEqual(created["data"]["status"], "created")
-        self.assertIn(REQUEST_REDACTION, json.dumps(created["data"]["echo"]))
-        self.assertIn(REQUEST_REDACTION, str(rejected.exception))
+        self.assertEqual(created["data"]["echo"], variants)
+        self.assertEqual(rejected["code"], "zuora.validation_failed")
         self.assertEqual(deleted["data"], {"status": "deleted"})
         self.refuse("update_workflow_auth_provider", {"provider_id": "ap-1", "auth_type": "hmac"})
         self.refuse("create_workflow_auth_provider", {"name": "x", "service_name": "y", "auth_type": "kerberos", "credentials": {}})
-
-    def test_registered_credentials_redacted_raw_percent_and_base64(self) -> None:
-        secrets = (_CLIENT_ID, _SECRET, _TOKEN)
-        encoders: tuple[Callable[[str], str], ...] = (
-            lambda value: value,
-            lambda value: quote(value, safe=""),
-            lambda value: base64.b64encode(value.encode()).decode(),
-            lambda value: base64.urlsafe_b64encode(value.encode()).decode().rstrip("="),
-        )
-        for encode in encoders:
-            echoed = [encode(secret) for secret in secrets]
-            with self.subTest(sample=echoed[0]):
-                client = self.client(lambda _, echoed=echoed: vendor_json(200, {**workflow_record(42), "description": " ".join(echoed)}))
-                success = self.run_op("get_workflow", client, {"workflow_id": 42})
-                failing = self.client(lambda _, echoed=echoed: vendor_json(400, {"errors": [f"bad token {value}" for value in echoed]}))
-                with self.assertRaises(ZuoraServiceError) as raised:
-                    self.run_op("get_workflow", failing, {"workflow_id": 42})
-                rendered = json.dumps(success) + str(raised.exception)
-                for value in echoed:
-                    self.assertNotIn(value, rendered)
-                self.assertIn(REQUEST_REDACTION, success["data"]["description"])
 
     def test_expired_token_is_reminted_once_then_reported(self) -> None:
         statuses = iter((401, 200))

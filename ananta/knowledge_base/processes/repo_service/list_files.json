@@ -1,14 +1,14 @@
 {
   "process_key": "service_interface::repo_service::list_files",
   "display_name": "List Repository Files",
-  "description": "List directory entries under a repo-root-confined path (defaults to the repo root), to a bounded recursion depth, with an optional file-name glob filter. Returns {path, type: file|dir} entries; denylisted locations (.git/, profile/ secrets, bundled venvs, __pycache__, runtime dirs) are excluded from the listing. The base path is confined exactly like read_file — traversal / symlink-escape / absolute-outside / denylisted base is typed-rejected. Entry count is capped with an explicit truncated marker.",
-  "embedding_description": "Enumerate files and subdirectories under a directory in the platform repository worktree, bounded by depth and optional name glob. Repo-root confined; excludes .git, profile secrets, and vendored venvs. Use to explore the tree or discover paths before reading them.",
+  "description": "Registered dispatch returns data.job_id and data.status=queued before repository preflight. Read service_interface::job_service::get_job by that exact id until terminal: job.result contains the complete original operation result and job.error retains failure information. Direct Python calls keep their full synchronous results. A bounded public descriptor is persisted; loss of the exclusive owner-memory body or an uncertain terminal write requires reconciliation without replay. List directory entries under a repo-root-confined path (defaults to the repo root), to a bounded recursion depth, with an optional file-name glob filter. Returns {path, type: file|dir} entries; denylisted locations (.git/, profile/ secrets, bundled venvs, __pycache__, runtime dirs) are excluded from the listing. The base path is confined exactly like read_file — traversal / symlink-escape / absolute-outside / denylisted base is typed-rejected. Entry count is capped with an explicit truncated marker.",
+  "embedding_description": "Submit List Repository Files to the shared repository worker; retrieve the exact returned job id for its complete original result or error. Enumerate files and subdirectories under a directory in the platform repository worktree, bounded by depth and optional name glob. Repo-root confined; excludes .git, profile secrets, and vendored venvs. Use to explore the tree or discover paths before reading them.",
   "result_processor_customizations": {
     "action_label": "Directory listed",
     "result_type": "repo_list_files_result",
-    "result_description": "Object with 'base' (listed dir or '.'), 'entries' ([{path, type}] — denylisted excluded), 'truncated'.",
+    "result_description": "Submission: data.job_id and data.status. Terminal job.result: Object with 'base' (listed dir or '.'), 'entries' ([{path, type}] — denylisted excluded), 'truncated'.",
     "presentation_guidance": "Group entries by type (dirs then files) or present as a tree; if 'truncated' is true, note the entry cap and suggest a narrower path/glob or shallower depth.",
-    "output_action_guidance": "Determine the appropriate next action based on the context and action result."
+    "output_action_guidance": "Keep the exact job id and retrieve job_service.get_job until terminal before consuming repository fields. Reconcile uncertain effects instead of resubmitting them. Determine the appropriate next action based on the context and action result."
   },
   "error_processor_customizations": {
     "action_context": "Listing a repo-root-confined worktree directory (bounded depth, optional glob) with denylisted entries excluded.",

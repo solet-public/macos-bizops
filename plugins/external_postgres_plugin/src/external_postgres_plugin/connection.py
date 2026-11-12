@@ -5,21 +5,14 @@ use targets FOREIGN databases resolved from ``external_pg::*`` address-book
 entries; it is structurally incapable of reaching the platform DB, enforced by
 :func:`assert_foreign_target` + the red-first containment smoke).
 
-Read-only is the psycopg3 CONNECTION CHARACTERISTIC (``conn.read_only = True``),
-set BEFORE the first execute so it applies at the BEGIN of EVERY transaction
-including the first implicit one — there is NO write-capable window. This is the
-LOAD-BEARING write-stopper (§8.5) for every READ verb: a write fails at the
-server with SQLSTATE 25006 regardless of statement leader/count/smuggling, even
-for an over-privileged registered credential. NOT a post-connect
-``SET default_transaction_read_only`` (which leaves the first implicit
-transaction write-capable — Codex BLOCKER).
-
-Write verbs (operator ruling, 2026-08-09 — the connector read-only posture
-reversal + Amendment 1, "vendor RBAC is the control plane") open a connection
-with ``read_only=False`` instead — a deliberate, verb-scoped choice, never a
-default. Whether such a connection can ACTUALLY write is then decided entirely
-by the registered credential's own server-side Postgres GRANTs; this module
-performs no plugin-side permission check either way.
+Every connection is an ordinary (transactional, non-autocommit) psycopg3
+connection. What it can do is decided entirely by the registered credential's
+own server-side Postgres GRANTs (USER ruling rul_4c99a30d; operator ruling
+2026-08-09 + Amendment 1, "vendor RBAC is the control plane"); this module sets
+no read-only characteristic and performs no plugin-side permission check. A
+server that is itself read-only (a hot standby, or a role whose
+``default_transaction_read_only`` is on) still refuses writes with SQLSTATE
+25006, which :func:`classify_pg_error` reports as the server's own refusal.
 """
 
 from __future__ import annotations
@@ -36,17 +29,22 @@ from .constants import (
     ERROR_PERMISSION_DENIED,
     ERROR_PLATFORM_DB_REFUSED,
     ERROR_QUERY_FAILED,
-    ERROR_READ_ONLY_VIOLATION,
+    ERROR_READ_ONLY_TRANSACTION,
     ERROR_TIMEOUT,
     GENERIC_MESSAGE_AUTH_FAILED,
     GENERIC_MESSAGE_CONNECTION_FAILED,
     GENERIC_MESSAGE_PERMISSION_DENIED,
-    GENERIC_MESSAGE_READ_ONLY,
+    GENERIC_MESSAGE_READ_ONLY_TRANSACTION,
     GENERIC_MESSAGE_TIMEOUT,
     PLATFORM_DBNAME,
     PLATFORM_HOSTS,
     SOCKET_HOST_SENTINEL,
 )
+
+# psycopg's SQL composition module (Identifier / Literal / SQL), re-exported so
+# the family modules compose COPY and admin statements without a second driver
+# import — this stays the plugin's ONE psycopg import site.
+pg_sql = psycopg.sql
 
 
 class ExternalPgGuardError(RuntimeError):
@@ -81,15 +79,10 @@ def assert_foreign_target(dsn: ExternalDsn, platform_pg_port: int) -> None:
     with a different dbname, or a same-named DB on a different host/port, both
     pass. Only the exact platform instance on the platform host:port is refused.
     """
-    if (
-        dsn.dbname.strip().lower() == PLATFORM_DBNAME
-        and _normalize_host(dsn.host) in PLATFORM_HOSTS
-        and int(dsn.port) == platform_pg_port
-    ):
+    if dsn.dbname.strip().lower() == PLATFORM_DBNAME and _normalize_host(dsn.host) in PLATFORM_HOSTS and int(dsn.port) == platform_pg_port:
         raise ExternalPgGuardError(
             ERROR_PLATFORM_DB_REFUSED,
-            "refusing the platform's own database instance; external_postgres_plugin "
-            "targets FOREIGN databases only",
+            "refusing the platform's own database instance; external_postgres_plugin targets FOREIGN databases only",
         )
 
 
@@ -98,18 +91,12 @@ def connect(
     *,
     statement_timeout_ms: int,
     platform_pg_port: int,
-    read_only: bool = True,
 ) -> psycopg.Connection[Any]:
     """Open a hardened connection to a foreign Postgres DB.
 
-    Enforces the containment guard first (never connects without it), sets the
-    statement_timeout windowlessly via libpq startup options, and applies the
-    ``read_only`` connection characteristic BEFORE any execute.
-
-    ``read_only`` defaults to ``True`` — every existing (read-verb) call site is
-    unaffected. A write verb passes ``read_only=False`` explicitly; whether that
-    connection's credential can actually write is then entirely the server's own
-    GRANT decision, never a plugin-side check.
+    Enforces the containment guard first (never connects without it) and sets
+    the statement_timeout windowlessly via libpq startup options. What the
+    connection can do is entirely the server's own GRANT decision.
     """
     assert_foreign_target(dsn, platform_pg_port)
     conn: psycopg.Connection[Any] = psycopg.connect(
@@ -122,10 +109,6 @@ def connect(
         connect_timeout=CONNECT_TIMEOUT_SECONDS,
         options=f"-c statement_timeout={statement_timeout_ms}",
     )
-    # BEFORE any execute (connection is not yet in a transaction): psycopg3 emits
-    # the read_only characteristic at every transaction BEGIN incl. the first, so
-    # there is no write-capable window for a read-only connection to slip through.
-    conn.read_only = read_only
     return conn
 
 
@@ -148,7 +131,7 @@ def classify_pg_error(exc: Exception) -> tuple[str, str]:
     if sqlstate == "42501":  # insufficient_privilege
         return ERROR_PERMISSION_DENIED, GENERIC_MESSAGE_PERMISSION_DENIED
     if sqlstate == "25006":  # read_only_sql_transaction
-        return ERROR_READ_ONLY_VIOLATION, GENERIC_MESSAGE_READ_ONLY
+        return ERROR_READ_ONLY_TRANSACTION, GENERIC_MESSAGE_READ_ONLY_TRANSACTION
     if sqlstate == "57014":  # query_canceled (statement_timeout)
         return ERROR_TIMEOUT, GENERIC_MESSAGE_TIMEOUT
     if sqlstate[:2] in ("08", "53", "57", "58", "3D", "3F"):

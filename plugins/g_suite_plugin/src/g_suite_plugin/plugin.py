@@ -13,6 +13,9 @@ Verbs:
   - list_accounts / set_default_account / disconnect_account (multiple accounts)
   - 32 Gmail verbs (messages, attachments, threads, labels, drafts, history,
     profile), declared in gmail_*_processes.py and gmail_registry.py
+  - 47 Gmail build-2 verbs (push watch/stop, settings, filters, forwarding,
+    delegates, send-as, S/MIME, client-side encryption), declared from the rows
+    in gmail_settings_spec.py / gmail_sharing_spec.py
   - drive_list_files / drive_download_file / drive_upload_file /
     drive_create_folder / drive_share
   - sheets_create / sheets_create_from_files / sheets_get_values /
@@ -54,9 +57,11 @@ from ananta.interfaces.edge_process_provider import (
     EdgeProcessProvider,
 )
 
-from . import completion_templates, docs_actions, drive_actions, sheets_actions, slides_actions
+from . import calendar_operations, completion_templates, docs_actions, drive_actions, sheets_actions, slides_actions
 from .account_processes import ACCOUNT_PARAM, ACTIVE_ACCOUNT, AccountProcesses, VerbFailureError, account_selector
 from .accounts import AccountStore
+from .calendar_processes import CalendarProcesses
+from .completion_templates import queued_handle_schema
 from .constants import (
     BLOB_NAMESPACE,
     DRIVE_DEFAULT_PAGE_SIZE,
@@ -65,7 +70,6 @@ from .constants import (
     ERROR_API_ERROR,
     ERROR_BLOB_STORAGE_NOT_AVAILABLE,
     ERROR_INVALID_PARAMS,
-    ERROR_SERVER_START_FAILED,
     ERROR_VAULT_NOT_AVAILABLE,
     GMAIL_FULL_MAILBOX_SCOPE,
     JOB_ACTION_NAME,
@@ -108,18 +112,22 @@ from .constants import (
     VAULT_KEY_REFRESH_TOKEN,
 )
 from .drive_api_processes import DriveAPIProcesses
+from .editors_api_processes import EditorsAPIProcesses
 from .errors import classify_exception
 from .gmail_actions import GmailIO, OutgoingAttachment
 from .gmail_mailbox_processes import GmailMailboxProcesses
 from .gmail_message_processes import GmailMessageProcesses
 from .gmail_registry import GMAIL_OPERATIONS
+from .gmail_settings_actions import GMAIL_SETTINGS_VERBS
+from .gmail_settings_processes import GmailSettingsProcesses
+from .gmail_sharing_processes import GmailSharingProcesses
 from .oauth.app_config import AppConfigLoader
-from .oauth.http_server import OAuthServer, OAuthServerStartError, build_start_result
+from .oauth.http_server import OAuthServer
 from .oauth.oauth_client import build_authorization_request
-from .oauth.oauth_routes import CallbackOptions
 from .oauth.service_factory import GoogleServiceFactory
 from .oauth.token_store import TokenStore, TokenStoreError
 from .people_api_processes import PeopleAPIProcesses
+from .queued_verbs import QueuedVerbs
 from .tasks_api_processes import TasksAPIProcesses
 from .workspace_actions import producer as workspace_producer
 from .workspace_registry import WORKSPACE_METHODS
@@ -227,8 +235,8 @@ class _DeferredJobRuntime:
     stop_event: threading.Event = field(default_factory=threading.Event)
 
 
-class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, GmailMessageProcesses, GmailMailboxProcesses, AccountProcesses, ServicePlugin, EdgeProcessProvider):
-    """Google Workspace (Gmail / Drive / Sheets / Docs / Slides) plugin."""
+class GSuitePlugin(GmailSettingsProcesses, CalendarProcesses, DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, EditorsAPIProcesses, GmailMessageProcesses, GmailMailboxProcesses, GmailSharingProcesses, QueuedVerbs, AccountProcesses, ServicePlugin, EdgeProcessProvider):
+    """Google Workspace (Gmail / Calendar / Drive / Sheets / Docs / Slides) plugin."""
 
     name: str = PLUGIN_NAME
 
@@ -422,34 +430,32 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
         job_id = str(job.get("id", job.get("job_id", "")))
         manager = self._deferred.manager
         assert manager is not None
+        verb = self._gmail_job_verb(job)
         manager.update_job(job_id, {"status": "processing"})
-        verb = ""
         try:
-            payload_result = manager.get_job_payload(job_id)
-            request_data: dict[str, Any] = (payload_result.get("data") or {}).get("payload") or {}
-            verb = str(request_data.get("verb", ""))
-            params: dict[str, Any] = request_data.get("params") or {}
-            produce = self._deferred_producers().get(verb)
-            if produce is None:
-                raise ValueError(f"no deferred producer registered for verb '{verb}'")
-            data = self._call_as_account(verb, params, lambda: produce(params))
+            verb, params = self._queued_request(manager.get_job_payload(job_id), verb)
+            data = self._execute_queued(verb, params)
         except VerbFailureError as failure:
-            self._fail_job(job_id, failure.code, str(failure))
-            return
+            updates = {"status": "error", "error": {"code": failure.code, "message": str(failure)}}
         except Exception as exc:  # noqa: BLE001 — classified below, never re-raised
             code, message = classify_exception(exc, verb)
-            self._fail_job(job_id, code, message)
-            return
-        if self.logger:
-            self.logger.debug("%s: deferred success (job_id=%s)", verb, job_id)
-        manager.update_job(job_id, {"status": "completed", "result": data})
+            updates = {"status": "error", "error": {"code": code, "message": message}}
+        else:
+            if self.logger:
+                self.logger.debug("%s: deferred success (job_id=%s)", verb, job_id)
+            updates = {"status": "completed", "result": data}
+        manager.update_job(job_id, updates)
 
-    def _fail_job(self, job_id: str, code: str, message: str) -> None:
-        manager = self._deferred.manager
-        assert manager is not None
-        manager.update_job(job_id, {"status": "error", "error": {"code": code, "message": message}})
+    def _execute_queued(self, verb: str, params: dict[str, Any]) -> object:
+        unbound = self._account_free_producers().get(verb)
+        if unbound is not None:
+            return unbound(params)
+        produce = self._deferred_producers().get(verb)
+        if produce is None:
+            raise ValueError(f"no deferred producer registered for verb '{verb}'")
+        return self._call_as_account(verb, params, lambda: produce(params))
 
-    def _deferred_producers(self) -> dict[str, Callable[[dict[str, Any]], dict[str, Any]]]:
+    def _deferred_producers(self) -> dict[str, Callable[[dict[str, Any]], object]]:
         """verb name -> zero-state callable performing the real Google API I/O.
 
         Built lazily (not a class-level dict) because each thunk closes over
@@ -458,6 +464,9 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
         return {
             **{verb: self._gmail_producer(action) for verb, (action, _, _) in GMAIL_OPERATIONS.items()},
             **{verb: workspace_producer(self._require_factory, self._gmail_io, verb) for verb in WORKSPACE_METHODS},
+            **self._calendar_producers(),
+            **{verb: self._gmail_settings_producer(verb) for verb in GMAIL_SETTINGS_VERBS},
+            **self._queued_verb_producers(),
             "drive_download_file": lambda params: drive_actions.download_file(self._require_factory().drive(), params, self._store_blob),
             "drive_upload_file": lambda params: drive_actions.upload_file(self._require_factory().drive(), params, self._load_attachment),
             "drive_list_files": lambda params: drive_actions.list_files(self._require_factory().drive(), params),
@@ -521,8 +530,13 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
         """
         try:
             self._require_accounts().check_selector(account_selector(params))
+            response = self._dispatch_deferred(params, state, verb)
         except TokenStoreError as exc:
-            return self._error(exc.code, str(exc))
+            response = self._error(exc.code, str(exc))
+        return response
+
+    def _dispatch_deferred(self, params: dict[str, Any], state: dict[str, Any], verb: str) -> dict[str, Any]:
+        """Build the dispatch response; only _run_deferred returns it publicly."""
         context = self._validate_deferred_context(state)
         if context is None:
             return self._error(ERROR_INVALID_PARAMS, "session_id/flow_id missing from state context")
@@ -570,7 +584,7 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
     def _gmail_io(self) -> GmailIO:
         return GmailIO(attachment_loader=self._load_attachment, blob_writer=self._store_blob)
 
-    def _success(self, data: dict[str, Any]) -> dict[str, Any]:
+    def _success(self, data: object) -> dict[str, Any]:
         return {
             "action_status": ActionStatus.COMPLETED.value,
             "data": data,
@@ -637,7 +651,7 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
 
     def _run(
         self,
-        produce: Callable[[], dict[str, Any]],
+        produce: Callable[[], object],
         endpoint_name: str,
         params: dict[str, Any],
     ) -> dict[str, Any]:
@@ -649,13 +663,15 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
         try:
             data = self._call_as_account(endpoint_name, params, produce)
         except VerbFailureError as failure:
-            return self._error(failure.code, str(failure))
+            response = self._error(failure.code, str(failure))
         except Exception as exc:  # noqa: BLE001 — surface any account/Google fault as a typed error
             code, message = classify_exception(exc, endpoint_name)
-            return self._error(code, message)
-        if self.logger:
-            self.logger.debug("%s: success", endpoint_name)
-        return self._success(data)
+            response = self._error(code, message)
+        else:
+            if self.logger:
+                self.logger.debug("%s: success", endpoint_name)
+            response = self._success(data)
+        return response
 
     # ------------------------------------------------------------------
     # EdgeProcessProvider
@@ -680,6 +696,8 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
             ),
             **{verb: _edge(verb, result_type, retryable=retryable) for verb, (_, retryable, result_type) in GMAIL_OPERATIONS.items()},
             **{verb: _edge(verb, f"g_suite_{verb}_result", retryable=method["httpMethod"] == "GET") for verb, (_, method) in WORKSPACE_METHODS.items()},
+            **{op.verb: _edge(op.verb, op.result_type, retryable=op.retryable) for op in calendar_operations.OPERATIONS},
+            **{verb: _edge(verb, spec.result_type, retryable=not spec.write) for verb, spec in GMAIL_SETTINGS_VERBS.items()},
             "drive_list_files": _edge(
                 "drive_list_files",
                 RESULT_TYPE_DRIVE_LIST,
@@ -789,37 +807,20 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
     @platform_process(
         name="test_connection",
         display_name="Google Workspace: Test Connection",
-        description=("Verify the connected Workspace account with Gmail's minimal profile read. This does not list Drive files or return any third-party content."),
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={"account": ACCOUNT_PARAM},
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Bounded connection verdict: account_identity and harmless_read_ok.",
-            properties={
-                "account_identity": ParameterMetadata(type=ParameterType.STRING, description="Connected account email identity."),
-                "harmless_read_ok": ParameterMetadata(type=ParameterType.BOOLEAN, description="True when the minimal profile read succeeded."),
-            },
+        description=(
+            "Verify the connected Workspace account with Gmail's minimal profile read. This does not list Drive files or return any third-party content. "
+            "Runs as a background job: an unknown or missing account is refused at once; otherwise this returns a job_id immediately and the verdict arrives when the read completes."
         ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
+        parameters={"account": ACCOUNT_PARAM},
+        return_value_schema=queued_handle_schema("the bounded connection verdict {account, account_identity, harmless_read_ok, account_tier, granted_scopes, missing_default_scopes}"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def test_connection(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        def _profile() -> dict[str, Any]:
-            profile = self._require_factory().gmail().users().getProfile(userId="me").execute()
-            account_identity = profile.get("emailAddress")
-            if not isinstance(account_identity, str) or not account_identity:
-                raise ValueError("Gmail profile response did not contain emailAddress")
-            facts = self._require_accounts().token_store(ACTIVE_ACCOUNT.get()).credential_facts()
-            granted = facts["granted_scopes"]
-            return {
-                "account_identity": account_identity,
-                "harmless_read_ok": True,
-                "account_tier": facts["account_tier"],
-                "granted_scopes": granted,
-                "missing_default_scopes": sorted(set(OAUTH_SCOPES) - set(granted)) if granted is not None else None,
-            }
-
-        return self._run(_profile, "test_connection", params)
+        return self._run_deferred(params, state, "test_connection")
 
     @platform_process(
         name="connect_account",
@@ -884,8 +885,13 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
     @platform_process(
         name="start_interface",
         display_name="Start Google OAuth Callback Server",
-        description=("Start the FastAPI/uvicorn HTTPS callback server that handles the Google OAuth redirect. Must be running before the operator completes the browser flow. In cloud deployment, the ALB routes /oauth/google/* to this port."),
+        description=(
+            "Start the FastAPI/uvicorn HTTPS callback server that handles the Google OAuth redirect. Must be running before the operator completes the browser flow. In cloud deployment, the ALB routes /oauth/google/* to this port. "
+            "Runs as a background job: this returns a job_id immediately, and the bound host, port and callback URL arrive once the socket is bound. No connected account is needed."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "host": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -898,34 +904,11 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
                 description="Preferred TCP port; auto-allocated if unset.",
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Server host, port, callback URL.",
-        ),
+        return_value_schema=queued_handle_schema("{host, port, callback_url, message} for the bound server"),
         context_handling=ContextHandling.NONE,
     )
     def start_interface(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        config = self.config_provider or {}
-        host = str(params.get("host") or config.get("callback_host") or "127.0.0.1")
-        port_val = params.get("port") or config.get("callback_port")
-        preferred_port: int | None = int(str(port_val)) if port_val is not None else None
-        try:
-            token_store = self._require_token_store()
-            app_config_loader = self._require_app_config_loader()
-        except RuntimeError as exc:
-            return self._error("service_not_available", str(exc))
-        try:
-            port = self._oauth_server.start(
-                host=host,
-                preferred_port=preferred_port,
-                token_store=token_store,
-                app_config_loader=app_config_loader,
-                pending_states=self._pending_states,
-                callback_options=CallbackOptions(requested_scopes=self._connect.scopes, complete=self._complete_connect),
-            )
-        except OAuthServerStartError as exc:
-            return self._error(ERROR_SERVER_START_FAILED, str(exc))
-        return self._success(build_start_result(port, host))
+        return self._queue_start_interface(params, state)
 
     @platform_process(
         name="stop_interface",
@@ -1374,8 +1357,12 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
     @platform_process(
         name="sheets_export",
         display_name="Sheets: Export",
-        description=("Export a spreadsheet to csv or xlsx into blob storage and return its sheet_blob_key. Requires a connected account."),
+        description=(
+            "Export a spreadsheet to csv or xlsx into blob storage and return its sheet_blob_key. Requires a connected account. Runs as a background job: a missing id or unsupported format is refused at once; otherwise this returns a job_id immediately and the sheet_blob_key arrives when the export completes."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "account": ACCOUNT_PARAM,
             "id": ParameterMetadata(
@@ -1389,19 +1376,12 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
                 description="Export format: 'csv' (default) or 'xlsx'.",
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="sheet_blob_key + namespace + filename referencing the exported bytes.",
-        ),
+        return_value_schema=queued_handle_schema("{sheet_blob_key, namespace, filename, account} referencing the exported bytes"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def sheets_export(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: sheets_actions.export_spreadsheet(self._require_factory().drive(), params, self._store_blob),
-            "sheets_export",
-            params,
-        )
+        return self._queue_export(params, state, "sheets_export")
 
     # ------------------------------------------------------------------
     # @platform_process implementations — Docs
@@ -1497,8 +1477,12 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
     @platform_process(
         name="docs_export",
         display_name="Docs: Export",
-        description=("Export a document to pdf, docx, or txt into blob storage and return its doc_blob_key. Requires a connected account."),
+        description=(
+            "Export a document to pdf, docx, or txt into blob storage and return its doc_blob_key. Requires a connected account. Runs as a background job: a missing id or unsupported format is refused at once; otherwise this returns a job_id immediately and the doc_blob_key arrives when the export completes."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "account": ACCOUNT_PARAM,
             "id": ParameterMetadata(
@@ -1512,19 +1496,12 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
                 description="Export format: 'pdf' (default), 'docx', or 'txt'.",
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="doc_blob_key + namespace + filename referencing the exported bytes.",
-        ),
+        return_value_schema=queued_handle_schema("{doc_blob_key, namespace, filename, account} referencing the exported bytes"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def docs_export(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: docs_actions.export_document(self._require_factory().drive(), params, self._store_blob),
-            "docs_export",
-            params,
-        )
+        return self._queue_export(params, state, "docs_export")
 
     # ------------------------------------------------------------------
     # @platform_process implementations — Slides
@@ -1615,8 +1592,12 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
     @platform_process(
         name="slides_export",
         display_name="Slides: Export",
-        description=("Export a presentation to pdf or pptx into blob storage and return its deck_blob_key. Requires a connected account."),
+        description=(
+            "Export a presentation to pdf or pptx into blob storage and return its deck_blob_key. Requires a connected account. Runs as a background job: a missing id or unsupported format is refused at once; otherwise this returns a job_id immediately and the deck_blob_key arrives when the export completes."
+        ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
         parameters={
             "account": ACCOUNT_PARAM,
             "id": ParameterMetadata(
@@ -1630,19 +1611,12 @@ class GSuitePlugin(DriveAPIProcesses, PeopleAPIProcesses, TasksAPIProcesses, Gma
                 description="Export format: 'pdf' (default) or 'pptx'.",
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="deck_blob_key + namespace + filename referencing the exported bytes.",
-        ),
+        return_value_schema=queued_handle_schema("{deck_blob_key, namespace, filename, account} referencing the exported bytes"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
         context_handling=ContextHandling.NONE,
     )
     def slides_export(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return self._run(
-            lambda: slides_actions.export_presentation(self._require_factory().drive(), params, self._store_blob),
-            "slides_export",
-            params,
-        )
+        return self._queue_export(params, state, "slides_export")
 
 
 def _edge(

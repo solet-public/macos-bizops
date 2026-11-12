@@ -1,7 +1,7 @@
 {
   "process_key": "service_interface::blob_storage_service::store_blob",
   "display_name": "Store Blob",
-  "description": "Store binary content with metadata in blob storage. Returns unique blob_id for later retrieval.",
+  "description": "Store binary content with metadata in blob storage. Returns unique blob_id for later retrieval. Registered dispatch returns a queued job_id/status receipt. Read job_service.get_job by that exact id for the full original result or typed error; do not repeat uncertain effects after input or worker loss. Direct Python calls retain synchronous results. Owner admission persists a bounded descriptor. Before admission, the existing poller transport preflight parses, schema-validates and reserializes input under the 16 MiB payload guard. This known bounded residual is outside this Unit acceptance under the coordinator ruling agm-_699f6a6e354543f4bd4ef9f3336ac3cf and transport evidence uev_022644ad06f143488311abc4401cadbf. The Blob review measured 81.65 ms for an offline 16 MiB-content preflight probe before admission (uev_8d5cbc6a87c6497d8a0c96de56b5761d), not live latency or persisted-job timing. The under-50-ms receipt acceptance covers ordinary arguments through real preflight while the Blob leaf is parked.",
   "embedding_description": "Save file to blob storage. Upload binary content. Store audio image document. Persist file with metadata. Save generated output. Write binary data. File upload storage. Save attachment. Store media file. Write output to storage. Persist binary artifact. Upload file with tags.",
   "result_processor_customizations": {
     "action_label": "Blob stored",

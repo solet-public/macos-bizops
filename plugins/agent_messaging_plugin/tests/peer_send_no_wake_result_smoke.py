@@ -330,7 +330,7 @@ def test_local_cli_prints_receipt_and_warns_without_failing() -> None:
     dispatched: list[dict[str, Any]] = []
     envelope = _real_process_envelope(action_result, dispatched)
     _check_real_queue_keeps_send_completed(envelope, dispatched)
-    with patch.object(cli_module, "_run", return_value=envelope):
+    with patch.object(cli_module, "_run", side_effect=lambda callback: callback(SimpleNamespace(call_and_wait=lambda *_args, **_kwargs: envelope))):
         response = CliRunner().invoke(
             cli_module.cli,
             ["call", "plugin::agent_messaging_plugin::peer_send_by_name", "{}"],
@@ -387,7 +387,7 @@ def _exercise_hook_ticks(*, unwritable_fallback: bool) -> tuple[int, bool, int]:
     # Produce exactly the receipt the local CLI prints, with its service call mocked.
     from click.testing import CliRunner
 
-    with patch.object(cli_module, "_run", return_value=cli_envelope):
+    with patch.object(cli_module, "_run", side_effect=lambda callback: callback(SimpleNamespace(call_and_wait=lambda *_args, **_kwargs: cli_envelope))):
         cli_response = CliRunner().invoke(
             cli_module.cli,
             ["call", "plugin::agent_messaging_plugin::peer_send_by_name", "{}"],
@@ -477,7 +477,7 @@ def test_no_notice_mutant_is_red_for_each_sender_path() -> None:
     with patch.object(peer_dispatch, "_add_stored_no_wake_notice", _identity_notice_mutant):
         action_result = _call_peer_send_by_name("driver_unavailable")
     envelope = _real_process_envelope(action_result)
-    with patch.object(cli_module, "_run", return_value=envelope):
+    with patch.object(cli_module, "_run", side_effect=lambda callback: callback(SimpleNamespace(call_and_wait=lambda *_args, **_kwargs: envelope))):
         response = CliRunner().invoke(
             cli_module.cli,
             ["call", "plugin::agent_messaging_plugin::peer_send_by_name", "{}"],

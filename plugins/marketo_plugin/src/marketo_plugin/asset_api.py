@@ -15,6 +15,7 @@ from typing import Any, Final
 from .errors import MarketoEnvelopeError, MarketoTransportError
 from .http_client import MarketoClient
 from .marketing_actions import _gate_and_check_parent, _require_str, _resolve_effective_limit, _write_records_tsv
+from .request import decode_body
 
 # Adobe's hard per-call maximum, not an additional plugin capability limit.
 ASSET_PAGE_CAP: Final[int] = 200
@@ -152,9 +153,15 @@ def prepare(verb: str, params: dict[str, Any], path_gate: Callable[[str], str]) 
 
 
 def _call(client: MarketoClient, request: dict[str, Any], query: dict[str, Any]) -> dict[str, Any]:
-    response = client.request(request["method"], request["path"], query=query, form_body=request.get("form_body"))
-    payload = response["body"]
-    status = response["status"]
+    response, _ = client.request_raw(
+        request["method"],
+        request["path"],
+        query=query,
+        form_body=request.get("form_body"),
+        multipart_files=request.get("multipart_files"),
+    )
+    payload = decode_body(response)
+    status = response.status_code
     if status >= 500 or not isinstance(payload, dict):
         raise MarketoTransportError(status)
     if status in {401, 403} and not payload.get("errors"):
@@ -191,12 +198,12 @@ def _read_pages(client: MarketoClient, request: dict[str, Any]) -> tuple[list[An
 
 
 def execute(client: MarketoClient, request: dict[str, Any]) -> dict[str, Any]:
-    """Execute form writes or paginated reads, retaining redacted envelope metadata."""
+    """Execute form writes or paginated reads, retaining envelope metadata."""
     if request["method"] == "POST":
         return _call(client, request, {})
     records, envelopes, truncated = _read_pages(client, request)
     limit = request.get("effective_limit", len(records))
-    handle = _write_records_tsv(client.redact(records[:limit]), request["resolved_path"])
+    handle = _write_records_tsv(records[:limit], request["resolved_path"])
     handle.update(truncated=truncated or len(records) > limit, envelopes=envelopes)
     # Resuming from the consumed page boundary would skip rows if the limit cut a page.
     if handle["truncated"] and request["paged"]:

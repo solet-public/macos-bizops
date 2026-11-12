@@ -6,9 +6,9 @@ Article Role: plugin_reference
 
 Article Tags: planning-stage:execution, evidence-category:capability-reference, domain:google-workspace, domain:local-solet, domain:cloud-solet
 
-Embedding Description: Google Workspace plugin reference — the one-time operator setup for connecting Gmail, Drive, Sheets, Docs, and Slides to one or more Google accounts, Workspace or personal Gmail (Desktop-app loopback flow for local solets, Web-application redirect flow for cloud), where the client ID, client secret, and account tokens live (address book vs vault), the account verbs and the optional account argument, the Gmail and Workspace verbs with argument shapes, typed gsuite.* errors, recovery for a failed Google token exchange, where created sheets, docs, and slides land in Drive (My Drive root of the connected account) with how to build their URLs from returned ids, and how to create multi-tab spreadsheets from csv/tsv files and apply tab renames or cell formatting via the Sheets batch-update verb.
+Embedding Description: Google Workspace plugin reference — the one-time operator setup for connecting Gmail, Calendar, Drive, Sheets, Docs, and Slides to one or more Google accounts, Workspace or personal Gmail (Desktop-app loopback flow for local solets, Web-application redirect flow for cloud), where the client ID, client secret, and account tokens live (address book vs vault), the account verbs and the optional account argument, the Gmail and Workspace verbs with argument shapes, typed gsuite.* errors, recovery for a failed Google token exchange, where created sheets, docs, and slides land in Drive (My Drive root of the connected account) with how to build their URLs from returned ids, and how to create multi-tab spreadsheets from csv/tsv files and apply tab renames or cell formatting via the Sheets batch-update verb.
 
-Solet-native access to Google Workspace — **Gmail, Drive, Sheets, Docs,
+Solet-native access to Google Workspace — **Gmail, Calendar, Drive, Sheets, Docs,
 Slides** — for the solet, peers, and plans. It is the platform
 capability, distinct from the operator's claude.ai-side
 `mcp__claude_ai_Gmail`/`Drive`/`Calendar` connectors: this one lets the
@@ -65,8 +65,13 @@ solet itself act on Workspace, including on cloud solets.
   `gsuite.unknown_account` listing the connected accounts. No unified inbox,
   cross-account search or sync.
 - **Scopes:** the consent requests `gmail.modify` (covers every Gmail verb
-  except permanent delete), `drive`, `documents`, `spreadsheets`,
-  `presentations`. `connect_account gmail_permanent_delete=true` also requests
+  except permanent delete and the settings writes), `gmail.settings.basic`
+  (Gmail settings writes: vacation, filters, IMAP, POP, language, send-as
+  signatures, S/MIME, client-side encryption), `drive`, `documents`,
+  `spreadsheets`, `presentations`. An account connected before
+  `gmail.settings.basic` was added keeps working for every other verb and
+  reconnects once for settings writes (`test_connection` lists it under
+  `missing_default_scopes`). `connect_account gmail_permanent_delete=true` also requests
   `https://mail.google.com/`, the only scope Gmail accepts for permanent
   delete. A call the grant does not cover returns `gsuite.missing_scope`
   naming the scope and the reconnect step.
@@ -103,9 +108,10 @@ OAuth client.
    - https://console.cloud.google.com/apis/library/slides.googleapis.com
 4. Go to: https://console.cloud.google.com/auth/overview → **Get started** →
    app name + support email → Audience: **Internal** → **Create**
-5. Left nav: **Data access** → **Add or remove scopes** → check these five →
+5. Left nav: **Data access** → **Add or remove scopes** → check these six →
    **Update** → **Save**:
    - `/auth/gmail.modify`
+   - `/auth/gmail.settings.basic`
    - `/auth/drive`
    - `/auth/documents`
    - `/auth/spreadsheets`
@@ -152,7 +158,8 @@ browser; the callback exchanges the code and vaults the tokens. Google refresh
 tokens are durable (no rotation), so this never needs re-running.
 
 11. Dispatch `start_interface` with the port from step 10 (local: host
-    `127.0.0.1`)
+    `127.0.0.1`). It is a background job: wait for its result (the bound
+    `callback_url`) before the operator opens the consent page.
 12. Dispatch `connect_account` (optional `alias`, `set_default`,
     `gmail_permanent_delete`) → open the returned `authorize_url` → sign in with
     the account to connect → approve. Repeat for each further account.
@@ -180,22 +187,38 @@ holder session to dispatch and report the action id.
   URI — comparing the raw Keychain string against the plaintext secret will
   always "mismatch"; decode before comparing.
 
-## Verbs (built — 59 total: 4 setup, 3 account, 32 Gmail, 20 Drive, Sheets, Docs and Slides)
+## Verbs (built — 208 total: 4 setup, 3 account, 79 Gmail, 122 Drive, People, Tasks, Sheets, Docs and Slides)
+
+Rows marked *job* return `{job_id, status: queued}` at once and the payload
+shown when the job finishes; an invalid argument (a missing or unknown
+`account`, a missing `id`, an unsupported `format`, an unparseable `port`)
+still fails at once with no job. `test_connection` is a job too: its finished
+result is the bounded verdict `{account, account_identity, harmless_read_ok,
+account_tier, granted_scopes, missing_default_scopes}`. Read any finished job
+with `service_interface::job_service::get_job` (see "Retrieving a background
+job's result without a live listener" below).
 
 | Verb | Args | Returns |
 |---|---|---|
 | `connect_account` | — | `{authorize_url, state, redirect_uri, instructions}` |
-| `start_interface` | `host?`, `port?` | `{host, port, callback_url}` |
+| `start_interface` | `host?`, `port?` | *job* → `{host, port, callback_url, message}` |
 | `stop_interface` | — | `{stopped}` |
 | `list_accounts` | — | `{accounts:[{email, alias, tier, granted_scopes, default, token_health}], count}` |
 | `set_default_account` | `account` | `{account, alias, default}` |
-| `disconnect_account` | `account` | `{account, revoke_status, credentials_deleted, new_default}` |
+| `disconnect_account` | `account` | *job* → `{account, revoke_status, credentials_deleted, new_default}` |
 | `gmail_list_messages` | `query?`, `label_ids?`, `page_token?`, `include_spam_trash?`, `max?` (default+cap 500 per page) | `{messages:[{id, thread_id}], count, next_page_token, result_size_estimate}` |
 | `gmail_get_message` | `id`, `format?` (full, raw, metadata, minimal), `metadata_headers?` | full: `{id, thread_id, label_ids, snippet, headers, body_text, body_html, attachments, ...}`; raw: `{raw, raw_rfc822, ...}` |
 | `gmail_send` | `to`, `cc?`, `bcc?`, `subject?`, `body?`, `html_body?`, `attachments?`, `thread_id?`, `in_reply_to?`, `references?` | `{id, thread_id, label_ids}` |
 | 29 more Gmail verbs | messages (insert, import, modify, batch modify, trash, untrash, delete, batch delete), attachments, threads, labels, drafts, history, profile | see `vendor_api_coverage.md` in this knowledge base for the full table, scopes and tiers |
+| 47 Gmail build-2 verbs | push (`gmail_watch` with an explicit Pub/Sub `topic_name`, `gmail_stop`), settings get/update (auto-forwarding, IMAP, POP, language, vacation), filters, forwarding addresses, delegates, send-as (signatures), S/MIME, client-side encryption identities and key pairs; optional `fields`, `pretty_print`, `quota_user`, `xgafv` (Google `$.xgafv`, `1` or `2`) and `alt=json` on every verb (non-JSON `alt=proto`/`media` is rejected); `chain_validation` (`all` or `none`) on key-pair create | resources in snake_case, as received; lists `{<rows>, count}` (CSE lists add `next_page_token`); see `vendor_api_coverage.md` |
 
 Every verb above and below also takes the optional `account` argument.
+
+Results are not scanned. The connector returns the vendor result as received;
+bulk results go to disk through `output_path`. Audit and log lines are built
+only from method, path without query values, status, duration and correlation
+id, so they never carry headers, bodies or credential values.
+
 | `drive_list_files` | `query?`, `max?`, `acknowledge_default_limit_override?`, `row_limit?` (default 500, cap 1000) | `{files:[{id, name, mime, modified, size}], count}` |
 | `drive_download_file` | `id` | `{file_blob_key, name, mime}` |
 | `drive_upload_file` | `name`, `blob_key`, `parent?`, `mime?` | `{id, web_view_link}` |
@@ -207,20 +230,108 @@ Every verb above and below also takes the optional `account` argument.
 | `sheets_update_values` | `id`, `range`, `values` | `{updated_cells}` |
 | `sheets_append_values` | `id`, `range`, `values` | `{updated_cells}` |
 | `sheets_batch_update` | `id`, `requests` | `{replies}` |
-| `sheets_export` | `id`, `format?` (csv\|xlsx) | `{sheet_blob_key}` |
+| `sheets_export` | `id`, `format?` (csv\|xlsx) | *job* → `{sheet_blob_key, namespace, filename}` |
 | `docs_create` | `title`, `content?` | `{id}` |
 | `docs_get` | `id` | `{title, body_text}` |
 | `docs_batch_update` | `id`, `requests` | `{replies}` |
-| `docs_export` | `id`, `format?` (pdf\|docx\|txt) | `{doc_blob_key}` |
+| `docs_export` | `id`, `format?` (pdf\|docx\|txt) | *job* → `{doc_blob_key, namespace, filename}` |
 | `slides_create` | `title` | `{id}` |
 | `slides_get` | `id` | `{slides:[{object_id, element_count}], count}` |
 | `slides_batch_update` | `id`, `requests` | `{replies}` |
-| `slides_export` | `id`, `format?` (pdf\|pptx) | `{deck_blob_key}` |
+| `slides_export` | `id`, `format?` (pdf\|pptx) | *job* → `{deck_blob_key, namespace, filename}` |
 
 Errors are typed with the `gsuite.*` prefix: `gsuite.not_connected`,
 `gsuite.auth_expired`, `gsuite.permission_denied`, `gsuite.rate_limited`,
 `gsuite.not_found`, `gsuite.invalid_params`, `gsuite.result_too_large`
 (`sheets_get_values` only, see below).
+
+## Google Calendar (38 verbs, the whole Calendar API v3)
+
+Every method of the Google Calendar API v3 (vendor reference revision
+20261102) is one typed verb named `calendar_<resource>_<method>`: writes and
+deletes included, with the Google scopes the account granted as the only
+boundary. Arguments are the vendor's own path and query parameters in
+snake_case (`calendar_id`, `time_min`, `single_events`, `send_updates`, ...),
+`body` (the vendor request object, passed through unchanged) where the method
+takes one, and an optional `account` (email or alias). The default account is used when omitted; every completed result names the account. Each verb is a background job (job_id at
+once; Google's response on completion, with `next_page_token` /
+`next_sync_token` lifted out and the account named). Arguments are checked
+against Google's own API document at dispatch, so a wrong name, type, enum
+value or missing required argument is `gsuite.invalid_params` before any job
+exists. `calendar_id` `primary` is the account's main calendar.
+
+Every verb also accepts the discovery document's API-wide query parameters:
+`fields` (partial-response selector), `pretty_print` (boolean, sent as
+`prettyPrint`), `alt` (`json`), `quota_user` (sent as `quotaUser`) and the
+deprecated `user_ip` (sent as `userIp`). For example,
+`calendar_events_list(calendar_id="primary", fields="items(id),nextPageToken", pretty_print=false)`
+requests only event ids and the continuation token. Include `nextPageToken`
+or `nextSyncToken` in `fields` when you need paging or incremental sync;
+the plugin can lift only tokens Google returns. These options apply to one
+request: correct them on the next call, or omit them to restore Google's
+defaults. Vendor names with punctuation use the client-safe spelling before
+snake case (`$.xgafv` becomes `x__xgafv` when declared by discovery).
+`key`, `access_token` and `oauth_token` belong to the Google account contract
+and are declared only as refused arguments so framework submission reaches
+the named account-contract error before a job is created. Use `connect_account`
+for consent and `account` to select a connected credential. Pagination, status
+and job routing are read from the response itself, and a failure is returned as
+a typed error. Results are not scanned. The connector returns the vendor result as received;
+bulk results go to disk through `output_path`. Audit and log lines are built
+only from method, path without query values, status, duration and correlation
+id, so they never carry headers, bodies or credential values.
+
+| Resource | Verbs | Narrowest scope requested |
+|---|---|---|
+| Calendar list (the user's subscriptions) | `calendar_calendarlist_list` / `_get` / `_watch`; `_insert` / `_update` / `_patch` / `_delete` | `calendar.calendarlist.readonly`; `calendar.calendarlist` |
+| Calendars (owner metadata) | `calendar_calendars_get`; `_insert` / `_update` / `_patch` / `_delete` / `_clear` / `_transfer_ownership` | `calendar.calendars.readonly`; `calendar.calendars` |
+| Events | `calendar_events_list` / `_get` / `_instances` / `_watch`; `_insert` / `_import` / `_quick_add` / `_update` / `_patch` / `_delete` / `_move` | `calendar.events.readonly`; `calendar.events` |
+| Free/busy | `calendar_freebusy_query` | `calendar.events.freebusy` |
+| Sharing rules (ACL) | `calendar_acl_list` / `_get` / `_watch`; `_insert` / `_update` / `_patch` / `_delete` | `calendar.acls.readonly`; `calendar.acls` |
+| User settings (read-only at Google) | `calendar_settings_list` / `_get` / `_watch` | `calendar.settings.readonly` |
+| Colours, watch channels | `calendar_colors_get`, `calendar_channels_stop` | `calendar.calendarlist.readonly`; any Calendar scope |
+
+- **Meetings.** `calendar_events_insert` takes attendees (`send_updates`
+  `all` / `externalOnly` / `none` decides who Google emails), `recurrence`
+  rules and a Google Meet link via `conferenceData.createRequest` with
+  `conference_data_version=1`. `update` is a full replace; `patch` changes
+  only the fields sent.
+- **Paging and sync.** List verbs return one page; pass `page_token` to
+  continue. The last page carries `next_sync_token`; passing it as
+  `sync_token` returns only what changed. Google refuses some filters
+  together with a sync token (events: `q`, `time_min`/`time_max`,
+  `order_by`, `i_cal_uid`, `updated_min`, extended-property filters;
+  calendar list: `min_access_role`) and dispatch refuses them first. A
+  `gsuite.sync_token_expired` (Google's 410) means: clear local copies, list
+  again without `sync_token`, keep the new `next_sync_token`.
+- **Watch channels.** The `_watch` verbs register a webhook at an HTTPS
+  address you control; stop one with `calendar_channels_stop` using the id
+  and `resourceId` from the watch response.
+- **Scopes.** connect_account requests the ten narrow Calendar scopes above
+  (never the broad `calendar` scope); read and write variants are separate,
+  so unticking a write scope on Google's consent screen keeps the read verbs.
+  An account connected before Calendar support lacks them: its Calendar
+  verbs return `gsuite.missing_scope` naming the scope until it reconnects
+  (`start_interface`, then `connect_account`).
+- **What each account tier gets.** A consumer account (`@gmail.com` or
+  another personal Google Account) gets 37 of the 38 verbs: everything
+  except `calendar_calendars_transfer_ownership`, which needs a Google
+  Workspace administrator with the Manage Calendars privilege, and except
+  sharing rules for a whole domain (`scope.type` `domain`), which need a
+  Workspace domain. Both are refused with one `gsuite.workspace_only`
+  message naming the tier. A Workspace user gets the same 37; a Workspace
+  administrator with Manage Calendars gets all 38. Status events
+  (`focusTime`, `outOfOffice`, `workingLocation`) are, per Google, only on
+  primary calendars and only for some users; Google's answer decides.
+- **No public Google API** (so no verb): appointment schedules and booking
+  pages, writing user settings, room and building resources (Admin SDK
+  Directory, a later build), and Tasks shown in Calendar (Tasks API, a later
+  build).
+- **Errors** beyond the common ones: `gsuite.missing_scope`,
+  `gsuite.unknown_account`, `gsuite.workspace_only`,
+  `gsuite.sync_token_expired`, `gsuite.gone` (already deleted) and
+  `gsuite.conflict` (duplicate id or a changed etag). Results and messages
+  never carry the account's tokens, in raw, percent-encoded or base64 form.
 
 ## Retrieving a background job's result without a live listener
 
@@ -353,11 +464,13 @@ no `addSheet`-reply lookup.
 
 ## Status
 
-All five products (Gmail, Drive, Sheets, Docs, Slides) are built and
-whole-tree gate-clean. Gmail build 1 (2026-11-07) covers the core Gmail API, 32
-methods, with several accounts. Gmail settings and push watch are the next
-build, then Calendar; `vendor_api_coverage.md` tracks the remainder. Scopes for all five were granted in one consent set at
-connect time, so no re-consent was needed when Docs/Slides shipped.
+The connector includes Gmail, Calendar, Drive, Sheets, Docs and Slides.
+Calendar covers all 38 methods of the Calendar API v3 at vendor revision
+20261102, on the same per-account contract. Existing accounts reconnect to
+approve the ten additional narrow Calendar scopes. Gmail build 1 covers the
+32 core Gmail API methods; Gmail build 2 adds 47 settings and push-watch
+methods, so all 79 Gmail v1 methods are typed verbs. `vendor_api_coverage.md`
+tracks the Gmail inventory and the remaining surfaces.
 
 ## Drive, Contacts and Tasks
 

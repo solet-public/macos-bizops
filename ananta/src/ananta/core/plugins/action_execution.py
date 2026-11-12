@@ -16,11 +16,12 @@ entry point: `execute(plugin, action_name, parameters)`.
 from __future__ import annotations
 
 import inspect
+import time
 from typing import TYPE_CHECKING
 
 from ananta.core.domain.enums import ErrorSeverity
 from ananta.core.plugins.plugin_contracts import ActionStatus
-from ananta.core.runtime.loop_invariant import record_handler_entry
+from ananta.core.runtime.loop_invariant import record_handler_entry, record_handler_wall_time
 from ananta.error_handling import AnantaError, PluginError
 
 if TYPE_CHECKING:
@@ -87,10 +88,17 @@ async def _execute_action_method(
             severity=ErrorSeverity.ERROR,
         )
 
-    record_handler_entry(f"plugin::{plugin.name}::{action_name}", "handler")
-    if inspect.iscoroutinefunction(method):
-        return await method(parameters)
-    return method(parameters)
+    process_key = f"plugin::{plugin.name}::{action_name}"
+    record_handler_entry(process_key, "handler")
+    # Advisory wall time: a sync handler's time is time spent blocking this
+    # thread; an awaited handler's time includes its suspensions.
+    started = time.perf_counter()
+    try:
+        if inspect.iscoroutinefunction(method):
+            return await method(parameters)
+        return method(parameters)
+    finally:
+        record_handler_wall_time(process_key, time.perf_counter() - started)
 
 
 def _format_action_response(response: object) -> dict[str, object]:

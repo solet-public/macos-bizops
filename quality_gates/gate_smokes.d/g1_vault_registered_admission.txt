@@ -1,0 +1,2 @@
+# Real registered vault admission with synthetic credentials and owned private PG.
+plugins/macos_vault_plugin/tests/g1_vault_registered_admission_smoke.py

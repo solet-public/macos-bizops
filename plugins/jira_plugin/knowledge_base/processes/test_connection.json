@@ -1,7 +1,7 @@
 {
   "process_key": "plugin::jira_plugin::test_connection",
   "display_name": "Jira: Test Connection",
-  "description": "Verify the configured Jira credentials by fetching the authenticated account. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the check finishing; ok, the site base_url, and the service account's id and display name are delivered when the job completes. Read action.",
+  "description": "Verify the configured Jira credentials by fetching the authenticated account. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the check finishing; ok, the site base_url, and the service account's id and display name are delivered when the job completes. Read action. Optional site selects a bound Atlassian site; omitted uses the default. Queued and completed results identify the site.",
   "embedding_description": "Confirm the Jira connector is configured and can authenticate. Dispatches asynchronously, returning a job_id immediately; the resolved site base url plus the service account's id and display name arrive via job completion. A health check after registering or rotating credentials, confirming the token works and points at the expected site.",
   "result_processor_customizations": {
     "action_label": "Jira connection check queued",

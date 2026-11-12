@@ -20,6 +20,7 @@ from ananta.core.actions.action_metadata import (
 )
 from ananta.core.domain.enums import ProcessorPolicyCategory
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.registered_job_operations import registered_job_return_schema
 
 
 class KnowledgeSearchAPI(ABC):
@@ -27,6 +28,7 @@ class KnowledgeSearchAPI(ABC):
 
     @service_interface_process(
         name="search",
+        is_async=True,
         is_discoverable=True,
         provider="knowledge_service",
         parameters={
@@ -42,25 +44,13 @@ class KnowledgeSearchAPI(ABC):
                 default=8,
             ),
             "name": ParameterMetadata(
-                description=(
-                    "Scope the search to a single knowledge base by name. "
-                    "Required to reach knowledge bases that are excluded from "
-                    "default semantic search (e.g. workbench): an explicit name "
-                    "bypasses the default-scope exclusion, while an unscoped "
-                    "search never returns those KBs' semantic results."
-                ),
+                description=("Scope the search to a single knowledge base by name. Required to reach knowledge bases that are excluded from default semantic search (e.g. workbench): an explicit name bypasses the default-scope exclusion, while an unscoped search never returns those KBs' semantic results."),
                 required=False,
                 type=ParameterType.STRING,
                 default=None,
             ),
             "process_key": ParameterMetadata(
-                description=(
-                    "Tier-1 exact process-key match: restrict results to chunks "
-                    "tagged with this process key, e.g. to find the knowledge "
-                    "article(s) bound to a specific verb/process. Runs ahead of "
-                    "the tag and semantic tiers and (like tags) is not subject to "
-                    "the default-scope KB exclusion."
-                ),
+                description=("Tier-1 exact process-key match: restrict results to chunks tagged with this process key, e.g. to find the knowledge article(s) bound to a specific verb/process. Runs ahead of the tag and semantic tiers and (like tags) is not subject to the default-scope KB exclusion."),
                 required=False,
                 type=ParameterType.STRING,
                 default=None,
@@ -103,11 +93,7 @@ class KnowledgeSearchAPI(ABC):
                 },
             ),
             "min_knowledge_layer": ParameterMetadata(
-                description=(
-                    "Lower bound (inclusive) of the allowed knowledge-layer "
-                    "range. Must be paired with max_knowledge_layer; mutually "
-                    "exclusive with knowledge_layers."
-                ),
+                description=("Lower bound (inclusive) of the allowed knowledge-layer range. Must be paired with max_knowledge_layer; mutually exclusive with knowledge_layers."),
                 required=False,
                 type=ParameterType.INTEGER,
                 default=None,
@@ -127,31 +113,24 @@ class KnowledgeSearchAPI(ABC):
                 default=None,
             ),
             "include_unlayered": ParameterMetadata(
-                description=(
-                    "When any layer filter is supplied, unlabeled chunks are "
-                    "excluded by default. Set this true to include them — "
-                    "useful during the layer-annotation migration when not "
-                    "every article has been classified yet."
-                ),
+                description=("When any layer filter is supplied, unlabeled chunks are excluded by default. Set this true to include them — useful during the layer-annotation migration when not every article has been classified yet."),
                 required=False,
                 type=ParameterType.BOOLEAN,
                 default=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Search results with provenance",
-            type=ParameterType.OBJECT,
-            properties={
-                "results": ParameterMetadata(
-                    type=ParameterType.LIST, description="Search result chunks with provenance"
-                ),
-                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Result count"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Search results with provenance",
+                type=ParameterType.OBJECT,
+                properties={
+                    "results": ParameterMetadata(type=ParameterType.LIST, description="Search result chunks with provenance"),
+                    "count": ParameterMetadata(type=ParameterType.INTEGER, description="Result count"),
+                },
+            )
         ),
-        result_processor_customizations=MergeResultProcessorCustomizations(
-        ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        result_processor_customizations=MergeResultProcessorCustomizations(),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def search(
@@ -170,6 +149,7 @@ class KnowledgeSearchAPI(ABC):
 
     @service_interface_process(
         name="search_planning_references",
+        is_async=True,
         is_discoverable=True,
         provider="knowledge_service",
         parameters={
@@ -191,20 +171,18 @@ class KnowledgeSearchAPI(ABC):
                 default=None,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Planning reference articles with provenance",
-            type=ParameterType.OBJECT,
-            properties={
-                "results": ParameterMetadata(
-                    type=ParameterType.LIST, description="Planning reference chunks with provenance"
-                ),
-                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Result count"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Planning reference articles with provenance",
+                type=ParameterType.OBJECT,
+                properties={
+                    "results": ParameterMetadata(type=ParameterType.LIST, description="Planning reference chunks with provenance"),
+                    "count": ParameterMetadata(type=ParameterType.INTEGER, description="Result count"),
+                },
+            )
         ),
-        result_processor_customizations=MergeResultProcessorCustomizations(
-        ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        result_processor_customizations=MergeResultProcessorCustomizations(),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def search_planning_references(
@@ -216,16 +194,12 @@ class KnowledgeSearchAPI(ABC):
 
     @service_interface_process(
         name="test_retrieval",
+        is_async=True,
         is_discoverable=True,
         provider="knowledge_service",
         parameters={
             "article_path": ParameterMetadata(
-                description=(
-                    "Repo-relative path to the article under test, starting at "
-                    "'knowledge_bases/' (e.g. "
-                    "knowledge_bases/ananta_platform/13_solet_setup/"
-                    "04_when_to_split_a_service_plugin.md)."
-                ),
+                description=("Repo-relative path to the article under test, starting at 'knowledge_bases/' (e.g. knowledge_bases/ananta_platform/13_solet_setup/04_when_to_split_a_service_plugin.md)."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -235,10 +209,7 @@ class KnowledgeSearchAPI(ABC):
                 type=ParameterType.LIST,
             ),
             "forbidden_queries": ParameterMetadata(
-                description=(
-                    "Queries that must NOT surface this article better than "
-                    "forbidden_min_rank (owned by other articles)"
-                ),
+                description=("Queries that must NOT surface this article better than forbidden_min_rank (owned by other articles)"),
                 required=True,
                 type=ParameterType.LIST,
             ),
@@ -249,63 +220,54 @@ class KnowledgeSearchAPI(ABC):
                 default=3,
             ),
             "forbidden_min_rank": ParameterMetadata(
-                description=(
-                    "A forbidden query fails if the article ranks better than "
-                    "this 1-indexed position"
-                ),
+                description=("A forbidden query fails if the article ranks better than this 1-indexed position"),
                 required=False,
                 type=ParameterType.INTEGER,
                 default=4,
             ),
             "active_knowledge_bases": ParameterMetadata(
-                description=(
-                    "Optional subset of active knowledge bases to evaluate "
-                    "against; default is all currently active KBs"
-                ),
+                description=("Optional subset of active knowledge bases to evaluate against; default is all currently active KBs"),
                 required=False,
                 type=ParameterType.LIST,
                 default=None,
             ),
             "process_key_assertions": ParameterMetadata(
-                description=(
-                    "Process keys referenced by the article body that must "
-                    "still resolve in the live registry"
-                ),
+                description=("Process keys referenced by the article body that must still resolve in the live registry"),
                 required=False,
                 type=ParameterType.LIST,
                 default=None,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Retrieval test report with verdict and per-check diagnostics",
-            type=ParameterType.OBJECT,
-            properties={
-                "passed": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when every target, forbidden, and key check passed",
-                ),
-                "target_results": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Per-target-query observed rank, score, and top-3 paths",
-                ),
-                "forbidden_results": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Per-forbidden-query observed rank, score, and top-3 paths",
-                ),
-                "process_key_freshness": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Per-asserted-key registry existence records",
-                ),
-                "failures": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Human-readable DRIFT, OVERREACH, and STALE_PROCESS_KEY findings",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Retrieval test report with verdict and per-check diagnostics",
+                type=ParameterType.OBJECT,
+                properties={
+                    "passed": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="True when every target, forbidden, and key check passed",
+                    ),
+                    "target_results": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Per-target-query observed rank, score, and top-3 paths",
+                    ),
+                    "forbidden_results": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Per-forbidden-query observed rank, score, and top-3 paths",
+                    ),
+                    "process_key_freshness": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Per-asserted-key registry existence records",
+                    ),
+                    "failures": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Human-readable DRIFT, OVERREACH, and STALE_PROCESS_KEY findings",
+                    ),
+                },
+            )
         ),
-        result_processor_customizations=MergeResultProcessorCustomizations(
-        ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        result_processor_customizations=MergeResultProcessorCustomizations(),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def test_retrieval(
@@ -326,28 +288,19 @@ class KnowledgeSearchAPI(ABC):
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "corpus_root": ParameterMetadata(
-                description=(
-                    "Repo-relative directory to walk for "
-                    "'*.retrieval_test.yaml' companion files"
-                ),
+                description=("Repo-relative directory to walk for '*.retrieval_test.yaml' companion files"),
                 required=False,
                 type=ParameterType.STRING,
                 default="knowledge_bases",
             ),
             "report_dir": ParameterMetadata(
-                description=(
-                    "Repo-relative directory the timestamped Markdown report "
-                    "is written into"
-                ),
+                description=("Repo-relative directory the timestamped Markdown report is written into"),
                 required=False,
                 type=ParameterType.STRING,
                 default="profile/data/kb_retrieval_audit_reports",
             ),
             "active_knowledge_bases": ParameterMetadata(
-                description=(
-                    "Optional subset of active knowledge bases whose articles "
-                    "are audited; default is every active KB"
-                ),
+                description=("Optional subset of active knowledge bases whose articles are audited; default is every active KB"),
                 required=False,
                 type=ParameterType.LIST,
                 default=None,
@@ -360,29 +313,21 @@ class KnowledgeSearchAPI(ABC):
             ),
         },
         return_value_schema=ReturnValueSchema(
-            description=(
-                "Background-submission receipt; the audit's findings are "
-                "written to a timestamped Markdown report under report_dir"
-            ),
+            description=("Background-submission receipt; the audit's findings are written to a timestamped Markdown report under report_dir"),
             type=ParameterType.OBJECT,
             properties={
                 "audit": ParameterMetadata(
                     type=ParameterType.STRING,
-                    description="'started' if this call began a new background "
-                    "audit pass, 'already_running' if a prior pass (direct or "
-                    "cron) is still in flight (no-op)",
+                    description="'started' if this call began a new background audit pass, 'already_running' if a prior pass (direct or cron) is still in flight (no-op)",
                 ),
                 "report_dir": ParameterMetadata(
                     type=ParameterType.STRING,
-                    description="Absolute directory the pass writes its "
-                    "timestamped Markdown report into",
+                    description="Absolute directory the pass writes its timestamped Markdown report into",
                 ),
             },
         ),
-        result_processor_customizations=MergeResultProcessorCustomizations(
-        ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        result_processor_customizations=MergeResultProcessorCustomizations(),
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def audit_retrieval_corpus(
@@ -412,9 +357,7 @@ class KnowledgeSearchAPI(ABC):
             properties={
                 "audit": ParameterMetadata(
                     type=ParameterType.STRING,
-                    description="'started' if this fire began a new background "
-                    "audit pass, 'already_running' if a prior pass is still in "
-                    "flight (no-op)",
+                    description="'started' if this fire began a new background audit pass, 'already_running' if a prior pass is still in flight (no-op)",
                 ),
             },
         ),

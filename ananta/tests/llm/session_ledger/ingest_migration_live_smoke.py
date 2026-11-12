@@ -67,7 +67,10 @@ sys.path.insert(
 
 from ananta.core.domain.types import ActionResult  # noqa: E402
 from ananta.interfaces.state_management_interface import StateManagementInterface  # noqa: E402
-from ananta.llm.session_ledger.importer import _event_external_id, _project_tool_call  # noqa: E402
+from ananta.llm.session_ledger.importer_persistence import (  # noqa: E402
+    _event_external_id,
+    _project_tool_call,
+)
 from ananta.llm.session_ledger.repository import (  # noqa: E402
     SessionLedgerRepository,
 )

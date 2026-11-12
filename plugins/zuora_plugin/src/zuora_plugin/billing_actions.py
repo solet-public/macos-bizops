@@ -79,17 +79,19 @@ from .constants import (
     BULK_EXPORT_ROW_CAP,
     DATA_QUERY_MAX_ROWS_CAP,
     DEFAULT_ROW_LIMIT,
+    ERROR_API_ERROR,
     LIST_ROW_LIMIT_CAP,
     PARAM_ACKNOWLEDGE_OVERRIDE,
     PARAM_ROW_LIMIT,
     SUPPORTED_OBJECT_TYPES,
     ZUORA_LIST_PAGE_SIZE_MAX,
 )
+from .errors import ZuoraServiceError, vendor_object
 from .typed_operations import collect
 
 # path_gate(output_tsv_path) -> realpath-resolved path to write, or raises
-# ExportPathRefusedError. Injected by the plugin, which binds the operator's
-# export_allowed_roots config (export_containment.assert_export_path_allowed).
+# PathRefusedError. Injected by the plugin, which binds the operator's
+# registered path addresses config (ananta.file_locations.containment.assert_path_allowed).
 PathGate = Callable[[str], str]
 
 # Defense-in-depth circuit breaker on the queryMore loop — independent of
@@ -123,7 +125,7 @@ def data_query(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict
     )
     zoql = _require_str(params, "zoql")
     output_tsv_path = _require_str(params, "output_tsv_path")
-    return _write_zoql_result_tsv(client, zoql, effective_limit, path_gate, output_tsv_path)
+    return _write_zoql_result_tsv(client, zoql, effective_limit, path_gate, output_tsv_path, params)
 
 
 def bulk_export(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
@@ -143,7 +145,7 @@ def bulk_export(client: Any, params: dict[str, Any], path_gate: PathGate) -> dic
     )
     zoql = _require_str(params, "zoql")
     output_tsv_path = _require_str(params, "output_tsv_path")
-    return _write_zoql_result_tsv(client, zoql, effective_limit, path_gate, output_tsv_path)
+    return _write_zoql_result_tsv(client, zoql, effective_limit, path_gate, output_tsv_path, params)
 
 
 def get_object(client: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -152,7 +154,7 @@ def get_object(client: Any, params: dict[str, Any]) -> dict[str, Any]:
     object_id = _require_str(params, "id")
     response = client.get(f"/v1/object/{object_type}/{object_id}")
     _raise_for_status(response, is_query=False)
-    return {"object": response.json()}
+    return {"object": vendor_object(response)}
 
 
 def create_object(client: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -163,7 +165,7 @@ def create_object(client: Any, params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("'fields' is required and must be a non-empty object")
     response = client.post(f"/v1/object/{object_type}", json=fields)
     _raise_for_status(response, is_query=False)
-    payload = response.json()
+    payload = vendor_object(response)
     return {
         "id": _as_str(payload.get("Id")),
         "success": bool(payload.get("Success", True)),
@@ -179,7 +181,7 @@ def update_object(client: Any, params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("'fields' is required and must be a non-empty object")
     response = client.put(f"/v1/object/{object_type}/{object_id}", json=fields)
     _raise_for_status(response, is_query=False)
-    payload = response.json()
+    payload = vendor_object(response)
     return {"success": bool(payload.get("Success", True))}
 
 
@@ -228,7 +230,7 @@ def get_invoice(client: Any, params: dict[str, Any]) -> dict[str, Any]:
     invoice_id = _require_str(params, "id")
     response = client.get(f"/v1/invoices/{invoice_id}", headers=headers)
     _raise_for_status(response, is_query=False)
-    return {"invoice": response.json()}
+    return {"invoice": vendor_object(response)}
 
 
 def list_invoices(client: Any, params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
@@ -251,7 +253,7 @@ def list_invoices(client: Any, params: dict[str, Any], path_gate: PathGate) -> d
     resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
     response = client.get(f"/v1/invoices/accounts/{account_id}")
     _raise_for_status(response, is_query=False)
-    payload = response.json()
+    payload = vendor_object(response)
     invoices = payload.get("invoices")
     invoices = invoices if isinstance(invoices, list) else []
     truncated = len(invoices) >= effective_limit
@@ -270,6 +272,7 @@ def _write_zoql_result_tsv(
     cap: int,
     path_gate: PathGate,
     output_tsv_path: str,
+    params: dict[str, Any],
 ) -> dict[str, Any]:
     resolved_path = _gate_and_check_parent(path_gate, output_tsv_path)
     records, total_size, truncated = _run_zoql_query(client, zoql, cap)
@@ -313,7 +316,7 @@ def _query_page(
 ) -> tuple[list[dict[str, Any]], int, bool, str | None]:
     response = client.post(path, json=body)
     _raise_for_status(response, is_query=True)
-    payload = response.json()
+    payload = vendor_object(response)
     records = _as_record_list(payload.get("records"))
     total_size = _as_int(payload.get("size"), default=len(records))
     done = bool(payload.get("done", True))
@@ -339,7 +342,7 @@ def _paginate_account_list(
     while len(records) < cap:
         response = client.get(path, params={**read_options, "page": page, "pageSize": ZUORA_LIST_PAGE_SIZE_MAX}, headers=headers)
         _raise_for_status(response, is_query=False)
-        payload = response.json()
+        payload = vendor_object(response)
         page_items = _as_record_list(payload.get(list_key))
         records.extend(page_items)
         if len(page_items) < ZUORA_LIST_PAGE_SIZE_MAX:
@@ -371,8 +374,9 @@ def _write_records_tsv(
     *,
     truncated: bool,
 ) -> dict[str, Any]:
+    """Render the records as received to a TSV file."""
     columns = _ordered_columns(records)
-    row_lists = [[_cell_value(record.get(column)) for column in columns] for record in records]
+    row_lists = [[_cell_value(row.get(column)) for column in columns] for row in records]
     with open(resolved_path, "wb") as handle:
         handle.write(_to_tsv(columns, row_lists))
     return {
@@ -429,7 +433,10 @@ def _cell_value(value: Any) -> Any:
     """Coerce a record value to a TSV-safe form; nested objects become JSON text."""
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
-    return json.dumps(value, default=str, ensure_ascii=False)
+    try:
+        return json.dumps(value, default=str, ensure_ascii=False)
+    except Exception:
+        raise ZuoraServiceError(ERROR_API_ERROR, "Zuora returned an unrenderable export value.") from None
 
 
 def _to_tsv(columns: list[str], row_lists: list[list[Any]]) -> bytes:

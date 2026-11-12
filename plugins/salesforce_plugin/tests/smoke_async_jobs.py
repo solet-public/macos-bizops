@@ -23,10 +23,10 @@ Exercises:
      test_connection wrapper, and a REST-level fault classifying
      topology-safe through the SAME path smoke_records.py already covers at
      the ``_run`` level — decoupled entirely from the dispatch call.
-  4. ACTION_HANDLERS carries all 21 migrated/added verbs (the 9 original
+  4. ACTION_HANDLERS carries all 23 migrated/added verbs (the 9 original
      D0.3-migrated verbs, the 4 lane-sf-bulk-v2 Bulk v2 ingest verbs,
      authenticated_request and the composite/tooling/bulk_jobs/reports/
-     dashboards/rest_resources/actions families) —
+     dashboards/rest_resources/actions/metadata/content_files families) —
      a name typo here would silently strand a verb's queued jobs forever
      (the drain loop only polls names present in this dict).
   5. ensure_worker_started is idempotent: two calls produce the same thread
@@ -182,6 +182,8 @@ def test_all_verbs_dispatch_async() -> None:
         "dashboards": {"operation": "refresh", "dashboard_id": "01ZD00000007S89MAE"},
         "rest_resources": {"operation": "delete_by_external_id", "sobject": "Account", "external_id_field": "External_Id__c", "external_id": "A-100"},
         "actions": {"operation": "list_custom"},
+        "metadata": {"operation": "deploy_status", "deploy_request_id": "0AfR000000014UoKAI"},
+        "content_files": {"operation": "delete_document", "content_document_id": "069R0000000yZ9CIAU"},
     }
     for action_name, params in calls.items():
         method = getattr(plugin, action_name)
@@ -191,7 +193,7 @@ def test_all_verbs_dispatch_async() -> None:
             result["action_status"] == "completed" and result["data"].get("status") == "queued",
             str(result),
         )
-    _assert("twenty-one jobs created, one per verb", len(fake_manager._jobs) == 21)
+    _assert("twenty-three jobs created, one per verb", len(fake_manager._jobs) == 23)
 
 
 def test_worker_completes_get_record_on_success() -> None:
@@ -327,9 +329,11 @@ def test_action_handlers_covers_all_thirteen_verbs() -> None:
         "dashboards",
         "rest_resources",
         "actions",
+        "metadata",
+        "content_files",
     }
     _assert(
-        "ACTION_HANDLERS carries exactly the 21 migrated/added verb names",
+        "ACTION_HANDLERS carries exactly the 23 migrated/added verb names",
         set(async_jobs.ACTION_HANDLERS.keys()) == expected,
         str(sorted(async_jobs.ACTION_HANDLERS.keys())),
     )

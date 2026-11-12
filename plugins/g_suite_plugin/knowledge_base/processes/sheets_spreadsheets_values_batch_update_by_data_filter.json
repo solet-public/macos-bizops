@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::g_suite_plugin::sheets_spreadsheets_values_batch_update_by_data_filter",
+  "display_name": "Sheets Spreadsheets Values Batch Update By Data Filter",
+  "description": "sheets.spreadsheets.values.batchUpdateByDataFilter: POST v4/spreadsheets/{spreadsheetId}/values:batchUpdateByDataFilter. Sets values in one or more ranges of a spreadsheet. For more information, see Read, write, and search metadata. The caller must specify the spreadsheet ID, a valueInputOption, and one or more DataFilterValueRanges. Body: vendor BatchUpdateValuesByDataFilterRequest JSON, checked against the pinned discovery schema. Runs as a background job; completion preserves the vendor response and names the selected account. key, access_token and oauth_token are refused: the connected account authenticates. Parameters use exact vendor names. See editors_api_coverage.md for scopes, bodies and lifecycle.",
+  "embedding_description": "Use Sheets Spreadsheets Values Batch Update By Data Filter to sets values in one or more ranges of a spreadsheet in Google Sheets, as the selected connected Google account (POST v4/spreadsheets/{spreadsheetId}/values:batchUpdateByDataFilter). Send the vendor BatchUpdateValuesByDataFilterRequest body; it is checked against Google's schema. Returns Google's full response.",
+  "result_processor_customizations": {
+    "action_label": "Sheets Spreadsheets Values Batch Update By Data Filter queued",
+    "result_type": "g_suite_sheets_spreadsheets_values_batch_update_by_data_filter_result",
+    "result_description": "Job queued; completion includes account, method, full vendor response and response headers.",
+    "presentation_guidance": "Show the account that answered and any reply objects in request order.",
+    "output_action_guidance": "Return one short message through the active IO plugin."
+  },
+  "error_processor_customizations": {
+    "action_context": "Sheets Spreadsheets Values Batch Update By Data Filter",
+    "error_interpretation": "gsuite.invalid_params names the argument or body field and the vendor rule it broke, including refused key/access_token/oauth_token; gsuite.unknown_account names connected accounts; gsuite.missing_scope requires reconnect; gsuite.auth_expired includes Testing-mode renewal guidance; gsuite.permission_denied, gsuite.not_found and gsuite.rate_limited preserve vendor messages.",
+    "recovery_guidance": "Correct the named vendor field, choose a connected account, or reconnect with start_interface and connect_account to approve missing scopes. Retry rate limits later."
+  }
+}

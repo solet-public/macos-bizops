@@ -3,6 +3,12 @@
 The official client owns URL escaping, media encoding and response decoding.
 Paging is explicit: pass the returned nextPageToken back as pageToken. No
 response envelope or vendor fields are projected away.
+
+For the editor APIs (Docs, Sheets, Slides) the API-wide response-format
+parameters are honoured exactly: the official client always rewrites ``alt`` to
+``json`` and cannot parse a JSONP ``callback`` reply, so ``alt=proto``,
+``alt=media`` and ``callback`` send the caller's value and return Google's raw
+reply as a blob instead of a parsed response.
 """
 
 from __future__ import annotations
@@ -75,6 +81,24 @@ def _check_entitlement(verb: str, method: dict[str, Any], facts: dict[str, Any])
         raise VerbFailureError("gsuite.missing_scope", f"{verb} needs one of {', '.join(accepted)}. Reconnect this account with start_interface then connect_account and approve the requested access.")
 
 
+RAW_ALT_PRODUCTS: frozenset[str] = frozenset({"docs", "sheets", "slides"})
+_RAW_ALT_MIME: dict[str, str] = {"proto": "application/x-protobuf", "media": "application/octet-stream"}
+_ALT_JSON = re.compile(r"(?<=[?&])alt=json(?=&|$)")
+
+
+def raw_reply_mime(method: dict[str, Any], params: dict[str, Any]) -> str | None:
+    """MIME of the raw reply the caller asked for, or None for a parsed JSON reply."""
+    if method["id"].split(".")[0] not in RAW_ALT_PRODUCTS or method.get("supportsMediaDownload"):
+        return None
+    if params.get("callback") is not None:
+        return "text/javascript"
+    return _RAW_ALT_MIME.get(str(params.get("alt")))
+
+
+def _raw_body(_response: Any, content: bytes) -> bytes:
+    return content
+
+
 def _request_kwargs(verb: str, params: dict[str, Any], io: GmailIO) -> dict[str, Any]:
     _, method = WORKSPACE_METHODS[verb]
     kwargs = request_arguments(verb, params)
@@ -100,6 +124,9 @@ def _build_request(service: Any, method: dict[str, Any], kwargs: dict[str, Any],
     if kwargs.get("alt") == "media" and method.get("supportsMediaDownload"):
         method_name += "_media"
     request = getattr(resource, method_name)(**kwargs)
+    if raw_reply_mime(method, params) is not None:
+        request.uri = _ALT_JSON.sub(f"alt={params.get('alt') or 'json'}", request.uri)
+        request.postproc = _raw_body
     for key, header in (("if_match", "If-Match"), ("if_none_match", "If-None-Match")):
         if params.get(key) is not None:
             if not isinstance(params[key], str):
@@ -111,6 +138,10 @@ def _build_request(service: Any, method: dict[str, Any], kwargs: dict[str, Any],
 def _result(response: Any, method: dict[str, Any], params: dict[str, Any], io: GmailIO) -> dict[str, Any]:
     if not method.get("response") and not method.get("supportsMediaDownload"):
         return {"response": None, "method": method["id"]}
+    raw_mime = raw_reply_mime(method, params)
+    if raw_mime is not None:
+        key = io.blob_writer(response, method["id"], raw_mime)
+        return {"file_blob_key": key, "mime_type": raw_mime, "size": len(response), "method": method["id"]}
     if isinstance(response, bytes):
         mime = str(params.get("mimeType") or "application/octet-stream")
         key = io.blob_writer(response, str(params.get("fileId") or "download"), mime)

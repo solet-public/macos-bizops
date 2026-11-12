@@ -125,7 +125,6 @@ def _rendered_files(request: AdapterRequest) -> dict[Path, tuple[str, int]]:
         "{{HYDRATION_DATE}}": datetime.now(UTC).date().isoformat(),
         "{{BACKUP_PATH}}": "managed-by-executable-hydration",
         "{{MARKETPLACE_NAME}}": marketplace,
-        "{{GIT_CONTROLLER_NAME}}": str(request.public_inputs.get("git_controller_name", "")),
     }
     shell_values = {**values, "{{CLONE_DIR_ZSH}}": _zsh_quote(str(request.target))}
     mapping = {
@@ -149,7 +148,7 @@ def _rendered_files(request: AdapterRequest) -> dict[Path, tuple[str, int]]:
     if "codex" not in selected_coding_agents(request):
         del mapping["codex_launcher.template"]
         del mapping["codex_marketplace_json.template"]
-    if values["{{GIT_CONTROLLER_NAME}}"]:
+    if request.public_inputs.get("execution_topology") == "fleet":
         mapping["fleet_functions.zsh.template"] = (
             request.target / "client" / f"{request.name}-fleet.zsh",
             0o644,
@@ -170,7 +169,7 @@ def _rendered_files(request: AdapterRequest) -> dict[Path, tuple[str, int]]:
 
 def render_claude_marketplace(marketplace: str) -> str:
     """The ``.claude-plugin/marketplace.json`` hydration writes; the update's registration reuses it (iss_c9a7b626)."""
-    values = {"{{MARKETPLACE_NAME}}": marketplace, "{{GIT_CONTROLLER_NAME}}": ""}
+    values = {"{{MARKETPLACE_NAME}}": marketplace}
     return _render_template("marketplace_json.template", values, values)
 
 
@@ -178,8 +177,6 @@ def _render_template(template_name: str, values: dict[str, str], shell_values: d
     if template_name.endswith(".json.template"):
         return _render_json(_TEMPLATES / template_name, values)
     content = _render(_TEMPLATES / template_name, shell_values)
-    if not values["{{GIT_CONTROLLER_NAME}}"]:
-        content = "\n".join(line for line in content.splitlines() if "GIT_CONTROLLER_NAME=" not in line) + "\n"
     if template_name in _STAMPED_SHELL_TEMPLATES:
         content = _stamped(content, template_name)
     return content

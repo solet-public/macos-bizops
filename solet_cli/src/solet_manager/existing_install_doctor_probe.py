@@ -33,7 +33,26 @@ from .update_candidate import UpdateCandidate
 from .update_runtime_plan import PlanContext, RuntimeSeams, declared_closure_for, decode_facts, operation_request, public_inputs_for
 from .update_topology import executed_code_overlap
 
-__all__ = ["STALE_ARTIFACT_STATES", "VERIFIED_ARTIFACT_STATES", "DoctorProbe", "Section", "artifact_check", "artifact_facts", "check", "executed_code_overlap_paths", "executed_code_unknown_reason", "executed_code_verifiable", "not_applicable", "operation_by_ref", "probe_status", "run_probes", "unbound_reason", "unknown", "unknown_section", "verdict"]
+__all__ = [
+    "STALE_ARTIFACT_STATES",
+    "VERIFIED_ARTIFACT_STATES",
+    "DoctorProbe",
+    "Section",
+    "artifact_check",
+    "artifact_facts",
+    "check",
+    "executed_code_overlap_paths",
+    "executed_code_unknown_reason",
+    "executed_code_verifiable",
+    "not_applicable",
+    "operation_by_ref",
+    "probe_status",
+    "run_probes",
+    "unbound_reason",
+    "unknown",
+    "unknown_section",
+    "verdict",
+]
 
 VERIFIED_ARTIFACT_STATES = frozenset({"stamped_current"})
 STALE_ARTIFACT_STATES = frozenset({"stamped_previous", "legacy_matched"})
@@ -224,10 +243,31 @@ def _refresh_only_check(check_id: str, artifact_id: str, facts: dict[str, str], 
     return check(check_id, DiagnosticStatus.VERIFIED, f"Managed artifact {artifact_id} is {state}: it is refresh-only, so it was left as it is and never overwritten.", source, observed=observed, expected="stamped_current_or_left_in_place")
 
 
+def _retired_assignments_check(check_id: str, artifact_id: str, facts: dict[str, str], source: str) -> DiagnosticCheck | None:
+    """Removal evidence verifies absence, without claiming a template render."""
+    if facts.get("verification_scope") != "retired_controller_assignments":
+        return None
+    if (facts.get("state"), facts.get("action"), facts.get("conflict")) != (
+        "verified",
+        "none",
+        "none",
+    ):
+        return None
+    observed: dict[str, JsonValue] = dict(facts)
+    return check(
+        check_id,
+        DiagnosticStatus.VERIFIED,
+        f"Managed artifact {artifact_id} has no retired controller assignments; its other bytes are preserved.",
+        source,
+        observed=observed,
+        expected="retired_controller_assignments_absent",
+    )
+
+
 def artifact_check(check_id: str, artifact_id: str, facts: dict[str, str] | None, source: str) -> DiagnosticCheck:
     if facts is None:
         return unknown(check_id, f"No probe reported managed artifact {artifact_id}.", source, reason="artifact_unreported")
-    settled = _refresh_only_check(check_id, artifact_id, facts, source)
+    settled = _retired_assignments_check(check_id, artifact_id, facts, source) or _refresh_only_check(check_id, artifact_id, facts, source)
     if settled is not None:
         return settled
     state, conflict = facts.get("state", "unknown"), facts.get("conflict", "none")
@@ -242,5 +282,3 @@ def artifact_check(check_id: str, artifact_id: str, facts: dict[str, str] | None
         # A recognised previous render is not a contradiction: the current render is missing.
         return check(check_id, DiagnosticStatus.MISSING, f"Managed artifact {artifact_id} is {state}; the current render is missing.", source, reason="artifact_stale", repair="hydrate_managed_artifact", observed=observed, expected="stamped_current")
     return check(check_id, DiagnosticStatus.FAILED, f"Managed artifact {artifact_id} is {state}, not the current render.", source, reason="artifact_state_unrecognised", repair="hydrate_managed_artifact", observed=observed, expected="stamped_current")
-
-

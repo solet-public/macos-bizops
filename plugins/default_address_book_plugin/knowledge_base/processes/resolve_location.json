@@ -1,0 +1,7 @@
+{
+  "process_key": "plugin::default_address_book_plugin::resolve_location",
+  "display_name": "Resolve a file location",
+  "description": "The registered call returns a queued job receipt with job_id and status. Read the complete original outcome from service_interface::job_service::get_job using that exact job_id; admission is not operation completion. Choose where to save a file: an explicit directory, then a path address matching project:<name> and file_kind:<kind>, then the session launch directory when available, then solet_home. Project and file-kind values are trimmed and lower-case. Register a path address with one path entry to save a project location; update corrects tags, update_entry corrects the directory, and delete removes it. Deleting solet_home restores the computed Documents default with an advisory. Paths overlapping the solet installation are skipped during resolution. Returns directory, rung, address_name, advisories and writable from a write probe in the solet process. Missing locations and denied filesystem access are advisories. Large exports use solet_home/Exports.nosync. The launch directory is caller context, never a verb argument; until capture is available, resolution reports it missing.",
+  "embedding_description": "Where will you save this file? Resolve a project folder, explicit path, session directory or solet home in Documents; check writability and explain fallback advisories. Save reports for Acme in a registered project:acme file_kind:report path address.",
+  "processor_policy_category": "edge"
+}

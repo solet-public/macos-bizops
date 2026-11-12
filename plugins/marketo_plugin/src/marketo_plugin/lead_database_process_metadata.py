@@ -40,7 +40,7 @@ JOB_HANDLE_SCHEMA: Final[ReturnValueSchema] = ReturnValueSchema(
 _OUTPUT_TSV_PATH: Final[ParameterMetadata] = ParameterMetadata(
     type=ParameterType.STRING,
     required=True,
-    description="ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry.",
+    description="ABSOLUTE .tsv destination path, contained under a registered path address.",
 )
 _API_NAME: Final[ParameterMetadata] = ParameterMetadata(
     type=ParameterType.STRING,

@@ -118,6 +118,8 @@ class ContractReconciliation:
     operation_statuses_to_reset: tuple[str, ...] = ()
     first_use_inactive_probe_migrations: tuple[FirstUseInactiveProbeMigration, ...] = ()
     answer_value_migrations: tuple[AnswerValueMigration, ...] = ()
+    retired_decision_ids: tuple[str, ...] = ()
+    retired_public_input_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,18 +192,14 @@ def _parse_reconciliation(value: JsonValue) -> ContractReconciliation:
     if len({item.source for item in parsed_mappings}) != len(parsed_mappings):
         raise ContractError("contract reconciliation source stage-probe mappings must be unique")
     if len({item.destination for item in parsed_mappings}) != len(parsed_mappings):
-        raise ContractError(
-            "contract reconciliation destination stage-probe mappings must be unique"
-        )
+        raise ContractError("contract reconciliation destination stage-probe mappings must be unique")
     parsed_first_use_migrations = parse_first_use_inactive_probe_migrations(
         entry["first_use_inactive_probe_migrations"],
         migration_id=migration_id,
         source_digest=source[2],
         destination_digest=destination[1],
     )
-    operation_statuses_to_reset = parse_operation_statuses_to_reset(
-        entry["operation_statuses_to_reset"]
-    )
+    operation_statuses_to_reset = parse_operation_statuses_to_reset(entry["operation_statuses_to_reset"])
     answer_value_migrations = parse_answer_value_migrations(entry["answer_value_migrations"])
     return ContractReconciliation(
         migration_id=migration_id,
@@ -213,7 +211,19 @@ def _parse_reconciliation(value: JsonValue) -> ContractReconciliation:
         operation_statuses_to_reset=operation_statuses_to_reset,
         first_use_inactive_probe_migrations=parsed_first_use_migrations,
         answer_value_migrations=answer_value_migrations,
+        retired_decision_ids=_retired_answer_ids(entry["retired_decision_ids"], "decision"),
+        retired_public_input_ids=_retired_answer_ids(entry["retired_public_input_ids"], "public input"),
     )
+
+
+def _retired_answer_ids(value: JsonValue, kind: str) -> tuple[str, ...]:
+    """Parse an explicit, unique retirement list; omitted lists retire nothing."""
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+        raise ContractError(f"retired {kind} ids must be an array of non-empty strings")
+    values = cast(tuple[str, ...], tuple(value))
+    if len(set(values)) != len(values):
+        raise ContractError(f"retired {kind} ids must be unique")
+    return values
 
 
 def _manifest_identity(
@@ -229,10 +239,7 @@ def _manifest_identity(
         raise ContractError(f"contract reconciliation {label} identity values are invalid")
     digest = values[-1]
     if not isinstance(digest, str) or re.fullmatch(RECONCILIATION_DIGEST_PATTERN, digest) is None:
-        raise ContractError(
-            f"contract reconciliation {label} flow_contract_digest must be sha256 followed by "
-            "64 lowercase hexadecimal characters"
-        )
+        raise ContractError(f"contract reconciliation {label} flow_contract_digest must be sha256 followed by 64 lowercase hexadecimal characters")
     return cast(tuple[str, ...], values)
 
 
@@ -253,11 +260,7 @@ def _stage_probe_identity(value: JsonValue) -> tuple[str, str, str]:
         value["boundary"],
         value["probe_id"],
     )
-    if (
-        not isinstance(stage_id, str)
-        or boundary not in {"entry", "exit"}
-        or not isinstance(probe_id, str)
-    ):
+    if not isinstance(stage_id, str) or boundary not in {"entry", "exit"} or not isinstance(probe_id, str):
         raise ContractError("contract reconciliation stage-probe identity values are invalid")
     return stage_id, boundary, probe_id
 
@@ -289,15 +292,9 @@ class StartupReadinessBudget:
         consumer_probe_ref: str,
     ) -> dict[str, JsonValue]:
         if consumer_probe_purpose not in self.consumer_probe_purposes:
-            raise ContractError(
-                "executor_contracts.start_command.startup_readiness does not "
-                f"govern {consumer_probe_purpose!r}"
-            )
+            raise ContractError(f"executor_contracts.start_command.startup_readiness does not govern {consumer_probe_purpose!r}")
         if consumer_probe_ref not in self.consumer_probe_refs:
-            raise ContractError(
-                "executor_contracts.start_command.startup_readiness does not "
-                f"govern probe {consumer_probe_ref!r}"
-            )
+            raise ContractError(f"executor_contracts.start_command.startup_readiness does not govern probe {consumer_probe_ref!r}")
         return {
             "startup_readiness_contract_version": self.contract_version,
             "startup_readiness_contract_digest": self.contract_digest,
@@ -361,12 +358,8 @@ class ContractBundle:
         digest = contract_digest(root)
         if expected_digest is not None and digest != expected_digest:
             raise ContractError(
-                "pinned setup contract identity mismatch: "
-                f"recorded={expected_digest}, observed={digest}",
-                repair=(
-                    "Restore the managed target's recorded release bytes; do not "
-                    "resume it under formula contracts from another release."
-                ),
+                f"pinned setup contract identity mismatch: recorded={expected_digest}, observed={digest}",
+                repair=("Restore the managed target's recorded release bytes; do not resume it under formula contracts from another release."),
             )
         flow = loaded["macos_setup_flow.json"]
         if resume_compatibility:
@@ -455,7 +448,6 @@ class ContractBundle:
         )
 
 
-
 def knowledge_readiness_budget(bundle: ContractBundle) -> int:
     """Return the separately declared parent timeout for knowledge stage exit."""
     # Older pinned schemas use the ordinary boundary timeout. A schema that
@@ -468,6 +460,7 @@ def knowledge_readiness_budget(bundle: ContractBundle) -> int:
     source = "executor_contracts.knowledge_readiness"
     readiness = _json_object(_object(bundle.flow, "executor_contracts").get("knowledge_readiness"), source)
     return _integer(readiness, "timeout_seconds", source)
+
 
 def startup_readiness_budget(bundle: ContractBundle) -> StartupReadinessBudget:
     """Return validated startup-readiness authority and consumer lineage."""
@@ -558,14 +551,9 @@ def _require_contract_files(
     if not missing:
         return
     rendered_missing = ", ".join(missing)
-    repair = (
-        "Reinstall the formula contracts."
-        if origin == "production"
-        else "Pass a reviewed development contract directory containing the complete bundle."
-    )
+    repair = "Reinstall the formula contracts." if origin == "production" else "Pass a reviewed development contract directory containing the complete bundle."
     raise ContractError(
-        f"{origin} setup contract directory is incomplete at {directory}; "
-        f"missing: {rendered_missing}",
+        f"{origin} setup contract directory is incomplete at {directory}; missing: {rendered_missing}",
         repair=repair,
     )
 
@@ -641,16 +629,10 @@ def _normalize_legacy_resume_flow_v1(
     if not _is_known_legacy_resume_shape(flow):
         return flow
     normalized = deepcopy(flow)
-    normalized_operations = cast(
-        dict[str, dict[str, dict[str, JsonValue]]], normalized["operations"]
-    )
+    normalized_operations = cast(dict[str, dict[str, dict[str, JsonValue]]], normalized["operations"])
     normalized_decisions = cast(dict[str, dict[str, dict[str, JsonValue]]], normalized["decisions"])
-    normalized_operations["install_python_runtime"]["idempotency"]["postcondition_probe_refs"] = [
-        "python_version_valid"
-    ]
-    normalized_operations["install_postgresql"]["idempotency"]["postcondition_probe_refs"] = [
-        "postgres_binary_version_valid"
-    ]
+    normalized_operations["install_python_runtime"]["idempotency"]["postcondition_probe_refs"] = ["python_version_valid"]
+    normalized_operations["install_postgresql"]["idempotency"]["postcondition_probe_refs"] = ["postgres_binary_version_valid"]
     normalized_operations["install_postgresql"]["idempotency"]["precondition_probe_refs"] = [
         "postgres_binary_version_valid",
         "postgres_ready",
@@ -665,23 +647,15 @@ def _normalize_legacy_resume_flow_v1(
         "fresh_shell_path_valid",
         "fresh_shell_python_valid",
     ]
-    normalized_operations["configure_lm_studio_embeddings"]["idempotency"][
-        "precondition_probe_refs"
-    ] = ["embedding_request_succeeds"]
-    normalized_operations["configure_lm_studio_inference"]["idempotency"][
-        "precondition_probe_refs"
-    ] = []
-    normalized_operations["configure_lm_studio_inference"]["idempotency"][
-        "postcondition_probe_refs"
-    ] = []
+    normalized_operations["configure_lm_studio_embeddings"]["idempotency"]["precondition_probe_refs"] = ["embedding_request_succeeds"]
+    normalized_operations["configure_lm_studio_inference"]["idempotency"]["precondition_probe_refs"] = []
+    normalized_operations["configure_lm_studio_inference"]["idempotency"]["postcondition_probe_refs"] = []
     candidate_contract = cast(
         dict[str, JsonValue],
         normalized_decisions["inference_model"]["option_source"]["candidate_contract"],
     )
     candidate_contract["qualification_probe_refs"] = []
-    normalized_operations["open_background_items_settings"]["idempotency"][
-        "postcondition_probe_refs"
-    ] = []
+    normalized_operations["open_background_items_settings"]["idempotency"]["postcondition_probe_refs"] = []
     return normalized
 
 

@@ -36,30 +36,54 @@ Exits 0 on success, 1 on first failure.
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import NonCallableMagicMock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta/src"))
+import tempfile  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+from ananta.file_locations.containment import PathRefusedError, assert_path_allowed, derive_allowed_roots  # noqa: E402
+from ananta.file_locations.resolution import PathAddress, SoletTree  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "snowflake_plugin" / "src"))
 
 from snowflake_plugin import query_actions  # noqa: E402
-from snowflake_plugin.constants import (  # noqa: E402
-    CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
-    DEFAULT_ROW_LIMIT,
-    EXPORT_ROW_CAP,
-    MAX_ROWS_HARD_CAP,
-    PARAM_ACKNOWLEDGE_OVERRIDE,
-    PARAM_ROW_LIMIT,
-)
-from snowflake_plugin.export_containment import (  # noqa: E402
-    ExportPathRefusedError,
-    assert_export_path_allowed,
-)
+from snowflake_plugin.constants import DEFAULT_ROW_LIMIT, EXPORT_ROW_CAP, MAX_ROWS_HARD_CAP, PARAM_ACKNOWLEDGE_OVERRIDE, PARAM_ROW_LIMIT  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
+
+
+_LOCATION_ROOT = Path(__file__).resolve().parents[3]
+_LOCATION_TREE = SoletTree(_LOCATION_ROOT, _LOCATION_ROOT / "profile")
+
+
+def _checked_path(path: str, directories: list[str], *, suffix: str | None = ".tsv", param_name: str = "output_tsv_path", reading: bool = False) -> str:
+    """Exercise real address-derived containment, never a mocked boundary."""
+    addresses = [PathAddress(f"project-{index}", Path(directory), frozenset(), frozenset(), datetime.now(UTC)) for index, directory in enumerate(directories)]
+    roots = derive_allowed_roots(addresses, None, _LOCATION_TREE, _LOCATION_ROOT.parent / "test-solet-files")
+    result = assert_path_allowed(path, roots, _LOCATION_TREE, suffix=suffix, param_name=param_name, plugin_name="test")
+    if reading and not Path(result.value).is_file():
+        raise PathRefusedError(f"{param_name} must name an existing regular file")
+    return result.value
+
+
+def _bind_locations(plugin: Any, directories: list[str]) -> NonCallableMagicMock:
+    """Supply a live address-book service through the production binding."""
+    orchestrator = NonCallableMagicMock()
+    orchestrator.APP_HOME = str(_LOCATION_TREE.app_home)
+    orchestrator.plugin_manager.get_plugin.return_value = None
+    orchestrator.get_service.return_value.list_path_addresses.return_value = {
+        "action_status": "completed",
+        "data": {"addresses": [{"name": f"project-{index}", "tags": [], "updated_at": datetime.now(UTC).isoformat(), "entries": [{"field_type": "path", "value": directory}]} for index, directory in enumerate(directories)]},
+    }
+    plugin.orchestrator_ref = orchestrator
+    return orchestrator
 
 
 def _assert(label: str, cond: bool, msg: str = "") -> None:
@@ -93,12 +117,7 @@ def _gate_for(roots: list[str]) -> Any:
     """The REAL containment gate bound to the given allowed roots."""
 
     def gate(output_tsv_path: str) -> str:
-        return assert_export_path_allowed(
-            output_tsv_path,
-            roots,
-            config_key=CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
-            plugin_name="snowflake_plugin",
-        )
+        return _checked_path(output_tsv_path, roots, suffix=".tsv", param_name="output_tsv_path", reading=False)
 
     return gate
 
@@ -119,7 +138,9 @@ def test_run_query_default_stops_at_default() -> None:
     with tempfile.TemporaryDirectory(prefix="snw_rq_default_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
         result = query_actions.run_query(
-            conn, {"sql": "SELECT id FROM t", "output_tsv_path": out_path}, _gate_for([workspace]),
+            conn,
+            {"sql": "SELECT id FROM t", "output_tsv_path": out_path},
+            _gate_for([workspace]),
         )
         _assert(
             "run_query default stops at DEFAULT_ROW_LIMIT",
@@ -231,7 +252,9 @@ def test_export_query_default_stops_at_default() -> None:
     with tempfile.TemporaryDirectory(prefix="snw_eq_default_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
         result = query_actions.export_query(
-            conn, {"sql": "SELECT id FROM t", "output_tsv_path": out_path}, _gate_for([workspace]),
+            conn,
+            {"sql": "SELECT id FROM t", "output_tsv_path": out_path},
+            _gate_for([workspace]),
         )
         _assert(
             "export_query default (no override) also stops at DEFAULT_ROW_LIMIT",
@@ -318,7 +341,8 @@ def test_export_gate_binds_via_initialize() -> None:
 
     with tempfile.TemporaryDirectory(prefix="snw_gate_smoke_") as workspace:
         plugin = SnowflakePlugin()
-        plugin.initialize({CONFIG_KEY_EXPORT_ALLOWED_ROOTS: [workspace]})
+        plugin.initialize({})
+        _bind_locations(plugin, [workspace])
         admitted = plugin._export_path_gate(str(Path(workspace) / "out.tsv"))
         _assert(
             "initialize() binds config; configured root admits the path",
@@ -379,7 +403,7 @@ def test_export_refused_outside_root() -> None:
                 {"sql": "SELECT id FROM t", "output_tsv_path": out_path},
                 _gate_for([workspace]),
             )
-        except ExportPathRefusedError as exc:
+        except PathRefusedError as exc:
             raised = exc
         _assert("outside-root path is refused", raised is not None)
         _assert("no file written on refusal", not Path(out_path).exists())
@@ -390,47 +414,27 @@ def test_export_refused_outside_root() -> None:
 
 
 def test_export_refused_empty_roots() -> None:
-    conn = _fake_conn(["id"], [(1,)])
-    raised = None
-    try:
-        query_actions.export_query(
-            conn,
-            {"sql": "SELECT id FROM t", "output_tsv_path": "/tmp/anywhere.tsv"},
-            _gate_for([]),
-        )
-    except ExportPathRefusedError as exc:
-        raised = exc
-    _assert("empty export_allowed_roots refuses (refuse-all default)", raised is not None)
-    _assert(
-        "refusal names the config key",
-        raised is not None and CONFIG_KEY_EXPORT_ALLOWED_ROOTS in str(raised),
-    )
+    with tempfile.TemporaryDirectory() as directory:
+        home = Path(directory).resolve() / "home"
+        roots = derive_allowed_roots([], None, _LOCATION_TREE, home)
+        result = assert_path_allowed(str(home / "Exports.nosync/out.tsv"), roots, _LOCATION_TREE, suffix=".tsv", param_name="output_tsv_path", plugin_name="test")
+        _assert("empty address book admits computed exports folder", result.value == str(home / "Exports.nosync/out.tsv"))
+        _assert("computed default carries an advisory", bool(result.advisories))
 
 
 def test_export_refused_misconfigured_roots() -> None:
-    # Codex-proven hole (2026-07-15 Wave-2 review): a RELATIVE configured root
-    # realpaths against the SERVER process cwd and admitted paths under it; a
-    # BLANK root realpaths TO the cwd. Both must be refused as config faults.
-    conn = _fake_conn(["id"], [(1,)])
-    cwd_relative_target = str(Path.cwd() / "relative-root" / "out.tsv")
-    for bad_roots, label in (
-        (["relative-root"], "relative configured root is refused"),
-        ([""], "blank configured root is refused"),
-    ):
-        raised = None
-        try:
-            query_actions.export_query(
-                conn,
-                {"sql": "SELECT id FROM t", "output_tsv_path": cwd_relative_target},
-                _gate_for(bad_roots),
-            )
-        except ExportPathRefusedError as exc:
-            raised = exc
-        _assert(label, raised is not None)
-        _assert(
-            f"{label}: message names the offending entry as misconfigured",
-            raised is not None and "misconfigured" in str(raised),
-        )
+    with tempfile.TemporaryDirectory() as directory:
+        home = Path(directory).resolve() / "home"
+        for raw in ("relative-root", ""):
+            addresses = [PathAddress("malformed", Path(raw), frozenset(), frozenset(), datetime.now(UTC))]
+            roots = derive_allowed_roots(addresses, None, _LOCATION_TREE, home)
+            _assert("malformed address is disclosed", any("malformed" in message for message in roots.advisories))
+            raised = False
+            try:
+                assert_path_allowed(str(Path(directory).resolve() / "outside.tsv"), roots, _LOCATION_TREE, suffix=".tsv", param_name="output_tsv_path", plugin_name="test")
+            except PathRefusedError as exc:
+                raised = "path address" in str(exc)
+            _assert("malformed address never authorizes another folder", raised)
 
 
 def test_export_refused_relative_path() -> None:
@@ -443,7 +447,7 @@ def test_export_refused_relative_path() -> None:
                 {"sql": "SELECT id FROM t", "output_tsv_path": "exports/out.tsv"},
                 _gate_for([workspace]),
             )
-        except ExportPathRefusedError:
+        except PathRefusedError:
             raised = True
         _assert("relative output_tsv_path is refused", raised)
 
@@ -458,7 +462,7 @@ def test_export_refused_wrong_suffix() -> None:
                 {"sql": "SELECT id FROM t", "output_tsv_path": str(Path(workspace) / "out.csv")},
                 _gate_for([workspace]),
             )
-        except ExportPathRefusedError:
+        except PathRefusedError:
             raised = True
         _assert("non-.tsv suffix is refused", raised)
 
@@ -479,7 +483,24 @@ def test_export_missing_parent_raises() -> None:
         _assert("missing parent directory raises ValueError", raised)
 
 
+def test_address_root_replaces_config() -> None:
+    """A live address authorizes exports without a connector root setting."""
+    from snowflake_plugin.plugin import SnowflakePlugin
+
+    with tempfile.TemporaryDirectory() as directory:
+        plugin = SnowflakePlugin()
+        plugin.initialize({})
+        orchestrator = MagicMock()
+        orchestrator.APP_HOME = str(REPO_ROOT / "profile")
+        orchestrator.get_service.return_value.list_path_addresses.return_value = {"action_status": "completed", "data": {"addresses": [{"name": "project", "tags": [], "updated_at": "2026-11-08T00:00:00+00:00", "entries": [{"field_type": "path", "value": directory}]}]}}
+        orchestrator.plugin_manager.get_plugin.return_value = None
+        plugin.orchestrator_ref = orchestrator
+        path = str(Path(directory).resolve() / "out.tsv")
+        _assert("live path address authorizes export without connector config", plugin._export_path_gate(path) == path)
+
+
 def main() -> int:
+    test_address_root_replaces_config()
     print("\nsnowflake_plugin data-export/override smoke tests")
     print("=" * 52)
     test_run_query_default_stops_at_default()

@@ -1,13 +1,10 @@
 {
-  "action_status": "completed",
-  "data_contains": {
-    "deleted_memories": true,
-    "deleted_memorizations": true,
-    "deleted_vectors": true,
-    "purged": true
-  },
-  "output_not_contains": [
-    "error"
+  "action_status_any": [
+    "completed"
+  ],
+  "output_contains_any": [
+    "job_id",
+    "queued"
   ],
   "timeout_seconds": 120
 }

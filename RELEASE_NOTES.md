@@ -2,6 +2,59 @@
 
 Newest release first. Earlier releases follow below the divider.
 
+## 2026-11-10 — r73: faster job admission, safer credential use, broader connectors, tracked work folders, and simpler bridge results
+
+**Solet Manager manager-v0.1.0-r73.**
+
+### Jobs and bridge calls
+
+- Plugin operations that may take time now return a job receipt promptly while their work runs in an owned worker. Poll the returned job for its result or error.
+- This covers selected connector, media, memory, knowledge, scheduling, messaging, deployment, blob, vector, embedding, thinking, and vault operations.
+- HTTP plugin requests and blocking subprocess operations use the same job receipt pattern; synchronous library calls remain available where callers need an immediate value.
+- A bridge call now waits for a queued operation's completed result by default, including when output is piped or redirected. Use `--no-wait` when you want the job handle immediately.
+- Bridge consumers and registered deployments wait for completed jobs, so follow-on work receives the operation outcome.
+- Job admission keeps the public receipt small and retains full inputs with the worker; an uncertain worker outcome does not replay an operation that may already have taken effect.
+- A client without channel notifications can read the result of a long-running call: process_result now follows the job receipt.
+- Concurrent bridge calls keep their registered job flow and waiter metadata, so each call receives its own operation outcome.
+
+### Credentials and vault
+
+- Resolved credentials stay inside the SoundCloud and knowledge-base Git consumers. Authenticated clone and fetch keep a public origin URL and pass credentials to Git through a dedicated helper.
+- SoundCloud bootstrap resolves its app secret where it is used and creates a fresh local recipient key for encrypted export.
+- Vault credential, host, crypto, and administrative operations that can take time now return job receipts while secret operands remain in the worker.
+- Vault callers that need an immediate answer for existence, storage, rotation, or encrypted export retain that synchronous behavior.
+- Connected-account operations keep caller credentials out of returned content, job records, and diagnostic output across Gmail, Calendar, Jira, Zuora, Marketo, Snowflake, and other connector paths.
+- Gmail settings and sharing operations now use connected accounts across their full registered method set.
+- Vault bootstrap guidance now describes credential use without exposing resolved values to a session.
+
+### Connector capabilities
+
+- Snowflake supports contained local stage-file transfers, stage listing and removal, and COPY operations for tables and locations.
+- Google Calendar accepts API-wide parameters on its verbs, including partial-response options, alongside method-specific parameters.
+- Google Docs, Sheets, and Slides expose typed background operations through connected Google accounts.
+- Jira supports multi-site authentication and broader planning API operations.
+- Zuora adds create, read, correction, and terminal actions across product, rate-plan, charge, definition, and catalog-group families.
+- Marketo adds multipart Files and image operations plus typed bulk import and extract job lifecycles.
+- Salesforce adds typed Metadata deployment and Files operations, with expanded REST and Tooling coverage.
+- PostgreSQL operations now include scripts, COPY, dump and restore, activity and statistics, and writes allowed by the configured database role.
+- Blob lookups accept bare identifiers through the filesystem provider, alongside existing addressed paths.
+
+### Files, updates, and work folders
+
+- File locations can use explicit, project, session, or solet-home addresses. Live address listing and overlap checks help keep saved locations distinct.
+- Solet-home hydration carries configured addresses and connector export locations through setup.
+- Fresh-install and update checks include path-address readback, retained configuration and export hashes, and a second update for idempotence.
+- Protected-folder and platform-specific location guidance gives callers an advisory when a chosen location may need attention.
+
+### Reliability
+
+- Knowledge activity, scheduler registry walks, and embedding generation move slow work off the request path while preserving completed results for polling.
+- The session ledger no longer writes a second copy of the same event text, and a session file that cannot be parsed is recorded once instead of being retried on every poll.
+
+### Coordination hooks
+
+- Coordination hooks 0.9.0 and later no longer include a git gate.
+
 ## 2026-11-07 — r72: a solet on stable r71 can update; connectors reach the full vendor surface; Codex is optional; no plugin work runs on the event loop; adopter-reported install and update fixes
 
 **Solet Manager manager-v0.1.0-r72.**

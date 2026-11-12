@@ -192,6 +192,9 @@ _BRIDGE_ERROR_STATUS: Final[dict[str, int]] = {
     "bridge.attachment_missing": 400,
     "bridge.invalid_process_key": 400,
     "bridge.process_not_allowed": 403,
+    "bridge.waiter_owner_mismatch": 403,
+    "bridge.job_not_found": 404,
+    "bridge.waiter_release_conflict": 409,
 }
 
 
@@ -211,6 +214,7 @@ class OpenBridgeBody(BaseModel):
 
     parent_pid: int | None = None
     caller_agent_session_id: str = ""
+    launch_directory: dict[str, str] | None = None
 
 
 class ProcessSearchBody(BaseModel):
@@ -226,6 +230,7 @@ class ProcessCallBody(BaseModel):
     process_key: str
     arguments: dict[str, Any]
     reason: str | None = None
+    bridge_wait_attached: bool = False
 
 
 class PeerRegisterBody(BaseModel):
@@ -491,6 +496,7 @@ def _register_bridge_lifecycle_routes(
             # identity is derived server-side from the REGISTERED binding this key
             # resolves to, at trigger-data-build time.
             bridge.caller_agent_session_id = body.caller_agent_session_id.strip()
+            bridge.launch_directory = dict(body.launch_directory) if body.launch_directory is not None else None
             return bridge
 
         bridge = await run_bridge_work(_open_blocking)
@@ -623,6 +629,7 @@ def _register_platform_surface_routes(
     async def process_result_route(
         bridge_id: str,
         action_id: str,
+        follow_job: bool = False,
     ) -> JSONResponse:
         record_handler_entry("route::agent_messaging_plugin::process_result_route", "route")
         _ = bridge_id
@@ -630,7 +637,13 @@ def _register_platform_surface_routes(
             _process_result_blocking,
             platform_surface,
             action_id,
+            follow_job,
         )
+
+    @app.post(f"{API_PREFIX}/{{bridge_id}}/job/{{job_id}}/waiter/release")
+    async def release_job_waiter_route(bridge_id: str, job_id: str) -> JSONResponse:
+        record_handler_entry("route::agent_messaging_plugin::release_job_waiter_route", "route")
+        return await run_bridge_work(_release_job_waiter_blocking, platform_surface, bridge_id, job_id)
 
     @app.get(f"{API_PREFIX}/{{bridge_id}}/download/{{blob_id}}")
     async def download_route(
@@ -692,6 +705,8 @@ def _process_call_blocking(
     }
     if body.reason is not None:
         trigger_data["reason"] = body.reason
+    if body.bridge_wait_attached:
+        trigger_data["bridge_wait_attached"] = True
     try:
         payload = platform_surface.process_call(
             process_key=body.process_key,
@@ -703,12 +718,21 @@ def _process_call_blocking(
     return JSONResponse(content=payload, status_code=200)
 
 
+def _release_job_waiter_blocking(platform_surface: PlatformSurface, bridge_id: str, job_id: str) -> JSONResponse:
+    try:
+        payload = platform_surface.release_job_waiter(job_id=job_id, bridge_id=bridge_id)
+    except BridgeError as exc:
+        return _bridge_error_response(exc)
+    return JSONResponse(content=payload)
+
+
 def _process_result_blocking(
     platform_surface: PlatformSurface,
     action_id: str,
+    follow_job: bool,
 ) -> JSONResponse:
     try:
-        payload = platform_surface.process_result(action_id=action_id)
+        payload = platform_surface.process_result(action_id=action_id, follow_job=follow_job)
     except BridgeError as exc:
         return _bridge_error_response(exc)
     return JSONResponse(content=payload, status_code=200)

@@ -588,7 +588,7 @@ dead coordination, and only this line distinguishes that from a healthy install.
 
 Requirement 3 is satisfied by the launcher that step 2 installed on the user's machine. With the accepted zshrc (new terminal window, or `source ~/.zshrc`), the command `claude-<name>` is on PATH; declined, the absolute path form works identically. Optional arguments: a session label (default `Operator`), then a model alias, then an effort level. The launcher exports the session-label and stable session-id environment variables and execs `claude --name <label>`, which is what makes the session properly named in both Claude Code and the solet's peer registry.
 
-The Claude desktop app is also a supported client. Open the session in the clone directory. A desktop or hand-started session without launcher variables gets a durable identity of its own, persisted per Claude session id and shared by its hooks, its `<name>` CLI and its MCP bridge. Its SessionStart context names that identity, and `<name> watch --role <Role>`, run in the background, claims a role from the CLI alone. The agent-messaging article "Claude desktop app and hand-started Claude Code sessions" has the details.
+Start the launcher from the project folder where you want files saved. It records that folder in `SOLET_LAUNCH_DIRECTORY` before entering the clone for project settings. The Claude desktop app is also a supported client. A desktop session opened in the clone, or a launcher started there or in a folder containing it, uses `solet_home` and advises how to launch from a project folder. Older launchers should be refreshed through step 2; bridges without the variable mark their own working directory as `cwd_fallback`. A desktop or hand-started session without launcher variables gets a durable identity of its own, persisted per Claude session id and shared by its hooks, its `<name>` CLI and its MCP bridge. Its SessionStart context names that identity, and `<name> watch --role <Role>`, run in the background, claims a role from the CLI alone. The agent-messaging article "Claude desktop app and hand-started Claude Code sessions" has the details.
 
 ## Step 4a — offer: multi-role fleet coordination (optional)
 
@@ -649,16 +649,15 @@ clone's `.claude/settings.json`, that is a pre-ruling install: migrate them to
 user scope per Step 2 rather than debugging why fleet sessions get no
 role-reclaim prompt.
 
-Everything through Step 4 gives the operator ONE properly-named session. Some operators want to run SEVERAL Claude Code (and/or Codex) sessions concurrently against the same solet, each independently addressable — a coordinator session, a session that owns all git mutations, an architect/reviewer session, worker sessions. This is exactly the pattern this platform's own development runs on (see this repo's own `.zshrc` and `.claude/settings.json` for a live, battle-tested example — `claude-coordinator-dawn`, `claude-git-controller`, `claude-architect`, and so on). Offer this explicitly; do not build it unasked, and do not build it as part of the Step 2 baseline.
+Everything through Step 4 gives the operator ONE properly-named session. Some operators want to run SEVERAL Claude Code (and/or Codex) sessions concurrently against the same solet, each independently addressable — a coordinator session, an architect/reviewer session, worker sessions. This is exactly the pattern this platform's own development runs on (see this repo's own `.zshrc` and `.claude/settings.json` for a live, battle-tested example — `claude-coordinator-dawn`, `claude-architect`, and so on). Offer this explicitly; do not build it unasked, and do not build it as part of the Step 2 baseline.
 
 **Ask first, don't prescribe.** "Do you want to run just one session with {{SOLET_NAME}}, or several at once, each with its own role?" If several: "How many, and what should each be called?" Offer this platform's own roster as a concrete starting point, scaled to what the operator actually needs — most operators need far fewer than this repo's ~14 roles:
 
 - A **coordinator** role (drives the work, delegates, holds the plan).
-- A **git-controller** role, if more than one session will edit files in the same clone — see the git-safety paragraph below for why this matters.
 - An **architect** or **reviewer** role, if the operator wants a second opinion / design-ruling session distinct from the one doing the work.
 - Plain worker roles (`worker-1`, `worker-2`, ...) for parallel task lanes.
 
-Let the operator pick names and count; do not invent roles they did not ask for.
+Let the operator pick names and count; do not invent roles they did not ask for. There is no git-controller role to offer: if more than one session will edit files in the same clone, give each its own worktree instead (see the git-safety paragraph below).
 
 **What accepting builds.** Render `fleet_functions.zsh.template` to `<clone>/client/{{SOLET_NAME}}-fleet.zsh` and add `source "<clone>/client/{{SOLET_NAME}}-fleet.zsh"` to `<clone>/client/{{SOLET_NAME}}.zsh` (the file Step 2 already installed). The template gives one shared `_claude_for_{{SOLET_NAME}}(role, model, effort)` launcher plus ONE example role function to copy per role the operator chose (a restart variant is included in the same comment block). This is a genuinely different trust level than the Step 2 launcher — read the template's own header comment and carry that reasoning into the conversation with the operator, don't just render it silently:
 
@@ -667,7 +666,11 @@ Let the operator pick names and count; do not invent roles they did not ask for.
 - `--dangerously-skip-permissions` is opt-in and separately gated in the template (an env var the operator sets, not a hardcoded flag). When enabled, it selects the same effective `bypassPermissions` mode as `--permission-mode bypassPermissions`; on installed Claude Code 2.1.243 the two spellings are behaviorally equivalent. Neither spelling retains a permission classifier that the other removes — the background classifier belongs to `auto` mode, not bypass. The fleet flag still matters because the fleet launcher otherwise inherits this machine's resolved permission mode, while the Step 2 single-session launcher explicitly defaults to bypass; enabling the flag may therefore change a fleet session from its inherited mode to bypass, but it is never “more permissive than bypassPermissions.” If a session already in effective `bypassPermissions` is denied, do not switch spellings and call that a repair. Establish the effective mode, capture the exact independent denial, and classify the actual boundary (hook, managed policy, tool availability, OS/sandbox, credential, service, or another evidenced cause). For permission-mode facts, use this evidence order: installed-binary behavior first, current vendor documentation second, and this knowledge-base text last. Do not default the fleet opt-in on.
 - Peer messaging, role binding, AND idle wake come from each session's watcher (armed by the SessionStart hook → rename skill) plus the user-scope `<name> wake` Stop hook — not from any launcher flag — on the default transport. The template's `{{SOLET_NAME}}_FLEET_TRANSPORT` knob (default `watch`) declares the transport per Step 4a's offer paragraph; setting it to `mcp` re-points the rename skill to the MCP bridge and disarms the wake Stop hook via its guard. The optional MCP development-channel flag (`{{SOLET_NAME}}_FLEET_MCP_CHANNELS=1`) is the matching wake half and exists in the template gated OFF; the flag alone is inert (it also needs a registered MCP server via `claude mcp add` AND Anthropic-direct auth — unusable on Bedrock, impossible on an MCP-blocked machine), and it is only for an operator who explicitly asks for MCP and whose policy permits it — never suggest it unprompted.
 
-**Git safety when more than one session shares this deployment directory — no hook arms or checks it.** The coordination-hooks plugin no longer carries a git-text gate (removed in `0.9.0`, operator ruling rul_e71e43be). Hydration does not arm one, and no hook blocks a git mutation from any session. If more than one session will run git commands (commit, push, checkout, stash, branch) against the SAME directory, a stash or checkout from one session can silently clobber another session's in-progress work. Git control among those sessions is the repository's own responsibility (rul_d8893e33): name the one git-mutating role by convention, and tell the operator that no hook enforces it.
+**Git safety when more than one session shares this deployment directory — no hook arms or checks it.** The coordination-hooks plugin no longer carries a git-text gate (removed in `0.9.0`, operator ruling rul_e71e43be). Hydration does not arm one, and no hook blocks a git mutation from any session. If more than one session will run git commands (commit, push, checkout, stash, branch) against the SAME directory, a stash or checkout from one session can silently clobber another session's in-progress work. Git control among those sessions is the repository's own responsibility (rul_d8893e33), and the platform ships no git controller role. Keep each session's work where the others cannot reach it: the operator's own session works in the clone, and every other session works in its own folder or its coding tool's own worktree (Claude Code `--worktree`, Codex `--worktree`). Tell the operator that no hook enforces this. Worktrees still share one stash list and one set of branches, so a stash made in one worktree can be popped from another.
+
+Setup asks no Git-controller question, records no controller-name setting, and
+exports no controller identity. The existing solo/fleet topology choice controls
+whether fleet launchers are materialized.
 
 **Operational guidance: leave sessions running, use `/clear`.** Once a role's session is started, tell the operator to leave it running in its own iTerm2 (or other terminal) tab rather than closing it between conversations. Quitting a session loses its process and its role's live identity until it is manually relaunched; the `/clear` slash command instead resets the conversation while the process (and its stable `AGENT_SESSION_ID`) keeps running — the coordination-hooks plugin's `SessionStart` matcher already covers `clear` (`hooks/hooks.json`, `startup|resume|clear`), so the role-binding reminder fires automatically and the session is addressable again within moments. This is the operational rhythm this platform runs on: long-lived tabs, `/clear` between tasks, restart only when a session is genuinely stuck.
 
@@ -682,50 +685,49 @@ Everything above in Step 4a covers sessions an operator starts by hand. A coordi
 **Zero-risk setup + verify, for the session doing the deploying:**
 1. Run this plugin's own test suite green before trusting any of this (`tests/run_all.py` under the installed/checkout `coordination-hooks` path) — both new hooks and the resolution ladder ship with dedicated smokes; confirm they exist in your own install, not just the source tree.
 2. **The fail-closed/fail-open contracts, stated plainly.** `headless_tool_allowlist_gate.py` ships UNARMED — it only enforces when the spawning call supplied an explicit `allowed_tools` list (`FLEET_HEADLESS_TOOL_ALLOWLIST` set, even to an empty string); an ordinary spawn is unaffected. Once armed, it is the one hook in this stack that is FAIL-CLOSED — any parse or exception path also blocks (`exit 2`), because this is the actual safety boundary for an unattended worker with no human present to catch a hook bug. `capture_session_mapping.py` is non-fatal in every failure mode (missing env var, bad stdin, unwritable spool dir all warn and exit `0`) and writes only to the one spool directory its adapter declared — never anywhere else, never a credential.
-3. **Bounded post-update verification.** Reuse Step 6's cache-copy hooks diff below, scoped to `hooks/`, to confirm this plugin's shipped fallback copy (rung 2) actually reached the installed cache. Then spawn one worker with a minimal `allowed_tools` list and confirm a call outside that list is refused with the gate's clean stderr reason — not a hang, not a silent allow. "The worker started fine" is not evidence the resolution ladder or the allowlist gate are actually working — prove one real block, the same discipline the git-controller-gate paragraph above already uses for the fleet-wide git safety gate.
+3. **Bounded post-update verification.** Reuse Step 6's cache-copy hooks diff below, scoped to `hooks/`, to confirm this plugin's shipped fallback copy (rung 2) actually reached the installed cache. Then spawn one worker with a minimal `allowed_tools` list and confirm a call outside that list is refused with the gate's clean stderr reason — not a hang, not a silent allow. "The worker started fine" is not evidence the resolution ladder or the allowlist gate are actually working — prove one real block.
 
-## Step 4b — configure the export/workspace root (required before any business-connector activation)
+## Step 4b — confirm the solet's files folder
 
-**Do this before Step 4c.** Business-connector reads (Jira, Salesforce, Snowflake, Postgres,
-and similar) never return record-level data inline — results are exported to a file the operator
-supplies, and every business-connector verb refuses outright until a workspace root is
-configured (an empty allow-list is the secure default: no export destination, no read).
-Skipping this step does not mean "business connectors work with a smaller safety margin" —
-it means every one of them fails loud on first use, for an operator who was never told why.
-Measured 2026-07-29 (the architect ruling on business-connector data boundaries, filed in
-this checkout's `workbench/` directory under that date; §3).
+**Do this before Step 4c.** Propose the per-user Documents default and let the
+user confirm or choose another folder:
 
-**Two directories, asked separately, never conflated:**
+> I'll keep files for `<solet name>` in `~/Documents/<solet name>` (and large
+> exports in `~/Documents/<solet name>/Exports.nosync`). Is that okay, or would
+> you like a different folder?
 
-1. *Where does the solet itself live?* — `app_home` (`<clone>/profile`). Already fixed;
-   nothing to ask here.
-2. *Where do you keep the projects you work in?* — the export root. Ask in plain words: "Where
-   do you keep the folders you work in day to day — the parent directory, not any one project?"
-   (a `~/Workspace`-style directory: stable, singular, and it covers every future job folder
-   without per-job reconfiguration). Do not accept a specific project folder as the answer — it
-   will pass today and fail on the operator's very next job.
+Use the computed default for this solet. If Documents overlaps the installation,
+the default is `~/Library/Application Support/<solet name>/Files`; if that also
+overlaps, an admissible sibling of the installation is chosen. Show the returned
+advisory naming the chosen folder and how to change it.
+`app_home` is the solet's own installation folder (`<clone>/profile`). The
+solet-manager variable `SOLET_HOME` is unrelated to this user files folder.
 
-**Validate, don't just record.** The natural answer to question 2 can accidentally contain
-`app_home` (a `~/Workspace`-style root nested one level above this very clone is the *default*
-case on a developer's own machine, not an edge case) — admitting it as an export root would let
-exports land back inside the platform's own managed tree, the opposite of what this closes. Call
-the real validator rather than hand-rolling the check:
-
-```bash
-<clone>/.venv/bin/python3 -c "
+```python
 from pathlib import Path
-from github_midwife_plugin.export_root_validation import configure_export_root
-written = configure_export_root(Path('<clone>'), '<clone>/profile', '<operator's answer>')
-print(written)
-"
+from github_midwife_plugin.export_root_validation import configure_solet_home
+
+result = configure_solet_home(
+    Path("<clone>"), "<clone>/profile", "<solet name>",
+    chosen=None,  # Or the user's explicitly chosen absolute directory.
+)
+print(result)
 ```
 
-`configure_export_root` rejects a root that is, contains, or is contained by `app_home` (naming
-which direction failed), and otherwise persists the validated root into `export_allowed_roots`
-for every business-connector plugin actually installed in this clone — additive and idempotent,
-so re-running it (a second job-folder root added later, or simply re-running this step) never
-duplicates or clobbers an already-configured root. Show the operator the rejection message
-verbatim if it fires; do not silently retry with a different guess.
+The function creates the home and `Exports.nosync` folders and records the
+`solet_home` and `solet_home_exports` path addresses in the address-book boot
+entries. It preserves existing names and reports advisories. A folder
+containing, inside, or equal to the installation tree falls back to the default
+with an advisory; choose a folder outside the installation. Connector read and write roots now derive from these addresses and the session folder; no per-connector root setup is needed.
+
+After the runtime starts, call
+`service_interface::address_book_service::resolve` for `solet_home` to
+confirm the live saved path. Show that path to the user. The location resolver
+is an in-process library call; the validation ladder checks it through the guest
+interpreter with those live address facts. Check filesystem access in the
+process that writes files and record `unknown` until that context is measured.
+A denial produces the Files and Folders advisory; grant access or choose another
+folder and check again.
 
 ## Step 4c — activate shipped plugins; configure credentials on first use
 
@@ -972,3 +974,16 @@ Senders see it named honestly: every send to a watcher-held session is delivery-
 - `plugin::agent_messaging_plugin::peer_claim_role` — the role-claim process the watcher dispatches over its registered bridge.
 - `plugins/github_midwife_plugin/knowledge_base/08_deployment_report_card.md` — the fully-deployed-state roster and the operator-facing card Step 6 closes out with.
 - `plugins/github_midwife_plugin/knowledge_base/07_upstream_feedback_runbook.md` — how this deployment reports defects and requests features upstream once it is running.
+
+
+## Where your solet saves files
+
+Your solet keeps its own files in a folder in your Documents folder named after it, and large exports go into the `Exports.nosync` folder inside it so iCloud does not copy them. When you start a session from a project folder, files you ask for without naming a place are saved in that project folder. To set a place for a project, say "save `<kind of file>` for `<project>` in `<folder>`", for example "save reports for Acme in ~/Clients/Acme/Reports". To check, ask "where will you save this?". Your solet never saves into its own installation folder; if you start it from there, it saves to its Documents folder and tells you.
+
+**Where your solet saves files.** After this update your solet has a home folder in your Documents folder, named after it, and saves exports into `Exports.nosync` inside it. Every export folder you set up before is kept as a saved location, so your existing exports stay where they are and keep working, and nothing is moved or deleted. If an old export folder was inside the solet's own installation folder, your solet now tells you and suggests the new home folder instead. On a Mac, if you see a note about Files and Folders access, allow it in System Settings → Privacy & Security; your solet keeps working in the meantime. Start sessions from your project folder to have files saved there.
+
+Refresh an old launcher through hydration step 2 to capture the project folder. Existing saved folders remain readable; nothing is moved or deleted. An old export folder inside the installation is retained for reference and the solet suggests its home instead. If Documents overlaps the installation, the home uses the application-support folder and names it in an advisory.
+
+On macOS, a denied protected-folder write reports Files and Folders access in System Settings → Privacy & Security, naming the launching binary. Missing access is an advisory; the next usable location is tried. Record a `grant_status` entry on the `solet_home` address as `granted`, `missing` or `unknown`, with the UTC date and checking process in its description. The public `address_book_service` verbs `resolve`, `add_entry`, `update_entry` and `delete_entry` read, set, correct and clear it; do not append duplicate status entries. A Terminal or validation-interpreter check does not establish a LaunchAgent grant. Record `unknown` until the process that writes the file has been checked.
+
+Windows uses the Documents known folder, including redirection to OneDrive; OneDrive does not honor `.nosync`, so its sync advisory offers another saved location for large exports. Linux uses XDG Documents settings and then `~/Documents`. Both return unproven status; Linux installation and launch remain on hold.

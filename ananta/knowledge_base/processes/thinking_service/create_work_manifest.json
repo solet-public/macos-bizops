@@ -1,7 +1,7 @@
 {
   "process_key": "service_interface::thinking_service::create_work_manifest",
   "display_name": "Create Work Manifest",
-  "description": "persist an authored-by-value Work Manifest document. The calling agent authors the full manifest markdown and passes it in `content`; the platform derives the manifest_id, validates, stores, and focuses it.",
+  "description": "persist an authored-by-value Work Manifest document. The calling agent authors the full manifest markdown and passes it in `content`; the platform derives the manifest_id, validates, stores, and focuses it. Returns a queued job receipt; retrieve its exact job_id with job_service.get_job for the complete original operation result or typed error.",
   "embedding_description": "Persist an authored work manifest document. The calling agent writes the initial project manifest markdown with an ordered list of phases declaring the overall shape of the work, then passes it by value. The platform derives the manifest id from the focused brief, stores the document, and returns it as working context for the next turn.",
   "result_processor_customizations": {
     "action_label": "Work Manifest created",
@@ -22,5 +22,6 @@
   "error_processor_customizations": {
     "action_context": "Persisting an authored-by-value Work Manifest document. create_work_manifest accepts {content}. The calling agent must author the full manifest markdown and pass it in `content` — the platform never generates it. The platform derives manifest_id deterministically from the focused Complete Brief Form — never include manifest_id in the action arguments.",
     "error_interpretation": "authored_content_required: `content` was missing or empty — the thinking-model authoring path was retired (DEP-01); author the full document and pass it by value. ValidationError: arguments do not conform to the schema, or a `##` section exceeds the size limit. StorageError: knowledge base write failed. ArtifactIdDerivationError: the focused brief is missing or lacks composition_number/genre fields."
-  }
+  },
+  "is_async": true
 }

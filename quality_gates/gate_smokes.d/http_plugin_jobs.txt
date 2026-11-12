@@ -1,0 +1,1 @@
+plugins/openai_embeddings_plugin/tests/http_jobs_smoke.py

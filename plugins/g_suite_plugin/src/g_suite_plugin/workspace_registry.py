@@ -1,4 +1,4 @@
-"""Pinned vendor contracts for the Drive, People and Tasks typed processes.
+"""Pinned vendor contracts for the Drive, People, Tasks, Docs, Sheets and Slides processes.
 
 Discovery revision 20261106, fetched from Google's discovery endpoints. Keeping
 the full documents also preserves schemas, media support and newer methods
@@ -15,10 +15,13 @@ from typing import Any
 
 from ananta.core.actions.action_metadata import ParameterMetadata, ParameterType
 
+# Build 3 products, then the build 4 editor APIs (Docs v1, Sheets v4, Slides v1).
+WORKSPACE_PRODUCTS: tuple[str, ...] = ("drive", "people", "tasks", "docs", "sheets", "slides")
+
 
 @cache
 def discovery_document(product: str) -> dict[str, Any]:
-    if product not in {"drive", "people", "tasks"}:
+    if product not in WORKSPACE_PRODUCTS:
         raise ValueError(f"Unknown Workspace API: {product}")
     return json.loads(files("g_suite_plugin").joinpath(f"discovery/{product}.json").read_text())
 
@@ -34,7 +37,7 @@ def verb_name(method_id: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", method_id.replace(".", "_")).lower()
 
 
-WORKSPACE_METHODS: dict[str, tuple[str, dict[str, Any]]] = {verb_name(method["id"]): (product, method) for product in ("drive", "people", "tasks") for method in _methods(discovery_document(product))}
+WORKSPACE_METHODS: dict[str, tuple[str, dict[str, Any]]] = {verb_name(method["id"]): (product, method) for product in WORKSPACE_PRODUCTS for method in _methods(discovery_document(product))}
 
 _TYPES = {"string": ParameterType.STRING, "integer": ParameterType.INTEGER, "boolean": ParameterType.BOOLEAN, "number": ParameterType.FLOAT}
 

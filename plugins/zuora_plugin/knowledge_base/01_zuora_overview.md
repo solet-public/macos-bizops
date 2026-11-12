@@ -87,6 +87,12 @@ Current lifecycle inventory:
 - **Usage** (typed): import a usage file (all or nothing; Zuora answers with a
   status link), create, read, correct and delete one usage record, read the
   rate detail of a usage-based invoice item.
+- **Legacy catalog** (typed): products, product rate plans, product rate
+  plan charges, product charge definitions and catalog groups: create, read,
+  correct, clear mutable fields and delete; bulk charge definitions,
+  effective-date retirement/restoration and reversible group membership.
+  See [catalog lifecycle](catalog_lifecycle.md) for every route and vendor
+  concurrency premise. The newer Commerce API stays on `request`.
 - **Object Query** (typed, read-only by vendor design): list or read one
   record of any of Zuora's standard objects or a custom object with
   `filter[]`, `expand[]`, `sort[]` and field lists.
@@ -102,7 +108,7 @@ Zuora defines some billing terminal states as void or cancel rather than
 delete. Those keep the vendor's own semantics; the docs never call a void a
 delete. Zuora publishes no ETag or version precondition on the Workflow, Data
 Query, Files, Orders, Subscriptions, Accounts, Payment Methods, Payments,
-billing document, memo, bill run or usage routes, so concurrent corrections
+billing document, memo, bill run, usage or legacy catalog routes, so concurrent corrections
 are last-writer-wins: read current state
 with the matching get or list verb before writing. The one documented
 precondition, `If-Match` on a custom object record replace, is accepted as
@@ -116,7 +122,12 @@ the verb accepts
 `idempotency_key` so a caller can repeat a create safely; the plugin itself
 never replays a write.
 
-## Typed verbs (Workflows through Usage)
+## Typed verbs (Workflows through Catalog)
+
+The 28 legacy catalog operations live in
+`plugins/zuora_plugin/src/zuora_plugin/catalog_actions.py`, with declarations
+in `catalog_product_processes.py` and `catalog_definition_processes.py`.
+Their request and lifecycle details are in [catalog lifecycle](catalog_lifecycle.md).
 
 Every typed verb is one `Operation` in
 `plugins/zuora_plugin/src/zuora_plugin/workflow_actions.py`,
@@ -137,10 +148,9 @@ rules, the reserved run-parameter words). The shared executor in
 `plugins/zuora_plugin/src/zuora_plugin/typed_operations.py` validates before
 any OAuth or vendor call, percent-encodes identifiers into their path
 segment, sends exactly one request (a 401 re-mints the bearer once), maps a
-non-2xx answer to a typed job error, and redacts the registered client
-id/secret, the minted bearer and caller-supplied secret fields (auth-provider
-credentials) in raw, percent/form-encoded and base64 forms from every result,
-error and audit line.
+non-2xx answer to a typed job error, and returns the vendor result as
+received. Its audit line is built only from method, path without query values,
+status, duration and correlation id.
 
 The Orders, Subscriptions, Accounts, Payment Methods, Payments, Custom
 Object, billing document, memo, bill run and usage verbs follow Zuora's v1 conventions
@@ -179,18 +189,13 @@ Object, billing document, memo, bill run and usage verbs follow Zuora's v1 conve
   back as `cursor` (records also need `page_size`), null at the end or when
   Zuora returned fewer records than `page_size`. Object Query `page_size` is
   1 to 99.
-- **Payment instruments.** Card numbers, security codes, bank account
-  numbers, IBANs, gateway and wallet tokens and encrypted wallet payloads a
-  caller embeds in an account, order, payment-method, payment, credit memo
-  refund or debit memo collect body are
-  redacted from every echo, error and audit line, in the same raw,
-  percent-encoded and base64 forms as the credentials. A payment-method body
-  is itself the instrument, so its top-level `accountNumber` (a bank account
-  number there) is redacted too. `create_payment_session` returns Zuora's
-  Payment Form session `token` unredacted, because handing it to the browser
-  form is the verb's purpose.
+- **Results and log hygiene.** Results are not scanned: every verb returns
+  the vendor result as received, and bulk results go to disk through
+  `output_path`. Audit and log lines are built only from method, path without
+  query values, status, duration and correlation id, so a payment instrument a
+  caller embeds in a body never reaches a log line.
 - **Uploads.** `upload_custom_object_job_file` reads one `.csv` from
-  `input_path` under `export_allowed_roots` and sends it as `text/csv`.
+  `input_path` under a saved location and sends it as `text/csv`.
   `upload_invoice_file`, `upload_credit_memo_file` and
   `upload_debit_memo_file` send one `.pdf`, and `import_usage` one `.csv`,
   `.xls`, `.xlsx` or `.zip`, as the `file` part of a multipart/form-data body
@@ -203,7 +208,7 @@ number while Zuora's `pagination.next_page` is present, otherwise null).
 `page_size`) with a hint to filter by status or raise `page_size`. `export_workflow`
 can write its JSON to an `output_path` backup; `import_workflow` and
 `import_workflow_version` read one back from `input_path`. Both paths, and
-the download verbs' `output_path`, must sit under `export_allowed_roots` and
+the download verbs' `output_path`, must sit under a saved location and
 are checked before any vendor call. `download_data_query_result` reads the
 job and fetches the pre-signed `dataFile` URL Zuora itself issued, never a
 caller URL, and never sends the bearer token there; a job that has not
@@ -253,10 +258,7 @@ write their result to the caller's `output_tsv_path` — never records inline,
 at any size (`workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md`;
 the former blob-export/`INLINE_BYTE_CAP` branch on `data_query`/`bulk_export`
 is deleted, not lowered). Neither destination is platform blob storage — the
-path must be absolute, end in `.tsv`, and lie under an operator-configured
-`export_allowed_roots` entry in this plugin's config (`export_containment.py`,
-realpath + `commonpath` containment mirroring `ledger_allowed_roots`; the
-default `[]` REFUSES every write). `get_object`/`get_invoice` (single-record
+path must be absolute, end in `.tsv`, and lie under a saved path address, the session folder or solet home; the installation tree is always excluded. `get_object`/`get_invoice` (single-record
 fetch-by-id) are unaffected and stay inline.
 
 Each of the four defaults to 500 records absent an acknowledged override:
@@ -312,7 +314,7 @@ filtered by account, document date or status, each row carrying its
 verb; `list_invoices` keeps its TSV export contract unchanged.
 
 New error code: `zuora.export_path_refused` (path not absolute / not `.tsv` /
-not contained under any configured `export_allowed_roots` entry).
+not contained under any saved location).
 
 ## Security posture (mirrors the Jira/Snowflake/Salesforce/external-Postgres wave)
 
@@ -331,7 +333,7 @@ not contained under any configured `export_allowed_roots` entry).
   Object-not-found, validation-failed, query-failed and permission-denied
   errors describe the caller's own object/query via the vendor's message
   fields only (`reasons[].message`, Workflow `errors`/`Errors`, Data Query
-  `message`), redacted for credentials.
+  `message`), as received.
 - **Secrets hygiene.** The OAuth client_secret is chain-consumed through the
   address book's `resolve_with_secrets` — this plugin declares no vault keys
   of its own (`get_required_vault_keys`/`get_declared_vault_keys` both
@@ -374,10 +376,10 @@ posture section above.)
 | `src/zuora_plugin/app_config.py` | Resolves `zuora_tenant` from the address book; the client_secret is chain-consumed. |
 | `src/zuora_plugin/http_client.py` | `ZuoraClient` — synchronous httpx client with cached, re-mintable bearer auth (client-credentials grant). |
 | `src/zuora_plugin/errors.py` | Topology-safe error classification (`classify_zuora_response`) from the response body's `reasons` list. |
-| `src/zuora_plugin/export_containment.py` | Own-copy workspace-root containment gate (`assert_export_path_allowed`) binding `export_allowed_roots` — admits `output_tsv_path` for `data_query`/`bulk_export`/`list_subscriptions`/`list_invoices`. |
+| `ananta/src/ananta/file_locations/containment.py` | Shared `assert_path_allowed` guard using saved path addresses, the session folder and solet home — admits `output_tsv_path` for `data_query`/`bulk_export`/`list_subscriptions`/`list_invoices`. |
 | `src/zuora_plugin/billing_actions.py` | Pure verb implementations: `data_query`, `get_object`, `create_object`, `update_object`, `list_subscriptions`, `get_invoice`, `list_invoices`, `bulk_export` — the latter four write to `output_tsv_path` under the §5 override mechanism (see the migration section above). |
 | `src/zuora_plugin/plugin.py` | The `ZuoraPlugin` EDGE provider — client lifecycle, error mapping, EDGE registration, `_export_path_gate`. |
-| `plugins/zuora_plugin/src/zuora_plugin/typed_operations.py` | Shared executor for typed vendor operations: validation, path encoding, one call, error mapping, redaction, audit log, pagination. |
+| `plugins/zuora_plugin/src/zuora_plugin/typed_operations.py` | Shared executor for typed vendor operations: validation, path encoding, one call, error mapping, audit log, pagination. |
 | `plugins/zuora_plugin/src/zuora_plugin/workflow_actions.py` | The 20 Workflow operations (definitions, export/import, versions, runs, tasks, usage, auth providers). |
 | `plugins/zuora_plugin/src/zuora_plugin/data_query_actions.py` | SQL Data Query jobs and Files operations, including result and file downloads. |
 | `plugins/zuora_plugin/src/zuora_plugin/typed_verbs.py` | Registry tying each typed verb to its worker handler, dispatch validator, retry class and result type. |

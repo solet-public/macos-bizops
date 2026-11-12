@@ -119,7 +119,7 @@ _GOLDEN_APPLY_TRACE: tuple[tuple[str, str, JsonObject], ...] = (
             "solet_name": "barrier-terminal",
         },
     ),
-    ("install_shell_integration", "hydration::shell.install", {"selected_coding_agents": ["codex", "claude_code"]}),
+    ("install_shell_integration", "hydration::shell.install", {"execution_topology": "solo", "selected_coding_agents": ["codex", "claude_code"]}),
     (
         "configure_lm_studio_embeddings",
         "setup::models.configure_lm_studio_embeddings",

@@ -1,25 +1,23 @@
-"""Read-only statement guards — BELT-tier, defense-in-depth only.
+"""Statement SHAPE helpers — never an access-control decision.
 
-These are NOT the write boundary. The LOAD-BEARING write-stopper is the psycopg3
-connection read-only characteristic (``conn.read_only = True``, connection.py),
-which fails any write at SQLSTATE 25006 regardless of what slips past here. These
-guards are fast-fail UX + result-shape hygiene:
+What a statement may do is decided by the registered credential's own
+server-side Postgres GRANTs (USER ruling rul_4c99a30d; operator ruling
+2026-08-09 + Amendment 1). Nothing here inspects whether a statement reads or
+writes. These helpers only split and count statements, with a REAL SQL parser
+(``sqlparse``, BSD; operator-ratified rev-F-final over pglast/GPL) that is
+dollar-quote / string / comment aware:
 
-- :func:`assert_single_statement` — exactly one top-level statement per call
-  (bounds ``SET``-injection + multi-result), via a REAL SQL parser (``sqlparse``,
-  BSD; operator-ratified rev-F-final over pglast/GPL). Worst case if a smuggled
-  second statement slips sqlparse: the only useful append is a ``SET`` the
-  read-only session tolerates (belt-tier DoS at worst — not a write, not an
-  escape; fresh-connection-per-call + internal-only reachability bound it).
-- :func:`assert_read_statement` — the leading keyword must be in the Datagrip
-  read/introspection family ``{SELECT, WITH, EXPLAIN, SHOW, VALUES, TABLE}``.
-  ``EXPLAIN ANALYZE <write>`` is admitted here but still fails at the read-only
-  connection layer (25006), so the belt need not model it.
+- :func:`assert_single_statement` — the one-statement contract of
+  ``run_query``/``export_query``/``run_statement`` (predictable result and
+  commit semantics; ``run_script`` is the multi-statement verb).
+- :func:`split_statements` — ``run_script``'s splitter: one entry per
+  top-level statement, comment/whitespace-only fragments dropped.
+- :func:`leading_keyword` — the upper-cased leading keyword, used to name a
+  statement in a result or an error, and to find transaction-control
+  statements a one-transaction script cannot contain.
 
 This module contains NO SQL string literals and imports NO database driver, so
-it stays FULLY GATED (no allowlist entry) — the §3 honesty condition. Folding
-these guards into the S2-exempt ``query_actions.py`` would hide them inside the
-exemption.
+it stays FULLY GATED (no allowlist entry).
 """
 
 from __future__ import annotations
@@ -28,58 +26,42 @@ import re
 
 import sqlparse
 
-from .constants import (
-    ERROR_INVALID_PARAMS,
-    ERROR_READ_ONLY_VIOLATION,
-    READ_LEADERS,
-)
+from .constants import ERROR_INVALID_PARAMS
 
 
 class StatementGuardError(RuntimeError):
-    """Raised when a statement is refused by a belt-tier guard."""
+    """Raised when a statement's SHAPE does not fit the verb's contract."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
 
 
-def assert_single_statement(sql: str) -> None:
-    """Refuse anything other than exactly one non-empty top-level statement.
+def split_statements(sql: str) -> list[str]:
+    """Split a script into its top-level statements, dropping empty fragments.
 
-    ``sqlparse`` is dollar-quote / string / comment aware — a ``;`` inside a
-    string, dollar-quoted body, or comment does NOT split the statement.
-    Whitespace/comment-only fragments (no meaningful first token) are dropped
-    before counting.
+    A ``;`` inside a string, a dollar-quoted body (a function definition) or a
+    comment does NOT split. Each returned statement keeps its own text with
+    the trailing ``;`` stripped.
     """
-    statements = [
-        stmt for stmt in sqlparse.parse(sql) if stmt.token_first(skip_cm=True) is not None
-    ]
-    if not statements:
+    statements: list[str] = []
+    for stmt in sqlparse.parse(sql):
+        if stmt.token_first(skip_cm=True) is None:
+            continue
+        text = str(stmt).strip()
+        statements.append(text[:-1].rstrip() if text.endswith(";") else text)
+    return statements
+
+
+def assert_single_statement(sql: str) -> None:
+    """Refuse anything other than exactly one non-empty top-level statement."""
+    count = len(split_statements(sql))
+    if count == 0:
         raise StatementGuardError(ERROR_INVALID_PARAMS, "no SQL statement was provided")
-    if len(statements) > 1:
+    if count > 1:
         raise StatementGuardError(
             ERROR_INVALID_PARAMS,
-            "only a single SQL statement is permitted per call",
-        )
-
-
-def assert_read_statement(sql: str) -> None:
-    """Refuse a statement whose leading keyword is not a permitted read leader.
-
-    Belt-tier shape hygiene only — ``WITH`` is admitted because a CTE query is the
-    common read shape, NOT because a ``WITH`` leader is provably read-only. A
-    data-modifying CTE DOES lead with ``WITH``
-    (``WITH t AS (DELETE FROM … RETURNING …) SELECT …``), so this guard cannot and
-    does not decide read-vs-write. The LOAD-BEARING write boundary is the read-only
-    connection: any write, including one hidden in a leading-``WITH`` CTE, is
-    refused server-side at SQLSTATE 25006 regardless of what this guard admits.
-    """
-    leader = leading_keyword(sql)
-    if leader not in READ_LEADERS:
-        raise StatementGuardError(
-            ERROR_READ_ONLY_VIOLATION,
-            f"statement leader '{leader or '?'}' is not a permitted read statement; "
-            "this connection is read-only",
+            "only a single SQL statement is permitted per call; use run_script to run several statements in one transaction",
         )
 
 

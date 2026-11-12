@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::g_suite_plugin::calendar_calendarlist_patch",
+  "display_name": "Calendar: Change Calendar List Entry",
+  "description": "Change selected fields of the account's settings for one calendar list entry (patch: only the fields in body change; an explicit null clears one) (PATCH users/me/calendarList/{calendarId}; scope calendar.calendarlist). Runs as a background job: dispatch returns job_id/status queued at once; completion carries the vendor response (plus next_page_token/next_sync_token when Google returns them) and names the account used. API-wide query arguments: alt (json), fields (partial-response selector), pretty_print (boolean), quota_user and user_ip (deprecated). Arguments key/access_token/oauth_token are declared only to refuse credential overrides: credentials belong to the Google account contract; select credentials with account.",
+  "embedding_description": "Change only some of the user's personal settings for one Google Calendar on their list, such as renaming it locally, recolouring it, hiding it or changing its default reminders, leaving every other setting untouched (PATCH semantics).",
+  "result_processor_customizations": {
+    "action_label": "Google Calendar calendar list entry change started",
+    "result_type": "g_suite_calendar_calendarlist_patch_result",
+    "result_description": "Job queued for the Google Calendar calendar list entry change; completion with Google's response will be delivered automatically.",
+    "presentation_guidance": "",
+    "output_action_guidance": "Return exactly one action using the active IO plugin's post_message (process_key: plugin::<io_plugin>::post_message). Use the provided session_id. Keep the message short and friendly. Do NOT invent process identifiers (no present_result, no status actions)."
+  },
+  "error_processor_customizations": {
+    "action_context": "Dispatch a background job for the Google Calendar calendar list entry change (PATCH users/me/calendarList/{calendarId}).",
+    "error_interpretation": "gsuite.invalid_params: an argument does not match the vendor's Calendar API shape (unknown name, wrong type, missing required, value not allowed) or the session context is missing. gsuite.not_connected: no Google account linked. gsuite.unknown_account: 'account' names no connected account. gsuite.missing_scope: the account's grant lacks the Calendar scope this verb needs. gsuite.permission_denied: the account lacks access to that calendar or event. gsuite.not_found: the id does not exist or is not visible. gsuite.rate_limited: Google rate limit. gsuite.api_error: job creation failed or another Google error.",
+    "recovery_guidance": "gsuite.invalid_params: correct the named argument (snake_case names; pass the vendor request object as body). gsuite.not_connected or gsuite.missing_scope: run start_interface then connect_account and approve the Calendar permissions. gsuite.unknown_account: use an email or alias from the connected accounts. gsuite.not_found: list first to get a valid id. gsuite.rate_limited: retry later with backoff."
+  }
+}

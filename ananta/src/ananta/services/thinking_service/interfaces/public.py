@@ -19,6 +19,7 @@ from ananta.core.actions.action_metadata import (
 from ananta.core.domain.enums import ProcessorPolicyCategory
 from ananta.core.domain.types import ActionResult
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.registered_job_operations import registered_job_return_schema
 
 
 class ThinkingServiceAPI(ABC):
@@ -29,6 +30,7 @@ class ThinkingServiceAPI(ABC):
     # ==========================================================================
 
     @service_interface_process(
+        is_async=True,
         name="upsert_plan",
         is_discoverable=False,
         provider="thinking_service",
@@ -41,25 +43,24 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Plan write result",
-            type=ParameterType.OBJECT,
-            properties={
-                "plan_id": ParameterMetadata(type=ParameterType.STRING, description="Plan task ID"),
-                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="Memory ID"),
-                "focused": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="Whether plan was pinned to focus buffer",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Plan write result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "plan_id": ParameterMetadata(type=ParameterType.STRING, description="Plan task ID"),
+                    "memory_id": ParameterMetadata(type=ParameterType.STRING, description="Memory ID"),
+                    "focused": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="Whether plan was pinned to focus buffer",
+                    ),
+                },
+            )
         ),
         # No result_processor_customizations — terminal by design.
         # upsert_plan is bookkeeping; its completion never triggers a process_results vertex.
@@ -75,16 +76,14 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="create_extended_plan",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=True,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -106,46 +105,36 @@ class ThinkingServiceAPI(ABC):
                 default=None,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Created plan with task ID, memory ID, and content",
-            type=ParameterType.OBJECT,
-            properties={
-                "plan_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Task ID (thk prefix)"
-                ),
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Memory ID from remember()"
-                ),
-                "focused": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="Whether plan was pinned to focus buffer",
-                ),
-                "step_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of steps in the plan"
-                ),
-                "content": ParameterMetadata(
-                    type=ParameterType.STRING, description="Full plan text"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Created plan with task ID, memory ID, and content",
+                type=ParameterType.OBJECT,
+                properties={
+                    "plan_id": ParameterMetadata(type=ParameterType.STRING, description="Task ID (thk prefix)"),
+                    "memory_id": ParameterMetadata(type=ParameterType.STRING, description="Memory ID from remember()"),
+                    "focused": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="Whether plan was pinned to focus buffer",
+                    ),
+                    "step_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of steps in the plan"),
+                    "content": ParameterMetadata(type=ParameterType.STRING, description="Full plan text"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
-    def create_extended_plan(
-        self, goal: str, topic: str | None = None, context: str | None = None
-    ) -> dict[str, Any]: ...
+    def create_extended_plan(self, goal: str, topic: str | None = None, context: str | None = None) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="update_plan",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=True,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -160,24 +149,18 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Updated plan content",
-            type=ParameterType.OBJECT,
-            properties={
-                "plan_id": ParameterMetadata(type=ParameterType.STRING, description="Task ID"),
-                "memory_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Memory ID (may change)"
-                ),
-                "refocused": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="Whether plan was re-focused"
-                ),
-                "step_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of steps"
-                ),
-                "content": ParameterMetadata(
-                    type=ParameterType.STRING, description="Updated plan text"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Updated plan content",
+                type=ParameterType.OBJECT,
+                properties={
+                    "plan_id": ParameterMetadata(type=ParameterType.STRING, description="Task ID"),
+                    "memory_id": ParameterMetadata(type=ParameterType.STRING, description="Memory ID (may change)"),
+                    "refocused": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether plan was re-focused"),
+                    "step_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of steps"),
+                    "content": ParameterMetadata(type=ParameterType.STRING, description="Updated plan text"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -190,10 +173,7 @@ class ThinkingServiceAPI(ABC):
         provider="thinking_service",
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -208,15 +188,9 @@ class ThinkingServiceAPI(ABC):
             description="List of plans with metadata",
             type=ParameterType.OBJECT,
             properties={
-                "plans": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of plan objects"
-                ),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Total plans matching filter"
-                ),
-                "focused_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of plans in focus buffer"
-                ),
+                "plans": ParameterMetadata(type=ParameterType.LIST, description="List of plan objects"),
+                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Total plans matching filter"),
+                "focused_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of plans in focus buffer"),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -256,16 +230,12 @@ class ThinkingServiceAPI(ABC):
             description="Playbook creation result with IDs for tracking",
             type=ParameterType.OBJECT,
             properties={
-                "playbook_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Playbook ID (pbk- prefix)"
-                ),
+                "playbook_id": ParameterMetadata(type=ParameterType.STRING, description="Playbook ID (pbk- prefix)"),
                 "planning_context_id": ParameterMetadata(
                     type=ParameterType.STRING,
                     description="Planning context ID for the inference loop",
                 ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Playbook status (active)"
-                ),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Playbook status (active)"),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -293,15 +263,9 @@ class ThinkingServiceAPI(ABC):
             description="Full playbook content",
             type=ParameterType.OBJECT,
             properties={
-                "playbook_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Playbook ID"
-                ),
-                "content": ParameterMetadata(
-                    type=ParameterType.STRING, description="Full playbook markdown"
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Playbook lifecycle status"
-                ),
+                "playbook_id": ParameterMetadata(type=ParameterType.STRING, description="Playbook ID"),
+                "content": ParameterMetadata(type=ParameterType.STRING, description="Full playbook markdown"),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Playbook lifecycle status"),
                 "title": ParameterMetadata(type=ParameterType.STRING, description="Playbook title"),
             },
         ),
@@ -330,15 +294,9 @@ class ThinkingServiceAPI(ABC):
             description="Single playbook section content",
             type=ParameterType.OBJECT,
             properties={
-                "playbook_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Playbook ID"
-                ),
-                "section_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Section ID"
-                ),
-                "content": ParameterMetadata(
-                    type=ParameterType.STRING, description="Section markdown content"
-                ),
+                "playbook_id": ParameterMetadata(type=ParameterType.STRING, description="Playbook ID"),
+                "section_id": ParameterMetadata(type=ParameterType.STRING, description="Section ID"),
+                "content": ParameterMetadata(type=ParameterType.STRING, description="Section markdown content"),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -362,12 +320,8 @@ class ThinkingServiceAPI(ABC):
             description="List of playbooks with metadata",
             type=ParameterType.OBJECT,
             properties={
-                "playbooks": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of playbook objects"
-                ),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Total playbooks matching filter"
-                ),
+                "playbooks": ParameterMetadata(type=ParameterType.LIST, description="List of playbook objects"),
+                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Total playbooks matching filter"),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -396,16 +350,12 @@ class ThinkingServiceAPI(ABC):
             description="Patch request stored; planning VERTEX will resume",
             type=ParameterType.OBJECT,
             properties={
-                "playbook_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Playbook ID"
-                ),
+                "playbook_id": ParameterMetadata(type=ParameterType.STRING, description="Playbook ID"),
                 "planning_context_id": ParameterMetadata(
                     type=ParameterType.STRING,
                     description="Planning context ID for the inference loop",
                 ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Playbook status (active)"
-                ),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="Playbook status (active)"),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -422,16 +372,14 @@ class ThinkingServiceAPI(ABC):
     # ==========================================================================
 
     @service_interface_process(
+        is_async=True,
         name="create_resolved_intake_state",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -441,29 +389,24 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "content": ParameterMetadata(
-                description=(
-                    "Full authored Resolved Intake State markdown document, "
-                    "authored by the calling agent and passed by value"
-                ),
+                description=("Full authored Resolved Intake State markdown document, authored by the calling agent and passed by value"),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Resolved Intake State creation result with full document",
-            type=ParameterType.OBJECT,
-            properties={
-                "intake_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Intake State ID"
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Operation status"
-                ),
-                "content": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Full created Resolved Intake State content",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Resolved Intake State creation result with full document",
+                type=ParameterType.OBJECT,
+                properties={
+                    "intake_id": ParameterMetadata(type=ParameterType.STRING, description="Intake State ID"),
+                    "status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
+                    "content": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Full created Resolved Intake State content",
+                    ),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -476,44 +419,39 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="create_work_manifest",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
             "content": ParameterMetadata(
-                description=(
-                    "Full authored Work Manifest markdown document, authored "
-                    "by the calling agent and passed by value"
-                ),
+                description=("Full authored Work Manifest markdown document, authored by the calling agent and passed by value"),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Work Manifest creation result with full document",
-            type=ParameterType.OBJECT,
-            properties={
-                "manifest_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Manifest ID (derived by the platform from the focused brief)",
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Operation status"
-                ),
-                "content": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Full created Work Manifest content",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Work Manifest creation result with full document",
+                type=ParameterType.OBJECT,
+                properties={
+                    "manifest_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Manifest ID (derived by the platform from the focused brief)",
+                    ),
+                    "status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
+                    "content": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Full created Work Manifest content",
+                    ),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -525,16 +463,14 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="patch_work_manifest",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -549,17 +485,15 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Work Manifest write result",
-            type=ParameterType.OBJECT,
-            properties={
-                "manifest_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Manifest ID"
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Operation status"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Work Manifest write result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "manifest_id": ParameterMetadata(type=ParameterType.STRING, description="Manifest ID"),
+                    "status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -572,16 +506,14 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="create_authored_artifact",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -591,47 +523,43 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "content": ParameterMetadata(
-                description=(
-                    "Full authored artifact document, authored by the "
-                    "calling agent and passed by value (markdown; raw "
-                    "JSON payload for pipeline_spec)"
-                ),
+                description=("Full authored artifact document, authored by the calling agent and passed by value (markdown; raw JSON payload for pipeline_spec)"),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Authored artifact creation result",
-            type=ParameterType.OBJECT,
-            properties={
-                "artifact_type": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Artifact type key",
-                ),
-                "artifact_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Artifact ID (derived by the platform)",
-                ),
-                "parent_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Parent artifact ID (derived by the platform; empty for brief)",
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Operation status"
-                ),
-                "content": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Full created artifact content",
-                ),
-                "knowledge_base_path": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Path within the knowledge base",
-                ),
-                "source_memory_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Focused memory ID for the stored artifact",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Authored artifact creation result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "artifact_type": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Artifact type key",
+                    ),
+                    "artifact_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Artifact ID (derived by the platform)",
+                    ),
+                    "parent_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Parent artifact ID (derived by the platform; empty for brief)",
+                    ),
+                    "status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
+                    "content": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Full created artifact content",
+                    ),
+                    "knowledge_base_path": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Path within the knowledge base",
+                    ),
+                    "source_memory_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Focused memory ID for the stored artifact",
+                    ),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -644,16 +572,14 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="create_movement_design",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -668,47 +594,43 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "packet_content": ParameterMetadata(
-                description=(
-                    "Full authored Movement Design Packet markdown document, "
-                    "authored by the calling agent and passed by value"
-                ),
+                description=("Full authored Movement Design Packet markdown document, authored by the calling agent and passed by value"),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "ledger_content": ParameterMetadata(
-                description=(
-                    "Full authored Phrase Design Ledger markdown document, "
-                    "authored by the calling agent and passed by value"
-                ),
+                description=("Full authored Phrase Design Ledger markdown document, authored by the calling agent and passed by value"),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Movement design creation result with packet and ledger",
-            type=ParameterType.OBJECT,
-            properties={
-                "packet_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Movement Design Packet ID (mdp- prefix)",
-                ),
-                "ledger_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Phrase Design Ledger ID (pdl- prefix)",
-                ),
-                "manifest_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Parent manifest ID",
-                ),
-                "movement_type": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Movement type",
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Operation status",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Movement design creation result with packet and ledger",
+                type=ParameterType.OBJECT,
+                properties={
+                    "packet_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Movement Design Packet ID (mdp- prefix)",
+                    ),
+                    "ledger_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Phrase Design Ledger ID (pdl- prefix)",
+                    ),
+                    "manifest_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Parent manifest ID",
+                    ),
+                    "movement_type": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Movement type",
+                    ),
+                    "status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Operation status",
+                    ),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -723,16 +645,14 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="patch_authored_artifact",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -752,18 +672,18 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Authored artifact write result",
-            type=ParameterType.OBJECT,
-            properties={
-                "artifact_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Artifact ID",
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Operation status"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Authored artifact write result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "artifact_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Artifact ID",
+                    ),
+                    "status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -783,10 +703,7 @@ class ThinkingServiceAPI(ABC):
         is_long_running=False,
         parameters={
             "content": ParameterMetadata(
-                description=(
-                    "Full Work Breakdown Structure markdown document authored "
-                    "by the calling agent (passed by value)"
-                ),
+                description=("Full Work Breakdown Structure markdown document authored by the calling agent (passed by value)"),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -841,24 +758,19 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="register_authored_work_breakdown_structure",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
             "content": ParameterMetadata(
-                description=(
-                    "Full Work Breakdown Structure markdown document authored "
-                    "by the calling agent (passed by value)"
-                ),
+                description=("Full Work Breakdown Structure markdown document authored by the calling agent (passed by value)"),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -883,27 +795,29 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Authored WBS registration result",
-            type=ParameterType.OBJECT,
-            properties={
-                "wbs_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="WBS ID",
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Operation status ('registered')",
-                ),
-                "knowledge_base_path": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Path within the thinking_plans knowledge base",
-                ),
-                "source_memory_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Focused memory ID for the stored document",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Authored WBS registration result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "wbs_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="WBS ID",
+                    ),
+                    "status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Operation status ('registered')",
+                    ),
+                    "knowledge_base_path": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Path within the thinking_plans knowledge base",
+                    ),
+                    "source_memory_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Focused memory ID for the stored document",
+                    ),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -925,18 +839,12 @@ class ThinkingServiceAPI(ABC):
         is_long_running=False,
         parameters={
             "content": ParameterMetadata(
-                description=(
-                    "Full joseki knowledge-base card markdown authored by "
-                    "the calling agent (passed by value)"
-                ),
+                description=("Full joseki knowledge-base card markdown authored by the calling agent (passed by value)"),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "joseki_key": ParameterMetadata(
-                description=(
-                    "Expected JOSEKI_KEY; when provided, the card's own "
-                    "JOSEKI_KEY line must match it"
-                ),
+                description=("Expected JOSEKI_KEY; when provided, the card's own JOSEKI_KEY line must match it"),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -974,42 +882,41 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="register_authored_joseki",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "content": ParameterMetadata(
-                description=(
-                    "Full joseki knowledge-base card markdown authored by "
-                    "the calling agent (passed by value); the card's "
-                    "JOSEKI_KEY line is its identity"
-                ),
+                description=("Full joseki knowledge-base card markdown authored by the calling agent (passed by value); the card's JOSEKI_KEY line is its identity"),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Authored joseki card registration result",
-            type=ParameterType.OBJECT,
-            properties={
-                "joseki_key": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="JOSEKI_KEY parsed from the card",
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Operation status ('registered')",
-                ),
-                "state": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Initial lifecycle state ('draft')",
-                ),
-                "knowledge_base_path": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Card path within the authored_joseki knowledge base",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Authored joseki card registration result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "joseki_key": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="JOSEKI_KEY parsed from the card",
+                    ),
+                    "status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Operation status ('registered')",
+                    ),
+                    "state": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Initial lifecycle state ('draft')",
+                    ),
+                    "knowledge_base_path": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Card path within the authored_joseki knowledge base",
+                    ),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -1021,6 +928,7 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="transition_authored_joseki",
         is_discoverable=True,
         provider="thinking_service",
@@ -1032,46 +940,43 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "target_state": ParameterMetadata(
-                description=(
-                    "Target lifecycle state: 'candidate' (validation-gated), "
-                    "'superseded' (requires superseded_by), or 'archived' "
-                    "(retire). 'proven' is earned via a recorded run, not set "
-                    "here"
-                ),
+                description=("Target lifecycle state: 'candidate' (validation-gated), 'superseded' (requires superseded_by), or 'archived' (retire). 'proven' is earned via a recorded run, not set here"),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "superseded_by": ParameterMetadata(
-                description=(
-                    "JOSEKI_KEY of the replacing card; required only when "
-                    "target_state is 'superseded'"
-                ),
+                description=("JOSEKI_KEY of the replacing card; required only when target_state is 'superseded'"),
                 required=False,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Lifecycle transition result for an authored joseki",
-            type=ParameterType.OBJECT,
-            properties={
-                "joseki_key": ParameterMetadata(
-                    type=ParameterType.STRING, description="The transitioned card",
-                ),
-                "previous_state": ParameterMetadata(
-                    type=ParameterType.STRING, description="State before the transition",
-                ),
-                "state": ParameterMetadata(
-                    type=ParameterType.STRING, description="State after the transition",
-                ),
-                "superseded_by": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Replacement key when superseded; null otherwise",
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="'transitioned' or 'unchanged' (idempotent no-op)",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Lifecycle transition result for an authored joseki",
+                type=ParameterType.OBJECT,
+                properties={
+                    "joseki_key": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="The transitioned card",
+                    ),
+                    "previous_state": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="State before the transition",
+                    ),
+                    "state": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="State after the transition",
+                    ),
+                    "superseded_by": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Replacement key when superseded; null otherwise",
+                    ),
+                    "status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="'transitioned' or 'unchanged' (idempotent no-op)",
+                    ),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -1096,11 +1001,7 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "wbs_id": ParameterMetadata(
-                description=(
-                    "Optional WBS id of the run instance; echoed in the result "
-                    "for the caller's correlation (v1 records the run_count / "
-                    "last_run_at aggregate, not a per-run log)"
-                ),
+                description=("Optional WBS id of the run instance; echoed in the result for the caller's correlation (v1 records the run_count / last_run_at aggregate, not a per-run log)"),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -1110,7 +1011,8 @@ class ThinkingServiceAPI(ABC):
             type=ParameterType.OBJECT,
             properties={
                 "joseki_key": ParameterMetadata(
-                    type=ParameterType.STRING, description="The card",
+                    type=ParameterType.STRING,
+                    description="The card",
                 ),
                 "state": ParameterMetadata(
                     type=ParameterType.STRING,
@@ -1121,10 +1023,12 @@ class ThinkingServiceAPI(ABC):
                     description="Successful-run counter after this record",
                 ),
                 "wbs_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Echoed run instance id",
+                    type=ParameterType.STRING,
+                    description="Echoed run instance id",
                 ),
                 "status": ParameterMetadata(
-                    type=ParameterType.STRING, description="'run_recorded'",
+                    type=ParameterType.STRING,
+                    description="'run_recorded'",
                 ),
             },
         ),
@@ -1159,13 +1063,16 @@ class ThinkingServiceAPI(ABC):
                     description="False when no lifecycle row exists for the key",
                 ),
                 "joseki_key": ParameterMetadata(
-                    type=ParameterType.STRING, description="The card",
+                    type=ParameterType.STRING,
+                    description="The card",
                 ),
                 "state": ParameterMetadata(
-                    type=ParameterType.STRING, description="Current lifecycle state",
+                    type=ParameterType.STRING,
+                    description="Current lifecycle state",
                 ),
                 "provenance": ParameterMetadata(
-                    type=ParameterType.STRING, description="Authoring provenance",
+                    type=ParameterType.STRING,
+                    description="Authoring provenance",
                 ),
                 "knowledge_base_path": ParameterMetadata(
                     type=ParameterType.STRING,
@@ -1176,10 +1083,12 @@ class ThinkingServiceAPI(ABC):
                     description="Replacement key when superseded; null otherwise",
                 ),
                 "run_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Recorded successful runs",
+                    type=ParameterType.INTEGER,
+                    description="Recorded successful runs",
                 ),
                 "last_run_at": ParameterMetadata(
-                    type=ParameterType.STRING, description="Last run timestamp (ISO)",
+                    type=ParameterType.STRING,
+                    description="Last run timestamp (ISO)",
                 ),
             },
         ),
@@ -1209,7 +1118,8 @@ class ThinkingServiceAPI(ABC):
             type=ParameterType.OBJECT,
             properties={
                 "joseki_key": ParameterMetadata(
-                    type=ParameterType.STRING, description="The card",
+                    type=ParameterType.STRING,
+                    description="The card",
                 ),
                 "previous_knowledge_base_path": ParameterMetadata(
                     type=ParameterType.STRING,
@@ -1235,6 +1145,7 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="transition_plan_template",
         is_discoverable=True,
         provider="thinking_service",
@@ -1246,46 +1157,43 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "target_state": ParameterMetadata(
-                description=(
-                    "Target curation state: 'active' (endorse a draft as the "
-                    "canonical skeleton to fork), 'superseded' (requires "
-                    "superseded_by), or 'archived' (retire). 'draft' is the "
-                    "authoring origin, not a manual target"
-                ),
+                description=("Target curation state: 'active' (endorse a draft as the canonical skeleton to fork), 'superseded' (requires superseded_by), or 'archived' (retire). 'draft' is the authoring origin, not a manual target"),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "superseded_by": ParameterMetadata(
-                description=(
-                    "Template key of the replacing card; required only when "
-                    "target_state is 'superseded'"
-                ),
+                description=("Template key of the replacing card; required only when target_state is 'superseded'"),
                 required=False,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Curation-lifecycle transition result for a plan template",
-            type=ParameterType.OBJECT,
-            properties={
-                "template_key": ParameterMetadata(
-                    type=ParameterType.STRING, description="The transitioned template",
-                ),
-                "previous_state": ParameterMetadata(
-                    type=ParameterType.STRING, description="State before the transition",
-                ),
-                "state": ParameterMetadata(
-                    type=ParameterType.STRING, description="State after the transition",
-                ),
-                "superseded_by": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Replacement key when superseded; null otherwise",
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="'transitioned' or 'unchanged' (idempotent no-op)",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Curation-lifecycle transition result for a plan template",
+                type=ParameterType.OBJECT,
+                properties={
+                    "template_key": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="The transitioned template",
+                    ),
+                    "previous_state": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="State before the transition",
+                    ),
+                    "state": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="State after the transition",
+                    ),
+                    "superseded_by": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Replacement key when superseded; null otherwise",
+                    ),
+                    "status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="'transitioned' or 'unchanged' (idempotent no-op)",
+                    ),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -1299,6 +1207,7 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="get_plan_template",
         is_discoverable=True,
         provider="thinking_service",
@@ -1310,37 +1219,45 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Plan-template curation view (front-matter state + discovery axes)",
-            type=ParameterType.OBJECT,
-            properties={
-                "found": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="False when no card exists for the key",
-                ),
-                "template_key": ParameterMetadata(
-                    type=ParameterType.STRING, description="The template",
-                ),
-                "title": ParameterMetadata(
-                    type=ParameterType.STRING, description="Human-facing card title",
-                ),
-                "state": ParameterMetadata(
-                    type=ParameterType.STRING, description="Current curation state",
-                ),
-                "goal": ParameterMetadata(
-                    type=ParameterType.STRING, description="Discovery axis: what it achieves",
-                ),
-                "domain": ParameterMetadata(
-                    type=ParameterType.STRING, description="Discovery axis: the problem domain",
-                ),
-                "outcome": ParameterMetadata(
-                    type=ParameterType.STRING, description="Discovery axis: the kind of result",
-                ),
-                "superseded_by": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Replacement key when superseded; null otherwise",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Plan-template curation view (front-matter state + discovery axes)",
+                type=ParameterType.OBJECT,
+                properties={
+                    "found": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="False when no card exists for the key",
+                    ),
+                    "template_key": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="The template",
+                    ),
+                    "title": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Human-facing card title",
+                    ),
+                    "state": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Current curation state",
+                    ),
+                    "goal": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Discovery axis: what it achieves",
+                    ),
+                    "domain": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Discovery axis: the problem domain",
+                    ),
+                    "outcome": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Discovery axis: the kind of result",
+                    ),
+                    "superseded_by": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Replacement key when superseded; null otherwise",
+                    ),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -1352,16 +1269,14 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="start_wbs_execution",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -1371,30 +1286,33 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Pull-mode execution session state (start or resume)",
-            type=ParameterType.OBJECT,
-            properties={
-                "wbs_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="WBS ID",
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="WBS tracking status after the call ('in_progress')",
-                ),
-                "resumed": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when prior executed steps exist (resume path)",
-                ),
-                "executed_step_numbers": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Step numbers already durably executed",
-                ),
-                "next": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Envelope for the next unexecuted step (see get_next_wbs_step)",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Pull-mode execution session state (start or resume)",
+                type=ParameterType.OBJECT,
+                properties={
+                    "wbs_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="WBS ID",
+                    ),
+                    "status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="WBS tracking status after the call ('in_progress')",
+                    ),
+                    "resumed": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="True when prior executed steps exist (resume path)",
+                    ),
+                    "executed_step_numbers": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Step numbers already durably executed",
+                    ),
+                    "next": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Envelope for the next unexecuted step (see get_next_wbs_step)",
+                    ),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -1406,16 +1324,14 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="get_next_wbs_step",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -1425,61 +1341,61 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Pull-mode envelope for the next unexecuted WBS step",
-            type=ParameterType.OBJECT,
-            properties={
-                "kind": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="'execute' | 'await_user' | 'complete'",
-                ),
-                "wbs_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="WBS ID",
-                ),
-                "step_number": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Next step number (null when kind='complete')",
-                ),
-                "title": ParameterMetadata(
-                    type=ParameterType.STRING, description="Step title",
-                ),
-                "process_keys": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Process keys the step declares",
-                ),
-                "sub_steps": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=(
-                        "Sub-steps with resolved arguments (bound literals + "
-                        "resolved Composed references) and any unresolved "
-                        "Composed targets"
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Pull-mode envelope for the next unexecuted WBS step",
+                type=ParameterType.OBJECT,
+                properties={
+                    "kind": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="'execute' | 'await_user' | 'complete'",
                     ),
-                ),
-                "support_articles": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="SUPPORT_ARTICLES filenames for the step",
-                ),
-                "result_processor_kind": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="The step's RESULT_PROCESSOR_KIND (or null)",
-                ),
-                "auto_safe": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when the author marked AUTO_SAFE: true",
-                ),
-                "expected_result_contract": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="What a valid observation must contain",
-                ),
-                "completion_criteria": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="How this step is completed and recorded",
-                ),
-                "remaining_step_numbers": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="All unexecuted step numbers, in order",
-                ),
-            },
+                    "wbs_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="WBS ID",
+                    ),
+                    "step_number": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Next step number (null when kind='complete')",
+                    ),
+                    "title": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Step title",
+                    ),
+                    "process_keys": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Process keys the step declares",
+                    ),
+                    "sub_steps": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("Sub-steps with resolved arguments (bound literals + resolved Composed references) and any unresolved Composed targets"),
+                    ),
+                    "support_articles": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="SUPPORT_ARTICLES filenames for the step",
+                    ),
+                    "result_processor_kind": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="The step's RESULT_PROCESSOR_KIND (or null)",
+                    ),
+                    "auto_safe": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="True when the author marked AUTO_SAFE: true",
+                    ),
+                    "expected_result_contract": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="What a valid observation must contain",
+                    ),
+                    "completion_criteria": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="How this step is completed and recorded",
+                    ),
+                    "remaining_step_numbers": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="All unexecuted step numbers, in order",
+                    ),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -1491,16 +1407,14 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="record_wbs_step_observation",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -1520,10 +1434,7 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "result": ParameterMetadata(
-                description=(
-                    "The executed tool's result envelope (must carry a "
-                    "success status: completed/succeeded/success)"
-                ),
+                description=("The executed tool's result envelope (must carry a success status: completed/succeeded/success)"),
                 required=True,
                 type=ParameterType.OBJECT,
             ),
@@ -1538,31 +1449,33 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.LIST,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=(
-                "Observation outcome — accepted=false means NOTHING advanced"
-            ),
-            type=ParameterType.OBJECT,
-            properties={
-                "wbs_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="WBS ID",
-                ),
-                "step_number": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Observed step",
-                ),
-                "accepted": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True when validated and durably recorded",
-                ),
-                "errors": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Validation errors (empty when accepted)",
-                ),
-                "next": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Envelope for the next unexecuted step",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Observation outcome — accepted=false means NOTHING advanced"),
+                type=ParameterType.OBJECT,
+                properties={
+                    "wbs_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="WBS ID",
+                    ),
+                    "step_number": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Observed step",
+                    ),
+                    "accepted": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="True when validated and durably recorded",
+                    ),
+                    "errors": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Validation errors (empty when accepted)",
+                    ),
+                    "next": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Envelope for the next unexecuted step",
+                    ),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -1579,16 +1492,14 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="advance_wbs_execution",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -1598,42 +1509,37 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=(
-                "Q15 advance evaluation: auto_safe steps come back as a "
-                "validated ready-to-submit action definition; everything "
-                "else returns control to the agent"
-            ),
-            type=ParameterType.OBJECT,
-            properties={
-                "mode": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="'auto_safe' | 'agent_review' | 'complete'",
-                ),
-                "wbs_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="WBS ID",
-                ),
-                "step_number": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Evaluated next step (absent when complete)",
-                ),
-                "reasons": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Why the step needs agent review (empty for auto_safe)",
-                ),
-                "action_definition": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description=(
-                        "Validated closed-world {process_key, arguments} — "
-                        "present only for mode='auto_safe'; the driver may "
-                        "submit it mechanically without review"
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Q15 advance evaluation: auto_safe steps come back as a validated ready-to-submit action definition; everything else returns control to the agent"),
+                type=ParameterType.OBJECT,
+                properties={
+                    "mode": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="'auto_safe' | 'agent_review' | 'complete'",
                     ),
-                ),
-                "envelope": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="The evaluated step's full envelope",
-                ),
-            },
+                    "wbs_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="WBS ID",
+                    ),
+                    "step_number": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Evaluated next step (absent when complete)",
+                    ),
+                    "reasons": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Why the step needs agent review (empty for auto_safe)",
+                    ),
+                    "action_definition": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description=("Validated closed-world {process_key, arguments} — present only for mode='auto_safe'; the driver may submit it mechanically without review"),
+                    ),
+                    "envelope": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="The evaluated step's full envelope",
+                    ),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -1645,16 +1551,14 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="patch_work_breakdown_structure",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -1669,15 +1573,15 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Work Breakdown Structure update result",
-            type=ParameterType.OBJECT,
-            properties={
-                "wbs_id": ParameterMetadata(type=ParameterType.STRING, description="WBS ID"),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Operation status"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Work Breakdown Structure update result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "wbs_id": ParameterMetadata(type=ParameterType.STRING, description="WBS ID"),
+                    "status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -1690,16 +1594,14 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="generate_section_stem_wbs",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -1724,76 +1626,65 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "style_family": ParameterMetadata(
-                description=(
-                    "Style family identifier (e.g., 'neuro_ambient', "
-                    "'early_baroque'). Selects the pipeline schema "
-                    "from the matching knowledge base."
-                ),
+                description=("Style family identifier (e.g., 'neuro_ambient', 'early_baroque'). Selects the pipeline schema from the matching knowledge base."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "artifact_prefix": ParameterMetadata(
-                description=(
-                    "Artifact filename prefix committed in the Work "
-                    "Manifest. Output filenames are derived from this."
-                ),
+                description=("Artifact filename prefix committed in the Work Manifest. Output filenames are derived from this."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "pipeline_spec_id": ParameterMetadata(
-                description=(
-                    "PipelineSpec artifact ID (psp- prefix). The "
-                    "platform reads the artifact from the knowledge "
-                    "base, extracts the embedded JSON, and uses it to "
-                    "generate the WBS."
-                ),
+                description=("PipelineSpec artifact ID (psp- prefix). The platform reads the artifact from the knowledge base, extracts the embedded JSON, and uses it to generate the WBS."),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "pipeline_spec": ParameterMetadata(
-                description=(
-                    "PipelineSpec as an inline JSON object — used by "
-                    "direct callers (tests, integration harnesses). "
-                    "Production flows pass pipeline_spec_id instead."
-                ),
+                description=("PipelineSpec as an inline JSON object — used by direct callers (tests, integration harnesses). Production flows pass pipeline_spec_id instead."),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Deterministic WBS generation result",
-            type=ParameterType.OBJECT,
-            properties={
-                "wbs_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="WBS ID",
-                ),
-                "manifest_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Parent manifest ID",
-                ),
-                "phase_number": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Phase number",
-                ),
-                "phase_name": ParameterMetadata(
-                    type=ParameterType.STRING, description="Phase name",
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Operation status",
-                ),
-                "content": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Full generated WBS content",
-                ),
-                "knowledge_base_path": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Path within the knowledge base",
-                ),
-                "source_memory_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Focused memory ID for the stored WBS",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Deterministic WBS generation result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "wbs_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="WBS ID",
+                    ),
+                    "manifest_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Parent manifest ID",
+                    ),
+                    "phase_number": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Phase number",
+                    ),
+                    "phase_name": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Phase name",
+                    ),
+                    "status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Operation status",
+                    ),
+                    "content": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Full generated WBS content",
+                    ),
+                    "knowledge_base_path": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Path within the knowledge base",
+                    ),
+                    "source_memory_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Focused memory ID for the stored WBS",
+                    ),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -1812,16 +1703,14 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="record_work_breakdown_structure_step_state",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -1851,18 +1740,16 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.LIST,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Step state recording result",
-            type=ParameterType.OBJECT,
-            properties={
-                "wbs_id": ParameterMetadata(type=ParameterType.STRING, description="WBS ID"),
-                "step_number": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Step number"
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Operation status"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Step state recording result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "wbs_id": ParameterMetadata(type=ParameterType.STRING, description="WBS ID"),
+                    "step_number": ParameterMetadata(type=ParameterType.INTEGER, description="Step number"),
+                    "status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -1878,16 +1765,14 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="record_work_manifest_phase_state",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -1922,20 +1807,16 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Phase state recording result",
-            type=ParameterType.OBJECT,
-            properties={
-                "manifest_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Manifest ID"
-                ),
-                "phase_number": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Phase number"
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Operation status"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Phase state recording result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "manifest_id": ParameterMetadata(type=ParameterType.STRING, description="Manifest ID"),
+                    "phase_number": ParameterMetadata(type=ParameterType.INTEGER, description="Phase number"),
+                    "status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -1952,16 +1833,14 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="graft_work_breakdown_structure_segment",
         is_discoverable=True,
         provider="thinking_service",
         is_long_running=False,
         parameters={
             "state": ParameterMetadata(
-                description=(
-                    "Current application state (automatically injected at "
-                    "execution time; carries the acting session — JOS-02)"
-                ),
+                description=("Current application state (automatically injected at execution time; carries the acting session — JOS-02)"),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
@@ -1981,15 +1860,15 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Plan graft result",
-            type=ParameterType.OBJECT,
-            properties={
-                "wbs_id": ParameterMetadata(type=ParameterType.STRING, description="WBS ID"),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING, description="Operation status"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Plan graft result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "wbs_id": ParameterMetadata(type=ParameterType.STRING, description="WBS ID"),
+                    "status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
+                },
+            )
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -2018,9 +1897,7 @@ class ThinkingServiceAPI(ABC):
             type=ParameterType.OBJECT,
             properties={
                 "plan_id": ParameterMetadata(type=ParameterType.STRING, description="Plan ID"),
-                "content": ParameterMetadata(
-                    type=ParameterType.STRING, description="Full plan markdown"
-                ),
+                "content": ParameterMetadata(type=ParameterType.STRING, description="Full plan markdown"),
             },
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -2033,6 +1910,7 @@ class ThinkingServiceAPI(ABC):
     # ==========================================================================
 
     @service_interface_process(
+        is_async=True,
         name="process_planning_results",
         provider="thinking_service",
         processor_policy_category=ProcessorPolicyCategory.VERTEX,
@@ -2050,21 +1928,23 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.OBJECT,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Planning inference loop output",
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or failed",
-                    required=False,
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Planning output (actions or artifacts)",
-                    required=False,
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Planning inference loop output",
+                properties={
+                    "action_status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status: completed or failed",
+                        required=False,
+                    ),
+                    "data": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Planning output (actions or artifacts)",
+                        required=False,
+                    ),
+                },
+            )
         ),
         action_definition_template={
             "name": "process_planning_result",
@@ -2098,39 +1978,35 @@ class ThinkingServiceAPI(ABC):
     ) -> ActionResult: ...
 
     @service_interface_process(
+        is_async=True,
         name="resume_thinking_completion",
         provider="thinking_service",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         work_count_impact=0,
         parameters={
             "request_id": ParameterMetadata(
-                description=(
-                    "The served completion request id (icr-...) whose durable "
-                    "row carries the completion text and planning correlation."
-                ),
+                description=("The served completion request id (icr-...) whose durable row carries the completion text and planning correlation."),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description=(
-                "Planning loop re-entry output (INF-02 resume continuation): "
-                "the same actions-or-artifacts shape process_planning_results "
-                "produces"
-            ),
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or failed",
-                    required=False,
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Planning output (actions or artifacts)",
-                    required=False,
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description=("Planning loop re-entry output (INF-02 resume continuation): the same actions-or-artifacts shape process_planning_results produces"),
+                properties={
+                    "action_status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status: completed or failed",
+                        required=False,
+                    ),
+                    "data": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Planning output (actions or artifacts)",
+                        required=False,
+                    ),
+                },
+            )
         ),
         # Deploy-fix 2026-07-05 (historical): both customization blocks were
         # added when the post-KB-merge boot check required them; that FATAL
@@ -2189,24 +2065,18 @@ class ThinkingServiceAPI(ABC):
     # ------------------------------------------------------------------
 
     @service_interface_process(
+        is_async=True,
         name="run_joseki",
         provider="thinking_service",
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         parameters={
             "joseki_key": ParameterMetadata(
-                description=(
-                    "JOSEKI_KEY of a registered candidate/proven card to "
-                    "execute (drafts and retired cards are rejected)"
-                ),
+                description=("JOSEKI_KEY of a registered candidate/proven card to execute (drafts and retired cards are rejected)"),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "bindings": ParameterMetadata(
-                description=(
-                    "Concrete values for the card's <<BIND:name>> slots; the "
-                    "card must be closed-world under these bindings or the "
-                    "call fails typed (joseki_not_mechanizable)"
-                ),
+                description=("Concrete values for the card's <<BIND:name>> slots; the card must be closed-world under these bindings or the call fails typed (joseki_not_mechanizable)"),
                 required=True,
                 type=ParameterType.OBJECT,
             ),
@@ -2216,37 +2086,33 @@ class ThinkingServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description=(
-                "Run handle; the run executes asynchronously — the envelope's "
-                "returned action (Pattern 6a) submits step 1 in the run's own "
-                "session and the coordinator chain drives the rest"
-            ),
-            type=ParameterType.OBJECT,
-            properties={
-                "run_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Run row id (jrun-…)",
-                ),
-                "wbs_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Instantiated joseki-scoped WBS id",
-                ),
-                "session_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="The run's dedicated platform session",
-                ),
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Always 'running' on success",
-                ),
-                "actions": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=(
-                        "Single-element Pattern-6a list: step 1's action "
-                        "definition, platform-submitted after this verb returns"
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Run handle; the run executes asynchronously — the envelope's returned action (Pattern 6a) submits step 1 in the run's own session and the coordinator chain drives the rest"),
+                type=ParameterType.OBJECT,
+                properties={
+                    "run_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Run row id (jrun-…)",
                     ),
-                ),
-            },
+                    "wbs_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Instantiated joseki-scoped WBS id",
+                    ),
+                    "session_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="The run's dedicated platform session",
+                    ),
+                    "status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Always 'running' on success",
+                    ),
+                    "actions": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("Single-element Pattern-6a list: step 1's action definition, platform-submitted after this verb returns"),
+                    ),
+                },
+            )
         ),
     )
     @abstractmethod
@@ -2264,26 +2130,22 @@ class ThinkingServiceAPI(ABC):
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         parameters={
             "wbs_id": ParameterMetadata(
-                description=(
-                    "The run WBS id; the terminal step the instantiator "
-                    "appends binds this — not for human invocation"
-                ),
+                description=("The run WBS id; the terminal step the instantiator appends binds this — not for human invocation"),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
         return_value_schema=ReturnValueSchema(
-            description=(
-                "Terminal outcome; run evidence records only on the winning "
-                "status CAS (a lost race is a benign no-op)"
-            ),
+            description=("Terminal outcome; run evidence records only on the winning status CAS (a lost race is a benign no-op)"),
             type=ParameterType.OBJECT,
             properties={
                 "run_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Run row id",
+                    type=ParameterType.STRING,
+                    description="Run row id",
                 ),
                 "wbs_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="The run WBS id",
+                    type=ParameterType.STRING,
+                    description="The run WBS id",
                 ),
                 "status": ParameterMetadata(
                     type=ParameterType.STRING,
@@ -2295,10 +2157,7 @@ class ThinkingServiceAPI(ABC):
                 ),
                 "joseki_state": ParameterMetadata(
                     type=ParameterType.STRING,
-                    description=(
-                        "Card lifecycle state after evidence recording; None "
-                        "on the noop path"
-                    ),
+                    description=("Card lifecycle state after evidence recording; None on the noop path"),
                     required=False,
                 ),
                 "run_count": ParameterMetadata(
@@ -2341,7 +2200,8 @@ class ThinkingServiceAPI(ABC):
                     description="False when no run row exists for the id",
                 ),
                 "run_id": ParameterMetadata(
-                    type=ParameterType.STRING, description="Run row id",
+                    type=ParameterType.STRING,
+                    description="Run row id",
                 ),
                 "joseki_key": ParameterMetadata(
                     type=ParameterType.STRING,
@@ -2401,10 +2261,7 @@ class ThinkingServiceAPI(ABC):
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "status": ParameterMetadata(
-                description=(
-                    "Optional status filter: running, awaiting_user, "
-                    "completed, or failed"
-                ),
+                description=("Optional status filter: running, awaiting_user, completed, or failed"),
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -2425,12 +2282,11 @@ class ThinkingServiceAPI(ABC):
             properties={
                 "runs": ParameterMetadata(
                     type=ParameterType.LIST,
-                    description=(
-                        "Run row projections (same shape as get_joseki_run)"
-                    ),
+                    description=("Run row projections (same shape as get_joseki_run)"),
                 ),
                 "count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Rows returned",
+                    type=ParameterType.INTEGER,
+                    description="Rows returned",
                 ),
             },
         ),
@@ -2445,29 +2301,27 @@ class ThinkingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="reconcile_joseki_runs",
         is_discoverable=False,
         provider="thinking_service",
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description=(
-                "Sweep outcome over every running joseki run — the ordered "
-                "reconciler duties (violation surfacing, runtime-failure "
-                "surfacing, stall detection); the canonical EDGE_SINK "
-                "cron-sibling shape"
-            ),
-            type=ParameterType.OBJECT,
-            properties={
-                "swept": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Running runs examined",
-                ),
-                "results": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Per-run duty outcomes",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Sweep outcome over every running joseki run — the ordered reconciler duties (violation surfacing, runtime-failure surfacing, stall detection); the canonical EDGE_SINK cron-sibling shape"),
+                type=ParameterType.OBJECT,
+                properties={
+                    "swept": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Running runs examined",
+                    ),
+                    "results": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Per-run duty outcomes",
+                    ),
+                },
+            )
         ),
     )
     @abstractmethod

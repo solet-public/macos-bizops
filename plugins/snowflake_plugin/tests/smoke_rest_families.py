@@ -13,7 +13,6 @@ route every declared family.
 
 from __future__ import annotations
 
-import base64
 import json
 import sys
 import unittest
@@ -21,7 +20,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
-from urllib.parse import quote, quote_from_bytes, quote_plus
+from urllib.parse import quote
 
 import httpx
 from cryptography.hazmat.primitives import serialization
@@ -59,8 +58,8 @@ class FamilyFixture(unittest.TestCase):
     def run_family(self, family: str, params: dict[str, Any], handler: Handler) -> dict[str, Any]:
         real = rest_client.perform_request
 
-        def with_transport(config: SnowflakeAccountConfig, request: dict[str, Any], *, timeout_seconds: int) -> dict[str, Any]:
-            return real(config, request, timeout_seconds=timeout_seconds, transport=httpx.MockTransport(handler))
+        def with_transport(config: SnowflakeAccountConfig, request: dict[str, Any], *, timeout_seconds: int, result_hints: Callable[[dict[str, Any]], dict[str, Any]] | None = None) -> dict[str, Any]:
+            return real(config, request, timeout_seconds=timeout_seconds, transport=httpx.MockTransport(handler), result_hints=result_hints)
 
         with patch.object(rest_client, "perform_request", with_transport):
             outcome = rest_families.run_family(family, self.plugin(), params)
@@ -419,18 +418,6 @@ class Transcripts(FamilyFixture):
         self.assertEqual(outcome["error"], {"code": "snowflake.api_error", "message": "Snowflake REST request failed; vendor state may have changed"})
 
 
-def forms(secret: str) -> dict[str, str]:
-    """Raw, percent-encoded and base64 spellings a reviewer named."""
-    raw = secret.encode()
-    out = {"raw": secret, "percent": quote_from_bytes(raw, safe=""), "form": quote_plus(secret, safe="")}
-    for name, encode in (("base64", base64.b64encode), ("base64url", base64.urlsafe_b64encode)):
-        encoded = encode(raw).decode()
-        out[name] = encoded
-        out[name + "_unpadded"] = encoded.rstrip("=")
-        out[name + "_percent"] = quote(encoded, safe="")
-    return out
-
-
 class ResourceTranscripts(FamilyFixture):
     """Build 3 resource families against their documented vendor response shapes."""
 
@@ -535,58 +522,6 @@ class ResourceTranscripts(FamilyFixture):
                 self.assertEqual((data["status"], data["error_code"], data["body"]), (status, code, REST_ERROR))
 
 
-class Redaction(FamilyFixture):
-    def test_issued_jwt_and_vendor_token_variants_never_reach_result_or_hints(self) -> None:
-        token, redactor = rest_client.authentication(self.config)
-        issued = "vendor-issued-session+token/=="
-        jwt_forms = forms(token)
-        issued_forms = forms(issued)
-        every = {**{"jwt_" + k: v for k, v in jwt_forms.items()}, **{"issued_" + k: v for k, v in issued_forms.items()}}
-        body = {
-            "code": "333334",
-            "message": "echo " + " ".join(every.values()),
-            "statementHandle": HANDLE,
-            "statementStatusUrl": f"/api/v2/statements/{HANDLE}?jwt={jwt_forms['percent']}",
-            "resultHandler": "01b8-" + jwt_forms["base64url_unpadded"][:40],
-            "access_token": issued,
-            "rows": [[value] for value in every.values()],
-        }
-        headers = {"Location": "/api/v2/results/x?t=" + jwt_forms["percent"], "Link": f'</api/v2/results/x?page=1&t={issued_forms["base64_percent"]}>; rel="next"', "X-Echo": jwt_forms["base64"]}
-        cases = (
-            ("sql_api", {"operation": "submit", "body": {"statement": "SELECT 1"}}),
-            ("task", scoped("execute")),
-            ("stream", scoped("get")),
-            ("dynamic_table", scoped("refresh")),
-            ("database", db("enable_replication", body={"accounts": ["MYORG.DR"]})),
-            ("schema", sch("undrop")),
-            ("warehouse", wh("resume")),
-            ("stage", scoped("presigned_url", file_path="part_0.csv")),
-        )
-        for family, params in cases:
-            with self.subTest(family=family), patch.object(rest_client, "authentication", return_value=(token, redactor)):
-                data = self.run_family(family, params, lambda _: httpx.Response(202, json=body, headers=headers))
-                rendered = json.dumps(data)
-                for name, value in every.items():
-                    self.assertNotIn(value, rendered, name)
-                self.assertIn("[REDACTED]", data["pagination"]["location"])
-                self.assertIn("[REDACTED]", data["pagination"]["links"]["next"])
-
-    def test_caller_sent_stage_credentials_never_come_back(self) -> None:
-        aws = {"credential_type": "AWS", "aws_key_id": "AKIAEXAMPLE", "aws_secret_key": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY="}
-        azure = {"credential_type": "AZURE", "azure_sas_token": "sv=2026-01-01&ss=b&sig=AbC%2Bdef%3D"}
-        for credentials, secret in ((aws, aws["aws_secret_key"]), (azure, azure["azure_sas_token"])):
-            with self.subTest(credential_type=credentials["credential_type"]):
-                spellings = forms(secret)
-                error = {"code": "091003", "error_code": "091003", "message": "Failure using stage area. Cause: [Access Denied] " + " ".join(spellings.values()), "request_id": "5d1f2a54-1111-2222-3333-444455556666"}
-                params = {"operation": "create", "database": "DB", "schema": "PUBLIC", "body": {"name": "EXT", "url": "s3://bucket/landing/", "credentials": credentials}}
-                data = self.run_family("stage", params, lambda _, error=error, spellings=spellings: httpx.Response(400, json=error, headers={"X-Echo": spellings["base64"]}))
-                rendered = json.dumps(data)
-                self.assertEqual([name for name, value in spellings.items() if value in rendered], [])
-                self.assertIn("[REDACTED]", data["body"]["message"])
-                self.assertEqual(data["headers"]["x-echo"], "[REDACTED]")
-                self.assertEqual(data["error_code"], "snowflake.api_error")
-
-
 class Plugin(FamilyFixture):
     def test_dispatch_refuses_before_job_and_queues_valid_input(self) -> None:
         plugin = self.plugin()
@@ -610,14 +545,14 @@ class Plugin(FamilyFixture):
         manager = MagicMock()
         manager.get_job_payload.return_value = {"action_status": "completed", "data": {"payload": scoped("suspend")}}
         vendor = {"status": 200, "headers": {}, "body": {"status": "Statement executed successfully."}, "body_encoding": "json", "correlation_id": "c-1"}
-        with patch.object(rest_client, "perform_request", return_value=dict(vendor)) as transport:
+        with patch.object(rest_client, "perform_request", return_value={**vendor, "_hints": {}}) as transport:
             async_jobs._process_job(plugin, manager, "job-1", "task")
         self.assertEqual(transport.call_args.args[1]["path"], f"{_BASE}/tasks/NIGHTLY:suspend")
         manager.update_job.assert_called_with("job-1", {"status": "completed", "result": {**vendor, "family": "task", "operation": "suspend", "method": "POST"}})
 
     def test_every_family_is_a_worker_rest_action(self) -> None:
         for family in rest_families.FAMILIES:
-            self.assertIn(family, async_jobs.REST_ACTIONS)
+            self.assertIn(family, async_jobs.PLUGIN_ACTIONS)
             handler, gated = async_jobs.ACTION_HANDLERS[family]
             self.assertFalse(gated)
             self.assertEqual(handler.func, rest_families.run_family)  # type: ignore[attr-defined]

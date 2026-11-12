@@ -23,6 +23,7 @@ from ananta.core.actions.action_metadata import (
     ReturnValueSchema,
 )
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.async_job_manager import registered_job_return_schema
 
 
 class JobServiceAPI(ABC):
@@ -40,53 +41,46 @@ class JobServiceAPI(ABC):
     """
 
     @service_interface_process(
+        is_async=True,
         name="get_latest_job",
         is_discoverable=True,
         provider="job_service",
         parameters={
             "plugin_name": ParameterMetadata(
-                description=(
-                    "Filter to jobs created by the specified plugin "
-                    "(e.g., default_image_generation_plugin)"
-                ),
+                description=("Filter to jobs created by the specified plugin (e.g., default_image_generation_plugin)"),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "action_name": ParameterMetadata(
-                description=(
-                    "Filter to jobs created by the specified action (e.g., generate_image)"
-                ),
+                description=("Filter to jobs created by the specified action (e.g., generate_image)"),
                 required=False,
                 type=ParameterType.STRING,
             ),
             "status": ParameterMetadata(
-                description=(
-                    "Filter to jobs in the specified status "
-                    "(pending, processing, completed, failed, cancelled)"
-                ),
+                description=("Filter to jobs in the specified status (pending, processing, completed, failed, cancelled)"),
                 required=False,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Asynchronous job metadata",
-            type=ParameterType.OBJECT,
-            properties={
-                "job": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Job record from core__asynchronous_jobs",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Fetch the latest job for a plugin/action to retrieve job_id before status monitoring",
-                "Diagnose async job failures by inspecting stored result/error payloads",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Asynchronous job metadata",
+                type=ParameterType.OBJECT,
+                properties={
+                    "job": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Job record from core__asynchronous_jobs",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Fetch the latest job for a plugin/action to retrieve job_id before status monitoring",
+                    "Diagnose async job failures by inspecting stored result/error payloads",
+                ],
+            )
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     @abstractmethod
     def get_latest_job(
@@ -108,10 +102,7 @@ class JobServiceAPI(ABC):
         provider="job_service",
         parameters={
             "job_id": ParameterMetadata(
-                description=(
-                    "Identifier of the job to fetch — the job_id a born-async "
-                    "dispatch returned in its {job_id, status: queued} envelope"
-                ),
+                description=("Identifier of the job to fetch — the job_id a born-async dispatch returned in its {job_id, status: queued} envelope"),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -122,10 +113,7 @@ class JobServiceAPI(ABC):
             properties={
                 "job": ParameterMetadata(
                     type=ParameterType.OBJECT,
-                    description=(
-                        "Job record from core__job, or null when no job carries "
-                        "that job_id"
-                    ),
+                    description=("Job record from core__job, or null when no job carries that job_id"),
                     required=False,
                 ),
             },
@@ -135,9 +123,7 @@ class JobServiceAPI(ABC):
             ],
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     @abstractmethod
     def get_job(self, job_id: str) -> dict[str, Any]:
@@ -151,46 +137,41 @@ class JobServiceAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="list_unreached_job_completions",
         is_discoverable=True,
         provider="job_service",
         parameters={
             "limit": ParameterMetadata(
-                description=(
-                    "Maximum jobs to return, newest first (1-100, default 20)"
-                ),
+                description=("Maximum jobs to return, newest first (1-100, default 20)"),
                 required=False,
                 type=ParameterType.INTEGER,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Finished jobs whose completion had no channel to arrive on",
-            type=ParameterType.OBJECT,
-            properties={
-                "jobs": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=(
-                        "Job records, each with its stored result/error payload "
-                        "attached, newest first"
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Finished jobs whose completion had no channel to arrive on",
+                type=ParameterType.OBJECT,
+                properties={
+                    "jobs": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("Job records, each with its stored result/error payload attached, newest first"),
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="How many job records are in this page",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Drain the results of background jobs dispatched from a CLI or "
-                "direct process_call, which have no completion channel",
-                "Audit which finished jobs nobody was ever told about",
-            ],
+                    "count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="How many job records are in this page",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Drain the results of background jobs dispatched from a CLI or direct process_call, which have no completion channel",
+                    "Audit which finished jobs nobody was ever told about",
+                ],
+            )
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     @abstractmethod
     def list_unreached_job_completions(self, limit: int = 20) -> dict[str, Any]:
@@ -204,45 +185,41 @@ class JobServiceAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="detect_unresolved_completion_tokens",
         is_discoverable=True,
         provider="job_service",
         parameters={
             "limit": ParameterMetadata(
-                description=(
-                    "Maximum jobs to return, newest first (1-100, default 20)"
-                ),
+                description=("Maximum jobs to return, newest first (1-100, default 20)"),
                 required=False,
                 type=ParameterType.INTEGER,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Finished jobs whose flow token was never resolved",
-            type=ParameterType.OBJECT,
-            properties={
-                "jobs": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=(
-                        "Job records that read terminal while their flow token "
-                        "sits in a non-terminal state, newest first"
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Finished jobs whose flow token was never resolved",
+                type=ParameterType.OBJECT,
+                properties={
+                    "jobs": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("Job records that read terminal while their flow token sits in a non-terminal state, newest first"),
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="How many job records are in this page",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Find jobs that look completed but left their flow open forever",
-                "Diagnose a flow that never closed despite its job reporting success",
-            ],
+                    "count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="How many job records are in this page",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Find jobs that look completed but left their flow open forever",
+                    "Diagnose a flow that never closed despite its job reporting success",
+                ],
+            )
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     @abstractmethod
     def detect_unresolved_completion_tokens(self, limit: int = 20) -> dict[str, Any]:
@@ -256,16 +233,13 @@ class JobServiceAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="sweep_stale_jobs",
         is_discoverable=True,
         provider="job_service",
         parameters={
             "max_age_minutes": ParameterMetadata(
-                description=(
-                    "How long a job may sit in 'processing' without reporting "
-                    "progress before it is failed. Required — pick it from what "
-                    "the target plugin's work actually takes"
-                ),
+                description=("How long a job may sit in 'processing' without reporting progress before it is failed. Required — pick it from what the target plugin's work actually takes"),
                 required=True,
                 type=ParameterType.INTEGER,
             ),
@@ -275,41 +249,35 @@ class JobServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "limit": ParameterMetadata(
-                description=(
-                    "Maximum jobs to sweep in one call (1-100, default 20); each "
-                    "swept job fires its error continuation, so this bounds the burst"
-                ),
+                description=("Maximum jobs to sweep in one call (1-100, default 20); each swept job fires its error continuation, so this bounds the burst"),
                 required=False,
                 type=ParameterType.INTEGER,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Jobs terminated by the staleness sweep",
-            type=ParameterType.OBJECT,
-            properties={
-                "swept": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=(
-                        "One entry per swept job: job_id, provider_name, "
-                        "last_updated_at, status_reason, update_accepted"
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Jobs terminated by the staleness sweep",
+                type=ParameterType.OBJECT,
+                properties={
+                    "swept": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("One entry per swept job: job_id, provider_name, last_updated_at, status_reason, update_accepted"),
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="How many jobs were swept",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Clear jobs whose worker died mid-run, so their flows can close",
-                "Bound a stuck-job backlog for one plugin after a crash",
-            ],
+                    "count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="How many jobs were swept",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Clear jobs whose worker died mid-run, so their flows can close",
+                    "Bound a stuck-job backlog for one plugin after a crash",
+                ],
+            )
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     @abstractmethod
     def sweep_stale_jobs(

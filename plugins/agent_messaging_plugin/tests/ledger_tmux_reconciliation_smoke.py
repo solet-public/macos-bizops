@@ -319,7 +319,7 @@ def test_process_is_read_only() -> None:
         patch.object(state, "update_state", wraps=state.update_state) as update,
         patch.object(state, "write_state", wraps=state.write_state) as write,
     ):
-        result = plugin.reconcile_ledger_tmux({}, {})
+        result = plugin._reconcile_ledger_tmux()  # noqa: SLF001 — worker collector retains read-only behavior
     assert result["action_status"] == "completed"
     assert _reasons(result["data"]) == ["ledger_tmux_missing"]
     assert state._rows == before, "Reconciliation must leave the ledger unchanged"  # noqa: SLF001

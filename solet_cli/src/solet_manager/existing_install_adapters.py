@@ -176,9 +176,7 @@ def invoke_existing_adapter(registry: ExistingInstallAdapterRegistry, request: O
     return OperationResult.from_dict(cast(dict[str, JsonValue], raw), request)
 
 
-def invoke_reconciliation(
-    registry: ExistingInstallAdapterRegistry, envelope: dict[str, JsonValue], *, timeout_seconds: int
-) -> ReconciliationOutcome:
+def invoke_reconciliation(registry: ExistingInstallAdapterRegistry, envelope: dict[str, JsonValue], *, timeout_seconds: int) -> ReconciliationOutcome:
     """Feed the fixed reconciliation envelope to the refreshed target's adapter executable."""
     command = registry.command_for("reconciliation")
     if command is None:
@@ -220,7 +218,7 @@ def invoke_instance_bridge(
     command = registry.command_for("instance_bridge")
     if command is None:
         raise AdapterMissingError("the target does not provide the bridge CLI vector")
-    argv = (*command, "call", "--timeout", str(timeout_seconds), process_key, json.dumps(arguments, sort_keys=True, separators=(",", ":")))
+    argv = (*command, "call", "--timeout", str(timeout_seconds), process_key, json.dumps(arguments, sort_keys=True, separators=(",", ":")), "--wait")
     envelope = _run_bridge(argv, registry, timeout_seconds)
     result = envelope.get("result")
     if not isinstance(result, dict) or result.get("success") is not True:
@@ -240,9 +238,7 @@ def bridge_health(registry: ExistingInstallAdapterRegistry, *, timeout_seconds: 
     return _run_bridge((*command, "health"), registry, timeout_seconds)
 
 
-def run_launchctl(
-    registry: ExistingInstallAdapterRegistry, verb: str, *arguments: str, timeout_seconds: int = 60
-) -> subprocess.CompletedProcess[str]:
+def run_launchctl(registry: ExistingInstallAdapterRegistry, verb: str, *arguments: str, timeout_seconds: int = 60) -> subprocess.CompletedProcess[str]:
     """Run one closed ``launchctl`` vector; the verb set is fixed and the label is the caller's."""
     if verb not in _LAUNCHCTL_VERBS:
         raise StateConflictError(f"launchctl verb {verb!r} is outside the closed vector set")
@@ -306,7 +302,23 @@ def _run_bridge(argv: tuple[str, ...], registry: ExistingInstallAdapterRegistry,
         raise AdapterProtocolError(f"bridge CLI stdout is not JSON: {exc}") from exc
     if not isinstance(raw, dict):
         raise AdapterProtocolError("bridge CLI stdout must be one JSON object")
-    return cast(dict[str, JsonValue], raw)
+    payload = cast(dict[str, JsonValue], raw)
+    return _bridge_job_envelope(payload) if "id" in payload else payload
+
+
+def _bridge_job_envelope(job: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Restore the action envelope after the CLI has awaited a born-async job.
+
+    Owner workers retain the original ActionResult without the processor's
+    success marker. Validate the terminal record before restoring that marker;
+    synchronous envelopes and health reads retain their existing interpretation.
+    """
+    result = job.get("result")
+    if job.get("status") != "completed" or job.get("error") or not isinstance(result, dict):
+        raise AdapterError(f"bridge job did not complete: {bounded_redacted(str(job))[:512]}")
+    if result.get("success") is False or result.get("error") or result.get("action_status", "completed") != "completed":
+        raise AdapterError(f"bridge job action failed: {bounded_redacted(str(result))[:512]}")
+    return {"status": "completed", "result": {"success": True, **result}}
 
 
 def _adapter_environment(registry: ExistingInstallAdapterRegistry) -> dict[str, str]:

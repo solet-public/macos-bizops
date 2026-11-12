@@ -1,0 +1,2 @@
+# B1: old adopted solets, pre-runtime address migration, new boot, rerun and rollback.
+solet_cli/tests/file_locations_upgrade_smoke.py

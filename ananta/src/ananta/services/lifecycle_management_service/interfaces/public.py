@@ -27,6 +27,7 @@ from ananta.core.actions.action_metadata import (
     ReturnValueSchema,
 )
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.async_job_manager import registered_job_return_schema
 
 LIST_PLUGINS_FILTER_VALUES: tuple[str, ...] = (
     "enabled",
@@ -57,6 +58,7 @@ class LifecycleManagementAPI(ABC):
     """
 
     @service_interface_process(
+        is_async=True,
         name="start_service_via_interface",
         is_discoverable=True,
         provider="lifecycle_management_service",
@@ -77,31 +79,27 @@ class LifecycleManagementAPI(ABC):
                 type=ParameterType.OBJECT,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Service start result",
-            type=ParameterType.OBJECT,
-            properties={
-                "success": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="Whether service started successfully",
-                    required=False,
-                ),
-                "service_name": ParameterMetadata(
-                    type=ParameterType.STRING, description="Name of started service", required=False
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Status message", required=False
-                ),
-            },
-            usage_patterns=[
-                "Start console service for user interaction",
-                "Start background services for processing",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Service start result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "success": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="Whether service started successfully",
+                        required=False,
+                    ),
+                    "service_name": ParameterMetadata(type=ParameterType.STRING, description="Name of started service", required=False),
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Status message", required=False),
+                },
+                usage_patterns=[
+                    "Start console service for user interaction",
+                    "Start background services for processing",
+                ],
+            )
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     @abstractmethod
     def start_service_via_interface(
@@ -123,39 +121,34 @@ class LifecycleManagementAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="stop_service",
         is_discoverable=True,
         provider="lifecycle_management_service",
         parameters={
-            "service": ParameterMetadata(
-                description="Name of the service to stop", required=True, type=ParameterType.STRING
-            ),
+            "service": ParameterMetadata(description="Name of the service to stop", required=True, type=ParameterType.STRING),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Service stop result",
-            type=ParameterType.OBJECT,
-            properties={
-                "success": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="Whether service stopped successfully",
-                    required=False,
-                ),
-                "service_name": ParameterMetadata(
-                    type=ParameterType.STRING, description="Name of stopped service", required=False
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Status message", required=False
-                ),
-            },
-            usage_patterns=[
-                "Stop console service cleanly",
-                "Shutdown background services",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Service stop result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "success": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="Whether service stopped successfully",
+                        required=False,
+                    ),
+                    "service_name": ParameterMetadata(type=ParameterType.STRING, description="Name of stopped service", required=False),
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Status message", required=False),
+                },
+                usage_patterns=[
+                    "Stop console service cleanly",
+                    "Shutdown background services",
+                ],
+            )
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     @abstractmethod
     def stop_service(self, service: str) -> dict[str, Any]:
@@ -170,48 +163,48 @@ class LifecycleManagementAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="reload_python_module",
         is_discoverable=True,
         provider="lifecycle_management_service",
         parameters={
             "module_name": ParameterMetadata(
-                description=(
-                    "Fully-qualified Python module name to reload, as it appears "
-                    "in sys.modules (e.g. 'audio_processing_plugin.audio_analysis')."
-                ),
+                description=("Fully-qualified Python module name to reload, as it appears in sys.modules (e.g. 'audio_processing_plugin.audio_analysis')."),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Module reload result",
-            type=ParameterType.OBJECT,
-            properties={
-                "success": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="Whether the module was reloaded successfully",
-                    required=False,
-                ),
-                "module_name": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Module that was targeted",
-                    required=False,
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status or refusal detail",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Reload a pure-DSP module after a code edit without restarting",
-                "Apply a synthesizers fix without losing blob storage state",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Module reload result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "success": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="Whether the module was reloaded successfully",
+                        required=False,
+                    ),
+                    "module_name": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Module that was targeted",
+                        required=False,
+                    ),
+                    "message": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status or refusal detail",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Reload a pure-DSP module after a code edit without restarting",
+                    "Apply a synthesizers fix without losing blob storage state",
+                ],
+            )
         ),
         is_enabled=True,
         error_processor_customizations=MergeErrorProcessorCustomizations(
             retryable=False,
-        )
+        ),
     )
     @abstractmethod
     def reload_python_module(self, module_name: str) -> dict[str, Any]:
@@ -295,38 +288,37 @@ class LifecycleManagementAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="list_available_plugins",
         is_discoverable=True,
         provider="lifecycle_management_service",
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description=(
-                "Plugins that could be loaded into the next manifest, sourced "
-                "from installed entry points plus source-tree directories with "
-                "valid plugin.yaml or pyproject.toml."
-            ),
-            type=ParameterType.OBJECT,
-            properties={
-                "plugins": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=(
-                        "Sorted list of per-plugin records. Each entry carries "
-                        "name (str), source ('installed_entry_point' for plugins "
-                        "registered via importlib.metadata.entry_points, or "
-                        "'available_uninstalled' for plugins present in the "
-                        "repo's plugins/ directory but not yet pip-installed), "
-                        "has_metadata (bool), version (str|null), description "
-                        "(str|null), and implements (list of interface short "
-                        "names parsed from plugin.yaml)."
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description=("Plugins that could be loaded into the next manifest, sourced from installed entry points plus source-tree directories with valid plugin.yaml or pyproject.toml."),
+                type=ParameterType.OBJECT,
+                properties={
+                    "plugins": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=(
+                            "Sorted list of per-plugin records. Each entry carries "
+                            "name (str), source ('installed_entry_point' for plugins "
+                            "registered via importlib.metadata.entry_points, or "
+                            "'available_uninstalled' for plugins present in the "
+                            "repo's plugins/ directory but not yet pip-installed), "
+                            "has_metadata (bool), version (str|null), description "
+                            "(str|null), and implements (list of interface short "
+                            "names parsed from plugin.yaml)."
+                        ),
+                        required=False,
                     ),
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Populate apply_manifest's diff preview before writing a new manifest",
-                "Confirm a candidate plugin is installable before referencing it in a manifest",
-                "Survey the solet image's plugin catalog",
-            ],
+                },
+                usage_patterns=[
+                    "Populate apply_manifest's diff preview before writing a new manifest",
+                    "Confirm a candidate plugin is installable before referencing it in a manifest",
+                    "Survey the solet image's plugin catalog",
+                ],
+            )
         ),
         is_enabled=True,
         error_processor_customizations=MergeErrorProcessorCustomizations(
@@ -352,59 +344,53 @@ class LifecycleManagementAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="set_plugin_enabled",
         is_discoverable=True,
         provider="lifecycle_management_service",
         parameters={
             "plugin_name": ParameterMetadata(
-                description=(
-                    "Name of the plugin to enable or disable (matches the "
-                    "entry-point name and the key under "
-                    "orchestrator.plugin_manager.plugins)."
-                ),
+                description=("Name of the plugin to enable or disable (matches the entry-point name and the key under orchestrator.plugin_manager.plugins)."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "enabled": ParameterMetadata(
-                description=(
-                    "Target state. True schedules the plugin into the live roster, "
-                    "load if needed, and starts services for LifecycleManaged plugins. "
-                    "False stops services, removes the plugin from the live roster, "
-                    "and refreshes the process registry so its action keys disappear."
-                ),
+                description=("Target state. True schedules the plugin into the live roster, load if needed, and starts services for LifecycleManaged plugins. False stops services, removes the plugin from the live roster, and refreshes the process registry so its action keys disappear."),
                 required=True,
                 type=ParameterType.BOOLEAN,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Plugin enable/disable result",
-            type=ParameterType.OBJECT,
-            properties={
-                "applied": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="Whether the runtime state change took effect in this session",
-                    required=False,
-                ),
-                "restart_required": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="True if the persisted change needs a solet restart to fully apply",
-                    required=False,
-                ),
-                "plugin_name": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Plugin the call targeted",
-                    required=False,
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status or refusal detail",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Disable a misbehaving plugin without restarting the solet",
-                "Re-enable a plugin after fixing its config",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Plugin enable/disable result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "applied": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="Whether the runtime state change took effect in this session",
+                        required=False,
+                    ),
+                    "restart_required": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="True if the persisted change needs a solet restart to fully apply",
+                        required=False,
+                    ),
+                    "plugin_name": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Plugin the call targeted",
+                        required=False,
+                    ),
+                    "message": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status or refusal detail",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Disable a misbehaving plugin without restarting the solet",
+                    "Re-enable a plugin after fixing its config",
+                ],
+            )
         ),
         is_enabled=True,
         error_processor_customizations=MergeErrorProcessorCustomizations(
@@ -412,9 +398,7 @@ class LifecycleManagementAPI(ABC):
         ),
     )
     @abstractmethod
-    def set_plugin_enabled(
-        self, plugin_name: str, enabled: bool
-    ) -> dict[str, Any]:
+    def set_plugin_enabled(self, plugin_name: str, enabled: bool) -> dict[str, Any]:
         """Toggle a plugin's enabled state, persisting and applying live.
 
         Writes ``enabled`` into the per-plugin config file (creating it if
@@ -435,6 +419,7 @@ class LifecycleManagementAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="set_plugin_priority",
         is_discoverable=True,
         provider="lifecycle_management_service",
@@ -445,48 +430,42 @@ class LifecycleManagementAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "priority": ParameterMetadata(
-                description=(
-                    "New load-priority integer. Lower values load earlier; "
-                    "foundational service plugins use values below 50. The "
-                    "value is persisted to the per-plugin config file and "
-                    "consulted by the plugin manager on the next start."
-                ),
+                description=("New load-priority integer. Lower values load earlier; foundational service plugins use values below 50. The value is persisted to the per-plugin config file and consulted by the plugin manager on the next start."),
                 required=True,
                 type=ParameterType.INTEGER,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Plugin priority update result",
-            type=ParameterType.OBJECT,
-            properties={
-                "applied": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="Whether the change was persisted to disk",
-                    required=False,
-                ),
-                "takes_effect": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=(
-                        "When the new priority becomes active. v1 always returns "
-                        "'next_restart'; in-session reorder is out of scope."
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Plugin priority update result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "applied": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="Whether the change was persisted to disk",
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "plugin_name": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Plugin the call targeted",
-                    required=False,
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status or refusal detail",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Promote a plugin to load earlier on the next restart",
-                "Demote a plugin so a higher-priority alternative wins service binding",
-            ],
+                    "takes_effect": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=("When the new priority becomes active. v1 always returns 'next_restart'; in-session reorder is out of scope."),
+                        required=False,
+                    ),
+                    "plugin_name": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Plugin the call targeted",
+                        required=False,
+                    ),
+                    "message": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status or refusal detail",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Promote a plugin to load earlier on the next restart",
+                    "Demote a plugin so a higher-priority alternative wins service binding",
+                ],
+            )
         ),
         is_enabled=True,
         error_processor_customizations=MergeErrorProcessorCustomizations(
@@ -494,9 +473,7 @@ class LifecycleManagementAPI(ABC):
         ),
     )
     @abstractmethod
-    def set_plugin_priority(
-        self, plugin_name: str, priority: int
-    ) -> dict[str, Any]:
+    def set_plugin_priority(self, plugin_name: str, priority: int) -> dict[str, Any]:
         """Persist a plugin's load priority; takes effect on the next start.
 
         Writes ``priority`` into the per-plugin config file (creating it if
@@ -516,6 +493,7 @@ class LifecycleManagementAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="reload_plugin_config",
         is_discoverable=True,
         provider="lifecycle_management_service",
@@ -526,38 +504,37 @@ class LifecycleManagementAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Plugin config reload result",
-            type=ParameterType.OBJECT,
-            properties={
-                "success": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="Whether the new config was pushed into the plugin",
-                    required=False,
-                ),
-                "plugin_name": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Plugin the call targeted",
-                    required=False,
-                ),
-                "dirty_keys": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=(
-                        "Config keys whose values differ between the prior in-memory "
-                        "view and the freshly-read on-disk file."
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Plugin config reload result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "success": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="Whether the new config was pushed into the plugin",
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status or refusal detail",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Pick up a per-plugin config edit without restarting the solet",
-                "Apply a tweaked sample rate or model selection mid-session",
-            ],
+                    "plugin_name": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Plugin the call targeted",
+                        required=False,
+                    ),
+                    "dirty_keys": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("Config keys whose values differ between the prior in-memory view and the freshly-read on-disk file."),
+                        required=False,
+                    ),
+                    "message": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status or refusal detail",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Pick up a per-plugin config edit without restarting the solet",
+                    "Apply a tweaked sample rate or model selection mid-session",
+                ],
+            )
         ),
         is_enabled=True,
         error_processor_customizations=MergeErrorProcessorCustomizations(
@@ -584,79 +561,68 @@ class LifecycleManagementAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="update_platform_config",
         is_discoverable=True,
         provider="lifecycle_management_service",
         parameters={
             "scope": ParameterMetadata(
-                description=(
-                    "Top-level section of platform.json being mutated, e.g. 'logging'. "
-                    "Validated against the platform-config allowlist."
-                ),
+                description=("Top-level section of platform.json being mutated, e.g. 'logging'. Validated against the platform-config allowlist."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "key": ParameterMetadata(
-                description=(
-                    "Key within the scope, e.g. 'log_level'. Validated against the "
-                    "platform-config allowlist for the chosen scope."
-                ),
+                description=("Key within the scope, e.g. 'log_level'. Validated against the platform-config allowlist for the chosen scope."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "value": ParameterMetadata(
-                description=(
-                    "New value for the scope.key entry. Stored verbatim in platform.json; "
-                    "consumer responsibility to validate type/range."
-                ),
+                description=("New value for the scope.key entry. Stored verbatim in platform.json; consumer responsibility to validate type/range."),
                 required=True,
                 type=ParameterType.OBJECT,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Platform config update result",
-            type=ParameterType.OBJECT,
-            properties={
-                "applied": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="Whether the new value was persisted",
-                    required=False,
-                ),
-                "prev_value": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description=(
-                        "Previous value at scope.key (null when no prior entry existed)"
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Platform config update result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "applied": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="Whether the new value was persisted",
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "restart_required": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description=(
-                        "True if the new value cannot be applied in-process and only takes "
-                        "effect on the next solet restart"
+                    "prev_value": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description=("Previous value at scope.key (null when no prior entry existed)"),
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "scope": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Scope written",
-                    required=False,
-                ),
-                "key": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Key written",
-                    required=False,
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status or refusal detail",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Raise the platform log level to DEBUG without restarting",
-                "Persist an allowlisted env-var-like setting from a process call",
-            ],
+                    "restart_required": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description=("True if the new value cannot be applied in-process and only takes effect on the next solet restart"),
+                        required=False,
+                    ),
+                    "scope": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Scope written",
+                        required=False,
+                    ),
+                    "key": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Key written",
+                        required=False,
+                    ),
+                    "message": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status or refusal detail",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Raise the platform log level to DEBUG without restarting",
+                    "Persist an allowlisted env-var-like setting from a process call",
+                ],
+            )
         ),
         is_enabled=True,
         error_processor_customizations=MergeErrorProcessorCustomizations(
@@ -664,9 +630,7 @@ class LifecycleManagementAPI(ABC):
         ),
     )
     @abstractmethod
-    def update_platform_config(
-        self, scope: str, key: str, value: Any
-    ) -> dict[str, Any]:
+    def update_platform_config(self, scope: str, key: str, value: Any) -> dict[str, Any]:
         """Persist a single platform-level config entry and apply it live where possible.
 
         Validates ``(scope, key)`` against the platform-config allowlist,
@@ -688,51 +652,48 @@ class LifecycleManagementAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="install_plugin_from_path",
         is_discoverable=True,
         provider="lifecycle_management_service",
         parameters={
             "path": ParameterMetadata(
-                description=(
-                    "Filesystem path to the plugin source root (the directory that "
-                    "contains plugin.yaml or pyproject.toml). The directory will be "
-                    "installed into the active venv with `pip install -e <path>`."
-                ),
+                description=("Filesystem path to the plugin source root (the directory that contains plugin.yaml or pyproject.toml). The directory will be installed into the active venv with `pip install -e <path>`."),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Plugin installation result",
-            type=ParameterType.OBJECT,
-            properties={
-                "installed": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description=(
-                        "True when a brand-new plugin entry-point appeared after install"
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Plugin installation result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "installed": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description=("True when a brand-new plugin entry-point appeared after install"),
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "plugin_name": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Name of the newly-installed plugin (empty if none new)",
-                    required=False,
-                ),
-                "new_process_keys": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Process keys that the new plugin contributes to the registry",
-                    required=False,
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status or refusal detail",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Install a freshly-checked-out plugin without restarting the solet",
-                "Bring a sibling plugin online from a workbench scratch directory",
-            ],
+                    "plugin_name": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Name of the newly-installed plugin (empty if none new)",
+                        required=False,
+                    ),
+                    "new_process_keys": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Process keys that the new plugin contributes to the registry",
+                        required=False,
+                    ),
+                    "message": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status or refusal detail",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Install a freshly-checked-out plugin without restarting the solet",
+                    "Bring a sibling plugin online from a workbench scratch directory",
+                ],
+            )
         ),
         is_enabled=True,
         error_processor_customizations=MergeErrorProcessorCustomizations(
@@ -758,6 +719,7 @@ class LifecycleManagementAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="apply_manifest",
         is_discoverable=True,
         provider="lifecycle_management_service",
@@ -782,12 +744,7 @@ class LifecycleManagementAPI(ABC):
                 type=ParameterType.OBJECT,
             ),
             "reason": ParameterMetadata(
-                description=(
-                    "Operator-supplied audit string. Recorded in the "
-                    "deployment plugin's restart message and surfaced in "
-                    "the response so future status calls can trace 'why "
-                    "was this restart triggered'."
-                ),
+                description=("Operator-supplied audit string. Recorded in the deployment plugin's restart message and surfaced in the response so future status calls can trace 'why was this restart triggered'."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -805,130 +762,107 @@ class LifecycleManagementAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "dry_run": ParameterMetadata(
-                description=(
-                    "When true, validate + diff + return without writing "
-                    "or delegating restart. Use to preview the change "
-                    "shape and to read the current etag before a "
-                    "subsequent committing call."
-                ),
+                description=("When true, validate + diff + return without writing or delegating restart. Use to preview the change shape and to read the current etag before a subsequent committing call."),
                 required=False,
                 type=ParameterType.BOOLEAN,
                 default=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="apply_manifest outcome",
-            type=ParameterType.OBJECT,
-            properties={
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=(
-                        "'applied' when the manifest was validated, written, "
-                        "and the deployment plugin reported a manifest-applied "
-                        "restart status (queued / completed). "
-                        "'dry_run' when the caller passed dry_run=true. "
-                        "'rejected' when pre-flight validation or the CAS "
-                        "check failed (no disk write happened); "
-                        "rejection_reasons explains why. "
-                        "'restart_failed_after_manifest_commit' (Codex review "
-                        "#2 Finding 1) when the manifest WAS written locally "
-                        "(and to S3 for cloud) but the deployment plugin "
-                        "could not schedule the restart — a partial remote "
-                        "commit that needs operator recovery; restart_status "
-                        "carries the underlying failure token and "
-                        "rejection_reasons formats the deploy error."
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="apply_manifest outcome",
+                type=ParameterType.OBJECT,
+                properties={
+                    "status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=(
+                            "'applied' when the manifest was validated, written, "
+                            "and the deployment plugin reported a manifest-applied "
+                            "restart status (queued / completed). "
+                            "'dry_run' when the caller passed dry_run=true. "
+                            "'rejected' when pre-flight validation or the CAS "
+                            "check failed (no disk write happened); "
+                            "rejection_reasons explains why. "
+                            "'restart_failed_after_manifest_commit' (Codex review "
+                            "#2 Finding 1) when the manifest WAS written locally "
+                            "(and to S3 for cloud) but the deployment plugin "
+                            "could not schedule the restart — a partial remote "
+                            "commit that needs operator recovery; restart_status "
+                            "carries the underlying failure token and "
+                            "rejection_reasons formats the deploy error."
+                        ),
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "diff": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description=(
-                        "Set-level diff between current and proposed: "
-                        "{added_plugins, removed_plugins, rebound_services}."
+                    "diff": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description=("Set-level diff between current and proposed: {added_plugins, removed_plugins, rebound_services}."),
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "current_etag": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=(
-                        "The current on-disk etag at the moment of read. "
-                        "Populated on every response (rejection, dry-run, "
-                        "and committed). The caller passes this back as "
-                        "expected_etag on a subsequent committing call."
+                    "current_etag": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=("The current on-disk etag at the moment of read. Populated on every response (rejection, dry-run, and committed). The caller passes this back as expected_etag on a subsequent committing call."),
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "new_etag": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=(
-                        "Etag of the newly-written manifest + bindings "
-                        "pair. Populated when status='applied'."
+                    "new_etag": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=("Etag of the newly-written manifest + bindings pair. Populated when status='applied'."),
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "manifest_written_to": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=(
-                        "Path of the manifest.yaml that was written. "
-                        "Populated when status='applied'."
+                    "manifest_written_to": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=("Path of the manifest.yaml that was written. Populated when status='applied'."),
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "service_bindings_written_to": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=(
-                        "Path of the service_bindings.json that was "
-                        "written. Populated when status='applied'."
+                    "service_bindings_written_to": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=("Path of the service_bindings.json that was written. Populated when status='applied'."),
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "restart_action_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=(
-                        "Identifier the bound deployment plugin returned "
-                        "from its restart_with_manifest call. Semantics "
-                        "depend on the implementation — cloud sibling "
-                        "returns a pollable id consumable by "
-                        "self_deployment_service::deploy_status; local "
-                        "sibling returns an audit-only token. Empty "
-                        "string on status='restart_failed_after_manifest_commit'."
+                    "restart_action_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=(
+                            "Identifier the bound deployment plugin returned "
+                            "from its restart_with_manifest call. Semantics "
+                            "depend on the implementation — cloud sibling "
+                            "returns a pollable id consumable by "
+                            "self_deployment_service::deploy_status; local "
+                            "sibling returns an audit-only token. Empty "
+                            "string on status='restart_failed_after_manifest_commit'."
+                        ),
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "restart_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=(
-                        "Verbatim status the bound deployment plugin "
-                        "returned from restart_with_manifest. Populated "
-                        "when status='applied' (carries the happy-path "
-                        "token, e.g. 'queued' or 'completed') or "
-                        "when status='restart_failed_after_manifest_commit' "
-                        "(carries one of 'failed', 'unbound', "
-                        "'plugin_protocol_error', 'plugin_raised') so the "
-                        "operator can tell exactly what the deployment "
-                        "plugin reported."
+                    "restart_status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=(
+                            "Verbatim status the bound deployment plugin "
+                            "returned from restart_with_manifest. Populated "
+                            "when status='applied' (carries the happy-path "
+                            "token, e.g. 'queued' or 'completed') or "
+                            "when status='restart_failed_after_manifest_commit' "
+                            "(carries one of 'failed', 'unbound', "
+                            "'plugin_protocol_error', 'plugin_raised') so the "
+                            "operator can tell exactly what the deployment "
+                            "plugin reported."
+                        ),
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "rejection_reasons": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=(
-                        "List of human-readable reasons populated when "
-                        "status='rejected'. Empty otherwise."
+                    "rejection_reasons": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("List of human-readable reasons populated when status='rejected'. Empty otherwise."),
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status detail.",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Preview a plugin add via dry_run=true; commit on a follow-up call",
-                "Atomically swap a service binding alongside a plugin set change",
-                "Roll forward to a new local manifest and trigger a self-restart",
-            ],
+                    "message": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status detail.",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Preview a plugin add via dry_run=true; commit on a follow-up call",
+                    "Atomically swap a service binding alongside a plugin set change",
+                    "Roll forward to a new local manifest and trigger a self-restart",
+                ],
+            )
         ),
         is_enabled=True,
         error_processor_customizations=MergeErrorProcessorCustomizations(

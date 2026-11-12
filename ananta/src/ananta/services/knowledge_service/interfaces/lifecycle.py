@@ -17,6 +17,7 @@ from ananta.core.actions.action_metadata import (
     ReturnValueSchema,
 )
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.registered_job_operations import registered_job_return_schema
 
 
 class KnowledgeLifecycleAPI(ABC):
@@ -24,6 +25,7 @@ class KnowledgeLifecycleAPI(ABC):
 
     @service_interface_process(
         name="install",
+        is_async=True,
         is_discoverable=True,
         provider="knowledge_service",
         parameters={
@@ -39,18 +41,16 @@ class KnowledgeLifecycleAPI(ABC):
                 default=None,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Install result with chunk count and metadata",
-            type=ParameterType.OBJECT,
-            properties={
-                "name": ParameterMetadata(type=ParameterType.STRING, description="KB name"),
-                "chunk_count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of indexed chunks"
-                ),
-                "source_type": ParameterMetadata(
-                    type=ParameterType.STRING, description="local, symlink, or git"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Install result with chunk count and metadata",
+                type=ParameterType.OBJECT,
+                properties={
+                    "name": ParameterMetadata(type=ParameterType.STRING, description="KB name"),
+                    "chunk_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of indexed chunks"),
+                    "source_type": ParameterMetadata(type=ParameterType.STRING, description="local, symlink, or git"),
+                },
+            )
         ),
     )
     @abstractmethod
@@ -58,46 +58,44 @@ class KnowledgeLifecycleAPI(ABC):
 
     @service_interface_process(
         name="ingest",
+        is_async=True,
         is_discoverable=True,
         provider="knowledge_service",
         parameters={
             "name": ParameterMetadata(
-                description=(
-                    "Knowledge base directory name, or the literal 'all' to ingest "
-                    "every knowledge base under the knowledge_base root"
-                ),
+                description=("Knowledge base directory name, or the literal 'all' to ingest every knowledge base under the knowledge_base root"),
                 required=True,
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Idempotent ingest result: which KBs were reindexed, skipped, or failed",
-            type=ParameterType.OBJECT,
-            properties={
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="'success', or 'partial' when one or more KBs failed in 'all' mode",
-                ),
-                "mode": ParameterMetadata(
-                    type=ParameterType.STRING, description="'single' or 'all'"
-                ),
-                "ingested": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="KB names that were reindexed (were stale or not yet installed)",
-                ),
-                "unchanged": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="KB names skipped because their indexed content is current",
-                ),
-                "failed": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Per-KB failures as {name, error} ('all' mode only; single mode raises)",
-                ),
-                "total_chunks": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Total chunks indexed across the reingested KBs",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Idempotent ingest result: which KBs were reindexed, skipped, or failed",
+                type=ParameterType.OBJECT,
+                properties={
+                    "status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="'success', or 'partial' when one or more KBs failed in 'all' mode",
+                    ),
+                    "mode": ParameterMetadata(type=ParameterType.STRING, description="'single' or 'all'"),
+                    "ingested": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="KB names that were reindexed (were stale or not yet installed)",
+                    ),
+                    "unchanged": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="KB names skipped because their indexed content is current",
+                    ),
+                    "failed": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Per-KB failures as {name, error} ('all' mode only; single mode raises)",
+                    ),
+                    "total_chunks": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Total chunks indexed across the reingested KBs",
+                    ),
+                },
+            )
         ),
     )
     @abstractmethod
@@ -105,6 +103,7 @@ class KnowledgeLifecycleAPI(ABC):
 
     @service_interface_process(
         name="uninstall",
+        is_async=True,
         is_discoverable=True,
         provider="knowledge_service",
         parameters={
@@ -120,15 +119,15 @@ class KnowledgeLifecycleAPI(ABC):
                 default=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Uninstall result",
-            type=ParameterType.OBJECT,
-            properties={
-                "name": ParameterMetadata(type=ParameterType.STRING, description="KB name"),
-                "chunks_archived": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of chunks archived"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Uninstall result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "name": ParameterMetadata(type=ParameterType.STRING, description="KB name"),
+                    "chunks_archived": ParameterMetadata(type=ParameterType.INTEGER, description="Number of chunks archived"),
+                },
+            )
         ),
     )
     @abstractmethod
@@ -136,6 +135,7 @@ class KnowledgeLifecycleAPI(ABC):
 
     @service_interface_process(
         name="update",
+        is_async=True,
         is_discoverable=True,
         provider="knowledge_service",
         parameters={
@@ -145,15 +145,15 @@ class KnowledgeLifecycleAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Update result with changed file count",
-            type=ParameterType.OBJECT,
-            properties={
-                "name": ParameterMetadata(type=ParameterType.STRING, description="KB name"),
-                "files_changed": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of files reindexed"
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Update result with changed file count",
+                type=ParameterType.OBJECT,
+                properties={
+                    "name": ParameterMetadata(type=ParameterType.STRING, description="KB name"),
+                    "files_changed": ParameterMetadata(type=ParameterType.INTEGER, description="Number of files reindexed"),
+                },
+            )
         ),
     )
     @abstractmethod
@@ -175,12 +175,8 @@ class KnowledgeLifecycleAPI(ABC):
             description="List of installed knowledge bases",
             type=ParameterType.OBJECT,
             properties={
-                "installs": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of KB install records"
-                ),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Total count"
-                ),
+                "installs": ParameterMetadata(type=ParameterType.LIST, description="List of KB install records"),
+                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Total count"),
             },
         ),
     )
@@ -198,9 +194,7 @@ class KnowledgeLifecycleAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Activation result", type=ParameterType.OBJECT
-        ),
+        return_value_schema=ReturnValueSchema(description="Activation result", type=ParameterType.OBJECT),
     )
     @abstractmethod
     def activate(self, name: str) -> dict[str, Any]: ...
@@ -216,9 +210,7 @@ class KnowledgeLifecycleAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Deactivation result", type=ParameterType.OBJECT
-        ),
+        return_value_schema=ReturnValueSchema(description="Deactivation result", type=ParameterType.OBJECT),
     )
     @abstractmethod
     def deactivate(self, name: str) -> dict[str, Any]: ...

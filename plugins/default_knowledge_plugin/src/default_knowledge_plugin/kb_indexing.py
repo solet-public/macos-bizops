@@ -125,13 +125,13 @@ def resolve_from_address_book(
     name: str,
     address_book_service: Any,
 ) -> tuple[str | None, str | None, dict[str, Any] | None]:
-    """Resolve source URL, token, and indexing config from the address book."""
+    """Resolve public source URL, token reference and indexing config."""
     from ananta.core.domain.enums import ActionStatus
 
     if address_book_service is None:
         return None, None, None
 
-    resolved = address_book_service.resolve_with_secrets(name)
+    resolved = address_book_service.resolve(name)
     if resolved.get("action_status") != ActionStatus.COMPLETED.value:
         return None, None, None
 

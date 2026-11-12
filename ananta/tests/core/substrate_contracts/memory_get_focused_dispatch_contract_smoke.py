@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
+sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(_REPO_ROOT / "plugins" / "actr_memory_plugin" / "src"))
 
@@ -83,13 +84,14 @@ from ananta.services.memory_service.interfaces.public import MemoryServiceAPI  #
 # via explicit path inserts.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(_REPO_ROOT / "quality_gates"))
-from return_shape_gate import (  # noqa: E402
+from substrate_contract_fixtures import Checker  # noqa: E402
+
+from quality_gates.return_shape_gate import (  # noqa: E402
     _PLUGIN_DECORATOR,
     _SERVICE_DECORATOR,
     _classify_symbol,
     _SymbolIndex,
 )
-from substrate_contract_fixtures import Checker  # noqa: E402
 
 if TYPE_CHECKING:
     from ananta.core.services.prompt_context_builder import PromptContextBuilder
@@ -196,9 +198,7 @@ def _real_action_processor(service: object) -> ActionProcessor:
         MemoryServiceAPI.get_recent_memory_structured,
     ):
         metadata = getattr(api_method, "_service_interface_metadata")  # noqa: B009
-        processes[f"service_interface::{_PROVIDER}::{metadata.name}"] = (
-            metadata.to_process_dict()
-        )
+        processes[f"service_interface::{_PROVIDER}::{metadata.name}"] = metadata.to_process_dict()
     return ActionProcessor(
         plugin_manager=PluginManager(),
         orchestrator=_Orchestrator(service),  # type: ignore[arg-type]
@@ -258,25 +258,22 @@ def _pin_get_focused_registration(checker: Checker) -> None:
 def _pin_structured_registration(checker: Checker) -> None:
     """Case F: get_recent_memory_structured registration-shape pins."""
     structured_md = getattr(  # noqa: B009
-        MemoryServiceAPI.get_recent_memory_structured, "_service_interface_metadata",
+        MemoryServiceAPI.get_recent_memory_structured,
+        "_service_interface_metadata",
     )
     checker.check(
         structured_md.name == _STRUCTURED_VERB and structured_md.provider == _PROVIDER,
-        "F1: decorator registers name=get_recent_memory_structured "
-        "provider=memory_service",
+        "F1: decorator registers name=get_recent_memory_structured provider=memory_service",
     )
     structured_rvs = structured_md.to_process_dict()["return_value_schema"]
     checker.check(
         isinstance(structured_rvs, dict) and structured_rvs.get("type") == "object",
         "F2: return_value_schema is OBJECT (envelope), not LIST",
     )
-    structured_props = (
-        structured_rvs.get("properties", {}) if isinstance(structured_rvs, dict) else {}
-    )
+    structured_props = structured_rvs.get("properties", {}) if isinstance(structured_rvs, dict) else {}
     checker.check(
-        isinstance(structured_props, dict)
-        and set(structured_props.keys()) == {"events", "count"},
-        "F3: schema properties are exactly {events, count}",
+        isinstance(structured_props, dict) and set(structured_props.keys()) == {"job_id", "status"},
+        "F3: registered structured read returns a job receipt; its synchronous body retains {events, count}",
     )
     # (former F4 field_sensitivities-mirror pin retired with the declarations,
     # 2026-07-16 frontier-first B4 — F3's schema-properties pin carries the
@@ -310,9 +307,7 @@ def _pin_real_plugin_envelopes(checker: Checker) -> None:
         isinstance(structured_obj, dict),
         "G1: ACTRMemoryPlugin.get_recent_memory_structured returns a dict",
     )
-    structured_env: dict[str, Any] = (
-        structured_obj if isinstance(structured_obj, dict) else {}
-    )
+    structured_env: dict[str, Any] = structured_obj if isinstance(structured_obj, dict) else {}
     checker.check(
         structured_env.get("events") == _EVENT_ROWS,
         "G2: envelope['events'] carries the backend event rows unchanged",
@@ -347,7 +342,8 @@ def _wrapper_shaped_service(plugin: Any) -> Any:
             max_events: int = 20,
         ) -> dict[str, Any]:
             return plugin.get_recent_memory_structured(
-                session_id=session_id, max_events=max_events,
+                session_id=session_id,
+                max_events=max_events,
             )
 
     return _Shim()
@@ -360,17 +356,18 @@ def _pin_act_time_dispatch(checker: Checker) -> None:
     )
     try:
         result = processor._execute_service_interface_action(  # noqa: SLF001
-            _PROVIDER, _VERB, {}, _queued_action(),
+            _PROVIDER,
+            _VERB,
+            {},
+            _queued_action(),
         )
     except FrameworkError as err:
         # Pre-fix shape: the dispatch contract kills the verb right here.
         checker.check(False, f"C1: dispatch raised FrameworkError [{err}]")
     else:
         checker.check(
-            result.get("memories") == _BACKEND_RECORDS
-            and result.get("count") == len(_BACKEND_RECORDS),
-            "C1: _execute_service_interface_action returns the envelope "
-            "(pre-fix list shape raised FrameworkError here)",
+            result.get("memories") == _BACKEND_RECORDS and result.get("count") == len(_BACKEND_RECORDS),
+            "C1: _execute_service_interface_action returns the envelope (pre-fix list shape raised FrameworkError here)",
         )
 
     processor_h = _real_action_processor(
@@ -378,16 +375,17 @@ def _pin_act_time_dispatch(checker: Checker) -> None:
     )
     try:
         result_h = processor_h._execute_service_interface_action(  # noqa: SLF001
-            _PROVIDER, _STRUCTURED_VERB, {"max_events": 5}, _queued_action(),
+            _PROVIDER,
+            _STRUCTURED_VERB,
+            {"max_events": 5},
+            _queued_action(),
         )
     except FrameworkError as err:
         checker.check(False, f"H1: dispatch raised FrameworkError [{err}]")
     else:
         checker.check(
-            result_h.get("events") == _EVENT_ROWS
-            and result_h.get("count") == len(_EVENT_ROWS),
-            "H1: _execute_service_interface_action returns the envelope through "
-            "the declared-parameter path (pre-fix list shape raised here)",
+            result_h.get("events") == _EVENT_ROWS and result_h.get("count") == len(_EVENT_ROWS),
+            "H1: _execute_service_interface_action returns the envelope through the declared-parameter path (pre-fix list shape raised here)",
         )
 
 
@@ -396,20 +394,24 @@ def _pin_negative_controls(checker: Checker) -> None:
     broken = _real_action_processor(_ListShapedService())
     checker.expect_raises(
         FrameworkError,
-        "D1: bare-list return raises FrameworkError('must return dict') "
-        "through the SAME entrypoint",
+        "D1: bare-list return raises FrameworkError('must return dict') through the SAME entrypoint",
         lambda: broken._execute_service_interface_action(  # noqa: SLF001
-            _PROVIDER, _VERB, {}, _queued_action(),
+            _PROVIDER,
+            _VERB,
+            {},
+            _queued_action(),
         ),
     )
 
     broken_i = _real_action_processor(_ListShapedService())
     checker.expect_raises(
         FrameworkError,
-        "I1: bare-list get_recent_memory_structured raises FrameworkError "
-        "through the SAME entrypoint",
+        "I1: bare-list get_recent_memory_structured raises FrameworkError through the SAME entrypoint",
         lambda: broken_i._execute_service_interface_action(  # noqa: SLF001
-            _PROVIDER, _STRUCTURED_VERB, {}, _queued_action(),
+            _PROVIDER,
+            _STRUCTURED_VERB,
+            {},
+            _queued_action(),
         ),
     )
 
@@ -418,10 +420,11 @@ def _pin_consumer_seams(checker: Checker) -> None:
     """Cases E + J: in-process consumers unwrap the envelopes correctly."""
     checker.check(
         has_focused_plan(
-            _real_plugin_with_standin_backend(), session_id="sess-contract",
-        ) is True,
-        "E1: has_focused_plan finds the ACTIVE_PLAN through the envelope "
-        "(a missed unwrap is silently masked to False by its guard)",
+            _real_plugin_with_standin_backend(),
+            session_id="sess-contract",
+        )
+        is True,
+        "E1: has_focused_plan finds the ACTIVE_PLAN through the envelope (a missed unwrap is silently masked to False by its guard)",
     )
 
     class _EmptyFocus:
@@ -440,9 +443,7 @@ def _pin_consumer_seams(checker: Checker) -> None:
 
     records = fetch_recent_memory_records(
         session_id="sess-smoke",
-        builder=cast("PromptContextBuilder", _BuilderStub(
-            _real_plugin_with_standin_backend()
-        )),
+        builder=cast("PromptContextBuilder", _BuilderStub(_real_plugin_with_standin_backend())),
         max_events=5,
     )
     checker.check(
@@ -451,8 +452,7 @@ def _pin_consumer_seams(checker: Checker) -> None:
     )
     checker.expect_raises(
         TypeError,
-        "J2: a pre-fix bare-list return raises loud TypeError at the consumer "
-        "(the old isinstance-else-[] silently masked it)",
+        "J2: a pre-fix bare-list return raises loud TypeError at the consumer (the old isinstance-else-[] silently masked it)",
         lambda: fetch_recent_memory_records(
             session_id="sess-smoke",
             builder=cast("PromptContextBuilder", _BuilderStub(_ListShapedService())),
@@ -468,25 +468,20 @@ def _pin_collision_rule_probe(checker: Checker) -> None:
         dataclass_names=frozenset({"ValidationResult"}),
     )
     checker.check(
-        _classify_symbol("ValidationResult", _PLUGIN_DECORATOR, collision_index)
-        is not None,
+        _classify_symbol("ValidationResult", _PLUGIN_DECORATOR, collision_index) is not None,
         "K1: TypedDict+dataclass name collision FAILS CLOSED on the plugin path",
     )
     checker.check(
-        _classify_symbol("ValidationResult", _SERVICE_DECORATOR, collision_index)
-        is None,
-        "K2: the same collision stays allowed on the service path (both kinds "
-        "satisfy its dispatch contract)",
+        _classify_symbol("ValidationResult", _SERVICE_DECORATOR, collision_index) is None,
+        "K2: the same collision stays allowed on the service path (both kinds satisfy its dispatch contract)",
     )
     typeddict_only = _SymbolIndex(
         typeddict_names=frozenset({"ValidationResult"}),
         dataclass_names=frozenset(),
     )
     checker.check(
-        _classify_symbol("ValidationResult", _PLUGIN_DECORATOR, typeddict_only)
-        is None,
-        "K3: an unambiguous TypedDict name stays allowed on the plugin path "
-        "(control)",
+        _classify_symbol("ValidationResult", _PLUGIN_DECORATOR, typeddict_only) is None,
+        "K3: an unambiguous TypedDict name stays allowed on the plugin path (control)",
     )
 
 

@@ -1,17 +1,17 @@
 {
   "process_key": "plugin::macos_coding_agent_session_plugin::spawn_bridge",
   "display_name": "Spawn MCP bridge subprocess (macOS coding-agent session plugin)",
-  "description": "macOS implementation of spawn_bridge: starts `python -m agent_messaging_plugin.mcp_bridge` as a child of the solet process and tracks it under the supplied agent_instance_id. See service_interface::coding_agent_session_service::spawn_bridge for the canonical contract; this plugin-side process key is the bound provider's surface and resolves to the same verb. Bound-provider skip semantics (per `0e72ac15`) mean callers route through the service_interface::* key, not this plugin::* key.",
-  "embedding_description": "macOS-scope implementation of spawn_bridge — starts an MCP bridge subprocess as a child of the solet process (not iTerm2) and records its pid keyed by agent_instance_id. Mirrors the canonical service_interface::coding_agent_session_service::spawn_bridge contract. Returns BridgeSpawnResult.",
+  "description": "Returns promptly with data.job_id and data.status=queued after persisting the request. The existing platform job worker performs the operation; retrieve its completed result or error with service_interface::job_service::get_job using this exact job_id. A queue receipt does not assert that the operation succeeded. The dispatched plugin action queues bridge creation. Its completed result retains status, agent_instance_id, solet_name, pid, started_at and message. The separate Python CodingAgentSessionServiceInterface.spawn_bridge method still returns BridgeSpawnResult synchronously for internal callers such as the iTerm2 plugin; this dispatch receipt does not change that typed interface.",
+  "embedding_description": "Queue macOS MCP bridge subprocess creation and return job_id with queued status. Read job_service.get_job for the prior bridge status, pid and audit fields. The separate Python coding-agent session service method still returns its typed BridgeSpawnResult synchronously for internal callers.",
   "result_processor_customizations": {
-    "action_label": "MCP bridge spawned",
+    "action_label": "spawn_bridge queued",
     "result_type": "coding_agent_session_bridge_spawn_result",
-    "result_description": "BridgeSpawnResult frozen dataclass mirroring the canonical service interface return.",
-    "presentation_guidance": "See the canonical service_interface entry; the plugin-side surface mirrors it."
+    "result_description": "Dispatch: {job_id, status: queued}. The completed job result retains the former payload: BridgeSpawnResult frozen dataclass mirroring the canonical service interface return.",
+    "presentation_guidance": "Report queued acceptance and the exact job_id, then inspect job.result. A completed operation whose status is failed reports a spawn failure, never success."
   },
   "error_processor_customizations": {
     "action_context": "macOS-side spawn of an MCP bridge subprocess.",
     "error_interpretation": "See the canonical service_interface entry; same error tokens.",
-    "recovery_guidance": "See the canonical service_interface entry."
+    "recovery_guidance": "After successful dispatch, inspect the exact job.error before considering another invocation; an unreadable terminal write is not evidence that an effect did not occur. See the canonical service_interface entry."
   }
 }

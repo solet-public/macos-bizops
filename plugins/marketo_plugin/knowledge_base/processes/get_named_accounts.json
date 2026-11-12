@@ -11,7 +11,7 @@
   },
   "error_processor_customizations": {
     "action_context": "Read Marketo named accounts from the configured instance.",
-    "error_interpretation": "marketo.invalid_params: refused at dispatch before any vendor call (missing or malformed parameters, more than 300 entries, an action/dedupe_by/delete_by value Marketo does not define, or an output_tsv_path outside export_allowed_roots). On the finished job: marketo.permission_denied (vendor 603 or HTTP 403) means the API user's Role lacks the Access API permission; marketo.auth_failed (601/602 after one re-mint, or HTTP 401) means the credential was rejected; marketo.validation_failed and other vendor codes carry Marketo's own message.",
+    "error_interpretation": "marketo.invalid_params: refused at dispatch before any vendor call (missing or malformed parameters, more than 300 entries, an action/dedupe_by/delete_by value Marketo does not define, or an output_tsv_path outside saved locations). On the finished job: marketo.permission_denied (vendor 603 or HTTP 403) means the API user's Role lacks the Access API permission; marketo.auth_failed (601/602 after one re-mint, or HTTP 401) means the credential was rejected; marketo.validation_failed and other vendor codes carry Marketo's own message.",
     "recovery_guidance": "marketo.permission_denied: grant Read-Only Named Account (or Read-Write Named Account) under Admin > Users & Roles > Roles > the API role > Access API, then retry. Adobe documents some Lead Database object APIs as unavailable on subscriptions with a native CRM sync; that vendor error is reported as returned."
   }
 }

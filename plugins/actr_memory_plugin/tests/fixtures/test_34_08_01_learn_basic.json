@@ -1,13 +1,14 @@
 {
   "name": "test_learn_basic",
-  "description": "Verify ingesting knowledge from a file path into memory",
+  "description": "Verify ingesting knowledge from a file path into memory Submit returns a queued job receipt; the registered http_jobs_smoke asserts terminal result and error through JobService.",
   "process_key": "plugin::actr_memory_plugin::learn_action",
   "arguments": {
     "params": {
       "path": "/tmp/test_knowledge.md"
     },
     "state": {
-      "session_id": "test-session-070"
+      "session_id": "test-session-070",
+      "flow_id": "test-flow-test_learn_basic"
     }
   },
   "timeout_seconds": 60

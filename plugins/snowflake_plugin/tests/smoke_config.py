@@ -17,7 +17,7 @@ Exercises:
   5. repr() redacts the private key (never logs the DER bytes)
   6. statement_timeout_seconds / login_timeout_seconds config bounds:
      absent -> default; non-positive / non-integer -> fail loud
-  7. EDGE parity: validate_edge_process_provider raises nothing, 21 verbs
+  7. EDGE parity: validate_edge_process_provider raises nothing, 22 verbs
 
 Run:
     SOLET_NAME=<name> .venv/bin/python3 \
@@ -187,7 +187,7 @@ def test_edge_parity() -> None:
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 21 verbs discovered", len(actions) == 21, str(len(actions)))
+    _assert("all 22 verbs discovered", len(actions) == 22, str(len(actions)))
 
 
 def main() -> int:

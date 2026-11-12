@@ -43,22 +43,6 @@ TASK_PAGE_LENGTH_MAX: Final[int] = 100
 RUN_RESERVED_PARAMETERS: Final[frozenset[str]] = frozenset({"controller", "action", "id", "user_email", "user_token", "format"})
 WORKFLOW_STATUSES: Final[tuple[str, ...]] = ("Active", "Inactive")
 AUTH_PROVIDER_TYPES: Final[tuple[str, ...]] = ("basic_auth", "oauth_1.0", "oauth_2.0", "NetsuiteTBA", "hmac", "s3")
-# Credential fields in the auth-provider schema whose values are secret material.
-AUTH_PROVIDER_SECRET_FIELDS: Final[frozenset[str]] = frozenset(
-    {
-        "password",
-        "access_key",
-        "secret_key",
-        "client_secret",
-        "consumer_secret",
-        "token",
-        "token_secret",
-        "auth_header_value",
-        "signed_header_value",
-        "key",
-        "secret",
-    }
-)
 
 
 def _definition(params: dict[str, Any], gate: PathGate) -> dict[str, Any] | None:
@@ -128,14 +112,6 @@ def _auth_provider_body(params: dict[str, Any], *, creating: bool) -> dict[str, 
     if not provider:
         raise ValueError("pass at least one of name, description, active or credentials")
     return {"auth_provider": provider}
-
-
-def auth_provider_secrets(params: dict[str, Any]) -> list[str]:
-    """Secret credential values the caller sent, redacted from any vendor echo."""
-    credentials = params.get("credentials")
-    if not isinstance(credentials, dict):
-        return []
-    return [value for key, value in credentials.items() if key in AUTH_PROVIDER_SECRET_FIELDS and isinstance(value, str) and value]
 
 
 _TRACK: Final[tuple[str, ...]] = ("zuora_track_id",)
@@ -258,7 +234,6 @@ _ROUTES: Final[tuple[Operation, ...]] = (
         "POST",
         "/auth_providers",
         body=lambda params, _gate: _auth_provider_body(params, creating=True),
-        secrets=auth_provider_secrets,
     ),
     Operation(
         "update_workflow_auth_provider",
@@ -266,7 +241,6 @@ _ROUTES: Final[tuple[Operation, ...]] = (
         "/auth_providers/{provider_id}",
         path_fields=_PROVIDER_ID,
         body=lambda params, _gate: _auth_provider_body(params, creating=False),
-        secrets=auth_provider_secrets,
     ),
     Operation("delete_workflow_auth_provider", "DELETE", "/auth_providers/{provider_id}", path_fields=_PROVIDER_ID),
 )

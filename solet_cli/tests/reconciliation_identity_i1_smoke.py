@@ -243,14 +243,18 @@ def _check_manifest_destination_shape() -> None:
         "sixth migration pins the four precondition-subset sibling repairs",
     )
     _check(
-        isinstance(migrations, list) and len(migrations) == 38,
-        "thirty-eight shipped migrations including direct LM Studio pgvector reconciliation, the eight r64 bridges, stable r43/r48 bridges, four Git-control wording bridges and four Codex-optional bridges",
+        isinstance(migrations, list) and len(migrations) == 39 + 47,
+        "thirty-nine preserved migrations plus forty-seven explicit controller-retirement forward bridges",
     )
     _check(
         all(isinstance(item, dict) and isinstance(item.get("destination"), dict) and set(item["destination"]) == {"flow_id", "flow_contract_digest"} for item in migrations),
         "shipped destination identities are digest-only",
     )
-    _check(len(load_contract_reconciliations()) == 38, "digest-only manifest parses")
+    _check(len(load_contract_reconciliations()) == 86, "digest-only manifest parses")
+    _check(
+        all(row.get("retired_decision_ids") == ["git_mutation_control"] and row.get("retired_public_input_ids") == ["git_controller_name"] for row in migrations[39:]),
+        "all forty-five new bridges explicitly retire both public answer fields",
+    )
 
 
 def _check_digest_tool() -> None:

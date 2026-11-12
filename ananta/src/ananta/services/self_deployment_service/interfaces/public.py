@@ -43,69 +43,43 @@ from ananta.core.actions.action_metadata import (
 )
 from ananta.core.domain.enums import ProcessorPolicyCategory
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.async_job_manager import registered_job_return_schema
 from ananta.interfaces.lifecycle_result_types import RestartResult, StopSelfResult
 
 PROVIDER = "self_deployment_service"
 
 
 _NEW_MANIFEST_PARAM = ParameterMetadata(
-    description=(
-        "The manifest dict ``apply_manifest`` just wrote to disk. v1 scope "
-        "(Architect §15.1): ``{plugins: list[str], profile_name?: str}``. "
-        "Carried for audit + future routing; the on-disk file at "
-        "``<APP_HOME>/config/manifest.yaml`` is the source of truth that "
-        "the new boot actually reads."
-    ),
+    description=("The manifest dict ``apply_manifest`` just wrote to disk. v1 scope (Architect §15.1): ``{plugins: list[str], profile_name?: str}``. Carried for audit + future routing; the on-disk file at ``<APP_HOME>/config/manifest.yaml`` is the source of truth that the new boot actually reads."),
     required=True,
     type=ParameterType.OBJECT,
 )
 _EXPECTED_ETAG_PARAM = ParameterMetadata(
     description=(
-        "CAS lock from ``apply_manifest``'s pre-flight read of the on-disk "
-        "manifest. Implementations re-read the manifest's stored ETag at "
-        "dispatch time and refuse the restart when it differs from this "
-        "value. Guards against a second ``apply_manifest`` racing the first "
-        "between manifest-write and restart-dispatch."
+        "CAS lock from ``apply_manifest``'s pre-flight read of the on-disk manifest. Implementations re-read the manifest's stored ETag at dispatch time and refuse the restart when it differs from this value. Guards against a second ``apply_manifest`` racing the first between manifest-write and restart-dispatch."
     ),
     required=True,
     type=ParameterType.STRING,
 )
 _REASON_PARAM = ParameterMetadata(
-    description=(
-        "Operator-supplied audit string. Recorded in the restart message "
-        "and surfaced in the response for audit correlation."
-    ),
+    description=("Operator-supplied audit string. Recorded in the restart message and surfaced in the response for audit correlation."),
     required=True,
     type=ParameterType.STRING,
 )
 _DRY_RUN_PARAM = ParameterMetadata(
-    description=(
-        "When ``True``, the implementation plans + reports without "
-        "mutating any cloud / local-process state. Cloud sibling emits "
-        "the planned AWS calls; macOS sibling reports what the watchdog "
-        "would do without forking."
-    ),
+    description=("When ``True``, the implementation plans + reports without mutating any cloud / local-process state. Cloud sibling emits the planned AWS calls; macOS sibling reports what the watchdog would do without forking."),
     required=False,
     type=ParameterType.BOOLEAN,
     default=False,
 )
 
 _STOP_REASON_PARAM = ParameterMetadata(
-    description=(
-        "Operator-supplied audit string for the stop. Required — a stop "
-        "without an audit message is undisciplined operator action. "
-        "Recorded on the LaunchAgent log / CloudWatch + echoed in the "
-        "response."
-    ),
+    description=("Operator-supplied audit string for the stop. Required — a stop without an audit message is undisciplined operator action. Recorded on the LaunchAgent log / CloudWatch + echoed in the response."),
     required=True,
     type=ParameterType.STRING,
 )
 _STOP_DRY_RUN_PARAM = ParameterMetadata(
-    description=(
-        "When ``True``, plan + report without writing the drain "
-        "sentinel, spawning the watchdog (macOS), or calling ECS "
-        "UpdateService (cloud). Returns StopSelfStatus.DRY_RUN."
-    ),
+    description=("When ``True``, plan + report without writing the drain sentinel, spawning the watchdog (macOS), or calling ECS UpdateService (cloud). Returns StopSelfStatus.DRY_RUN."),
     required=False,
     type=ParameterType.BOOLEAN,
     default=False,
@@ -119,11 +93,7 @@ def _stop_self_return_schema() -> ReturnValueSchema:
         properties={
             "status": ParameterMetadata(
                 type=ParameterType.STRING,
-                description=(
-                    "StopSelfStatus value: 'success' (stop scheduled/confirmed), "
-                    "'already_stopped' (idempotent re-invocation), 'failed', or "
-                    "'dry_run'."
-                ),
+                description=("StopSelfStatus value: 'success' (stop scheduled/confirmed), 'already_stopped' (idempotent re-invocation), 'failed', or 'dry_run'."),
             ),
             "reason": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -131,25 +101,15 @@ def _stop_self_return_schema() -> ReturnValueSchema:
             ),
             "duration_seconds": ParameterMetadata(
                 type=ParameterType.FLOAT,
-                description=(
-                    "Wall-clock seconds the verb spent. Sub-second on macOS "
-                    "(watchdog runs out-of-process); minutes on cloud "
-                    "(describe_services polling)."
-                ),
+                description=("Wall-clock seconds the verb spent. Sub-second on macOS (watchdog runs out-of-process); minutes on cloud (describe_services polling)."),
             ),
             "stopped_at": ParameterMetadata(
                 type=ParameterType.STRING,
-                description=(
-                    "ISO-8601 UTC of confirmed stop (cloud: runningCount=0; "
-                    "macOS: watchdog spawn moment)."
-                ),
+                description=("ISO-8601 UTC of confirmed stop (cloud: runningCount=0; macOS: watchdog spawn moment)."),
             ),
             "backend_action_id": ParameterMetadata(
                 type=ParameterType.STRING,
-                description=(
-                    "Backend-specific audit id: macOS watchdog pid as a string "
-                    "or cloud ECS service ARN."
-                ),
+                description=("Backend-specific audit id: macOS watchdog pid as a string or cloud ECS service ARN."),
             ),
             "dry_run": ParameterMetadata(
                 type=ParameterType.BOOLEAN,
@@ -183,13 +143,7 @@ def _restart_return_schema() -> ReturnValueSchema:
             ),
             "restart_action_id": ParameterMetadata(
                 type=ParameterType.STRING,
-                description=(
-                    "Pollable identifier for the cutover (cloud sibling "
-                    "returns ``finisher_action_id`` consumable by "
-                    "``cloud_self_deployment_service::deploy_status``). "
-                    "Empty string for macOS sibling (audit-only token) and "
-                    "on failed status."
-                ),
+                description=("Pollable identifier for the cutover (cloud sibling returns ``finisher_action_id`` consumable by ``cloud_self_deployment_service::deploy_status``). Empty string for macOS sibling (audit-only token) and on failed status."),
             ),
             "message": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -227,6 +181,7 @@ class SelfDeploymentServicePublicAPI(ABC):
     """
 
     @service_interface_process(
+        is_async=True,
         name="restart_with_manifest",
         provider=PROVIDER,
         is_discoverable=True,
@@ -236,7 +191,7 @@ class SelfDeploymentServicePublicAPI(ABC):
             "reason": _REASON_PARAM,
             "dry_run": _DRY_RUN_PARAM,
         },
-        return_value_schema=_restart_return_schema(),
+        return_value_schema=registered_job_return_schema(_restart_return_schema()),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         is_long_running=True,
         result_processor_customizations=MergeResultProcessorCustomizations(
@@ -270,6 +225,7 @@ class SelfDeploymentServicePublicAPI(ABC):
         """
 
     @service_interface_process(
+        is_async=True,
         name="stop_self",
         provider=PROVIDER,
         is_discoverable=True,
@@ -277,7 +233,7 @@ class SelfDeploymentServicePublicAPI(ABC):
             "reason": _STOP_REASON_PARAM,
             "dry_run": _STOP_DRY_RUN_PARAM,
         },
-        return_value_schema=_stop_self_return_schema(),
+        return_value_schema=registered_job_return_schema(_stop_self_return_schema()),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         is_long_running=True,
         result_processor_customizations=MergeResultProcessorCustomizations(

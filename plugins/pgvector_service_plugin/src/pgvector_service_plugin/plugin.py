@@ -16,7 +16,8 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextvars import copy_context
 from datetime import UTC, datetime
-from typing import Any, cast
+from functools import wraps
+from typing import Any, Concatenate, cast
 
 from ananta.core.actions.action_metadata import (
     platform_process,
@@ -150,6 +151,7 @@ class PGVectorServicePlugin(ServicePlugin, VectorServiceAPI, VectorProvider, Vec
         self.name = PLUGIN_NAMESPACE
         self._provider: PGVectorProvider | None = None
         self._state_service: StateServiceProtocol | None = None
+        self._vector_activity_lock = threading.RLock()
         # Caller-bound VaultServiceProxy injected by lifecycle
         # (_inject_vault_service in startup_sequence.py) BEFORE the readiness
         # loop. Its baked-in CallContext lets own-namespace secret retrieval
@@ -769,3 +771,21 @@ class PGVectorServicePlugin(ServicePlugin, VectorServiceAPI, VectorProvider, Vec
     def get_namespace_stats_action(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         """Get namespace stats - action handler."""
         return dict(self.get_namespace_stats(params.get("namespace", "")))
+
+
+def _serialized_vector_activity[**P, T](operation: Callable[Concatenate[PGVectorServicePlugin, P], T]) -> Callable[Concatenate[PGVectorServicePlugin, P], T]:
+    """One reentrant provider fence shared by registered and synchronous writers."""
+
+    @wraps(operation)
+    def run(plugin: PGVectorServicePlugin, *args: P.args, **kwargs: P.kwargs) -> T:
+        with plugin._vector_activity_lock:
+            return operation(plugin, *args, **kwargs)
+
+    return run
+
+
+# One adapter retains synchronous full results and same-thread composition.
+# Indexed get_vector and the memory-only namespace list remain direct controls.
+_SERIAL_VECTOR_ACTIVITIES = frozenset({"store_vectors", "search_similar", "get_namespace_stats", "delete_vectors", "update_metadata", "delete_all_in_namespace", "delete_by_external_ids"})
+for _activity_name in _SERIAL_VECTOR_ACTIVITIES:
+    setattr(PGVectorServicePlugin, _activity_name, _serialized_vector_activity(cast(Callable[..., Any], getattr(PGVectorServicePlugin, _activity_name))))

@@ -91,7 +91,7 @@ Root instruction files are bootstraps, not platform handbooks. They contain only
 - the exact local Step Zero and session-ledger commands;
 - an explicitly selected alternate profile, if this particular repo has one;
 - the failure and degraded-source ladder;
-- a small set of safety constraints that must bind before retrieval, such as protected history paths or who may mutate shared git state;
+- a small set of safety constraints that must bind before retrieval, such as protected history paths or the repository's own git rules;
 - search phrases or canonical article titles for the remaining operating rules.
 
 Volatile architecture descriptions, inventories, quality-gate internals, deployment recipes, plugin contracts, messaging topology, long Git procedures, and historical rationale belong in knowledge-base articles or task-specific skills. If a source-code comment cites a detailed rule, it should cite that canonical article or executable gate, not a root bootstrap file. This prevents a root-file edit from silently orphaning the rule a production module thought it referenced.
@@ -109,18 +109,26 @@ Volatile architecture descriptions, inventories, quality-gate internals, deploym
 | Session-ledger recall discipline | `Recall Before Work` plus the exact local command in both root templates | Command ships in every hydrated clone; the broader article is development-checkout-only |
 | Messaging, role binding, delegation, and runner-specific wake behavior | The active messaging plugin's `Inter-Agent Messaging` material and runner-specific runbook, when that runbook is actually shipped | Capability-dependent; report a missing contract instead of guessing |
 | Solet birth, teardown, deployment, and topology details | `13_solet_setup/`, the selected midwife/undertaker plugin runbook, and the applicable deployment skill | Capability- and environment-dependent |
-| Shared-worktree git coordination | The root file's minimal pre-retrieval safety rule, `Peer Pre-Completion Gate Procedure`, and the repository's Git-Controller skill | Repository-specific |
+| Shared-worktree git coordination | The repository's own root file and its own git procedure, plus the destructive-git boundary below | Repository-specific |
 | Historical rationale and one-time design analysis | The relevant versioned Workbench record | Development checkout only; never a runtime bootstrap dependency |
 
 ### Shared-checkout destructive-git boundary
 
-A generated seed does not select a single-session or Git-Controller policy
-automatically. When a repository does designate one sole git mutator, its root
-bootstrap must name that role before retrieval because another session's
-checkout, stash, or reset can destroy uncommitted work.
+The platform ships no git gate and no git controller role. The
+coordination-hooks plugin removed its git-text gate in `0.9.0` (2026-10-10),
+and a generated seed names no session as the only one allowed to run git. Each
+repository owns its own git rules. When a repository has one, such as who may
+land on its main branch, its own root bootstrap states it before retrieval and
+sessions working in that repository follow it.
 
-The designation does not authorize destructive operations. A controller must
-stop for explicit operator confirmation before:
+The hazard is several sessions running git in one shared working folder:
+another session's checkout, stash, or reset can destroy uncommitted edits it
+did not write. When other sessions share the repository, work in your own
+folder or in your coding tool's own worktree (Claude Code `--worktree`, Codex
+`--worktree`). Worktrees still share one stash list and one set of branches,
+so a stash made in one worktree can be popped from another.
+
+Whichever session runs git, stop for explicit operator confirmation before:
 
 - `git push --force` or `git push -f`;
 - `git reset --hard`;
@@ -132,9 +140,8 @@ stop for explicit operator confirmation before:
   `git restore <path>`.
 
 Branches and stashes remain recovery artifacts and are not deleted as part of
-normal landing or cleanup. Repository-specific controller procedures may add
-stricter confirmation or verification steps, but may not silently weaken the
-root safety boundary.
+normal landing or cleanup. A repository's own git procedure may add stricter
+confirmation or verification steps, but may not silently weaken this boundary.
 
 ## The content boundary this section is held to
 

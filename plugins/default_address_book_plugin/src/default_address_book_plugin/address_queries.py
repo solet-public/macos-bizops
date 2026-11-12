@@ -105,11 +105,7 @@ def filter_rows(
         rows = [r for r in rows if tag in r.get("tags", [])]
     if query:
         query_lower = query.lower()
-        rows = [
-            r for r in rows
-            if query_lower in str(r.get("name", "")).lower()
-            or query_lower in str(r.get("description", "")).lower()
-        ]
+        rows = [r for r in rows if query_lower in str(r.get("name", "")).lower() or query_lower in str(r.get("description", "")).lower()]
     return rows
 
 
@@ -122,3 +118,15 @@ def count_tags_in_rows(rows: list[dict[str, Any]]) -> dict[str, int]:
                 if isinstance(tag, str):
                     tag_counts[tag] = tag_counts.get(tag, 0) + 1
     return tag_counts
+
+
+def list_path_address_rows(state_service: StateServiceProtocol, namespace: str) -> list[dict[str, Any]]:
+    """Complete live location read; explicit full-scan consent for a curated book."""
+    result = state_service.read_state(
+        namespace=namespace,
+        query={"table": "address", "filters": {"address_type": "path", "is_deleted": 0}, "unbounded": True},
+    )
+    if result.get("action_status") != "completed":
+        raise RuntimeError(f"Path addresses unavailable: {result.get('error')}")
+    rows = extract_rows_from_result(result)
+    return [{**row, "entries": get_entries_for_address(state_service, namespace, row["id"])} for row in rows]

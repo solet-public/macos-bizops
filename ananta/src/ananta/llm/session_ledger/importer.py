@@ -35,6 +35,10 @@ from ananta.llm.session_ledger.blob_adapter import (
     BlobAdapterError,
     SessionLedgerBlobAdapter,
 )
+from ananta.llm.session_ledger.importer_persistence import (
+    _OrdinalCounter,
+    persist_normalized_for_session,
+)
 from ananta.llm.session_ledger.lease import LeaseHeartbeat
 from ananta.llm.session_ledger.poll_advisories import (
     collect_poll_advisories,
@@ -58,13 +62,15 @@ from ananta.llm.session_ledger.repository import (
     SessionLedgerRepository,
     SourceRow,
 )
-from ananta.llm.session_ledger.shared import (
-    _strip_nuls,
-    derive_event_external_id,
+from ananta.llm.session_ledger.session_failures import (
+    SessionReadError,
+    discovery_source,
+    failure_records,
+    reading_session,
+    record_persisted_events,
 )
 from ananta.llm.session_ledger.types import (
     CursorScope,
-    EventType,
     ExternalSessionRef,
     ImportBatchStatus,
     ImporterReport,
@@ -105,57 +111,13 @@ _VENDOR_FROM_SOURCE_KIND: dict[IngestSourceKind, SourceVendor] = {
 _DEFAULT_POLLING_LEASE_TTL_SECONDS = 600
 _ADOPT_RECENCY_WINDOW_MINUTES = 10
 
+
 # GAP-5 idempotent ingest: the per-ingest-pass source-order occurrence counter
 # for the null-``vendor_event_id`` fallback ordinal. Keyed by
 # ``(session_id, event_type, role, content_key, event_at)`` so ONE counter dict
 # serves both the per-session polling loop AND the multi-session push chunk loop;
 # the value is the next ordinal (0-based) for that group. Re-ingest replays the
 # same source order → same ordinals → the derived external_id dedups.
-_OrdinalCounter = dict[tuple[str, str, str | None, str, datetime], int]
-
-
-def _event_external_id(
-    *,
-    normalized: NormalizedSessionEvent,
-    session_id: str,
-    ordinals: _OrdinalCounter,
-) -> str:
-    """The event's ``external_id`` for the idempotent upsert (importer-side).
-
-    ``vendor_event_id`` when present; else the deterministic ``derv:`` hash over
-    the source-order occurrence ordinal. The ordinal counter increments ONLY for
-    null-vendor events — vendor-present events are keyed by ``vendor_event_id``
-    and must NOT consume an ordinal, so the live counting matches the slice-2
-    backfill (which ranks only the null-vendor rows in each group). ``content_key``
-    = the NUL-stripped ``content_text`` (?? ``""``), hashed at FULL size —
-    CONTENT-addressed, NOT keyed on ``content_blob_id``: the blob id is a random
-    state-generated pointer minted fresh on every (unconditional) re-offload, so
-    keying on it would diverge the ``external_id`` across re-ingests of an
-    OFFLOADED event and silently DUPLICATE the very re-ingest this dedups.
-    ``normalized.content_text`` is still present here (the offload nulls only the
-    PERSISTED row at ``ingest.py``, not ``normalized``); sha256 absorbs any size.
-    Stripped ONCE here so the counter key and the hash agree. The slice-2 backfill
-    recomputes the SAME key from stored ``content_text`` (inline) or the FETCHED
-    blob content (offloaded).
-    """
-    if normalized.vendor_event_id is not None:
-        return normalized.vendor_event_id
-    role = normalized.role.value if normalized.role is not None else None
-    content_key = _strip_nuls(normalized.content_text) or ""
-    key = (session_id, normalized.event_type.value, role, content_key, normalized.event_at)
-    ordinal = ordinals.get(key, 0)
-    ordinals[key] = ordinal + 1
-    return derive_event_external_id(
-        vendor_event_id=None,
-        session_id=session_id,
-        event_type=normalized.event_type.value,
-        role=role,
-        content_key=content_key,
-        event_at=normalized.event_at,
-        ordinal=ordinal,
-    )
-
-
 class LedgerPollError(Exception):
     """Raised by :meth:`SessionLedgerImporter.poll_source` (single failure channel).
 
@@ -434,7 +396,7 @@ class SessionLedgerImporter:
         try:
             run_pass = self._run_oversized_pass if oversized else self._run_pulling_pass
             with poll_source_context(source_row.id):
-                seen, persisted = run_pass(
+                seen, persisted, batches_failed = run_pass(
                     source_row=source_row,
                     plugin=plugin,
                     batch_id=batch_id,
@@ -485,7 +447,7 @@ class SessionLedgerImporter:
         plugin: PullingSourceMixin,
         batch_id: str,
         heartbeat: LeaseHeartbeat,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         return _run_regular_visit(self, source_row=source_row, plugin=plugin, batch_id=batch_id, heartbeat=heartbeat)
 
     def _run_oversized_pass(
@@ -495,7 +457,7 @@ class SessionLedgerImporter:
         plugin: PullingSourceMixin,
         batch_id: str,
         heartbeat: LeaseHeartbeat,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         return _run_oversized_visit(self, source_row=source_row, plugin=plugin, batch_id=batch_id, heartbeat=heartbeat)
 
     # ------------------------------------------------------------------
@@ -593,7 +555,7 @@ class SessionLedgerImporter:
                     actor_session_label=session_ref.originator_session_label,
                     actor_agent_instance_id=session_ref.originator_agent_instance_id,
                 )
-            events_persisted += self._persist_normalized_for_session(
+            persisted = self._persist_normalized_for_session(
                 session_id=session_id,
                 normalized=normalized,
                 batch_id=batch_id,
@@ -601,6 +563,8 @@ class SessionLedgerImporter:
                 source_kind=source_row.source_kind,
                 ordinals=ordinals,
             )
+            events_persisted += persisted
+            record_persisted_events(persisted)
         _checkpoint_session(
             self,
             source_row=source_row,
@@ -623,119 +587,16 @@ class SessionLedgerImporter:
         source_kind: IngestSourceKind,
         ordinals: _OrdinalCounter,
     ) -> int:
-        # vendor_event_id fast-path dedup (bug 2026-05-31): a cursor that failed
-        # to persist re-yields events on the next poll. KEPT alongside the GAP-5
-        # (session_id, external_id) upsert: it still dedups vendor-present
-        # re-ingests of LEGACY rows (null external_id until the slice-2 backfill)
-        # the upsert can't yet catch; for new rows the upsert is authoritative.
-        if normalized.vendor_event_id is not None:
-            existing_id = self._repository.find_event_id_by_vendor_id(
-                session_id=session_id,
-                vendor_event_id=normalized.vendor_event_id,
-            )
-            if existing_id is not None:
-                logger.debug(
-                    "ledger persist: skipping duplicate session_id=%s vendor_event_id=%s (existing event_id=%s)",
-                    session_id,
-                    normalized.vendor_event_id,
-                    existing_id,
-                )
-                return 0
-        content_blob_id: str | None = None
-        if normalized.content_text is not None and self._blob_adapter.should_offload_text(normalized.content_text):
-            content_blob_id = self._blob_adapter.store_event_text(
-                content_text=normalized.content_text,
-                session_id=session_id,
-                external_session_id=normalized.external_session_id,
-                sequence=-1,
-            )
-        external_id = _event_external_id(
-            normalized=normalized,
-            session_id=session_id,
-            ordinals=ordinals,
-        )
-        result = self._repository.append_event(
+        return persist_normalized_for_session(
+            self._repository,
+            self._blob_adapter,
             session_id=session_id,
             normalized=normalized,
             batch_id=batch_id,
-            content_blob_id=content_blob_id,
             session_vendor=session_vendor,
             source_kind=source_kind,
-            external_id=external_id,
+            ordinals=ordinals,
         )
-        if result.deduped:
-            # Upsert hit an existing row — event + children already persisted on
-            # the first ingest; skip the child projection (no double-write).
-            return 0
-        _project_tool_call(
-            self._repository,
-            normalized=normalized,
-            session_id=session_id,
-            event_id=result.event_id,
-        )
-        return 1
-
-
-def _project_tool_call(
-    repository: SessionLedgerRepository,
-    *,
-    normalized: NormalizedSessionEvent,
-    session_id: str,
-    event_id: str,
-) -> None:
-    """Project a TOOL_CALL / TOOL_RESULT event into ``session_ledger__tool_call``.
-
-    Module-level (mirrors :func:`_finalize_failed`) so the importer class stays a
-    focused orchestrator — it takes ``repository`` rather than ``self``.
-    """
-    if normalized.event_type is EventType.TOOL_CALL:
-        tool_name = _extract_tool_name(normalized)
-        if tool_name is None:
-            return
-        repository.record_tool_call(
-            session_id=session_id,
-            call_event_id=event_id,
-            tool_name=tool_name,
-            called_at=normalized.event_at,
-        )
-        return
-    if normalized.event_type is EventType.TOOL_RESULT:
-        # Spec §17.3 M3 acceptance: TOOL_CALL/TOOL_RESULT projection
-        # populates session_ledger__tool_call with status='succeeded'.
-        # The result's vendor_parent_event_id is the tool_use_id;
-        # the matching call's vendor_event_id equals that same id.
-        tool_use_id = normalized.vendor_parent_event_id
-        if tool_use_id is None:
-            return
-        call_event_id = repository.find_call_event_id_for_resolution(
-            session_id=session_id,
-            tool_use_vendor_id=tool_use_id,
-        )
-        if call_event_id is None:
-            # No matching call — surface for debugging but don't fail
-            # the batch; the call may yet arrive in a later poll pass
-            # (out-of-order discovery on a sibling file). The status
-            # will stay 'pending' until a subsequent result lands.
-            logger.warning(
-                "tool_result has no matching tool_call in session %s (tool_use_id=%s); leaving projection pending",
-                session_id,
-                tool_use_id,
-            )
-            return
-        repository.resolve_tool_call(
-            call_event_id=call_event_id,
-            result_event_id=event_id,
-            status="succeeded",
-            resolved_at=normalized.event_at,
-        )
-
-
-def _extract_tool_name(normalized: NormalizedSessionEvent) -> str | None:
-    content = normalized.content_json
-    if not isinstance(content, dict):
-        return None
-    name = content.get("tool_name")
-    return name if isinstance(name, str) else None
 
 
 def _resolve_pushed_source(
@@ -889,12 +750,14 @@ def _run_regular_visit(
     plugin: PullingSourceMixin,
     batch_id: str,
     heartbeat: LeaseHeartbeat,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Cooperative whole-session visit; unproved contracts remain whole polls."""
     budget = PollBudget(importer._source_visit_seconds, importer._poll_clock)
     reason = _yield_reason(importer, source_row)
     capability = source_row.source_kind in FILESYSTEM_POLL_KINDS and plugin.supports_whole_session_poll
     progress = PollDiscoveryProgress()
+    failures = failure_records(importer._repository, source_row, plugin, heartbeat)
+    discovery = discovery_source(plugin, failures)
     sessions_seen = events_persisted = sessions_failed = 0
     discovery_cursor = importer._repository.read_cursor(
         source_id=source_row.id,
@@ -902,7 +765,7 @@ def _run_regular_visit(
     )
     last_session_ref: ExternalSessionRef | None = None
     iterator = (
-        plugin.discover_sessions_for_poll(
+        discovery.discover_sessions_for_poll(
             source_row.root_uri,
             discovery_cursor,
             read_event_cursor=lambda key: _read_event_cursor(importer, source_row, key),
@@ -917,17 +780,21 @@ def _run_regular_visit(
             heartbeat.check()
             sessions_seen += 1
             try:
-                events_persisted += importer._poll_one_session(
-                    source_row=source_row,
-                    session_ref=session_ref,
-                    batch_id=batch_id,
-                    plugin=plugin,
-                    heartbeat=heartbeat,
-                    progress=progress if capability else None,
-                )
+                with reading_session(failures, session_ref):
+                    events_persisted += importer._poll_one_session(
+                        source_row=source_row,
+                        session_ref=session_ref,
+                        batch_id=batch_id,
+                        plugin=plugin,
+                        heartbeat=heartbeat,
+                        progress=progress if capability else None,
+                    )
                 last_session_ref = session_ref
-                if isinstance(session_ref, PollSessionRef) and session_ref.discovery_pair is not None:
-                    progress.last_examined = session_ref.discovery_pair
+                _acknowledge_discovery_ref(session_ref, progress)
+            except SessionReadError as exc:
+                sessions_failed += 1
+                events_persisted += exc.events_persisted
+                progress.regular_pending = True
             except (ValueError, LedgerRepositoryError, BlobAdapterError) as exc:
                 sessions_failed += 1
                 progress.regular_pending = True
@@ -944,11 +811,7 @@ def _run_regular_visit(
             close()
     heartbeat.check()
     _write_discovery_checkpoint(importer, source_row, plugin, discovery_cursor, progress, last_session_ref, capability)
-    importer._repository.finish_batch(
-        batch_id,
-        polling_lease_token=heartbeat.handle.lease_token,
-        status=ImportBatchStatus.COMPLETED,
-    )
+    _finish_session_batch(importer._repository, batch_id, heartbeat, sessions_failed)
     elapsed = budget.elapsed
     logger.info(
         "ledger poll source=%s kind=%s policy=%s elapsed=%.3fs budget=%.3fs overrun=%.3fs sessions=%d failures=%d exhausted=%s pending=%s deferred=%d deferred_bytes=%d",
@@ -965,7 +828,7 @@ def _run_regular_visit(
         progress.deferred_count,
         progress.deferred_bytes,
     )
-    return sessions_seen, events_persisted
+    return sessions_seen, events_persisted, int(sessions_failed > 0)
 
 
 def _run_oversized_visit(
@@ -975,13 +838,15 @@ def _run_oversized_visit(
     plugin: PullingSourceMixin,
     batch_id: str,
     heartbeat: LeaseHeartbeat,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Authoritative recheck under the common acquired-source batch custody."""
     heartbeat.check()
     cursor = importer._repository.read_cursor(source_id=source_row.id, scope=CursorScope.DISCOVERY)
-    seen = persisted = 0
+    seen = persisted = failed = 0
+    failures = failure_records(importer._repository, source_row, plugin, heartbeat)
+    discovery = discovery_source(plugin, failures)
     if cursor is not None and cursor.get("state") == "caught_up":
-        selection = plugin.select_oversized_session(
+        selection = discovery.select_oversized_session(
             source_row.root_uri,
             read_event_cursor=lambda key: _read_event_cursor(importer, source_row, key),
             threshold=OVERSIZED_SESSION_BYTES,
@@ -995,21 +860,37 @@ def _run_oversized_visit(
             )
         elif selection.candidate is not None:
             seen = 1
-            persisted = importer._poll_one_session(
-                source_row=source_row,
-                session_ref=selection.candidate,
-                batch_id=batch_id,
-                plugin=plugin,
-                heartbeat=heartbeat,
-                progress=PollDiscoveryProgress(),
-            )
+            try:
+                with reading_session(failures, selection.candidate):
+                    persisted = importer._poll_one_session(
+                        source_row=source_row,
+                        session_ref=selection.candidate,
+                        batch_id=batch_id,
+                        plugin=plugin,
+                        heartbeat=heartbeat,
+                        progress=PollDiscoveryProgress(),
+                    )
+            except SessionReadError as exc:
+                failed = 1
+                persisted = exc.events_persisted
             # Never checkpoint regular discovery on an oversized success.
-    importer._repository.finish_batch(
+    _finish_session_batch(importer._repository, batch_id, heartbeat, failed)
+    return seen, persisted, failed
+
+
+def _acknowledge_discovery_ref(ref: ExternalSessionRef, progress: PollDiscoveryProgress) -> None:
+    if isinstance(ref, PollSessionRef) and ref.discovery_pair is not None:
+        progress.last_examined = ref.discovery_pair
+
+
+def _finish_session_batch(repository: SessionLedgerRepository, batch_id: str, heartbeat: LeaseHeartbeat, failed: int) -> None:
+    repository.finish_batch(
         batch_id,
         polling_lease_token=heartbeat.handle.lease_token,
-        status=ImportBatchStatus.COMPLETED,
+        status=ImportBatchStatus.FAILED if failed else ImportBatchStatus.COMPLETED,
+        error_kind="session_failure" if failed else None,
+        error_message=f"{failed} session(s) failed; see per-session diagnostics" if failed else None,
     )
-    return seen, persisted
 
 
 def _checkpoint_session(
@@ -1060,7 +941,9 @@ def _yield_reason(importer: SessionLedgerImporter, source: SourceRow) -> str | N
     )
 
 
-def _oversized_sources(importer: SessionLedgerImporter) -> Iterator[tuple[SourceRow, PullingSourceMixin]]:
+def _oversized_sources(
+    importer: SessionLedgerImporter,
+) -> Iterator[tuple[SourceRow, PullingSourceMixin]]:
     """Stable row order plus a transient last-completed-source rotation hint."""
     sources = sorted(importer._repository.list_sources(enabled_only=True), key=lambda row: row.id)
     last = importer._last_oversized_source

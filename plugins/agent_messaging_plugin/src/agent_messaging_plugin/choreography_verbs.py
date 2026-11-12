@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 PROVIDER_PLUGIN_NAME = "agent_messaging_plugin"
 ACTION_ROTATE_SESSION = "rotate_session"
 ACTION_RESTART_SESSION = "restart_session"
+ACTION_RECONCILE_LEDGER_TMUX = "reconcile_ledger_tmux"
 
 JOB_STATUS_QUEUED = "queued"
 JOB_STATUS_PROCESSING = "processing"
@@ -61,12 +62,18 @@ JOB_STATUS_ERROR = "error"
 # hand-typed at each call site) so the worker and any future status-reading
 # caller agree on the vocabulary.
 ROTATE_LEGS = (
-    "resolve_ledger_row", "durable_pickup_dispatch", "clear_session",
-    "drive_session", "verify",
+    "resolve_ledger_row",
+    "durable_pickup_dispatch",
+    "clear_session",
+    "drive_session",
+    "verify",
 )
 RESTART_LEGS = (
-    "capture_old_row", "terminate_session", "spawn_session",
-    "role_reclaim_drive", "verify",
+    "capture_old_row",
+    "terminate_session",
+    "spawn_session",
+    "role_reclaim_drive",
+    "verify",
 )
 
 
@@ -81,14 +88,12 @@ def validate_flow_session_context(state: dict[str, Any]) -> tuple[str, str]:
     if not isinstance(session_id, str) or not session_id:
         raise VerbError(
             "missing_flow_context",
-            "session_id missing from state context — refusing to dispatch a "
-            "choreography job with no flow context to strand.",
+            "session_id missing from state context — refusing to dispatch a choreography job with no flow context to strand.",
         )
     if not isinstance(flow_id, str) or not flow_id:
         raise VerbError(
             "missing_flow_context",
-            "flow_id missing from state context — refusing to dispatch a "
-            "choreography job with no flow context to strand.",
+            "flow_id missing from state context — refusing to dispatch a choreography job with no flow context to strand.",
         )
     return session_id, flow_id
 
@@ -104,8 +109,13 @@ def _error_message(result: dict[str, Any]) -> str:
 
 
 def _create_job(
-    async_job_manager: AsyncJobManager, *, action_name: str, notes: str,
-    request_data: dict[str, Any], session_id: str, flow_id: str,
+    async_job_manager: AsyncJobManager,
+    *,
+    action_name: str,
+    notes: str,
+    request_data: dict[str, Any],
+    session_id: str,
+    flow_id: str,
 ) -> dict[str, Any]:
     """Shared ms-scale dispatch: no I/O, no driver-channel call — a single
     ``AsyncJobManager.create_job`` write and return. Raises :class:`VerbError`
@@ -140,7 +150,9 @@ class RotateSessionDispatchRequest:
 
 
 def dispatch_rotate_session(
-    async_job_manager: AsyncJobManager, req: RotateSessionDispatchRequest, state: dict[str, Any],
+    async_job_manager: AsyncJobManager,
+    req: RotateSessionDispatchRequest,
+    state: dict[str, Any],
 ) -> dict[str, Any]:
     """§2.1 ``rotate_session`` dispatch. Validates required fields + flow
     context, then creates a queued job — no driver-channel call happens on
@@ -152,7 +164,8 @@ def dispatch_rotate_session(
     Errors: ``missing_argument``, ``missing_flow_context``, ``job_creation_failed``."""
     if not req.agent_instance_id.strip():
         raise VerbError(
-            "missing_argument", "rotate_session requires a non-empty agent_instance_id.",
+            "missing_argument",
+            "rotate_session requires a non-empty agent_instance_id.",
         )
     if not req.role_name.strip():
         raise VerbError("missing_argument", "rotate_session requires a non-empty role_name.")
@@ -169,7 +182,8 @@ def dispatch_rotate_session(
             "pickup_text": req.pickup_text,
             "park_first": req.park_first,
         },
-        session_id=session_id, flow_id=flow_id,
+        session_id=session_id,
+        flow_id=flow_id,
     )
 
 
@@ -182,7 +196,9 @@ class RestartSessionDispatchRequest:
 
 
 def dispatch_restart_session(
-    async_job_manager: AsyncJobManager, req: RestartSessionDispatchRequest, state: dict[str, Any],
+    async_job_manager: AsyncJobManager,
+    req: RestartSessionDispatchRequest,
+    state: dict[str, Any],
 ) -> dict[str, Any]:
     """§2.2 ``restart_session`` dispatch. Validates required fields + flow
     context, then creates a queued job — no ``terminate_session``/
@@ -195,7 +211,8 @@ def dispatch_restart_session(
     ``missing_flow_context``, ``job_creation_failed``."""
     if not req.agent_instance_id.strip():
         raise VerbError(
-            "missing_argument", "restart_session requires a non-empty agent_instance_id.",
+            "missing_argument",
+            "restart_session requires a non-empty agent_instance_id.",
         )
     if not req.role_name.strip():
         raise VerbError("missing_argument", "restart_session requires a non-empty role_name.")
@@ -212,7 +229,8 @@ def dispatch_restart_session(
             "role_class": req.role_class,
             "grace_seconds": req.grace_seconds,
         },
-        session_id=session_id, flow_id=flow_id,
+        session_id=session_id,
+        flow_id=flow_id,
     )
 
 
@@ -225,7 +243,8 @@ class GenerateCurationReportDispatchRequest:
 
 
 def dispatch_generate_curation_report(
-    async_job_manager: AsyncJobManager, req: GenerateCurationReportDispatchRequest,
+    async_job_manager: AsyncJobManager,
+    req: GenerateCurationReportDispatchRequest,
     state: dict[str, Any],
 ) -> dict[str, Any]:
     """M2.2 ``generate_curation_report`` dispatch. ``head_lines`` is the
@@ -238,7 +257,8 @@ def dispatch_generate_curation_report(
     ``job_creation_failed``."""
     if not req.head_lines:
         raise VerbError(
-            "missing_argument", "generate_curation_report requires a non-empty head_lines list.",
+            "missing_argument",
+            "generate_curation_report requires a non-empty head_lines list.",
         )
     session_id, flow_id = validate_flow_session_context(state)
     return _create_job(
@@ -251,7 +271,24 @@ def dispatch_generate_curation_report(
             "byte_budget": req.byte_budget,
             "line_budget": req.line_budget,
         },
-        session_id=session_id, flow_id=flow_id,
+        session_id=session_id,
+        flow_id=flow_id,
+    )
+
+
+def dispatch_reconcile_ledger_tmux(
+    async_job_manager: AsyncJobManager,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    """Enqueue metadata collection on the existing choreography worker."""
+    session_id, flow_id = validate_flow_session_context(state)
+    return _create_job(
+        async_job_manager,
+        action_name=ACTION_RECONCILE_LEDGER_TMUX,
+        notes="Observe ledger and tmux metadata",
+        request_data={},
+        session_id=session_id,
+        flow_id=flow_id,
     )
 
 
@@ -266,7 +303,10 @@ def _extract_job_row(job_result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _attach_terminal_payload(
-    async_job_manager: AsyncJobManager, envelope: dict[str, Any], job_id: str, status: str,
+    async_job_manager: AsyncJobManager,
+    envelope: dict[str, Any],
+    job_id: str,
+    status: str,
 ) -> None:
     """Mutates ``envelope`` in place with the result/error payload for a
     terminal job — split out of :func:`check_choreography_job_status` to
@@ -284,7 +324,8 @@ def _attach_terminal_payload(
 
 
 def check_choreography_job_status(
-    async_job_manager: AsyncJobManager, job_id: str,
+    async_job_manager: AsyncJobManager,
+    job_id: str,
 ) -> dict[str, Any]:
     """§2.1/§2.2 caller-side polling verb (the ``check_generation_status``
     precedent) — the sole way a direct caller learns a choreography job's
@@ -293,12 +334,14 @@ def check_choreography_job_status(
     payload written by the worker. Errors: ``missing_argument``, ``job_not_found``."""
     if not job_id.strip():
         raise VerbError(
-            "missing_argument", "check_choreography_job_status requires a non-empty job_id.",
+            "missing_argument",
+            "check_choreography_job_status requires a non-empty job_id.",
         )
     job_result = async_job_manager.get_job(job_id)
     if job_result.get("action_status") != "completed":
         raise VerbError(
-            "job_not_found", f"check_choreography_job_status: {_error_message(job_result)}",
+            "job_not_found",
+            f"check_choreography_job_status: {_error_message(job_result)}",
         )
     job = _extract_job_row(job_result)
     status = str(job.get("status") or "")

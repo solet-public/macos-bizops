@@ -18,13 +18,18 @@ Run:
 from __future__ import annotations
 
 import json
+import logging
 import stat
 import sys
 import tempfile
+import threading
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import patch
 
 import httpx
 
@@ -83,10 +88,7 @@ def _leaderboard(rows: Sequence[Sequence[str]]) -> str:
 
 
 def _detail_fixture(score: str, cost: str) -> str:
-    return (
-        "<html><body>Model summary|Intelligence|Updated|#|45| / |202|" + score
-        + "|Artificial Analysis Intelligence Index|blah|" + cost + "|Cost per Intelligence Index task|blah</body></html>"
-    ).replace("|", "<span></span>")  # tag-strip collapses these right back to '|' delimiters
+    return ("<html><body>Model summary|Intelligence|Updated|#|45| / |202|" + score + "|Artificial Analysis Intelligence Index|blah|" + cost + "|Cost per Intelligence Index task|blah</body></html>").replace("|", "<span></span>")  # tag-strip collapses these right back to '|' delimiters
 
 
 def _handler(request: httpx.Request) -> httpx.Response:
@@ -267,9 +269,23 @@ def test_detail_score_parses_with_and_without_updated_token() -> None:
 def _seed_cell(state: RealShapeState, model: str, effort: str, *, acceptance: str = CELL_ACCEPTANCE_ACCEPTED, clock: str | None = None) -> None:
     now = datetime.now(UTC).isoformat()
     record: dict[str, Any] = {
-        "provider": "anthropic", "runtime": "claude_code", "model": model, "effort": effort, "capability_score": 30.0, "cost_per_task_usd": 1.0, "relative_cost_multiplier": None,
-        "currency": "USD", "effort_supported": True, "measured_at": now, "accepted_at": now, "acceptance": acceptance, "agreeing_observation_ids": [],
-        "disagreement_note": None, "staleness_window_hours": 72, "last_refresh_run_id": "run-before", "harness_unverified_since": clock,
+        "provider": "anthropic",
+        "runtime": "claude_code",
+        "model": model,
+        "effort": effort,
+        "capability_score": 30.0,
+        "cost_per_task_usd": 1.0,
+        "relative_cost_multiplier": None,
+        "currency": "USD",
+        "effort_supported": True,
+        "measured_at": now,
+        "accepted_at": now,
+        "acceptance": acceptance,
+        "agreeing_observation_ids": [],
+        "disagreement_note": None,
+        "staleness_window_hours": 72,
+        "last_refresh_run_id": "run-before",
+        "harness_unverified_since": clock,
     }
     state.upsert_state(AGENT_ROLE_BINDING_NAMESPACE, {"table": TABLE_MODEL_CAPABILITY_CELL, "record": record, "conflict_columns": ["runtime", "model", "effort"]})
 
@@ -298,13 +314,116 @@ def test_the_registered_result_schema_declares_every_field_the_verb_returns() ->
     from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: PLC0415 -- the plugin import is heavy; only this test needs it
 
     declared = set(AgentMessagingPlugin.refresh_model_capability_catalog._platform_process_metadata.return_value_schema.properties)  # type: ignore[attr-defined]  # noqa: SLF001
-    returned = set(_refresh(RealShapeState(), _handler))
+    returned = {"job_id", "status"}
     _check(declared == returned, f"the registered return_value_schema declares exactly the fields the verb returns (declared-only {sorted(declared - returned)}, returned-only {sorted(returned - declared)})")
 
 
 def test_the_roster_is_gone() -> None:
     names = ("_ROSTER", "_RosterEntry", "roster_cells", "fetch_all_readings", "_detail_slug", "_parse_effort")
     _check(not [name for name in names if hasattr(fetch, name)], "no hand-kept roster, slug rule or roster enumeration remains in the fetch module")
+
+
+def _operation_fixture(plugin: Any) -> tuple[Any, Any]:
+    root = Path(__file__).resolve().parents[3]
+    sys.path.insert(0, str(root / "ananta/tests/core/actions"))
+    from ananta.core.state.async_job_manager import AsyncJobManager
+    from ananta.core.state.flow_runtime_graph import FlowRuntimeGraph
+    from ananta.services.job_service.service import JobService
+    from async_job_fixture_support import JobState  # pyright: ignore[reportMissingImports]
+
+    class Ledger(JobState):  # pyright: ignore[reportUntypedBaseClass]
+        def write_state(self, namespace: str, data: dict[str, Any], calling_service: str | None = None, calling_namespace: str | None = None) -> dict[str, Any]:
+            record = {"created_at": datetime.now(UTC).isoformat(), **data["record"]}
+            return super().write_state(namespace, {**data, "record": record}, calling_service, calling_namespace)
+
+    ledger = Ledger()
+    ledger.rows["flows"] = [{"id": "smoke-flow", "status": "active", "trigger_type": "bridge_process_call"}]
+    manager = AsyncJobManager(ledger, FlowRuntimeGraph(ledger))
+    plugin.logger = logging.getLogger(plugin.name)
+    if plugin.orchestrator_ref is None:
+        plugin.orchestrator_ref = SimpleNamespace(async_job_manager=manager)
+    else:
+        plugin.orchestrator_ref.async_job_manager = manager
+    return manager, JobService(ledger, manager)
+
+
+def _wait_operation(plugin: Any, service: Any, job_id: str, verb: str) -> dict[str, Any]:
+    deadline = time.monotonic() + 5
+    while True:
+        job = service.get_job(job_id)["data"]["result"]["job"]
+        if job["status"] in {"completed", "error"}:
+            break
+        assert time.monotonic() < deadline, f"{verb}: worker did not finish"
+        time.sleep(0.005)
+    worker = plugin._operation_jobs._thread
+    if worker is not None:
+        worker.join(2)
+        assert not worker.is_alive()
+    return job
+
+
+def _assert_operation_outcome(job: dict[str, Any], verb: str, expected: dict[str, Any] | None, value: Any, failure: bool) -> None:
+    assert job["status"] == ("error" if failure else "completed"), job
+    if expected is not None:
+        assert job["result"].get("data", {}) == expected, f"{verb}: original_result_payload"
+    if failure:
+        if isinstance(value, dict):
+            assert job["error"] == value["error"], f"{verb}: original_error_payload"
+        else:
+            assert "controlled failure" in str(job["error"]), f"{verb}: original_error_payload"
+    else:
+        assert job["error"] is None
+
+
+def prove_queued_operation(plugin: Any, verb: str, params: dict[str, Any], boundary: Any, attribute: str, value: Any, expected: dict[str, Any] | None, *, failure: bool = False) -> dict[str, Any]:
+    """Real platform dispatch and job retrieval, with only the work boundary replaced."""
+    from ananta.core.actions.action_processor import ActionProcessor
+    from ananta.core.plugins.plugin_manager import PluginManager
+
+    manager, service = _operation_fixture(plugin)
+    touched: list[int] = []
+
+    def slow(*args: Any, **kwargs: Any) -> Any:
+        touched.append(threading.get_ident())
+        time.sleep(0.1)
+        if isinstance(value, Exception):
+            raise value
+        return value(*args, **kwargs) if callable(value) else value
+
+    action = SimpleNamespace(id="queued-operation", process_key=f"plugin::{plugin.name}::{verb}", session_id="smoke-session", flow_id="smoke-flow", context_id=None, source_plugin=None, flow_token_id=None)
+    processor = ActionProcessor(PluginManager())
+    with patch.object(boundary, attribute, side_effect=slow):
+        started = time.perf_counter()
+        receipt: Any = processor._execute_plugin_method(plugin, verb, params, cast(Any, action))  # pyright: ignore[reportPrivateUsage]
+        elapsed = time.perf_counter() - started
+        assert "job_id" in receipt.get("data", {}), f"{verb}: queued_receipt_before_work_completion: {receipt}"
+        assert elapsed < 0.05, f"{verb}: fast_return_bound: {elapsed}"
+        assert receipt["data"]["status"] == "queued"
+        job_id = receipt["data"]["job_id"]
+        request = manager.get_job_payload(job_id, "request")["data"]["payload"]
+        assert request["parameters"] == params, f"{verb}: durable_original_request"
+        job = _wait_operation(plugin, service, job_id, verb)
+    assert touched and threading.get_ident() not in touched, f"{verb}: work_must_run_off_caller"
+    _assert_operation_outcome(job, verb, expected, value, failure)
+    print(f"  PASS  {plugin.name}.{verb}: fast receipt, persisted request, worker, job_service result/error")
+    return job
+
+
+def test_born_async_fleet_messaging_verbs() -> None:
+    from agent_messaging_plugin import plugin as module
+
+    report = {"verdict": "not_stalled", "ready_and_owned_count": 2, "produced_count": 1, "advisories": []}
+    for verb, attribute, params in (
+        ("refresh_model_capability_catalog", "catalog_refresh", {"trigger": "manual"}),
+        ("seed_model_capability_catalog", "catalog_seed", {}),
+        ("sweep_fleet_stall", "run_fleet_stall_sweep", {}),
+        ("sweep_fleet_stall_cron", "run_fleet_stall_sweep", {}),
+    ):
+        for failure in (False, True):
+            plugin = module.AgentMessagingPlugin()
+            error = module.CatalogError("controlled_failure", "controlled failure") if "catalog" in verb else module.FleetStallSweepError("controlled failure")
+            with patch.object(plugin, "_get_state_service", return_value=object()), patch.object(plugin, "_fleet_stall_register_reader", return_value=object()):
+                prove_queued_operation(plugin, verb, params, module, attribute, error if failure else report, {} if failure else report, failure=failure)
 
 
 def _check(condition: object, label: str) -> None:
@@ -319,6 +438,7 @@ def _check(condition: object, label: str) -> None:
 
 def main() -> int:
     print("model_capability_refresh_smoke")
+    test_born_async_fleet_messaging_verbs()
     test_the_roster_is_gone()
     test_detail_score_parses_with_and_without_updated_token()
     test_refresh_accepts_conflicts_and_names_single_sources()

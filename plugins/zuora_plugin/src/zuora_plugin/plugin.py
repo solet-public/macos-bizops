@@ -1,4 +1,4 @@
-"""Zuora plugin entry point — typed Workflow, SQL Data Query, Files, Orders, Subscriptions, Accounts, Payment Methods, Payments, Custom Objects, Object Query, Billing Documents, Invoices, Credit and Debit Memos, Bill Runs, Usage, ZOQL, object and billing verbs.
+"""Zuora plugin entry point — typed Workflow, SQL Data Query, Files, Orders, Subscriptions, Accounts, Payment Methods, Payments, Custom Objects, Object Query, Billing Documents, Invoices, Credit and Debit Memos, Bill Runs, Usage, Legacy Catalog, ZOQL, object and billing verbs.
 
 Headless OAuth 2.0 client-credentials auth (chain-consumed from the
 ``zuora_tenant`` address-book entry) against a Zuora tenant — no browser
@@ -66,10 +66,13 @@ the SQL-access gate's connector-root declaration covers this plugin.
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 from ananta.core.actions.action_metadata import (
     ContextHandling,
@@ -82,28 +85,35 @@ from ananta.core.actions.action_metadata import (
 )
 from ananta.core.config.config_provider import ConfigProvider
 from ananta.core.domain.enums import ActionStatus, ProcessorPolicyCategory
-from ananta.core.plugins.plugin_base import PluginBase
+from ananta.core.plugins.plugin_base import OrchestratorProtocol, PluginBase
+from ananta.file_locations.addresses import path_addresses
+from ananta.file_locations.containment import Located, PathRefusedError, assert_path_allowed, derive_allowed_roots, location_advisories, location_session_id, retain_location_advisories
+from ananta.file_locations.documents import default_solet_home, documents_folder
+from ananta.file_locations.resolution import SoletTree, solet_tree_from_app_home
+from ananta.interfaces.address_book_service_interface import AddressBookServiceInterface
 from ananta.interfaces.edge_process_provider import (
     EdgeProcessDefinition,
     EdgeProcessProvider,
 )
 
-from . import async_jobs, export_containment, request_actions, typed_verbs
+from . import async_jobs, request_actions, typed_verbs
 from .account_processes import AccountProcesses
 from .app_config import AppConfigError, AppConfigLoader
 from .bill_run_usage_processes import BillRunUsageProcesses
 from .billing_actions import ZuoraResponseError, v1_headers
+from .catalog_definition_processes import CatalogDefinitionProcesses
+from .catalog_product_processes import CatalogProductProcesses
 from .commerce_fields import subscription_read_options
 from .commerce_params import SEGMENT_PARAMS, V1_HEADER_PARAMS
 from .constants import (
     BULK_EXPORT_ROW_CAP,
-    CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
     CONFIG_KEY_REQUEST_TIMEOUT_SECONDS,
     DATA_QUERY_MAX_ROWS_CAP,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_ROW_LIMIT,
     ERROR_ADDRESS_BOOK_NOT_AVAILABLE,
     ERROR_API_ERROR,
+    ERROR_EXPORT_PATH_REFUSED,
     ERROR_INVALID_PARAMS,
     ERROR_NOT_CONFIGURED,
     LIST_ROW_LIMIT_CAP,
@@ -120,7 +130,6 @@ from .constants import (
     RESULT_TYPE_REQUEST,
     RESULT_TYPE_TEST_CONNECTION,
     RESULT_TYPE_UPDATE_OBJECT,
-    TSV_SUFFIX,
     ZUORA_LIST_PAGE_SIZE_MAX,
     ZUORA_QUERY_PAGE_ROW_CAP,
 )
@@ -142,6 +151,41 @@ from .workflow_processes import WorkflowProcesses
 # more consequential than a leaked CRM contact row. Metadata/ids stay low.
 
 
+def _launch_directory(orchestrator: OrchestratorProtocol) -> Located[str | None]:
+    """Read this job's exact active A2 bridge capture, never process cwd."""
+    session_id = location_session_id()
+    manager = getattr(orchestrator, "plugin_manager", None)
+    if not session_id or manager is None:
+        return Located(None, ())
+    try:
+        messaging = manager.get_plugin("agent_messaging_plugin")
+        surface = getattr(messaging, "_platform_surface", None)
+        capture = surface.launch_directory_for_session(session_id) if surface is not None else None
+        if isinstance(capture, dict) and isinstance(capture.get("path"), str):
+            advisories = ("Launch directory uses the bridge client's cwd fallback; refresh the launcher.",) if capture.get("source") == "cwd_fallback" else ()
+            return Located(capture["path"], advisories)
+    except Exception:
+        return Located(None, ("Launch directory capture is unavailable; using path addresses and solet_home.",))
+    return Located(None, ())
+
+
+def _read_location_roots(orchestrator: OrchestratorProtocol | None) -> tuple[Located[tuple[Path, ...]], SoletTree]:
+    """Read live address inputs and assemble advisory-bearing roots."""
+    if orchestrator is None:
+        raise RuntimeError("orchestrator APP_HOME must be injected before file I/O")
+    tree = solet_tree_from_app_home(Path(orchestrator.APP_HOME))
+    try:
+        service = orchestrator.get_service("address_book_service")
+        addresses = path_addresses(cast(AddressBookServiceInterface, service)) if service is not None else Located((), ("Path address service is unavailable; using computed solet_home.",))
+    except Exception:
+        addresses = Located((), ("Path addresses could not be read; using computed solet_home.",))
+    launch = _launch_directory(orchestrator)
+    name = os.environ.get("SOLET_NAME", tree.repo_root.name)
+    home = default_solet_home(name, documents_folder(sys.platform, os.environ, Path.home()), tree, Path.home() / "Library/Application Support" / name / "Files")
+    roots = derive_allowed_roots(addresses.value, launch.value, tree, home.value)
+    return Located(roots.value, (*addresses.advisories, *launch.advisories, *home.advisories, *roots.advisories)), tree
+
+
 class ZuoraPlugin(
     WorkflowProcesses,
     DataQueryFileProcesses,
@@ -154,6 +198,8 @@ class ZuoraPlugin(
     CreditMemoProcesses,
     DebitMemoProcesses,
     BillRunUsageProcesses,
+    CatalogProductProcesses,
+    CatalogDefinitionProcesses,
     PluginBase,
     EdgeProcessProvider,
 ):
@@ -237,58 +283,50 @@ class ZuoraPlugin(
             self._client = ZuoraClient(config, timeout_seconds=self._request_timeout_seconds())
         return self._client
 
-    def _success(self, data: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "action_status": ActionStatus.COMPLETED.value,
-            "data": data,
-            "actions": [],
-            "error": None,
-            "timestamp": datetime.now(UTC).isoformat(),
-        }
+    def _success(self, data: dict[str, Any], *, job_control: bool = False) -> dict[str, Any]:
+        if location_advisories():
+            data = {**data, "advisories": [*data.get("advisories", []), *location_advisories()]}
+        if job_control:
+            # These exact two fields come from our job manager, never a vendor.
+            try:
+                data = {key: data[key] for key in ("job_id", "status")}
+            except Exception:
+                return self._error(ERROR_API_ERROR, "could not read the created job identity")
+        return self._finish(ActionStatus.COMPLETED.value, data, None)
 
     def _error(self, code: str, message: str) -> dict[str, Any]:
+        return self._finish(ActionStatus.ERROR.value, {}, {"code": code, "message": message})
+
+    def _finish(self, status: str, data: dict[str, Any], error: dict[str, Any] | None) -> dict[str, Any]:
+        """The one finish step: the result or error as received, in the root protocol envelope."""
         return {
-            "action_status": ActionStatus.ERROR.value,
-            "data": {},
+            "action_status": status,
+            "data": data,
             "actions": [],
-            "error": {"code": code, "message": message},
+            "error": error,
             "timestamp": datetime.now(UTC).isoformat(),
         }
 
-    def _export_path_gate(
-        self,
-        output_tsv_path: str,
-        *,
-        param_name: str = "output_tsv_path",
-        suffix: str | None = TSV_SUFFIX,
-    ) -> str:
-        """Admit an export path via workspace-root containment; return the realpath.
+    def _location_roots(self) -> tuple[Located[tuple[Path, ...]], SoletTree]:
+        return _read_location_roots(self.orchestrator_ref)
 
-        Binds the operator's ``export_allowed_roots`` config (yaml default
-        ``[]`` = refuse-all; no hardcoded callsite default per authoring trap
-        #10) to the own-copy containment gate. A malformed config value is a
-        loud config fault, never a silent admit-all or refuse-all.
-        """
-        config = self.config_provider or {}
-        raw_roots = config.get(CONFIG_KEY_EXPORT_ALLOWED_ROOTS)
-        roots: list[str] = []
-        if raw_roots is not None:
-            if not isinstance(raw_roots, list) or not all(isinstance(entry, str) for entry in raw_roots):
-                raise ZuoraServiceError(
-                    ERROR_NOT_CONFIGURED,
-                    f"{CONFIG_KEY_EXPORT_ALLOWED_ROOTS} must be a list of directory path strings",
-                )
-            roots = list(raw_roots)
-        return export_containment.assert_export_path_allowed(
-            output_tsv_path,
-            roots,
-            config_key=CONFIG_KEY_EXPORT_ALLOWED_ROOTS,
-            plugin_name=self.name,
-            param_name=param_name,
-            suffix=suffix,
-        )
+    def _assert_path(self, path: str, *, suffix: str | None, param_name: str, reading: bool = False) -> str:
+        """The single binding to shared connector containment on every I/O."""
+        roots, tree = self._location_roots()
+        retain_location_advisories(roots.advisories)
+        try:
+            result = assert_path_allowed(path, roots, tree, suffix=suffix, param_name=param_name, plugin_name=self.name)
+            if reading and not Path(result.value).is_file():
+                raise PathRefusedError(f"{param_name} must name an existing regular file")
+            return result.value
+        except PathRefusedError as exc:
+            exc.code = ERROR_EXPORT_PATH_REFUSED
+            raise
 
-    def _run(self, produce: Callable[[ZuoraClient], dict[str, Any]], endpoint_name: str) -> dict[str, Any]:
+    def _export_path_gate(self, output_tsv_path: str, *, param_name: str = "output_tsv_path", suffix: str | None = ".tsv") -> str:
+        return self._assert_path(output_tsv_path, suffix=suffix, param_name=param_name)
+
+    def _run(self, produce: Callable[[ZuoraClient], dict[str, Any]], endpoint_name: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Shared error-classification path for every Zuora verb."""
         try:
             client = self._require_client()
@@ -297,7 +335,7 @@ class ZuoraPlugin(
             return self._error(ERROR_INVALID_PARAMS, str(exc))
         except AppConfigError as exc:
             return self._error(ERROR_NOT_CONFIGURED, str(exc))
-        except (ZuoraServiceError, export_containment.ExportPathRefusedError) as exc:
+        except (ZuoraServiceError, PathRefusedError) as exc:
             return self._error(exc.code, str(exc))
         except ZuoraAuthError:
             return self._error("zuora.auth_failed", "Zuora OAuth token request failed.")
@@ -331,11 +369,13 @@ class ZuoraPlugin(
             return self._error(ERROR_INVALID_PARAMS, str(exc))
         except RuntimeError as exc:
             return self._error(ERROR_NOT_CONFIGURED, str(exc))
+        except Exception:
+            return self._error(ERROR_API_ERROR, "could not create the async job")
         if create_result.get("action_status") != "completed":
             error = create_result.get("error", {})
-            message = str(error.get("message", "failed to create async job"))
+            message = str(error.get("message", "failed to create async job")) if isinstance(error, dict) else "failed to create async job"
             return self._error(ERROR_API_ERROR, message)
-        return self._success(create_result["data"])
+        return self._success(create_result["data"], job_control=True)
 
     def _dispatch_typed(
         self,
@@ -383,7 +423,7 @@ class ZuoraPlugin(
         description=(
             "Send one authenticated REST request (GET/POST/PUT/PATCH/DELETE) to a relative "
             "path on the registered Zuora tenant. Vendor RBAC controls all operations. "
-            "Returns job_id/status queued immediately; status, redacted headers/body and "
+            "Returns job_id/status queued immediately; status, headers/body and "
             "pagination arrive on completion. Calls may change vendor state; report the "
             "HTTP status and body faithfully. Never automatically replay a write."
         ),
@@ -442,7 +482,7 @@ class ZuoraPlugin(
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description=("ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry."),
+                description=("ABSOLUTE .tsv destination path, contained under a registered path address."),
             ),
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
@@ -572,7 +612,7 @@ class ZuoraPlugin(
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description="ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry.",
+                description="ABSOLUTE .tsv destination path, contained under a registered path address.",
             ),
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
@@ -661,7 +701,7 @@ class ZuoraPlugin(
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description="ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry.",
+                description="ABSOLUTE .tsv destination path, contained under a registered path address.",
             ),
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,
@@ -696,7 +736,7 @@ class ZuoraPlugin(
             "file at an ABSOLUTE output_tsv_path in the operator's workspace. Returns immediately "
             "with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch "
             "returning is NOT the same as the job finishing. The path must lie "
-            "under an operator-configured export_allowed_roots entry (empty config refuses every "
+            "under an registered path address (register a path address to authorize each "
             "export). Nested objects are serialized as JSON text in their cells. Same read rules "
             "and override mechanism as data_query, with a higher hard cap: Zuora's own ZOQL query "
             f"call returns at most {ZUORA_QUERY_PAGE_ROW_CAP} records per call, and this verb "
@@ -717,7 +757,7 @@ class ZuoraPlugin(
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
-                description="ABSOLUTE .tsv destination path, contained under an export_allowed_roots entry.",
+                description="ABSOLUTE .tsv destination path, contained under a registered path address.",
             ),
             PARAM_ACKNOWLEDGE_OVERRIDE: ParameterMetadata(
                 type=ParameterType.BOOLEAN,

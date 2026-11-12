@@ -8,9 +8,10 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import urlparse
 
 from ananta.core.domain.enums import ActionStatus
+
+from .kb_git_credential import run_git_transport
 
 if TYPE_CHECKING:
     from .models import Manifest
@@ -23,17 +24,8 @@ _GIT_BRANCH = "managed"
 
 
 def git_clone(url: str, target: Path, token: str | None = None) -> None:
-    """Clone a git repository. Token used only in-memory for auth."""
-    clone_url = url
-    if token:
-        parsed = urlparse(url)
-        clone_url = f"{parsed.scheme}://{token}@{parsed.netloc}{parsed.path}"
-    subprocess.run(
-        ["git", "clone", clone_url, str(target)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    """Clone with a public origin and a pipe-only credential exchange."""
+    run_git_transport("clone", url, target, token)
 
 
 def git_setup_branch(repo_path: Path) -> None:
@@ -161,40 +153,22 @@ def fetch_and_merge_git(
     Returns a list of changed Paths on success, or an error dict on merge conflict.
     ``collect_files_fn`` is ``kb_source.collect_files`` injected to avoid circular import.
     """
-    if token and record.get("source"):
-        parsed = urlparse(record["source"])
-        auth_url = f"{parsed.scheme}://{token}@{parsed.netloc}{parsed.path}"
-        original_url = record["source"]
-        subprocess.run(
-            ["git", "remote", "set-url", "origin", auth_url],
-            cwd=kb_dir, check=True, capture_output=True, text=True,
-        )
-        try:
-            subprocess.run(
-                ["git", "fetch", "origin"],
-                cwd=kb_dir, check=True, capture_output=True, text=True,
-            )
-        finally:
-            subprocess.run(
-                ["git", "remote", "set-url", "origin", original_url],
-                cwd=kb_dir, check=True, capture_output=True, text=True,
-            )
-    else:
-        subprocess.run(
-            ["git", "fetch", "origin"],
-            cwd=kb_dir, check=True, capture_output=True, text=True,
-        )
+    run_git_transport("fetch", str(record.get("source") or ""), kb_dir, token)
 
     default_branch = git_default_branch(kb_dir)
     merge_result = subprocess.run(
         ["git", "merge", f"origin/{default_branch}", "--no-edit"],
-        cwd=kb_dir, capture_output=True, text=True,
+        cwd=kb_dir,
+        capture_output=True,
+        text=True,
     )
 
     if merge_result.returncode != 0:
         subprocess.run(
             ["git", "merge", "--abort"],
-            cwd=kb_dir, capture_output=True, text=True,
+            cwd=kb_dir,
+            capture_output=True,
+            text=True,
         )
         return {
             "status": "error",

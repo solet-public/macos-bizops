@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
-"""Statement-guard smoke tests (belt-tier) for external_postgres_plugin.
+"""Statement SHAPE smoke tests for external_postgres_plugin.
 
-Hermetic — no Postgres. Covers the read-leader guard + single-statement parser
-so the gate has real teeth on the guard logic even when the live scratch DB is
-absent (the load-bearing read-only proof lives in smoke_readonly.py).
+Hermetic — no Postgres. The statement module splits and counts statements; it
+never decides read versus write (USER ruling rul_4c99a30d: the registered
+role's GRANTs are the only boundary).
 
-RED-FIRST: the write-leader-REFUSED and multi-statement-REFUSED assertions are
-the teeth. Neutralizing ``assert_read_statement`` / ``assert_single_statement``
-to no-ops flips them to FAIL. The read-leader-ALLOWED assertions guard the
-opposite error (a guard so tight it rejects a legitimate Datagrip read).
-
-Exercises:
-  1. read leaders {SELECT, WITH, EXPLAIN, SHOW, VALUES, TABLE} ALLOWED
-  2. write leaders {INSERT, UPDATE, DELETE, MERGE, CREATE, CREATE TEMP, DROP,
-     ALTER, TRUNCATE, GRANT} REFUSED (read_only_violation)
-  3. single statement OK; two statements REFUSED
-  4. a ';' inside a string does NOT split (sqlparse is string-aware)
-  5. empty / whitespace / comment-only REFUSED
-  6. comment-led text sees the REAL leader (a commented-out write is single+read)
-  7. EXPLAIN ANALYZE <write> is ADMITTED by the belt (documented: the read-only
-     connection is the real write-stopper at 25006)
+RED-FIRST teeth:
+  1. the read-leader allowlist is GONE — ``assert_read_statement`` and
+     ``READ_LEADERS`` no longer exist, and every write/DDL leader passes the
+     shape check (re-adding a leader refusal flips these to FAIL)
+  2. single statement OK; two statements REFUSED, and the refusal points at
+     run_script (neutralizing ``assert_single_statement`` flips this)
+  3. a ';' inside a string or a dollar-quoted function body does NOT split
+  4. empty / whitespace / comment-only REFUSED
+  5. ``split_statements`` returns one entry per statement, trailing ';'
+     stripped, empty fragments dropped
+  6. ``leading_keyword`` sees the real leader past comments and parentheses
 
 Run:
     SOLET_NAME=<name> .venv/bin/python3 \
@@ -36,10 +32,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "external_postgres_plugin" / "src"))
 
+from external_postgres_plugin import constants, statement_guard  # noqa: E402
 from external_postgres_plugin.statement_guard import (  # noqa: E402
     StatementGuardError,
-    assert_read_statement,
     assert_single_statement,
+    leading_keyword,
+    split_statements,
 )
 
 _passed = 0
@@ -56,22 +54,6 @@ def _assert(label: str, cond: bool, msg: str = "") -> None:
         print(f"  FAIL  {label}: {msg or 'assertion failed'}")
 
 
-def _read_allowed(sql: str) -> bool:
-    try:
-        assert_read_statement(sql)
-        return True
-    except StatementGuardError:
-        return False
-
-
-def _refused_code(sql: str) -> str:
-    try:
-        assert_read_statement(sql)
-        return ""
-    except StatementGuardError as exc:
-        return exc.code
-
-
 def _single_ok(sql: str) -> bool:
     try:
         assert_single_statement(sql)
@@ -80,89 +62,74 @@ def _single_ok(sql: str) -> bool:
         return False
 
 
-def test_read_leaders_allowed() -> None:
-    for sql in (
-        "SELECT * FROM orders",
-        "WITH x AS (SELECT 1) SELECT * FROM x",
-        "EXPLAIN SELECT 1",
-        "SHOW transaction_read_only",
-        "VALUES (1, 2)",
-        "TABLE orders",
-        "  select 1",  # leading whitespace + lower-case
-        "(SELECT 1)",  # parenthesized
-    ):
-        _assert(f"read leader allowed: {sql!r}", _read_allowed(sql), sql)
-
-
-def test_write_leaders_refused() -> None:
+def test_no_read_leader_allowlist() -> None:
+    _assert("assert_read_statement removed", not hasattr(statement_guard, "assert_read_statement"))
+    _assert("READ_LEADERS removed", not hasattr(constants, "READ_LEADERS"))
     for sql in (
         "INSERT INTO t VALUES (1)",
         "UPDATE t SET a = 1",
         "DELETE FROM t",
-        "MERGE INTO t USING s ON (t.id = s.id)",
+        "MERGE INTO t USING s ON (t.id = s.id) WHEN MATCHED THEN DELETE",
         "CREATE TABLE t (a int)",
         "CREATE TEMP TABLE t (a int)",
         "DROP TABLE t",
         "ALTER TABLE t ADD COLUMN b int",
         "TRUNCATE t",
         "GRANT SELECT ON t TO r",
-        "COPY orders TO STDOUT",              # COPY refused (§2.1/§8.5) — not a read leader
-        "COPY orders FROM '/etc/passwd'",     # server-side file read refused
+        "WITH d AS (DELETE FROM t RETURNING id) SELECT id FROM d",
     ):
-        _assert(
-            f"write leader REFUSED: {sql!r}",
-            _refused_code(sql) == "external_pg.read_only_violation",
-            sql,
-        )
+        _assert(f"write/DDL leader passes the shape check: {sql!r}", _single_ok(sql), sql)
 
 
 def test_single_vs_multi() -> None:
     _assert("single statement OK", _single_ok("SELECT * FROM t WHERE id = 1"))
-    _assert("two statements REFUSED", not _single_ok("SELECT 1; DELETE FROM t"))
     _assert("trailing semicolon OK", _single_ok("SELECT 1;"))
+    try:
+        assert_single_statement("SELECT 1; DELETE FROM t")
+        refused, message = False, ""
+    except StatementGuardError as exc:
+        refused, message = exc.code == "external_pg.invalid_params", str(exc)
+    _assert("two statements REFUSED as invalid_params", refused)
+    _assert("the refusal points at run_script", "run_script" in message, message)
 
 
-def test_semicolon_in_string_is_single() -> None:
+def test_quoting_does_not_split() -> None:
     _assert("';' inside a string does not split", _single_ok("SELECT ';' AS semi, id FROM t"))
+    body = "CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; SELECT 2; $$ LANGUAGE sql"
+    _assert("';' inside a dollar-quoted body does not split", _single_ok(body))
 
 
 def test_empty_refused() -> None:
-    _assert("empty string REFUSED as multi/empty", not _single_ok("   "))
-    _assert("comment-only REFUSED as empty", not _single_ok("-- just a comment"))
+    _assert("empty string REFUSED", not _single_ok("   "))
+    _assert("comment-only REFUSED", not _single_ok("-- just a comment"))
 
 
-def test_comment_led_sees_real_leader() -> None:
-    # A leading comment does not hide the real statement — a commented header on
-    # a write still refuses at the read-leader guard.
-    _assert(
-        "comment-led DELETE still REFUSED",
-        _refused_code("-- report\nDELETE FROM t") == "external_pg.read_only_violation",
-    )
-    # And the commented-out write is a SINGLE read statement.
-    _assert("commented-out write is single+read", _single_ok("SELECT 1 -- ; DELETE FROM t"))
-    _assert("commented-out write reads as SELECT", _read_allowed("SELECT 1 -- ; DELETE FROM t"))
+def test_split_statements() -> None:
+    script = "CREATE SCHEMA app;\nCREATE FUNCTION app.f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql;\nINSERT INTO app.t VALUES (';');\n-- trailing comment only\n"
+    parts = split_statements(script)
+    _assert("three statements", len(parts) == 3, str(parts))
+    _assert("trailing ';' stripped", parts[0] == "CREATE SCHEMA app", parts[0])
+    _assert("function body kept whole", "SELECT 1; $$" in parts[1], parts[1])
+    _assert("quoted ';' kept in its statement", parts[2] == "INSERT INTO app.t VALUES (';')")
+    _assert("empty script splits to nothing", split_statements("  -- x\n") == [])
 
 
-def test_explain_analyze_write_admitted_by_belt() -> None:
-    # The belt admits EXPLAIN ANALYZE <write> (leader EXPLAIN) — the read-only
-    # CONNECTION refuses the actual write at SQLSTATE 25006 (smoke_readonly.py).
-    # This documents the belt-vs-boundary split explicitly.
-    _assert(
-        "EXPLAIN ANALYZE <write> admitted by the belt (boundary is conn.read_only)",
-        _read_allowed("EXPLAIN ANALYZE INSERT INTO t VALUES (1)"),
-    )
+def test_leading_keyword() -> None:
+    _assert("comment-led leader", leading_keyword("-- report\nDELETE FROM t") == "DELETE")
+    _assert("parenthesized leader", leading_keyword("(SELECT 1)") == "SELECT")
+    _assert("lower-case leader", leading_keyword("  begin") == "BEGIN")
+    _assert("empty has no leader", leading_keyword("   ") == "")
 
 
 def main() -> int:
-    print("\nexternal_postgres_plugin statement-guard smoke tests")
+    print("\nexternal_postgres_plugin statement-shape smoke tests")
     print("=" * 52)
-    test_read_leaders_allowed()
-    test_write_leaders_refused()
+    test_no_read_leader_allowlist()
     test_single_vs_multi()
-    test_semicolon_in_string_is_single()
+    test_quoting_does_not_split()
     test_empty_refused()
-    test_comment_led_sees_real_leader()
-    test_explain_analyze_write_admitted_by_belt()
+    test_split_statements()
+    test_leading_keyword()
     print()
     print(f"Results: {_passed} passed, {len(_failed)} failed")
     if _failed:

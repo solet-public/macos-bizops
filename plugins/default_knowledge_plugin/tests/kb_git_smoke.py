@@ -24,25 +24,169 @@ plugins/default_knowledge_plugin/tests/kb_git_smoke.py``.
 
 from __future__ import annotations
 
+import base64
+import functools
+import http.server
+
 # ruff: noqa: E402
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import patch
 
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 _SRC = _PLUGIN_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from default_knowledge_plugin import kb_lifecycle
 from default_knowledge_plugin.kb_git import (
     _GIT_BRANCH,
     fetch_and_merge_git,
+    git_clone,
     git_setup_branch,
 )
+from default_knowledge_plugin.kb_git_credential import GitTransportError
 from default_knowledge_plugin.models import Manifest
 
 _CHECKS_RUN: list[str] = []
+
+
+def authenticated_transport(root: Path) -> None:
+    """Real Git HTTP authentication against an owned loopback-only repository."""
+    fake = "fake-only-http-git-password"
+    source = root / "http-source"
+    _init_repo(source)
+    _commit(source, "auth.md", "# Authenticated local fixture\n")
+    _git(source, "update-server-info")
+    target = root / "http-clone"
+    expected = "Basic " + base64.b64encode(f"x-access-token:{fake}".encode()).decode()
+    observations: list[bool] = []
+    authenticated: list[str] = []
+    reject = threading.Event()
+    cancelling, entered, release = threading.Event(), threading.Event(), threading.Event()
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            configuration = target / ".git/config"
+            observations.append(not configuration.exists() or fake not in configuration.read_text())
+            if self.headers.get("Authorization") != expected:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="owned"')
+                self.end_headers()
+                return
+            authenticated.append(self.path)
+            if cancelling.is_set():
+                entered.set()
+                release.wait(5)
+                return
+            if reject.is_set():
+                self.send_error(403)
+                return
+            super().do_GET()
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Handler, directory=str(root)))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    origin = f"http://127.0.0.1:{server.server_port}/http-source/.git"
+    native_run = subprocess.run
+    commands: list[list[str]] = []
+
+    def observed_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        commands.append(argv)
+        assert fake not in str(argv) and fake not in str(kwargs.get("env", {})), "credential entered child argv/environment"
+        return native_run(argv, **kwargs)
+
+    try:
+        with patch("default_knowledge_plugin.kb_git_credential.subprocess.run", side_effect=observed_run):
+            git_clone(origin, target, fake)
+            assert _git(target, "remote", "get-url", "origin").stdout.strip() == origin
+            git_setup_branch(target)
+            before = _tip(target, "HEAD")
+            _commit(source, "next.md", "# Update\n")
+            _git(source, "update-server-info")
+            configuration = target / ".git/config"
+            configuration.write_text(configuration.read_text().replace(origin, origin.replace("http://", f"http://{fake}@")))
+            record = {"source": origin, "last_indexed_commit": before}
+            changed = fetch_and_merge_git(target, record, fake, Manifest(name="owned-auth"), None)
+            assert changed == [target / "next.md"]
+            reject.set()
+            try:
+                fetch_and_merge_git(target, record, fake, Manifest(name="owned-auth"), None)
+            except GitTransportError as exc:
+                assert str(exc) == "git fetch failed (exit 128)" and exc.__cause__ is None
+            else:
+                raise AssertionError("authenticated rejection must fail native fetch")
+            reject.clear()
+            cancelling.set()
+            cancelled_fetch(target, record, fake, entered, release)
+        assert authenticated and observations and all(observations)
+        assert fake not in (target / ".git/config").read_text()
+        assert _git(target, "remote", "get-url", "origin").stdout.strip() == origin
+        assert commands and all(fake not in str(command) for command in commands)
+        print("PASS native authenticated clone/fetch, public origin during requests, pipe credential and categorical failure")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def cancelled_fetch(target: Path, record: dict[str, str], fake: str, entered: threading.Event, release: threading.Event) -> None:
+    """Interrupt only after a real Git child reaches the authenticated peer."""
+
+    class InterruptedProcess(subprocess.Popen[bytes]):
+        def communicate(self, input: bytes | None = None, timeout: float | None = None) -> tuple[bytes, bytes]:
+            arguments: Any = self.args
+            if "fetch" not in arguments:
+                return super().communicate(input, timeout)
+            assert entered.wait(5), "native Git must reach authenticated request before interruption"
+            raise KeyboardInterrupt
+
+    try:
+        with patch("subprocess.Popen", InterruptedProcess):
+            try:
+                fetch_and_merge_git(target, record, fake, Manifest(name="owned-cancel"), None)
+            except KeyboardInterrupt:
+                pass
+            else:
+                raise AssertionError("cancellation must propagate")
+    finally:
+        release.set()
+    assert fake not in (target / ".git/config").read_text()
+
+
+def explicit_source(root: Path) -> None:
+    """A real explicit-URL clone must never read a name-bound credential."""
+    origin = root / "explicit-origin"
+    _init_repo(origin)
+    _commit(origin, "a.md", "# Explicit source\n")
+    lookups: list[str] = []
+
+    def credential(name: str) -> dict[str, Any]:
+        lookups.append(name)
+        return {"action_status": "completed", "data": {"entries": [{"field_type": "token", "value": "fake-only-bound-to-another-source"}]}}
+
+    class CloneReachedError(RuntimeError):
+        """Owned stop after native clone, before installer indexing/persistence."""
+
+    with patch.object(kb_lifecycle, "git_setup_branch", side_effect=CloneReachedError):
+        try:
+            kb_lifecycle.install_kb("explicit-target", origin.as_uri(), root, None, None, SimpleNamespace(resolve_with_secrets=credential), budget=None)
+        except CloneReachedError:
+            pass
+        else:
+            raise AssertionError("explicit source must reach post-clone branch setup")
+    assert (root / "explicit-target/.git").is_dir(), "native clone must complete before checking non-use"
+    assert lookups == [], "explicit caller URL must never consume a stored credential"
+    assert _git(root / "explicit-target", "remote", "get-url", "origin").stdout.strip() == origin.as_uri()
+    print("PASS actual explicit-source clone never resolves a name-bound credential")
 
 
 class SmokeFailureError(AssertionError):
@@ -57,7 +201,12 @@ def _check(label: str, condition: bool, detail: str = "") -> None:
 
 def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args], cwd=cwd, check=check, capture_output=True, text=True, timeout=30,
+        ["git", *args],
+        cwd=cwd,
+        check=check,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
 
 
@@ -211,6 +360,10 @@ def _check_fetch_and_merge_on_managed_still_works(root: Path) -> None:
 def main() -> int:
     try:
         _check_branch_constant_is_managed()
+        with tempfile.TemporaryDirectory() as tmp:
+            authenticated_transport(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp:
+            explicit_source(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_fresh_creates_managed_from_default(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:

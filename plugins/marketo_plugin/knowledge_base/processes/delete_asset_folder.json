@@ -6,7 +6,7 @@
   "result_processor_customizations": {
     "action_label": "Marketo: Delete Asset Folder job dispatched",
     "result_type": "marketo_delete_asset_folder_result",
-    "result_description": "Queued job_id and status. Poll check_marketo_job_status for the redacted vendor success/result/requestId/warnings envelope.",
+    "result_description": "Queued job_id and status. Poll check_marketo_job_status for the vendor success/result/requestId/warnings envelope.",
     "presentation_guidance": "Poll the job before reporting success. Report vendor results and warnings; read back before retrying uncertain writes."
   },
   "error_processor_customizations": {

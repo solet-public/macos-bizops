@@ -1,13 +1,13 @@
 {
   "process_key": "plugin::default_address_book_plugin::register",
   "display_name": "Register Address",
-  "description": "Register a named address entry for connection info like URLs, API endpoints, database connection strings, or service credentials. NOT for storing file content - use blob storage or SSML/audio plugins for files. Auto-ingests to memory for semantic search.",
-  "embedding_description": "Register an address-book entry binding a logical name to one or more typed fields (URL, API endpoint, database connection string, service credential reference, OAuth client identifier). Named lookup surface for endpoints, paths, service routing, vault references. Backs the address_book_service interface used by peer_claim_role, midwife/undertaker AssumeRole seams, and OAuth client provisioning.",
+  "description": "Register an address and auto-ingest its description to memory. Returns immediately with job_id and status queued; work runs on the plugin worker.",
+  "embedding_description": "Queue a named address registration with typed endpoint fields, optional tags and memory auto-ingest. Returns job_id and status queued before storage or embedding runs. Retrieve service_interface::job_service::get_job until terminal; job.result contains address_id and optional memory_id. Do not repeat a write because a poll is delayed.",
   "result_processor_customizations": {
-    "action_label": "Register Address",
-    "result_type": "address_registered",
-    "result_description": "New address registration with address_id and optional memory_id",
+    "action_label": "Job queued",
+    "result_type": "job_receipt",
+    "result_description": "Queued job handle with job_id and status; the final response is stored in job.result.",
     "presentation_guidance": "",
-    "output_action_guidance": "Determine the appropriate next action based on the context and action result."
+    "output_action_guidance": "Retain this exact job_id. Schedule job_service::get_job while queued or processing; inspect terminal result or error before using the final data. Do not repeat a write because a poll is delayed."
   }
 }

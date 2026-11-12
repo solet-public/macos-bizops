@@ -72,7 +72,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ananta.llm.session_ledger.poll_advisories import record_unknown_line
+from ananta.llm.session_ledger.session_failures import record_unknown_line
 from ananta.llm.session_ledger.types import RawSessionEvent
 
 logger = logging.getLogger(__name__)

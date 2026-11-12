@@ -1,50 +1,21 @@
-"""Hydration-time export-root validation and persistence (07-29 ruling §3).
-
-The 2026-07-29 data-boundary ruling requires hydration to ask two mutually
-exclusive questions: where the solet itself lives (``app_home``,
-unchanged) and where the operator keeps the projects they work in (the
-export root — "parent-of-jobs", stable and singular). The ruling's own
-words for the second question's guard are "the wizard validates prompt 2's
-answer rather than merely recording it... a few lines in the wizard" — but
-no scripted, interactive wizard exists on the seed-born path: genesis
-(``steps.py``) is a deterministic, non-interactive step machine by design,
-and the only actual interactive CLI wizard (``initialization/solets/
-wizard.py``) is absent from ``seed_manifest.yaml``'s ``copy:`` allowlist and
-never reaches a seed-born instance. So this module supplies the "few lines"
-as a real, callable, testable function; the QUESTION itself is asked by the
-driving coding agent as a hydration-runbook conversational step (see
-``01_hydration_runbook.md``), which calls this module before persisting an
-answer.
-
-Deliberately an OWN COPY for this plugin, matching the platform's
-per-plugin-copy direction already documented in every connector's own
-``export_containment.py`` ("deliberate duplication over a shared module").
-What is SHARED is the algorithm/constant-set, not an import: the same
-realpath + ``os.path.commonpath`` containment technique
-``assert_export_path_allowed`` uses, applied to a different predicate.
-``assert_export_path_allowed`` asks "is this destination inside an allowed
-root" (one-directional). This module asks "is this proposed root mutually
-non-overlapping with app_home" (both directions checked, since a root that
-CONTAINS app_home is exactly as dangerous as one contained BY it — either
-way an export destination could land inside the platform's own tree).
-"""
+"""Hydration home addresses; connector configs are never written."""
 
 from __future__ import annotations
 
 import json
 import os
+import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
+
+from ananta.file_locations.containment import assert_location_admissible
+from ananta.file_locations.documents import default_solet_home, documents_folder, exports_folder
+from ananta.file_locations.resolution import SoletTree, overlaps_solet_tree
 
 ERROR_EXPORT_ROOT_REJECTED: Final[str] = "github_midwife.export_root_rejected"
-CONFIG_KEY_EXPORT_ALLOWED_ROOTS: Final[str] = "export_allowed_roots"
 
-# The full connector roster this migration touches (07-29 ruling + the
-# 2026-08-02 limits/data-export design doc §7, Tier 1 + Tier 2). Not every
-# plugin in this tuple is present in every clone — `configure_export_root`
-# only writes config for the ones actually installed under `<clone>/plugins/`,
-# so an uninstalled connector's config is never touched (inert-by-absence,
-# not inert-by-unread-key).
+# B1 reads this roster to carry existing connector roots into addresses.
 BUSINESS_CONNECTOR_PLUGINS: Final[tuple[str, ...]] = (
     "external_postgres_plugin",
     "snowflake_plugin",
@@ -74,81 +45,96 @@ def _resolve_absolute(label: str, raw: str) -> str:
     expanded = os.path.expandvars(os.path.expanduser(raw))
     if not expanded or not os.path.isabs(expanded):
         raise ExportRootRejectedError(
-            f"{label} must be an ABSOLUTE directory path after ~/$VAR "
-            f"expansion (got {raw!r}); a relative or blank path would "
-            "resolve against the server process cwd",
+            f"{label} must be an ABSOLUTE directory path after ~/$VAR expansion (got {raw!r}); a relative or blank path would resolve against the server process cwd",
         )
     return expanded
 
 
 def assert_export_root_valid(proposed_root: str, app_home: str) -> str:
-    """Validate a proposed export root against ``app_home``.
-
-    Rejects a root that is, is contained by, or contains ``app_home`` — an
-    export destination must never fall inside a platform-managed tree, in
-    either direction (07-29 ruling: "Configuring app_home as an export root
-    would be worse than useless... a direct path into the blob and ledger
-    surfaces"). Returns the realpath-resolved root on success; raises
-    ``ExportRootRejectedError`` naming which direction failed otherwise.
-    """
-    resolved_root = _resolve_absolute("the export root", proposed_root)
-    resolved_home = _resolve_absolute("app_home", app_home)
-
-    root_real = os.path.realpath(resolved_root)
-    home_real = os.path.realpath(resolved_home)
-
-    if root_real == home_real or os.path.commonpath([home_real, root_real]) == root_real:
-        raise ExportRootRejectedError(
-            f"export root {proposed_root!r} contains (or equals) the "
-            f"solet home {app_home!r} — an export destination must "
-            "never admit the platform's own tree; choose a directory "
-            "outside app_home, such as a parent-of-jobs workspace folder",
-        )
-    if os.path.commonpath([root_real, home_real]) == home_real:
-        raise ExportRootRejectedError(
-            f"export root {proposed_root!r} is INSIDE the solet home "
-            f"{app_home!r} — exports would land inside the platform's own "
-            "managed tree; choose a directory outside app_home",
-        )
-    return root_real
+    """Validate hydration locations using the same core tree guard."""
+    directory = Path(_resolve_absolute("the export root", proposed_root))
+    tree = SoletTree(Path(app_home).parent, Path(app_home))
+    try:
+        assert_location_admissible(directory, tree)
+    except ValueError as exc:
+        raise ExportRootRejectedError(str(exc)) from exc
+    return str(directory.resolve())
 
 
-def configure_export_root(
-    clone_root: Path,
-    app_home: str,
-    proposed_root: str,
-    *,
-    connector_plugins: tuple[str, ...] = BUSINESS_CONNECTOR_PLUGINS,
-) -> dict[str, list[str]]:
-    """Validate ``proposed_root`` and persist it into every installed connector's config.
+@dataclass(frozen=True, slots=True)
+class SoletHomeResult:
+    """Hydration paths and advisories, including any preserved reserved names."""
 
-    Idempotent and additive: an already-present root is not duplicated, and
-    any other operator-added root already in a connector's
-    ``export_allowed_roots`` is preserved, never clobbered. Only connectors
-    actually installed under ``<clone_root>/plugins/<name>/`` are touched —
-    an uninstalled connector's config is left alone entirely (there is
-    nothing there to configure). Returns ``{plugin_name: updated_roots}``
-    for every connector actually written, so the caller can report exactly
-    what changed.
-    """
-    resolved_root = assert_export_root_valid(proposed_root, app_home)
+    solet_home: Path
+    exports: Path
+    advisories: tuple[str, ...]
 
-    config_dir = Path(app_home) / "config" / "plugins"
-    config_dir.mkdir(parents=True, exist_ok=True)
 
-    written: dict[str, list[str]] = {}
-    for plugin_name in connector_plugins:
-        if not (clone_root / "plugins" / plugin_name).is_dir():
+def _reserved_path(entries: list[dict[str, Any]], name: str) -> Path | None:
+    for address in entries:
+        if address.get("name") != name:
             continue
-        config_path = config_dir / f"{plugin_name}.json"
-        if config_path.is_file():
-            existing = json.loads(config_path.read_text(encoding="utf-8"))
-        else:
-            existing = {}
-        roots = list(existing.get(CONFIG_KEY_EXPORT_ALLOWED_ROOTS, []))
-        if resolved_root not in roots:
-            roots.append(resolved_root)
-        existing[CONFIG_KEY_EXPORT_ALLOWED_ROOTS] = roots
-        config_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
-        written[plugin_name] = roots
-    return written
+        for entry in address.get("entries", []):
+            if entry.get("field_type") == "path" and Path(entry["value"]).is_absolute():
+                return Path(entry["value"])
+    return None
+
+
+def _create_home_folders(home: Path, exports: Path, advisories: list[str]) -> None:
+    for directory in (home, exports):
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            advisories.append(f"Could not create {directory}: {exc}; grant access or choose another folder.")
+
+
+def _write_home_addresses(seed: Path, payload: dict[str, Any], solet_name: str, home: Path, exports: Path) -> None:
+    entries: list[dict[str, Any]] = payload["entries"]
+    names = {entry.get("name") for entry in entries}
+    for name, directory, tag in (("solet_home", home, "solet_home"), ("solet_home_exports", exports, "exports")):
+        if name in names:
+            continue
+        entries.append({"name": name, "address_type": "path", "description": f"Files for {solet_name}", "tags": [tag], "entries": [{"field_type": "path", "description": "Directory", "value": str(directory)}]})
+    seed.parent.mkdir(parents=True, exist_ok=True)
+    rendered = json.dumps(payload, indent=2) + "\n"
+    if not seed.is_file() or seed.read_text(encoding="utf-8") != rendered:
+        seed.write_text(rendered, encoding="utf-8")
+
+
+def _chosen_home(chosen: str | None, default: Path, tree: SoletTree, advisories: list[str]) -> Path:
+    home = Path(os.path.expandvars(os.path.expanduser(chosen))) if chosen else default
+    if not home.is_absolute() or overlaps_solet_tree(home, tree):
+        advisories.append(f"Chosen home {home} is relative or overlaps the solet tree; using {default} outside the tree.")
+        return default
+    return home
+
+
+def configure_solet_home(clone_root: Path, app_home: str, solet_name: str, chosen: str | None) -> SoletHomeResult:
+    """Create the confirmed Documents home and seed its two reserved addresses.
+
+    Existing names are preserved. The boot loader separately preserves names
+    already live in the address book. An unsafe answer produces an advisory
+    and the computed default; it does not interrupt hydration.
+    """
+    tree = SoletTree(clone_root, Path(app_home))
+    documents = documents_folder(sys.platform, os.environ, Path.home())
+    default = default_solet_home(solet_name, documents, tree, Path.home() / "Library/Application Support" / solet_name / "Files")
+    advisories: list[str] = list(default.advisories)
+    home = _chosen_home(chosen, default.value, tree, advisories)
+    seed = Path(app_home) / "config/plugins/default_address_book_plugin/entries.json"
+    payload = json.loads(seed.read_text(encoding="utf-8")) if seed.is_file() else {"entries": []}
+    entries: list[dict[str, Any]] = payload["entries"]
+    existing_home = _reserved_path(entries, "solet_home")
+    if existing_home is not None and not overlaps_solet_tree(existing_home, tree):
+        if existing_home != home:
+            advisories.append(f"Preserving existing solet_home address at {existing_home}.")
+        home = existing_home
+    exports = exports_folder(home)
+    existing_exports = _reserved_path(entries, "solet_home_exports")
+    if existing_exports is not None and not overlaps_solet_tree(existing_exports, tree):
+        exports = existing_exports
+    _create_home_folders(home, exports, advisories)
+    _write_home_addresses(seed, payload, solet_name, home, exports)
+    if not documents.proven:
+        advisories.append(f"Documents resolution on {sys.platform} is unproven; default is {documents.path}.")
+    return SoletHomeResult(home, exports, tuple(advisories))

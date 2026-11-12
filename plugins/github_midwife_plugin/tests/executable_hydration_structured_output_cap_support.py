@@ -6,7 +6,9 @@ import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+from github_midwife_plugin.setup_adapter_runtime import Runtime
 
 
 def _public_observed_values(evidence: Any) -> dict[str, Any] | None:
@@ -15,20 +17,13 @@ def _public_observed_values(evidence: Any) -> dict[str, Any] | None:
     observed = evidence[0].get("observed")
     if not isinstance(observed, list) or not all(isinstance(item, str) for item in observed):
         return None
-    return {
-        key: json.loads(value)
-        for item in observed
-        if "=" in item
-        for key, value in [item.split("=", maxsplit=1)]
-    }
+    return {key: json.loads(value) for item in observed if "=" in item for key, value in [item.split("=", maxsplit=1)]}
 
 
 def _assert_evidence_digest(result: Any, check: Callable[[object, str], None]) -> None:
     evidence = result["evidence"][0]
     observed = evidence["observed"]
-    expected_digest = "sha256:" + hashlib.sha256(
-        json.dumps(observed, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    expected_digest = "sha256:" + hashlib.sha256(json.dumps(observed, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     check(
         isinstance(observed, bool) and evidence["digest"] == expected_digest,
         "knowledge readiness evidence keeps a public scalar observation with a matching digest",
@@ -54,13 +49,9 @@ def _assert_pre_call_timeout(
 
     command_count = len(runtime.commands)
     clock = PreCallDriftClock()
-    timeout = wait_for_knowledge(
-        timeout_probe, runtime, monotonic=clock.monotonic, sleep=clock.sleep
-    )
+    timeout = wait_for_knowledge(timeout_probe, runtime, monotonic=clock.monotonic, sleep=clock.sleep)
     check(
-        timeout["checkpoint_status"] == "blocked"
-        and timeout["error_kind"] == "knowledge_retrieval_timeout"
-        and len(runtime.commands) == command_count,
+        timeout["checkpoint_status"] == "blocked" and timeout["error_kind"] == "knowledge_retrieval_timeout" and len(runtime.commands) == command_count,
         "pre-call subsecond budget is a timeout, not a malformed response",
     )
 
@@ -124,6 +115,7 @@ def run_knowledge_output_cap(
         "call",
         "service_interface::knowledge_service::search",
         '{"query":"session start orientation","top_k":1}',
+        "--wait",
     )
     runtime.responses[vector] = command_outcome(
         0,
@@ -209,10 +201,9 @@ def run_knowledge_readiness_poll(
         "call",
         "service_interface::knowledge_service::search",
         '{"query":"session start orientation","top_k":1}',
+        "--wait",
     )
-    empty = command_outcome(
-        0, False, 1, '{"result":{"success":true,"data":{"count":0,"results":[]}}}', ""
-    )
+    empty = command_outcome(0, False, 1, '{"result":{"success":true,"data":{"count":0,"results":[]}}}', "")
     result_row = {
         "content": "fixture result",
         "knowledge_base": "fixture",
@@ -230,9 +221,7 @@ def run_knowledge_readiness_poll(
     )
     runtime.response_sequences[vector] = [empty, nonempty]
     clock = Clock()
-    result = _wait_for_knowledge_retrieval(
-        probe, runtime, monotonic=clock.monotonic, sleep=clock.sleep
-    )
+    result = _wait_for_knowledge_retrieval(probe, runtime, monotonic=clock.monotonic, sleep=clock.sleep)
     check(
         result["checkpoint_status"] == "verified" and clock.sleeps == [0.5],
         "stage-exit knowledge readiness polls until measured retrieval is nonempty",
@@ -275,13 +264,9 @@ def run_knowledge_readiness_poll(
             empty,
         ]
         malformed_clock = Clock()
-        malformed = _wait_for_knowledge_retrieval(
-            probe, runtime, monotonic=malformed_clock.monotonic, sleep=malformed_clock.sleep
-        )
+        malformed = _wait_for_knowledge_retrieval(probe, runtime, monotonic=malformed_clock.monotonic, sleep=malformed_clock.sleep)
         check(
-            malformed["error_kind"] == "knowledge_retrieval_protocol_invalid"
-            and not malformed_clock.sleeps
-            and len(runtime.response_sequences[vector]) == 1,
+            malformed["error_kind"] == "knowledge_retrieval_protocol_invalid" and not malformed_clock.sleeps and len(runtime.response_sequences[vector]) == 1,
             f"{label} successful knowledge envelope fails immediately without a retry",
         )
     runtime.response_sequences[vector] = [
@@ -295,14 +280,9 @@ def run_knowledge_readiness_poll(
         empty,
     ]
     timed_out_clock = Clock()
-    timed_out = _wait_for_knowledge_retrieval(
-        probe, runtime, monotonic=timed_out_clock.monotonic, sleep=timed_out_clock.sleep
-    )
+    timed_out = _wait_for_knowledge_retrieval(probe, runtime, monotonic=timed_out_clock.monotonic, sleep=timed_out_clock.sleep)
     check(
-        timed_out["checkpoint_status"] == "blocked"
-        and timed_out["error_kind"] == "knowledge_retrieval_timeout"
-        and not timed_out_clock.sleeps
-        and len(runtime.response_sequences[vector]) == 1,
+        timed_out["checkpoint_status"] == "blocked" and timed_out["error_kind"] == "knowledge_retrieval_timeout" and not timed_out_clock.sleeps and len(runtime.response_sequences[vector]) == 1,
         "governed knowledge process timeout is an immediate timeout, not a protocol error",
     )
     timeout_probe = request(
@@ -316,23 +296,18 @@ def run_knowledge_readiness_poll(
     deadline_clock = Clock()
     deadline = _wait_for_knowledge_retrieval(
         timeout_probe,
-        SlowRuntime(runtime, deadline_clock),
+        cast(Runtime, SlowRuntime(runtime, deadline_clock)),
         monotonic=deadline_clock.monotonic,
         sleep=deadline_clock.sleep,
     )
     check(
-        deadline["checkpoint_status"] == "blocked"
-        and deadline_clock.now == 1.0
-        and len(runtime.response_sequences[vector]) == 1,
+        deadline["checkpoint_status"] == "blocked" and deadline_clock.now == 1.0 and len(runtime.response_sequences[vector]) == 1,
         "knowledge poll never starts a governed call beyond its remaining deadline",
     )
     _assert_pre_call_timeout(timeout_probe, runtime, _wait_for_knowledge_retrieval, check)
-    _assert_parent_budget_cap(
-        target, runtime, request, check, nonempty, vector, _wait_for_knowledge_retrieval
-    )
+    _assert_parent_budget_cap(target, runtime, request, check, nonempty, vector, _wait_for_knowledge_retrieval)
     _assert_extended_readiness(target, runtime, request, check, command_outcome, vector, empty, nonempty)
     runtime.response_sequences.pop(vector)
-
 
 
 def _assert_extended_readiness(
@@ -368,47 +343,38 @@ def _assert_extended_readiness(
 
     def run(responses: list[Any], durations: list[float], budget: int = 120) -> tuple[Any, TimedRuntime]:
         timed = TimedRuntime(responses, durations)
-        probe = request(target, operation_id="knowledge_retrieval_succeeds",
-                        operation_ref="service_interface::knowledge_service.search",
-                        probe_purpose="stage_exit", timeout_seconds=budget)
-        response = _wait_for_knowledge_retrieval(
-            probe, timed, monotonic=timed.monotonic, sleep=timed.sleep
-        )
+        probe = request(target, operation_id="knowledge_retrieval_succeeds", operation_ref="service_interface::knowledge_service.search", probe_purpose="stage_exit", timeout_seconds=budget)
+        response = _wait_for_knowledge_retrieval(probe, cast(Runtime, timed), monotonic=timed.monotonic, sleep=timed.sleep)
         return response, timed
 
     response, timed = run([empty, nonempty], [40.0, 1.0])
-    check(response["checkpoint_status"] == "verified" and timed.now == 41.5,
-          "readiness beyond the old 30-second budget verifies before the new deadline")
+    check(response["checkpoint_status"] == "verified" and timed.now == 41.5, "readiness beyond the old 30-second budget verifies before the new deadline")
     response, timed = run([empty, nonempty], [60.0, 54.0])
-    check(response["checkpoint_status"] == "verified" and timed.timeouts == [60, 54]
-          and timed.now < 115, "remaining child budget preserves parent launch/result reserve")
+    check(response["checkpoint_status"] == "verified" and timed.timeouts == [60, 54] and timed.now < 115, "remaining child budget preserves parent launch/result reserve")
     response, timed = run([nonempty], [115.0])
-    check(response["error_kind"] == "knowledge_retrieval_timeout",
-          "success at the inner deadline cannot verify")
+    check(response["error_kind"] == "knowledge_retrieval_timeout", "success at the inner deadline cannot verify")
     response, timed = run([empty], [1.0], 6)
-    check(response["error_kind"] == "knowledge_retrieval_timeout" and timed.now < 6,
-          "persistent empty emits a structured retry-safe timeout before parent termination")
+    check(response["error_kind"] == "knowledge_retrieval_timeout" and timed.now < 6, "persistent empty emits a structured retry-safe timeout before parent termination")
     response, timed = run([], [], 5)
-    check(response["error_kind"] == "knowledge_retrieval_timeout" and not timed.timeouts,
-          "exhausted reserve before first call never launches")
+    check(response["error_kind"] == "knowledge_retrieval_timeout" and not timed.timeouts, "exhausted reserve before first call never launches")
     _assert_extended_failures(run, command_outcome, nonempty, check)
     # An ordinary completion probe stays single-shot, including successful empty.
     from github_midwife_plugin.installation_state_doctor import knowledge
-    probe = request(target, operation_id="knowledge_retrieval_succeeds",
-                    operation_ref="service_interface::knowledge_service.search",
-                    probe_purpose="completion", timeout_seconds=30)
+
+    probe = request(target, operation_id="knowledge_retrieval_succeeds", operation_ref="service_interface::knowledge_service.search", probe_purpose="completion", timeout_seconds=30)
     runtime.response_sequences[vector] = [empty, nonempty]
     response = knowledge(probe, runtime)
-    check(response["checkpoint_status"] != "verified"
-          and len(runtime.response_sequences[vector]) == 1,
-          "ordinary completion remains single-shot")
+    check(response["checkpoint_status"] != "verified" and len(runtime.response_sequences[vector]) == 1, "ordinary completion remains single-shot")
 
 
 def _assert_extended_failures(
-    run: Callable[..., Any], command_outcome: Any, nonempty: Any,
+    run: Callable[..., Any],
+    command_outcome: Any,
+    nonempty: Any,
     check: Callable[[object, str], None],
 ) -> None:
     from dataclasses import replace
+
     negatives = [
         (replace(nonempty, executable_missing=True), "knowledge_retrieval_executable_missing"),
         (replace(nonempty, returncode=1), "knowledge_retrieval_transport_failed"),
@@ -416,33 +382,29 @@ def _assert_extended_failures(
         (replace(nonempty, stdout_truncated=True, stdout_bytes=nonempty.stdout_bytes + 1), "output_truncated"),
         (replace(nonempty, stderr_truncated=True, stderr_bytes=1), "output_truncated"),
     ]
-    negatives.append((command_outcome(0, False, 1,
-                      '{"result":{"success":false,"error":{"message":"private-error"}}}', ""),
-                      "knowledge_retrieval_service_failed"))
+    negatives.append((command_outcome(0, False, 1, '{"result":{"success":false,"error":{"message":"private-error"}}}', ""), "knowledge_retrieval_service_failed"))
     for envelope in (
-        "not-json", "[]",
+        "not-json",
+        "[]",
         '{"result":{"success":true,"data":{"count":true,"results":[]}}}',
         '{"result":{"success":true,"data":{"count":-1,"results":[]}}}',
         '{"result":{"success":true,"data":{"count":0,"results":{}}}}',
         '{"result":{"success":true,"action_status":"failed","data":{"count":0,"results":[]}}}',
     ):
-        negatives.append((command_outcome(0, False, 1, envelope, ""),
-                          "knowledge_retrieval_protocol_invalid"))
+        negatives.append((command_outcome(0, False, 1, envelope, ""), "knowledge_retrieval_protocol_invalid"))
     for field, value in (("score", True), ("score", float("nan")), ("content", None)):
         payload = json.loads(nonempty.stdout)
         payload["result"]["data"]["results"][0][field] = value
-        negatives.append((command_outcome(0, False, 1, json.dumps(payload), ""),
-                          "knowledge_retrieval_protocol_invalid"))
+        negatives.append((command_outcome(0, False, 1, json.dumps(payload), ""), "knowledge_retrieval_protocol_invalid"))
     for field, value in (("status", "failed"), ("error_message", "private-error"), ("status", [])):
         payload = json.loads(nonempty.stdout)
         payload[field] = value
-        negatives.append((command_outcome(0, False, 1, json.dumps(payload), ""),
-                          "knowledge_retrieval_protocol_invalid"))
+        negatives.append((command_outcome(0, False, 1, json.dumps(payload), ""), "knowledge_retrieval_protocol_invalid"))
     for outcome, error in negatives:
         response, timed = run([outcome, nonempty], [0.0, 0.0])
-        check(response["error_kind"] == error and len(timed.timeouts) == 1,
-              f"{error} fails immediately without retry or late success")
+        check(response["error_kind"] == error and len(timed.timeouts) == 1, f"{error} fails immediately without retry or late success")
         check("private-error" not in json.dumps(response), "terminal evidence excludes raw payloads")
+
 
 def _evidence_observed(response: Any, evidence_id: str) -> object:
     matches = [item for item in response["evidence"] if item["id"] == evidence_id]
@@ -476,10 +438,15 @@ def run_plugin_roster_output_cap(
         "call",
         "service_interface::lifecycle_management_service::list_plugins",
         "{}",
+        "--wait",
     )
 
     def row(
-        name: str, *, status: str = "ready", padding: str = "", **optional: object,
+        name: str,
+        *,
+        status: str = "ready",
+        padding: str = "",
+        **optional: object,
     ) -> dict[str, object]:
         value: dict[str, object] = {
             "name": name,
@@ -502,8 +469,7 @@ def run_plugin_roster_output_cap(
 
     production_rows = [row(f"fixture_plugin_{index:02d}") for index in range(34)]
     manifest.write_text(
-        "profile_name: fixture\nplugins:\n"
-        + "".join(f"- {entry['name']}\n" for entry in production_rows),
+        "profile_name: fixture\nplugins:\n" + "".join(f"- {entry['name']}\n" for entry in production_rows),
         encoding="utf-8",
     )
     check(
@@ -542,8 +508,7 @@ def run_plugin_roster_output_cap(
     )
     last_name = str(production_rows[-1]["name"])
     check(
-        _evidence_observed(dormant, "plugin_roster_unready")
-        == [f"{last_name}: uninitialized: no last_error reported"],
+        _evidence_observed(dormant, "plugin_roster_unready") == [f"{last_name}: uninitialized: no last_error reported"],
         "iss_4b22fdeb: unready evidence names the plugin and its status",
     )
 
@@ -553,8 +518,7 @@ def run_plugin_roster_output_cap(
     runtime.responses[vector] = roster(erroring_rows)
     erroring = dispatch_request(probe, runtime)
     check(
-        erroring["error_kind"] == "plugin_roster_unready"
-        and _evidence_observed(erroring, "plugin_roster_unready") == [f"{last_name}: error: {torn}"],
+        erroring["error_kind"] == "plugin_roster_unready" and _evidence_observed(erroring, "plugin_roster_unready") == [f"{last_name}: error: {torn}"],
         "iss_4b22fdeb: unready evidence carries each plugin's last_error",
     )
     check(
@@ -571,29 +535,26 @@ def run_plugin_roster_output_cap(
     degraded_rows[-1] = row(last_name, warning=unavailable)
     runtime.responses[vector] = roster(degraded_rows)
     degraded = dispatch_request(probe, runtime)
-    warnings = [item for item in degraded["evidence"] if item["id"] == "plugin_roster_warnings"]
+    warnings = [item for item in cast(list[dict[str, Any]], degraded["evidence"]) if item["id"] == "plugin_roster_warnings"]
     check(
         degraded["checkpoint_status"] == "verified",
         "iss_7f4ce644: a ready-but-degraded plugin satisfies the roster",
     )
     check(
-        len(warnings) == 1 and warnings[0]["status"] == "warning"
-        and warnings[0]["observed"] == [f"{last_name}: {unavailable}"],
+        len(warnings) == 1 and warnings[0]["status"] == "warning" and warnings[0]["observed"] == [f"{last_name}: {unavailable}"],
         "iss_7f4ce644: the degraded plugin's warning stays visible in doctor evidence",
     )
 
     for bad in ({"last_error": 7}, {"warning": ""}):
         malformed_rows = list(production_rows)
-        malformed_rows[-1] = row(last_name, **bad)
+        malformed_rows[-1] = row(last_name, **cast(dict[str, Any], bad))
         runtime.responses[vector] = roster(malformed_rows)
         check(
             dispatch_request(probe, runtime)["error_kind"] == "plugin_roster_invalid",
             f"a mistyped optional roster field is invalid, not silently dropped: {sorted(bad)}",
         )
 
-    runtime.responses[vector] = roster(
-        [row("oversized_plugin", padding="x" * structured_output_limit)]
-    )
+    runtime.responses[vector] = roster([row("oversized_plugin", padding="x" * structured_output_limit)])
     truncated = dispatch_request(probe, runtime)
     check(
         truncated["error_kind"] == "output_truncated",
@@ -602,7 +563,6 @@ def run_plugin_roster_output_cap(
     evidence = truncated["evidence"]
     observed_values = _public_observed_values(evidence)
     check(
-        observed_values is not None
-        and observed_values.get("stdout_bytes", 0) > structured_output_limit,
+        observed_values is not None and observed_values.get("stdout_bytes", 0) > structured_output_limit,
         "truncated roster carries byte-count evidence",
     )

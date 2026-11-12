@@ -45,6 +45,7 @@ import sys
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -127,11 +128,16 @@ class _ThreeSessionSource(LLMSessionSourceInterface, PullingSourceMixin):
         )
 
     def discover_sessions(
-        self, root_uri: str, cursor_payload: dict[str, object] | None,
+        self,
+        root_uri: str,
+        cursor_payload: dict[str, object] | None,
     ) -> Iterator[ExternalSessionRef]:
         del root_uri, cursor_payload
-        for ext_id, label in (("ext_a", "session A"), ("ext_b", "session B"),
-                              ("ext_c", "session C")):
+        for ext_id, label in (
+            ("ext_a", "session A"),
+            ("ext_b", "session B"),
+            ("ext_c", "session C"),
+        ):
             yield ExternalSessionRef(
                 external_session_id=ext_id,
                 vendor_session_label=label,
@@ -140,7 +146,9 @@ class _ThreeSessionSource(LLMSessionSourceInterface, PullingSourceMixin):
             )
 
     def read_events(
-        self, root_uri: str, session: ExternalSessionRef,
+        self,
+        root_uri: str,
+        session: ExternalSessionRef,
         cursor_payload: dict[str, object] | None,
     ) -> Iterator[RawSessionEvent]:
         del root_uri, cursor_payload
@@ -156,7 +164,9 @@ class _ThreeSessionSource(LLMSessionSourceInterface, PullingSourceMixin):
             return
 
     def session_discovery_cursor(
-        self, root_uri: str, last_seen: ExternalSessionRef | None,
+        self,
+        root_uri: str,
+        last_seen: ExternalSessionRef | None,
     ) -> dict[str, object]:
         del root_uri
         if last_seen is None:
@@ -164,7 +174,9 @@ class _ThreeSessionSource(LLMSessionSourceInterface, PullingSourceMixin):
         return {"last_seen": last_seen.external_session_id}
 
     def event_read_cursor(
-        self, root_uri: str, session: ExternalSessionRef,
+        self,
+        root_uri: str,
+        session: ExternalSessionRef,
         last_event: RawSessionEvent | None,
     ) -> dict[str, object]:
         del root_uri, session
@@ -192,9 +204,30 @@ def _raw(ext_id: str, vendor_event_id: str, text: str) -> RawSessionEvent:
 class _PoisonBlobStorageService:
     def __init__(self) -> None:
         self.calls: list[bytes] = []
+        self.root = TemporaryDirectory()
+
+    def get_blob_store_root(self) -> Path:
+        return Path(self.root.name)
+
+    def search_blobs(
+        self,
+        namespace: str,
+        metadata_filters: dict[str, object],
+    ) -> dict[str, Any]:
+        del namespace, metadata_filters
+        return {
+            "action_status": "completed",
+            "data": {"files": [], "total_count": 0},
+            "actions": [],
+            "error": None,
+            "timestamp": "",
+        }
 
     def store_blob(
-        self, namespace: str, content: bytes, metadata: dict[str, object],
+        self,
+        namespace: str,
+        content: bytes,
+        metadata: dict[str, object],
     ) -> dict[str, Any]:
         del namespace, metadata
         self.calls.append(content)
@@ -236,7 +269,9 @@ def _build_importer(state: StubStateService) -> SessionLedgerImporter:
     # a ``secret_gate=`` kwarg and no scan runs at ingest. events_quarantined
     # is always 0 on the ImporterReport returned by poll_once.
     return SessionLedgerImporter(
-        registry=registry, repository=repo, blob_adapter=adapter,
+        registry=registry,
+        repository=repo,
+        blob_adapter=adapter,
     )
 
 
@@ -259,12 +294,7 @@ def _seed_source_row(state: StubStateService) -> None:
     # before the per-session try/except can fire. Mirrors the
     # ``importer_smoke._make_importer`` canonical primer shape.
     state.add_fetch_one_response(
-        lambda sql, _params: (
-            "UPDATE session_ledger__source" in sql
-            and "polling_lease_until = %s" in sql
-            and "polling_lease_token = %s" in sql
-            and "RETURNING id" in sql
-        ),
+        lambda sql, _params: "UPDATE session_ledger__source" in sql and "polling_lease_until = %s" in sql and "polling_lease_token = %s" in sql and "RETURNING id" in sql,
         {"id": "src_test"},
     )
 
@@ -285,31 +315,21 @@ def test_poisoned_session_does_not_kill_batch() -> None:
     )
     _check(
         report.sessions_seen == 3,
-        f"all 3 sessions yielded by discover_sessions are visited (got "
-        f"{report.sessions_seen}); pre-fix this would stop at the poison "
-        "session because the outer try/except aborted the whole batch",
+        f"all 3 sessions yielded by discover_sessions are visited (got {report.sessions_seen}); pre-fix this would stop at the poison session because the outer try/except aborted the whole batch",
     )
     _check(
         report.events_persisted >= 2,
-        f"events_persisted >= 2 (sessions A + C both write at least one event; "
-        f"got {report.events_persisted})",
+        f"events_persisted >= 2 (sessions A + C both write at least one event; got {report.events_persisted})",
     )
     _check(
-        report.batches_failed == 0,
-        f"batches_failed == 0 (per-session try/except means the batch is "
-        f"COMPLETED with diagnostic logging; got {report.batches_failed})",
+        report.batches_failed == 1,
+        f"batches_failed == 1 (siblings persist while the batch reports the failed session; got {report.batches_failed})",
     )
 
-    discovery_writes = [
-        w for w in state.writes
-        if w.table == TABLE_SOURCE_CURSOR
-        and w.record.get("cursor_scope") == "discovery"
-    ]
+    discovery_writes = [w for w in state.writes if w.table == TABLE_SOURCE_CURSOR and w.record.get("cursor_scope") == "discovery"]
     _check(
         len(discovery_writes) >= 1,
-        f"DISCOVERY cursor written despite mid-loop poison "
-        f"(got {len(discovery_writes)} discovery-scoped writes); pre-fix "
-        "this was zero",
+        f"DISCOVERY cursor written despite mid-loop poison (got {len(discovery_writes)} discovery-scoped writes); pre-fix this was zero",
     )
 
 
@@ -332,14 +352,12 @@ def test_repeated_poll_skips_already_persisted_vendor_events() -> None:
     report = importer.poll_once()
     _check(
         report.events_persisted == 0,
-        f"events_persisted == 0 on re-poll where every vendor_event_id is "
-        f"already known to the repository (got {report.events_persisted})",
+        f"events_persisted == 0 on re-poll where every vendor_event_id is already known to the repository (got {report.events_persisted})",
     )
     event_writes = [w for w in state.writes if w.table == TABLE_EVENT]
     _check(
         len(event_writes) == 0,
-        f"NO event write_state fires when "
-        f"find_event_id_by_vendor_id returns a row (got {len(event_writes)})",
+        f"NO event write_state fires when find_event_id_by_vendor_id returns a row (got {len(event_writes)})",
     )
 
 

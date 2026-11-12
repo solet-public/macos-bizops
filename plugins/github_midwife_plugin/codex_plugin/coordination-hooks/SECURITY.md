@@ -74,7 +74,7 @@ Outputs, exhaustively:
   `hookSpecificOutput.additionalContext`; live context uses the same envelope
   for bounded register data, role/count observations and failure lines;
 - context reporter success/no-reading/unarmed: inert `{}` JSON, exit `0`;
-- armed reporter contract or delivery failure: fixed-prefix stderr, exit `1`.
+- armed reporter contract or delivery failure: fixed-prefix stderr, exit `1`;
 - inbox consumer, nothing pending or unarmed: inert `{}` JSON, exit `0`;
 - inbox consumer, pending found: `{"decision": "block", "reason": "<fixed
   nudge>"}` JSON, exit `0` — Codex's continuation contract is driven by the

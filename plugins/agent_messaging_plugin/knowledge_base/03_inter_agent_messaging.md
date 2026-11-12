@@ -936,10 +936,56 @@ busy-to-idle pickup, role rotation, duplicate coalescing, both inbox sections,
 queue saturation, restart and transaction rollback. Its checks also run through
 the registered `tmux_driver_channel_smoke.py` gate entry.
 
+## Waiting for a process result through the local CLI
+
+`solet-bridge call PROCESS_KEY '<arguments>'` waits for a born-async job by
+default on terminals, pipes and redirected files. It prints one terminal job
+row; `job.result` retains the original operation envelope and `job.error`
+retains a failure. Synchronous responses keep their existing envelope.
+`--wait` states that choice explicitly; `--no-wait` returns the queued handle
+and preserves ordinary completion delivery.
+
+Wait intent travels with the initial dispatch and is copied into the root
+job's metadata before work starts. A valid `bridge_wait_attached` binding
+suppresses both caller role delivery and the fallback continuation, so a
+caller receiving the result does not also receive a completion wake. Registered
+children consult the root marker at completion time to suppress only their
+caller-role message; their internal continuations still run. Children carry no
+waiter marker. Missing or corrupt intent
+advises and uses ordinary completion routing.
+
+`--job-timeout` limits waiting, without cancelling or replaying the operation.
+On timeout the CLI makes one owner-bound release attempt and prints a JSON
+handle with error code `job_wait_timeout`, then exits nonzero and gives the
+redemption command on stderr. Release clears the flag, preserves its binding,
+unrelated metadata and append-only attachment/release history, and restores
+normal completion delivery. A repeated release is idempotent. A foreign
+bridge/session or stale metadata write is refused. Terminal outcomes remain
+readable and cannot reopen. SIGINT, SIGTERM, SIGHUP, SystemExit during waiting
+or output, and output failure also attempt one release before the originating
+bridge closes; an uncertain release is disclosed and never retried automatically.
+The single root release also restores notification for children that finish
+later, including children created after release.
+
+The active manager serializes release with terminal commit and routing. The
+durable result is authoritative even if notification delivery fails; retrieve
+the exact job id before resubmitting an operation. SIGKILL or host loss cannot
+run cleanup and may leave the waiter attached. At the cross-runtime timeout or
+SIGKILL/host-loss boundary, at most one root completion wake may be missed as
+an explicit advisory; the durable result remains redeemable through `get_job`.
+This does not authorize effect replay.
+
 ## Ledger/tmux metadata reconciliation
 
 `plugin::agent_messaging_plugin::reconcile_ledger_tmux` takes no arguments and
-returns a fresh, read-only report. The same collector rides the existing
+returns a queued job handle immediately. Its existing single choreography worker
+collects the fresh, read-only report. Poll
+`plugin::agent_messaging_plugin::check_choreography_job_status` with that exact
+`job_id` until terminal; the status response's `result` holds the former complete
+response envelope and its `data` holds the report. Collection failures retain
+the original error under the terminal error payload. Job creation and progress
+write only the existing job ledger; the observed session ledger is unchanged.
+The same collector rides the existing
 bridge lifecycle sweep (configurable `bridge_sweep_interval_seconds`, shipped
 default 300 seconds). A separately guarded rider logs its timestamped report;
 an observer fault emits an advisory and leaves the existing riders running.

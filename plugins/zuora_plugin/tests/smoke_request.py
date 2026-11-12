@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import base64
 import json
-import re
 import sys
 import unittest
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-from urllib.parse import parse_qs, quote, quote_plus
+from urllib.parse import parse_qs
 
 import httpx
 
@@ -24,9 +23,9 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "zuora_plugin" / "src"))
 
 from ananta.core.plugins.action_discovery import discover_actions  # noqa: E402
 from ananta.core.process_registry.plugin_registration_validator import PluginRegistrationValidator  # noqa: E402
+from finish_support import finished  # noqa: E402  # pyright: ignore[reportMissingImports]
 from zuora_plugin import async_jobs, request_actions  # noqa: E402
 from zuora_plugin.app_config import ZuoraTenantConfig  # noqa: E402
-from zuora_plugin.constants import REQUEST_REDACTION  # noqa: E402
 from zuora_plugin.http_client import ZuoraClient  # noqa: E402
 from zuora_plugin.plugin import ZuoraPlugin  # noqa: E402
 
@@ -59,76 +58,6 @@ class _RequestClientCase(unittest.TestCase):
         client._http = httpx.Client(base_url=_BASE, transport=httpx.MockTransport(transport))  # noqa: SLF001
         self.addCleanup(client.close)
         return client
-
-
-class CredentialEncodingTests(_RequestClientCase):
-    def _assert_encoded_redaction(self, encode: Callable[[str], str]) -> None:
-        credentials = ("registered client /+?=???~~~", "registered secret /+?=???~~~é", "minted token /+?=???~~~")
-        encoded = [encode(value) for value in credentials]
-        payload = "|".join(encoded)
-        for kind in ("json", "text", "binary"):
-            with self.subTest(kind=kind):
-
-                def vendor(_: httpx.Request, kind: str = kind) -> httpx.Response:
-                    headers = {"Zuora-Track-Id": payload}
-                    if kind == "json":
-                        return httpx.Response(200, headers=headers, json={"echo": payload, "nested": [{value: value} for value in encoded], "nextPage": f"/workflows/{payload}"})
-                    headers["Content-Type"] = "text/plain" if kind == "text" else "application/octet-stream"
-                    return httpx.Response(200, headers=headers, content=b"prefix\x00" + payload.encode() + b"\x00suffix")
-
-                client = self._client(vendor, client_id=credentials[0], client_secret=credentials[1], token=credentials[2])
-                with self.assertLogs("zuora_plugin", level="INFO") as audit:
-                    result = request_actions.request(client, {"method": "GET", "path": f"/workflows/{payload}", "query": {"echo": payload}, "headers": {"X-Trace": payload}})
-                response = json.dumps(result)
-                if kind == "binary":
-                    decoded = base64.b64decode(result["body"], validate=True).decode()
-                    self.assertIn(REQUEST_REDACTION, decoded)
-                    response += decoded
-                for value in encoded:
-                    self.assertNotIn(value, " ".join(audit.output), "encoded credential survived in audit")
-                    self.assertNotIn(value, response, "encoded credential survived in response")
-                self.assertIn(REQUEST_REDACTION, result["headers"]["zuora-track-id"])
-
-    def test_percent_upper_credentials_in_audit_and_response(self) -> None:
-        self._assert_encoded_redaction(lambda value: quote(value, safe=""))
-
-    def test_percent_lower_credentials_in_audit_and_response(self) -> None:
-        self._assert_encoded_redaction(lambda value: re.sub(r"%[0-9A-F]{2}", lambda match: match[0].lower(), quote(value, safe="")))
-
-    def test_percent_mixed_hex_credentials_in_audit_and_response(self) -> None:
-        self._assert_encoded_redaction(lambda value: re.sub(r"%([0-9A-F])([0-9A-F])", lambda match: "%" + match[1].lower() + match[2].upper(), quote(value, safe="")))
-
-    def test_percent_all_bytes_credentials_in_audit_and_response(self) -> None:
-        self._assert_encoded_redaction(lambda value: "".join(f"%{byte:02X}" for byte in value.encode()))
-
-    def test_form_plus_credentials_in_audit_and_response(self) -> None:
-        self._assert_encoded_redaction(lambda value: quote_plus(value, safe=""))
-
-    def test_base64_credentials_in_audit_and_response(self) -> None:
-        self._assert_encoded_redaction(lambda value: base64.b64encode(value.encode()).decode())
-
-    def test_base64url_credentials_in_audit_and_response(self) -> None:
-        self._assert_encoded_redaction(lambda value: base64.urlsafe_b64encode(value.encode()).decode())
-
-    def test_unpadded_base64_credentials_in_audit_and_response(self) -> None:
-        self._assert_encoded_redaction(lambda value: base64.b64encode(value.encode()).decode().rstrip("="))
-
-    def test_unpadded_base64url_credentials_in_audit_and_response(self) -> None:
-        self._assert_encoded_redaction(lambda value: base64.urlsafe_b64encode(value.encode()).decode().rstrip("="))
-
-    def test_percent_encoded_base64_credentials_in_audit_and_response(self) -> None:
-        self._assert_encoded_redaction(lambda value: quote(base64.b64encode(value.encode()).decode(), safe=""))
-
-    def test_encoded_cached_token_audit_on_transport_error(self) -> None:
-        def vendor(req: httpx.Request) -> httpx.Response:
-            raise httpx.ConnectError("fixture transport failure", request=req)
-
-        client = self._client(vendor)
-        client.ensure_authenticated()
-        encoded = base64.urlsafe_b64encode(_TOKEN.encode()).decode()
-        with self.assertLogs("zuora_plugin", level="INFO") as audit, self.assertRaises(httpx.ConnectError):
-            request_actions.request(client, {"method": "GET", "path": f"/workflows/{encoded}"})
-        self.assertNotIn(encoded, " ".join(audit.output))
 
 
 class RequestTests(_RequestClientCase):
@@ -180,23 +109,22 @@ class RequestTests(_RequestClientCase):
                 request_actions.request(client, {"method": "POST", "path": "/workflows", "headers": headers})
         self.assertIsNone(client._token)  # noqa: SLF001 — no OAuth request either
 
-    def test_secret_redaction_in_body_headers_pagination_and_audit(self) -> None:
+    def test_body_as_received_and_audit_without_query_values_or_body(self) -> None:
         def vendor(_: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200, headers={"X-Unselected": "ignored", "Set-Cookie": _TOKEN, "Zuora-Request-Id": "vendor-id", "Link": f'</workflows?token={_TOKEN}>; rel="next"'}, json={"access_token": "new-vendor-token", "echo": f"{_SECRET} {_TOKEN} caller-secret new-vendor-token", "nextPage": f"/workflows?token={_TOKEN}"}
-            )
+            return httpx.Response(200, headers={"X-Unselected": "ignored", "Set-Cookie": _TOKEN, "Zuora-Request-Id": "vendor-id", "Link": f'</workflows?token={_TOKEN}>; rel="next"'}, json={"access_token": "new-vendor-token", "echo": "vendor text", "nextPage": f"/workflows?token={_TOKEN}"})
 
         with self.assertLogs("zuora_plugin", level="INFO") as audit:
-            result = request_actions.request(self._client(vendor), {"method": "PATCH", "path": "/workflows?client_secret=caller-secret", "query": {"filter": "private-query"}, "body": {"client_secret": "caller-secret"}})
-        rendered = json.dumps(result) + " ".join(audit.output)
+            params = {"method": "PATCH", "path": "/workflows?client_secret=caller-secret", "query": {"filter": "private-query"}, "body": {"client_secret": "caller-secret"}}
+            result = finished(self._client(vendor), lambda c: request_actions.request(c, params), params)["data"]
+        logged = " ".join(audit.output)
         for secret in (_SECRET, _TOKEN, "caller-secret", "new-vendor-token", "private-query"):
-            self.assertNotIn(secret, rendered)
-        self.assertEqual(result["body"]["access_token"], REQUEST_REDACTION)
+            self.assertNotIn(secret, logged)
+        for field in ("method=PATCH", "path=/workflows?client_secret=", "status=200", "duration_ms=", "correlation_id=" + result["correlation_id"]):
+            self.assertIn(field, logged)
+        self.assertEqual(result["body"]["access_token"], "new-vendor-token")
         self.assertNotIn("set-cookie", result["headers"])
         self.assertNotIn("x-unselected", result["headers"])
         self.assertEqual(result["headers"]["zuora-request-id"], "vendor-id")
-        for field in ("method=PATCH", "path=/workflows?", "status=200", "duration_ms=", "correlation_id=" + result["correlation_id"]):
-            self.assertIn(field, audit.output[0])
 
     def test_workflow_backup_lists_and_downloads_export(self) -> None:
         calls: list[str] = []

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Private live PostgreSQL write behavioral proof.
+"""Private live PostgreSQL write proof and the build-1 acceptance walk.
 
 Run under quality_gates/provision_test_pg.py; the private manifest variable
 selects this smoke's independent database on the owned loopback cluster.
 No fixture returns 77; provisioned setup or body failures return nonzero.
-The original SQL behavior, read/write probes and dynamic OS-user assertions
-remain exercised. See quality_gates/private_postgres.md.
+Proves run_statement commits (visible from a separate connection), then walks
+the build-1 acceptance path: create a schema, migrate it (run_script), bulk-load
+a CSV (copy), dump it (pg_dump), restore the archive into a second database
+(pg_restore; plain SQL restores are refused), and read activity, locks and
+statistics. The
+dynamic OS-user assertions remain exercised. See quality_gates/private_postgres.md.
 """
 
 from __future__ import annotations
@@ -26,7 +30,13 @@ sys.path.insert(0, str(_ROOT))
 REPO_ROOT = _ROOT
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "external_postgres_plugin" / "src"))
 
-from external_postgres_plugin import query_actions  # noqa: E402
+from external_postgres_plugin import (  # noqa: E402
+    admin_actions,
+    client_tools,
+    copy_actions,
+    query_actions,
+    script_actions,
+)
 from external_postgres_plugin.app_config import ExternalDsn  # noqa: E402
 from external_postgres_plugin.connection import connect  # noqa: E402
 from external_postgres_plugin.statement_guard import StatementGuardError  # noqa: E402
@@ -66,7 +76,7 @@ def _configure_fixture() -> None:
     config = load_fixture("external_write")
     if config.user != _USER:
         raise FixtureIntegrityError("fixture user differs from the current OS user")
-    _HOST, _PORT, _SCRATCH_DB = config.host, config.port, config.database
+    _HOST, _PORT, _SCRATCH_DB = config.host, config.port, config.database  # pyright: ignore[reportConstantRedefinition] -- fixture endpoint bound once per run
 
 
 def _dsn() -> ExternalDsn:
@@ -91,6 +101,16 @@ def _psql(sql: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _psql_on(dbname: str, sql: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(pg_binary("psql")), "-X", *load_fixture("external_write").endpoint_args(), "-d", dbname, "-v", "ON_ERROR_STOP=1", "-c", sql],
+        env=without_libpq(os.environ),
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+
 def _psql_scalar(sql: str) -> str | None:
     result = subprocess.run(
         [str(pg_binary("psql")), "-X", *load_fixture("external_write").endpoint_args(), "-d", _SCRATCH_DB, "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c", sql],
@@ -107,15 +127,18 @@ def _psql_scalar(sql: str) -> str | None:
 def _setup() -> bool:
     try:
         subprocess.run([str(pg_binary("createdb")), *load_fixture("external_write").endpoint_args(), "--maintenance-db=postgres", _SCRATCH_DB], env=without_libpq(os.environ), capture_output=True, text=True, timeout=20)  # ignore failure — the DB may already exist
-        seed = _psql(f"DROP TABLE IF EXISTS {_PROBE}; CREATE TABLE {_PROBE}(id serial PRIMARY KEY, val int);")
-        return seed.returncode == 0
+        seed = _psql(f"DROP SCHEMA IF EXISTS epg_walk CASCADE; DROP TABLE IF EXISTS {_PROBE}; CREATE TABLE {_PROBE}(id serial PRIMARY KEY, val int);")
+        _psql_on("postgres", f"DROP DATABASE IF EXISTS {_restore_db()}")
+        restore = _psql_on("postgres", f"CREATE DATABASE {_restore_db()}")
+        return seed.returncode == 0 and restore.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
 
 def _teardown() -> None:
     try:
-        _psql(f"DROP TABLE IF EXISTS {_PROBE};")
+        _psql(f"DROP TABLE IF EXISTS {_PROBE}; DROP SCHEMA IF EXISTS epg_walk CASCADE;")
+        _psql_on("postgres", f"DROP DATABASE IF EXISTS {_restore_db()}")
     except (OSError, subprocess.SubprocessError):
         pass
 
@@ -125,9 +148,9 @@ def _passthrough_gate(path: str) -> str:
 
 
 def _run_live_checks(workspace: Path) -> None:
-    write_conn = connect(_dsn(), statement_timeout_ms=30_000, platform_pg_port=_PORT, read_only=False)
+    write_conn = connect(_dsn(), statement_timeout_ms=30_000, platform_pg_port=_PORT)
     try:
-        _assert("conn.read_only is False for a write connection", write_conn.read_only is False)
+        _assert("the connection carries no read-only characteristic (None)", write_conn.read_only is None)
 
         # (2) no-RETURNING write: commits, visible from a FRESH separate connection.
         result = query_actions.run_statement(
@@ -184,26 +207,166 @@ def _run_live_checks(workspace: Path) -> None:
     finally:
         write_conn.close()
 
-    # (4) the write reversal is verb-scoped: a read_only=True connection on the
-    # SAME scratch DB, in the SAME run, still cannot write.
-    read_conn = connect(_dsn(), statement_timeout_ms=30_000, platform_pg_port=_PORT)
+    _acceptance_walk(workspace)
+
+
+def _file_gate(path: str, _param: str) -> str:
+    return path
+
+
+def _restore_db() -> str:
+    return f"{_SCRATCH_DB}_restore"
+
+
+def _walk_scalar(sql: str, dbname: str) -> str | None:
+    result = subprocess.run(
+        [str(pg_binary("psql")), "-X", *load_fixture("external_write").endpoint_args(), "-d", dbname, "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c", sql],
+        env=without_libpq(os.environ),
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _on(dsn: ExternalDsn, action: Any) -> Any:
+    conn = connect(dsn, statement_timeout_ms=30_000, platform_pg_port=_PORT)
     try:
-        _assert("conn.read_only is True for the DEFAULT (unaffected) connection", read_conn.read_only is True)
-        refused_state: str | None = None
-        try:
-            with read_conn.cursor() as cur:
-                cur.execute(f"INSERT INTO {_PROBE}(val) VALUES (7)")
-            read_conn.rollback()
-        except Exception as exc:  # a real psycopg error carries .sqlstate
-            read_conn.rollback()
-            refused_state = getattr(exc, "sqlstate", None)
-        print(f"    observed SQLSTATE {refused_state} for a write on the default read-only connection")
-        _assert(
-            "the default (read_only=True) connection still refuses a write — reversal is verb-scoped",
-            refused_state == "25006",
-        )
+        return action(conn)
     finally:
-        read_conn.close()
+        conn.close()
+
+
+def _acceptance_walk(workspace: Path) -> None:
+    """Build-1 acceptance: create a schema, migrate it, bulk-load a CSV, dump it,
+    restore it into a second database, and read the activity/statistics views."""
+    source = _dsn()
+    target = ExternalDsn(
+        name="restore",
+        host=_HOST,
+        port=_PORT,
+        dbname=_restore_db(),
+        user=_USER,
+        password="",
+        sslmode=_SSLMODE,
+    )
+    settings = client_tools.ToolSettings(bin_dir=str(pg_binary("psql").parent), timeout_seconds=120, platform_pg_port=5432)
+
+    created = _on(source, lambda c: script_actions.run_script(c, {"sql": ("CREATE SCHEMA epg_walk;\nCREATE TABLE epg_walk.customer (id int PRIMARY KEY, name text NOT NULL);\n")}))
+    _assert("walk: schema created", created["failed_count"] == 0 and created["committed"] is True)
+    migrated = _on(source, lambda c: script_actions.run_script(c, {"sql": ("ALTER TABLE epg_walk.customer ADD COLUMN email text;\nCREATE INDEX customer_email_idx ON epg_walk.customer (email);\nCREATE FUNCTION epg_walk.digits(t text) RETURNS text LANGUAGE sql AS $$ SELECT regexp_replace(t, '\\D', '', 'g') $$;\n")}))
+    _assert("walk: migration applied", migrated["statement_count"] == 3 and migrated["failed_count"] == 0)
+
+    csv_path = workspace / "customers.csv"
+    csv_path.write_text("id,name,email\n1,Alice,alice@example.com\n2,Grace,grace@example.com\n3,Ed\\sger,\n", encoding="utf-8")
+    loaded = _on(
+        source,
+        lambda c: copy_actions.run_copy(
+            c,
+            {
+                "operation": "from_file",
+                "path": str(csv_path),
+                "schema": "epg_walk",
+                "table": "customer",
+                "columns": ["id", "name", "email"],
+                "format": "csv",
+                "header": True,
+            },
+            _file_gate,
+        ),
+    )
+    print(f"    observed copy from_file = {loaded}")
+    _assert("walk: COPY loaded 3 rows", loaded["rowcount"] == 3)
+    _assert("walk: rows committed", _walk_scalar("SELECT count(*) FROM epg_walk.customer", _SCRATCH_DB) == "3")
+    exported = _on(
+        source,
+        lambda c: copy_actions.run_copy(
+            c,
+            {
+                "operation": "to_file",
+                "path": str(workspace / "export.csv"),
+                "query": "SELECT id, name FROM epg_walk.customer ORDER BY id",
+                "format": "csv",
+                "header": True,
+            },
+            _file_gate,
+        ),
+    )
+    _assert("walk: COPY to_file wrote 3 rows", exported["rowcount"] == 3)
+    _assert("walk: exported CSV content", (workspace / "export.csv").read_text(encoding="utf-8").splitlines()[1] == "1,Alice")
+
+    _walk_dump_restore(source, target, settings, workspace)
+    _walk_admin(source)
+
+
+def _walk_dump_restore(source: ExternalDsn, target: ExternalDsn, settings: client_tools.ToolSettings, workspace: Path) -> None:
+    """Dump custom and restore it into the second database; plain SQL restores are refused."""
+    dumped = client_tools.dump_database(
+        source,
+        {"output_path": str(workspace / "walk.dump"), "format": "custom", "schema": ["epg_walk"]},
+        _file_gate,
+        settings,
+    )
+    print(f"    observed dump = {dumped}")
+    _assert("walk: custom dump written", dumped["bytes"] > 0 and dumped["format"] == "custom")
+    restored = client_tools.restore_database(
+        target,
+        {"input_path": str(workspace / "walk.dump"), "exit_on_error": True, "single_transaction": True},
+        _file_gate,
+        settings,
+    )
+    print(f"    observed restore = {restored}")
+    _assert("walk: archive restored through pg_restore", restored["tool"] == "pg_restore" and restored["format"] == "custom")
+    _assert("walk: restored rows in the second database", _walk_scalar("SELECT count(*) FROM epg_walk.customer", _restore_db()) == "3")
+    _assert("walk: restored index", _walk_scalar("SELECT count(*) FROM pg_indexes WHERE indexname = 'customer_email_idx'", _restore_db()) == "1")
+
+    _assert("walk: backslash data survived pg_restore", _walk_scalar("SELECT name FROM epg_walk.customer WHERE id = 3", _restore_db()) == "Ed\\sger")
+    _assert("walk: dollar-quoted body with a backslash survived", _walk_scalar("SELECT epg_walk.digits('a1b2')", _restore_db()) == "12")
+
+    # A plain-SQL dump is written (pg_dump's default format) but never replayed: restore
+    # takes archives only, so no psql meta-command in a plain file can run on this host.
+    plain = client_tools.dump_database(source, {"output_path": str(workspace / "walk.sql"), "schema": ["epg_walk"]}, _file_gate, settings)
+    _assert("walk: plain dump written", plain["format"] == "plain" and plain["bytes"] > 0)
+    marker = workspace / "meta_command_ran"
+    evil = workspace / "evil.sql"
+    evil.write_text(f"SELECT 1;\n\\! touch {marker}\n", encoding="utf-8")
+    for path in (workspace / "walk.sql", evil):
+        code = ""
+        try:
+            client_tools.restore_database(target, {"input_path": str(path)}, _file_gate, settings)
+        except client_tools.ClientToolError as exc:
+            code = exc.code
+        _assert(f"walk: plain SQL restore refused ({path.name})", code == "external_pg.plain_sql_restore_refused", code)
+    _assert("walk: the shell meta-command in the refused file never ran", not marker.exists())
+
+
+def _walk_admin(source: ExternalDsn) -> None:
+    """Read activity, locks and statistics; reset one table; VACUUM via autocommit."""
+    activity = _on(source, lambda c: admin_actions.run_activity(c, {"operation": "list", "database": _SCRATCH_DB, "limit": 1}))
+    _assert("walk: activity lists this session", activity["returned"] == 1 and "pid" in activity["rows"][0])
+    locks = _on(source, lambda c: admin_actions.run_activity(c, {"operation": "locks", "granted": True}))
+    _assert("walk: locks readable", locks["returned"] >= 1 and "blocked_by" in locks["rows"][0])
+    cancelled = _on(source, lambda c: admin_actions.run_activity(c, {"operation": "cancel", "pid": 1}))
+    _assert("walk: cancel of a non-backend pid is not signalled", cancelled["signalled"] is False)
+    sizes = _on(source, lambda c: admin_actions.run_statistics(c, {"operation": "relation_sizes", "schema": "epg_walk"}))
+    _assert("walk: relation size of the loaded table", sizes["rows"][0]["relation"] == "customer" and sizes["rows"][0]["total_bytes"] > 0)
+    databases = _on(source, lambda c: admin_actions.run_statistics(c, {"operation": "database_sizes"}))
+    _assert("walk: database sizes include the scratch database", any(r["datname"] == _SCRATCH_DB for r in databases["rows"]))
+    reset = _on(source, lambda c: admin_actions.run_statistics(c, {"operation": "reset_table", "schema": "epg_walk", "table": "customer"}))
+    _assert("walk: one table's counters reset", reset["reset"] is True)
+    vacuumed = _on(
+        source,
+        lambda c: query_actions.run_statement(
+            c,
+            {"sql": "VACUUM (ANALYZE) epg_walk.customer", "autocommit": True},
+            _passthrough_gate,
+        ),
+    )
+    _assert("walk: VACUUM runs through run_statement autocommit", vacuumed == {"rowcount": -1, "has_result_set": False, "autocommit": True})
+    _assert(
+        "walk: the VACUUM's ANALYZE is recorded",
+        _walk_scalar("SELECT last_analyze IS NOT NULL FROM pg_stat_user_tables WHERE relname = 'customer'", _SCRATCH_DB) == "t",
+    )
 
 
 def _mid_run_fail(detail: str) -> int:
@@ -274,8 +437,8 @@ def _check_source_carries_no_operator_username() -> None:
 
 
 def main() -> int:
-    print("\nexternal_postgres_plugin LIVE write-capability smoke")
-    print("=" * 53)
+    print("\nexternal_postgres_plugin LIVE write + build-1 acceptance smoke")
+    print("=" * 62)
     _check_user_is_dynamic_getuser()
     _check_source_carries_no_operator_username()
     if _failed:
@@ -300,7 +463,7 @@ def main() -> int:
     if _failed:
         print("FAILED:", _failed)
         return 1
-    print("All LIVE write-capability checks passed.")
+    print("All LIVE write and acceptance-walk checks passed.")
     print("PRIVATE_PG_BODY external_write")
     return 0
 

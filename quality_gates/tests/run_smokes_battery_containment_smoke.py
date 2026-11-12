@@ -4,6 +4,7 @@ runner's deadline-free use of the owned-process collector."""
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import inspect
 import io
@@ -27,6 +28,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 from quality_gates import full_smoke_campaign, run_smokes, smoke_process  # noqa: E402
 from quality_gates.smoke_budgets import load_budgets  # noqa: E402
 from quality_gates.tests import _run_smokes_head_receipt_fixture, _smoke_process_fixture  # noqa: E402
+from quality_gates.tests._run_smokes_scratch_fixture import _group_alive  # noqa: E402
 
 _RunSuiteResult = tuple[list[str], list[str], list[str], list[str], float]
 _RunTimedResult = tuple[str, str, float, int | None]
@@ -450,7 +452,7 @@ def _assert_runner_imports_and_lists_without_identity_smoke() -> int:
 def _assert_timeout_api_and_flag_are_removed() -> int:
     """The timeout CLI/API is gone: no ignored flag, keyword, alias or default survives."""
     leftovers = [name for name in ("_DEFAULT_TIMEOUT", "_ENTRY_TIMEOUTS_SECONDS") if hasattr(run_smokes, name)]
-    accepting = [name for name in ("_run_one", "_wait_for_smoke", "_run_timed", "_run_serial_phase", "_run_suite", "_retry_failures") if "timeout" in inspect.signature(vars(run_smokes)[name]).parameters]
+    accepting = [name for name in ("_run_one", "_wait_for_smoke", "_run_timed", "_run_serial_phase", "_run_suite") if "timeout" in inspect.signature(vars(run_smokes)[name]).parameters]
     keyword = inspect.signature(run_smokes._run_one).bind_partial
     with contextlib.suppress(TypeError):
         accepting.append(f"_run_one(timeout=...) bound {keyword(timeout=_REMOVED_TIMEOUT_ARGUMENT)}")
@@ -460,13 +462,28 @@ def _assert_timeout_api_and_flag_are_removed() -> int:
     return 5
 
 
+def _assert_single_failure_fails_battery() -> int:
+    args = argparse.Namespace(jobs=4)
+    observed = ([], ["red.py"], [], [], 0.0)
+    with patch.object(run_smokes, "_run_suite", return_value=observed) as run:
+        selected = run_smokes._run_selected_suite(Path(sys.executable), ["red.py"], args, frozenset())
+    assert selected == observed
+    run.assert_called_once()
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        verdict = run_smokes._summarize(1, selected[0], selected[1], selected[2], fail_on_skip=False, harness=selected[3])
+    assert verdict == 1 and output.getvalue().count("red.py") == 1, (verdict, output.getvalue())
+    return 1
+
+
 def _process_group_is_live(process_group: int) -> bool:
     try:
         os.killpg(process_group, 0)
     except ProcessLookupError:
         return False
-    except PermissionError as error:
-        raise AssertionError(f"cannot verify session cleanup for process group {process_group}") from error
+    except PermissionError:
+        # An owned fixture group retains our uid; this number was reused.
+        return False
     return True
 
 
@@ -703,6 +720,11 @@ def _assert_changed_head_gets_distinct_receipt() -> int:
 
 def main() -> None:
     checks = _assert_heavy_pool_and_jobs_bound()
+    with patch.object(os, "killpg", side_effect=PermissionError):
+        # EPERM means the group still exists; permission denial cannot prove it is gone.
+        assert _group_alive(12345), "inaccessible process group remains present"
+        assert not _process_group_is_live(12345), "inaccessible reused process group is not an owned fixture"
+    checks += 2
     checks += _assert_duplicate_candidate_receipt_refuses()
     checks += _assert_changed_head_gets_distinct_receipt()
     checks += _assert_rate_fuse_aborts_process_groups()
@@ -711,6 +733,7 @@ def main() -> None:
     checks += _assert_deleted_index_path_is_not_candidate_source()
     checks += _assert_cleanup_permission_error_contains_one_smoke_failure()
     checks += _assert_runner_collection_lifecycle()
+    checks += _assert_single_failure_fails_battery()
     checks += _assert_runner_imports_and_lists_without_identity_smoke()
     print(f"run-smokes battery containment smoke: {checks} checks passed")
 

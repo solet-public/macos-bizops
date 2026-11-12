@@ -6,8 +6,8 @@
   "result_processor_customizations": {
     "action_label": "Zuora subscription version custom fields updated",
     "result_type": "zuora_update_subscription_version_custom_fields_result",
-    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
-    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body as received).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically."
   },
   "error_processor_customizations": {
     "action_context": "Set, correct or clear (null) the custom fields of one subscription version and its rate plans and charges (PUT /v1/subscriptions/{subscriptionNumber}/versions/{version}/customFields).",

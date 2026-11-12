@@ -1,7 +1,7 @@
 {
   "process_key": "service_interface::thinking_service::get_plan_template",
   "display_name": "Get Plan Template Curation View",
-  "description": "read a registered plan-template card's curation view: its current lifecycle state and the discovery-by-intent axes (goal, domain, outcome) that make it findable and forkable.",
+  "description": "read a registered plan-template card's curation view: its current lifecycle state and the discovery-by-intent axes (goal, domain, outcome) that make it findable and forkable. Returns a queued job receipt; retrieve its exact job_id with job_service.get_job for the complete original operation result or typed error.",
   "embedding_description": "Look up a plan template by its key and read its curation view — the current lifecycle state (draft, active, superseded, or archived), the human-facing title, the replacement key when superseded, and the discovery-by-intent axes goal/domain/outcome. This reads the front-matter curation metadata, not the joseki-program skeleton body. Returns found=false when no card exists for the key.",
   "processor_policy_category": "edge",
   "result_processor_customizations": {
@@ -15,5 +15,6 @@
     "action_context": "Reading a plan template's curation view by template_key. get_plan_template accepts {template_key} and never mutates the card.",
     "error_interpretation": "PlanTemplateStateConflict: a card exists at the key's path but its Template Key disagrees with the requested key (a mismatched/drifted card). PlanTemplateCardError (core): the stored card is malformed (missing a required field or an unknown state) and cannot be parsed. A missing card is NOT an error — it returns found=false.",
     "recovery_guidance": "Mismatched card: operate on the key the card actually declares, or repair the card's Template Key line. Malformed card: fix the missing/invalid front-matter field named in the message. Absent template: confirm the key, or register the template before reading it."
-  }
+  },
+  "is_async": true
 }

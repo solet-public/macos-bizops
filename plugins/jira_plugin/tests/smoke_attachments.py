@@ -147,12 +147,12 @@ def test_add_attachment_filename_override() -> None:
 
 
 def test_add_attachment_schema_has_no_path_param() -> None:
-    params = JiraPlugin.add_attachment._platform_process_metadata.parameters
+    params = vars(JiraPlugin.add_attachment)["_platform_process_metadata"].parameters
     keys = set(params.keys())
     _assert("no 'path' param on the verb schema", "path" not in keys)
     _assert("no 'file' param on the verb schema", "file" not in keys)
     _assert("blob_key is the byte source param", "blob_key" in keys)
-    _assert("schema is exactly key/blob_key/filename", keys == {"key", "blob_key", "filename"})
+    _assert("schema includes site/key/blob_key/filename", keys == {"site", "key", "blob_key", "filename"})
 
 
 def test_add_attachment_path_only_refused_no_local_read() -> None:

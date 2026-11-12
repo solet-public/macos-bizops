@@ -233,7 +233,7 @@ def test_edge_parity() -> None:
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 23 verbs discovered", len(actions) == 23)
+    _assert("all 25 verbs discovered", len(actions) == 25)
 
 
 def main() -> int:

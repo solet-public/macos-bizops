@@ -1,0 +1,2 @@
+# Offline media preparer contract: generated inputs and handler-derived table.
+quality_gates/tests/fast_return_census_media_smoke.py

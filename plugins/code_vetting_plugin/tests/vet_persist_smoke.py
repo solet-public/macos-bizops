@@ -27,7 +27,7 @@ from __future__ import annotations
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 _SRC = _PLUGIN_ROOT / "src"
@@ -36,6 +36,7 @@ if str(_SRC) not in sys.path:
 
 import code_vetting_plugin.plugin as plugin_module
 from ananta.core.plugins.protocols import SchemaProvider
+from ananta.interfaces.state_service_protocol import StateServiceProtocol
 from code_vetting_plugin.live_state import (
     VETTING_RUNS_NAMESPACE,
     VETTING_RUNS_TABLE,
@@ -148,7 +149,7 @@ def _installed_state() -> FakeStateService:
 def _install_declared_schema(state: FakeStateService, plugin: plugin_module.CodeVettingPlugin) -> None:
     """Create every table the plugin DECLARES via get_schema_definitions — what the platform does at boot."""
     for schema in plugin.get_schema_definitions():
-        tables = schema.tables.values() if isinstance(schema.tables, dict) else schema.tables
+        tables = schema.tables.values()
         for table in tables:
             state.install_schema(schema.namespace, table.table_name)
 
@@ -172,8 +173,8 @@ def _metrics(run_id: str, started: str, *, report: str) -> RunMetrics:
 
 def _check_schema_declaration() -> None:
     plugin = plugin_module.CodeVettingPlugin()
-    _check("CodeVettingPlugin is a SchemaProvider (declares its owned tables at boot)", isinstance(plugin, SchemaProvider), "")
-    declared = {(s.namespace, t.table_name) for s in plugin.get_schema_definitions() for t in (s.tables.values() if isinstance(s.tables, dict) else s.tables)}
+    _check("CodeVettingPlugin is a SchemaProvider (declares its owned tables at boot)", isinstance(cast("object", plugin), SchemaProvider), "")
+    declared = {(s.namespace, t.table_name) for s in plugin.get_schema_definitions() for t in (s.tables.values())}
     _check("plugin DECLARES the vetting_runs table (so collect_schemas creates it before any write)", (VETTING_RUNS_NAMESPACE, VETTING_RUNS_TABLE) in declared, str(declared))
 
 
@@ -181,27 +182,27 @@ def _check_create_before_upsert() -> None:
     fresh = FakeStateService()
     raised = False
     try:
-        persist_run_sync(fresh, _metrics("vr-x", "2026-07-21T00:00:00Z", report="r"))
+        persist_run_sync(cast("StateServiceProtocol", fresh), _metrics("vr-x", "2026-07-21T00:00:00Z", report="r"))
     except LiveStateError:
         raised = True
     _check("fresh trail (table NOT created) REJECTS the upsert — the live failure reproduced hermetically", raised and fresh.upserts == 0, str(fresh.upserts))
     installed = FakeStateService()
     _install_declared_schema(installed, plugin_module.CodeVettingPlugin())
-    persist_run_sync(installed, _metrics("vr-y", "2026-07-21T00:00:00Z", report="r"))
+    persist_run_sync(cast("StateServiceProtocol", installed), _metrics("vr-y", "2026-07-21T00:00:00Z", report="r"))
     _check("installing the plugin's DECLARED schema (boot's job) lets the write through", installed.upserts == 1, str(installed.upserts))
 
 
 def _check_sync_write_and_prune() -> None:
     state = _installed_state()
-    persist_run_sync(state, _metrics("vr-1", "2026-07-21T00:00:00Z", report="# report one"))
+    persist_run_sync(cast("StateServiceProtocol", state), _metrics("vr-1", "2026-07-21T00:00:00Z", report="# report one"))
     _check("persist_run_sync wrote one row", state.upserts == 1 and "vr-1" in state.rows, str(state.upserts))
-    row = read_vetting_run(state, "vr-1")
+    row = cast("dict[str, Any] | None", read_vetting_run(cast("StateServiceProtocol", state), "vr-1"))
     assert row is not None
     _check("sync write round-trips report", row["report"] == "# report one", str(row.get("report")))
     _check("sync write round-trips literal_table at structural_metrics.literals[]", row["structural_metrics"]["literals"][0]["value"] == "TODO", str(row["structural_metrics"]))
     _check("sync write round-trips candidate at dead_symbols.candidates[]", row["dead_symbols"]["candidates"][0]["name"] == "dead_fn", str(row["dead_symbols"]))
-    persist_run_sync(state, _metrics("vr-2", "2026-07-21T00:00:01Z", report="r2"), retention=2)
-    persist_run_sync(state, _metrics("vr-3", "2026-07-21T00:00:02Z", report="r3"), retention=2)
+    persist_run_sync(cast("StateServiceProtocol", state), _metrics("vr-2", "2026-07-21T00:00:01Z", report="r2"), retention=2)
+    persist_run_sync(cast("StateServiceProtocol", state), _metrics("vr-3", "2026-07-21T00:00:02Z", report="r3"), retention=2)
     _check("bounded-retention prune hard-deletes the oldest beyond the bound", "vr-1" not in state.rows and {"vr-2", "vr-3"} <= set(state.rows), str(sorted(state.rows)))
 
 
@@ -229,7 +230,7 @@ def _check_run_gate(base: Path) -> None:
     on = plugin._run(_stub_scan, scope="s", tag="l1", target_path=str(fixture), persist=True)  # noqa: SLF001
     _check("persist=True writes exactly one row", state.upserts == 1, str(state.upserts))
     _check("persist does NOT change the payload key set (side-effect only)", set(off) == set(on), f"{set(off) ^ set(on)}")
-    row = read_vetting_run(state, str(on["run_id"]))
+    row = cast("dict[str, Any] | None", read_vetting_run(cast("StateServiceProtocol", state), str(on["run_id"])))
     assert row is not None
     _check("persisted run round-trips: substrate=heuristic, L1 layer, report + candidates present", row["substrate"] == "heuristic" and row["layers_run"] == ["L1_deterministic"] and bool(row["report"]) and row["dead_symbols"]["candidates"][0]["name"] == "dead_fn", str({k: row[k] for k in ("substrate", "layers_run")}))
 
@@ -243,9 +244,9 @@ def _check_verb_param_wiring(base: Path) -> None:
         plugin = _StubPlugin(state, base / "worktree")
         (base / "worktree").mkdir()
         fixture = _foreign_fixture(base)
-        plugin.vet_codebase({"target_path": str(fixture)}, {})
+        plugin._vet_codebase_now({"target_path": str(fixture)})  # noqa: SLF001 -- persistence in the worker operation
         _check("vet_codebase default (no persist) writes nothing", state.upserts == 0, str(state.upserts))
-        plugin.vet_codebase({"target_path": str(fixture), "persist": True}, {})
+        plugin._vet_codebase_now({"target_path": str(fixture), "persist": True})  # noqa: SLF001
         _check("vet_codebase persist=True threads through to a write", state.upserts == 1, str(state.upserts))
     finally:
         plugin_module.run_all = original

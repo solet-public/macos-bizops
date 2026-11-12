@@ -74,7 +74,7 @@ from marketo_plugin.constants import (  # noqa: E402
     PARAM_ACKNOWLEDGE_OVERRIDE,
     PARAM_ROW_LIMIT,
 )
-from marketo_plugin.errors import MarketoEnvelopeError, classify_marketo_envelope  # noqa: E402
+from marketo_plugin.errors import MarketoEnvelopeError, MarketoServiceError, classify_marketo_envelope  # noqa: E402
 from marketo_plugin.plugin import MarketoPlugin  # noqa: E402
 
 _passed = 0
@@ -358,9 +358,13 @@ def test_create_or_update_leads_read_only_preflight() -> None:
                 "lookup_field": "id",
             },
         )
-    except ValueError as exc:
+    except MarketoServiceError as exc:
         refusal = str(exc)
+        refusal_code = exc.code
+    else:
+        refusal_code = ""
     _assert("read-only non-key field refused", bool(refusal), refusal)
+    _assert("read-only refusal is typed marketo.invalid_params", refusal_code == "marketo.invalid_params", refusal_code)
     _assert(
         "refusal names only the offending field and record",
         "readOnlyPersonSource (records 1)" in refusal and "id (" not in refusal,
@@ -460,7 +464,7 @@ def test_create_or_update_leads_read_only_preflight() -> None:
                 "lookup_field": "id",
             },
         )
-    except ValueError as exc:
+    except MarketoServiceError as exc:
         heterogeneous_refusal = str(exc)
     _assert(
         "heterogeneous refusal names every field",
@@ -578,11 +582,13 @@ def test_check_setup_all_pass() -> None:
     _assert("check_setup all-pass reads_verified", result["reads_verified"] is True)
     _assert("check_setup ran all 6 read probes", len(result["checks"]) == 6, str(result["checks"]))
     _assert(
-        "check_setup names the 27 unverified write verbs",
+        "check_setup names the 41 unverified write verbs",
         set(result["writes_unverified"])
         == {"create_or_update_leads", "delete_leads", "merge_leads", "add_leads_to_list", "remove_leads_from_list", "trigger_campaign", "add_named_account_list_members", "remove_named_account_list_members"}
         | {f"{operation}_{family}" for operation in ("sync", "delete") for family in ("companies", "opportunities", "opportunity_roles", "sales_persons", "named_accounts", "named_account_lists", "custom_objects")}
-        | {"create_asset_folder", "update_asset_folder", "delete_asset_folder", "set_asset_token", "delete_asset_token"},
+        | {"create_asset_folder", "update_asset_folder", "delete_asset_folder", "set_asset_token", "delete_asset_token"}
+        | {"create_asset_file", "update_asset_file_content", "import_leads", "import_custom_objects", "import_program_members"}
+        | {f"{operation}_bulk_{family}_extract" for operation in ("create", "enqueue", "cancel") for family in ("lead", "activity", "program_member")},
         str(result["writes_unverified"]),
     )
 
@@ -605,6 +611,7 @@ def test_check_setup_mixed_pass_fail() -> None:
         }
 
     client = MagicMock()
+
     client.get_json.side_effect = get_json_side_effect
     result = marketing_actions.check_setup(client)
     _assert("check_setup mixed reads_verified false", result["reads_verified"] is False)
@@ -903,6 +910,7 @@ def test_list_paging_fields_surfaced() -> None:
     _assert("list_campaigns has no more_result field — hidden by design", "more_result" not in result)
 
     lists_client = MagicMock()
+
     lists_client.get_json.side_effect = [
         {"success": True, "result": [{"id": 5}], "nextPageToken": "l-2", "moreResult": False},
         {"success": True, "result": [{"id": 6}], "nextPageToken": None, "moreResult": False},
@@ -951,7 +959,7 @@ def test_edge_parity() -> None:
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 58 verbs discovered", len(actions) == 58, str(len(actions)))
+    _assert("all 93 verbs discovered", len(actions) == 93, str(len(actions)))
     _assert("get_activities registered as a verb", "get_activities" in {a.name for a in actions})
     _assert(
         "list_activity_types registered as a verb",

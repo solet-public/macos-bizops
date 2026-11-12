@@ -171,7 +171,6 @@ ZUORA_QUERY_PAGE_ROW_CAP: Final[int] = 2000
 ZUORA_LIST_PAGE_SIZE_MAX: Final[int] = 40
 
 TSV_SUFFIX: Final[str] = ".tsv"
-CONFIG_KEY_EXPORT_ALLOWED_ROOTS: Final[str] = "export_allowed_roots"
 
 # ---------------------------------------------------------------------------
 # Override friction (§5) — required together or not at all; absent means the

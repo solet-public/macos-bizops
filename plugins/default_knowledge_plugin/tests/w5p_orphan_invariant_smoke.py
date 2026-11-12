@@ -21,12 +21,10 @@ Acceptance-criterion coverage (per W5.P design §4):
   #4 — no new transaction infrastructure; the primitive is the existing
        `state_service.transactional()` (provider self-binds psycopg
        autocommit=False); FK CASCADE is PG-native.
-  #5 — concurrent same-KB `update_kb` / `reindex_file` operations serialize
-       via the single-threaded ActionQueuePoller's one-at-a-time synchronous
-       EDGE dispatch (D3/kb GAP-6, 2026-06-21): the redundant per-KB
-       `pg_advisory_xact_lock(hashtext(name)::bigint)` was REMOVED; the single
-       remaining transactional() block (install-record UPDATE) stays for write
-       atomicity (the chunk-delete moved to the owner verb — SQL-lockdown cohort).
+  #5 — complete provider operations serialize through one reentrant activity
+       guard, including registered jobs, synchronous callers and startup
+       hydration. The legacy poller-only premise no longer holds once dispatch
+       returns a job. Existing typed install-record writes remain atomic.
   #6 — operator-fired `purge_orphaned_chunks` verb runs dry-run by
        default; `confirm=True` performs batched hard delete. The former
        companion `purge_orphan_vectors` was RETIRED (FORK C, 2026-06-22)
@@ -53,6 +51,15 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "default_knowledge_plugin" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
+
+# These optional source trees may be pruned by a shipped profile.
+for optional_source in (
+    "plugins/default_knowledge_plugin/src/default_knowledge_plugin",
+    "plugins/postgres_state_management_plugin/src/postgres_state_management_plugin",
+):
+    if not (REPO_ROOT / optional_source).is_dir():
+        print(f"ADVISORY optional provider source absent: {optional_source}; W5P fixture skipped")
+        raise SystemExit(77)
 
 from ananta.services.memory_service.schema import get_memory_schema  # noqa: E402
 from ananta.types.column_types import ColumnType  # noqa: E402
@@ -90,7 +97,9 @@ class _FakeTxn:
         self.executed.append((sql, list(params) if params else None))
 
     def fetch_all(
-        self, sql: str, params: list[Any] | None = None,
+        self,
+        sql: str,
+        params: list[Any] | None = None,
     ) -> list[dict[str, Any]]:
         self.executed.append((sql, list(params) if params else None))
         if self._fetch_responses:
@@ -117,7 +126,10 @@ class _FakeTxn:
         return f"{namespace}-fake"
 
     def update_state(
-        self, namespace: str, query: dict[str, Any], updates: dict[str, Any],
+        self,
+        namespace: str,
+        query: dict[str, Any],
+        updates: dict[str, Any],
     ) -> int:
         table = query.get("table")
         self.executed.append(
@@ -152,7 +164,9 @@ class _FakeStateService:
             raise
 
     def execute_sql(
-        self, sql_query: str, sql_params: list[Any] | None = None,
+        self,
+        sql_query: str,
+        sql_params: list[Any] | None = None,
     ) -> dict[str, Any]:
         self.executed_sql.append((sql_query, sql_params))
         if self.execute_sql_responses:
@@ -190,7 +204,9 @@ class _FakeMemoryService:
         return {"action_status": "completed", "data": {"deleted_count": len(ids)}}
 
     def get_memories_by_tag(
-        self, tag: str, include_archived: bool = False,
+        self,
+        tag: str,
+        include_archived: bool = False,
     ) -> dict[str, Any]:
         self.tag_queries.append(tag)
         self.tag_include_archived.append(include_archived)
@@ -206,8 +222,7 @@ class _FakeMemoryService:
 
 def smoke_criterion_1_spawn_purge_removed() -> None:
     print("\n[#1] Spawn-path purge removed from auto_install_knowledge_bases")
-    src = (REPO_ROOT / "plugins" / "default_knowledge_plugin" / "src"
-           / "default_knowledge_plugin" / "plugin.py").read_text()
+    src = (REPO_ROOT / "plugins" / "default_knowledge_plugin" / "src" / "default_knowledge_plugin" / "plugin.py").read_text()
     _check(
         "purge_orphaned_chunks(self._state_service, self._memory_service)" not in src,
         "plugin.py no longer auto-calls purge_orphaned_chunks on the spawn path",
@@ -218,7 +233,7 @@ def smoke_criterion_1_spawn_purge_removed() -> None:
         "_run_auto_install(" in src,
         "auto_install_knowledge_bases still invokes the install pass (_run_auto_install)",
     )
-    plugin_method_src = src[src.index("def auto_install_knowledge_bases"):]
+    plugin_method_src = src[src.index("def auto_install_knowledge_bases") :]
     plugin_method_src = plugin_method_src[: plugin_method_src.index("\n    async def ")]
     _check(
         "purge_orphaned_chunks(" not in plugin_method_src,
@@ -237,10 +252,17 @@ def smoke_criterion_2_atomic_rollback() -> None:
     memory = _FakeMemoryService()
     # Seed an install record so uninstall_kb finds it.
     state.read_state_responses.append(
-        {"data": {"records": [{
-            "name": "kb_x", "memory_ids": '["mem-1","mem-2","mem-3"]',
-            "source_type": "local",
-        }]}},
+        {
+            "data": {
+                "records": [
+                    {
+                        "name": "kb_x",
+                        "memory_ids": '["mem-1","mem-2","mem-3"]',
+                        "source_type": "local",
+                    }
+                ]
+            }
+        },
     )
     # Force the install-record-delete transaction body to raise so the rollback
     # path triggers. Per D4 (operator-locked 2026-06-21): the chunk delete
@@ -251,7 +273,10 @@ def smoke_criterion_2_atomic_rollback() -> None:
     state.raise_in_txn = RuntimeError("simulated mid-txn failure")
     try:
         kb_lifecycle.uninstall_kb(
-            "kb_x", remove_files=False, state_service=state, memory_service=memory,
+            "kb_x",
+            remove_files=False,
+            state_service=state,
+            memory_service=memory,
         )
     except RuntimeError:
         pass
@@ -278,8 +303,7 @@ def smoke_criterion_3_hard_delete() -> None:
     kb_indexing.delete_kb_chunks(["mem-a", "mem-b"], memory)
     _check(
         memory.deleted_id_batches == [["mem-a", "mem-b"]],
-        "delete_kb_chunks calls memory_service.delete_memories_by_ids(ids) "
-        "(owner verb; vector-first cascade subsumes the old kb-side vector call)",
+        "delete_kb_chunks calls memory_service.delete_memories_by_ids(ids) (owner verb; vector-first cascade subsumes the old kb-side vector call)",
     )
     empty = _FakeMemoryService()
     kb_indexing.delete_kb_chunks([], empty)
@@ -295,11 +319,16 @@ def smoke_criterion_3_hard_delete() -> None:
     per_file = _FakeMemoryService()
     kb_tag = kb_id_tag("kb_x")
     doc_tag = document_tag("a/b.md")
-    per_file.tag_responses.append({"memories": [
-        {"id": "mine-1", "tags": [kb_tag, doc_tag]},
-        {"id": "other-1", "tags": ["kb:other_kb", doc_tag]},
-        {"id": "mine-2", "tags": [kb_tag, doc_tag, "knowledge:official"]},
-    ], "count": 3})
+    per_file.tag_responses.append(
+        {
+            "memories": [
+                {"id": "mine-1", "tags": [kb_tag, doc_tag]},
+                {"id": "other-1", "tags": ["kb:other_kb", doc_tag]},
+                {"id": "mine-2", "tags": [kb_tag, doc_tag, "knowledge:official"]},
+            ],
+            "count": 3,
+        }
+    )
     deleted = kb_indexing.delete_kb_chunks_for_file("kb_x", "a/b.md", per_file)
     _check(
         per_file.tag_queries == [doc_tag],
@@ -320,13 +349,9 @@ def smoke_criterion_3_hard_delete() -> None:
 
     # Durable source-level tripwire: zero raw foreign-namespace SQL / txn-cursor
     # calls remain in kb_indexing.py (the SQL-lockdown migration this asserts).
-    src = (REPO_ROOT / "plugins" / "default_knowledge_plugin" / "src"
-           / "default_knowledge_plugin" / "kb_indexing.py").read_text()
+    src = (REPO_ROOT / "plugins" / "default_knowledge_plugin" / "src" / "default_knowledge_plugin" / "kb_indexing.py").read_text()
     _check(
-        "DELETE FROM actr_memory_plugin__memory" not in src
-        and "SELECT id FROM actr_memory_plugin__memory" not in src
-        and "txn.execute(" not in src
-        and "txn.fetch_all(" not in src,
+        "DELETE FROM actr_memory_plugin__memory" not in src and "SELECT id FROM actr_memory_plugin__memory" not in src and "txn.execute(" not in src and "txn.fetch_all(" not in src,
         "kb_indexing.py issues zero raw foreign-namespace SQL / txn-cursor calls (SQL-lockdown)",
     )
 
@@ -340,16 +365,14 @@ def smoke_criterion_4_existing_primitive() -> None:
     print("\n[#4] Implementation uses existing state_service.transactional()")
     # Verify the postgres plugin exposes `transactional()` as a context manager,
     # matching the design's "no new infra" claim.
-    pg_plugin_src = (REPO_ROOT / "plugins" / "postgres_state_management_plugin"
-                     / "src" / "postgres_state_management_plugin" / "plugin.py").read_text()
+    pg_plugin_src = (REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src" / "postgres_state_management_plugin" / "plugin.py").read_text()
     _check(
         "def transactional(" in pg_plugin_src and "@contextmanager" in pg_plugin_src,
         "postgres_state_management_plugin already exposes transactional() (no new infra)",
     )
     # And no new transaction wrapper was introduced in default_knowledge_plugin.
     dk_files = list(
-        (REPO_ROOT / "plugins" / "default_knowledge_plugin" / "src"
-         / "default_knowledge_plugin").rglob("*.py"),
+        (REPO_ROOT / "plugins" / "default_knowledge_plugin" / "src" / "default_knowledge_plugin").rglob("*.py"),
     )
     for path in dk_files:
         src = path.read_text()
@@ -360,15 +383,14 @@ def smoke_criterion_4_existing_primitive() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Smoke 5 — Criterion #5: per-KB serialization via serial EDGE dispatch
-# (D3/kb GAP-6, 2026-06-21: the redundant advisory lock was removed)
+# Smoke 5 — Criterion #5: complete operations share the provider guard
+# The parked registered/direct concurrency proof lives in the admission smoke.
 # ---------------------------------------------------------------------------
 
 
-def smoke_criterion_5_serial_dispatch_serialization() -> None:
-    print("\n[#5] per-KB update/reindex serialize via serial poller dispatch (no advisory lock)")
-    src_dir = (REPO_ROOT / "plugins" / "default_knowledge_plugin" / "src"
-               / "default_knowledge_plugin")
+def smoke_criterion_5_provider_serialization() -> None:
+    print("\n[#5] update/reindex share complete provider serialization (no advisory lock)")
+    src_dir = REPO_ROOT / "plugins" / "default_knowledge_plugin" / "src" / "default_knowledge_plugin"
     lifecycle_src = (src_dir / "kb_lifecycle.py").read_text()
     file_ops_src = (src_dir / "kb_file_ops.py").read_text()
 
@@ -391,27 +413,27 @@ def smoke_criterion_5_serial_dispatch_serialization() -> None:
     # mention `state_service.transactional()`, so a bare substring count would
     # over-count).
     txn_block = "with state_service.transactional() as txn:"
-    update_kb_src = lifecycle_src[lifecycle_src.index("def update_kb"):]
+    update_kb_src = lifecycle_src[lifecycle_src.index("def update_kb") :]
     update_kb_src = update_kb_src[: update_kb_src.index("\ndef ")]
     _check(
         update_kb_src.count(txn_block) == 1,
-        "update_kb retains ONLY the install-record UPDATE transactional() block "
-        "(chunk-delete moved to the owner verb — SQL-lockdown cohort)",
+        "update_kb retains ONLY the install-record UPDATE transactional() block (chunk-delete moved to the owner verb — SQL-lockdown cohort)",
     )
-    reindex_src = file_ops_src[file_ops_src.index("def reindex_file"):]
+    reindex_src = file_ops_src[file_ops_src.index("def reindex_file") :]
     reindex_src = reindex_src[: reindex_src.index("\ndef ")]
     _check(
         reindex_src.count(txn_block) == 1,
-        "reindex_file retains ONLY the install-record UPDATE transactional() block "
-        "(chunk-delete moved to the owner verb — SQL-lockdown cohort)",
+        "reindex_file retains ONLY the install-record UPDATE transactional() block (chunk-delete moved to the owner verb — SQL-lockdown cohort)",
     )
 
-    # The serial-dispatch dependency is documented as the durable tripwire
-    # (Dusk: "the tripwire comment IS the durable record").
-    _check(
-        "ActionQueuePoller" in update_kb_src and "TRIPWIRE" in update_kb_src,
-        "update_kb documents the serial-dispatch serialization + tripwire",
-    )
+    # Preserve the serialization tripwire for BOTH replacement leaves. The
+    # real caller smoke proves this premise while an actual deletion is parked;
+    # a green old-poller assertion cannot stand in for that behavioral proof.
+    for operation_source in (update_kb_src, reindex_src):
+        _check(
+            "reentrant activity guard" in operation_source and "synchronous" in operation_source and "startup hydration" in operation_source,
+            "replacement leaf documents the shared provider guard for synchronous/startup callers",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -441,12 +463,19 @@ def smoke_criterion_6_operator_verbs() -> None:
         {"data": {"records": [{"memory_ids": '["mem-active1","mem-active2"]'}]}},
     )
     memory.tag_responses.append(
-        {"memories": [
-            {"id": "mem-active1"}, {"id": "mem-orphan1"}, {"id": "mem-orphan2"},
-        ], "count": 3},
+        {
+            "memories": [
+                {"id": "mem-active1"},
+                {"id": "mem-orphan1"},
+                {"id": "mem-orphan2"},
+            ],
+            "count": 3,
+        },
     )
     result = kb_lifecycle.purge_orphaned_chunks(
-        state, memory, confirm=False,
+        state,
+        memory,
+        confirm=False,
     )
     _check(
         result["status"] == "dry_run",
@@ -486,7 +515,10 @@ def smoke_criterion_6_operator_verbs() -> None:
         {"memories": [{"id": "mem-active1"}, {"id": "mem-orphan1"}], "count": 2},
     )
     result = kb_lifecycle.purge_orphaned_chunks(
-        state, memory, confirm=True, batch_size=10,
+        state,
+        memory,
+        confirm=True,
+        batch_size=10,
     )
     _check(
         result["status"] == "completed" and result["orphan_count"] == 1,
@@ -575,7 +607,7 @@ def main() -> int:
     smoke_criterion_2_atomic_rollback()
     smoke_criterion_3_hard_delete()
     smoke_criterion_4_existing_primitive()
-    smoke_criterion_5_serial_dispatch_serialization()
+    smoke_criterion_5_provider_serialization()
     smoke_criterion_6_operator_verbs()
     smoke_fk_column_definition_emit()
     smoke_fk_memory_schema_cascade()

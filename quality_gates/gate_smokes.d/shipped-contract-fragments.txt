@@ -27,4 +27,3 @@
 # prune predicate, the duplicate-entry refusal, the unreadable-fragment advisory,
 # the union digest behind toolchain.contract_hash, and parity between the plugin's
 # fragment reader and quality_gates/gate_smoke_register.py. Offline, hermetic.
-quality_gates/tests/shipped_contract_fragment_union_smoke.py

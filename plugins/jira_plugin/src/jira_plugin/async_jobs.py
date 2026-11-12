@@ -40,17 +40,32 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from ananta.constants import CONTEXT_KEY_FLOW_ID, CONTEXT_KEY_SESSION_ID
+from ananta.core.actions.action_metadata import ParameterMetadata, ParameterType, ReturnValueSchema
 
-from . import comment_actions, completion_templates, issue_actions
+from . import attachment_actions, comment_actions, completion_templates, issue_actions
 from .constants import ERROR_API_ERROR, PLUGIN_NAME
+from .families import execute
+from .family_processes import FAMILY_NAMES
+from .site_context import CURRENT_SITE
 
 if TYPE_CHECKING:
     from .plugin import JiraPlugin
 
 logger = logging.getLogger(PLUGIN_NAME)
 
+JOB_RETURN_SCHEMA = ReturnValueSchema(
+    type=ParameterType.OBJECT,
+    description="Queued job receipt; job.result contains the former response envelope.",
+    properties={
+        "job_id": ParameterMetadata(type=ParameterType.STRING, required=True),
+        "status": ParameterMetadata(type=ParameterType.STRING, required=True),
+    },
+)
+
 POLL_INTERVAL_SECONDS = 2.0
 _JOB_LIST_LIMIT = 10
+_ATTACHMENT_NAMES = ("add_attachment", "download_attachment")
+
 
 def _test_connection(client: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Fetch the authenticated account to confirm connectivity + credentials.
@@ -119,7 +134,10 @@ def ensure_worker_started(plugin: JiraPlugin) -> None:
         if plugin._worker_thread is not None and plugin._worker_thread.is_alive():
             return
         thread = threading.Thread(
-            target=_worker_loop, args=(plugin,), name=f"{PLUGIN_NAME}-async-worker", daemon=True,
+            target=_worker_loop,
+            args=(plugin,),
+            name=f"{PLUGIN_NAME}-async-worker",
+            daemon=True,
         )
         plugin._worker_thread = thread
         thread.start()
@@ -157,13 +175,13 @@ def _worker_loop(plugin: JiraPlugin) -> None:
         try:
             _drain_queued_jobs(plugin)
         except Exception:  # the loop must never die — a bad pass still yields the next one
-            logger.exception("%s async worker: drain pass failed", PLUGIN_NAME)
+            logger.warning("%s async worker: drain pass failed; exception details suppressed", PLUGIN_NAME)
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
 def _drain_queued_jobs(plugin: JiraPlugin) -> None:
     async_job_manager = _acquire_async_job_manager(plugin)
-    for action_name in ACTION_HANDLERS:
+    for action_name in (*ACTION_HANDLERS, *FAMILY_NAMES, *_ATTACHMENT_NAMES):
         listing = async_job_manager.list_jobs(
             status="queued",
             provider_name=f"{PLUGIN_NAME}.{action_name}",
@@ -178,14 +196,32 @@ def _drain_queued_jobs(plugin: JiraPlugin) -> None:
                 _process_job(plugin, async_job_manager, job_id, action_name)
 
 
+def _publish_job(plugin: JiraPlugin, manager: Any, job_id: str, row: dict[str, Any]) -> None:
+    """Publish finished content as received."""
+    manager.update_job(job_id, dict(row))
+
+
 def _process_job(
-    plugin: JiraPlugin, async_job_manager: Any, job_id: str, action_name: str,
+    plugin: JiraPlugin,
+    async_job_manager: Any,
+    job_id: str,
+    action_name: str,
 ) -> None:
     """Run one job's real Jira I/O and complete it. Runs on the ONE worker thread only."""
-    async_job_manager.update_job(job_id, {"status": "processing"})
+    try:
+        _complete_job(plugin, async_job_manager, job_id, action_name)
+    except Exception:  # noqa: BLE001 — raw request/vendor parsing must never enter the job ledger
+        _publish_job(plugin, async_job_manager, job_id, {"status": "error", "error": {"code": ERROR_API_ERROR, "message": "Jira job failed; exception details suppressed."}})
+
+
+def _complete_job(plugin: JiraPlugin, async_job_manager: Any, job_id: str, action_name: str) -> None:
+    """Interpret the raw job envelope before publishing the sanitized outcome."""
+    _publish_job(plugin, async_job_manager, job_id, {"status": "processing"})
     payload_result = async_job_manager.get_job_payload(job_id, "request")
     if payload_result.get("action_status") != "completed":
-        async_job_manager.update_job(
+        _publish_job(
+            plugin,
+            async_job_manager,
             job_id,
             {
                 "status": "error",
@@ -197,9 +233,31 @@ def _process_job(
         )
         return
     params = payload_result.get("data", {}).get("payload", {})
-    action_fn = ACTION_HANDLERS[action_name]
-    outcome = plugin._run(lambda: action_fn(plugin._require_client(), params), action_name)
-    if outcome.get("action_status") == "completed":
-        async_job_manager.update_job(job_id, {"status": "completed", "result": outcome.get("data", {})})
+    if action_name in _ATTACHMENT_NAMES:
+        outcome = plugin._run_for_site(params, lambda: _attachment_data(plugin, action_name, params), action_name)
+        updates: dict[str, Any] = {"status": "completed" if outcome.get("action_status") == "completed" else "error", "result": outcome}
+        if outcome.get("error"):
+            updates["error"] = outcome["error"]
+        _publish_job(plugin, async_job_manager, job_id, updates)
+        return
+    if action_name in FAMILY_NAMES:
+        outcome = plugin._run_for_site(
+            params,
+            lambda: execute(plugin._require_sites(), CURRENT_SITE.get(), action_name, params),
+            action_name,
+        )
     else:
-        async_job_manager.update_job(job_id, {"status": "error", "error": outcome.get("error", {})})
+        action_fn = ACTION_HANDLERS[action_name]
+        outcome = plugin._run_for_site(params, lambda: action_fn(plugin._require_client(), params), action_name)
+    if outcome.get("action_status") == "completed":
+        _publish_job(plugin, async_job_manager, job_id, {"status": "completed", "result": outcome.get("data", {})})
+    else:
+        _publish_job(plugin, async_job_manager, job_id, {"status": "error", "error": outcome.get("error", {})})
+
+
+def _attachment_data(plugin: JiraPlugin, action_name: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Keep attachment byte loading, Jira I/O and blob publication on this worker."""
+    client = plugin._require_client()
+    if action_name == "add_attachment":
+        return attachment_actions.add_attachment(client, params, plugin._load_attachment)
+    return attachment_actions.download_attachment(client, params, plugin._store_blob)

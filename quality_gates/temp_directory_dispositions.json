@@ -1,0 +1,188 @@
+[
+  {
+    "path": "ananta/src/ananta/file_locations/no_link_stat.py",
+    "function": "_self_check",
+    "prefix": "<default>",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "deployment/scripts/codex_coordination_hooks_safe_install.py",
+    "function": "safe_install",
+    "prefix": "'codex-hooks-cache-snapshot-'",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/agent_messaging_plugin/src/agent_messaging_plugin/lane_worktree_preservation.py",
+    "function": "_rebuilt_index",
+    "prefix": "'lane-custody-index-'",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/audio_processing_plugin/src/audio_processing_plugin/blob_io.py",
+    "function": "save_audio_to_blob",
+    "prefix": "<default>",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/audio_processing_plugin/src/audio_processing_plugin/ffmpeg_filters.py",
+    "function": "run_ffmpeg_filter_in_temp_dir",
+    "prefix": "<default>",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/audio_processing_plugin/src/audio_processing_plugin/plugin.py",
+    "function": "AudioProcessingPlugin.concatenate_audio",
+    "prefix": "<default>",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/audio_processing_plugin/src/audio_processing_plugin/plugin.py",
+    "function": "AudioProcessingPlugin.execute_ffmpeg",
+    "prefix": "<default>",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/audio_processing_plugin/src/audio_processing_plugin/sidechain.py",
+    "function": "run_convolution_reverb",
+    "prefix": "<default>",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/audio_processing_plugin/src/audio_processing_plugin/swatch_io.py",
+    "function": "_transcode_or_copy",
+    "prefix": "<default>",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/audio_separation_plugin/src/audio_separation_plugin/separation.py",
+    "function": "separate_sources",
+    "prefix": "<default>",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/code_vetting_plugin/src/code_vetting_plugin/scanners/secrets.py",
+    "function": "_tracked_snapshot",
+    "prefix": "'vetting_snap_'",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/coreai_embeddings_plugin/src/coreai_embeddings_plugin/assets/acquisition.py",
+    "function": "acquire_asset",
+    "prefix": "f'.{ASSET_DIRECTORY}.staging-'",
+    "reason": "Context-managed staging sibling of its destination, removed at scope exit."
+  },
+  {
+    "path": "plugins/cosyvoice2_tts_plugin/src/cosyvoice2_tts_plugin/plugin.py",
+    "function": "CosyVoice2TTSPlugin._process_job",
+    "prefix": "'cosyvoice2_'",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/external_postgres_plugin/src/external_postgres_plugin/client_tools.py",
+    "function": "_password_file",
+    "prefix": "'epg_pass_'",
+    "reason": "Removed in finally; lifecycle only; secret handling at this site is under the secrets-flow design (rul_e9a942a3 clause 22), not judged here."
+  },
+  {
+    "path": "plugins/generative_composition_plugin/src/generative_composition_plugin/baroque_post_processing.py",
+    "function": "combine_voices_to_midi",
+    "prefix": "<default>",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/macos_midwife_plugin/src/macos_midwife_plugin/clone_copy.py",
+    "function": "resolve_source",
+    "prefix": "'macos_midwife_clone_'",
+    "reason": "Owned shallow-clone parent removed by source_scope after the birther copies, including failure paths; no register on birthing host."
+  },
+  {
+    "path": "plugins/musical_synthesis_plugin/src/musical_synthesis_plugin/blob_helpers.py",
+    "function": "save_audio_to_blob",
+    "prefix": "<default>",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/musical_synthesis_plugin/src/musical_synthesis_plugin/score_renderer.py",
+    "function": "abc_to_midi_bytes_via_abc2midi",
+    "prefix": "<default>",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/musical_synthesis_plugin/src/musical_synthesis_plugin/score_renderer.py",
+    "function": "render_score_to_blob",
+    "prefix": "<default>",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/pedalboard_effects_plugin/src/pedalboard_effects_plugin/blob_io.py",
+    "function": "save_audio_to_blob",
+    "prefix": "<default>",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/platform_dev_surface_plugin/src/platform_dev_surface_plugin/quality/landing_verify.py",
+    "function": "_merge_file",
+    "prefix": "'gc_landing_verify_'",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/platform_dev_surface_plugin/src/platform_dev_surface_plugin/quality/operations.py",
+    "function": "QualityOperations.run_test",
+    "prefix": "<default>",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "plugins/seed_factory_plugin/src/seed_factory_plugin/assemble.py",
+    "function": "_ref_policy_paths",
+    "prefix": "'seed-ref-policy-'",
+    "reason": "Context-managed staging nested under the active release-run work folder, removed at scope exit."
+  },
+  {
+    "path": "plugins/seed_factory_plugin/src/seed_factory_plugin/assemble.py",
+    "function": "_ref_resolution_inputs",
+    "prefix": "'seed-ref-resolution-'",
+    "reason": "Context-managed staging nested under the active release-run work folder, removed at scope exit."
+  },
+  {
+    "path": "plugins/seed_factory_plugin/src/seed_factory_plugin/public_acts.py",
+    "function": "_Acts.scratch",
+    "prefix": "f'{label}-'",
+    "reason": "Nested under the active release-run folder; standalone is process-bound regenerable (WF7 f1c4c99e)."
+  },
+  {
+    "path": "plugins/snowflake_plugin/src/snowflake_plugin/stage_files.py",
+    "function": "_transfer",
+    "prefix": "'.snowflake-get-'",
+    "reason": "Context-managed staging sibling of its destination, removed at scope exit."
+  },
+  {
+    "path": "quality_gates/born_clone_target_runtime_venv_proof.py",
+    "function": "main",
+    "prefix": "'birth6-target-runtime-'",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "quality_gates/candidate_tree.py",
+    "function": "build_candidate_tree",
+    "prefix": "'candidate-tree-'",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "quality_gates/candidate_tree.py",
+    "function": "build_staged_tree",
+    "prefix": "'staged-tree-'",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "quality_gates/pyright_repo.py",
+    "function": "selected_config",
+    "prefix": "'pyright-selected-tests-'",
+    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
+  },
+  {
+    "path": "quality_gates/run_smokes_scratch.py",
+    "function": "BatteryRuntime._allocate",
+    "prefix": "'b-'",
+    "reason": "Registered process-bound smoke-battery folder; close_root and the native sweeper own lifecycle."
+  }
+]

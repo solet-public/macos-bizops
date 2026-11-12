@@ -111,6 +111,9 @@ behaviour below, and deleting the hook supplied no replacement mechanism.
 |---|---|---|---|
 | Git mutation ban | A mutating `git` command in a `Bash` tool call from any session whose launcher-owned `AGENT_ROLE` was not the role named in `GIT_CONTROLLER_NAME`. Armed only when that variable was exported; fail-open when unset. | No | None in this plugin. Git control among sessions sharing a directory is the repository's own responsibility (`rul_d8893e33`). |
 | Agent and Task spawn ban | Never enforced by the Codex copy: it routed only `PreToolUse` with `tool_name == "Bash"`, and native edit and delegation tools stayed unrouted. | No (it never was) | None. |
+| Bash-level `.git/` mutation block | A `Bash` command whose file-mutating command or redirect named the repository's own `.git/` directory, from any session whose `AGENT_ROLE` was not the named controller role. | No | None. |
+| Inline `git -c` and global-option bans | From any session whose `AGENT_ROLE` was not the named controller role: `git -c` setting `commit.gpgsign`, `core.hooksPath`, `gc.auto`, or an `alias.` whose value starts with `!`, and the global options `--git-dir` and `--work-tree`. | No | None. |
+| `--no-verify` ban and the operator-confirmation prefix | `--no-verify` on any git command from any other session. The named controller role could run `--no-verify`, a force-push, `reset --hard`, `clean -fd`, a rebase, a branch deletion or a path-discarding `checkout --` / `restore` only with a `GIT_CONTROLLER_OPERATOR_CONFIRMATION=<id>` prefix on that one git command. | No | None. No hook asks for, reads or checks that prefix. |
 | Git beside a shell evaluator word or an untokenisable construct | A `Bash` command naming `git` that the shared policy could not safely inspect, refused fail-closed. The origin repository's own gate (`64e9810fb`, never shipped) additionally refused `git` beside a shell evaluator word (`bash`, `sh`, `zsh`, `dash`, `ksh`, `fish`, `eval`, `source`, `exec`) or an unreadable shell construct, for every role. | No | None. A command of this shape is no longer refused or flagged by any hook. |
 
 `GIT_CONTROLLER_NAME` and `AGENT_ROLE` are still exported by the Codex launcher,
@@ -147,8 +150,8 @@ seed integration or for the later installed-cache equality proof.
 
 ## Update/cachebuster procedure
 
-Only the live Git-Controller may mutate files in the shared solet checkout. For a
-reviewed local development update, that session runs the Codex plugin-creator
+Follow the repository's own git rules for its shared checkout. For a
+reviewed local development update, the session doing the update runs the Codex plugin-creator
 cachebuster helper against this plugin, reviews the resulting single version
 suffix, and reinstalls from the existing marketplace:
 

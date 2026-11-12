@@ -1,0 +1,2 @@
+# Result read follows born-async job receipts.
+plugins/agent_messaging_plugin/tests/process_result_job_follow_smoke.py

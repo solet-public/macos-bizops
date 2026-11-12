@@ -1,0 +1,4 @@
+# Multipart Files/images and complete Bulk Import/Extract job transcripts.
+plugins/marketo_plugin/tests/bulk_file_smoke.py
+# Generic request is a direct consumer of the shared multipart client.
+plugins/marketo_plugin/tests/test_request.py

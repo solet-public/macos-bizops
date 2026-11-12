@@ -760,11 +760,13 @@ Hooks run as the same OS user as the Claude Code session that invokes them.
 There is **no privilege boundary** here to defend, and the plugin claims
 none. Its reminders, wake waiter, liveness and rotation hooks, memory-passthrough
 utilities and headless tool-allowlist gate are steering and bookkeeping, not a
-git-mutation control. The git-text gate retired in `0.9.0` (operator ruling
+git-mutation control. The git-text gate removed in `0.9.0` (operator ruling
 `rul_e71e43be`) is inventoried in `README.md` under *Retired behaviours*: its
-git-mutation ban, its `Agent`/`Task` spawn ban and its refusal of `git` beside a
-shell evaluator word or an untokenisable construct are all unenforced, and no
-control in this plugin replaces any of them.
+git-mutation ban, its `Agent`/`Task` spawn ban, its Bash-level `.git/` block,
+its inline `git -c` and global-option bans, its `--no-verify` ban with the
+operator-confirmation prefix, and its refusal of `git` beside a shell evaluator
+word or an untokenisable construct are all unenforced, and no control in this
+plugin replaces any of them.
 
 ## Failure modes
 

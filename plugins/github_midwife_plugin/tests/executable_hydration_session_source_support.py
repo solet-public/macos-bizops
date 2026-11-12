@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from ananta.llm.session_ledger.root_uri import canonicalize_root_uri_for_storage
+from github_midwife_plugin.setup_adapter_contract import AdapterRequest
+from github_midwife_plugin.setup_adapter_runtime import CommandOutcome
 
 
 def run_session_source_boot_registration_regression(
@@ -39,6 +41,7 @@ def run_session_source_boot_registration_regression(
         "call",
         "service_interface::session_ledger_service::list_sources",
         "{}",
+        "--wait",
     )
     runtime = fake_runtime(target.parent / "session-source-boot")
     runtime.responses[health_command] = healthy_outcome
@@ -121,6 +124,7 @@ def run_session_source_boot_registration_regression(
         "call",
         "service_interface::session_ledger_service::poll_source",
         json.dumps({"source_id": "source-boot"}, separators=(",", ":")),
+        "--wait",
     )
     runtime.responses[poll_command] = command_outcome(
         0,
@@ -177,6 +181,7 @@ def run_router_and_qualification_regressions(
         "call",
         "service_interface::local_self_deployment_service::swap_status",
         "{}",
+        "--wait",
     )
 
     def router_result(status: dict[str, Any], *, nested: bool = False) -> dict[str, Any]:
@@ -336,6 +341,7 @@ def run_router_and_qualification_regressions(
         "call",
         "plugin::agent_messaging_plugin::peer_identity",
         "{}",
+        "--wait",
     )
     runtime.responses[peer_command] = command_outcome(
         0,
@@ -419,6 +425,7 @@ def run_router_and_qualification_regressions(
             "call",
             "service_interface::knowledge_service::search",
             '{"query":"session start orientation","top_k":1}',
+            "--wait",
         )
     ] = command_outcome(0, False, 1, '{"result":{"data":{"count":0,"results":[]}}}', "")
     failed_kb = dispatch_request(kb, runtime)
@@ -532,3 +539,43 @@ def _router_transport_regression(
         unavailable["error_kind"] == "router_transport_503" and unavailable["evidence"][0]["observed"] == "router_transport_503",
         "router public-port 503 is distinct from a null active binding",
     )
+
+
+def run_bridge_job_readback_checks(target: Path, runtime: Any, request: AdapterRequest) -> None:
+    """Both setup and doctor consume real worker payloads, never admission."""
+    from github_midwife_plugin import installation_doctor as doctor
+    from github_midwife_plugin import setup_operations as setup
+
+    key = "service_interface::session_ledger_service::list_sources"
+    vector = (str(target / ".venv/bin/solet-bridge"), "call", key, "{}")
+    receipt = {"status": "completed", "result": {"success": True, "data": {"job_id": "job-source", "status": "queued"}}}
+    job: dict[str, Any] = {"id": "job-source", "status": "completed", "error": None, "result": {"sources": [{"source_id": "source-final"}]}}
+
+    def configure() -> None:
+        runtime.responses[vector] = CommandOutcome(0, False, 1, json.dumps(receipt), "")
+        runtime.responses[(*vector, "--wait")] = CommandOutcome(0, False, 1, json.dumps(job), "")
+
+    configure()
+    outcome = setup.solet_call(request, runtime, key, {})
+    assert setup._solet_success_payload(outcome) == job["result"], "setup must await the final source list, not admission"
+    job["result"] = {"action_status": "completed", "error": None, "data": {"router_status": {"active_instance_id": "solet-blue-final"}}}
+    configure()
+    outcome = doctor._solet_call(request, runtime, key, {})
+    assert doctor._merged_call_payload(outcome) == job["result"]["data"], "doctor must decode final owner data"
+    assert doctor._call_payload(outcome) == job["result"]["data"], "nested owner data remains available to plugin probes"
+    for status in ("error", "cancelled", "processing"):
+        job["status"] = status
+        configure()
+        outcome = setup.solet_call(request, runtime, key, {})
+        assert not setup.solet_call_succeeded(outcome), f"setup accepted {status} job"
+        assert not doctor._call_succeeded(outcome), f"doctor accepted {status} job"
+    job.update(status="completed", error={"message": "worker failed"})
+    configure()
+    outcome = doctor._solet_call(request, runtime, key, {})
+    assert not setup.solet_call_succeeded(outcome) and not doctor._call_succeeded(outcome), "failed job is never a successful probe"
+    job.update(error=None, result={"action_status": "error", "error": {"message": "action failed"}})
+    configure()
+    outcome = doctor._solet_call(request, runtime, key, {})
+    assert not setup.solet_call_succeeded(outcome) and not doctor._call_succeeded(outcome), "failed original action is never a successful probe"
+    timed_out = CommandOutcome(0, True, 1, json.dumps(receipt), "job timed out")
+    assert not setup.solet_call_succeeded(timed_out) and not doctor._call_succeeded(timed_out), "CLI job timeout is never success"

@@ -257,9 +257,9 @@ class CustomObjectProcesses:
     @platform_process(
         name="upload_custom_object_job_file",
         display_name="Zuora: Upload Custom Object Bulk Job File",
-        description="Upload the one .csv file of a pending custom object bulk job (POST /objects/jobs/{id}/files) from input_path under export_allowed_roots; the job starts when the upload finishes." + QUEUED_NOTE,
+        description="Upload the one .csv file of a pending custom object bulk job (POST /objects/jobs/{id}/files) from input_path under registered path addresses; the job starts when the upload finishes." + QUEUED_NOTE,
         processor_policy_category=EDGE,
-        parameters={"job_id": JOB_ID, "input_path": text("Absolute path of the .csv file under an export_allowed_roots entry; an id column is required for updates.", required=True), **V1_HEADER_PARAMS},
+        parameters={"job_id": JOB_ID, "input_path": text("Absolute path of the .csv file under a registered path address; an id column is required for updates.", required=True), **V1_HEADER_PARAMS},
         return_value_schema=QUEUED,
         error_processor_customizations=WRITE,
         context_handling=NONE,

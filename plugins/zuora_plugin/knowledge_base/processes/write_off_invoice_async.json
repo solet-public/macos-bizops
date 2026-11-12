@@ -6,8 +6,8 @@
   "result_processor_customizations": {
     "action_label": "Zuora invoice async written off",
     "result_type": "zuora_write_off_invoice_async_result",
-    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
-    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body as received).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically."
   },
   "error_processor_customizations": {
     "action_context": "Write off a large posted invoice as a Zuora job (POST /v1/invoices/{invoiceKey}/write-off-async); read the job with get_invoice_write_off_async_job. Same body as write_off_invoice.",

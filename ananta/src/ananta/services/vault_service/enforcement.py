@@ -35,8 +35,12 @@ Reference:
 
 from __future__ import annotations
 
+import re
+import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 from functools import wraps
+from weakref import WeakKeyDictionary
 
 from ananta.core.services.call_context import (
     CallContext,
@@ -81,13 +85,13 @@ def enforce_namespace(key: str, ctx: CallContext | None) -> None:
         )
     if parts[1] != ctx.calling_plugin:
         raise VaultAccessDeniedError(
-            f"plugin {ctx.calling_plugin!r} cannot access key in "
-            f"namespace {parts[1]!r}",
+            f"plugin {ctx.calling_plugin!r} cannot access key in namespace {parts[1]!r}",
         )
 
 
 def assert_operator_principal(
-    ctx: CallContext | None, method_name: str,
+    ctx: CallContext | None,
+    method_name: str,
 ) -> None:
     """Authorize an operator-only vault method call.
 
@@ -135,3 +139,68 @@ __all__ = [
     "enforce_namespace",
     "requires_operator_principal",
 ]
+
+
+_PROVIDER_LOCKS: WeakKeyDictionary[object, threading.RLock] = WeakKeyDictionary()
+_PROVIDER_LOCKS_GUARD = threading.Lock()
+
+
+def serialized_vault_operation[T](operation: Callable[..., T]) -> Callable[..., T]:
+    """One reentrant provider guard for jobs and full-result internal calls.
+
+    Weak ownership also covers early caller-bound startup access, before a
+    provider's readiness initialization. No worker or durable queue is added.
+    Nested S1 use/metadata calls stay on the same thread and acquire the same
+    RLock. The entry and its complete composition remain one critical section.
+    """
+
+    @wraps(operation)
+    def run(provider: object, *args: object, **kwargs: object) -> T:
+        with _PROVIDER_LOCKS_GUARD:
+            lock = _PROVIDER_LOCKS.setdefault(provider, threading.RLock())
+        with lock:
+            return operation(provider, *args, **kwargs)
+
+    return run
+
+
+def _public_vault_failure(code: str) -> dict[str, object]:
+    timestamp = datetime.now(UTC).isoformat()
+    return {
+        "action_status": "error",
+        "data": {},
+        "actions": [],
+        "error": {"type": "VaultError", "code": code, "message": "Vault operation failed; inspect its public state before retrying.", "severity": "error", "timestamp": timestamp},
+        "timestamp": timestamp,
+    }
+
+
+def _public_vault_error_code(error: object) -> str:
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, str) and re.fullmatch(r"vault\.[a-z_]{1,64}", code) else "vault.operation_failed"
+
+
+def public_vault_outcome(operation: Callable[[], dict[str, object]]) -> dict[str, object]:
+    """Project failures before the generic job owner can persist or log them.
+
+    Provider/authentication exceptions and failed envelopes can contain an
+    operand or a decoded credential. Only an existing bounded vault error code
+    survives; messages, details and failure data never cross into a job. The
+    provider's successful public outcomes remain intact. Internal migration
+    retrieval never enters this adapter or a session registration.
+    """
+    try:
+        outcome = operation()
+    except VaultAccessDeniedError:
+        return _public_vault_failure("vault.access_denied")
+    except VaultKeyMalformedError:
+        return _public_vault_failure("vault.key_malformed")
+    except Exception:
+        return _public_vault_failure("vault.operation_failed")
+    error = outcome.get("error")
+    if error or outcome.get("action_status") in {"error", "failed"}:
+        return _public_vault_failure(_public_vault_error_code(error))
+    data = outcome.get("data")
+    if isinstance(data, dict) and data.get("authenticated") is False:
+        return {**outcome, "data": {"authenticated": False, "reason": "Invalid passphrase", "message": "Authentication failed"}}
+    return outcome

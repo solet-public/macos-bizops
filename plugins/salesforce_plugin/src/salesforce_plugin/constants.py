@@ -85,12 +85,10 @@ SOQL_MAX_RECORDS_CAP: Final[int] = 1000
 SOQL_EXPORT_ROW_CAP: Final[int] = 50_000
 TSV_SUFFIX: Final[str] = ".tsv"
 CSV_SUFFIX: Final[str] = ".csv"
-CONFIG_KEY_EXPORT_ALLOWED_ROOTS: Final[str] = "export_allowed_roots"
 # Bulk v2 ingest input containment — the read-side mirror of
-# export_allowed_roots (refuse-all default; realpath+commonpath containment
-# via import_containment.py). See knowledge_base/01_salesforce_overview.md
+# the same live path addresses as exports (realpath containment
+# via ananta.file_locations.containment). See knowledge_base/01_salesforce_overview.md
 # "Bulk v2 ingest" section for the full posture.
-CONFIG_KEY_IMPORT_ALLOWED_ROOTS: Final[str] = "import_allowed_roots"
 
 # ---------------------------------------------------------------------------
 # Bulk v2 ingest — the vendor's full operation set. hardDelete bypasses the
@@ -160,3 +158,5 @@ RESULT_TYPE_REPORTS: Final[str] = "salesforce_reports_result"
 RESULT_TYPE_DASHBOARDS: Final[str] = "salesforce_dashboards_result"
 RESULT_TYPE_REST_RESOURCES: Final[str] = "salesforce_rest_resources_result"
 RESULT_TYPE_ACTIONS: Final[str] = "salesforce_actions_result"
+RESULT_TYPE_METADATA: Final[str] = "salesforce_metadata_result"
+RESULT_TYPE_CONTENT_FILES: Final[str] = "salesforce_content_files_result"

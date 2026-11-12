@@ -1,0 +1,6 @@
+# Fragment of the gate-smoke register for the Google Calendar build
+# (frq_f6cb6658 / iss_3d1db44e, unt_bd13e942). Hermetic unittest module: the
+# real google-api-python-client builds each of the 38 Calendar API v3 requests
+# and googleapiclient's HttpMockSequence records them and answers with
+# vendor-shaped transcripts; no live Google, no network, no background thread.
+plugins/g_suite_plugin/tests/smoke_calendar.py

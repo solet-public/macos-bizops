@@ -391,7 +391,6 @@ def _prepare(
             "embeddings_implementation": "lm_studio",
             "inference_implementation": inference_implementation,
             "execution_topology": "solo",
-            "git_mutation_control": "single_session",
             "session_sources": [],
         },
         decision_sources={
@@ -399,7 +398,6 @@ def _prepare(
             "embeddings_implementation": "config",
             "inference_implementation": "config",
             "execution_topology": "config",
-            "git_mutation_control": "config",
             "session_sources": "config",
         },
     )

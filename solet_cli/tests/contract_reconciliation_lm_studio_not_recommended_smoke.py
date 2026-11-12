@@ -12,11 +12,14 @@ from __future__ import annotations
 
 # ruff: noqa: E402
 import json
+import runpy
 import sys
 import tempfile
 import uuid
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import cast
+from unittest.mock import patch
 
 _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT / "solet_cli" / "src") not in sys.path:
@@ -414,7 +417,7 @@ def _check_git_control_revision(destination: ContractBundle, declarations: tuple
     fixture = _SOURCE_FIXTURE.with_name(digest.removeprefix("sha256:"))
     catalog = json.loads((_ROOT / "solet_cli/release_contracts/stable_predecessor_contracts.v1.json").read_text())
     revisions = [row["flow_source_revision"] for row in catalog["supported_predecessor_contracts"] if row["flow_contract_digest"] == digest]
-    _check("four supported seeds record the prior contract", len(revisions) == 4)
+    _check("five supported seeds record the prior contract", len(revisions) == 5)
     for revision in revisions:
         source = ContractBundle.load(source_revision=revision, directory=fixture, expected_digest=digest)
         _check_git_control_bridge(source, destination, declarations)
@@ -433,7 +436,7 @@ def _check_git_control_revision(destination: ContractBundle, declarations: tuple
         _check("an unknown prior-contract revision retains the existing integrity refusal", False)
 
 
-def main() -> int:
+def _historical_main() -> int:
     source = ContractBundle.load(source_revision=_LIVE_STABLE_REVISION, directory=_SOURCE_FIXTURE, expected_digest=_SOURCE_DIGEST)
     destination = ContractBundle.load(source_revision=_LIVE_STABLE_REVISION, directory=_CONTRACTS)
     _check(
@@ -449,6 +452,15 @@ def main() -> int:
     _check_git_control_revision(destination, declarations)
     print(f"contract_reconciliation_lm_studio_not_recommended_smoke OK: {len(_CHECKS)} checks passed")
     return 0
+
+
+def main() -> int:
+    """Keep the historical bridge's preceding contract byte-identical."""
+    support = runpy.run_path(str(_ROOT / "plugins/github_midwife_plugin/tests/controller_setting_retirement_smoke.py"))
+    with TemporaryDirectory(prefix="historical-controller-contract-") as directory:
+        contracts = support["materialize_pre_retirement_contracts"](Path(directory))
+        with patch.dict(globals(), {"_CONTRACTS": contracts}):
+            return _historical_main()
 
 
 if __name__ == "__main__":

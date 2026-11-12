@@ -1,7 +1,7 @@
 {
   "process_key": "plugin::jira_plugin::add_comment",
   "display_name": "Jira: Add Comment",
-  "description": "Add a plain-text comment to a Jira issue. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the comment being posted; the new comment id is delivered when the job completes. Write action.",
+  "description": "Add a plain-text comment to a Jira issue. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) -- the dispatch returning is NOT the same as the comment being posted; the new comment id is delivered when the job completes. Write action. Optional site selects a bound Atlassian site; omitted uses the default. Queued and completed results identify the site.",
   "embedding_description": "Post a plain-text comment onto an existing Jira issue's comment thread - a status note, a question, a hand-off message - by giving the issue key and the comment body. Dispatches asynchronously, returning a job_id immediately; the new comment's id arrives via job completion. The write side of a ticket's discussion thread.",
   "result_processor_customizations": {
     "action_label": "Jira comment post queued",

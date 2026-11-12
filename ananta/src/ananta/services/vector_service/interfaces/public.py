@@ -12,6 +12,7 @@ from ananta.core.actions.action_metadata import (
 from ananta.core.domain.enums import DistanceMetric
 from ananta.core.domain.types import ActionResult
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.registered_job_operations import registered_job_return_schema
 
 
 class VectorServiceAPI(ABC):
@@ -21,35 +22,34 @@ class VectorServiceAPI(ABC):
         name="store_vectors",
         provider="vector_service",
         parameters={
-            "namespace": ParameterMetadata(
-                description="Namespace for vectors", required=True, type=ParameterType.STRING
-            ),
+            "namespace": ParameterMetadata(description="Namespace for vectors", required=True, type=ParameterType.STRING),
             "vectors": ParameterMetadata(
                 description="Vector data with IDs and metadata",
                 required=True,
                 type=ParameterType.LIST,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Vector storage confirmation",
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or failed",
-                    required=False,
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="Storage results", required=False
-                ),
-            },
-            usage_patterns=[
-                "Store embeddings for semantic search",
-                "Index vector data",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Vector storage confirmation",
+                properties={
+                    "action_status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status: completed or failed",
+                        required=False,
+                    ),
+                    "data": ParameterMetadata(type=ParameterType.OBJECT, description="Storage results", required=False),
+                },
+                usage_patterns=[
+                    "Store embeddings for semantic search",
+                    "Index vector data",
+                ],
+            )
         ),
+        is_async=True,
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def store_vectors(self, namespace: str, vectors: list[dict[str, Any]]) -> ActionResult:
@@ -60,9 +60,7 @@ class VectorServiceAPI(ABC):
         name="search_similar",
         provider="vector_service",
         parameters={
-            "namespace": ParameterMetadata(
-                description="Namespace to search", required=True, type=ParameterType.STRING
-            ),
+            "namespace": ParameterMetadata(description="Namespace to search", required=True, type=ParameterType.STRING),
             "query_vector": ParameterMetadata(
                 description="Query vector for similarity search",
                 required=True,
@@ -74,30 +72,29 @@ class VectorServiceAPI(ABC):
                 type=ParameterType.INTEGER,
                 default=10,
             ),
-            "filters": ParameterMetadata(
-                description="Metadata filters", required=False, type=ParameterType.OBJECT
-            ),
+            "filters": ParameterMetadata(description="Metadata filters", required=False, type=ParameterType.OBJECT),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Similar vectors ranked by similarity",
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or failed",
-                    required=False,
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="Search results", required=False
-                ),
-            },
-            usage_patterns=[
-                "Find similar content",
-                "Semantic search",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Similar vectors ranked by similarity",
+                properties={
+                    "action_status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status: completed or failed",
+                        required=False,
+                    ),
+                    "data": ParameterMetadata(type=ParameterType.OBJECT, description="Search results", required=False),
+                },
+                usage_patterns=[
+                    "Find similar content",
+                    "Semantic search",
+                ],
+            )
         ),
+        is_async=True,
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def search_similar(
@@ -115,12 +112,8 @@ class VectorServiceAPI(ABC):
         name="get_vector",
         provider="vector_service",
         parameters={
-            "namespace": ParameterMetadata(
-                description="Namespace containing vector", required=True, type=ParameterType.STRING
-            ),
-            "vector_id": ParameterMetadata(
-                description="Vector ID to retrieve", required=True, type=ParameterType.STRING
-            ),
+            "namespace": ParameterMetadata(description="Namespace containing vector", required=True, type=ParameterType.STRING),
+            "vector_id": ParameterMetadata(description="Vector ID to retrieve", required=True, type=ParameterType.STRING),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -131,9 +124,7 @@ class VectorServiceAPI(ABC):
                     description="Status: completed or failed",
                     required=False,
                 ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="Vector data", required=False
-                ),
+                "data": ParameterMetadata(type=ParameterType.OBJECT, description="Vector data", required=False),
             },
             usage_patterns=[
                 "Retrieve specific vectors",
@@ -141,7 +132,7 @@ class VectorServiceAPI(ABC):
             ],
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def get_vector(self, namespace: str, vector_id: str) -> ActionResult:
@@ -152,38 +143,35 @@ class VectorServiceAPI(ABC):
         name="delete_vectors",
         provider="vector_service",
         parameters={
-            "namespace": ParameterMetadata(
-                description="Namespace containing vectors", required=True, type=ParameterType.STRING
-            ),
-            "vector_ids": ParameterMetadata(
-                description="Vector IDs to delete", required=False, type=ParameterType.LIST
-            ),
+            "namespace": ParameterMetadata(description="Namespace containing vectors", required=True, type=ParameterType.STRING),
+            "vector_ids": ParameterMetadata(description="Vector IDs to delete", required=False, type=ParameterType.LIST),
             "filters": ParameterMetadata(
                 description="Metadata filters for deletion",
                 required=False,
                 type=ParameterType.OBJECT,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Deletion confirmation",
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or failed",
-                    required=False,
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="Deletion results", required=False
-                ),
-            },
-            usage_patterns=[
-                "Remove vectors",
-                "Clean up vector storage",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Deletion confirmation",
+                properties={
+                    "action_status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status: completed or failed",
+                        required=False,
+                    ),
+                    "data": ParameterMetadata(type=ParameterType.OBJECT, description="Deletion results", required=False),
+                },
+                usage_patterns=[
+                    "Remove vectors",
+                    "Clean up vector storage",
+                ],
+            )
         ),
+        is_async=True,
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def delete_vectors(
@@ -199,15 +187,9 @@ class VectorServiceAPI(ABC):
         name="update_metadata",
         provider="vector_service",
         parameters={
-            "namespace": ParameterMetadata(
-                description="Namespace containing vectors", required=True, type=ParameterType.STRING
-            ),
-            "vector_id": ParameterMetadata(
-                description="Vector ID to update", required=True, type=ParameterType.STRING
-            ),
-            "metadata": ParameterMetadata(
-                description="New metadata values", required=True, type=ParameterType.OBJECT
-            ),
+            "namespace": ParameterMetadata(description="Namespace containing vectors", required=True, type=ParameterType.STRING),
+            "vector_id": ParameterMetadata(description="Vector ID to update", required=True, type=ParameterType.STRING),
+            "metadata": ParameterMetadata(description="New metadata values", required=True, type=ParameterType.OBJECT),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -218,9 +200,7 @@ class VectorServiceAPI(ABC):
                     description="Status: completed or failed",
                     required=False,
                 ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="Update results", required=False
-                ),
+                "data": ParameterMetadata(type=ParameterType.OBJECT, description="Update results", required=False),
             },
             usage_patterns=[
                 "Update vector metadata",
@@ -228,12 +208,10 @@ class VectorServiceAPI(ABC):
             ],
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
-    def update_metadata(
-        self, namespace: str, vector_id: str, metadata: dict[str, Any]
-    ) -> ActionResult:
+    def update_metadata(self, namespace: str, vector_id: str, metadata: dict[str, Any]) -> ActionResult:
         """Update vector metadata."""
         ...
 
@@ -250,9 +228,7 @@ class VectorServiceAPI(ABC):
                     description="Status: completed or failed",
                     required=False,
                 ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="Namespace list", required=False
-                ),
+                "data": ParameterMetadata(type=ParameterType.OBJECT, description="Namespace list", required=False),
             },
             usage_patterns=[
                 "Discover vector namespaces",
@@ -260,7 +236,7 @@ class VectorServiceAPI(ABC):
             ],
         ),
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def list_namespaces(self) -> ActionResult:
@@ -271,30 +247,29 @@ class VectorServiceAPI(ABC):
         name="get_namespace_stats",
         provider="vector_service",
         parameters={
-            "namespace": ParameterMetadata(
-                description="Namespace to get stats for", required=True, type=ParameterType.STRING
-            ),
+            "namespace": ParameterMetadata(description="Namespace to get stats for", required=True, type=ParameterType.STRING),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Namespace statistics and metadata",
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or failed",
-                    required=False,
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="Namespace statistics", required=False
-                ),
-            },
-            usage_patterns=[
-                "Check namespace statistics",
-                "Monitor vector storage",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Namespace statistics and metadata",
+                properties={
+                    "action_status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status: completed or failed",
+                        required=False,
+                    ),
+                    "data": ParameterMetadata(type=ParameterType.OBJECT, description="Namespace statistics", required=False),
+                },
+                usage_patterns=[
+                    "Check namespace statistics",
+                    "Monitor vector storage",
+                ],
+            )
         ),
+        is_async=True,
         is_enabled=True,
-        error_processor_customizations=MergeErrorProcessorCustomizations()
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def get_namespace_stats(self, namespace: str) -> ActionResult:

@@ -7,11 +7,11 @@
     "action_label": "Zuora SQL data query submitted",
     "result_type": "zuora_submit_data_query_result",
     "result_description": "Queued job envelope. Completion carries Zuora's job record (data.id, data.queryStatus) in data. Poll get_data_query_job, then download_data_query_result.",
-    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential values never appear; [REDACTED] marks where Zuora echoed one."
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically."
   },
   "error_processor_customizations": {
     "action_context": "Submit a SQL Data Query job (POST /query/jobs). output_format JSON, CSV (default), TSV or DSV with a one-character column_separator; compression NONE (default), GZIP or ZIP; optional read_deleted, source_data LIVE or WAREHOUSE, warehouse_size, use_index_join and encryption_key. Completion carries the job id and queryStatus.",
-    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape or an output/input path outside export_allowed_roots (zuora.export_path_refused). zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.object_not_found, zuora.validation_failed (vendor 4xx), zuora.query_failed (Data Query 4xx), zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
+    "error_interpretation": "zuora.invalid_params is input that does not match Zuora's documented shape or an output/input path outside saved locations (zuora.export_path_refused). zuora.permission_denied is the vendor's 403 for the registered OAuth client's role, with Zuora's reason. zuora.object_not_found, zuora.validation_failed (vendor 4xx), zuora.query_failed (Data Query 4xx), zuora.rate_limited and zuora.api_error map Zuora's answer; zuora.auth_failed is a 401 credential failure.",
     "recovery_guidance": "Correct the parameters, or ask the Zuora administrator to grant the OAuth client's role the needed Workflow, Data Query or Files permission. Read current vendor state with the matching get or list verb before retrying a write. Back off on rate limits."
   }
 }

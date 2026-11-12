@@ -1,6 +1,6 @@
 """Quality Service Public API.
 
-``@service_interface_process``-decorated surface for the three verbs of
+``@service_interface_process``-decorated surface for the quality verbs of
 :class:`QualityServiceInterface`. The bound provider
 (``platform_dev_surface_plugin``) inherits the plain contract ABC and is
 reachable through ``service_interface::quality_service::*`` keys. The matching
@@ -12,6 +12,11 @@ customization blocks on the decorator (structural half) — the companion JSON
 supplies the prose half. ``requires_call_context=True`` logs the server-built
 principal per gate run / repo read. ``run_gate`` / ``run_test`` are
 ``is_long_running`` — the full aggregate gate and smoke suite run for minutes.
+
+The sixteen selected registrations return canonical owned-job receipts before
+argument traversal or operation preflight. Retrieve the exact job for its
+original terminal result. Direct provider calls keep synchronous results;
+``detect_scope_regex_gaps`` remains the bounded synchronous control.
 
 Gate/smoke output is the platform's OWN toolchain output (ruff / radon / smoke
 verdicts), not user data — every field is rated public (0.0) for exposure
@@ -33,6 +38,7 @@ from ananta.core.actions.action_metadata import (
 )
 from ananta.core.domain.enums import ProcessorPolicyCategory
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.registered_job_operations import registered_job_return_schema
 
 if TYPE_CHECKING:
     from ananta.core.services.call_context import CallContext
@@ -164,13 +170,14 @@ class QualitySmokeProofPublicAPI(ABC):
     """The coherent frozen-selection, proof and campaign contract."""
 
     @service_interface_process(
+        is_async=True,
         name="select_smokes",
         provider=PROVIDER,
         is_discoverable=True,
         parameters={
             "request": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="request for select_smokes."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Compute immutable focused selection and current clean proof reuse."),
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(type=ParameterType.OBJECT, description="Compute immutable focused selection and current clean proof reuse.")),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type="select_smokes_result"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
@@ -182,13 +189,14 @@ class QualitySmokeProofPublicAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="run_selected_smokes",
         provider=PROVIDER,
         is_discoverable=True,
         parameters={
             "request": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="request for run_selected_smokes."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Execute the complete computed selection and append honest per-smoke attempts."),
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(type=ParameterType.OBJECT, description="Execute the complete computed selection and append honest per-smoke attempts.")),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type="run_selected_smokes_result"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
@@ -201,6 +209,7 @@ class QualitySmokeProofPublicAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="get_smoke_proof",
         provider=PROVIDER,
         is_discoverable=True,
@@ -208,7 +217,7 @@ class QualitySmokeProofPublicAPI(ABC):
             "key": ParameterMetadata(type=ParameterType.STRING, required=True, description="key for get_smoke_proof."),
             "as_of": ParameterMetadata(type=ParameterType.INTEGER, required=False, description="as of for get_smoke_proof."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Read the current or historical smoke proof projection."),
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(type=ParameterType.OBJECT, description="Read the current or historical smoke proof projection.")),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type="get_smoke_proof_result"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
@@ -220,11 +229,12 @@ class QualitySmokeProofPublicAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="list_smoke_proofs",
         provider=PROVIDER,
         is_discoverable=True,
         parameters={},
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="List current smoke proof projections without modifying history."),
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(type=ParameterType.OBJECT, description="List current smoke proof projections without modifying history.")),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type="list_smoke_proofs_result"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
@@ -236,6 +246,7 @@ class QualitySmokeProofPublicAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="get_smoke_proof_history",
         provider=PROVIDER,
         is_discoverable=True,
@@ -243,7 +254,7 @@ class QualitySmokeProofPublicAPI(ABC):
             "key": ParameterMetadata(type=ParameterType.STRING, required=True, description="key for get_smoke_proof_history."),
             "as_of": ParameterMetadata(type=ParameterType.INTEGER, required=False, description="as of for get_smoke_proof_history."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Read immutable smoke proof history, optionally through one version."),
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(type=ParameterType.OBJECT, description="Read immutable smoke proof history, optionally through one version.")),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type="get_smoke_proof_history_result"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
@@ -255,6 +266,7 @@ class QualitySmokeProofPublicAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="correct_smoke_proof",
         provider=PROVIDER,
         is_discoverable=True,
@@ -264,7 +276,7 @@ class QualitySmokeProofPublicAPI(ABC):
             "expected_version": ParameterMetadata(type=ParameterType.INTEGER, required=True, description="expected version for correct_smoke_proof."),
             "reason": ParameterMetadata(type=ParameterType.STRING, required=True, description="reason for correct_smoke_proof."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Set or correct optional proof links with current-version authorization."),
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(type=ParameterType.OBJECT, description="Set or correct optional proof links with current-version authorization.")),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type="correct_smoke_proof_result"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
@@ -276,6 +288,7 @@ class QualitySmokeProofPublicAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="clear_smoke_proof",
         provider=PROVIDER,
         is_discoverable=True,
@@ -286,7 +299,7 @@ class QualitySmokeProofPublicAPI(ABC):
             "expected_version": ParameterMetadata(type=ParameterType.INTEGER, required=True, description="expected version for clear_smoke_proof."),
             "reason": ParameterMetadata(type=ParameterType.STRING, required=True, description="reason for clear_smoke_proof."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Clear optional metadata or active reuse while retaining all observations."),
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(type=ParameterType.OBJECT, description="Clear optional metadata or active reuse while retaining all observations.")),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type="clear_smoke_proof_result"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
@@ -298,6 +311,7 @@ class QualitySmokeProofPublicAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="retire_smoke_proof",
         provider=PROVIDER,
         is_discoverable=True,
@@ -306,7 +320,7 @@ class QualitySmokeProofPublicAPI(ABC):
             "expected_version": ParameterMetadata(type=ParameterType.INTEGER, required=True, description="expected version for retire_smoke_proof."),
             "reason": ParameterMetadata(type=ParameterType.STRING, required=True, description="reason for retire_smoke_proof."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Retire a proof from reuse with append-only versioned history."),
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(type=ParameterType.OBJECT, description="Retire a proof from reuse with append-only versioned history.")),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type="retire_smoke_proof_result"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
@@ -318,6 +332,7 @@ class QualitySmokeProofPublicAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="reinstate_smoke_proof",
         provider=PROVIDER,
         is_discoverable=True,
@@ -327,7 +342,7 @@ class QualitySmokeProofPublicAPI(ABC):
             "expected_version": ParameterMetadata(type=ParameterType.INTEGER, required=True, description="expected version for reinstate_smoke_proof."),
             "reason": ParameterMetadata(type=ParameterType.STRING, required=True, description="reason for reinstate_smoke_proof."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Revalidate a current frozen input key before reinstating a clean proof."),
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(type=ParameterType.OBJECT, description="Revalidate a current frozen input key before reinstating a clean proof.")),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type="reinstate_smoke_proof_result"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
@@ -339,11 +354,12 @@ class QualitySmokeProofPublicAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="ensure_full_smoke_schedule",
         provider=PROVIDER,
         is_discoverable=True,
         parameters={},
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Ensure the six-hour full battery and five-minute durable retry schedules."),
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(type=ParameterType.OBJECT, description="Ensure the six-hour full battery and five-minute durable retry schedules.")),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type="ensure_full_smoke_schedule_result"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
@@ -355,13 +371,14 @@ class QualitySmokeProofPublicAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="trigger_full_smoke_battery",
         provider=PROVIDER,
         is_discoverable=True,
         parameters={
             "trigger": ParameterMetadata(type=ParameterType.STRING, required=False, description="trigger for trigger_full_smoke_battery."),
         },
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Queue a full battery or retry pending work off the action queue."),
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(type=ParameterType.OBJECT, description="Queue a full battery or retry pending work off the action queue.")),
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type="trigger_full_smoke_battery_result"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
@@ -380,11 +397,12 @@ class QualityServicePublicAPI(QualitySmokeProofPublicAPI):
     """
 
     @service_interface_process(
+        is_async=True,
         name="list_gates",
         provider=PROVIDER,
         is_discoverable=True,
         parameters={},
-        return_value_schema=_list_return_schema(),
+        return_value_schema=registered_job_return_schema(_list_return_schema()),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(
             result_type="quality_gate_registry",
@@ -397,11 +415,12 @@ class QualityServicePublicAPI(QualitySmokeProofPublicAPI):
         """Read-only enumeration of the server-side gate registry + smoke register."""
 
     @service_interface_process(
+        is_async=True,
         name="run_gate",
         provider=PROVIDER,
         is_discoverable=True,
         parameters={"gate": _GATE_PARAM},
-        return_value_schema=_run_return_schema("gate", "The gate that was run."),
+        return_value_schema=registered_job_return_schema(_run_return_schema("gate", "The gate that was run.")),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         is_long_running=True,
         result_processor_customizations=MergeResultProcessorCustomizations(
@@ -415,11 +434,12 @@ class QualityServicePublicAPI(QualitySmokeProofPublicAPI):
         """Run ONE gate by allowlisted name; report pass/fail + bounded output."""
 
     @service_interface_process(
+        is_async=True,
         name="run_test",
         provider=PROVIDER,
         is_discoverable=True,
         parameters={"smoke": _SMOKE_PARAM},
-        return_value_schema=_run_return_schema("target", "'suite' or the single smoke path run."),
+        return_value_schema=registered_job_return_schema(_run_return_schema("target", "'suite' or the single smoke path run.")),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         is_long_running=True,
         result_processor_customizations=MergeResultProcessorCustomizations(
@@ -433,6 +453,7 @@ class QualityServicePublicAPI(QualitySmokeProofPublicAPI):
         """Run the gate-eligible smoke suite, or one registered smoke by path."""
 
     @service_interface_process(
+        is_async=True,
         name="verify_hash_manifest",
         provider=PROVIDER,
         is_discoverable=True,
@@ -441,7 +462,7 @@ class QualityServicePublicAPI(QualitySmokeProofPublicAPI):
             "root_path": ParameterMetadata(type=ParameterType.STRING, required=True, description="Existing absolute worktree/candidate-tree root."),
             "manifest": ParameterMetadata(type=ParameterType.DICT, required=True, description="Declared {repo_relative_path: lowercase_sha256} manifest."),
         },
-        return_value_schema=_hash_verify_return_schema(),
+        return_value_schema=registered_job_return_schema(_hash_verify_return_schema()),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type="gc_hash_verify_result"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
@@ -459,6 +480,7 @@ class QualityServicePublicAPI(QualitySmokeProofPublicAPI):
         """Rehash a declared manifest under one root; never changes Git or files."""
 
     @service_interface_process(
+        is_async=True,
         name="predict_gate_smokes_merge",
         provider=PROVIDER,
         is_discoverable=True,
@@ -468,7 +490,7 @@ class QualityServicePublicAPI(QualitySmokeProofPublicAPI):
             "current_master": ParameterMetadata(type=ParameterType.STRING, required=True, description="Current master revision in that worktree."),
             "register_path": ParameterMetadata(type=ParameterType.STRING, required=False, default="quality_gates/gate_smokes.txt", description="Repo-relative append-only tracked-debt register; its fragment directory (quality_gates/gate_smokes.d/) is resolved beside it and merged in."),
         },
-        return_value_schema=_merge_predict_return_schema(),
+        return_value_schema=registered_job_return_schema(_merge_predict_return_schema()),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type="gc_gate_smokes_merge_prediction"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),

@@ -1,7 +1,7 @@
 {
   "process_key": "service_interface::knowledge_service::read_file",
   "display_name": "Read Knowledge Base File",
-  "description": "Read the full contents of a file from a knowledge base, including a content_sha256 hash of the returned text for use as an edit_file precondition.",
+  "description": "Read the full contents of a file from a knowledge base, including a content_sha256 hash of the returned text for use as an edit_file precondition. Registered calls return a queued job_id/status receipt. Read that exact job with service_interface::job_service::get_job until terminal; job.result contains the complete operation result and job.error retains any failure. In-process calls return the complete result synchronously.",
   "embedding_description": "Open, read, view, or fetch the full text contents of a single named file — typically a markdown (.md) document — inside a knowledge base, together with its metadata and a content_sha256 hash of the exact returned text. Read-only; it does not list directories or modify anything. Use when you already know a file's path and want to see what that one file contains, or to obtain the content hash before a hash-preconditioned edit_file. This is the way to read a workbench planning document after discovering it: pass the Read path from the discovery chunk as the path, with name workbench. The returned content_sha256 is the value to pass back as edit_file's expected_content_hash.",
   "result_processor_customizations": {
     "action_label": "File read completed",

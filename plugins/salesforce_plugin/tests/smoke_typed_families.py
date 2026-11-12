@@ -2,7 +2,9 @@
 
 Routing and registration below also cover build 4's reports, dashboards,
 rest_resources and actions families, whose transcripts live in
-``smoke_typed_families_build4.py``.
+``smoke_typed_families_build4.py``, and build 5's operations and its
+metadata and content_files families (``smoke_typed_families_build5.py``,
+which also routes the three local-file transfer operations).
 
 Vendor calls run through the real ``SalesforceCliExecutor`` with
 ``subprocess.run`` patched to print what ``sf api request rest --include``
@@ -16,16 +18,23 @@ No CLI executable and no Salesforce org are needed.
 
 from __future__ import annotations
 
-import base64
-import json
-import subprocess
 import sys
-import tempfile
-import unittest
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch
-from urllib.parse import parse_qs, quote, quote_plus, urlsplit
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta/src"))
+import base64  # noqa: E402
+import json  # noqa: E402
+import subprocess  # noqa: E402
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock, patch  # noqa: E402
+from urllib.parse import parse_qs, quote, quote_plus, urlsplit  # noqa: E402
+
+from ananta.file_locations.containment import PathRefusedError, assert_path_allowed, derive_allowed_roots  # noqa: E402
+from ananta.file_locations.resolution import PathAddress, SoletTree  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "plugins/salesforce_plugin/src"))
@@ -33,7 +42,6 @@ sys.path.insert(0, str(ROOT / "plugins/salesforce_plugin/src"))
 from salesforce_plugin import async_jobs, completion_templates, request_actions, soql_actions, typed_families  # noqa: E402
 from salesforce_plugin.client import SalesforceCliExecutor  # noqa: E402
 from salesforce_plugin.errors import SalesforceCliCallError  # noqa: E402
-from salesforce_plugin.export_containment import ExportPathRefusedError, assert_export_path_allowed  # noqa: E402
 from salesforce_plugin.plugin import SalesforcePlugin  # noqa: E402
 
 V = "/services/data/v62.0"
@@ -44,8 +52,25 @@ CLASS_ID = "01pD0000000Fhy9IAC"
 REPORT_ID = "00OD0000001ZbP7MAK"
 INSTANCE_ID = "0LGD000000000IjOAI"
 DASHBOARD_ID = "01ZD00000007S89MAE"
+DEPLOY_ID = "0AfR000000014UoKAI"
+VERSION_ID = "068R0000000ytvdIAA"
+DOCUMENT_ID = "069R0000000yZ9CIAU"
 # Headers the installed CLI prints for a real org response; two are unknown to the generic parser.
 ORG_HEADERS = "date: Sat, 07 Nov 2026 06:00:00 GMT\nx-content-type-options: nosniff\nx-robots-tag: none\nsforce-limit-info: api-usage=25/15000\n"
+
+
+_LOCATION_ROOT = Path(__file__).resolve().parents[3]
+_LOCATION_TREE = SoletTree(_LOCATION_ROOT, _LOCATION_ROOT / "profile")
+
+
+def _checked_path(path: str, directories: list[str], *, suffix: str | None = ".tsv", param_name: str = "output_tsv_path", reading: bool = False) -> str:
+    """Exercise real address-derived containment, never a mocked boundary."""
+    addresses = [PathAddress(f"project-{index}", Path(directory), frozenset(), frozenset(), datetime.now(UTC)) for index, directory in enumerate(directories)]
+    roots = derive_allowed_roots(addresses, None, _LOCATION_TREE, _LOCATION_ROOT.parent / "test-solet-files")
+    result = assert_path_allowed(path, roots, _LOCATION_TREE, suffix=suffix, param_name=param_name, plugin_name="test")
+    if reading and not Path(result.value).is_file():
+        raise PathRefusedError(f"{param_name} must name an existing regular file")
+    return result.value
 
 
 def soql(*words: str) -> str:
@@ -117,12 +142,17 @@ class Routing(Fixture):
             "get": ("GET", V + f"/tooling/sobjects/ApexClass/{CLASS_ID}"),
             "update": ("PATCH", V + f"/tooling/sobjects/ApexClass/{CLASS_ID}"),
             "delete": ("DELETE", V + f"/tooling/sobjects/ApexClass/{CLASS_ID}"),
+            "composite_resources": ("GET", V + "/tooling/composite"),
+            "composite": ("POST", V + "/tooling/composite"),
+            "apex_compile_results": ("POST", V + "/tooling/apexCompileResults"),
         },
         "bulk_jobs": {
             "query_create": ("POST", V + "/jobs/query"),
             "query_get": ("GET", V + f"/jobs/query/{JOB_ID}"),
             "query_list": ("GET", V + "/jobs/query"),
             "query_results": ("GET", V + f"/jobs/query/{JOB_ID}/results"),
+            "query_result_pages": ("GET", V + f"/jobs/query/{JOB_ID}/resultPages"),
+            "query_result_pages_more": ("GET", V + f"/jobs/query/{JOB_ID}/resultpages"),
             "query_abort": ("PATCH", V + f"/jobs/query/{JOB_ID}"),
             "query_delete": ("DELETE", V + f"/jobs/query/{JOB_ID}"),
             "ingest_list": ("GET", V + "/jobs/ingest"),
@@ -138,6 +168,7 @@ class Routing(Fixture):
             "run_async": ("POST", V + f"/analytics/reports/{REPORT_ID}/instances"),
             "instances": ("GET", V + f"/analytics/reports/{REPORT_ID}/instances"),
             "instance_results": ("GET", V + f"/analytics/reports/{REPORT_ID}/instances/{INSTANCE_ID}"),
+            "instance_delete": ("DELETE", V + f"/analytics/reports/{REPORT_ID}/instances/{INSTANCE_ID}"),
             "query": ("POST", V + "/analytics/reports/query"),
             "update": ("PATCH", V + f"/analytics/reports/{REPORT_ID}"),
             "delete": ("DELETE", V + f"/analytics/reports/{REPORT_ID}"),
@@ -167,6 +198,8 @@ class Routing(Fixture):
             "upsert_by_external_id": ("PATCH", V + "/sobjects/Account/External_Id__c/A%2F100"),
             "delete_by_external_id": ("DELETE", V + "/sobjects/Account/External_Id__c/A%2F100"),
             "relationship": ("GET", V + f"/sobjects/Account/{ACCOUNT_ID}/Contacts"),
+            "relationship_update": ("PATCH", V + f"/sobjects/Account/{ACCOUNT_ID}/Contacts"),
+            "relationship_delete": ("DELETE", V + f"/sobjects/Account/{ACCOUNT_ID}/Contacts"),
             "query": ("GET", V + "/query"),
             "query_all": ("GET", V + "/queryAll"),
             "query_more": ("GET", V + "/queryAll/01gD0000002HU6KIAW-2000"),
@@ -184,6 +217,17 @@ class Routing(Fixture):
             "invoke_standard": ("POST", V + "/actions/standard/Account.NewCase"),
             "invoke_custom": ("POST", V + "/actions/custom/flow/Account.NewCase"),
         },
+        "metadata": {
+            "deploy": ("POST", V + "/metadata/deployRequest"),
+            "deploy_status": ("GET", V + f"/metadata/deployRequest/{DEPLOY_ID}"),
+            "deploy_cancel": ("PATCH", V + f"/metadata/deployRequest/{DEPLOY_ID}"),
+            "deploy_quick": ("POST", V + f"/metadata/deployRequest/{DEPLOY_ID}"),
+        },
+        "content_files": {
+            "upload": ("POST", V + "/sobjects/ContentVersion"),
+            "download": ("GET", V + f"/sobjects/ContentVersion/{VERSION_ID}/VersionData"),
+            "delete_document": ("DELETE", V + f"/sobjects/ContentDocument/{DOCUMENT_ID}"),
+        },
     }
 
     def minimal(self, family: str, operation: str) -> dict[str, Any]:
@@ -192,16 +236,19 @@ class Routing(Fixture):
         params: dict[str, Any] = {"operation": operation, "sobject": sobject, "id": record_id, "job_id": JOB_ID, "external_id_field": "External_Id__c"}
         params |= {"report_id": REPORT_ID, "instance_id": INSTANCE_ID, "report_type": "CustomEntity$Invoice__c", "dashboard_id": DASHBOARD_ID}
         params |= {"external_id": "A/100", "relationship": "Contacts", "action_type": "flow", "action": "Account.NewCase"}
+        params |= {"deploy_request_id": DEPLOY_ID, "content_version_id": VERSION_ID, "content_document_id": DOCUMENT_ID}
         spec = typed_families.FAMILIES[family][operation]
         query_values: dict[str, Any] = {"ids": [ACCOUNT_ID], "fields": ["Name"], "q": "FIND {Acme}", "anonymousBody": "System.debug(1);", "type": "apex"}
         query_values |= {"cloneId": REPORT_ID, "start": "2026-11-01T00:00:00+00:00", "end": "2026-11-07T00:00:00Z", "explain": soql("SELECT", "Id", "FROM", "Account")}
         params["query"] = {key: query_values[key] for key in spec.required_query}
         if spec.body == "object":
             values: dict[str, Any] = {"compositeRequest": [{}], "graphs": [{}], "batchRequests": [{}], "records": [{}], "ids": [ACCOUNT_ID], "fields": ["Name"], "operation": "query", "query": soql("SELECT", "Id", "FROM", "Account")}
-            values |= {"reportMetadata": {"name": "Probe"}, "q": "Acme", "inputs": [{}]}
+            values |= {"reportMetadata": {"name": "Probe"}, "q": "Acme", "inputs": [{}], "validatedDeployRequestId": DEPLOY_ID}
             params["body"] = {member: values[member] for member in spec.body_required} or {"Name": "Probe"}
         if operation == "query_more":
             params["next_records_url"] = V + ("/tooling/query/" if family == "tooling" else "/queryAll/") + "01gD0000002HU6KIAW-2000"
+        if operation == "query_result_pages_more":
+            params["next_records_url"] = V + f"/jobs/query/{JOB_ID}/resultpages?locator=YcApWm4N"
         return params
 
     def test_every_operation_reaches_its_vendor_path(self) -> None:
@@ -209,6 +256,8 @@ class Routing(Fixture):
         with tempfile.TemporaryDirectory() as workspace:
             for family, operations in self.EXPECTED.items():
                 for operation, (method, path) in operations.items():
+                    if typed_families.FAMILIES[family][operation].transfer != "none":
+                        continue  # local-file transfers are routed in smoke_typed_families_build5.py
                     with self.subTest(family=family, operation=operation):
                         params = self.minimal(family, operation)
                         gate = None
@@ -283,7 +332,7 @@ class Validation(Fixture):
 
     def test_results_path_refused_before_io(self) -> None:
         with tempfile.TemporaryDirectory() as workspace, patch("salesforce_plugin.client.subprocess.run") as run:
-            with self.assertRaises(ExportPathRefusedError):
+            with self.assertRaises(PathRefusedError):
                 typed_families.run_family("bulk_jobs", self.executor, {"operation": "query_results", "job_id": JOB_ID, "output_csv_path": "/etc/page.csv"}, _gate(workspace))
             run.assert_not_called()
 
@@ -420,10 +469,10 @@ class Transcripts(Fixture):
         self.assertNotIn("transcript", typed)
 
 
-class Redaction(Fixture):
-    """Every credential echo is hidden in raw, JSON-escaped, percent-encoded and base64 forms."""
+class AsReceived(Fixture):
+    """The vendor result is returned as received; the audit line carries none of it."""
 
-    def test_issued_token_variants_are_redacted_everywhere(self) -> None:
+    def test_vendor_echo_returned_as_received_and_absent_from_audit(self) -> None:
         token = "00DR0000000Ab12!AQ4AQ.token/with+chars="
         session = "sess!on/Value+2=="
         raw = token.encode()
@@ -435,10 +484,10 @@ class Redaction(Fixture):
                 "tooling",
                 {"operation": "create", "sobject": "NamedCredential", "body": {"DeveloperName": "Probe", "Password": session}, "headers": {"X-Api-Token": token}},
             )
-        rendered = json.dumps(result) + " ".join(audit.output)
+        logged = " ".join(audit.output)
         for variant in [*variants, session, quote(session, safe=""), base64.b64encode(session.encode()).decode()]:
-            self.assertNotIn(variant, rendered)
-        self.assertEqual(result["body"]["detail"]["Name"], "kept")
+            self.assertNotIn(variant, logged)
+        self.assertEqual(result["body"]["detail"], echo)
         self.assertEqual(result["body"]["id"], CLASS_ID)
 
 
@@ -461,7 +510,8 @@ class Wiring(unittest.TestCase):
                 handler, gate_factory = async_jobs.ACTION_HANDLERS[family]
                 self.assertEqual(handler.func, typed_families.run_family)  # type: ignore[attr-defined]
                 self.assertEqual(handler.args, (family,))  # type: ignore[attr-defined]
-                self.assertEqual(gate_factory is not None, family == "bulk_jobs")
+                # Only families that read or write a local file take a path gate.
+                self.assertEqual(gate_factory is not None, family in ("bulk_jobs", "metadata", "content_files"))
                 instructions = " ".join(completion_templates.build_completion_template(family, "result")["params"]["prompt"]["user"]["instructions"])  # type: ignore[index]
                 self.assertIn("pagination", instructions)
                 self.assertIn("failures", instructions)
@@ -471,7 +521,7 @@ class Wiring(unittest.TestCase):
         executor.run_json.return_value = {"records": [], "totalSize": 0, "done": True}
         with tempfile.TemporaryDirectory() as workspace:
             output = str(Path(workspace) / "rows.tsv")
-            gate = lambda path: assert_export_path_allowed(path, [workspace], config_key="export_allowed_roots", plugin_name="salesforce_plugin")  # noqa: E731
+            gate = lambda path: _checked_path(path, [workspace], suffix=".tsv", param_name="output_tsv_path", reading=False)  # noqa: E731
             soql_actions.soql_query(executor, {"query": soql("SELECT", "Id", "FROM", "Account"), "output_tsv_path": output, "include_deleted": True}, gate)
             self.assertIn("--all-rows", executor.run_json.call_args.args[0])
             soql_actions.export_soql(executor, {"query": soql("SELECT", "Id", "FROM", "Account"), "output_tsv_path": output}, gate)
@@ -511,23 +561,26 @@ class Registration(unittest.TestCase):
         expected = {
             "composite": ["sobject", "external_id_field"],
             "tooling": ["next_records_url", "sobject", "id"],
-            "bulk_jobs": ["job_id"],
+            "bulk_jobs": ["job_id", "next_records_url"],
             "reports": ["report_id", "instance_id", "report_type"],
             "dashboards": ["dashboard_id"],
             "rest_resources": ["sobject", "external_id_field", "external_id", "id", "relationship", "next_records_url"],
             "actions": ["action_type", "action"],
+            "metadata": ["deploy_request_id"],
+            "content_files": ["content_version_id", "content_document_id"],
         }
+        local = {"bulk_jobs": ["output_csv_path"], "metadata": ["zip_path"], "content_files": ["file_path", "output_path"]}
         decorated = {action.name: action for action in discover_actions(SalesforcePlugin())}
         for family, placeholders in expected.items():
             with self.subTest(family=family):
                 self.assertEqual(typed_families.path_parameters(family), placeholders)
-                tail = ["output_csv_path"] if family == "bulk_jobs" else []
+                tail = local.get(family, [])
                 self.assertEqual(list(decorated[family].parameters), ["operation", "query", "body", "headers", *placeholders, *tail])
 
 
 def _gate(workspace: str) -> Any:
     def gate(path: str) -> str:
-        return assert_export_path_allowed(path, [workspace], config_key="export_allowed_roots", plugin_name="salesforce_plugin", required_suffix=".csv")
+        return _checked_path(path, [workspace], suffix=".csv", param_name="output_tsv_path", reading=False)
 
     return gate
 

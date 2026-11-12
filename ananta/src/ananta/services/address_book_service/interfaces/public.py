@@ -7,7 +7,7 @@ Discoverability Policy (Task #47, 2026-05-24):
 - EVERY method declares ``is_discoverable=True`` explicitly. The base decorator
   default for ``@service_interface_process`` is ``is_discoverable=False`` (service
   methods are presumed internal); address-book operations are end-user / agent
-  -facing (register, resolve, resolve_with_secrets, add_entry, update, search,
+  -facing (register, resolve, add_entry, update, search,
   list_types, list_tags, ...), so the per-method flag overrides the default.
 - Adding a new method without ``is_discoverable=True`` will SILENTLY exclude it
   from ``process_search`` and the agent will not be able to find it.
@@ -78,19 +78,13 @@ class AddressBookServiceAPI(ABC):
             description="Registration result with address_id and memory_id",
             type=ParameterType.OBJECT,
             properties={
-                "address_id": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Database ID of created address"
-                ),
+                "address_id": ParameterMetadata(type=ParameterType.INTEGER, description="Database ID of created address"),
                 "memory_id": ParameterMetadata(
                     type=ParameterType.STRING,
                     description="UUID of associated memory for semantic search",
                 ),
-                "name": ParameterMetadata(
-                    type=ParameterType.STRING, description="The registered name"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
+                "name": ParameterMetadata(type=ParameterType.STRING, description="The registered name"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
             },
         ),
     )
@@ -138,36 +132,6 @@ class AddressBookServiceAPI(ABC):
         pass
 
     @service_interface_process(
-        name="resolve_with_secrets",
-        is_discoverable=True,
-        provider="address_book_service",
-        parameters={
-            "name": ParameterMetadata(
-                description="The registered name to resolve",
-                required=True,
-                type=ParameterType.STRING,
-            ),
-        },
-        return_value_schema=ReturnValueSchema(
-            description="Full address with secrets resolved",
-            type=ParameterType.OBJECT,
-            properties={
-                "address": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="Address record"
-                ),
-                "entries": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Entries with vault references replaced by actual values",
-                ),
-            },
-        ),
-    )
-    @abstractmethod
-    def resolve_with_secrets(self, name: str) -> dict[str, Any]:
-        """Get address with vault references resolved."""
-        pass
-
-    @service_interface_process(
         name="add_entry",
         is_discoverable=True,
         provider="address_book_service",
@@ -197,12 +161,8 @@ class AddressBookServiceAPI(ABC):
             description="Entry creation result",
             type=ParameterType.OBJECT,
             properties={
-                "entry_id": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Database ID of created entry"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
+                "entry_id": ParameterMetadata(type=ParameterType.INTEGER, description="Database ID of created entry"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
             },
         ),
     )
@@ -216,9 +176,7 @@ class AddressBookServiceAPI(ABC):
         is_discoverable=True,
         provider="address_book_service",
         parameters={
-            "entry_id": ParameterMetadata(
-                description="The entry ID to update", required=True, type=ParameterType.STRING
-            ),
+            "entry_id": ParameterMetadata(description="The entry ID to update", required=True, type=ParameterType.STRING),
             "field_type": ParameterMetadata(
                 description="New field type (optional)",
                 required=False,
@@ -242,12 +200,8 @@ class AddressBookServiceAPI(ABC):
             description="Updated entry",
             type=ParameterType.OBJECT,
             properties={
-                "entry": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="The updated entry record"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
+                "entry": ParameterMetadata(type=ParameterType.OBJECT, description="The updated entry record"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
             },
         ),
     )
@@ -267,17 +221,13 @@ class AddressBookServiceAPI(ABC):
         is_discoverable=True,
         provider="address_book_service",
         parameters={
-            "entry_id": ParameterMetadata(
-                description="The entry ID to delete", required=True, type=ParameterType.STRING
-            ),
+            "entry_id": ParameterMetadata(description="The entry ID to delete", required=True, type=ParameterType.STRING),
         },
         return_value_schema=ReturnValueSchema(
             description="Delete confirmation",
             type=ParameterType.OBJECT,
             properties={
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
             },
         ),
     )
@@ -319,12 +269,8 @@ class AddressBookServiceAPI(ABC):
             description="Updated address",
             type=ParameterType.OBJECT,
             properties={
-                "address": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="The updated address record"
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
+                "address": ParameterMetadata(type=ParameterType.OBJECT, description="The updated address record"),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
             },
         ),
     )
@@ -344,17 +290,13 @@ class AddressBookServiceAPI(ABC):
         is_discoverable=True,
         provider="address_book_service",
         parameters={
-            "name": ParameterMetadata(
-                description="The address name to delete", required=True, type=ParameterType.STRING
-            ),
+            "name": ParameterMetadata(description="The address name to delete", required=True, type=ParameterType.STRING),
         },
         return_value_schema=ReturnValueSchema(
             description="Delete confirmation",
             type=ParameterType.OBJECT,
             properties={
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING, description="Confirmation message"
-                ),
+                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
             },
         ),
     )
@@ -397,12 +339,8 @@ class AddressBookServiceAPI(ABC):
             description="List of matching addresses (without entries)",
             type=ParameterType.OBJECT,
             properties={
-                "addresses": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of address records (without entries)"
-                ),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER, description="Number of results"
-                ),
+                "addresses": ParameterMetadata(type=ParameterType.LIST, description="List of address records (without entries)"),
+                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of results"),
             },
         ),
     )
@@ -426,9 +364,7 @@ class AddressBookServiceAPI(ABC):
             description="Address types with counts",
             type=ParameterType.OBJECT,
             properties={
-                "types": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of {type, count} records"
-                ),
+                "types": ParameterMetadata(type=ParameterType.LIST, description="List of {type, count} records"),
             },
         ),
     )
@@ -446,9 +382,7 @@ class AddressBookServiceAPI(ABC):
             description="Tags with counts",
             type=ParameterType.OBJECT,
             properties={
-                "tags": ParameterMetadata(
-                    type=ParameterType.LIST, description="List of {tag, count} records"
-                ),
+                "tags": ParameterMetadata(type=ParameterType.LIST, description="List of {tag, count} records"),
             },
         ),
     )

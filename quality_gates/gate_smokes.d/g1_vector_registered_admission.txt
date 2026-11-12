@@ -1,0 +1,1 @@
+plugins/pgvector_service_plugin/tests/g1_vector_registered_admission_smoke.py

@@ -44,11 +44,11 @@ from session_lifecycle_transport_smoke import PacketLane, packet_lane  # noqa: E
 
 import agent_messaging_plugin.session_lifecycle_control as session_lifecycle_control  # noqa: E402
 import agent_messaging_plugin.session_lifecycle_verbs as lifecycle_verbs  # noqa: E402
+from agent_messaging_plugin.custody_store import PacketWriter  # noqa: E402
 from agent_messaging_plugin.lane_worktree_evidence import (  # noqa: E402
     RetirementCustodyContext,
     canonical_identity_sha256,
 )
-from agent_messaging_plugin.lane_worktree_preservation import PacketWriter  # noqa: E402
 from agent_messaging_plugin.lane_worktrees import (  # noqa: E402
     LaneWorktree,
     LaneWorktreeDisposability,
@@ -859,7 +859,8 @@ def _assert_packet_capture_refusals(root: Path) -> int:
     assert ((failed.get("error") or {}).get("code"), hosts, lane.lane.path.exists()) == ("custody_publication_failed", 0, True), failed
     unsupported = packet_lane(root / "unsupported", "retire-unsupported")
     _intent_to_add(unsupported.lane, unsupported.environment)
-    response, hosts = _packet_retire(unsupported, **(capture | {"expected_fingerprint": unsupported.fingerprint()}))
+    unsupported_request: dict[str, Any] = capture | {"expected_fingerprint": unsupported.fingerprint()}
+    response, hosts = _packet_retire(unsupported, **unsupported_request)
     assert ((response.get("error") or {}).get("code"), hosts, unsupported.lane.path.exists()) == ("custody_incomplete", 0, True), response
     blind = packet_lane(root / "superseded", "retire-superseded", unique_state=False)
     _staged_only(blind)

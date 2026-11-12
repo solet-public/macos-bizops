@@ -1,13 +1,13 @@
 {
   "process_key": "plugin::actr_memory_plugin::remember_action",
   "display_name": "Remember",
-  "description": "Store a new episodic memory",
-  "embedding_description": "Store a new episodic memory in the ACT-R store. Provide content, optional tags, and source_file; returns memory_id. Use to persist knowledge, notes, or observations for later recall and retrieval. Good for capturing user preferences or key facts.",
+  "description": "Store a new episodic memory. Returns immediately with job_id and status queued; work runs on the plugin worker.",
+  "embedding_description": "Queue a new episodic memory with content, optional tags and source_file. Returns job_id and status queued before embedding or storage runs. Read service_interface::job_service::get_job for the original response in job.result, including memory_id and message; failures also retain job.error.",
   "result_processor_customizations": {
-    "action_label": "Memory stored",
-    "result_type": "memory_created",
-    "result_description": "New memory record with memory_id and metadata",
+    "action_label": "Job queued",
+    "result_type": "job_receipt",
+    "result_description": "Queued job handle with job_id and status; the final response is stored in job.result.",
     "presentation_guidance": "",
-    "output_action_guidance": "Determine the appropriate next action based on the context and action result."
+    "output_action_guidance": "Retain this exact job_id. Schedule job_service::get_job while queued or processing; inspect terminal result or error before using the final data. Do not repeat a write because a poll is delayed."
   }
 }

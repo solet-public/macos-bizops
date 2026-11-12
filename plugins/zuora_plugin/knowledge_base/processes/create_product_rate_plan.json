@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::zuora_plugin::create_product_rate_plan",
+  "display_name": "Zuora: Create Product Rate Plan",
+  "description": "Create a product rate plan; body needs Name and ProductId and accepts effective dates, external ids, currencies and all vendor custom fields. (POST /v1/object/product-rate-plan). Returns job_id/status queued at once; dispatch is not completion.",
+  "embedding_description": "Create a product rate plan; body needs Name and ProductId and accepts effective dates, external ids, currencies and all vendor custom fields. Use this typed Zuora catalog operation with the registered tenant OAuth client. Vendor RBAC governs permission; completion reports the vendor result and any continuation, while queued means accepted for background work only.",
+  "result_processor_customizations": {
+    "action_label": "Zuora: Create Product Rate Plan",
+    "result_type": "zuora_create_product_rate_plan_result",
+    "result_description": "Queued job envelope; completion carries operation, method, path, status, correlation_id, data and pagination where the vendor pages.",
+    "presentation_guidance": "Queued is not completion. Relay vendor ids, states and errors exactly. Catalog mutations and deletes are first-class; never automatically replay a write."
+  },
+  "error_processor_customizations": {
+    "action_context": "Create a product rate plan; body needs Name and ProductId and accepts effective dates, external ids, currencies and all vendor custom fields.",
+    "error_interpretation": "zuora.invalid_params means the request fails the documented shape; zuora.auth_failed is a 401; zuora.permission_denied is the registered role's 403. zuora.validation_failed includes vendor preconditions or success false; zuora.object_not_found, zuora.rate_limited and zuora.api_error preserve the vendor failure class.",
+    "recovery_guidance": "Correct parameters or vendor catalog state; read current state before retrying a write. Preserve vendor reasons and any stale-write or reference refusal. Ask the tenant administrator for missing catalog permissions or enabled features; never retry deletes automatically."
+  }
+}

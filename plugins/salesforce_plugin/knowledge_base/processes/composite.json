@@ -6,7 +6,7 @@
   "result_processor_customizations": {
     "action_label": "Salesforce composite operation queued",
     "result_type": "salesforce_composite_result",
-    "result_description": "Queued dispatch: job_id and status. Completion: family, operation, method, status (HTTP), selected headers, body (compositeResponse, graphs, batch results, tree results or the Collections SaveResult array), correlation_id, error_code for a 4xx/5xx or unknown status, and failures: the count of failed subrequests, graphs or records inside a 2xx response. Credential values are redacted in raw, percent-encoded and base64 forms.",
+    "result_description": "Queued dispatch: job_id and status. Completion: family, operation, method, status (HTTP), selected headers, body (compositeResponse, graphs, batch results, tree results or the Collections SaveResult array), correlation_id, error_code for a 4xx/5xx or unknown status, and failures: the count of failed subrequests, graphs or records inside a 2xx response.",
     "presentation_guidance": "This operation may have created, changed or deleted records. Queued means the job was accepted, not that Salesforce applied it. A 200 can still carry failed parts: report failures and each failed part's errors. Report deletes from the vendor results, never from job completion alone, and never retry a write automatically."
   },
   "error_processor_customizations": {

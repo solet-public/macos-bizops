@@ -303,7 +303,7 @@ class InvoiceProcesses:
     @platform_process(
         name="upload_invoice_file",
         display_name="Zuora: Upload Invoice File",
-        description="Upload a PDF file to an invoice (POST /v1/invoices/{invoiceKey}/files, multipart/form-data) from input_path under export_allowed_roots; Zuora takes up to 4 MB and 50 files per invoice." + QUEUED_NOTE,
+        description="Upload a PDF file to an invoice (POST /v1/invoices/{invoiceKey}/files, multipart/form-data) from input_path under registered path addresses; Zuora takes up to 4 MB and 50 files per invoice." + QUEUED_NOTE,
         processor_policy_category=EDGE,
         parameters={"invoice_key": INVOICE_KEY, "input_path": PDF_INPUT, **IDEMPOTENT_HEADER_PARAMS},
         return_value_schema=QUEUED,

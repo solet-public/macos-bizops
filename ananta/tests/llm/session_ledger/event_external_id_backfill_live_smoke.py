@@ -57,7 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ananta.llm.session_ledger.blob_adapter import (  # noqa: E402
     SessionLedgerBlobAdapter,
 )
-from ananta.llm.session_ledger.importer import _event_external_id  # noqa: E402
+from ananta.llm.session_ledger.importer_persistence import _event_external_id  # noqa: E402
 from ananta.llm.session_ledger.repository import SessionLedgerRepository  # noqa: E402
 from ananta.llm.session_ledger.schema import (  # noqa: E402
     NAMESPACE,

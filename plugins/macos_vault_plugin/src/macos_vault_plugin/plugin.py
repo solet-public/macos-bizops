@@ -42,6 +42,7 @@ from ananta.services.store import Store, open_store
 from ananta.services.vault_service.enforcement import (
     enforce_namespace,
     requires_operator_principal,
+    serialized_vault_operation,
 )
 from ananta.services.vault_service.interfaces.public import VaultQualificationAPI, VaultServiceAPI
 from ananta.types.schema_types import SchemaDefinition
@@ -220,18 +221,14 @@ class MacosVaultPlugin(
 
         APP_HOME = getattr(self.orchestrator_ref, "APP_HOME", None)
         if not APP_HOME:
-            raise RuntimeError(
-                f"{self.name}: Application directory not configured - plugin cannot initialize"
-            )
+            raise RuntimeError(f"{self.name}: Application directory not configured - plugin cannot initialize")
 
         self.config_provider = ConfigProvider(self.name, self.config or {})
         self.logger = configure_plugin_logging(APP_HOME, self.name, self.config_provider)
         self.logger.debug(f"Initializing {self.name}")
 
         # Request state_service - plugin decides it needs this
-        self.state_service = cast(
-            StateServiceProtocol | None, self.orchestrator_ref.get_service("state_service")
-        )
+        self.state_service = cast(StateServiceProtocol | None, self.orchestrator_ref.get_service("state_service"))
         if self.state_service is None:
             raise RuntimeError(f"{self.name}: state_service not available")
         self.logger.debug("state_service acquired from orchestrator")
@@ -243,6 +240,7 @@ class MacosVaultPlugin(
         from macos_vault_plugin.postgres_backend import (  # noqa: PLC0415
             store as _pg_store_module,
         )
+
         _ = _pg_store_module
         self._audit_store = open_store(
             get_audit_schema(),
@@ -303,9 +301,7 @@ class MacosVaultPlugin(
             self.logger.debug("Per-credential Keychain substrate ACTIVE")
         else:
             self.logger.warning(
-                "Per-credential Keychain substrate INACTIVE — runtime vault "
-                "verbs will raise. Local profile requires macOS Keychain "
-                "per [[solet-locality]].",
+                "Per-credential Keychain substrate INACTIVE — runtime vault verbs will raise. Local profile requires macOS Keychain per [[solet-locality]].",
             )
 
     # ─────────────────────────────────────────────────────────────────────
@@ -339,16 +335,12 @@ class MacosVaultPlugin(
             stray_path = legacy_dir / stray
             if stray_path.exists():
                 raise VaultMasterKeyMigrationError(
-                    f"legacy vault scaffolding present at {stray_path}; "
-                    "expected default_vault_plugin/ to be empty after Tier 3 rename. "
-                    "Inspect and remove manually.",
+                    f"legacy vault scaffolding present at {stray_path}; expected default_vault_plugin/ to be empty after Tier 3 rename. Inspect and remove manually.",
                 )
         legacy_secrets = legacy_dir / "secrets"
         if legacy_secrets.is_dir() and any(legacy_secrets.glob("*.enc")):
             raise VaultMasterKeyMigrationError(
-                f"legacy file-bootstrap secrets present at {legacy_secrets}; "
-                "expected default_vault_plugin/secrets/ to be empty (file-bootstrap "
-                "substrate retired). Inspect and remove manually.",
+                f"legacy file-bootstrap secrets present at {legacy_secrets}; expected default_vault_plugin/secrets/ to be empty (file-bootstrap substrate retired). Inspect and remove manually.",
             )
 
     def _migrate_legacy_keypair_if_present(self) -> None:
@@ -372,27 +364,28 @@ class MacosVaultPlugin(
         )
 
     def _migrate_legacy_keypair_secret(
-        self, old_key: str, new_key: str, label: str,
+        self,
+        old_key: str,
+        new_key: str,
+        label: str,
     ) -> None:
         """Atomic state-service rename of one keypair row from old to new scoped name."""
         if self._get_by_key(old_key) is None:
             return
         if self._get_by_key(new_key) is not None:
             raise VaultKeypairMigrationError(
-                f"detected legacy {label} row {old_key!r} AND new-form row "
-                f"{new_key!r}; ambiguous state, refusing to migrate. Operator "
-                "must reconcile manually (likely one is stale from an aborted "
-                "prior migration).",
+                f"detected legacy {label} row {old_key!r} AND new-form row {new_key!r}; ambiguous state, refusing to migrate. Operator must reconcile manually (likely one is stale from an aborted prior migration).",
             )
         state_error = self._state_rename_secret(old_key, new_key)
         if state_error is not None:
             raise VaultKeypairMigrationError(
-                f"detected legacy {label} row at {old_key!r} but rename to "
-                f"{new_key!r} failed; REFUSING to mint fresh keypair (would "
-                "silently rotate sealed-box identity).",
+                f"detected legacy {label} row at {old_key!r} but rename to {new_key!r} failed; REFUSING to mint fresh keypair (would silently rotate sealed-box identity).",
             )
         self.logger.info(
-            "Migrated legacy keypair %s: %s -> %s", label, old_key, new_key,
+            "Migrated legacy keypair %s: %s -> %s",
+            label,
+            old_key,
+            new_key,
         )
 
     def _bootstrap_vault_and_keypair(self) -> None:
@@ -442,11 +435,7 @@ class MacosVaultPlugin(
             if not key_manager.is_initialized():
                 passphrase = self._get_passphrase()
                 if not passphrase:
-                    raise RuntimeError(
-                        f"{self.name}: vault not initialized and no passphrase "
-                        f"available. Set {passphrase_env_var()} or create "
-                        f"$APP_HOME/config/plugins/{self.name}/passphrase."
-                    )
+                    raise RuntimeError(f"{self.name}: vault not initialized and no passphrase available. Set {passphrase_env_var()} or create $APP_HOME/config/plugins/{self.name}/passphrase.")
                 key_manager.initialize(passphrase)
                 self._crypto = None
                 self.logger.info("Vault initialized (first boot)")
@@ -454,10 +443,7 @@ class MacosVaultPlugin(
         try:
             self._get_crypto()
         except VaultLockedError as exc:
-            raise RuntimeError(
-                f"{self.name}: vault locked and cannot be unlocked at start; "
-                f"check passphrase / Secrets Manager configuration: {exc}"
-            ) from exc
+            raise RuntimeError(f"{self.name}: vault locked and cannot be unlocked at start; check passphrase / Secrets Manager configuration: {exc}") from exc
 
         self._migrate_legacy_keypair_if_present()
         _, created = self._ensure_keypair_internal()
@@ -583,9 +569,7 @@ class MacosVaultPlugin(
 
         key_manager = self._get_key_manager()
         if not key_manager.is_initialized():
-            raise MasterKeyNotConfiguredError(
-                f"Vault not initialized. Run 'vault init' action or set {passphrase_env_var()}."
-            )
+            raise MasterKeyNotConfiguredError(f"Vault not initialized. Run 'vault init' action or set {passphrase_env_var()}.")
 
         if not key_manager.is_unlocked():
             # Direct-master-key backends (Secrets Manager) read the
@@ -598,9 +582,7 @@ class MacosVaultPlugin(
             else:
                 passphrase = self._get_passphrase()
                 if not passphrase:
-                    raise VaultLockedError(
-                        f"Vault is locked. Set {passphrase_env_var()} or provide passphrase file."
-                    )
+                    raise VaultLockedError(f"Vault is locked. Set {passphrase_env_var()} or provide passphrase file.")
                 key_manager.unlock(passphrase)
 
         self._crypto = key_manager.get_crypto()
@@ -757,31 +739,39 @@ class MacosVaultPlugin(
         """Return bounded evidence that this user's Keychain namespace is readable."""
         del call_context
         if self._keychain is None:
-            return self._success({
-                "backend": "macos_keychain",
-                "available": False,
-                "current_user_accessible": False,
-            })
-        try:
-            available = self._keychain.is_available()
-            if not available:
-                return self._success({
+            return self._success(
+                {
                     "backend": "macos_keychain",
                     "available": False,
                     "current_user_accessible": False,
-                })
+                }
+            )
+        try:
+            available = self._keychain.is_available()
+            if not available:
+                return self._success(
+                    {
+                        "backend": "macos_keychain",
+                        "available": False,
+                        "current_user_accessible": False,
+                    }
+                )
             self._keychain.list_credentials_under_solet()
         except Exception:
-            return self._success({
+            return self._success(
+                {
+                    "backend": "macos_keychain",
+                    "available": True,
+                    "current_user_accessible": False,
+                }
+            )
+        return self._success(
+            {
                 "backend": "macos_keychain",
                 "available": True,
-                "current_user_accessible": False,
-            })
-        return self._success({
-            "backend": "macos_keychain",
-            "available": True,
-            "current_user_accessible": True,
-        })
+                "current_user_accessible": True,
+            }
+        )
 
     def qualify_round_trip(
         self,
@@ -814,12 +804,14 @@ class MacosVaultPlugin(
                 deleted = result.get("action_status") == ActionStatus.COMPLETED.value
             except Exception:
                 deleted = False
-        return self._success({
-            "stored": stored,
-            "retrieved": retrieved,
-            "matched": matched,
-            "deleted": deleted,
-        })
+        return self._success(
+            {
+                "stored": stored,
+                "retrieved": retrieved,
+                "matched": matched,
+                "deleted": deleted,
+            }
+        )
 
     def rotate(
         self,
@@ -940,7 +932,8 @@ class MacosVaultPlugin(
         except Exception as e:
             self.logger.error(f"Vault initialization failed: {type(e).__name__}")
             return self._error(
-                ErrorCode.ENCRYPTION_FAILED, "Vault initialization failed",
+                ErrorCode.ENCRYPTION_FAILED,
+                "Vault initialization failed",
             )
 
     @requires_operator_principal
@@ -956,10 +949,7 @@ class MacosVaultPlugin(
             recovery_path = key_manager.create_recovery_key(recovery_passphrase)
             return self._success(
                 {
-                    "message": (
-                        "Recovery key created. Store the passphrase securely "
-                        "offline!"
-                    ),
+                    "message": ("Recovery key created. Store the passphrase securely offline!"),
                     "recovery_key_path": str(recovery_path),
                 },
             )
@@ -968,7 +958,8 @@ class MacosVaultPlugin(
         except Exception as e:
             self.logger.error(f"Recovery key creation failed: {type(e).__name__}")
             return self._error(
-                ErrorCode.ENCRYPTION_FAILED, "Recovery key creation failed",
+                ErrorCode.ENCRYPTION_FAILED,
+                "Recovery key creation failed",
             )
 
     @requires_operator_principal
@@ -983,27 +974,24 @@ class MacosVaultPlugin(
         if os.environ.get(passphrase_env_var()):
             return self._error(
                 ErrorCode.PASSPHRASE_MISMATCH,
-                "Passphrase rotation is refused while the vault unlocks from "
-                f"{passphrase_env_var()}; update the persistent environment "
-                "configuration and restart instead.",
+                f"Passphrase rotation is refused while the vault unlocks from {passphrase_env_var()}; update the persistent environment configuration and restart instead.",
             )
         passphrase_file = self._passphrase_file_path()
         if passphrase_file is None or not passphrase_file.exists():
             return self._error(
                 ErrorCode.PASSPHRASE_MISMATCH,
-                "Passphrase rotation requires the persistent passphrase file at "
-                "$APP_HOME/config/plugins/macos_vault_plugin/passphrase.",
+                "Passphrase rotation requires the persistent passphrase file at $APP_HOME/config/plugins/macos_vault_plugin/passphrase.",
             )
         try:
             staged_file = self._stage_rotated_passphrase(
-                passphrase_file, new_passphrase,
+                passphrase_file,
+                new_passphrase,
             )
         except OSError:
             self.logger.error("Passphrase rotation could not stage passphrase file")
             return self._error(
                 ErrorCode.ENCRYPTION_FAILED,
-                "Passphrase rotation could not prepare its persistent file; "
-                "no rotation was performed.",
+                "Passphrase rotation could not prepare its persistent file; no rotation was performed.",
             )
         try:
             key_manager = self._get_key_manager()
@@ -1016,10 +1004,7 @@ class MacosVaultPlugin(
             self._crypto = None
             return self._success(
                 {
-                    "message": (
-                        "Passphrase rotated successfully. No secrets were "
-                        "re-encrypted."
-                    ),
+                    "message": ("Passphrase rotated successfully. No secrets were re-encrypted."),
                 },
             )
         except VaultNotInitializedError as e:
@@ -1029,7 +1014,8 @@ class MacosVaultPlugin(
         except Exception as e:
             self.logger.error(f"Passphrase rotation failed: {type(e).__name__}")
             return self._error(
-                ErrorCode.ENCRYPTION_FAILED, "Passphrase rotation failed",
+                ErrorCode.ENCRYPTION_FAILED,
+                "Passphrase rotation failed",
             )
         finally:
             staged_file.unlink(missing_ok=True)
@@ -1077,8 +1063,7 @@ class MacosVaultPlugin(
         public_bytes = self._get_stored_public_key_bytes()
         if public_bytes is None:
             raise RuntimeError(
-                f"{self.name}: encryption keypair not loaded after prepare_for_readiness; "
-                "call ensure_encryption_keypair explicitly or check startup_sequence ordering.",
+                f"{self.name}: encryption keypair not loaded after prepare_for_readiness; call ensure_encryption_keypair explicitly or check startup_sequence ordering.",
             )
         return self._success({"public_key": self._b64encode_bytes(public_bytes)})
 
@@ -1102,13 +1087,13 @@ class MacosVaultPlugin(
             recipient_pub_bytes = self._b64decode_str(recipient_pubkey)
         except ValueError:
             return self._error(
-                ErrorCode.INVALID_PUBKEY, "recipient_pubkey is not valid base64",
+                ErrorCode.INVALID_PUBKEY,
+                "recipient_pubkey is not valid base64",
             )
         if len(recipient_pub_bytes) != X25519_KEY_LENGTH_BYTES:
             return self._error(
                 ErrorCode.INVALID_PUBKEY,
-                f"recipient_pubkey must decode to {X25519_KEY_LENGTH_BYTES} bytes; "
-                f"got {len(recipient_pub_bytes)}",
+                f"recipient_pubkey must decode to {X25519_KEY_LENGTH_BYTES} bytes; got {len(recipient_pub_bytes)}",
             )
         peer_fp = self._pubkey_fingerprint(recipient_pub_bytes)
 
@@ -1132,7 +1117,8 @@ class MacosVaultPlugin(
                 error_message="secret_not_found",
             )
             return self._error(
-                ErrorCode.SECRET_NOT_FOUND, f"no secret named {secret_name!r} in vault",
+                ErrorCode.SECRET_NOT_FOUND,
+                f"no secret named {secret_name!r} in vault",
             )
 
         plaintext_bytes = plaintext_value.encode("utf-8")
@@ -1185,8 +1171,7 @@ class MacosVaultPlugin(
         private_bytes = self._get_stored_private_key_bytes()
         if private_bytes is None:
             raise RuntimeError(
-                f"{self.name}: encryption keypair not loaded after prepare_for_readiness; "
-                "call ensure_encryption_keypair explicitly or check startup_sequence ordering.",
+                f"{self.name}: encryption keypair not loaded after prepare_for_readiness; call ensure_encryption_keypair explicitly or check startup_sequence ordering.",
             )
         local_pub_fp = self._pubkey_fingerprint(
             self._get_stored_public_key_bytes() or b"",
@@ -1196,7 +1181,8 @@ class MacosVaultPlugin(
             ciphertext_bytes = self._b64decode_str(ciphertext)
         except ValueError:
             return self._error(
-                ErrorCode.INVALID_CIPHERTEXT, "ciphertext is not valid base64",
+                ErrorCode.INVALID_CIPHERTEXT,
+                "ciphertext is not valid base64",
             )
 
         # Reject the no-overwrite-against-existing case BEFORE decrypting — no
@@ -1243,11 +1229,7 @@ class MacosVaultPlugin(
 
         try:
             plaintext_str = plaintext_bytes.decode("utf-8")
-            store_result = (
-                self._rotate_impl(name, plaintext_str)
-                if existing
-                else self._store_impl(name, plaintext_str, [], {})
-            )
+            store_result = self._rotate_impl(name, plaintext_str) if existing else self._store_impl(name, plaintext_str, [], {})
             plaintext_fp = self._plaintext_fingerprint(plaintext_bytes)
         finally:
             del plaintext_bytes
@@ -1308,17 +1290,14 @@ class MacosVaultPlugin(
             "client_name": client_name,
             "scopes": scopes or ["mcp:read", "mcp:write"],
             "redirect_uris": redirect_uris or [],
-            "grant_types": (
-                grant_types
-                if grant_types is not None
-                else ["authorization_code", "refresh_token"]
-            ),
+            "grant_types": (grant_types if grant_types is not None else ["authorization_code", "refresh_token"]),
         }
         try:
             return self._success(self._oauth_registry.register_client(params))
         except OauthGrantValidationError as exc:
             return self._error(
-                ErrorCode.OAUTH_CLIENT_INVALID_NAME, str(exc),
+                ErrorCode.OAUTH_CLIENT_INVALID_NAME,
+                str(exc),
             )
 
     @requires_operator_principal
@@ -1472,7 +1451,8 @@ class MacosVaultPlugin(
         only.
         """
         return self._oauth_registry.verify_client_credentials(
-            client_id, client_secret,
+            client_id,
+            client_secret,
         )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1529,15 +1509,12 @@ class MacosVaultPlugin(
         """
         if self._keychain is None:
             raise RuntimeError(
-                f"{self.name}: per-credential Keychain substrate not initialized "
-                "before vault verb dispatched. Check prepare_for_readiness ordering.",
+                f"{self.name}: per-credential Keychain substrate not initialized before vault verb dispatched. Check prepare_for_readiness ordering.",
             )
         pair = self._parse_scoped_key(key)
         if pair is None:
             raise ValueError(
-                f"{self.name}: key {key!r} is not in scoped form "
-                "'<solet>.<plugin>.<credential>'. The vault no longer "
-                "accepts non-scoped keys.",
+                f"{self.name}: key {key!r} is not in scoped form '<solet>.<plugin>.<credential>'. The vault no longer accepts non-scoped keys.",
             )
         return pair
 
@@ -1557,7 +1534,8 @@ class MacosVaultPlugin(
         """
         if not self.state_service:
             return self._error(
-                ErrorCode.ENCRYPTION_FAILED, "State service not available",
+                ErrorCode.ENCRYPTION_FAILED,
+                "State service not available",
             )
         result = self.state_service.update_state(
             namespace=VAULT_NAMESPACE,
@@ -1571,9 +1549,7 @@ class MacosVaultPlugin(
             )
         return None
 
-    def _store_impl(
-        self, key: str, value: str, tags: builtins.list[str], metadata: dict[str, str]
-    ) -> ActionResult:
+    def _store_impl(self, key: str, value: str, tags: builtins.list[str], metadata: dict[str, str]) -> ActionResult:
         """Keychain-only store. ``tags`` / ``metadata`` are not yet persisted (Round 4 kSecAttrGeneric scope)."""
         del tags, metadata  # accepted for interface stability; persisted in Round 4
         pair = self._require_keychain_pair(key)
@@ -1614,10 +1590,12 @@ class MacosVaultPlugin(
         pair = self._require_keychain_pair(key)
         if self._keychain is None:
             return self._error(ErrorCode.ENCRYPTION_FAILED, "Keychain unavailable")
-        return self._success({
-            "key": key,
-            "exists": self._keychain.exists_credential(*pair),
-        })
+        return self._success(
+            {
+                "key": key,
+                "exists": self._keychain.exists_credential(*pair),
+            }
+        )
 
     def _list_impl(self, tag: str | None) -> ActionResult:
         """Keychain enumeration via SystemKeychain.list_credentials_under_solet().
@@ -1656,11 +1634,13 @@ class MacosVaultPlugin(
     def _rename_impl(self, old_key: str, new_key: str) -> ActionResult:
         """Keychain-only rename: read-store-delete sequence on the per-credential surface."""
         if old_key == new_key:
-            return self._success({
-                "old_key": old_key,
-                "new_key": new_key,
-                "message": "Secret rename is a no-op (old_key == new_key)",
-            })
+            return self._success(
+                {
+                    "old_key": old_key,
+                    "new_key": new_key,
+                    "message": "Secret rename is a no-op (old_key == new_key)",
+                }
+            )
         old_pair = self._require_keychain_pair(old_key)
         new_pair = self._require_keychain_pair(new_key)
         if self._keychain is None:
@@ -1680,11 +1660,13 @@ class MacosVaultPlugin(
         self._keychain.store_credential(new_pair[0], new_pair[1], value_bytes)
         self._keychain.delete_credential(*old_pair)
         self.logger.debug("Secret renamed: %s -> %s", old_key, new_key)
-        return self._success({
-            "old_key": old_key,
-            "new_key": new_key,
-            "message": "Secret renamed",
-        })
+        return self._success(
+            {
+                "old_key": old_key,
+                "new_key": new_key,
+                "message": "Secret renamed",
+            }
+        )
 
     def _rotate_impl(self, key: str, new_value: str) -> ActionResult:
         """Keychain-only rotate: overwrite in place. Version tracking awaits Round 4 kSecAttrGeneric."""
@@ -1695,11 +1677,13 @@ class MacosVaultPlugin(
             return self._not_found(key)
         self._keychain.store_credential(pair[0], pair[1], new_value.encode("utf-8"))
         self.logger.debug("Secret rotated: %s", key)
-        return self._success({
-            "key": key,
-            "version": 1,
-            "message": "Secret rotated",
-        })
+        return self._success(
+            {
+                "key": key,
+                "version": 1,
+                "message": "Secret rotated",
+            }
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # Credential Ingestion (interface methods)
@@ -1752,9 +1736,7 @@ class MacosVaultPlugin(
     ) -> ActionResult:
         """Read a named field from a kv file and store it - interface method."""
         enforce_namespace(key, call_context)
-        return self._store_from_kv_file_impl(
-            key, file_path, field, format, strip, tags or [], metadata or {}
-        )
+        return self._store_from_kv_file_impl(key, file_path, field, format, strip, tags or [], metadata or {})
 
     @requires_operator_principal
     def store_from_keychain(
@@ -1770,9 +1752,7 @@ class MacosVaultPlugin(
     ) -> ActionResult:
         """Read a value from the OS keychain and store it - interface method."""
         enforce_namespace(key, call_context)
-        return self._store_from_keychain_impl(
-            key, service, account, keychain, tags or [], metadata or {}
-        )
+        return self._store_from_keychain_impl(key, service, account, keychain, tags or [], metadata or {})
 
     def _store_from_env_impl(
         self,
@@ -1926,9 +1906,7 @@ class MacosVaultPlugin(
             )
         return self._store_impl(key, raw_or_error, tags, metadata)
 
-    def _lookup_keychain_password(
-        self, service: str, account: str
-    ) -> str | None | ActionResult:
+    def _lookup_keychain_password(self, service: str, account: str) -> str | None | ActionResult:
         """Look up a keychain password, dispatching by platform.
 
         Returns the password string (found), ``None`` (not found), or an
@@ -2073,10 +2051,7 @@ class MacosVaultPlugin(
         ``RuntimeError``.
         """
         if self._audit_store is None:
-            raise RuntimeError(
-                f"{self.name}: _audit_transfer called before "
-                "prepare_for_readiness opened _audit_store"
-            )
+            raise RuntimeError(f"{self.name}: _audit_transfer called before prepare_for_readiness opened _audit_store")
         self._audit_store.insert(
             {
                 "direction": direction,
@@ -2159,9 +2134,12 @@ class MacosVaultPlugin(
         if error.get("code") != ErrorCode.KEY_EXISTS:
             return False
         rotate_result = self._rotate_impl(key, value)
-        return rotate_result.get(
-            "action_status",
-        ) == ActionStatus.COMPLETED.value
+        return (
+            rotate_result.get(
+                "action_status",
+            )
+            == ActionStatus.COMPLETED.value
+        )
 
     def _ensure_keypair_internal(self) -> tuple[bytes, bool]:
         """Idempotent keypair bootstrap. Returns (public_bytes, created).
@@ -2175,6 +2153,53 @@ class MacosVaultPlugin(
             return existing, False
         public_bytes = self._generate_and_store_keypair()
         return public_bytes, True
+
+
+# One shared whole-operation guard, including direct S1 migration calls and
+# bounded OAuth mutations. No method admits a worker or changes its result.
+# Reentrant composition (metadata/use -> exists/list/status/retrieve) keeps the
+# same guard; only ActionProcessor's explicit registered selection makes jobs.
+_SERIAL_VAULT_OPERATIONS = frozenset(
+    {
+        "store",
+        "retrieve",
+        "use",
+        "metadata",
+        "delete",
+        "list",
+        "exists",
+        "rotate",
+        "rename",
+        "store_random",
+        "status",
+        "unlock",
+        "lock",
+        "oauth_client_register",
+        "oauth_client_revoke",
+        "oauth_client_list",
+        "oauth_client_add_redirect_uri",
+        "store_from_env",
+        "store_from_file",
+        "store_from_kv_file",
+        "store_from_keychain",
+        "ensure_encryption_keypair",
+        "get_public_key",
+        "export_encrypted",
+        "import_encrypted",
+        "vault_init",
+        "vault_create_recovery",
+        "vault_rotate_passphrase",
+        "qualify_keychain",
+        "qualify_round_trip",
+        "lookup_oauth_client",
+        "verify_oauth_client_credentials",
+        "issue_oauth_refresh_token",
+        "consume_oauth_refresh_token",
+        "record_oauth_client_token_use",
+    }
+)
+for _operation_name in _SERIAL_VAULT_OPERATIONS:
+    setattr(MacosVaultPlugin, _operation_name, serialized_vault_operation(getattr(MacosVaultPlugin, _operation_name)))
 
 
 class _StoreOAuthClientStorage:
@@ -2200,7 +2225,9 @@ class _StoreOAuthClientStorage:
         return list(self._store.read())
 
     def update_client_redirect_uris(
-        self, client_id: str, redirect_uris: list[str],
+        self,
+        client_id: str,
+        redirect_uris: list[str],
     ) -> bool:
         return bool(
             self._store.update(
@@ -2210,7 +2237,9 @@ class _StoreOAuthClientStorage:
         )
 
     def record_client_token_use(
-        self, client_id: str, fields: Mapping[str, str],
+        self,
+        client_id: str,
+        fields: Mapping[str, str],
     ) -> bool:
         return bool(
             self._store.update({"client_id": client_id}, dict(fields)),

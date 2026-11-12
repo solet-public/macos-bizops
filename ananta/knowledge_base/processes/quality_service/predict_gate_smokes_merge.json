@@ -1,14 +1,14 @@
 {
   "process_key": "service_interface::quality_service::predict_gate_smokes_merge",
   "display_name": "Predict Gate-Smoke Register Merge",
-  "description": "Read a base revision, a lane worktree's current register file, and current master to predict the three-way merge of quality_gates/gate_smokes.txt or another named append-only tracked-debt register. Reports master drift, the lane's appended hunk, registrations already duplicated on master, registrations absent from master, and the exact git merge-file -p candidate content with a clean/conflict verdict. It reads Git only; it never stages, commits, merges, creates branches, or changes any Git state.",
-  "embedding_description": "Predict whether a lane's gate_smokes or tracked-debt register addition merges cleanly with current master. Return the exact candidate content, append-only hunk, duplicate and missing registrations, and clean/conflict result without running a Git merge or mutating a worktree.",
+  "description": "Registered dispatch returns data.job_id and data.status=queued before operation preflight. Read service_interface::job_service::get_job by that exact id until terminal: job.result is the complete original operation response and job.error retains a failure. Direct internal Python calls keep their complete synchronous results. Admission persists a bounded descriptor; loss of its owner-memory body requires reconciliation without automatic replay. Read a base revision, a lane worktree's current register file, and current master to predict the three-way merge of quality_gates/gate_smokes.txt or another named append-only tracked-debt register. Reports master drift, the lane's appended hunk, registrations already duplicated on master, registrations absent from master, and the exact git merge-file -p candidate content with a clean/conflict verdict. It reads Git only; it never stages, commits, merges, creates branches, or changes any Git state.",
+  "embedding_description": "Predict Gate-Smoke Register Merge through an owned quality-service worker. Registered dispatch returns a canonical job id before registry, Git, hash, proof or campaign preflight. Retrieve its exact id for the original result or error; internal calls stay synchronous and uncertain effects are never replayed.",
   "result_processor_customizations": {
     "action_label": "Gate-smoke register merge predicted",
     "result_type": "gc_gate_smokes_merge_prediction",
-    "result_description": "Object with refs, drift/append-only flags, lane hunk/registrations, duplicate and missing registrations, merged_candidate_content, merge_verdict, and git_merge_file_exit_code.",
+    "result_description": "Submission: data.job_id and data.status. Terminal job.result: Object with refs, drift/append-only flags, lane hunk/registrations, duplicate and missing registrations, merged_candidate_content, merge_verdict, and git_merge_file_exit_code.",
     "presentation_guidance": "Lead with merge_verdict and master_drifted_since_base. On conflict, surface the candidate conflict markers. On clean, name duplicate registrations already present on master and registrations still missing there.",
-    "output_action_guidance": "This is a report-only prediction. Git-Controller decides whether and how to stage or merge."
+    "output_action_guidance": "Keep the exact job id. Retrieve job_service.get_job until terminal before consuming operation fields; do not repeat effects after owner loss or an uncertain terminal write. This is a report-only prediction. Git-Controller decides whether and how to stage or merge."
   },
   "error_processor_customizations": {
     "action_context": "Read-only git show and git merge-file -p against a declared lane worktree and register.",

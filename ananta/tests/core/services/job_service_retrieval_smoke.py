@@ -58,7 +58,7 @@ import inspect
 import json
 import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
@@ -70,6 +70,7 @@ from ananta.core.state.job_completion_reach import (  # noqa: E402
 )
 from ananta.interfaces.state_service_protocol import StateServiceProtocol  # noqa: E402
 from ananta.services.job_service.service import JobService  # noqa: E402
+from ananta.services.state_service.ordered_query import apply_ordered_query_in_memory, parse_ordered_query  # noqa: E402
 
 _failures: list[str] = []
 
@@ -133,19 +134,13 @@ class _FakeStateService:
         return _ok(rows)
 
     def query_ordered(self, namespace: str, data: dict[str, object]) -> dict[str, object]:
-        order_by = cast(list[list[str]], data.get("order_by", []))
-        limit = cast(int, data.get("limit", 1))
-        if len(order_by) < 2 or len({pair[1] for pair in order_by}) != 1 or (limit > 100 and not data.get("unbounded", False)):
-            return {"action_status": "error", "error": "query_ordered grammar refused"}
-        rows = self._rows_for(dict(data))
-        for pair in reversed(order_by):
-            column, direction = pair
-            rows.sort(key=lambda row: str(row[column]), reverse=direction == "desc")
-        after = data.get("after")
-        if isinstance(after, list):
-            cursor = tuple(map(str, after))
-            rows = [row for row in rows if (str(row[order_by[0][0]]), str(row[order_by[1][0]])) < cursor]
-        return _ok(rows[:limit])
+        del namespace
+        try:
+            spec = parse_ordered_query(data)
+        except ValueError as error:
+            return {"action_status": "error", "error": str(error)}
+        source = self.jobs if spec.table == "job" else self.payloads
+        return _ok(apply_ordered_query_in_memory(source, spec))
 
     def write_state(
         self,

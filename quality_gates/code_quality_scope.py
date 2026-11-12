@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Touched-surface scoping for the code-quality gate on a landing merge.
 
-``code_quality_check.py`` runs twenty classes. Three of them -- ``syntax``,
+``code_quality_check.py`` runs twenty-one classes. Three of them -- ``syntax``,
 ``radon_cc`` and ``radon_mi`` -- decide each file from that file's own bytes,
 so on a landing merge they only need the files the merge touched. Two more --
 ``god_class`` and ``pyright`` -- also read the modules a file imports, so their
@@ -54,6 +54,7 @@ CLASS_NAMES: tuple[str, ...] = (
     "bundle_license",
     "schema_init",
     "smoke_contract_lint",
+    "temp_directory_census",
     "wint2_driver_import",
     "wint2_vault_key_declaration",
     "syntax",

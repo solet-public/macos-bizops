@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from .constants import BLOB_NAMESPACE, DOCS_DEFAULT_EXPORT_FORMAT, DOCS_EXPORT_MIME_BY_FORMAT
-from .drive_actions import BlobWriter, export_media_to_blob, resolve_export_mime
+from .drive_actions import BlobWriter, export_media_to_blob, export_target
 
 _INSERT_AT_START = 1
 
@@ -57,10 +57,7 @@ def batch_update(docs: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 def export_document(drive: Any, params: dict[str, Any], blob_writer: BlobWriter) -> dict[str, Any]:
     """Export a document to pdf/docx/txt via Drive's export_media; return doc_blob_key."""
-    document_id = _require_str(params, "id")
-    fmt = _as_str(params.get("format")) or DOCS_DEFAULT_EXPORT_FORMAT
-    mime = resolve_export_mime(fmt, DOCS_EXPORT_MIME_BY_FORMAT)
-    filename = f"{document_id}.{fmt}"
+    document_id, mime, filename = export_target(params, DOCS_DEFAULT_EXPORT_FORMAT, DOCS_EXPORT_MIME_BY_FORMAT)
     blob_key = export_media_to_blob(drive, document_id, mime, filename, blob_writer)
     return {"doc_blob_key": blob_key, "namespace": BLOB_NAMESPACE, "filename": filename}
 

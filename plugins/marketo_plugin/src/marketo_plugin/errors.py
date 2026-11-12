@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 from .constants import ERROR_API_ERROR, MARKETO_ERROR_CODE_MAP
+from .outward_values import outward_text
 
 
 class MarketoServiceError(Exception):
@@ -35,11 +36,12 @@ class MarketoEnvelopeError(Exception):
     def __init__(self, payload: dict[str, Any]) -> None:
         errors = payload.get("errors")
         first = errors[0] if isinstance(errors, list) and errors else {}
-        code = str(first.get("code", "")) if isinstance(first, dict) else ""
-        message = str(first.get("message", "")) if isinstance(first, dict) else ""
-        super().__init__(message or "Marketo request failed")
+        code = outward_text(first.get("code", "")) if isinstance(first, dict) else ""
+        message = first.get("message", "") if isinstance(first, dict) else ""
+        super().__init__(outward_text(message) or "Marketo request failed")
         self.payload = payload
         self.marketo_code = code
+        self.marketo_raw_code = first.get("code", "") if isinstance(first, dict) else ""
         self.marketo_message = message
 
 
@@ -55,8 +57,9 @@ def classify_marketo_envelope(exc: MarketoEnvelopeError) -> tuple[str, str]:
     """Return ``(marketo.* code, topology-safe message)`` for a ``success: false`` envelope."""
     mapped = MARKETO_ERROR_CODE_MAP.get(exc.marketo_code)
     our_code = mapped[0] if mapped is not None else ERROR_API_ERROR
-    detail = exc.marketo_message
-    prefix = f"Marketo rejected the request (code {exc.marketo_code or 'unknown'})"
+    detail = outward_text(exc.marketo_message)
+    raw_code = outward_text(exc.marketo_raw_code)
+    prefix = f"Marketo rejected the request (code {raw_code or 'unknown'})"
     return our_code, f"{prefix}: {detail}" if detail else f"{prefix}."
 
 

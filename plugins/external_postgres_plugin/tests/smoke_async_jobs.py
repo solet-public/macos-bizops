@@ -23,10 +23,9 @@ Exercises:
      plugin._export_path_gate, and that a driver fault classifies
      topology-safe there too, replacing smoke_query.py's old plugin-level
      dispatch test which asserted a scenario the new shape makes impossible).
-  4. run_statement's worker opens the connection with read_only=False (the
-     write reversal) while every READ verb's worker still opens read_only=True
-     (the default, unaffected) — proves the write path is verb-scoped, not a
-     regression in every other verb. Also proves the worker commits (not
+  4. no worker passes a read_only connection argument (USER ruling
+     rul_4c99a30d: the role's GRANTs are the only boundary) — neither the
+     write verb nor an introspection verb. Also proves the worker commits (not
      rolls back) on both the no-RETURNING inline-rowcount branch and the
      RETURNING-writes-a-TSV branch.
   5. ensure_worker_started is idempotent: two calls produce the same thread
@@ -45,7 +44,7 @@ import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -91,11 +90,7 @@ class _FakeAsyncJobManager:
         return {"action_status": "completed", "data": {"job_id": job_id, "status": "queued"}}
 
     def list_jobs(self, status: str | None = None, provider_name: str | None = None, **_: Any) -> dict[str, Any]:
-        jobs = [
-            j for j in self._jobs.values()
-            if (status is None or j["status"] == status)
-            and (provider_name is None or j["provider_name"] == provider_name)
-        ]
+        jobs = [j for j in self._jobs.values() if (status is None or j["status"] == status) and (provider_name is None or j["provider_name"] == provider_name)]
         return {"action_status": "completed", "data": {"jobs": jobs}}
 
     def get_job_payload(self, job_id: str, payload_type: str = "request") -> dict[str, Any]:
@@ -168,7 +163,8 @@ def test_dispatch_requires_session_and_flow_id() -> None:
 def test_dispatch_requires_connection_name() -> None:
     plugin, _ = _plugin_with_fake_manager()
     result = plugin.describe_table(
-        {"schema": "public", "table": "t"}, {"session_id": "s1", "flow_id": "f1"},
+        {"schema": "public", "table": "t"},
+        {"session_id": "s1", "flow_id": "f1"},
     )
     _assert("missing connection_name -> error status", result["action_status"] == "error")
     _assert(
@@ -184,7 +180,7 @@ def test_worker_completes_job_on_success() -> None:
 
     fake_conn = _fake_conn(["schema_name"], [("public",), ("analytics",)])
     original_connect = connection.connect
-    plugin._app_config_loader.resolve.return_value = SimpleNamespace()
+    cast(Any, plugin._app_config_loader).resolve.return_value = SimpleNamespace(user="u", password="")
     connection.connect = lambda *a, **kw: fake_conn  # type: ignore[assignment]
     try:
         async_jobs._process_job(plugin, fake_manager, job_id, "list_schemas")
@@ -215,7 +211,7 @@ def test_worker_completes_job_on_error_topology_safe() -> None:
 
     host_marker = "SECRET-HOST-9.9.9.9"
     original_connect = connection.connect
-    plugin._app_config_loader.resolve.return_value = SimpleNamespace()
+    cast(Any, plugin._app_config_loader).resolve.return_value = SimpleNamespace(user="u", password="")
 
     def _boom(*_a: Any, **_kw: Any) -> Any:
         raise _FakeDriverError("28P01", f"password authentication failed at {host_marker}")
@@ -283,7 +279,7 @@ def test_worker_run_query_writes_tsv_via_export_path_gate() -> None:
 
         fake_conn = _fake_conn(["id", "name"], [(1, "alice"), (2, "bob")])
         original_connect = connection.connect
-        plugin._app_config_loader.resolve.return_value = SimpleNamespace()
+        cast(Any, plugin._app_config_loader).resolve.return_value = SimpleNamespace(user="u", password="")
         connection.connect = lambda *a, **kw: fake_conn  # type: ignore[assignment]
         try:
             async_jobs._process_job(plugin, fake_manager, job_id, "run_query")
@@ -311,7 +307,7 @@ def test_worker_run_query_error_topology_safe() -> None:
     host_marker = "SECRET-HOST-9.9.9.9"
     user_marker = "SECRET-USER-marker"
     original_connect = connection.connect
-    plugin._app_config_loader.resolve.return_value = SimpleNamespace()
+    cast(Any, plugin._app_config_loader).resolve.return_value = SimpleNamespace(user="u", password="")
 
     def _boom(*_a: Any, **_kw: Any) -> Any:
         raise _FakeDriverError("28P01", f"password authentication failed for {user_marker} at {host_marker}")
@@ -331,7 +327,7 @@ def test_worker_run_query_error_topology_safe() -> None:
     )
 
 
-def test_run_statement_worker_opens_non_read_only_connection() -> None:
+def test_run_statement_worker_opens_unrestricted_connection() -> None:
     plugin, fake_manager = _plugin_with_fake_manager()
     dispatch = plugin.run_statement(
         {"connection_name": "x", "sql": "UPDATE t SET x = 1"},
@@ -342,7 +338,7 @@ def test_run_statement_worker_opens_non_read_only_connection() -> None:
     fake_conn = _fake_conn(None, [])
     connect_calls: list[dict[str, Any]] = []
     original_connect = connection.connect
-    plugin._app_config_loader.resolve.return_value = SimpleNamespace()
+    cast(Any, plugin._app_config_loader).resolve.return_value = SimpleNamespace(user="u", password="")
 
     def _record_connect(*_a: Any, **kw: Any) -> Any:
         connect_calls.append(kw)
@@ -356,8 +352,8 @@ def test_run_statement_worker_opens_non_read_only_connection() -> None:
 
     _assert("run_statement's worker opened exactly one connection", len(connect_calls) == 1)
     _assert(
-        "run_statement's worker opened it with read_only=False",
-        connect_calls[0].get("read_only") is False,
+        "run_statement's worker passed no read_only argument",
+        "read_only" not in connect_calls[0],
         str(connect_calls),
     )
     statuses = [updates.get("status") for _, updates in fake_manager.update_calls]
@@ -368,10 +364,9 @@ def test_run_statement_worker_opens_non_read_only_connection() -> None:
     _assert("the fake connection was committed, not rolled back", fake_conn.commit.called and not fake_conn.rollback.called)
 
 
-def test_read_verb_worker_still_opens_read_only_connection() -> None:
-    # Contrast case: a READ verb's worker must still open read_only=True (the
-    # default) -- proves the write path's read_only=False is verb-scoped, not
-    # a regression in every other verb's connection.
+def test_introspection_worker_opens_unrestricted_connection() -> None:
+    # The introspection verbs open the SAME ordinary connection as every other
+    # verb: no read-only characteristic is requested anywhere (rul_4c99a30d).
     plugin, fake_manager = _plugin_with_fake_manager()
     dispatch = plugin.list_schemas({"connection_name": "x"}, {"session_id": "s1", "flow_id": "f1"})
     job_id = dispatch["data"]["job_id"]
@@ -379,7 +374,7 @@ def test_read_verb_worker_still_opens_read_only_connection() -> None:
     fake_conn = _fake_conn(["schema_name"], [("public",)])
     connect_calls: list[dict[str, Any]] = []
     original_connect = connection.connect
-    plugin._app_config_loader.resolve.return_value = SimpleNamespace()
+    cast(Any, plugin._app_config_loader).resolve.return_value = SimpleNamespace(user="u", password="")
 
     def _record_connect(*_a: Any, **kw: Any) -> Any:
         connect_calls.append(kw)
@@ -392,8 +387,8 @@ def test_read_verb_worker_still_opens_read_only_connection() -> None:
         connection.connect = original_connect  # type: ignore[assignment]
 
     _assert(
-        "list_schemas's worker opened it with read_only=True",
-        connect_calls[0].get("read_only") is True,
+        "list_schemas's worker passed no read_only argument",
+        "read_only" not in connect_calls[0],
         str(connect_calls),
     )
 
@@ -417,7 +412,7 @@ def test_run_statement_worker_writes_tsv_for_returning() -> None:
 
         fake_conn = _fake_conn(["id"], [(7,)])
         original_connect = connection.connect
-        plugin._app_config_loader.resolve.return_value = SimpleNamespace()
+        cast(Any, plugin._app_config_loader).resolve.return_value = SimpleNamespace(user="u", password="")
         connection.connect = lambda *a, **kw: fake_conn  # type: ignore[assignment]
         try:
             async_jobs._process_job(plugin, fake_manager, job_id, "run_statement")
@@ -454,8 +449,8 @@ def main() -> int:
     test_run_query_dispatch_returns_queued_without_connecting()
     test_worker_run_query_writes_tsv_via_export_path_gate()
     test_worker_run_query_error_topology_safe()
-    test_run_statement_worker_opens_non_read_only_connection()
-    test_read_verb_worker_still_opens_read_only_connection()
+    test_run_statement_worker_opens_unrestricted_connection()
+    test_introspection_worker_opens_unrestricted_connection()
     test_run_statement_worker_writes_tsv_for_returning()
     test_ensure_worker_started_idempotent()
     print()

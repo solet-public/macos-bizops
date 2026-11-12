@@ -1,4 +1,4 @@
-"""Explicit, owned private PostgreSQL configuration for the nine routed smokes.
+"""Explicit, owned private PostgreSQL configuration for ten routed smokes.
 
 There is no profile route. A missing manifest is a disclosed skip; corrupt
 custody is an integrity error. The immutable manifest is retired with its run.
@@ -39,6 +39,7 @@ FIXTURE_KEYS = (
     "external_readonly",
     "external_multistatement",
     "external_write",
+    "fast_return_census",
 )
 PG_BIN_DIRECTORIES = (
     "/opt/homebrew/opt/postgresql@17/bin",

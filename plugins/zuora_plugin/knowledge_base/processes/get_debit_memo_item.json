@@ -6,8 +6,8 @@
   "result_processor_customizations": {
     "action_label": "Zuora debit memo item read",
     "result_type": "zuora_get_debit_memo_item_result",
-    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted).",
-    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body as received).",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically."
   },
   "error_processor_customizations": {
     "action_context": "Read one debit memo item (GET /v1/debit-memos/{debitMemoKey}/items/{dmitemid}): amount, balance, amount applied to it, SKU, source item and service period.",

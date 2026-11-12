@@ -10,13 +10,13 @@ user-guide/data-load-snowpipe-rest-apis). Endpoints the specs mark deprecated
 actions such as tables/{name}:as_select) are left to the generic request verb. Input checks mirror those documents: identifier pattern, query
 names, types and ranges, createMode values and required body members. Nothing
 here classifies reads against writes: the registered role's vendor grants
-decide every operation, including deletes. Transport, JWT and credential redaction are rest_client's.
+decide every operation, including deletes. Transport, JWT and the audit line are rest_client's.
 
 Pagination is surfaced, never followed: a list's last name for ``fromName``,
 the Link header's relations, a 202 result handler for ``fetch_result``, the
 next SQL API partition, a Snowpipe insert report's ``nextBeginMark`` and an
-incomplete load-history scan's next start time. Derived hints are read from the already-redacted
-result, so they cannot carry a credential the result itself does not.
+incomplete load-history scan's next start time. Derived hints are read from the
+result as received.
 """
 
 from __future__ import annotations
@@ -553,7 +553,7 @@ def _from_name_hint(operation: Operation, body: object, query: Mapping[str, Any]
 
 
 def pagination(operation: Operation, request: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, Any]:
-    """Explicit next-call hints derived from the redacted vendor result."""
+    """Interpret raw response controls before sanitizing each outward hint."""
     body = result.get("body")
     hint = _header_hints(result.get("headers") or {})
     if isinstance(body, dict):
@@ -571,7 +571,7 @@ def run_family(family: str, plugin: Any, params: dict[str, Any]) -> dict[str, An
         name, operation = _operation(family, params)
         request = build_request(family, params)
         config = plugin._app_config_loader.resolve()
-        result = rest_client.perform_request(config, request, timeout_seconds=plugin._login_timeout_seconds())
+        result = rest_client.perform_request(config, request, timeout_seconds=plugin._login_timeout_seconds(), result_hints=lambda raw: pagination(operation, request, raw))
     except (RestFamilyError, rest_client.RestRequestError) as exc:
         return plugin._error(ERROR_INVALID_PARAMS, str(exc))
     except Exception:
@@ -579,10 +579,10 @@ def run_family(family: str, plugin: Any, params: dict[str, Any]) -> dict[str, An
     status_errors = _SQL_API_STATUS_ERRORS if family == "sql_api" else _STATUS_ERRORS
     if result["status"] in status_errors:
         result["error_code"] = status_errors[result["status"]]
+    hint = result.pop("_hints")
     data = {**result, "family": family, "operation": name, "method": operation.method}
     if "requestId" in request["query"]:
         data["request_id"] = request["query"]["requestId"]
-    hint = pagination(operation, request, result)
     if hint:
         data["pagination"] = hint
     return plugin._success(data)

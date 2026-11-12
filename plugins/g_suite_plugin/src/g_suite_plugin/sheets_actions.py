@@ -29,7 +29,7 @@ from .constants import (
     SHEETS_TAB_FILE_DELIMITERS,
     SHEETS_VALUE_INPUT_OPTION_USER_ENTERED,
 )
-from .drive_actions import BlobWriter, export_media_to_blob, resolve_export_mime
+from .drive_actions import BlobWriter, export_media_to_blob, export_target
 
 
 class ResultTooLargeError(RuntimeError):
@@ -69,17 +69,10 @@ def get_values(sheets: Any, params: dict[str, Any]) -> dict[str, Any]:
     spreadsheet_id = _require_str(params, "id")
     cell_range = _require_str(params, "range")
     effective_limit = _resolve_effective_limit(params, verb="sheets_get_values")
-    response = (
-        sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=cell_range).execute()
-    )
+    response = sheets.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=cell_range).execute()
     values = response.get("values") or []
     if len(values) > effective_limit:
-        raise ResultTooLargeError(
-            f"sheets_get_values: the range returned {len(values)} rows, over the effective "
-            f"limit of {effective_limit}; narrow the requested range, or pass "
-            f"{PARAM_ACKNOWLEDGE_OVERRIDE}=true with an explicit {PARAM_ROW_LIMIT} (up to "
-            f"{SHEETS_ROW_LIMIT_CAP}) to raise the limit"
-        )
+        raise ResultTooLargeError(f"sheets_get_values: the range returned {len(values)} rows, over the effective limit of {effective_limit}; narrow the requested range, or pass {PARAM_ACKNOWLEDGE_OVERRIDE}=true with an explicit {PARAM_ROW_LIMIT} (up to {SHEETS_ROW_LIMIT_CAP}) to raise the limit")
     return {"values": values}
 
 
@@ -97,20 +90,13 @@ def _resolve_effective_limit(params: dict[str, Any], *, verb: str) -> int:
     override_present = override is True
     row_limit_present = row_limit is not None
     if override_present != row_limit_present:
-        raise ValueError(
-            f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be "
-            f"given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, "
-            f"{PARAM_ROW_LIMIT}={row_limit!r}"
-        )
+        raise ValueError(f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, {PARAM_ROW_LIMIT}={row_limit!r}")
     if not override_present:
         return SHEETS_DEFAULT_ROW_LIMIT
     if not isinstance(row_limit, int) or isinstance(row_limit, bool) or row_limit < 1:
         raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}' must be a positive integer")
     if row_limit > SHEETS_ROW_LIMIT_CAP:
-        raise ValueError(
-            f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of "
-            f"{SHEETS_ROW_LIMIT_CAP}; refusing rather than silently clamping"
-        )
+        raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of {SHEETS_ROW_LIMIT_CAP}; refusing rather than silently clamping")
     return row_limit
 
 
@@ -157,11 +143,7 @@ def batch_update(sheets: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Apply a list of raw Sheets API batchUpdate request objects."""
     spreadsheet_id = _require_str(params, "id")
     requests = _require_requests(params)
-    response = (
-        sheets.spreadsheets()
-        .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests})
-        .execute()
-    )
+    response = sheets.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
     return {"replies": response.get("replies") or []}
 
 
@@ -199,9 +181,7 @@ def create_spreadsheet_from_files(sheets: Any, params: dict[str, Any]) -> dict[s
         total_cells += _as_int(response.get("updatedCells"))
     return {
         "id": spreadsheet_id,
-        "tabs": [
-            {"name": name, "sheet_id": _require_sheet_id(sheet_ids, name)} for name, _ in grids
-        ],
+        "tabs": [{"name": name, "sheet_id": _require_sheet_id(sheet_ids, name)} for name, _ in grids],
         "updated_cells": total_cells,
     }
 
@@ -282,10 +262,7 @@ def _require_requests(params: dict[str, Any], key: str = "requests") -> list[dic
 
 def export_spreadsheet(drive: Any, params: dict[str, Any], blob_writer: BlobWriter) -> dict[str, Any]:
     """Export a spreadsheet to csv/xlsx via Drive's export_media; return sheet_blob_key."""
-    spreadsheet_id = _require_str(params, "id")
-    fmt = _as_str(params.get("format")) or SHEETS_DEFAULT_EXPORT_FORMAT
-    mime = resolve_export_mime(fmt, SHEETS_EXPORT_MIME_BY_FORMAT)
-    filename = f"{spreadsheet_id}.{fmt}"
+    spreadsheet_id, mime, filename = export_target(params, SHEETS_DEFAULT_EXPORT_FORMAT, SHEETS_EXPORT_MIME_BY_FORMAT)
     blob_key = export_media_to_blob(drive, spreadsheet_id, mime, filename, blob_writer)
     return {"sheet_blob_key": blob_key, "namespace": BLOB_NAMESPACE, "filename": filename}
 

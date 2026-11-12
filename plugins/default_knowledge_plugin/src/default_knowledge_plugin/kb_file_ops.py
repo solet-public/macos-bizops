@@ -68,7 +68,11 @@ def _is_under_subdir(relative_path: str, subdir: str) -> bool:
 
 
 def _enforce_write_guard(
-    record: dict[str, Any], manifest: Manifest, *, verb: str, path: str,
+    record: dict[str, Any],
+    manifest: Manifest,
+    *,
+    verb: str,
+    path: str,
 ) -> None:
     """Shared posture + protected-path guard for create / edit / delete.
 
@@ -83,29 +87,15 @@ def _enforce_write_guard(
     name = record["name"]
     posture = manifest.write_posture
     if posture == WritePosture.READ_ONLY:
-        raise PermissionError(
-            f"KB '{name}' is read_only; {verb}_file is not permitted."
-        )
+        raise PermissionError(f"KB '{name}' is read_only; {verb}_file is not permitted.")
     if posture == WritePosture.CREATE_ONLY and verb in ("edit", "delete"):
-        raise PermissionError(
-            f"KB '{name}' posture create_only rejects {verb}_file; "
-            f"use create_file, or archive_file to retire a doc."
-        )
+        raise PermissionError(f"KB '{name}' posture create_only rejects {verb}_file; use create_file, or archive_file to retire a doc.")
     if posture == WritePosture.CREATE_AND_CAS_EDIT and verb == "delete":
-        raise PermissionError(
-            f"KB '{name}' posture create_and_cas_edit rejects delete_file; "
-            f"use archive_file to retire a doc (workbench docs are archived, never deleted)."
-        )
+        raise PermissionError(f"KB '{name}' posture create_and_cas_edit rejects delete_file; use archive_file to retire a doc (workbench docs are archived, never deleted).")
     if _is_under_doc_history(path):
-        raise PermissionError(
-            f"'{path}' is under the platform-written {DOC_HISTORY_DIRNAME} "
-            f"snapshot sidecar; {verb}_file there is not permitted."
-        )
+        raise PermissionError(f"'{path}' is under the platform-written {DOC_HISTORY_DIRNAME} snapshot sidecar; {verb}_file there is not permitted.")
     if manifest.archive_subdir and _is_under_subdir(path, manifest.archive_subdir):
-        raise PermissionError(
-            f"'{path}' is under the archive subdir '{manifest.archive_subdir}'; "
-            f"use archive_file — a direct {verb}_file there bypasses supersession stamping."
-        )
+        raise PermissionError(f"'{path}' is under the archive subdir '{manifest.archive_subdir}'; use archive_file — a direct {verb}_file there bypasses supersession stamping.")
 
 
 def _validate_metadata_block(name: str, path: str, content: str) -> None:
@@ -123,11 +113,7 @@ def _validate_metadata_block(name: str, path: str, content: str) -> None:
         missing.append("a '# ' title line")
     missing.extend(key for key in METADATA_BLOCK_REQUIRED_KEYS if key not in present)
     if missing:
-        raise ValueError(
-            f"KB '{name}' requires the §4 metadata block on create; "
-            f"'{path}' is missing: {', '.join(missing)}. See the workbench "
-            f"document-authoring convention article (search name='workbench')."
-        )
+        raise ValueError(f"KB '{name}' requires the §4 metadata block on create; '{path}' is missing: {', '.join(missing)}. See the workbench document-authoring convention article (search name='workbench').")
 
 
 def _snapshot_relative(relative_path: str) -> str:
@@ -216,23 +202,13 @@ def reindex_file(
     window is a regenerable index, swept by the operator-fired
     ``purge_orphaned_chunks`` verb.
 
-    SERIALIZATION (no advisory lock — D3/kb GAP-6, 2026-06-21): the per-KB
-    ``pg_advisory_xact_lock(hashtext(name)::bigint)`` that previously guarded
-    these two transactions was removed as REDUNDANT. Every caller of this
-    function is a synchronous, non-self-completing service-interface EDGE verb
-    (``edit_file`` / ``create_file`` / ``delete_file``), which the
-    single-threaded ActionQueuePoller dispatches one-at-a-time (``_poll_once``
-    awaits each ``execute_action`` inline) — so two same-KB reindex/edit
-    operations can never overlap, and serial dispatch is strictly stronger than
-    the per-name lock (which released between the two txns anyway).
-    TRIPWIRE — this redundancy holds ONLY while: (a) these verbs stay
-    ``is_async=False`` / non-self-completing; (b) a single active-color poller
-    dispatches them; and (c) every in-process caller of
-    ``knowledge_service.{edit,create}_file`` (e.g. ``default_thinking_plugin``,
-    the one cross-plugin direct caller, itself poller-serialized) stays
-    poller-serialized. A future ``is_async`` flip on these verbs, a second
-    concurrent dispatcher, or a direct call from an async/threaded/non-poller
-    context re-surfaces the need for the per-KB advisory lock.
+    SERIALIZATION: the bound provider encloses the whole operation in its
+    reentrant activity guard. Registered jobs share one existing serial owner
+    worker; synchronous Thinking/service calls and startup hydration enter the
+    same provider guard and retain final results. Nested provider composition
+    stays on the calling thread. Chunk replacement and its install-record write
+    therefore remain together even after the registered action returns a job.
+    This is a local provider-instance guarantee, not a cross-process lock.
     """
     if relative_path.startswith("processes/"):
         return
@@ -262,7 +238,9 @@ def reindex_file(
 
 
 def browse_kb(
-    name: str, path: str, state_service: Any,
+    name: str,
+    path: str,
+    state_service: Any,
 ) -> dict[str, Any]:
     """List directory contents within a knowledge base."""
     record = get_install_record(name, state_service)
@@ -304,7 +282,9 @@ def browse_kb(
 
 
 def read_file_kb(
-    name: str, path: str, state_service: Any,
+    name: str,
+    path: str,
+    state_service: Any,
 ) -> dict[str, Any]:
     """Read a file from a knowledge base. Path traversal protected."""
     record = get_install_record(name, state_service)
@@ -327,8 +307,11 @@ def read_file_kb(
 
 
 def edit_file_kb(
-    name: str, path: str, content: str,
-    state_service: Any, memory_service: Any,
+    name: str,
+    path: str,
+    content: str,
+    state_service: Any,
+    memory_service: Any,
     expected_content_hash: str | None = None,
     *,
     budget: TokenBudget | None,
@@ -356,10 +339,7 @@ def edit_file_kb(
     _enforce_write_guard(record, manifest, verb="edit", path=path)
 
     if manifest.write_posture == WritePosture.CREATE_AND_CAS_EDIT and expected_content_hash is None:
-        raise PermissionError(
-            f"KB '{name}' posture create_and_cas_edit requires expected_content_hash "
-            f"on edit_file; read_file returns content_sha256 — pass it back to edit."
-        )
+        raise PermissionError(f"KB '{name}' posture create_and_cas_edit requires expected_content_hash on edit_file; read_file returns content_sha256 — pass it back to edit.")
 
     kb_dir = Path(record["resolved_path"])
 
@@ -367,11 +347,7 @@ def edit_file_kb(
         current = target.read_text(encoding="utf-8", errors="replace")
         current_hash = content_sha256(current)
         if current_hash != expected_content_hash:
-            raise ValueError(
-                f"edit_file precondition failed for '{path}': expected content "
-                f"hash {expected_content_hash} but current is {current_hash}. "
-                f"Re-read the file and reapply your change to the current version."
-            )
+            raise ValueError(f"edit_file precondition failed for '{path}': expected content hash {expected_content_hash} but current is {current_hash}. Re-read the file and reapply your change to the current version.")
         _write_prior_version_snapshot(kb_dir, path, current)
 
     target.write_text(content, encoding="utf-8")
@@ -385,8 +361,11 @@ def edit_file_kb(
 
 
 def create_file_kb(
-    name: str, path: str, content: str,
-    state_service: Any, memory_service: Any,
+    name: str,
+    path: str,
+    content: str,
+    state_service: Any,
+    memory_service: Any,
     *,
     budget: TokenBudget | None,
 ) -> dict[str, Any]:
@@ -421,8 +400,10 @@ def create_file_kb(
 
 
 def delete_file_kb(
-    name: str, path: str,
-    state_service: Any, memory_service: Any,
+    name: str,
+    path: str,
+    state_service: Any,
+    memory_service: Any,
     *,
     budget: TokenBudget | None,
 ) -> dict[str, Any]:
@@ -463,8 +444,11 @@ def delete_file_kb(
 
 
 def archive_file_kb(
-    name: str, path: str, superseded_by: str | None,
-    state_service: Any, memory_service: Any,
+    name: str,
+    path: str,
+    superseded_by: str | None,
+    state_service: Any,
+    memory_service: Any,
     *,
     budget: TokenBudget | None,
 ) -> dict[str, Any]:
@@ -495,17 +479,11 @@ def archive_file_kb(
 
     manifest = _manifest_for(record)
     if not manifest.archive_subdir:
-        raise ValueError(
-            f"KB '{name}' has no archive_subdir configured; archive_file is not available."
-        )
+        raise ValueError(f"KB '{name}' has no archive_subdir configured; archive_file is not available.")
     if _is_under_doc_history(path):
-        raise PermissionError(
-            f"'{path}' is under the {DOC_HISTORY_DIRNAME} snapshot sidecar; cannot archive it."
-        )
+        raise PermissionError(f"'{path}' is under the {DOC_HISTORY_DIRNAME} snapshot sidecar; cannot archive it.")
     if _is_under_subdir(path, manifest.archive_subdir):
-        raise PermissionError(
-            f"'{path}' is already under the archive subdir '{manifest.archive_subdir}'."
-        )
+        raise PermissionError(f"'{path}' is already under the archive subdir '{manifest.archive_subdir}'.")
 
     kb_dir = Path(record["resolved_path"]).resolve()
     source = validate_path(record, path)
@@ -517,9 +495,7 @@ def archive_file_kb(
     if not dest.is_relative_to(kb_dir):
         raise ValueError(f"Path traversal rejected: {new_relative}")
     if dest.exists():
-        raise FileExistsError(
-            f"Archive destination already exists: {new_relative} (never overwrites the record)."
-        )
+        raise FileExistsError(f"Archive destination already exists: {new_relative} (never overwrites the record).")
 
     prior = source.read_text(encoding="utf-8", errors="replace")
     archived = _stamp_archive_metadata(prior, superseded_by)

@@ -330,7 +330,7 @@ def test_edge_parity() -> None:
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 23 verbs discovered", len(actions) == 23, str(len(actions)))
+    _assert("all 25 verbs discovered", len(actions) == 25, str(len(actions)))
 
 
 def test_cli_provisioning() -> None:
@@ -393,7 +393,7 @@ def test_cli_provisioning() -> None:
         "executable_path": "/fake/bin/sf",
         "version": "@salesforce/cli/2.99.0",
     }
-    response = plugin.provision_cli({"acknowledge_system_change": True}, {})
+    response = plugin._provision_cli_now({"acknowledge_system_change": True})  # noqa: SLF001 -- worker operation; execute-path receipt covered separately
     _assert("provisioner binds absolute sf path", response["action_status"] == "completed", str(response))
     _assert(
         "binding uses ordinary config update without restart",

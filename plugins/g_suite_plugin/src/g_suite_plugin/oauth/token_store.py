@@ -14,8 +14,15 @@ unpublished, or it goes 6 months unused.
 
 from __future__ import annotations
 
+import itertools
 import json
+import threading
+import weakref
+from collections.abc import Callable, Generator, Iterable
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any, cast
 
 from ..constants import (
@@ -39,6 +46,159 @@ from ..constants import (
 )
 from .app_config import AppConfigError, AppConfigLoader
 from .oauth_client import refresh_access_token
+
+# Credential journal. Every credential value a TokenStore reads from, or begins
+# writing to, a vault key is appended to that key's journal, on any thread and
+# whether or not anyone is watching; a strict snapshot appends what it finds.
+# The editor jobs scrub with the journal of their account's keys, so a value the
+# store held, read or wrote at any time up to the job's exit is in the scrub set
+# with no inference about which write replaced which value. A key is "seen" once
+# its held value is known to be journaled (a read returned it, or a write applied
+# it). The one value the journal cannot hold is a key's original value never read
+# in this process: a write that BEGINS while its key is unseen may replace it
+# unrecorded, so every window overlapping that write fails closed. While no
+# window is open, each journal is trimmed to its last _JOURNAL_LIMIT values on
+# every append (a later window starts from its own strict snapshot, and copies
+# the values of writes still pending); trimming a key forgets that its held value
+# is journaled. While any window is open nothing is trimmed, and a key gaining
+# more than _JOURNAL_LIMIT values fails the watching windows closed. Watching
+# costs no vault operation: unwatched callers are unchanged.
+_KeyPair = tuple[str, str]
+_JOURNAL_LIMIT = 64
+_LOCK = threading.RLock()
+# Per vault service: key -> journaled values, and the keys whose held value is journaled.
+_JOURNAL: weakref.WeakKeyDictionary[Any, dict[str, list[str]]] = weakref.WeakKeyDictionary()
+_SEEN: weakref.WeakKeyDictionary[Any, set[str]] = weakref.WeakKeyDictionary()
+# Per vault service: key -> values appended while any window was open.
+_GROWTH: weakref.WeakKeyDictionary[Any, dict[str, int]] = weakref.WeakKeyDictionary()
+_IN_FLIGHT: dict[int, _Write] = {}
+_ACTIVE_LEDGERS: dict[_KeyPair | None, list[CredentialLedger]] = {}
+_WRITE_IDS = itertools.count(1)
+
+
+class CredentialLedger(list[str]):
+    """A registered window: every value journaled for its pairs while it is open; only ever grows."""
+
+    def __init__(self, pair: _KeyPair | None) -> None:
+        super().__init__()
+        self.pair = pair
+        self.uncertain_pairs: set[_KeyPair] = set()
+
+    def watches(self, pair: _KeyPair) -> bool:
+        return self.pair is None or self.pair == pair
+
+    def add(self, *values: str | None) -> None:
+        with _LOCK:
+            self.extend(value for value in dict.fromkeys(values) if value and value not in self)
+
+    def is_uncertain(self, pair: _KeyPair | None = None) -> bool:
+        """True when a credential of ``pair`` (any pair when None) may be missing from the journal."""
+        with _LOCK:
+            return bool(self.uncertain_pairs) if pair is None else pair in self.uncertain_pairs
+
+
+@dataclass
+class _Write:
+    pair: _KeyPair
+    key: str
+    new: str | None
+    blind: bool
+
+
+@contextmanager
+def credential_ledger(refresh_key: str | None = None, access_key: str | None = None, seed: Iterable[str] = ()) -> Generator[CredentialLedger]:
+    """Open a window on one key pair (or every pair when both keys are None)."""
+    ledger = CredentialLedger(None if refresh_key is None or access_key is None else (refresh_key, access_key))
+    with _LOCK:
+        pending = [write for write in _IN_FLIGHT.values() if ledger.watches(write.pair)]
+        ledger.uncertain_pairs.update(write.pair for write in pending if write.blind)
+        ledger.add(*(write.new for write in pending))  # a pending value may already be trimmed from the journal
+        _ACTIVE_LEDGERS.setdefault(ledger.pair, []).append(ledger)
+    try:
+        ledger.add(*seed)
+        yield ledger
+    finally:
+        _close(ledger)
+
+
+def _close(ledger: CredentialLedger) -> None:
+    """Unregister a window; once none is open, trim every journal to its last _JOURNAL_LIMIT values."""
+    with _LOCK:
+        remaining = [entry for entry in _ACTIVE_LEDGERS.get(ledger.pair, []) if entry is not ledger]
+        if remaining:
+            _ACTIVE_LEDGERS[ledger.pair] = remaining
+        else:
+            _ACTIVE_LEDGERS.pop(ledger.pair, None)
+        if _ACTIVE_LEDGERS:
+            return
+        _GROWTH.clear()
+        for vault, journals in list(_JOURNAL.items()):
+            for key in list(journals):
+                _trim(vault, key)
+
+
+def _trim(vault: Any, key: str) -> None:
+    """Keep a key's last _JOURNAL_LIMIT values; if any were dropped, its held value may no longer be journaled."""
+    values = _JOURNAL[vault][key]
+    if len(values) > _JOURNAL_LIMIT:
+        del values[:-_JOURNAL_LIMIT]
+        _SEEN.get(vault, set()).discard(key)
+
+
+def ledger_values(ledger: list[str]) -> list[str]:
+    """A consistent copy of ``ledger`` (other threads may be appending)."""
+    with _LOCK:
+        return list(ledger)
+
+
+def active_ledger_count() -> int:
+    """How many windows are open (0 when no call is scrubbing)."""
+    with _LOCK:
+        return sum(len(ledgers) for ledgers in _ACTIVE_LEDGERS.values())
+
+
+def journal_values(vault: Any, pair: _KeyPair) -> list[str]:
+    """Every value journaled in ``vault`` for both keys of ``pair``."""
+    with _LOCK:
+        journals = _JOURNAL.get(vault, {})
+        return [*journals.get(pair[0], ()), *journals.get(pair[1], ())]
+
+
+def _watchers(pair: _KeyPair) -> list[CredentialLedger]:
+    return [*_ACTIVE_LEDGERS.get(pair, ()), *_ACTIVE_LEDGERS.get(None, ())]
+
+
+def _journal(vault: Any, pair: _KeyPair, key: str, value: str | None) -> None:
+    if not value:
+        return
+    with _LOCK:
+        values = _JOURNAL.setdefault(vault, {}).setdefault(key, [])
+        added = value not in values
+        if added:
+            values.append(value)
+        if not _ACTIVE_LEDGERS:
+            _trim(vault, key)
+            return
+        watchers = _watchers(pair)
+        for ledger in watchers:
+            ledger.add(value)
+        if not added:
+            return
+        growth = _GROWTH.setdefault(vault, {})
+        growth[key] = growth.get(key, 0) + 1
+        if growth[key] > _JOURNAL_LIMIT:
+            for ledger in watchers:
+                ledger.uncertain_pairs.add(pair)
+
+
+def _envelope_token(envelope: str) -> str | None:
+    try:
+        payload: Any = json.loads(envelope)
+    except ValueError:
+        return None
+    token = payload.get(ACCESS_TOKEN_VALUE_KEY_TOKEN) if isinstance(payload, dict) else None
+    return token if isinstance(token, str) else None
+
 
 _FACT_KEYS = (
     ACCESS_TOKEN_VALUE_KEY_GRANTED_SCOPES,
@@ -162,6 +322,74 @@ class TokenStore:
             secrets.append(client_secret)
         return secrets
 
+    def held_credentials(self) -> list[str]:
+        """Strict snapshot: read and journal both stored credentials and the client secret.
+
+        Unlike :meth:`issued_secrets`, any failed vault read raises, so a caller
+        knows when the journal may be missing a held credential.
+        """
+        values = [self._strict_credential(key) for key in (self._refresh_key, self._access_key)]
+        values.append(self.current_client_secret())
+        return [value for value in values if value]
+
+    def _strict_credential(self, key: str) -> str | None:
+        exists = self._vault.exists(key)
+        if not _is_completed(exists):
+            raise TokenStoreError(ERROR_TOKEN_STORE_FAILED, "Stored credentials could not be read.")
+        if not (exists.get("data") or {}).get("exists", False):
+            self._journal_read(key, None)
+            return None
+        result = self._vault.retrieve(key)
+        if not _is_completed(result):
+            raise TokenStoreError(ERROR_TOKEN_STORE_FAILED, "Stored credentials could not be read.")
+        stored = (result.get("data") or {}).get("value")
+        return self._journal_read(key, stored if isinstance(stored, str) else None)
+
+    def current_client_secret(self) -> str:
+        """The OAuth client secret in use now (app config, no vault), added to every open window."""
+        secret = self._app_config_loader.load().client_secret
+        with _LOCK:
+            for ledger in _watchers(self._pair()):
+                ledger.add(secret)
+        return secret
+
+    def journal_values(self) -> list[str]:
+        """Every credential value journaled for this account's two keys."""
+        return journal_values(self._vault, self._pair())
+
+    def _pair(self) -> _KeyPair:
+        return (self._refresh_key, self._access_key)
+
+    def _journal_read(self, key: str, stored: str | None) -> str | None:
+        """Journal a value a read returned (the token inside an access envelope); the key is now seen."""
+        credential = (_envelope_token(stored) if key == self._access_key else stored) if stored is not None else None
+        with _LOCK:
+            _journal(self._vault, self._pair(), key, credential)
+            _SEEN.setdefault(self._vault, set()).add(key)
+        return credential
+
+    def _journaled_write[Result](self, key: str, new: str | None, put: Callable[[], Result]) -> Result:
+        """Journal the value BEFORE the vault call; a write to an unseen key fails overlapping windows closed."""
+        pair = self._pair()
+        with _LOCK:
+            write_id = next(_WRITE_IDS)
+            blind = key not in _SEEN.get(self._vault, set())
+            _IN_FLIGHT[write_id] = _Write(pair, key, new, blind)
+            _journal(self._vault, pair, key, new)
+            if blind:
+                for ledger in _watchers(pair):
+                    ledger.uncertain_pairs.add(pair)
+        applied = False
+        try:
+            result = put()
+            applied = _is_completed(result)
+            return result
+        finally:
+            with _LOCK:
+                del _IN_FLIGHT[write_id]
+                if applied:
+                    _SEEN.setdefault(self._vault, set()).add(key)
+
     # ------------------------------------------------------------------
     # Runtime read path — called by the service factory
     # ------------------------------------------------------------------
@@ -196,7 +424,7 @@ class TokenStore:
         """Delete this account's refresh token and access envelope from vault."""
         for key in (self._refresh_key, self._access_key):
             if self._exists(key):
-                self._vault.delete(key)
+                self._journaled_write(key, None, partial(self._vault.delete, key))
 
     def token_health(self) -> str:
         """No-network health word: access_token_fresh, refreshes_on_next_call or missing_refresh_token."""
@@ -228,6 +456,9 @@ class TokenStore:
                 ERROR_NOT_CONNECTED,
                 "No Google refresh token stored. Run connect_account first.",
             )
+        with _LOCK:
+            for ledger in _watchers(self._pair()):
+                ledger.add(app_config.client_secret)
         try:
             tokens = refresh_access_token(app_config, refresh_token=refresh_value)
         except Exception as exc:
@@ -245,19 +476,21 @@ class TokenStore:
     # ------------------------------------------------------------------
 
     def _write_refresh_token(self, refresh_token: str) -> None:
-        if self._exists(self._refresh_key):
-            result = self._vault.rotate(self._refresh_key, refresh_token)
-        else:
-            result = self._vault.store(
-                key=self._refresh_key,
-                value=refresh_token,
-                tags=[VAULT_TAG_REFRESH_TOKEN],
-                metadata={"issued_at": datetime.now(UTC).isoformat()},
-            )
+        result = self._journaled_write(self._refresh_key, refresh_token, partial(self._put_refresh_token, refresh_token))
         _require_completed(result, "refresh-token vault write failed")
 
+    def _put_refresh_token(self, refresh_token: str) -> Any:
+        if self._exists(self._refresh_key):
+            return self._vault.rotate(self._refresh_key, refresh_token)
+        return self._vault.store(
+            key=self._refresh_key,
+            value=refresh_token,
+            tags=[VAULT_TAG_REFRESH_TOKEN],
+            metadata={"issued_at": datetime.now(UTC).isoformat()},
+        )
+
     def _rotate_refresh_token(self, new_refresh_token: str) -> None:
-        result = self._vault.rotate(self._refresh_key, new_refresh_token)
+        result = self._journaled_write(self._refresh_key, new_refresh_token, partial(self._vault.rotate, self._refresh_key, new_refresh_token))
         if not _is_completed(result):
             raise TokenStoreError(
                 ERROR_REFRESH_TOKEN_ROTATE_FAILED,
@@ -280,16 +513,18 @@ class TokenStore:
         return cast(dict[str, Any], payload) if isinstance(payload, dict) else None
 
     def _write_envelope(self, envelope: str) -> None:
-        if self._exists(self._access_key):
-            result = self._vault.rotate(self._access_key, envelope)
-        else:
-            result = self._vault.store(
-                key=self._access_key,
-                value=envelope,
-                tags=[VAULT_TAG_ACCESS_TOKEN],
-                metadata={},
-            )
+        result = self._journaled_write(self._access_key, _envelope_token(envelope), partial(self._put_envelope, envelope))
         _require_completed(result, "access-token vault write failed")
+
+    def _put_envelope(self, envelope: str) -> Any:
+        if self._exists(self._access_key):
+            return self._vault.rotate(self._access_key, envelope)
+        return self._vault.store(
+            key=self._access_key,
+            value=envelope,
+            tags=[VAULT_TAG_ACCESS_TOKEN],
+            metadata={},
+        )
 
     def _read_cached_access_token(self) -> str | None:
         envelope = self._read_value(self._access_key)
@@ -301,14 +536,20 @@ class TokenStore:
         return token
 
     def _read_value(self, key: str) -> str | None:
-        if not self._exists(key):
+        exists = self._vault.exists(key)
+        if not _is_completed(exists):
+            return None
+        if not (exists.get("data") or {}).get("exists", False):
+            self._journal_read(key, None)  # definitely absent: nothing unjournaled is held
             return None
         result = self._vault.retrieve(key)
         if not _is_completed(result):
             return None
         data = result.get("data") or {}
         value = data.get("value")
-        return value if isinstance(value, str) else None
+        text = value if isinstance(value, str) else None
+        self._journal_read(key, text)
+        return text
 
     def _exists(self, key: str) -> bool:
         result = self._vault.exists(key)

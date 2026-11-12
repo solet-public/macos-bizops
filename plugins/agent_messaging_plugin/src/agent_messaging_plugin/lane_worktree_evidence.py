@@ -18,18 +18,15 @@ a caller that keeps the bytes passes a sink and receives exactly what it hashed.
 
 from __future__ import annotations
 
-import errno
 import hashlib
 import json
-import os
 import re
-import stat
 from collections.abc import Callable, Mapping
-from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from . import custody_store as store
 from .register_unit_client import (
     PsoletRegisterUnitClient,
     RegisteredRevision,
@@ -47,15 +44,10 @@ CUSTODY_EMPTY_SCAFFOLD = "empty_scaffold"
 CUSTODY_VERIFIED_PACKET = "verified_packet"
 
 CANDIDATE_STORE = "project-solet-candidates"
-REGULAR_MODE = 0o100644
-EXECUTABLE_MODE = 0o100755
-SYMLINK_MODE = 0o120000
-_ENTRY_MODES = frozenset({REGULAR_MODE, EXECUTABLE_MODE, SYMLINK_MODE})
+_ENTRY_MODES = frozenset({store.REGULAR_MODE, store.EXECUTABLE_MODE, store.SYMLINK_MODE})
 _LANDING_COMMIT_FIELDS = ("merge_sha", "candidate_commit_sha")
 _COMMIT_SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-_READ_CHUNK = 1 << 20
 EVIDENCE_PAGE_SIZE = 100
 EVIDENCE_PAGE_LIMIT = 20
 UNIT_TERMINAL_STATES = frozenset({"accepted", "cancelled", "superseded", "abandoned", "completed"})
@@ -158,33 +150,13 @@ def _cli_json(raw: bytes, label: str) -> object:
 
 
 @dataclass(frozen=True, slots=True)
-class LocalEntry:
-    """One path as Git would record it; ``mode`` None is absence.
-
-    ``readable`` False marks a directory, special file or unreadable path, which
-    no source can ever match.  Digests and the byte count are None when the
-    caller did not ask.
-    """
-
-    mode: int | None
-    sha256: str | None = None
-    oid: str | None = None
-    readable: bool = True
-    size: int | None = None
-
-
-ABSENT_ENTRY = LocalEntry(None)
-UNREADABLE_ENTRY = LocalEntry(None, readable=False)
-
-
-@dataclass(frozen=True, slots=True)
 class FinalEntry:
     """A source's exact final state for one path: ``mode`` None means absent."""
 
     mode: int | None
     sha256: str | None
 
-    def holds(self, local: LocalEntry) -> bool:
+    def holds(self, local: store.LocalEntry) -> bool:
         if not local.readable:
             return False
         if self.mode is None:
@@ -353,40 +325,6 @@ def unit_eligibility(
     return UnitEligibility(assignment.unit_id, state)
 
 
-def read_entry(
-    root: Path,
-    relative: str,
-    *,
-    object_format: str,
-    digest: bool,
-    sink: Callable[[bytes], None] | None = None,
-) -> LocalEntry:
-    """Read one path beneath ``root`` as Git records it, following no symlink.
-
-    A parent that is missing, a file or a symlink means Git sees no entry here,
-    so the path reads as absent.  Anything else Git cannot record as a blob is
-    unreadable, and a file that changes size while it is hashed is unreadable.
-    With ``digest``, ``sink`` receives the raw bytes or link text as they are
-    hashed; a caller must discard them unless the returned entry is readable.
-    """
-    parts = relative.split("/")
-    if any(part in {"", ".", ".."} for part in parts):
-        return UNREADABLE_ENTRY
-    with ExitStack() as stack:
-        located = _stat_beneath(root, parts, stack)
-        if isinstance(located, LocalEntry):
-            return located
-        directory, info = located
-        if stat.S_ISLNK(info.st_mode):
-            return _link_entry(parts[-1], directory, object_format=object_format, digest=digest, sink=sink)
-        if not stat.S_ISREG(info.st_mode):
-            return UNREADABLE_ENTRY
-        mode = EXECUTABLE_MODE if info.st_mode & stat.S_IXUSR else REGULAR_MODE
-        if not digest:
-            return LocalEntry(mode)
-        return _regular_entry(parts[-1], directory, info, mode, object_format, stack, sink)
-
-
 def candidate_packet(common_dir: Path, candidate: CandidateCustody) -> Path:
     """Where ``candidate-revision pack`` stores this identity's final files."""
     return common_dir / CANDIDATE_STORE / candidate.identity_sha256 / "packet"
@@ -396,75 +334,6 @@ def canonical_identity_sha256(identity: Mapping[str, Any]) -> str:
     """The digest ``candidate-revision`` names an identity by."""
     encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
-
-def _stat_beneath(root: Path, parts: list[str], stack: ExitStack) -> tuple[int, os.stat_result] | LocalEntry:
-    """Open each parent with no-follow, then lstat the leaf in its directory."""
-    try:
-        directory = os.open(root, _DIRECTORY_FLAGS)
-        stack.callback(os.close, directory)
-        for part in parts[:-1]:
-            directory = os.open(part, _DIRECTORY_FLAGS, dir_fd=directory)
-            stack.callback(os.close, directory)
-        return directory, os.stat(parts[-1], dir_fd=directory, follow_symlinks=False)
-    except (FileNotFoundError, NotADirectoryError):
-        return ABSENT_ENTRY
-    except OSError as exc:
-        return ABSENT_ENTRY if exc.errno == errno.ELOOP else UNREADABLE_ENTRY
-
-
-def _link_entry(
-    name: str,
-    directory: int,
-    *,
-    object_format: str,
-    digest: bool,
-    sink: Callable[[bytes], None] | None,
-) -> LocalEntry:
-    """A symlink's blob is its uninterpreted target, never what it points at."""
-    if not digest:
-        return LocalEntry(SYMLINK_MODE)
-    try:
-        target = os.fsencode(os.readlink(name, dir_fd=directory))
-    except OSError:
-        return UNREADABLE_ENTRY
-    oid = hashlib.new(object_format, b"blob %d\0" % len(target))
-    oid.update(target)
-    if sink is not None:
-        sink(target)
-    return LocalEntry(SYMLINK_MODE, hashlib.sha256(target).hexdigest(), oid.hexdigest(), size=len(target))
-
-
-def _regular_entry(
-    name: str,
-    directory: int,
-    info: os.stat_result,
-    mode: int,
-    object_format: str,
-    stack: ExitStack,
-    sink: Callable[[bytes], None] | None,
-) -> LocalEntry:
-    """Hash raw bytes in Git's blob framing and in SHA-256, with no filter applied."""
-    try:
-        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
-    except OSError:
-        return UNREADABLE_ENTRY
-    stack.callback(os.close, descriptor)
-    opened = os.fstat(descriptor)
-    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
-        return UNREADABLE_ENTRY
-    sha256 = hashlib.sha256()
-    oid = hashlib.new(object_format, b"blob %d\0" % opened.st_size)
-    consumed = 0
-    while chunk := os.read(descriptor, _READ_CHUNK):
-        consumed += len(chunk)
-        sha256.update(chunk)
-        oid.update(chunk)
-        if sink is not None:
-            sink(chunk)
-    if consumed != opened.st_size:
-        return UNREADABLE_ENTRY
-    return LocalEntry(mode, sha256.hexdigest(), oid.hexdigest(), size=consumed)
 
 
 def _unavailable(code: str, detail: str) -> RegisterCustody:
@@ -587,7 +456,7 @@ def _registered_documents(
         if verified != digest:
             advisories.append(f"retire_custody_document_unverified: {revision_id} {path}: digest disagrees")
             continue
-        documents[path] = (*documents.get(path, ()), FinalEntry(REGULAR_MODE, digest))
+        documents[path] = (*documents.get(path, ()), FinalEntry(store.REGULAR_MODE, digest))
     return documents
 
 

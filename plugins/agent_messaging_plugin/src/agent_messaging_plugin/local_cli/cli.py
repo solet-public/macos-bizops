@@ -290,7 +290,7 @@ def cli() -> None:
     "--wait/--no-wait",
     "wait",
     default=None,
-    help=("For a born-async verb that returns a job handle, also wait for the JOB to finish. Defaults to waiting on a terminal, not waiting when output is piped."),
+    help=("Wait for a born-async job's terminal result (default for terminals, pipes and files). --no-wait returns its queued handle and keeps completion delivery enabled."),
 )
 @click.option(
     "--job-timeout",
@@ -313,33 +313,39 @@ def call(
     A born-async verb answers in milliseconds with a job handle, not an
     outcome: its real work happens later on a background worker. When the
     dispatch returns ``{job_id, status: queued}`` this waits for the JOB too,
-    so an interactive call ends with the actual result instead of a handle the
+    so every call ends with the actual result instead of a handle the
     caller has to go redeem. ``--no-wait`` returns the handle immediately.
     """
     args = _parse_json_args(arguments)
-    result = _run(
-        lambda c: c.call_and_wait(
-            process_key,
-            args,
-            reason=reason,
-            poll_timeout_s=timeout_s,
-        ),
-    )
+    should_wait = True if wait is None else wait
+    if should_wait:
+        _install_sigterm_unwind(include_sighup=True)
+    _run(lambda client: _call_and_emit(client, process_key, args, reason=reason, timeout_s=timeout_s, should_wait=should_wait, job_timeout_s=job_timeout_s))
+
+
+def _call_and_emit(client: BridgeClient, process_key: str, arguments: dict[str, Any], *, reason: str | None, timeout_s: float, should_wait: bool, job_timeout_s: float) -> dict[str, Any]:
+    """Keep the originating bridge open through polling, output and any release."""
+    try:
+        result = client.call_and_wait(process_key, arguments, reason=reason, poll_timeout_s=timeout_s, bridge_wait_attached=should_wait)
+    except (BridgeResultTimeoutError, KeyboardInterrupt, SystemExit, OSError, BridgeCallError, httpx.HTTPError):
+        if should_wait:
+            click.echo("Waiter release is uncertain: dispatch returned no job id. Any accepted job remains durable; reconcile before resubmitting.", err=True)
+        raise
     if _stored_no_wake_process_result(process_key, result):
         _emit(result)
         click.echo(f"WARNING: {_stored_no_wake_sender_notice(result)}", err=True)
-        return
+        return result
     if str(result.get("status")) != "completed":
         _emit(result)
         raise SystemExit(int(ExitCodes.EXTERNAL_ERROR))
 
     job_id = queued_job_id(result)
-    should_wait = sys.stdout.isatty() if wait is None else wait
     if job_id is None or not should_wait:
         _emit(result)
-        return
+        return result
 
-    _await_and_emit_job(job_id, timeout_s=timeout_s, job_timeout_s=job_timeout_s)
+    _await_and_emit_job(client, job_id, timeout_s=timeout_s, job_timeout_s=job_timeout_s)
+    return result
 
 
 def _stored_no_wake_process_result(process_key: str, result: Mapping[str, Any]) -> bool:
@@ -368,7 +374,16 @@ def _stored_no_wake_sender_notice(result: Mapping[str, Any]) -> str:
     return "Message stored without waking the recipient; do NOT resend."
 
 
-def _await_and_emit_job(job_id: str, *, timeout_s: float, job_timeout_s: float) -> None:
+def _release_waiter(client: BridgeClient, job_id: str) -> dict[str, Any]:
+    """One best-effort release; uncertainty is explicit and never retried."""
+    try:
+        return client.release_job_waiter(job_id)
+    except (OSError, BridgeCallError, httpx.HTTPError) as exc:
+        click.echo(f"Waiter release uncertain for {job_id}: {exc}. Read the durable job before resubmitting.", err=True)
+        return {"job_id": job_id, "released": None, "advisory": "waiter_release_uncertain"}
+
+
+def _await_and_emit_job(client: BridgeClient, job_id: str, *, timeout_s: float, job_timeout_s: float) -> None:
     """Poll a dispatched job to terminal state and print the finished record.
 
     Progress goes to STDERR so stdout stays a single parseable JSON document —
@@ -386,26 +401,25 @@ def _await_and_emit_job(job_id: str, *, timeout_s: float, job_timeout_s: float) 
         )
 
     try:
-        job = _run(
-            lambda c: c.await_job(
-                job_id,
-                job_timeout_s=job_timeout_s,
-                poll_timeout_s=timeout_s,
-                on_poll=_progress,
-            ),
-            propagate_timeout=True,
-        )
-    except SystemExit:
-        raise
+        job = client.await_job(job_id, job_timeout_s=job_timeout_s, poll_timeout_s=timeout_s, on_poll=_progress)
     except BridgeResultTimeoutError as exc:
+        released = _release_waiter(client, job_id)
+        _emit({"job_id": job_id, "status": "job_wait_timeout", "error": {"code": "job_wait_timeout", "message": str(exc)}, "waiter_release": released})
         click.echo(f"{exc}", err=True)
         click.echo(
             f'The job is still running. Retrieve it later with:\n  {_invoked_name()} call service_interface::job_service::get_job \'{{"job_id": "{job_id}"}}\'',
             err=True,
         )
         raise SystemExit(int(ExitCodes.TIMEOUT_ERROR)) from exc
+    except (KeyboardInterrupt, SystemExit, OSError, BridgeCallError, httpx.HTTPError):
+        _release_waiter(client, job_id)
+        raise
 
-    _emit(job)
+    try:
+        _emit(job)
+    except (KeyboardInterrupt, SystemExit, OSError):
+        _release_waiter(client, job_id)
+        raise
     if str(job.get("status")) != "completed":
         raise SystemExit(int(ExitCodes.EXTERNAL_ERROR))
 
@@ -938,8 +952,8 @@ def _acquire_watch_singleton(lock_path: Path) -> None:
     _watch_singleton_handle = handle
 
 
-def _install_sigterm_unwind() -> None:
-    """SIGTERM -> SystemExit, so the bridge context manager unwinds — W2.
+def _install_sigterm_unwind(*, include_sighup: bool = False) -> None:
+    """SIGTERM (and waiting-call SIGHUP) -> SystemExit for bridge cleanup.
 
     Raising here is deliberate and is NOT the D2 failure shape: SystemExit in
     this client means "die on purpose". The D2 defect is a TRANSIENT claim
@@ -952,6 +966,8 @@ def _install_sigterm_unwind() -> None:
         raise SystemExit(128 + signum)
 
     signal.signal(signal.SIGTERM, _terminate)
+    if include_sighup:
+        signal.signal(signal.SIGHUP, _terminate)
 
 
 def _parent_is_gone(parent_pid: int | None) -> bool:

@@ -1,4 +1,4 @@
-# Spawned-Worker Naming, the Mutation Guard, and the Three Role Gates
+# Spawned-Worker Naming and the Three Role Gates
 
 Article Layer: 1
 
@@ -8,7 +8,7 @@ Tags: knowledge:tag:plugin_reference, knowledge:tag:agent_messaging, knowledge:t
 
 Article Tags: planning-stage:agent-to-agent-coordination, planning-stage:server-side-internals, evidence-category:identity-model, evidence-category:invariant-contract, domain:agent-messaging, domain:fleet-session-lifecycle
 
-Embedding Description: What a spawned fleet worker is NAMED on its own machine and what that name does and does not buy — the local_name spawn field feeding both host drivers' --name, why a role-named worker passes the Git-Controller mutation guard on its first turn but is still unreachable by role-addressed peer_send_by_name until it claims explicitly, and the three separate gates that govern role collisions (spawn refuses a second live local name, peer_claim_role refuses a live different-session holder, a dead holder stays cheaply claimable on purpose).
+Embedding Description: What a spawned fleet worker is NAMED on its own machine and what that name does and does not buy — the local_name spawn field feeding both host drivers' --name, why a role-named worker answers to that name on its first turn but is still unreachable by role-addressed peer_send_by_name until it claims explicitly, why no git gate reads that name any more, and the three separate gates that govern role collisions (spawn refuses a second live local name, peer_claim_role refuses a live different-session holder, a dead holder stays cheaply claimable on purpose).
 
 ## Purpose
 
@@ -37,43 +37,37 @@ The project class is the one whose entire point is that the worker *is* the
 role. Every other class is lane work, and `lane_id` is what those sessions were
 already labelled with, so the default is a no-op for them.
 
-## What the local name buys: the mutation guard, immediately
+## What the local name buys: the session's own name, immediately
 
-The Git-Controller gate is a `PreToolUse` hook that resolves its caller by
-reading `~/.claude/sessions/<parent_pid>.json` and taking the `name` field,
-then comparing it to the configured controller name **exactly**
-(`session_name == controller`).
+A worker answers to its `local_name` from its FIRST turn: it is the name the
+coding tool records for the session and the label its host shows. Nothing has
+to claim it first.
 
-Two consequences follow directly from that exactness:
+No git gate reads that name. The platform ships no git gate and no git
+controller role, and each repository owns its own git rules.
 
-1. A worker spawned with `local_name="Git-Controller"` passes the guard on its
-   FIRST turn. Before this, a spawned Git-Controller could not mutate git until
-   a second driven turn had it claim the name — the gap `#13` reported.
-2. **A uniquifying suffix is not available.** `Git-Controller-2` is not a
-   slightly-different Git-Controller; it is a session that cannot mutate git at
-   all. This is why the collision below is a refusal rather than a rename.
-
-Historical note worth keeping: the guard reads a file that, before 2026-08-14,
-only the HEADLESS driver ever populated — it alone passed `--name`. A tmux
-worker's name was always auto-derived (`nameSource: "derived"`), so the tmux
-host had never been guard-nameable at all. That asymmetry is the latent defect
-underneath `#13`; naming the tmux *session* would not have fixed it, because
-the guard never reads the tmux session name.
+Removed in coordination-hooks `0.9.0` (2026-10-10, operator ruling
+`rul_e71e43be`): a Git-Controller `PreToolUse` gate that read the session name
+from `~/.claude/sessions/<parent_pid>.json` and compared it exactly to a
+configured controller name. While it existed, a role-named spawn passed it on
+its first turn and a suffixed name such as `<Role>-2` could not run git at all.
+Neither is true now. The spawn-time refusal below still exists, and its error
+text still cites that removed guard.
 
 ## What the local name does NOT buy: routing
 
-Passing the mutation guard and being reachable by name are different
-mechanisms, and conflating them is the easy mistake here.
+Having a local name and being reachable by role are different mechanisms, and
+conflating them is the easy mistake here.
 
 **Spawning does not claim the durable role binding.** This is deliberate
 (operator ruling, 2026-08-14). Claiming a role adds a name and never releases
 the incumbent's, so an automatic claim at spawn would EVICT whoever currently
 holds that role — a destructive act triggered by a routine one.
 
-So a freshly spawned `Git-Controller`:
+So a freshly spawned project-role worker named `<Role>`:
 
-- passes the git mutation guard immediately (local name), **and**
-- is NOT yet a `peer_send_by_name` destination for `Git-Controller` (no claim).
+- answers to `<Role>` immediately (local name), **and**
+- is NOT yet a `peer_send_by_name` destination for `<Role>` (no claim).
 
 The worker claims its role explicitly once it is up; only then does
 role-addressed routing reach it. `role_name` is recorded on the
@@ -93,8 +87,7 @@ The ordering is **terminate the holder, then spawn the replacement.**
 
 The gate keys on the session LEDGER rather than the role binding because the
 collision it prevents is two local PROCESSES answering to one name on one
-machine — which is exactly what the guard's exact compare would let both of
-them do.
+machine, which nothing else would tell apart by name.
 
 ### 2. `peer_claim_role` — refuses a LIVE different-session holder
 

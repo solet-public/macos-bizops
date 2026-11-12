@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::external_postgres_plugin::activity",
+  "display_name": "External Postgres: Sessions and Locks",
+  "description": "See and control what is running on a registered foreign Postgres server. operation list reads pg_stat_activity (pid, database, user, application, client, state, waits, timings, query; optional state and database filters); locks reads pg_locks with pg_blocking_pids (optional granted filter); cancel calls pg_cancel_backend(pid); terminate calls pg_terminate_backend(pid, timeout_ms). List operations page with limit and offset and return next_offset when more rows exist. What the role sees and may signal is its own privilege (pg_read_all_stats, pg_signal_backend). Returns a queued job.",
+  "embedding_description": "Show which sessions and queries are running on an external Postgres server, what they wait on, and which locks are held or blocked by whom, then cancel a running query or terminate a backend by pid. Reads pg_stat_activity and pg_locks with blocking pids, paged with limit and offset.",
+  "result_processor_customizations": {
+    "action_label": "Foreign Postgres activity request queued",
+    "result_type": "external_postgres_activity_result",
+    "result_description": "Dispatch envelope: job_id (string) and status ('queued'). The outcome arrives when the job completes: list and locks return {operation, rows, returned, limit, offset, next_offset}, one object per row with the vendor's column names; cancel returns {operation, pid, signalled}; terminate returns {operation, pid, timeout_ms, signalled}.",
+    "presentation_guidance": "This call only confirms the job was queued. Once delivered, summarise sessions by state and wait, point out blocked pids and who blocks them, and offer the next page when next_offset is set. Query text can contain data values; quote it only as needed. For cancel or terminate, say whether the signal was sent (signalled false means the pid was not found or not signalled)."
+  },
+  "error_processor_customizations": {
+    "action_context": "Read sessions and locks, or cancel or terminate a backend, on a registered foreign Postgres server.",
+    "error_interpretation": "external_pg.invalid_params: an unknown operation, a missing or non-positive pid, a negative timeout_ms, a limit outside 1 to 1000, a negative offset, or a non-boolean granted. external_pg.permission_denied: the role may not signal that backend (it needs pg_signal_backend or the same role). external_pg.connection_unknown: no connection registered under that name. external_pg.auth_failed: the registered credential was rejected.",
+    "recovery_guidance": "external_pg.invalid_params: use operation list, locks, cancel or terminate with the parameters each takes; take pid from list. external_pg.permission_denied: ask the operator to grant pg_signal_backend, or signal only the role's own sessions. Rows without query text mean the role lacks pg_read_all_stats for other users' sessions."
+  }
+}

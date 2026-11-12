@@ -49,8 +49,9 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from ananta.core.actions.action_metadata import (
     ContextHandling,
@@ -88,6 +89,15 @@ from platform_health_plugin.host_disk_guard import (
 from platform_health_plugin.host_disk_guard import (
     ensure_host_disk_guard_schedule as _ensure_host_disk_guard_schedule,
 )
+from platform_health_plugin.main_seat_heartbeat import (
+    ensure_schedule as _ensure_seat_heartbeat_schedule,
+)
+from platform_health_plugin.main_seat_heartbeat import (
+    maintain_marker as _maintain_seat_heartbeat_marker,
+)
+from platform_health_plugin.main_seat_heartbeat import (
+    run_heartbeat as _run_seat_heartbeat,
+)
 from platform_health_plugin.model_capability_guard import (
     CHECK_PROCESS_NAME as MODEL_CAPABILITY_CHECK_PROCESS_NAME,
 )
@@ -110,6 +120,8 @@ from platform_health_plugin.model_capability_guard import (
     run_model_capability_guard as _run_model_capability_guard,
 )
 
+from .operation_jobs import JOB_RETURN_SCHEMA, AsyncJobs
+
 
 class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
     """Operator/CI diagnostic gate over the live process registry."""
@@ -118,6 +130,7 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
 
     def __init__(self) -> None:
         super().__init__()
+        self._operation_jobs = AsyncJobs()
         self.logger = logging.getLogger(__name__)
         self._running = False
         self._active = True
@@ -125,6 +138,7 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
         # previous check is still running is a no-op, never a second check.
         self._check_lock = threading.Lock()
         self._catalog_check_lock = threading.Lock()
+        self._seat_heartbeat_lock = threading.Lock()
 
     def prepare_for_readiness(self) -> None:
         if self.orchestrator_ref is None:
@@ -207,9 +221,7 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
         service = self.orchestrator_ref.get_service("scheduling_service")
         if service is None:
             raise RuntimeError(
-                f"{self.name}: scheduling_service is not available yet -- it exists only after "
-                "startup's init_service_manager step; run ensure_host_disk_guard_schedule as a "
-                "starting action or later, never from a plugin lifecycle method",
+                f"{self.name}: scheduling_service is not available yet -- it exists only after startup's init_service_manager step; run ensure_host_disk_guard_schedule as a starting action or later, never from a plugin lifecycle method",
             )
         return service
 
@@ -226,6 +238,11 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
 
     def get_edge_process_definitions(self) -> dict[str, EdgeProcessDefinition]:
         return {
+            "ensure_main_seat_heartbeat_schedule": EdgeProcessDefinition(
+                name="ensure_main_seat_heartbeat_schedule",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(result_type="seat_heartbeat_schedule_result"),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=False),
+            ),
             SWEEP_PROCESS_NAME: EdgeProcessDefinition(
                 name=SWEEP_PROCESS_NAME,
                 result_processor_template_customizations=MergeResultProcessorCustomizations(
@@ -281,46 +298,27 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
             "write_enabled": ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
-                description=(
-                    "When True, write-shape verbs (anything not starting with "
-                    "list_/get_) are invoked too. Use against a wipe-on-tear-down "
-                    "test schema; do not run against production state."
-                ),
+                description=("When True, write-shape verbs (anything not starting with list_/get_) are invoked too. Use against a wipe-on-tear-down test schema; do not run against production state."),
             ),
             "dry_run": ParameterMetadata(
                 type=ParameterType.BOOLEAN,
                 required=False,
-                description=(
-                    "Defaults to true. When true, returns every classification "
-                    "row and never dispatches a process. Set false only for an "
-                    "explicitly scoped live sweep."
-                ),
+                description=("Defaults to true. When true, returns every classification row and never dispatches a process. Set false only for an explicitly scoped live sweep."),
             ),
             "external_namespaces": ParameterMetadata(
                 type=ParameterType.LIST,
                 required=False,
-                description=(
-                    "Explicit list of declared outward-facing plugin provider "
-                    "namespaces to include in a live sweep. This is a list, not "
-                    "a broad enable flag, and requires operator_confirmation."
-                ),
+                description=("Explicit list of declared outward-facing plugin provider namespaces to include in a live sweep. This is a list, not a broad enable flag, and requires operator_confirmation."),
             ),
             "operator_confirmation": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=False,
-                description=(
-                    "Authorizing operator turn or message id, required whenever "
-                    "external_namespaces is non-empty. Echoed in those result rows."
-                ),
+                description=("Authorizing operator turn or message id, required whenever external_namespaces is non-empty. Echoed in those result rows."),
             ),
             "include_pattern": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=False,
-                description=(
-                    "Substring filter on process_key; only matching processes "
-                    "are swept. Useful for narrowing to one namespace, e.g. "
-                    "'session_ledger_service' or 'scheduling_service'."
-                ),
+                description=("Substring filter on process_key; only matching processes are swept. Useful for narrowing to one namespace, e.g. 'session_ledger_service' or 'scheduling_service'."),
             ),
         },
         output_type="object",
@@ -347,11 +345,7 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
                 ),
                 "results": ParameterMetadata(
                     type=ParameterType.LIST,
-                    description=(
-                        "Per-process rows: process_key, shape, status, "
-                        "would_dispatch, error_class, error_message, and "
-                        "operator_confirmation."
-                    ),
+                    description=("Per-process rows: process_key, shape, status, would_dispatch, error_class, error_message, and operator_confirmation."),
                 ),
             },
         ),
@@ -424,11 +418,7 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
                 type=ParameterType.STRING,
                 required=False,
                 description=(
-                    "Durable role to peer_send_by_name on a severity transition. No "
-                    "baked-in default: falls back to this plugin's own config key "
-                    "'alert_role' (plugin.yaml `config:` block); if that is also "
-                    "unset, the check still measures but cannot alert -- see "
-                    "alert_reason='alert_target_unconfigured' on the result."
+                    "Durable role to peer_send_by_name on a severity transition. No baked-in default: falls back to this plugin's own config key 'alert_role' (plugin.yaml `config:` block); if that is also unset, the check still measures but cannot alert -- see alert_reason='alert_target_unconfigured' on the result."
                 ),
             ),
         },
@@ -442,7 +432,9 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
                 "free_bytes": ParameterMetadata(type=ParameterType.INTEGER, description="Measured free bytes at path."),
                 "path": ParameterMetadata(type=ParameterType.STRING, description="Path measured."),
                 "transitioned": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether status differs from the last status an alert was successfully delivered for (the durable marker) -- true on entering warning/critical AND on recovery."),
-                "alerted": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the alert was confirmed DELIVERED TO A LIVE holder this call (queued_wake/queued_notification/queued_watcher). False on no transition, on a vacant/malformed role, or on queued_for_replay (persisted but nobody live received it)."),
+                "alerted": ParameterMetadata(
+                    type=ParameterType.BOOLEAN, description="Whether the alert was confirmed DELIVERED TO A LIVE holder this call (queued_wake/queued_notification/queued_watcher). False on no transition, on a vacant/malformed role, or on queued_for_replay (persisted but nobody live received it)."
+                ),
                 "alert_role": ParameterMetadata(type=ParameterType.STRING, description="Role a transition was reported to, or null if there was no transition this call."),
                 "alert_reason": ParameterMetadata(type=ParameterType.STRING, description="Set when transitioned is true and alerted is false: why the alert was not confirmed delivered to a live holder."),
             },
@@ -537,8 +529,7 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
             # target from config alone. A call-time override here could only
             # get an inert cron past the refusal below.
             raise ValueError(
-                "alert_role is not a parameter of ensure_host_disk_guard_schedule; "
-                "the installed cron alerts the platform_health_plugin config key 'alert_role'",
+                "alert_role is not a parameter of ensure_host_disk_guard_schedule; the installed cron alerts the platform_health_plugin config key 'alert_role'",
             )
         cron_expression = str(params.get("cron_expression") or DEFAULT_SCHEDULE_CRON)
         tag = str(params.get("tag") or DEFAULT_SCHEDULE_TAG)
@@ -550,36 +541,15 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
         )
         return _envelope(report)
 
-
     @platform_process(
+        is_async=True,
         name="check_model_capability_catalog",
         is_discoverable=False,
         context_handling=ContextHandling.NONE,
         parameters={},
         output_type="object",
         output_description="Model capability catalog refresh outcome, severity and alert outcome.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Refresh counts, catalog age, severity, and whether an alert was dispatched.",
-            properties={
-                "status": ParameterMetadata(type=ParameterType.STRING, description="One of: ok, warning, critical."),
-                "reasons": ParameterMetadata(type=ParameterType.LIST, description="Why the status is not ok."),
-                "refresh_failure": ParameterMetadata(type=ParameterType.STRING, description="Set when the refresh raised, failed or returned an unreadable result."),
-                "readings_gathered": ParameterMetadata(type=ParameterType.INTEGER, description="Readings the refresh gathered."),
-                "cells_accepted": ParameterMetadata(type=ParameterType.INTEGER, description="Cells the refresh accepted."),
-                "cells_conflicted": ParameterMetadata(type=ParameterType.INTEGER, description="Cells whose sources disagreed."),
-                "cells_unchanged": ParameterMetadata(type=ParameterType.INTEGER, description="Cells with insufficient new evidence."),
-                "sources_failed": ParameterMetadata(type=ParameterType.LIST, description="Sources whose fetch failed."),
-                "renewed": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether any accepted cell has a newer reading than before the run."),
-                "accepted_cell_count": ParameterMetadata(type=ParameterType.INTEGER, description="Accepted cells in the catalog after the run."),
-                "oldest_cell_age_hours": ParameterMetadata(type=ParameterType.FLOAT, description="Age of the oldest accepted cell, in hours; null with no accepted cell."),
-                "staleness_window_hours": ParameterMetadata(type=ParameterType.FLOAT, description="Tightest staleness window among accepted cells, read from the catalog."),
-                "transitioned": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether status differs from the last status an alert was delivered for."),
-                "alerted": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the alert reached a live holder this call."),
-                "alert_role": ParameterMetadata(type=ParameterType.STRING, description="Role a transition was reported to, or null."),
-                "alert_reason": ParameterMetadata(type=ParameterType.STRING, description="Why a transition was not confirmed delivered."),
-            },
-        ),
+        return_value_schema=JOB_RETURN_SCHEMA,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Model capability catalog check",
@@ -593,7 +563,7 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
         params: dict[str, Any],  # noqa: ARG002 — required by @platform_process signature
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        return _envelope(self._run_catalog_check(state))
+        return self._operation_jobs.submit(self, "check_model_capability_catalog", dict(params), state, lambda _values: _envelope(self._run_catalog_check(state)))
 
     # Literal ``name=``: the whole-tree gate resolves a cron target's
     # processor_policy_category from the literal decorator name.
@@ -626,6 +596,7 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
         return _envelope({"dispatch": outcome})
 
     @platform_process(
+        is_async=True,
         name="ensure_model_capability_guard_schedule",
         context_handling=ContextHandling.NONE,
         is_discoverable=False,
@@ -642,17 +613,8 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
             ),
         },
         output_type="object",
-        output_description="Ensure result for the model capability guard cron.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Whether the cron was created or already present.",
-            properties={
-                "status": ParameterMetadata(type=ParameterType.STRING, description="One of: created, already_present."),
-                "tag": ParameterMetadata(type=ParameterType.STRING, description="Schedule tag."),
-                "cron_expression": ParameterMetadata(type=ParameterType.STRING, description="Set when created."),
-                "schedule_id": ParameterMetadata(type=ParameterType.STRING, description="Set when created."),
-            },
-        ),
+        output_description="Queued guard installation job; read its full ensure outcome in job.result.",
+        return_value_schema=JOB_RETURN_SCHEMA,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Ensure model capability guard schedule",
@@ -661,6 +623,32 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
+    def ensure_model_capability_guard_schedule_action(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return cast(dict[str, Any], self.admit_registered_operation("ensure_model_capability_guard_schedule", params, state))
+
+    def admit_registered_operation(self, action_name: str, parameters: dict[str, Any], state: dict[str, Any]) -> dict[str, Any] | None:
+        """Admit the whole guard installer; its scheduler dependency stays synchronous."""
+        if action_name not in ("ensure_model_capability_guard_schedule", "ensure_main_seat_heartbeat_schedule"):
+            return None
+        operation = self.ensure_main_seat_heartbeat_schedule if action_name == "ensure_main_seat_heartbeat_schedule" else self.ensure_model_capability_guard_schedule
+        context = dict(state)
+        return self.submit_scheduler_operation(self, action_name, dict(parameters), context, lambda values: operation(values, context))
+
+    def submit_scheduler_operation(
+        self,
+        owner: PluginBase,
+        action_name: str,
+        parameters: dict[str, Any],
+        state: dict[str, Any],
+        operation: Callable[[dict[str, Any]], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Single scheduler-family queue, shared with this plugin's existing jobs.
+
+        Serialize ensure's lookup/create with all admitted registry walks. The
+        operation calls synchronous dependencies directly, never its own queue.
+        """
+        return self._operation_jobs.submit(owner, action_name, parameters, state, operation)
+
     def ensure_model_capability_guard_schedule(
         self,
         params: dict[str, Any],
@@ -672,6 +660,81 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
             tag=str(params.get("tag") or MODEL_CAPABILITY_DEFAULT_SCHEDULE_TAG),
         )
         return _envelope(report)
+
+    @platform_process(
+        name="check_main_seat_heartbeat_cron",
+        is_discoverable=False,
+        context_handling=ContextHandling.NONE,
+        processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
+        parameters={
+            "role": ParameterMetadata(type=ParameterType.STRING, required=False, description="Runtime seat role; supplied by the installed schedule."),
+            "operation": ParameterMetadata(type=ParameterType.STRING, required=False, description="observe (default), read, correct or clear; maintenance is operator-invoked."),
+            "record_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Historical marker record id for read."),
+            "expected_record_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Current marker identity for correction/clear."),
+            "reason": ParameterMetadata(type=ParameterType.STRING, required=False),
+            "tokens": ParameterMetadata(type=ParameterType.LIST, required=False),
+        },
+        output_type="object",
+        output_description="Prompt background dispatch or marker maintenance readback; never a model continuation.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Terminal dispatch outcome or marker maintenance readback.",
+            properties={
+                "dispatch": ParameterMetadata(type=ParameterType.STRING, required=False),
+                "marker": ParameterMetadata(type=ParameterType.OBJECT, required=False),
+                "found": ParameterMetadata(type=ParameterType.BOOLEAN, required=False),
+            },
+        ),
+    )
+    def check_main_seat_heartbeat_cron(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        if not self._active:
+            return _envelope({"dispatch": "inactive"})
+        if not self._seat_heartbeat_lock.acquire(blocking=False):
+            return _envelope({"dispatch": "already_running"})
+        operation = params.get("operation", "observe")
+        if operation != "observe":
+            try:
+                if self.orchestrator_ref is None:
+                    raise RuntimeError("heartbeat orchestrator unavailable")
+                return _envelope(_maintain_seat_heartbeat_marker(self.orchestrator_ref, params))
+            finally:
+                self._seat_heartbeat_lock.release()
+
+        def body() -> None:
+            try:
+                if self.orchestrator_ref is None:
+                    raise RuntimeError("heartbeat orchestrator unavailable")
+                _run_seat_heartbeat(self.orchestrator_ref, state=state, role=str(params.get("role") or ""))
+            except Exception:  # noqa: BLE001 -- never turn a failed tick into quiet
+                self.logger.exception("%s seat heartbeat failed", self.name)
+            finally:
+                self._seat_heartbeat_lock.release()
+
+        threading.Thread(target=body, name="seat-heartbeat-check", daemon=True).start()
+        return _envelope({"dispatch": "started"})
+
+    @platform_process(
+        name="ensure_main_seat_heartbeat_schedule",
+        is_async=True,
+        is_discoverable=False,
+        context_handling=ContextHandling.NONE,
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "role": ParameterMetadata(type=ParameterType.STRING, required=False, description="Runtime seat role for this installation."),
+            "prior_tag": ParameterMetadata(type=ParameterType.STRING, required=False, description="Deployment-specific predecessor schedule tag for migration."),
+            "expected_revision": ParameterMetadata(type=ParameterType.INTEGER, required=False, description="Advisory only: the scheduler has no conditional replacement verb."),
+        },
+        output_type="object",
+        output_description="Persisted installer admission; read the exact job for its result.",
+        return_value_schema=JOB_RETURN_SCHEMA,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="seat_heartbeat_schedule_result"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+    )
+    def ensure_main_seat_heartbeat_schedule_action(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return cast("dict[str, Any]", self.admit_registered_operation("ensure_main_seat_heartbeat_schedule", params, state))
+
+    def ensure_main_seat_heartbeat_schedule(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002 -- process signature
+        return _envelope(_ensure_seat_heartbeat_schedule(self._require_scheduling_service(), role=str(params.get("role") or ""), prior_tag=params.get("prior_tag"), expected_revision=params.get("expected_revision")))
 
 
 def _envelope(data: dict[str, Any]) -> dict[str, Any]:

@@ -32,6 +32,7 @@ seed's own validator before the fake controller answers.  Legs:
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -55,15 +56,15 @@ from solet_manager.errors import ManagedIdentityDriftError, UpdateFailedError  #
 from solet_manager.reconciliation_request import RECONCILIATION_WIRE_KEYS  # noqa: E402
 from solet_manager.update_execution import apply_update, preview_update_instance  # noqa: E402
 
-_CHECKS = 0
+_checks = 0
 BASELINE = "rel_20260910"
 CANDIDATE = "rel_20260918"
 THIRD = "rel_other"
 
 
 def _check(condition: object, label: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    global _checks
+    _checks += 1
     if not condition:
         raise AssertionError(label)
 
@@ -270,15 +271,48 @@ def _assert_plist_cas_refusal(root: Path) -> None:
     _check(getattr(exc, "error_kind", "") == "probe_drift", f"a plist changed after hydration_advanced is probe_drift at lifecycle entry: {getattr(exc, 'error_kind', exc)}")
 
 
+def _assert_bridge_job_readback(root: Path) -> None:
+    """The actual adapter must await admission before reading attestation data."""
+    from solet_manager import existing_install_adapters as adapters
+
+    bridge = root / "solet-bridge"
+    root.mkdir(parents=True, exist_ok=True)
+    bridge.touch()
+    registry = adapters.ExistingInstallAdapterRegistry("smoke", root, bridge, None)
+    data = _attestation(BASELINE)
+    job: dict[str, Any] = {"id": "job-attest", "status": "completed", "error": None, "result": {"action_status": "completed", "data": data, "error": None}}
+
+    def run(argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        receipt = {"status": "completed", "result": {"success": True, "data": {"job_id": "job-attest", "status": "queued"}}}
+        return subprocess.CompletedProcess(argv, 0, json.dumps(job if "--wait" in argv else receipt), "")
+
+    with patch.object(adapters.subprocess, "run", side_effect=run):
+        observed = adapters.invoke_instance_bridge(registry, adapters.ATTEST_PROCESS_KEY, {}, kind="self_deployment.attest")
+        _check(observed == data, "adapter must await the final attestation, not return admission")
+        for status in ("error", "cancelled", "processing"):
+            job["status"] = status
+            expect(adapters.AdapterError, lambda: adapters.invoke_instance_bridge(registry, adapters.ATTEST_PROCESS_KEY, {}, kind="self_deployment.attest"), "noncompleted job accepted")
+        job.update(status="completed", error={"message": "worker failed"})
+        expect(adapters.AdapterError, lambda: adapters.invoke_instance_bridge(registry, adapters.ATTEST_PROCESS_KEY, {}, kind="self_deployment.attest"), "failed job accepted")
+        job.update(error=None, result={"action_status": "error", "error": {"message": "action failed"}})
+        expect(adapters.AdapterError, lambda: adapters.invoke_instance_bridge(registry, adapters.ATTEST_PROCESS_KEY, {}, kind="self_deployment.attest"), "failed action accepted")
+    with patch.object(adapters.subprocess, "run", side_effect=subprocess.TimeoutExpired("bridge", 1)):
+        expect(adapters.AdapterError, lambda: adapters.invoke_instance_bridge(registry, adapters.ATTEST_PROCESS_KEY, {}, kind="self_deployment.attest"), "timed-out job accepted")
+    direct = subprocess.CompletedProcess([], 0, json.dumps({"result": {"success": True, "data": data}}), "")
+    with patch.object(adapters.subprocess, "run", return_value=direct):
+        _check(adapters.invoke_instance_bridge(registry, adapters.ATTEST_PROCESS_KEY, {}, kind="self_deployment.attest") == data, "synchronous envelope decoding is unchanged")
+
+
 def main() -> int:
     with db_spy(), TemporaryDirectory() as temporary:
         root = Path(temporary).resolve()
+        _assert_bridge_job_readback(root / "bridge-readback")
         _assert_success(root / "success")
         _assert_candidate_failed(root / "failed")
         _assert_not_serving_and_drift(root / "drift")
         _assert_recover_row(root / "recover")
         _assert_plist_cas_refusal(root / "cas")
-    print(f"existing_install_router_cutover_smoke OK: {_CHECKS} checks passed")
+    print(f"existing_install_router_cutover_smoke OK: {_checks} checks passed")
     return 0
 
 

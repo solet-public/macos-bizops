@@ -37,7 +37,7 @@ from .setup_adapter_runtime import (
     Runtime,
     resolve_executable,
 )
-from .setup_operations import genesis_artifacts_valid
+from .setup_operations import _solet_result, genesis_artifacts_valid
 
 type ProbeHandler = Callable[[AdapterRequest, Runtime], JsonObject]
 
@@ -273,11 +273,7 @@ def _resolve_cli_post_apply(runtime: Runtime, cli: str) -> str | None:
 
 def _cli_available(request: AdapterRequest, runtime: Runtime) -> JsonObject:
     cli = "claude" if "claude" in request.operation_ref else "codex"
-    executable = (
-        _resolve_cli_post_apply(runtime, cli)
-        if request.probe_purpose == "post_apply"
-        else resolve_executable(runtime, cli)
-    )
+    executable = _resolve_cli_post_apply(runtime, cli) if request.probe_purpose == "post_apply" else resolve_executable(runtime, cli)
     if executable is None:
         return _boolean_probe(
             request,
@@ -335,19 +331,13 @@ def _generic_process(request: AdapterRequest, runtime: Runtime) -> JsonObject:
     if isinstance(readiness, dict):
         return readiness
     key = _callable_to_process_key(request.operation_ref)
-    arguments = {
-        key: value
-        for key, value in request.public_inputs.items()
-        if not key.startswith(_READINESS_INPUT_PREFIX)
-    }
+    arguments = {key: value for key, value in request.public_inputs.items() if not key.startswith(_READINESS_INPUT_PREFIX)}
     outcome = _solet_call(
         request,
         runtime,
         key,
         arguments,
-        timeout_seconds=(
-            readiness.budget.governed_process_call_seconds if readiness is not None else None
-        ),
+        timeout_seconds=(readiness.budget.governed_process_call_seconds if readiness is not None else None),
     )
     if outcome.stdout_truncated or outcome.stderr_truncated:
         return truncated_solet_call_output(request, key, outcome)
@@ -355,9 +345,7 @@ def _generic_process(request: AdapterRequest, runtime: Runtime) -> JsonObject:
     repair = (
         f"Expected {key} to complete; found no successful process result. Verify the embedding_service binding, configured endpoint, and model, then retry setup."
         if key == "service_interface::embedding_service::get_embedding_dimension"
-        else (
-            f"Expected {key} to complete; found no successful process result. Verify the declared provider is registered and ready, repair its configured dependency, then retry setup."
-        )
+        else (f"Expected {key} to complete; found no successful process result. Verify the declared provider is registered and ready, repair its configured dependency, then retry setup.")
     )
     return _boolean_probe(
         request,
@@ -367,11 +355,7 @@ def _generic_process(request: AdapterRequest, runtime: Runtime) -> JsonObject:
         key,
         repair,
         duration_ms=outcome.duration_ms,
-        extra_evidence=(
-            [_readiness_evidence(request, readiness, process_called=True)]
-            if readiness is not None
-            else None
-        ),
+        extra_evidence=([_readiness_evidence(request, readiness, process_called=True)] if readiness is not None else None),
     )
 
 
@@ -439,19 +423,14 @@ def _coreai_binding_valid(target: Path) -> bool:
         binding: object = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return False
-    return (
-        isinstance(binding, dict)
-        and binding.get("embedding_service") == "coreai_embeddings_plugin"
-    )
+    return isinstance(binding, dict) and binding.get("embedding_service") == "coreai_embeddings_plugin"
 
 
 def _apple_inference_result(outcome: CommandOutcome) -> tuple[bool, object]:
     payload = _call_result(outcome)
     if payload is None or payload.get("action_status") != "completed":
         return False, None
-    if payload.get("error") is not None or (
-        "success" in payload and payload["success"] is not True
-    ):
+    if payload.get("error") is not None or ("success" in payload and payload["success"] is not True):
         return False, None
     data = payload.get("data")
     return True, data.get("result") if isinstance(data, dict) else None
@@ -483,10 +462,7 @@ def _generic_process_readiness(
     request: AdapterRequest,
     runtime: Runtime,
 ) -> _ReadinessObservation | JsonObject | None:
-    if (
-        request.probe_purpose in _READINESS_GATED_PURPOSES
-        and request.operation_id in _READINESS_CONSUMER_PROBES
-    ):
+    if request.probe_purpose in _READINESS_GATED_PURPOSES and request.operation_id in _READINESS_CONSUMER_PROBES:
         return _wait_for_target_readiness(request, runtime)
     return None
 
@@ -516,20 +492,12 @@ def _salesforce_cli(request: AdapterRequest, runtime: Runtime) -> JsonObject:
                 "completed envelope with executable=true, configured=true, absolute path, and non-empty version",
             )
         ],
-        repair=None
-        if valid
-        else "Provision the sf CLI through the reviewed Salesforce provisioning operation, then retry Salesforce configuration.",
+        repair=None if valid else "Provision the sf CLI through the reviewed Salesforce provisioning operation, then retry Salesforce configuration.",
     )
 
 
 def _salesforce_cli_valid(outcome: CommandOutcome, payload: JsonObject) -> bool:
-    return (
-        _call_succeeded(outcome)
-        and payload.get("executable") is True
-        and payload.get("configured") is True
-        and _absolute_path(payload.get("executable_path"))
-        and _bounded_version(payload.get("version"))
-    )
+    return _call_succeeded(outcome) and payload.get("executable") is True and payload.get("configured") is True and _absolute_path(payload.get("executable_path")) and _bounded_version(payload.get("version"))
 
 
 def _salesforce_cli_observation(payload: JsonObject) -> list[str]:
@@ -541,10 +509,7 @@ def _salesforce_cli_observation(payload: JsonObject) -> list[str]:
         "executable_path": executable_path if isinstance(executable_path, str) else None,
         "version": version if isinstance(version, str) and len(version) <= 256 else None,
     }
-    return [
-        f"{key}={json.dumps(value, sort_keys=True, separators=(',', ':'))}"
-        for key, value in sorted(observed.items())
-    ]
+    return [f"{key}={json.dumps(value, sort_keys=True, separators=(',', ':'))}" for key, value in sorted(observed.items())]
 
 
 def _absolute_path(value: object) -> bool:
@@ -619,9 +584,7 @@ def _readiness_target_identity_failure(request: AdapterRequest) -> JsonObject | 
     executable = target / ".venv/bin/solet-bridge"
     expected_shebang = f"#!{target}/.venv/bin/python3"
     try:
-        target_valid = (
-            target.is_dir() and not target.is_symlink() and target.resolve(strict=True) == target
-        )
+        target_valid = target.is_dir() and not target.is_symlink() and target.resolve(strict=True) == target
         executable_valid = executable.is_file() and not executable.is_symlink()
         with executable.open(encoding="utf-8") as stream:
             first_line = stream.readline().rstrip("\n")
@@ -647,9 +610,7 @@ def _readiness_target_identity_failure(request: AdapterRequest) -> JsonObject | 
                 source=str(executable),
             )
         ],
-        repair=(
-            f"Restore the canonical non-symlink target at {target} and its target-bound launcher {executable}; the governed process was not called."
-        ),
+        repair=(f"Restore the canonical non-symlink target at {target} and its target-bound launcher {executable}; the governed process was not called."),
     )
 
 
@@ -677,10 +638,7 @@ def _readiness_budget(request: AdapterRequest) -> _ReadinessBudget | JsonObject:
             "startup readiness lineage was not transported to this readiness consumer",
             observed="absent_transport",
             expected="complete_derived_budget_transport",
-            repair=(
-                "Provide the released startup readiness lineage to this declared "
-                "consumer; the governed process was not called."
-            ),
+            repair=("Provide the released startup readiness lineage to this declared consumer; the governed process was not called."),
         )
     if present_keys != set(READINESS_PUBLIC_INPUT_KEYS):
         return _readiness_configuration_failure(
@@ -784,15 +742,7 @@ def _readiness_arithmetic_valid(
     parent: JsonValue,
     reserve: JsonValue,
 ) -> bool:
-    return (
-        not isinstance(parent, bool)
-        and isinstance(parent, int)
-        and not isinstance(reserve, bool)
-        and isinstance(reserve, int)
-        and parent == request.timeout_seconds
-        and reserve >= 1
-        and reserve < parent
-    )
+    return not isinstance(parent, bool) and isinstance(parent, int) and not isinstance(reserve, bool) and isinstance(reserve, int) and parent == request.timeout_seconds and reserve >= 1 and reserve < parent
 
 
 def _readiness_configuration_failure(
@@ -820,10 +770,7 @@ def _readiness_configuration_failure(
                 source=source,
             )
         ],
-        repair=repair
-        or (
-            f"Restore the validated startup readiness authority at {source}; the governed process was not called."
-        ),
+        repair=repair or (f"Restore the validated startup readiness authority at {source}; the governed process was not called."),
     )
 
 
@@ -849,10 +796,9 @@ def _solet_call(
             "call",
             process_key,
             json.dumps(arguments, separators=(",", ":")),
+            "--wait",
         ),
-        timeout_seconds=(
-            min(request.timeout_seconds, 60) if timeout_seconds is None else timeout_seconds
-        ),
+        timeout_seconds=(min(request.timeout_seconds, 60) if timeout_seconds is None else timeout_seconds),
         cwd=request.target,
         extra_env={"SOLET_NAME": request.name},
         output_limit=_STRUCTURED_OUTPUT_LIMIT,
@@ -870,7 +816,7 @@ def _call_payload(outcome: CommandOutcome) -> JsonObject:
 def _merged_call_payload(outcome: CommandOutcome) -> JsonObject:
     """Return the bare service result splatted into a successful call envelope."""
 
-    outer = _call_result(outcome)
+    outer = _call_result(outcome, flatten_job_data=True)
     if outer is None or outer.get("success") is not True:
         return {}
     return {key: value for key, value in outer.items() if key not in _ENVELOPE_KEYS}
@@ -881,17 +827,8 @@ def _call_succeeded(outcome: CommandOutcome) -> bool:
     return outer is not None and outer.get("success") is True and outer.get("error") is None
 
 
-def _call_result(outcome: CommandOutcome) -> JsonObject | None:
-    if not outcome.ok:
-        return None
-    try:
-        raw: object = json.loads(outcome.stdout)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(raw, dict):
-        return None
-    outer = raw.get("result")
-    return cast(JsonObject, outer) if isinstance(outer, dict) else None
+def _call_result(outcome: CommandOutcome, *, flatten_job_data: bool = False) -> JsonObject | None:
+    return _solet_result(outcome, flatten_job_data=flatten_job_data)
 
 
 def nonempty_process_probe(
@@ -902,9 +839,7 @@ def nonempty_process_probe(
     payload = _call_payload(outcome)
     count = payload.get("count")
     results = payload.get("results")
-    nonempty = (isinstance(count, int) and count > 0) or (
-        isinstance(results, list) and bool(results)
-    )
+    nonempty = (isinstance(count, int) and count > 0) or (isinstance(results, list) and bool(results))
     return _boolean_probe(
         request,
         evidence_id,
@@ -996,22 +931,14 @@ def truncated_solet_call_output(
     return blocked(
         request,
         "output_truncated",
-        (
-            f"{process_key} output was truncated: stdout {outcome.stdout_bytes} bytes (truncated={outcome.stdout_truncated}), stderr {outcome.stderr_bytes} bytes (truncated={outcome.stderr_truncated})."
-        ),
+        (f"{process_key} output was truncated: stdout {outcome.stdout_bytes} bytes (truncated={outcome.stdout_truncated}), stderr {outcome.stderr_bytes} bytes (truncated={outcome.stderr_truncated})."),
         evidence_items=[
             _evidence(
                 "output_truncated",
                 False,
                 process_key,
-                [
-                    f"{key}={json.dumps(value, sort_keys=True, separators=(',', ':'))}"
-                    for key, value in sorted(observed.items())
-                ],
-                [
-                    f"{key}={json.dumps(value, sort_keys=True, separators=(',', ':'))}"
-                    for key, value in sorted(expected.items())
-                ],
+                [f"{key}={json.dumps(value, sort_keys=True, separators=(',', ':'))}" for key, value in sorted(observed.items())],
+                [f"{key}={json.dumps(value, sort_keys=True, separators=(',', ':'))}" for key, value in sorted(expected.items())],
             )
         ],
     )

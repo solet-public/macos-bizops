@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::external_postgres_plugin::copy",
+  "display_name": "External Postgres: COPY Files",
+  "description": "Bulk-move rows between a registered foreign Postgres connection and a file in the operator's workspace with PostgreSQL COPY. operation from_file loads a CSV, text or binary file into schema.table (optional columns, where filter) and commits; operation to_file writes schema.table (optional columns) or a query to the file. Every COPY option is a parameter: format, freeze, delimiter, null, default, header, quote, escape, force_quote, force_not_null, force_null, on_error, encoding, log_verbosity. The data streams over the connection (COPY FROM STDIN / TO STDOUT), so path is an ABSOLUTE path under a saved location. Vendor GRANTs alone decide what is allowed. Returns a queued job; the result has rowcount and bytes.",
+  "embedding_description": "Bulk-load a CSV or text file into an external Postgres table, or bulk-export a table or query to a CSV file, with the COPY command. Every COPY option is supported: format, header, delimiter, null string, quote and escape, force quote, on_error ignore, encoding. Files live in the operator's workspace, never on the database server.",
+  "result_processor_customizations": {
+    "action_label": "Foreign Postgres COPY queued",
+    "result_type": "external_postgres_copy_result",
+    "result_description": "Dispatch envelope: job_id (string) and status ('queued'). The outcome arrives when the job completes: from_file {operation, path, rowcount, bytes, notices} or to_file {operation, path, rowcount, bytes}.",
+    "presentation_guidance": "This call only confirms the job was queued. Once delivered, report the operation, the file path, the rows copied and the bytes moved; never inline the file's contents (data_sensitivity 0.5). Relay any server notices, such as rows skipped by on_error=ignore."
+  },
+  "error_processor_customizations": {
+    "action_context": "COPY rows between a registered foreign Postgres table or query and a workspace file.",
+    "error_interpretation": "external_pg.invalid_params: an unknown operation, a missing path/schema/table, both query and table for to_file, where on to_file, an invalid option value (format, header, on_error, log_verbosity, a non-list force_* option), a missing input file, or a missing output directory. external_pg.export_path_refused: the path must be absolute, have the required suffix where specified, and lie under a saved path address, the session folder or solet home, outside the installation tree. Input files must already exist. external_pg.query_failed: the server rejected the COPY, for example a bad row, a missing column, or an option that does not apply in that direction; the message is the server's own. external_pg.permission_denied: the role lacks INSERT or SELECT on the table.",
+    "recovery_guidance": "external_pg.export_path_refused: ask \"where will you save this?\" and use the returned folder, or say \"save exports for <project> in <folder>\" to save a project location. Keep it outside the installation tree; input files must already exist. external_pg.query_failed: fix the file or the options named in the server's message; on_error=ignore skips rows that fail type conversion. external_pg.permission_denied: ask the operator to GRANT the role the table privilege."
+  }
+}

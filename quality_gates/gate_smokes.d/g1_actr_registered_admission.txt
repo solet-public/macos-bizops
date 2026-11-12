@@ -1,0 +1,2 @@
+# Declarations always run; real registered ACTR dispatch requires provision_test_pg.py --exec.
+plugins/actr_memory_plugin/tests/g1_actr_registered_admission_smoke.py

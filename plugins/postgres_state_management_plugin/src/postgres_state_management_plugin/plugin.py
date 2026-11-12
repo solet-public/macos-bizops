@@ -31,6 +31,7 @@ from ananta.core.config.config_manager import get_config
 from ananta.core.domain.enums import ActionStatus, ProcessorPolicyCategory
 from ananta.core.domain.types import ActionResult
 from ananta.core.plugins.plugin_base import ServicePlugin
+from ananta.core.state.async_job_manager import REGISTERED_JOB_RETURN_SCHEMA, AsyncJobManager
 from ananta.interfaces.edge_process_provider import EdgeProcessDefinition, EdgeProcessProvider
 from ananta.interfaces.plugin_schema_service_interface import (
     PluginSchemaServiceInterface,
@@ -485,6 +486,7 @@ class PostgresStatePlugin(
         self.name = "postgres_state_management_plugin"
         self._provider: PostgresProvider | None = None
         self._lifecycle: object | None = None
+        self._schema_lifecycle_lock = threading.RLock()
         # Caller-bound VaultServiceProxy, injected by
         # ``_inject_state_vault_service`` (startup_sequence.py) before pool-open.
         self._vault_service: VaultServiceInterface | None = None
@@ -620,19 +622,30 @@ class PostgresStatePlugin(
         return self._lifecycle
 
     def install_plugin_schema(self, plugin_namespace: str, declared_schema_json: dict[str, Any]) -> dict[str, Any]:
-        return self._get_lifecycle().install_plugin_schema(plugin_namespace, declared_schema_json)
+        return self._run_schema_lifecycle("install_plugin_schema", plugin_namespace, declared_schema_json)
 
     def update_plugin_schema(self, plugin_namespace: str, declared_schema_json: dict[str, Any]) -> dict[str, Any]:
-        return self._get_lifecycle().update_plugin_schema(plugin_namespace, declared_schema_json)
+        return self._run_schema_lifecycle("update_plugin_schema", plugin_namespace, declared_schema_json)
 
     def uninstall_plugin_schema(self, plugin_namespace: str) -> dict[str, Any]:
-        return self._get_lifecycle().uninstall_plugin_schema(plugin_namespace)
+        return self._run_schema_lifecycle("uninstall_plugin_schema", plugin_namespace)
 
     def purge_plugin_schema(self, plugin_namespace: str, force: bool = False) -> dict[str, Any]:
-        return self._get_lifecycle().purge_plugin_schema(plugin_namespace, force=force)
+        return self._run_schema_lifecycle("purge_plugin_schema", plugin_namespace, force=force)
 
     def get_installed_schema(self, plugin_namespace: str) -> dict[str, Any]:
-        return self._get_lifecycle().get_installed_schema(plugin_namespace)
+        return self._run_schema_lifecycle("get_installed_schema", plugin_namespace)
+
+    def _run_schema_lifecycle(self, method_name: str, *args: object, **kwargs: object) -> dict[str, Any]:
+        """Serialize whole ownership operations, including synchronous callers.
+
+        Registered admission happens before this guard on the existing owner
+        worker. Startup and same-thread composition retain full results; the
+        reentrant guard never submits or waits on a nested bookkeeping job.
+        """
+        with self._schema_lifecycle_lock:
+            operation = getattr(self._get_lifecycle(), method_name)
+            return cast(dict[str, Any], operation(*args, **kwargs))
 
     # --- end PluginSchemaServiceInterface implementation -----------------
 
@@ -1284,6 +1297,22 @@ class PostgresStatePlugin(
                 details={"query": sql_query[:100]},  # Truncate for safety
             )
 
+    def admit_registered_operation(self, action_name: str, parameters: dict[str, Any], state: dict[str, Any]) -> dict[str, Any] | None:
+        """Both registered SQL keys admit this one existing owner operation."""
+        if action_name != "execute_sql":
+            return None
+        manager = getattr(self.orchestrator_ref, "async_job_manager", None)
+        if not isinstance(manager, AsyncJobManager):
+            raise RuntimeError("Registered SQL requires the initialized AsyncJobManager")
+        # State is built by ActionProcessor; admission captures its registered
+        # action/token context. Internal execute_sql calls remain synchronous.
+        if not state.get("flow_id") or not state.get("session_id"):
+            raise ValueError("Registered SQL requires server flow/session context")
+        return manager.submit_registered_operation(self.name, action_name, parameters, self._run_registered_sql)
+
+    def _run_registered_sql(self, parameters: dict[str, object]) -> dict[str, object]:
+        return dict(self.execute_sql(cast(str, parameters["sql_query"]), cast(list[object] | None, parameters.get("sql_params"))))
+
     @contextmanager
     def transactional(self) -> Generator[StateTransaction]:
         """Yield a :class:`StateTransaction` backed by a non-autocommit conn.
@@ -1886,6 +1915,7 @@ class PostgresStatePlugin(
     # overwriting any values set here in the decorator.
     @platform_process(
         name="execute_sql",
+        is_async=True,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "sql_query": ParameterMetadata(
@@ -1899,26 +1929,7 @@ class PostgresStatePlugin(
                 type=ParameterType.LIST,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="SQL query results",
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or failed",
-                    required=False,
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Query results containing records and count",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Execute advanced SQL queries",
-                "Perform complex database operations",
-            ],
-        ),
+        return_value_schema=REGISTERED_JOB_RETURN_SCHEMA,
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     def execute_sql_action(

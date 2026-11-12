@@ -156,7 +156,7 @@ def _poll_case(root: Path, kind: str, plugin_name: str, fixture_name: str) -> An
     from types import SimpleNamespace
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta" / "tests" / "llm" / "session_ledger"))
-    import importer_smoke as runtime
+    import importer_smoke as runtime  # pyright: ignore[reportMissingImports]
     from ananta.llm.session_ledger import types
     from ananta.llm.session_ledger.poll_budget import COMPLETED_VERSION_KEY, DiscoveryBudgetYield
 
@@ -243,7 +243,7 @@ def _poll_assert_events(case: Any) -> None:
     The expected stream is an uninterrupted read of the identical real inputs."""
     from collections import Counter
 
-    from ananta.llm.session_ledger.importer import _event_external_id
+    from ananta.llm.session_ledger.importer_persistence import _event_external_id
 
     assert Counter(map(repr, case.observed)) == Counter(map(repr, case.expected)), "whole-session restart preserves exact vendor events, usage and model data"
     rows = [row.record for row in case.state.upserts if row.table == "event"]

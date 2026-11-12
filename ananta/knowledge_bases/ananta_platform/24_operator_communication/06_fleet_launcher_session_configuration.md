@@ -16,7 +16,7 @@ Embedding Description: How to change the base model, effort level, advisor model
 
 ## Where this configuration lives
 
-A multi-session fleet — several concurrently-running coding-agent sessions, each addressable by a role name (a coordinator, a git-controller, reviewers, implementation lanes) — is started by a **launcher that lives in the operator's own shell profile** (typically `~/.zshrc` or equivalent), not inside the platform repository and not inside any plugin's hydration templates. Searching the repo's own tree for this configuration will not find it; it is a machine-local file the operator maintains directly.
+A multi-session fleet — several concurrently-running coding-agent sessions, each addressable by a role name (a coordinator, reviewers, implementation lanes) — is started by a **launcher that lives in the operator's own shell profile** (typically `~/.zshrc` or equivalent), not inside the platform repository and not inside any plugin's hydration templates. Searching the repo's own tree for this configuration will not find it; it is a machine-local file the operator maintains directly.
 
 The shape is one shared, parameterized function plus one thin wrapper per role:
 
@@ -55,6 +55,16 @@ Every Claude session in the fleet starts with Remote Control, so the operator ca
 ## Model and effort
 
 Both are ordinary per-session CLI flags on the `claude` invocation: `--model <alias>` and `--effort <level>` (`low`, `medium`, `high`, `xhigh`, `max`). Passing neither flag inherits the operator's `~/.claude/settings.json` defaults (`model` and `effortLevel` keys). A launcher function typically builds these as optional flags — an empty argument expands to zero flags rather than an empty-string flag value — so existing callers that don't pass a model/effort stay byte-identical after adding the parameters.
+
+## Context-window compaction per seat
+
+The launcher sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW` for each seat while preserving
+`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50`. The three named main seats and Operator
+use a 200000-token window by default; other roles retain 1000000. An explicit
+positive `--auto-compact-window N` on the
+launcher overrides the role default for that launch. The value is carried into
+the tmux re-entry command, so the detached host and the Claude process receive
+the same setting. Omitting the argument restores the role default.
 
 ## Transport per role
 

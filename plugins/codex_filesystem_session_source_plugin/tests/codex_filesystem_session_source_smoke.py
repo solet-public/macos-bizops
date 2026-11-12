@@ -2,7 +2,7 @@
 """Smoke test for codex_filesystem_session_source_plugin (no pytest).
 
 Spec §17.2 acceptance: fixture JSONL imports; cursors persist across
-restart; ValueError on unrecognized payload type. Per
+restart; advisory continuation on unrecognized payload type. Per
 [[sandbox-mutating-smokes]] the smoke writes its fixture rollouts under
 ``tempfile.TemporaryDirectory()`` and threads that temp dir as the
 per-call ``root_uri`` (P1.1.E) — the plugin resolves it via
@@ -52,6 +52,10 @@ def _check(condition: object, label: str) -> None:
     else:
         _failed.append(label)
         print(f"  FAIL  {label}")
+
+
+def _is_raw_session_event(value: object) -> bool:
+    return isinstance(value, RawSessionEvent)
 
 
 # ─── Fixture rollout writers ────────────────────────────────────────────────
@@ -216,7 +220,7 @@ def test_discover_sessions_rescans_old_stems() -> None:
             lines=_basic_rollout_lines("bbbb-uuid"),
         )
         plugin, root_uri = _make_plugin(root)
-        cursor = {"highest_filename_stem": "rollout-2025-10-15T06-56-07-0199e828-aaaa"}
+        cursor: dict[str, object] = {"highest_filename_stem": "rollout-2025-10-15T06-56-07-0199e828-aaaa"}
         refs = list(plugin.discover_sessions(root_uri, cursor_payload=cursor))
         _check(
             [ref.external_session_id for ref in refs] == ["rollout-2025-10-15T06-56-07-0199e828-aaaa", "rollout-2025-10-16T08-00-00-0199e828-bbbb"],
@@ -249,7 +253,7 @@ def test_read_events_skips_session_meta_and_noise() -> None:
         # turn_context (skip) + function_call + function_call_output = 4 events
         _check(len(raws) == 4, f"4 ledger events emitted; got {len(raws)}")
         _check(
-            all(isinstance(r, RawSessionEvent) for r in raws),
+            all(_is_raw_session_event(r) for r in raws),
             "all yielded items are RawSessionEvent",
         )
         _check(
@@ -414,10 +418,10 @@ def test_tool_call_and_result_have_distinct_vendor_event_ids() -> None:
         )
 
 
-# ─── ValueError on unrecognized line type ───────────────────────────────────
+# ─── Advisory continuation on unrecognized line type ───────────────────────────────────
 
 
-def test_unrecognized_top_level_type_raises() -> None:
+def test_unrecognized_top_level_type_advises() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         bad = _basic_rollout_lines("aaaa-uuid")
@@ -441,18 +445,11 @@ def test_unrecognized_top_level_type_raises() -> None:
             project_path="/proj/x",
             first_seen_at=plugin.discover_sessions(root_uri, None).__next__().first_seen_at,
         )
-        try:
-            list(plugin.read_events(root_uri, ref, cursor_payload=None))
-        except ValueError as exc:
-            _check(
-                "totally_unknown_codex_line_type" in str(exc),
-                "ValueError on unrecognized top-level line type",
-            )
-            return
-        _check(False, "expected ValueError on unrecognized top-level type")
+        raws = list(plugin.read_events(root_uri, ref, cursor_payload=None))
+        _check(len(raws) == 4, "unknown top-level line type keeps all understood events")
 
 
-def test_unrecognized_response_item_type_raises() -> None:
+def test_unrecognized_response_item_type_advises() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         bad = _basic_rollout_lines("aaaa-uuid")
@@ -476,15 +473,8 @@ def test_unrecognized_response_item_type_raises() -> None:
             project_path="/proj/x",
             first_seen_at=plugin.discover_sessions(root_uri, None).__next__().first_seen_at,
         )
-        try:
-            list(plugin.read_events(root_uri, ref, cursor_payload=None))
-        except ValueError as exc:
-            _check(
-                "brand_new_unknown_subtype" in str(exc),
-                "ValueError on unrecognized response_item.payload.type",
-            )
-            return
-        _check(False, "expected ValueError on unrecognized response_item type")
+        raws = list(plugin.read_events(root_uri, ref, cursor_payload=None))
+        _check(len(raws) == 4, "unknown response_item.payload.type keeps all understood events")
 
 
 # ─── Cursor producers ───────────────────────────────────────────────────────
@@ -665,7 +655,7 @@ def _poll_case(root: Path, kind: str, plugin_name: str, fixture_name: str) -> An
     from types import SimpleNamespace
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta" / "tests" / "llm" / "session_ledger"))
-    import importer_smoke as runtime
+    import importer_smoke as runtime  # pyright: ignore[reportMissingImports]
     from ananta.llm.session_ledger import types
     from ananta.llm.session_ledger.poll_budget import COMPLETED_VERSION_KEY, DiscoveryBudgetYield
 
@@ -752,7 +742,7 @@ def _poll_assert_events(case: Any) -> None:
     The expected stream is an uninterrupted read of the identical real inputs."""
     from collections import Counter
 
-    from ananta.llm.session_ledger.importer import _event_external_id
+    from ananta.llm.session_ledger.importer_persistence import _event_external_id
 
     assert Counter(map(repr, case.observed)) == Counter(map(repr, case.expected)), "whole-session restart preserves exact vendor events, usage and model data"
     rows = [row.record for row in case.state.upserts if row.table == "event"]
@@ -1055,7 +1045,7 @@ def test_real_oversized_worker_custody() -> None:
     from unittest.mock import patch
 
     sys.path.insert(0, str(REPO_ROOT / "ananta" / "tests" / "llm" / "session_ledger"))
-    import importer_smoke as runtime
+    import importer_smoke as runtime  # pyright: ignore[reportMissingImports]
     from ananta.llm.session_ledger import filesystem_poll as policy
     from ananta.llm.session_ledger import importer as importer_mod
     from ananta.llm.session_ledger.types import CursorScope, PollSessionRef
@@ -1127,8 +1117,8 @@ def main() -> int:
     test_read_events_resume_partial_yields_remainder()
     test_normalize_message_role_mapping()
     test_tool_call_and_result_have_distinct_vendor_event_ids()
-    test_unrecognized_top_level_type_raises()
-    test_unrecognized_response_item_type_raises()
+    test_unrecognized_top_level_type_advises()
+    test_unrecognized_response_item_type_advises()
     test_session_discovery_cursor_round_trip()
     test_archived_sessions_sibling_is_walked()
     test_qualify_is_source_local_and_content_blind()

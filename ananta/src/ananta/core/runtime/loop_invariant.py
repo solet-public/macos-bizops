@@ -4,6 +4,11 @@ Records are process-local: append/read, bounded FIFO retirement, then retirement
 on process exit. Counters last for the process lifetime. Recording never changes
 execution placement or refuses an invocation. Dispatch-only declarations are
 reviewed source, with a reason; remove a declaration to clear the exception.
+
+Handler wall time is advisory evidence too: per process key, the call count and
+the total, maximum and last elapsed seconds of timed handler calls. The table
+tracks at most ``entry_capacity`` keys; recording a new key beyond that evicts
+the least-recently-recorded key and counts the eviction.
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ import sys
 import threading
 import time
 import traceback
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -112,11 +117,41 @@ class ViolationSnapshot(ViolationSummary):
     recent: list[EntrySnapshot]
 
 
+class WallTimeSnapshot(TypedDict):
+    count: int
+    total_s: float
+    max_s: float
+    last_s: float
+
+
+class HandlerWallTimeSnapshot(TypedDict):
+    evicted_keys: int
+    by_process_key: dict[str, WallTimeSnapshot]
+
+
 class InvariantSnapshot(TypedDict):
     invocations: int
     capacity: int
     recent_entries: list[EntrySnapshot]
     violations: ViolationSnapshot
+    handler_wall_time: HandlerWallTimeSnapshot
+
+
+@dataclass
+class _WallTime:
+    count: int = 0
+    total_s: float = 0.0
+    max_s: float = 0.0
+    last_s: float = 0.0
+
+    def add(self, elapsed_s: float) -> None:
+        self.count += 1
+        self.total_s += elapsed_s
+        self.max_s = max(self.max_s, elapsed_s)
+        self.last_s = elapsed_s
+
+    def snapshot(self) -> WallTimeSnapshot:
+        return {"count": self.count, "total_s": self.total_s, "max_s": self.max_s, "last_s": self.last_s}
 
 
 @dataclass(frozen=True)
@@ -154,6 +189,21 @@ class HandlerEntryRecorder:
         self._violations: deque[_Entry] = deque(maxlen=self.config.entry_capacity)
         self._invocations = 0
         self._violation_count = 0
+        self._wall_time: OrderedDict[str, _WallTime] = OrderedDict()
+        self._wall_time_evicted_keys = 0
+
+    def record_wall_time(self, process_key: str, elapsed_s: float) -> None:
+        """Add one timed call; most recent key last, oldest evicted past capacity."""
+        with self._lock:
+            row = self._wall_time.get(process_key)
+            if row is None:
+                row = self._wall_time[process_key] = _WallTime()
+                if len(self._wall_time) > self.config.entry_capacity:
+                    self._wall_time.popitem(last=False)
+                    self._wall_time_evicted_keys += 1
+            else:
+                self._wall_time.move_to_end(process_key)
+            row.add(elapsed_s)
 
     def record(self, process_key: str, kind: str) -> None:
         # Import lazily: loop_lag's watchdog also reads our counters. The
@@ -182,6 +232,8 @@ class HandlerEntryRecorder:
             violations = tuple(self._violations)
             invocations = self._invocations
             count = self._violation_count
+            wall_time = {key: row.snapshot() for key, row in self._wall_time.items()}
+            evicted_keys = self._wall_time_evicted_keys
         last = violations[-1] if violations else None
         return {
             "invocations": invocations,
@@ -193,6 +245,7 @@ class HandlerEntryRecorder:
                 "last_stack": last.stack if last else None,
                 "recent": [entry.snapshot() for entry in violations],
             },
+            "handler_wall_time": {"evicted_keys": evicted_keys, "by_process_key": wall_time},
         }
 
     def violation_summary(self) -> ViolationSummary:
@@ -211,6 +264,11 @@ HANDLER_ENTRIES = HandlerEntryRecorder({(f"route::agent_messaging_plugin::{name}
 def record_handler_entry(process_key: str, kind: str) -> None:
     """Call immediately before the body, in its executing thread context."""
     HANDLER_ENTRIES.record(process_key, kind)
+
+
+def record_handler_wall_time(process_key: str, elapsed_s: float) -> None:
+    """Record one handler call's elapsed seconds; advisory, never refuses."""
+    HANDLER_ENTRIES.record_wall_time(process_key, elapsed_s)
 
 
 def handler_entry_snapshot() -> InvariantSnapshot:

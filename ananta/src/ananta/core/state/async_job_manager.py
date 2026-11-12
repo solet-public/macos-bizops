@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
-from copy import deepcopy
+import threading
 from typing import TYPE_CHECKING
 
 from ananta.constants import (
-    CONTEXT_KEY_FLOW_ID,
-    CONTEXT_KEY_SESSION_ID,
     FRAMEWORK_ASYNC_JOBS_TABLE,
     FRAMEWORK_NAMESPACE,
     NOTES_MAX_LENGTH,
@@ -19,8 +17,37 @@ from ananta.core.state.async_job_persistence import create_job_and_request, upda
 from ananta.core.state.execution_token_context import get_current_flow_token_id
 from ananta.core.state.job_completion_reach import record_completion_reach
 from ananta.core.state.job_completion_route import (
-    build_delivery_action,
-    resolve_route,
+    JobWaiterLocks,
+    bridge_wait_attached,
+    build_completion_action,
+    build_completion_arguments,
+    clear_bridge_waiter,
+    enrich_prompt_block,
+    populate_state_args,
+    route_completion_to_role,
+    stamp_bridge_waiter,
+)
+from ananta.core.state.registered_job_operations import (
+    REGISTERED_JOB_RETURN_SCHEMA as REGISTERED_JOB_RETURN_SCHEMA,
+)
+from ananta.core.state.registered_job_operations import (
+    OwnedOperation as OwnedOperation,
+)
+from ananta.core.state.registered_job_operations import (
+    RegisteredCompletion as RegisteredCompletion,
+)
+from ananta.core.state.registered_job_operations import (
+    RegisteredOperationOwner,
+    registered_job_owner_filters,
+    registered_job_owner_key,
+    registered_job_record,
+    require_registered_job_flow_token,
+)
+from ananta.core.state.registered_job_operations import (
+    registered_action_context as registered_action_context,
+)
+from ananta.core.state.registered_job_operations import (
+    registered_job_return_schema as registered_job_return_schema,
 )
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
 
@@ -50,6 +77,29 @@ class AsyncJobManager:
         # (due to initialization order - AsyncJobManager created before FRG)
         self._flow_runtime_graph: FlowRuntimeGraph | None = flow_runtime_graph
         self._action_factory: ActionFactory | None = None
+        self._registered_completion: RegisteredCompletion | None = None
+        self._owners_lock = threading.Lock()
+        self._owners: dict[str, RegisteredOperationOwner] = {}
+        self._completion_lock = threading.RLock()
+        self._waiter_locks = JobWaiterLocks()
+        self._routing_owners: dict[str, int] = {}
+        self._pending_token_resolutions: dict[str, str] = {}
+
+    def set_registered_completion_handler(self, handler: RegisteredCompletion) -> None:
+        """Wire the existing poller route before registered admission starts."""
+        self._registered_completion = handler
+
+    def submit_registered_operation(self, owner: str, action_name: str, parameters: dict[str, object], operation: OwnedOperation) -> dict[str, object]:
+        """Admit an explicit operation without changing its internal callable."""
+        return self._operation_owner(owner).submit(action_name, parameters, operation)
+
+    def run_registered_serial_body(self, owner: str, parameters: dict[str, object], operation: OwnedOperation) -> dict[str, object]:
+        """Preserve an existing synchronous fence without creating another job."""
+        return self._operation_owner(owner).call(parameters, operation)
+
+    def _operation_owner(self, owner: str) -> RegisteredOperationOwner:
+        with self._owners_lock:
+            return self._owners.setdefault(owner, RegisteredOperationOwner(self, owner))
 
     def create_job(
         self,
@@ -88,9 +138,7 @@ class AsyncJobManager:
             return notes_error
 
         provider_name = f"{plugin_name}.{action_name}"
-        job_record = self._build_job_record(
-            provider_name, request_payload, job_id, name, description, flow_id_trace, job_metadata
-        )
+        job_record = self._build_job_record(provider_name, request_payload, job_id, name, description, flow_id_trace, job_metadata)
 
         try:
             return self._create_job_with_payload(provider_name, job_record, request_payload)
@@ -158,12 +206,14 @@ class AsyncJobManager:
 
         # Link to FRG token from execution context
         flow_token_id = get_current_flow_token_id()
+        require_registered_job_flow_token(flow_token_id, provider_name)
         if flow_token_id:
             job_record["flow_token_id"] = flow_token_id
 
-        if job_metadata:
+        metadata = dict(job_metadata or {})
+        if metadata:
             try:
-                job_record["metadata"] = json.dumps(job_metadata)
+                job_record["metadata"] = json.dumps(metadata)
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"job_metadata must be JSON serializable: {exc}") from exc
 
@@ -178,7 +228,11 @@ class AsyncJobManager:
         """Create job record and write payload. Assumes state_service is available."""
         assert self.state_service is not None  # Caller must verify
 
-        generated_id = create_job_and_request(self.state_service, job_record, request_payload)
+        with registered_job_record(job_record) as owner:
+            stamp_bridge_waiter(self.state_service, self._namespace, job_record)
+            generated_id = create_job_and_request(self.state_service, job_record, request_payload)
+            if owner is not None and owner.root_job_id is None:
+                owner.root_job_id = generated_id
         logger.debug("Created async job %s for %s", generated_id, provider_name)
         return {
             "action_status": "completed",
@@ -292,9 +346,7 @@ class AsyncJobManager:
         first_record = records[0]
         return first_record if isinstance(first_record, dict) else None
 
-    def _parse_payload_data(
-        self, payload_record: dict[str, object], job_id: str
-    ) -> dict[str, object]:
+    def _parse_payload_data(self, payload_record: dict[str, object], job_id: str) -> dict[str, object]:
         """Parse payload_data field from a payload record."""
         payload_data_raw = payload_record.get("payload_data", "{}")
 
@@ -320,10 +372,7 @@ class AsyncJobManager:
         if plugin_name and action_name:
             filters["provider_name"] = f"{plugin_name}.{action_name}"
         elif plugin_name or action_name:
-            logger.error(
-                "Partial plugin/action filtering not supported. "
-                "Provide both plugin_name and action_name, or use status filter only."
-            )
+            logger.error("Partial plugin/action filtering not supported. Provide both plugin_name and action_name, or use status filter only.")
 
         if status:
             filters["status"] = status
@@ -398,8 +447,32 @@ class AsyncJobManager:
             }
 
     def update_job(self, job_id: str, updates: dict[str, object]) -> dict[str, object]:
+        """Serialize this job's outcome route with release, preserving sibling writes."""
+        with self._waiter_locks.for_job(job_id):
+            return self._update_job(job_id, updates)
+
+    def release_bridge_waiter(self, job_id: str, *, bridge_id: str, session_id: str) -> dict[str, object]:
+        """Clear one owner binding; a suppressed terminal result now routes once."""
+        with self._waiter_locks.for_job(job_id):
+            changed, job = clear_bridge_waiter(self.state_service, self._namespace, job_id, bridge_id=bridge_id, session_id=session_id)
+            status = str(job.get("status"))
+            if changed and status in {"completed", "error"}:
+                result = self._released_job_payload(job_id, "result")
+                error = self._released_job_payload(job_id, "error")
+                if not self._route_completion_to_role(job_id, status, result, error):
+                    self._handle_completion_actions(job_id, status, result, error)
+            return {"job_id": job_id, "released": changed, "bridge_wait_attached": False}
+
+    def _released_job_payload(self, job_id: str, kind: str) -> dict[str, object] | None:
+        result = self.get_job_payload(job_id, kind)
+        data = result.get("data")
+        payload = data.get("payload") if isinstance(data, dict) else None
+        return payload if isinstance(payload, dict) else None
+
+    def _update_job(self, job_id: str, updates: dict[str, object]) -> dict[str, object]:
         """Update job in unified ledger with support for payload fields."""
         outcome_committed = False
+        routing_token: str | None = None
         try:
             if not self.state_service:
                 return {
@@ -407,10 +480,16 @@ class AsyncJobManager:
                     "error": {"message": "State service not available"},
                 }
 
+            if updates.get("status") in {"completed", "error", "cancelled"}:
+                routing_token = self._begin_terminal_route(job_id)
             ledger_updates, result_payload, error_payload = self._extract_update_fields(updates)
 
             update_job_and_payloads(
-                self.state_service, job_id, ledger_updates, result_payload, error_payload,
+                self.state_service,
+                job_id,
+                ledger_updates,
+                result_payload,
+                error_payload,
             )
             new_status = updates.get("status")
             outcome_committed = new_status in ("completed", "error", "cancelled")
@@ -434,19 +513,27 @@ class AsyncJobManager:
                         job_id,
                         self._fetch_job_metadata(job_id),
                     )
-                    if not self._route_completion_to_role(
-                        job_id, str(new_status), result_payload, error_payload
-                    ):
+                    if not self._route_completion_to_role(job_id, str(new_status), result_payload, error_payload):
                         self._handle_completion_actions(
-                            job_id, str(new_status), result_payload, error_payload,
+                            job_id,
+                            str(new_status),
+                            result_payload,
+                            error_payload,
                         )
                 finally:
                     # Delivery failure stays drainable; it cannot strand the token.
+                    self._end_terminal_route(routing_token)
+                    routing_token = None
                     self._resolve_job_token(job_id, success=(new_status == "completed"))
 
-            return {"action_status": "completed", "data": {
-                "job_id": job_id, "updated": True, "outcome_committed": outcome_committed,
-            }}
+            return {
+                "action_status": "completed",
+                "data": {
+                    "job_id": job_id,
+                    "updated": True,
+                    "outcome_committed": outcome_committed,
+                },
+            }
 
         except Exception as e:
             logger.error(f"Error updating async job {job_id}: {e}")
@@ -455,10 +542,46 @@ class AsyncJobManager:
                 "data": {"job_id": job_id, "outcome_committed": outcome_committed},
                 "error": {"message": f"Exception updating job: {str(e)}"},
             }
+        finally:
+            self._end_terminal_route(routing_token)
 
-    def _extract_update_fields(
-        self, updates: dict[str, object]
-    ) -> tuple[dict[str, object], dict[str, object] | None, dict[str, object] | None]:
+    def _begin_terminal_route(self, job_id: str) -> str | None:
+        """Register routing before the outcome commit can be observed by a sibling."""
+        job = self._job_for_token_resolution(job_id)
+        owner_key = registered_job_owner_key(job) if job.get("flow_token_id") else None
+        if owner_key:
+            with self._completion_lock:
+                self._routing_owners[owner_key] = self._routing_owners.get(owner_key, 0) + 1
+        return owner_key
+
+    def _end_terminal_route(self, owner_key: str | None) -> None:
+        pending_job: str | None = None
+        if owner_key:
+            with self._completion_lock:
+                count = self._routing_owners[owner_key] - 1
+                if count:
+                    self._routing_owners[owner_key] = count
+                else:
+                    del self._routing_owners[owner_key]
+                    pending_job = self._pending_token_resolutions.pop(owner_key, None)
+        if pending_job is not None:
+            try:
+                self._resolve_job_token(pending_job)
+            except Exception:
+                assert owner_key is not None
+                with self._completion_lock:
+                    self._pending_token_resolutions[owner_key] = pending_job
+                logger.exception("Committed job %s still needs token reconciliation", pending_job)
+
+    def _owner_jobs_exist(self, job: dict[str, object], statuses: list[str]) -> bool:
+        result = self.state_service.query_state(self._namespace, {"table": self._table, "filters": {**registered_job_owner_filters(job), "status": statuses}, "limit": 1})
+        data = result.get("data")
+        records = data.get("records") if isinstance(data, dict) else None
+        if result.get("action_status") != "completed" or not isinstance(records, list):
+            raise RuntimeError(f"Cannot read linked job states for owner {job['id']}")
+        return bool(records)
+
+    def _extract_update_fields(self, updates: dict[str, object]) -> tuple[dict[str, object], dict[str, object] | None, dict[str, object] | None]:
         """Separate ledger updates from payload data."""
         ledger_updates: dict[str, object] = {}
         result_payload: dict[str, object] | None = None
@@ -475,15 +598,6 @@ class AsyncJobManager:
             error_payload = updates["error"]
 
         return ledger_updates, result_payload, error_payload
-
-    def _parse_process_key(self, process_key: str) -> tuple[str, str, str]:
-        """Parse process_key into provider parts."""
-        parts = process_key.split("::")
-        if len(parts) != 3:
-            raise ValueError(
-                f"Invalid process_key '{process_key}'. Expected provider_type::provider::function_name"
-            )
-        return parts[0], parts[1], parts[2]
 
     def set_action_factory(self, action_factory: ActionFactory) -> None:
         """Inject ActionFactory for automatic result routing."""
@@ -507,19 +621,8 @@ class AsyncJobManager:
             namespace=self._namespace,
             query={"table": self._table, "filters": {"id": job_id}, "limit": 1},
         )
-        if not is_status_match(result.get("action_status"), ActionStatus.COMPLETED):
-            return {}
-
-        data = result.get("data")
-        if not isinstance(data, dict):
-            return {}
-
-        records = data.get("records")
-        if not isinstance(records, list) or not records:
-            return {}
-
-        record = records[0]
-        if not isinstance(record, dict):
+        record = self._extract_first_record(result)
+        if record is None:
             return {}
 
         return self._decode_metadata(record.get("metadata"))
@@ -541,9 +644,7 @@ class AsyncJobManager:
         provider_name = record.get("provider_name")
         return provider_name if isinstance(provider_name, str) else ""
 
-    def _get_completion_handler(
-        self, job_id: str, status: str
-    ) -> tuple[dict[str, object], dict[str, object], str] | None:
+    def _get_completion_handler(self, job_id: str, status: str) -> tuple[dict[str, object], dict[str, object], str] | None:
         """Retrieve completion handler from job metadata.
 
         Returns tuple of (handler, metadata, handler_key) or None if not found.
@@ -567,175 +668,7 @@ class AsyncJobManager:
 
         return handler, metadata, handler_key
 
-    def _build_completion_arguments(
-        self,
-        handler: dict[str, object],
-        job_id: str,
-        status: str,
-        result_payload: dict[str, object] | None,
-        error_payload: dict[str, object] | None,
-    ) -> dict[str, object]:
-        """Build arguments dict from handler template."""
-        template = handler.get("template", {})
-        if not isinstance(template, dict):
-            template = {}
-
-        arguments = deepcopy(template)
-        params = self._ensure_dict_field(arguments, "params")
-        arguments["params"] = params
-
-        payload_key = "job_payload" if status == "completed" else "job_error"
-        payload_value = result_payload if status == "completed" else error_payload
-        params[payload_key] = payload_value or {}
-        params["job_id"] = job_id
-        params["job_status"] = status
-
-        return arguments
-
-    def _ensure_dict_field(self, container: dict[str, object], field: str) -> dict[str, object]:
-        """Ensure field in container is a dict, return it."""
-        value = container.setdefault(field, {})
-        if not isinstance(value, dict):
-            value = {}
-            container[field] = value
-        return value
-
-    def _populate_state_args(
-        self,
-        arguments: dict[str, object],
-        metadata: dict[str, object],
-        job_id: str,
-    ) -> tuple[dict[str, object], str | None, str | None]:
-        """Populate state arguments from metadata. Returns (state_args, session_id, flow_id)."""
-        state_args = self._ensure_dict_field(arguments, "state")
-        arguments["state"] = state_args
-
-        session_id: str | None = None
-        flow_id: str | None = None
-
-        session_id_raw = metadata.get("session_id")
-        if isinstance(session_id_raw, str) and session_id_raw:
-            session_id = session_id_raw
-            state_args.setdefault("session_id", session_id)
-
-        flow_id_raw = metadata.get("flow_id")
-        if isinstance(flow_id_raw, str) and flow_id_raw:
-            flow_id = flow_id_raw
-            state_args.setdefault("flow_id", flow_id)
-
-        state_args.setdefault("job_id", job_id)
-        return state_args, session_id, flow_id
-
-    def _build_action_definition(
-        self,
-        handler: dict[str, object],
-        process_key: str,
-        job_id: str,
-        status: str,
-        arguments: dict[str, object],
-        session_id: str | None,
-        flow_id: str,
-    ) -> dict[str, object]:
-        """Build action definition from handler and arguments.
-
-        Args:
-            handler: Handler definition with name, description, notes
-            process_key: The process key for the action
-            job_id: The async job ID
-            status: Job status (completed, failed, etc.)
-            arguments: Action arguments
-            session_id: Optional session ID
-            flow_id: Required flow ID (all actions require flow context)
-
-        Returns:
-            Complete action definition with flow_id
-        """
-        provider_type, provider, function_name = self._parse_process_key(process_key)
-        action_def: dict[str, object] = {
-            "name": handler.get("name") or f"{function_name}_{job_id}",
-            "description": handler.get("description") or f"Auto-routing for job {job_id}",
-            "process_key": process_key,
-            "process": {
-                "provider_type": provider_type,
-                "provider": provider,
-                "function_name": function_name,
-            },
-            "arguments": arguments,
-            "notes": handler.get("notes") or f"Async job {job_id} {status}",
-            CONTEXT_KEY_FLOW_ID: flow_id,
-        }
-
-        if session_id:
-            action_def[CONTEXT_KEY_SESSION_ID] = session_id
-
-        return action_def
-
-    def _enrich_result_data(self, user_prompt: dict[str, object], job_id: str, status: str) -> None:
-        """Enrich result_data section in user prompt."""
-        result_section = user_prompt.setdefault("result_data", {})
-        if isinstance(result_section, dict):
-            result_section.setdefault("job_id", job_id)
-            result_section.setdefault("status", status)
-
-    def _enrich_action_result(
-        self,
-        user_prompt: dict[str, object],
-        status: str,
-        payload_value: dict[str, object] | None,
-    ) -> None:
-        """Enrich action_result section in user prompt."""
-        action_status = "COMPLETED" if status == "completed" else status.upper()
-        action_result = user_prompt.setdefault("action_result", {})
-        if not isinstance(action_result, dict):
-            return
-
-        action_result.setdefault("action_status", action_status)
-        data_section = action_result.setdefault("data", {})
-        if isinstance(data_section, dict) and payload_value:
-            for key, value in payload_value.items():
-                data_section.setdefault(key, value)
-
-    def _enrich_prompt_block(
-        self,
-        params: dict[str, object],
-        job_id: str,
-        status: str,
-        result_payload: dict[str, object] | None,
-        error_payload: dict[str, object] | None,
-    ) -> None:
-        """Enrich prompt block with job data.
-
-        Populates both prompt.user (for ad-hoc inference templates) and
-        prompt.observation (for the standard observation pipeline used by
-        plan continuation). The observation dict enables plan step matching
-        when async jobs complete.
-        """
-        prompt_block = params.get("prompt")
-        if not isinstance(prompt_block, dict):
-            return
-
-        user_prompt = prompt_block.setdefault("user", {})
-        if not isinstance(user_prompt, dict):
-            return
-
-        payload_value = result_payload if status == "completed" else error_payload
-
-        self._enrich_result_data(user_prompt, job_id, status)
-        self._enrich_action_result(user_prompt, status, payload_value)
-
-        if payload_value:
-            user_prompt.setdefault("job_payload", payload_value)
-        if error_payload and status == "error":
-            user_prompt.setdefault("job_error", error_payload)
-
-        # Enrich observation dict if present (enables plan step matching)
-        observation = prompt_block.get("observation")
-        if isinstance(observation, dict):
-            self._enrich_action_result(observation, status, payload_value)
-
-    def _submit_completion_action(
-        self, action_def: dict[str, object], handler_key: str, job_id: str, process_key: str
-    ) -> None:
+    def _submit_completion_action(self, action_def: dict[str, object], handler_key: str, job_id: str, process_key: str) -> None:
         """Submit action definition to action factory."""
         try:
             assert self._action_factory is not None
@@ -755,66 +688,21 @@ class AsyncJobManager:
             )
             raise
 
-    def _route_completion_to_role(
-        self,
-        job_id: str,
-        status: str,
-        result_payload: dict[str, object] | None,
-        error_payload: dict[str, object] | None,
-    ) -> bool:
-        """Push this completion to its durable role, REPLACING the continuation.
+    def _route_completion_to_role(self, job_id: str, status: str, result_payload: dict[str, object] | None, error_payload: dict[str, object] | None) -> bool:
+        """Consume attached-root delivery or replace its continuation with a role push."""
+        factory = self._action_factory
+        return route_completion_to_role(self.state_service, self._namespace, self._fetch_job_metadata(job_id), job_id=job_id, provider_name=self._fetch_job_provider_name(job_id) if factory else "", status=status, result=result_payload, error=error_payload, submit=factory.submit_action_definition if factory else None)
 
-        True means the delivery action was submitted and the caller must NOT
-        also submit the plugin's continuation. False means no push route
-        applied and today's behaviour stands unchanged.
-
-        Replace, not duplicate, and only for a bridge-origin flow that carries a
-        routing role. For such a flow the continuation does not reach the
-        originator at all: with no inference-vertex binding it resolves DEFAULT,
-        forwards to the ``sys:autonomic`` frontier holder, and — when that slot
-        is vacant — DEFERS into the shared durable no-loss queue. Duplicating
-        would therefore hand every routed completion to a future ``sys:autonomic``
-        claimant's first drain as well, re-driving work whose owner was already
-        told. Channel flows and role-less bridge flows are untouched.
-
-        ERRORS route exactly like results: an owner wants a failure at least as
-        much as a success, and the status travels in the envelope.
-        """
-        if not self._action_factory:
-            return False
+    def _route_registered_completion(self, job_id: str, status: str, result_payload: dict[str, object] | None, error_payload: dict[str, object] | None) -> bool:
+        """Consume an attached root or route the registered original action."""
         metadata = self._fetch_job_metadata(job_id)
-        route = resolve_route(self.state_service, self._namespace, metadata, status)
-        if route is None:
-            return False
-        role, flow_id = route
-        action_def = build_delivery_action(
-            role=role,
-            job_id=job_id,
-            provider_name=self._fetch_job_provider_name(job_id),
-            status=status,
-            payload=result_payload if status == "completed" else error_payload,
-            flow_id=flow_id,
-            session_id=_optional_str(metadata, "session_id"),
-        )
-        try:
-            self._action_factory.submit_action_definition(action_def)
-        except Exception:  # noqa: BLE001 — fall back to the continuation, never drop
-            logger.error(
-                "AsyncJobManager: failed to submit role delivery for job %s to "
-                "role %s; falling back to the completion continuation and "
-                "leaving the unreached stamp in place",
-                job_id,
-                role,
-                exc_info=True,
-            )
-            return False
-        logger.info(
-            "AsyncJobManager: job %s completion routed to role %s "
-            "(continuation replaced)",
-            job_id,
-            role,
-        )
-        return True
+        if bridge_wait_attached(metadata):
+            return True
+        action_id = _optional_str(metadata, "registered_action_id")
+        if action_id and self._registered_completion is not None and "completion_handlers" not in metadata:
+            self._registered_completion(action_id, status, result_payload, error_payload)
+            return True
+        return False
 
     def _handle_completion_actions(
         self,
@@ -825,6 +713,9 @@ class AsyncJobManager:
     ) -> None:
         """Submit configured completion or error actions when jobs finish."""
         if status not in {"completed", "error"}:
+            return
+
+        if self._route_registered_completion(job_id, status, result_payload, error_payload):
             return
 
         if not self._action_factory:
@@ -838,25 +729,18 @@ class AsyncJobManager:
         process_key = handler.get("process_key")
         assert isinstance(process_key, str)  # Validated in _get_completion_handler
 
-        arguments = self._build_completion_arguments(
-            handler, job_id, status, result_payload, error_payload
-        )
-        _, session_id, flow_id = self._populate_state_args(arguments, metadata, job_id)
+        arguments = build_completion_arguments(handler, job_id, status, result_payload, error_payload)
+        _, session_id, flow_id = populate_state_args(arguments, metadata, job_id)
 
         # Fail fast: flow_id is required for all actions
         if not flow_id:
-            raise ValueError(
-                f"Async job {job_id} completion handler missing flow_id in metadata - "
-                "all actions require flow context"
-            )
+            raise ValueError(f"Async job {job_id} completion handler missing flow_id in metadata - all actions require flow context")
 
-        action_def = self._build_action_definition(
-            handler, process_key, job_id, status, arguments, session_id, flow_id
-        )
+        action_def = build_completion_action(handler, process_key, job_id, status, arguments, session_id, flow_id)
 
         params = arguments.get("params", {})
         if isinstance(params, dict):
-            self._enrich_prompt_block(params, job_id, status, result_payload, error_payload)
+            enrich_prompt_block(params, job_id, status, result_payload, error_payload)
 
         self._submit_completion_action(action_def, handler_key, job_id, process_key)
 
@@ -874,6 +758,31 @@ class AsyncJobManager:
                 error_code="async_job_manager.frg_not_initialized",
                 details={"job_id": job_id},
             )
+
+        job = self._job_for_token_resolution(job_id)
+        flow_token_id = job.get("flow_token_id")
+        if not flow_token_id:
+            # Job not linked to a token - this is valid for jobs created
+            # outside action context (e.g., direct API calls)
+            return
+
+        token_id = str(flow_token_id)
+        if self._owner_jobs_exist(job, ["queued", "processing"]):
+            return
+        success = success and not self._owner_jobs_exist(job, ["error", "cancelled"])
+
+        # Resolve the token (triggers flow completion check)
+        result_summary = {"job_id": job_id, "success": success}
+        owner_key = registered_job_owner_key(job)
+        with self._completion_lock:
+            if self._routing_owners.get(owner_key, 0):
+                self._pending_token_resolutions[owner_key] = job_id
+                return
+            self._flow_runtime_graph.complete_token(token_id, success=success, result_summary=result_summary)
+
+    def _job_for_token_resolution(self, job_id: str) -> dict[str, object]:
+        """Read and validate the exact durable job before changing its token."""
+        from ananta.error_handling import FrameworkError
 
         # Get this job's flow_token_id
         job_result = self.state_service.read_state(
@@ -913,17 +822,7 @@ class AsyncJobManager:
                 details={"job_id": job_id, "record": job},
             )
 
-        flow_token_id = job.get("flow_token_id")
-        if not flow_token_id:
-            # Job not linked to a token - this is valid for jobs created
-            # outside action context (e.g., direct API calls)
-            return
-
-        # Resolve the token (triggers flow completion check)
-        result_summary = {"job_id": job_id, "success": success}
-        self._flow_runtime_graph.complete_token(
-            str(flow_token_id), success=success, result_summary=result_summary
-        )
+        return job
 
     def _extract_count(self, result: dict[str, object]) -> int | None:
         """Extract count from SQL query result, returns None on error."""

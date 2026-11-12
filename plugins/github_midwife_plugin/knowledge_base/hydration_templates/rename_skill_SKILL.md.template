@@ -186,8 +186,8 @@ report it.
    **This patch is the last lock-step action of a completed claim from steps
    1–3 above, never a standalone act.** Writing this label without a
    preceding successful claim does not work around a blocked claim — it
-   forges the lock-step invariant this step exists to preserve: a git-mutation
-   gate that reads this file checks for the label only, so a label written
+   forges the lock-step invariant this step exists to preserve: anything that
+   reads this file sees the label only, so a label written
    without its claim looks identical to one earned by a real claim while
    holding none of the protection (the platform-side singleton lock, the loud
    refusal on a second live claim) that makes holding the role mean anything.

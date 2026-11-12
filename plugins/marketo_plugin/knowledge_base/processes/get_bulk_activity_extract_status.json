@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::get_bulk_activity_extract_status",
+  "display_name": "Marketo: Get Bulk Activity Extract Status",
+  "description": "Marketo get bulk activity extract status through the registered credential and vendor RBAC. Dispatches a platform job; poll check_marketo_job_status for its vendor response. Preserve batchId/exportId for vendor status calls; platform completion does not mean the vendor bulk job is complete.",
+  "embedding_description": "Marketo get bulk activity extract status through the registered credential and vendor RBAC. Dispatches a platform job; poll check_marketo_job_status for its vendor response. Preserve batchId/exportId for vendor status calls; platform completion does not mean the vendor bulk job is complete.",
+  "result_processor_customizations": {
+    "action_label": "Marketo: Get Bulk Activity Extract Status job dispatched",
+    "result_type": "marketo_get_bulk_activity_extract_status_result",
+    "result_description": "Queued platform job_id and status; poll check_marketo_job_status for the vendor response. Vendor bulk completion is separate.",
+    "presentation_guidance": "Preserve vendor ids, status, warnings/errors and continuation hints. Bulk downloads include body_base64 and content_range; file metadata reads produce a workspace TSV."
+  },
+  "error_processor_customizations": {
+    "action_context": "Marketo get bulk activity extract status through the registered credential and vendor RBAC. Dispatches a platform job; poll check_marketo_job_status for its vendor response. Preserve batchId/exportId for vendor status calls; platform completion does not mean the vendor bulk job is complete.",
+    "error_interpretation": "marketo.invalid_params: correct the documented input. marketo.permission_denied/auth_failed: credential or vendor RBAC refused. marketo.validation_failed: vendor rejected the operation.",
+    "recovery_guidance": "Read back before retrying uncertain writes. Vendor RBAC controls access. No confirmation prompt, invented endpoint, local role restriction or automatic mutation retry."
+  }
+}

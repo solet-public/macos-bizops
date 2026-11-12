@@ -1,4 +1,4 @@
-"""Registry of the typed verbs: Workflows, SQL Data Query jobs and Files (build 2); Orders, Subscriptions and Accounts (build 3); Payment Methods, Payments, Custom Objects and Object Query (build 4); Billing Documents, Invoices, Credit and Debit Memos, Bill Runs and Usage (build 5).
+"""Registry of the typed verbs: Workflows, SQL Data Query jobs and Files (build 2); Orders, Subscriptions and Accounts (build 3); Payment Methods, Payments, Custom Objects and Object Query (build 4); Billing Documents, Invoices, Credit and Debit Memos, Bill Runs and Usage (build 5); Products, Product Rate Plans, Product Rate Plan Charges, Product Charge Definitions and Catalog Groups (build 6).
 
 One place maps each verb name to its worker callable (registered in
 ``async_jobs.ACTION_HANDLERS``), its dispatch-time validator and its retry
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Final
 
-from . import account_actions, bill_run_usage_actions, billing_document_actions, custom_object_actions, data_query_actions, order_actions, payment_actions, workflow_actions
+from . import account_actions, bill_run_usage_actions, billing_document_actions, catalog_actions, custom_object_actions, data_query_actions, order_actions, payment_actions, workflow_actions
 from .typed_operations import ActionFn, Operation, action, build_path, validate
 
 _SPEC_OPERATIONS: Final[dict[str, Operation]] = {
@@ -32,6 +32,7 @@ _SPEC_OPERATIONS: Final[dict[str, Operation]] = {
         *billing_document_actions.DEBIT_MEMO_OPERATIONS,
         *bill_run_usage_actions.BILL_RUN_OPERATIONS,
         *bill_run_usage_actions.USAGE_OPERATIONS,
+        *catalog_actions.OPERATIONS,
     )
 }
 _DOWNLOADS: Final[dict[str, tuple[Operation, ActionFn]]] = {

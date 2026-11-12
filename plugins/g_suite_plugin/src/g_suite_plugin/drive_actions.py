@@ -94,20 +94,13 @@ def _resolve_effective_limit(params: dict[str, Any], *, verb: str) -> int:
     override_present = override is True
     row_limit_present = row_limit is not None
     if override_present != row_limit_present:
-        raise ValueError(
-            f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be "
-            f"given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, "
-            f"{PARAM_ROW_LIMIT}={row_limit!r}"
-        )
+        raise ValueError(f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, {PARAM_ROW_LIMIT}={row_limit!r}")
     if not override_present:
         return DRIVE_DEFAULT_PAGE_SIZE
     if not isinstance(row_limit, int) or isinstance(row_limit, bool) or row_limit < 1:
         raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}' must be a positive integer")
     if row_limit > DRIVE_PAGE_SIZE_CAP:
-        raise ValueError(
-            f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of "
-            f"{DRIVE_PAGE_SIZE_CAP}; refusing rather than silently clamping"
-        )
+        raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of {DRIVE_PAGE_SIZE_CAP}; refusing rather than silently clamping")
     return row_limit
 
 
@@ -123,10 +116,7 @@ def download_file(drive: Any, params: dict[str, Any], blob_writer: BlobWriter) -
     name = _as_str(meta.get("name")) or file_id
     mime = _as_str(meta.get("mimeType")) or "application/octet-stream"
     if mime.startswith(_GOOGLE_NATIVE_PREFIX):
-        raise ValueError(
-            f"'{name}' is a Google-native doc ({mime}); use the matching export verb "
-            "(docs_export / sheets_export / slides_export), not drive_download_file."
-        )
+        raise ValueError(f"'{name}' is a Google-native doc ({mime}); use the matching export verb (docs_export / sheets_export / slides_export), not drive_download_file.")
     content = drive.files().get_media(fileId=file_id).execute()
     if not isinstance(content, (bytes, bytearray)):
         raise ValueError(f"Drive returned non-bytes content for '{name}'")
@@ -221,6 +211,17 @@ def resolve_export_mime(fmt: str, mime_by_format: dict[str, str]) -> str:
     if not mime:
         raise ValueError(f"unsupported export format '{fmt}'; choose one of {sorted(mime_by_format)}")
     return mime
+
+
+def export_target(params: dict[str, Any], default_format: str, mime_by_format: dict[str, str]) -> tuple[str, str, str]:
+    """Validate an export request without any I/O; return (file id, export mime, filename).
+
+    The export verbs call this at dispatch, so a missing id or an unsupported
+    format fails before a job exists, and again in the worker before exporting.
+    """
+    file_id = _require_str(params, "id")
+    fmt = _as_str(params.get("format")) or default_format
+    return file_id, resolve_export_mime(fmt, mime_by_format), f"{file_id}.{fmt}"
 
 
 def _file_row(item: dict[str, Any]) -> dict[str, Any]:

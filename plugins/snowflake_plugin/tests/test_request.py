@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import sys
 import unittest
 from pathlib import Path
@@ -139,12 +138,10 @@ class RequestOperations(RestFixture):
                 restored = base64.b64decode(result["body"]) if expected_encoding == "base64" else result["body"].encode("utf-8")
                 self.assertEqual(restored, raw)
 
-    def test_duplicate_json_text_still_redacts_the_issued_jwt(self) -> None:
-        token, redactor = rest_client.authentication(self.config)
-        raw = '{"message":"' + token + '","message":"second vendor diagnostic"}'
-        with patch.object(rest_client, "authentication", return_value=(token, redactor)):
-            result = self.call({"method": "GET", "path": "/api/v2/anything"}, lambda _: httpx.Response(200, content=raw.encode()))
-        self.assertEqual(result["body"], '{"message":"[REDACTED]","message":"second vendor diagnostic"}')
+    def test_duplicate_json_members_are_kept_as_text(self) -> None:
+        raw = '{"message":"first vendor diagnostic","message":"second vendor diagnostic"}'
+        result = self.call({"method": "GET", "path": "/api/v2/anything"}, lambda _: httpx.Response(200, content=raw.encode()))
+        self.assertEqual(result["body"], raw)
         self.assertEqual(result["body_encoding"], "text")
         self.assertIn("duplicate JSON members", result["advisory"])
 
@@ -170,7 +167,7 @@ class RequestOperations(RestFixture):
 
     def test_jwt_signature_subject_expiry_and_key_custody(self) -> None:
         with patch.object(rest_client.time, "time", return_value=1700000000):
-            token, _ = rest_client.authentication(self.config)
+            token = rest_client.authentication(self.config)
         header, claims, signature = token.split(".")
         parsed = json.loads(base64.urlsafe_b64decode(claims + "=="))
         self.assertEqual(parsed["sub"], "ORG-ACCOUNT.SERVICE_USER")
@@ -179,126 +176,21 @@ class RequestOperations(RestFixture):
         self.key.public_key().verify(base64.urlsafe_b64decode(signature + "=="), f"{header}.{claims}".encode(), padding.PKCS1v15(), hashes.SHA256())
 
 
-def encodings(secret: bytes) -> dict[str, bytes]:
-    """Independently enumerate the review-required encoding cases."""
-    pct = quote_from_bytes(secret, safe="")
-    forms = {"raw": secret, "percent_upper": pct.encode(), "percent_lower": pct.lower().encode()}
-    # Lowercase only escapes; literal token letters retain their case.
-    import re
+class RequestAsReceived(RestFixture):
+    def test_response_is_returned_as_received(self) -> None:
+        body = {"access_token": "vendor-issued-token+/=", "echo": "vendor text"}
+        result = self.call({"method": "GET", "path": "/api/v2/x"}, lambda _: httpx.Response(200, json=body, headers={"X-Echo": "vendor-issued-token+/="}))
+        self.assertEqual(result["body"], body)
+        self.assertEqual(result["headers"]["x-echo"], "vendor-issued-token+/=")
 
-    forms["percent_lower"] = re.sub(rb"%[0-9A-F]{2}", lambda m: m[0].lower(), pct.encode())
-    if secret.isascii():
-        forms["form_plus"] = quote_plus(secret.decode("ascii"), safe="").encode()
-    for name, encoder in (("base64", base64.b64encode), ("base64url", base64.urlsafe_b64encode)):
-        encoded = encoder(secret)
-        forms[name] = encoded
-        forms[name + "_unpadded"] = encoded.rstrip(b"=")
-        forms[name + "_escaped"] = quote_from_bytes(encoded, safe="").encode()
-        forms[name + "_unpadded_escaped"] = quote_from_bytes(encoded.rstrip(b"="), safe="").encode()
-    return forms
-
-
-class RequestRedaction(RestFixture):
-    def test_reviewer_duplicate_member_issued_token_is_redacted_before_text_conversion(self) -> None:
-        token = "synthetic-vendor-issued-token+/="
-        raw = b'{"access_token":"synthetic-vendor-issued-token+/=","message":"first","message":"second"}'
+    def test_audit_line_is_built_without_query_values_headers_or_body(self) -> None:
+        secret = "caller-secret+/="
         with self.assertLogs(rest_client.logger, level="INFO") as logs:
-            result = self.call({"method": "POST", "path": "/api/v2/" + token}, lambda _: httpx.Response(200, content=raw, headers={"X-Echo": token}))
-        self.assertNotIn(token, " ".join(logs.output))
-        self.assertEqual(result["body"], '{"access_token":"[REDACTED]","message":"first","message":"second"}')
-        self.assertEqual(result["body_encoding"], "text")
-        self.assertIn("duplicate JSON members", result["advisory"])
-        for form in encodings(token.encode()).values():
-            self.assertNotIn(form, json.dumps(result).encode())
-
-    def test_issued_token_discovery_precedes_every_fallback_body_representation(self) -> None:
-        token = "synthetic-vendor-issued-token+/="
-        forms = encodings(token.encode())
-        text = '{"outer":[{"access_token":' + json.dumps(token) + ',"message":"first","message":"second"}],"echo":' + json.dumps([value.decode() for value in forms.values()]) + "}"
-        expected = text
-        # Independent expectation: every echoed form and the issuing value is gone.
-        for form in sorted(forms.values(), key=len, reverse=True):
-            expected = expected.replace(form.decode(), "[REDACTED]")
-        cases = [
-            (text.encode(), expected.encode()),
-            ((text + " trailing non-JSON suffix").encode(), (expected + " trailing non-JSON suffix").encode()),
-            (("data: " + text + "\n\ndata: done\n").encode(), ("data: " + expected + "\n\ndata: done\n").encode()),
-            (b"\xef\xbb\xbf" + text.encode(), b"\xef\xbb\xbf" + expected.encode()),
-            (text.encode() + b"\x80 trailing non-UTF8 suffix", expected.encode() + b"\x80 trailing non-UTF8 suffix"),
-            (b"caf\xe9 " + text.encode(), b"caf\xe9 " + expected.encode()),
-        ]
-        for encoding in ("utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"):
-            cases.append((text.encode(encoding), expected.encode(encoding)))
-            cases.append((text.encode(encoding) + b"\xff", expected.encode(encoding) + b"\xff"))
-        escaped = text.replace(token, token.replace("/", r"\/")).replace("synthetic", r"synthetic")
-        for encoding in ("utf-8", "utf-16", "utf-32"):
-            cases.append((escaped.encode(encoding) + b"\xff", expected.encode(encoding) + b"\xff"))
-        for raw, expected_raw in cases:
-            with self.subTest(raw_prefix=raw[:20], length=len(raw)):
-                result = self.call({"method": "GET", "path": "/api/v2/anything"}, lambda _, raw=raw: httpx.Response(200, content=raw, headers={"X-Echo": token}))
-                restored = base64.b64decode(result["body"]) if result["body_encoding"] == "base64" else result["body"].encode()
-                self.assertEqual(restored, expected_raw)
-                self.assertEqual(result["headers"]["x-echo"], "[REDACTED]")
-                for form in forms.values():
-                    self.assertNotIn(form, json.dumps(result).encode())
-
-    def test_every_duplicate_token_member_is_discovered_in_nested_objects(self) -> None:
-        first, second = "first-issued-secret+/=", "second-issued-secret+/="
-        text = '{"nested":[{"access_token":' + json.dumps(first) + ',"access_token":' + json.dumps(second) + '}],"echo":' + json.dumps([quote_plus(first, safe=""), base64.b64encode(second.encode()).decode()]) + "}"
-        result = self.call({"method": "GET", "path": "/api/v2/anything"}, lambda _: httpx.Response(200, content=text.encode()))
-        self.assertEqual(result["body"], '{"nested":[{"access_token":"[REDACTED]","access_token":"[REDACTED]"}],"echo":["[REDACTED]", "[REDACTED]"]}')
-
-    def test_each_encoding_for_private_key_and_issued_jwt(self) -> None:
-        token, redactor = rest_client.authentication(self.config)
-        for kind, secret in (("DER", self.config.private_key_der), ("PEM", self.pem), ("JWT", token.encode())):
-            for form, value in encodings(secret).items():
-                with self.subTest(secret=kind, form=form):
-                    self.assertEqual(redactor.binary(value), b"[REDACTED]")
-                    if value.isascii():
-                        text = value.decode("ascii")
-                        self.assertEqual(redactor.value({"nested": [text], text: text}), {"nested": ["[REDACTED]"], "[REDACTED]": "[REDACTED]"})
-
-    def test_audit_headers_query_json_text_and_binary_never_leak(self) -> None:
-        token, _ = rest_client.authentication(self.config)
-        # Freeze token generation, so the fake vendor can echo this call's JWT.
-        for kind, secret in (("PEM", self.pem), ("DER", self.config.private_key_der), ("JWT", token.encode())):
-            for form, value in encodings(secret).items():
-                for response_type in ("json", "text", "binary"):
-                    with self.subTest(secret=kind, form=form, response=response_type):
-                        safe_path = quote_from_bytes(value, safe="")
-
-                        def vendor(_: httpx.Request, response_type: str = response_type, value: bytes = value, safe_path: str = safe_path) -> httpx.Response:
-                            if response_type == "json":
-                                # DER raw is tested as binary, not lossy Unicode text.
-                                body = {"echo": value.decode("ascii")} if value.isascii() else {"echo": "binary tested separately"}
-                                return httpx.Response(200, json=body, headers={"Link": safe_path})
-                            raw = value if response_type == "text" else b"\xff" + value
-                            return httpx.Response(200, content=raw, headers={"Link": safe_path})
-
-                        _, redactor = rest_client.authentication(self.config)
-                        redactor.add(token.encode())
-                        with patch.object(rest_client, "authentication", return_value=(token, redactor)):
-                            # The issued token must be registered even when time advanced.
-                            with self.assertLogs(rest_client.logger, level="INFO") as logs:
-                                result = self.call({"method": "POST", "path": "/api/v2/" + safe_path, "query": {"secret": safe_path}}, vendor)
-                        self.assertNotIn(safe_path, "".join(logs.output))
-                        self.assertNotIn(safe_path, json.dumps(result))
-                        raw_body = base64.b64decode(result["body"]) if result["body_encoding"] == "base64" else json.dumps(result["body"]).encode()
-                        if value.isascii() or result["body_encoding"] == "base64":
-                            self.assertNotIn(value, raw_body)
-
-    def test_new_response_token_and_transport_diagnostics_are_redacted(self) -> None:
-        issued = "new vendor issued+/token="
-
-        def vendor(request: httpx.Request) -> httpx.Response:
-            logging.getLogger("httpcore.http11").debug("unsafe response %s", issued)
-            return httpx.Response(200, json={"access_token": issued, "echo": quote_plus(issued)}, headers={"Authorization": "Bearer " + issued, "X-Echo": base64.b64encode(issued.encode()).decode()})
-
-        with self.assertLogs("httpcore.http11", level="DEBUG") as logs:
-            result = self.call({"method": "GET", "path": "/api/v2/x"}, vendor)
-        self.assertNotIn(issued, "".join(logs.output))
-        self.assertEqual(result["body"], {"access_token": "[REDACTED]", "echo": "[REDACTED]"})
-        self.assertEqual(result["headers"]["x-echo"], "[REDACTED]")
+            self.call({"method": "POST", "path": "/api/v2/x", "query": {"secret": secret}, "headers": {"X-Api-Key": secret}, "body": {"password": secret}}, lambda _: httpx.Response(200, json={"echo": secret}, headers={"X-Echo": secret}))
+        logged = "".join(logs.output)
+        self.assertIn("/api/v2/x", logged)
+        for value in (secret, quote_plus(secret, safe=""), quote_from_bytes(secret.encode(), safe="")):
+            self.assertNotIn(value, logged)
 
 
 class RequestDispatch(RestFixture):

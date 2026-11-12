@@ -68,8 +68,12 @@ entitlements; Google supplies the reason for those denials.
 Google 400/401/403/404/429 errors retain their reason and message through the
 shared taxonomy. `gsuite.auth_expired` instructs reconnection; refresh-token
 `invalid_grant` explains the seven-day expiry for External OAuth apps in Testing
-mode. Secret redaction covers raw, URL-encoded and base64 variants in errors
-and successful responses. No extra confirmation or read-only mode is added.
+mode. No extra confirmation or read-only mode is added.
+
+Results are not scanned. The connector returns the vendor result as received;
+bulk results go to disk through `output_path`. Audit and log lines are built
+only from method, path without query values, status, duration and correlation
+id, so they never carry headers, bodies or credential values.
 
 ## Calling conventions and paging
 
@@ -136,7 +140,8 @@ retries a stale write automatically. GETs are marked retryable, writes are not.
   no general historical-revision API; no local history is represented as one.
 
 Drive Labels and Drive Activity are distinct APIs and remain subsequent parent
-Feature work. Docs/Sheets/Slides, setup flows and Admin SDK are separate builds.
+Feature work. Docs, Sheets and Slides are covered in `editors_api_coverage.md`;
+Forms, setup flows and Admin SDK are separate builds.
 
 ## Method inventory
 

@@ -16,29 +16,35 @@ Run: SOLET_NAME=<name> .venv/bin/python plugins/zuora_plugin/tests/smoke_billing
 
 from __future__ import annotations
 
-import base64
-import json
 import sys
-import tempfile
-import unittest
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch
-from urllib.parse import parse_qs, quote
+from unittest.mock import NonCallableMagicMock
 
-import httpx
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta/src"))
+import base64  # noqa: E402
+import json  # noqa: E402
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
+from collections.abc import Callable  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock, patch  # noqa: E402
+from urllib.parse import parse_qs, quote  # noqa: E402
+
+import httpx  # noqa: E402
+from ananta.file_locations.containment import PathRefusedError  # noqa: E402
+from ananta.file_locations.resolution import SoletTree  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "zuora_plugin" / "src"))
 
 from ananta.core.plugins.action_discovery import discover_actions  # noqa: E402
 from ananta.core.process_registry.plugin_registration_validator import PluginRegistrationValidator  # noqa: E402
+from finish_support import finished  # noqa: E402  # pyright: ignore[reportMissingImports]
 from zuora_plugin import async_jobs, bill_run_usage_actions, billing_actions, billing_document_actions, typed_verbs  # noqa: E402
 from zuora_plugin.app_config import ZuoraTenantConfig  # noqa: E402
-from zuora_plugin.constants import REQUEST_REDACTION  # noqa: E402
 from zuora_plugin.errors import ZuoraServiceError  # noqa: E402
-from zuora_plugin.export_containment import ExportPathRefusedError  # noqa: E402
 from zuora_plugin.http_client import ZuoraClient  # noqa: E402
 from zuora_plugin.plugin import ZuoraPlugin  # noqa: E402
 from zuora_plugin.typed_operations import Operation, PathGate, execute  # noqa: E402
@@ -66,6 +72,23 @@ _USAGE_ID = "8a90e5e48c1f4e2b018c2a7d1e3fus01"
 _PDF = b"%PDF-1.7\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n"
 
 Handler = Callable[[httpx.Request], httpx.Response]
+
+
+_LOCATION_ROOT = Path(__file__).resolve().parents[3]
+_LOCATION_TREE = SoletTree(_LOCATION_ROOT, _LOCATION_ROOT / "profile")
+
+
+def _bind_locations(plugin: Any, directories: list[str]) -> NonCallableMagicMock:
+    """Supply a live address-book service through the production binding."""
+    orchestrator = NonCallableMagicMock()
+    orchestrator.APP_HOME = str(_LOCATION_TREE.app_home)
+    orchestrator.plugin_manager.get_plugin.return_value = None
+    orchestrator.get_service.return_value.list_path_addresses.return_value = {
+        "action_status": "completed",
+        "data": {"addresses": [{"name": f"project-{index}", "tags": [], "updated_at": datetime.now(UTC).isoformat(), "entries": [{"field_type": "path", "value": directory}]} for index, directory in enumerate(directories)]},
+    }
+    plugin.orchestrator_ref = orchestrator
+    return orchestrator
 
 
 def vendor_json(status: int, body: Any) -> httpx.Response:
@@ -110,7 +133,8 @@ class TenantCase(unittest.TestCase):
         self.addCleanup(self.workspace.cleanup)
         self.root = Path(self.workspace.name)
         self.plugin = ZuoraPlugin()
-        self.plugin.initialize({"export_allowed_roots": [str(self.root)]})
+        self.plugin.initialize({})
+        _bind_locations(self.plugin, [str(self.root)])
         self.token_mints = 0
         self.requests: list[httpx.Request] = []
 
@@ -138,6 +162,10 @@ class TenantCase(unittest.TestCase):
 
     def run_op(self, name: str, client: ZuoraClient, params: dict[str, Any]) -> dict[str, Any]:
         return execute(_OPS[name], client, params, self.gate)
+
+    def finish_op(self, name: str, client: ZuoraClient, params: dict[str, Any]) -> dict[str, Any]:
+        """The published envelope: the operation, then the plugin's one finish step."""
+        return finished(client, lambda c: self.run_op(name, c, params), params, name=name)
 
     def refuse(self, name: str, params: dict[str, Any]) -> None:
         """Dispatch and worker both refuse the input; no OAuth mint and no vendor request happen."""
@@ -168,7 +196,7 @@ class RegistrationTests(unittest.TestCase):
         PluginRegistrationValidator().validate_edge_process_provider("zuora_plugin", plugin, list(actions.values()))
         edges = plugin.get_edge_process_definitions()
         self.assertEqual((len(_DOCUMENT_OPS), len(_RUN_USAGE_OPS)), (80, 14))
-        self.assertEqual(len(actions), 227)
+        self.assertEqual(len(actions), 255)
         for name in sorted(_OPS):
             with self.subTest(verb=name):
                 self.assertIn(name, actions)
@@ -469,31 +497,6 @@ class CreditMemoTests(TenantCase):
         self.refuse("list_credit_memos", {"amount": "50"})
         self.refuse("list_credit_memos", {"auto_apply_upon_posting": "false"})
 
-    def test_refund_redacts_payment_values_and_credentials_in_every_form(self) -> None:
-        card, token = "4111111111111111", "gw-tok-9a8b7c6d"
-        forms = every_encoding(card, token, _CLIENT_ID, _SECRET, _TOKEN)
-        body = {"totalAmount": 10.0, "type": "Electronic", "paymentMethodId": "8a90pm1", "gatewayOptions": [{"key": "Note", "value": "x"}], "creditCard": {"cardNumber": card, "tokenId": token}}
-        calls = iter(("ok", "refused"))
-
-        def vendor(req: httpx.Request) -> httpx.Response:
-            self.assertEqual((req.method, req.url.path), ("POST", f"/v1/credit-memos/{_CM_ID}/refund"))
-            if next(calls) == "ok":
-                return vendor_json(200, {"success": True, "id": "8a90refund1", "number": "R-00000011", "amount": 10.0, "status": "Processed", "creditMemoId": _CM_ID, "gatewayResponse": " ".join(forms)})
-            return vendor_json(400, refusal(53000020, f"Gateway declined {forms[0]} token {forms[4]} for client {forms[8]} secret {forms[13]} bearer {forms[18]}"))
-
-        client = self.client(vendor)
-        with self.assertLogs("zuora_plugin", level="INFO") as audit:
-            refunded = self.run_op("refund_credit_memo", client, {"credit_memo_key": _CM_ID, "body": body, "idempotency_key": "refund-1"})
-            with self.assertRaises(ZuoraServiceError) as rejected:
-                self.run_op("refund_credit_memo", client, {"credit_memo_key": _CM_ID, "body": body})
-        rendered = json.dumps(refunded) + str(rejected.exception) + " ".join(audit.output)
-        for form in forms:
-            self.assertNotIn(form, rendered)
-        self.assertIn(REQUEST_REDACTION, refunded["data"]["gatewayResponse"])
-        self.assertEqual(refunded["data"]["number"], "R-00000011")
-        self.assertEqual(rejected.exception.code, "zuora.validation_failed")
-        self.refuse("refund_credit_memo", {"credit_memo_key": _CM_ID, "body": {"type": "External"}})
-
     def test_reverse_write_off_cancel_delete_and_parts(self) -> None:
         def vendor(req: httpx.Request) -> httpx.Response:
             path = req.url.path
@@ -544,11 +547,11 @@ class DebitMemoTests(TenantCase):
 
         client = self.client(vendor)
         key = {"debit_memo_key": "DM00000101"}
-        created = self.run_op("create_debit_memo", client, {"body": {"accountNumber": "A00000101", "charges": [{"productRatePlanChargeId": "8a90prpc1", "amount": 50.0}], "reasonCode": "Charge Dispute"}, "idempotency_key": "late-fee-1"})
+        created = self.finish_op("create_debit_memo", client, {"body": {"accountNumber": "A00000101", "charges": [{"productRatePlanChargeId": "8a90prpc1", "amount": 50.0}], "reasonCode": "Charge Dispute"}, "idempotency_key": "late-fee-1"})["data"]
         self.assertEqual(created["data"]["status"], "Draft")
         self.run_op("post_debit_memo", client, key)
-        collected = self.run_op("collect_debit_memo", client, {**key, "body": {"applyCredit": True, "applicationOrder": ["CreditMemo"], "collect": True, "payment": {"creditCard": {"cardNumber": card}}}})
-        self.assertNotIn(card, json.dumps(collected))
+        collected = self.finish_op("collect_debit_memo", client, {**key, "body": {"applyCredit": True, "applicationOrder": ["CreditMemo"], "collect": True, "payment": {"creditCard": {"cardNumber": card}}}})["data"]
+        self.assertEqual(collected["data"]["processedPayment"]["gatewayResponse"], f"card {card}")
         self.assertEqual(collected["data"]["processedPayment"]["amount"], 30.0)
         self.run_op("write_off_debit_memo", client, {**key, "body": {"amount": 20.0, "memoDate": "2026-11-07"}})
         self.run_op("update_debit_memo_due_dates", client, {"body": {"debitMemos": [{"id": _DM_ID, "dueDate": "2027-01-07"}]}})
@@ -622,7 +625,7 @@ class UploadTests(TenantCase):
         (self.root / "empty.pdf").write_bytes(b"")
         client = self.client(lambda _: self.fail("no vendor request expected"))
         for path in (outside.name, str(self.root / "invoice.docx"), str(self.root / "empty.pdf"), str(self.root / "missing.pdf")):
-            with self.subTest(path=path), self.assertRaises((ValueError, ExportPathRefusedError)):
+            with self.subTest(path=path), self.assertRaises((ValueError, PathRefusedError)):
                 self.run_op("upload_invoice_file", client, {"invoice_key": "INV00000201", "input_path": path})
         self.refuse("upload_invoice_file", {"invoice_key": "INV00000201", "input_path": str(self.root / "invoice.docx")})
         self.refuse("import_usage", {"input_path": str(self.root / "usage.json")})
@@ -773,25 +776,6 @@ class LegacyHeaderTests(TenantCase):
 
 
 class CredentialAndDispatchTests(TenantCase):
-    def test_registered_credentials_redacted_raw_percent_and_base64(self) -> None:
-        echoed = every_encoding(_CLIENT_ID, _SECRET, _TOKEN)
-        for name, params in (
-            ("get_credit_memo", {"credit_memo_key": "CM00000101"}),
-            ("list_billing_documents", {"page_size": 5}),
-            ("get_bill_run", {"bill_run_id": _BILL_RUN_ID}),
-            ("get_usage", {"usage_id": _USAGE_ID}),
-        ):
-            with self.subTest(verb=name):
-                ok = self.client(lambda _: vendor_json(200, {"success": True, "comment": " ".join(echoed), "documents": [{"documentNumber": " ".join(echoed)}]}))
-                bad = self.client(lambda _: vendor_json(400, refusal(50000000, " ".join(echoed))))
-                with self.assertLogs("zuora_plugin", level="INFO") as audit:
-                    success = self.run_op(name, ok, params)
-                    with self.assertRaises(ZuoraServiceError) as raised:
-                        self.run_op(name, bad, params)
-                rendered = json.dumps(success) + str(raised.exception) + " ".join(audit.output)
-                for value in echoed:
-                    self.assertNotIn(value, rendered)
-
     def test_expired_token_reminted_once_then_reported(self) -> None:
         statuses = iter((401, 200))
         recovering = self.client(lambda _: vendor_json(next(statuses), {"success": True, "creditmemos": []}))

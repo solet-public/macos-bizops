@@ -20,6 +20,7 @@ from typing import Any
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build, build_from_document
 
+from .. import calendar_discovery
 from ..constants import ACCOUNT_TIER_CONSUMER, ACCOUNT_TIER_UNKNOWN, ACCOUNT_TIER_WORKSPACE_USER, CONSUMER_GMAIL_DOMAINS
 from ..workspace_registry import discovery_document
 from .token_store import TokenStore
@@ -53,6 +54,10 @@ class GoogleServiceFactory:
 
     def gmail(self) -> Any:
         return self._build("gmail", "v1")
+
+    def calendar(self) -> Any:
+        """Calendar client, with the shipped discovery overlay and this account's token."""
+        return calendar_discovery.build_service(self._tokens.get_access_token())
 
     def drive(self) -> Any:
         return self._build("drive", "v3")

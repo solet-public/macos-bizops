@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+import os
+from pathlib import Path
+from typing import Any, cast
 
 from ananta.core.domain.types import ActionResult
+from ananta.file_locations.containment import assert_location_admissible
+from ananta.file_locations.resolution import SoletTree
+from ananta.interfaces.address_book_service_interface import AddressCredentialReference, AddressMetadata, AddressMetadataResult, PublicAddressField
+from ananta.interfaces.credential_contracts import VaultReference
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
 from ananta.services.state_service.bounded_read import assert_within_ceiling
 
 from .address_queries import (
     count_tags_in_rows,
+    extract_rows_from_result,
     fetch_address_rows,
     filter_rows,
     get_by_name,
@@ -32,13 +39,60 @@ from .result_helpers import error, now, success
 # the bug to chase rather than a number to raise.
 # MEASURED 2026-08-15: default_address_book_plugin.address holds 26 rows.
 _ADDRESS_TABLE_CEILING = 50_000
-_ADDRESS_TABLE_CEILING_REASON = (
-    "the address table is a human-curated contact list written one entry at a "
-    "time by explicit registration, so it is bounded by curation and not by "
-    "traffic (measured: 26 rows)."
-)
+_ADDRESS_TABLE_CEILING_REASON = "the address table is a human-curated contact list written one entry at a time by explicit registration, so it is bounded by curation and not by traffic (measured: 26 rows)."
+
+
+def guard_path_address(
+    address_type: str,
+    entries: list[dict[str, Any]],
+    tree: SoletTree | None,
+) -> ActionResult | None:
+    """Refuse only tree overlap; other unusable values remain resolver advisories.
+
+    Pass condition: choose a path outside repo_root and app_home. Runtime
+    register/update/entry mutations invoke this on every call; seed boot skips
+    the same refusal. No guard applies to any other address type.
+    """
+    if address_type != "path":
+        return None
+    if tree is None:
+        logging.getLogger(__name__).warning("Path address tree context unavailable; overlap could not be measured")
+        return None
+    for entry in entries:
+        if entry.get("field_type") != "path":
+            continue
+        value = entry.get("value")
+        if not isinstance(value, str):
+            continue
+        directory = Path(os.path.expandvars(os.path.expanduser(value)))
+        if not directory.is_absolute():
+            continue
+        try:
+            assert_location_admissible(directory, tree)
+        except ValueError as exc:
+            return error(ErrorCode.PATH_OVERLAPS_TREE, str(exc))
+    return None
+
+
+def _normalise_location_entries(address_type: str, entries: list[dict[str, str]]) -> list[dict[str, str]]:
+    if address_type != "path":
+        return entries
+    return [{**entry, "value": os.path.expandvars(os.path.expanduser(entry["value"]))} if entry.get("field_type") == "path" else entry for entry in entries]
+
+
+def normalise_location_tags(address_type: str, tags: list[str]) -> list[str]:
+    """Canonicalise the resolver's project and file-kind tag values."""
+    if address_type != "path":
+        return tags
+    normalised: list[str] = []
+    for tag in tags:
+        prefix, separator, value = tag.strip().partition(":")
+        normalised.append(f"{prefix.lower()}:{value.strip().lower()}" if separator and prefix.lower() in ("project", "file_kind") else tag)
+    return normalised
+
 
 # ── Registration ─────────────────────────────────────────────────────────────
+
 
 def validate_entries(
     entries: list[dict[str, str]],
@@ -141,8 +195,14 @@ def finalize_registration(
     logger: logging.Logger,
 ) -> str | None:
     memory_id = ingest_to_memory(
-        memory_service, auto_ingest_enabled,
-        name, address_type, description, entries, tags, logger,
+        memory_service,
+        auto_ingest_enabled,
+        name,
+        address_type,
+        description,
+        entries,
+        tags,
+        logger,
     )
     if memory_id:
         state_service.update_state(
@@ -164,30 +224,61 @@ def register_impl(
     description: str,
     entries: list[dict[str, str]],
     tags: list[str],
+    *,
+    tree: SoletTree | None = None,
 ) -> ActionResult:
+    guard_error = guard_path_address(address_type, entries, tree)
+    if guard_error:
+        return guard_error
+    tags = normalise_location_tags(address_type, tags)
     entry_error = validate_entries(entries)
     if entry_error:
         return entry_error
+    entries = _normalise_location_entries(address_type, entries)
 
     timestamp = now()
     existing = get_by_name(state_service, namespace, name)
     if existing:
         return replace_existing_address(
-            state_service, namespace, memory_service, auto_ingest_enabled, logger,
-            existing, name, address_type, description, entries, tags, timestamp,
+            state_service,
+            namespace,
+            memory_service,
+            auto_ingest_enabled,
+            logger,
+            existing,
+            name,
+            address_type,
+            description,
+            entries,
+            tags,
+            timestamp,
         )
 
     address_id, insert_error = insert_address_record(
-        state_service, namespace, name, address_type, description, tags, timestamp,
+        state_service,
+        namespace,
+        name,
+        address_type,
+        description,
+        tags,
+        timestamp,
     )
     if insert_error:
         return insert_error
 
     insert_entry_records(state_service, namespace, address_id, entries, timestamp)
     memory_id = finalize_registration(
-        state_service, namespace, address_id,
-        name, address_type, description, entries, tags,
-        memory_service, auto_ingest_enabled, logger,
+        state_service,
+        namespace,
+        address_id,
+        name,
+        address_type,
+        description,
+        entries,
+        tags,
+        memory_service,
+        auto_ingest_enabled,
+        logger,
     )
 
     logger.debug(f"Address registered: {name}")
@@ -228,8 +319,14 @@ def replace_existing_address(
     insert_entry_records(state_service, namespace, address_id, entries, timestamp)
 
     memory_id = ingest_to_memory(
-        memory_service, auto_ingest_enabled,
-        name, address_type, description, entries, tags, logger,
+        memory_service,
+        auto_ingest_enabled,
+        name,
+        address_type,
+        description,
+        entries,
+        tags,
+        logger,
     )
     state_service.update_state(
         namespace=namespace,
@@ -248,6 +345,7 @@ def replace_existing_address(
 
 
 # ── Resolve ───────────────────────────────────────────────────────────────────
+
 
 def resolve_impl(
     state_service: StateServiceProtocol,
@@ -272,6 +370,53 @@ def resolve_impl(
 
 # ── Vault resolution ──────────────────────────────────────────────────────────
 
+
+def _metadata_entry(entry: object) -> PublicAddressField | AddressCredentialReference | str:
+    """The public-field schema excludes arbitrary credential-capable literals."""
+    if not isinstance(entry, dict):
+        raise ValueError("invalid address entry")
+    record = cast(dict[str, object], entry)
+    value = record.get("value")
+    if not isinstance(value, str):
+        raise ValueError("invalid address value")
+    field_type, description = record.get("field_type"), record.get("description")
+    field_type = field_type if isinstance(field_type, str) else ""
+    description = description if isinstance(description, str) else ""
+    if value.startswith("vault::"):
+        return AddressCredentialReference(field_type, description, VaultReference(value[7:]))
+    if field_type in {"url", "port", "host", "path", "protocol", "username", "base_url", "model", "timeout_seconds"}:
+        return PublicAddressField(field_type, description, value)
+    return field_type
+
+
+def project_address_metadata(name: str, result: ActionResult) -> AddressMetadataResult:
+    """Project ordinary resolution; this operation never receives a vault handle."""
+    if result.get("action_status") != "completed":
+        detail = result.get("error")
+        if detail and detail.get("code") == ErrorCode.NOT_FOUND:
+            return AddressMetadataResult("not_found")
+        return AddressMetadataResult("provider_error")
+    data = result.get("data")
+    entries = data.get("entries") if data is not None else None
+    if not isinstance(entries, list):
+        return AddressMetadataResult("provider_error")
+    fields: list[PublicAddressField] = []
+    references: list[AddressCredentialReference] = []
+    unprojected: list[str] = []
+    try:
+        for entry in cast(list[object], entries):
+            projected = _metadata_entry(entry)
+            if isinstance(projected, AddressCredentialReference):
+                references.append(projected)
+            elif isinstance(projected, PublicAddressField):
+                fields.append(projected)
+            else:
+                unprojected.append(projected)
+    except ValueError:
+        return AddressMetadataResult("provider_error")
+    return AddressMetadataResult("completed", AddressMetadata(name, tuple(fields), tuple(references), tuple(unprojected)))
+
+
 def apply_vault_result(
     entry: dict[str, Any],
     vault_key: str,
@@ -289,8 +434,7 @@ def apply_vault_result(
     if isinstance(vault_error, dict):
         return error(
             str(vault_error.get("code", "vault.error")),
-            f"Failed to resolve vault reference '{vault_key}': "
-            f"{vault_error.get('message', 'unknown error')}",
+            f"Failed to resolve vault reference '{vault_key}': {vault_error.get('message', 'unknown error')}",
         )
     return None
 
@@ -352,6 +496,7 @@ def resolve_with_secrets_impl(
 
 # ── Entry CRUD ────────────────────────────────────────────────────────────────
 
+
 def add_entry_impl(
     state_service: StateServiceProtocol,
     namespace: str,
@@ -360,11 +505,18 @@ def add_entry_impl(
     field_type: str,
     description: str,
     value: str,
+    *,
+    tree: SoletTree | None = None,
 ) -> ActionResult:
     address = get_by_name(state_service, namespace, name)
     if not address:
         return error(ErrorCode.NOT_FOUND, f"Address '{name}' not found")
 
+    guard_error = guard_path_address(address["address_type"], [{"field_type": field_type, "value": value}], tree)
+    if guard_error:
+        return guard_error
+    if address["address_type"] == "path" and field_type == "path":
+        value = os.path.expandvars(os.path.expanduser(value))
     entries = get_entries_for_address(state_service, namespace, address["id"])
     max_order = max((e.get("sort_order", 0) for e in entries), default=-1)
 
@@ -397,6 +549,21 @@ def add_entry_impl(
     return success({"entry_id": entry_id})
 
 
+def _guard_entry_update(state_service: StateServiceProtocol, namespace: str, entry: dict[str, Any], updates: dict[str, Any], tree: SoletTree | None) -> ActionResult | None:
+    parent_result = state_service.read_state(namespace=namespace, query={"table": "address", "filters": {"id": entry["default_address_book_plugin__address_id"]}})
+    parents = extract_rows_from_result(parent_result)
+    if not parents:
+        return None
+    effective = {**entry, **updates}
+    guard_error = guard_path_address(parents[0]["address_type"], [effective], tree)
+    if guard_error:
+        return guard_error
+    normalised = _normalise_location_entries(parents[0]["address_type"], [effective])
+    if "value" in updates:
+        updates["value"] = normalised[0]["value"]
+    return None
+
+
 def update_entry_impl(
     state_service: StateServiceProtocol,
     namespace: str,
@@ -404,6 +571,8 @@ def update_entry_impl(
     field_type: str | None,
     description: str | None,
     value: str | None,
+    *,
+    tree: SoletTree | None = None,
 ) -> ActionResult:
     entry = get_entry_by_id(state_service, namespace, str(entry_id))
     if not entry:
@@ -417,14 +586,25 @@ def update_entry_impl(
     if value is not None:
         updates["value"] = value
 
-    state_service.update_state(
+    guard_error = _guard_entry_update(state_service, namespace, entry, updates, tree)
+    if guard_error:
+        return guard_error
+    entry_result = state_service.update_state(
         namespace=namespace,
         query={"table": "address_entry", "filters": {"id": entry_id}},
         updates=updates,
     )
-
-    updated = get_entry_by_id(state_service, namespace, str(entry_id))
-    return success(updated or {})
+    if entry_result.get("action_status") != "completed":
+        return entry_result
+    parent_result = state_service.update_state(
+        namespace=namespace,
+        query={"table": "address", "filters": {"id": entry["default_address_book_plugin__address_id"]}},
+        updates={"updated_at": updates["updated_at"]},
+    )
+    updated = get_entry_by_id(state_service, namespace, str(entry_id)) or {}
+    if parent_result.get("action_status") != "completed":
+        updated["advisories"] = [f"Entry saved, but the address update time could not be refreshed: {parent_result.get('error')}"]
+    return success(updated)
 
 
 def delete_entry_impl(
@@ -454,18 +634,22 @@ def update_impl(
     address_type: str | None,
     description: str | None,
     tags: list[str] | None,
+    *,
+    tree: SoletTree | None = None,
 ) -> ActionResult:
     address = get_by_name(state_service, namespace, name)
     if not address:
         return error(ErrorCode.NOT_FOUND, f"Address '{name}' not found")
 
+    del tree  # Metadata update writes no path entry value.
+    effective_type = address_type if address_type is not None else address["address_type"]
     updates: dict[str, Any] = {"updated_at": now()}
     if address_type is not None:
         updates["address_type"] = address_type
     if description is not None:
         updates["description"] = description
     if tags is not None:
-        updates["tags"] = tags
+        updates["tags"] = normalise_location_tags(effective_type, tags)
 
     state_service.update_state(
         namespace=namespace,
@@ -515,6 +699,7 @@ def delete_impl(
 
 
 # ── Search / list ─────────────────────────────────────────────────────────────
+
 
 def search_impl(
     state_service: StateServiceProtocol,

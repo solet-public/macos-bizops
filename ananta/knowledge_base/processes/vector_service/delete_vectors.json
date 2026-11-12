@@ -1,18 +1,18 @@
 {
   "process_key": "service_interface::vector_service::delete_vectors",
   "display_name": "Delete Vectors",
-  "description": "Delete vectors by IDs or filter criteria.",
+  "description": "Delete vectors by IDs or filter criteria. Registered calls return one queued job receipt; read that exact job for the complete operation result.",
   "embedding_description": "",
   "result_processor_customizations": {
-    "action_label": "Vectors deleted",
-    "result_type": "vectors_deleted",
-    "result_description": "Deletion confirmation with count of vectors removed, namespace affected, and list of deleted vector IDs if applicable",
+    "action_label": "Vector operation queued",
+    "result_type": "vector_operation_queued",
+    "result_description": "Admission receipt with job_id and status. The complete original vector operation envelope is in job.result; typed failures are in job.error.",
     "presentation_guidance": "",
-    "output_action_guidance": "Determine the appropriate next action based on the context and action result."
+    "output_action_guidance": "Retain data.job_id and retrieve that exact id with service_interface::job_service::get_job until completed or error before consuming vectors, counts or search results."
   },
   "error_processor_customizations": {
     "action_context": "Permanently removes vectors from a namespace by ID list or metadata filter criteria",
     "error_interpretation": "NotFoundError: some or all vector IDs don't exist. NamespaceError: namespace not found. FilterError: invalid filter syntax. PermissionError: deletion not allowed on protected namespace.",
-    "recovery_guidance": "For not found errors: verify vector IDs exist before deletion. For filter errors: check filter syntax matches supported operators. For permission errors: check if namespace allows deletion."
+    "recovery_guidance": "For not found errors: verify vector IDs exist before deletion. For filter errors: check filter syntax matches supported operators. For permission errors: check if namespace allows deletion. A timeout or lost worker does not authorize retrying uncertain effects; reconcile the exact job and observed namespace state without replay."
   }
 }

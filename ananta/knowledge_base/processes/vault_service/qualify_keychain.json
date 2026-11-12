@@ -1,12 +1,12 @@
 {
   "process_key": "service_interface::vault_service::qualify_keychain",
   "display_name": "Qualify Keychain",
-  "description": "Check whether the configured macOS Keychain backend is available and readable by the current user. Returns only bounded boolean proof fields and never exposes credentials.",
-  "embedding_description": "Vault qualification: test Keychain availability and current-user readability without returning credential names or values.",
+  "description": "Returns an owned vault job receipt (job_id/status); read the exact job with job_service.get_job for its public terminal outcome. Check whether the configured macOS Keychain backend is available and readable by the current user. Returns only bounded boolean proof fields and never exposes credentials.",
+  "embedding_description": "Vault qualification: test Keychain availability and current-user readability without returning credential names or values. Registered execution returns job_id/status; the complete public outcome is in job.result. Secret operands remain volatile and failures are sanitized; uncertain effects require reconciliation, never automatic replay.",
   "result_processor_customizations": {
     "action_label": "Keychain qualified",
     "result_type": "vault_keychain_qualification",
-    "result_description": "Bounded Keychain proof: backend, available, and current_user_accessible.",
+    "result_description": "Queued vault job receipt. Completed public outcome: Bounded Keychain proof: backend, available, and current_user_accessible.",
     "presentation_guidance": "",
     "output_action_guidance": "Use a false result to diagnose local Keychain setup before vault-dependent work."
   },

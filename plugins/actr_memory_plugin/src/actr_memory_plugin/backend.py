@@ -63,6 +63,7 @@ from .memory_store import (
     save_memorization,
     save_memory,
     store_memory_vector,
+    update_memory_strength,
 )
 from .record_helpers import (
     build_learn_result,
@@ -1905,9 +1906,9 @@ class ACTRMemoryBackend:
             old_strength = memory.get("strength", 0)
 
             if abs(old_strength - new_strength) > 0.01:
-                memory["strength"] = new_strength
-                save_memory(self.state_service, memory)
-                updated += 1
+                # The snapshot may predate a bounded reinforcement or focus
+                # action. Persist only this derived field, never the old row.
+                updated += update_memory_strength(self.state_service, memory["id"], new_strength)
 
         return {
             "total_memories": len(all_memories),

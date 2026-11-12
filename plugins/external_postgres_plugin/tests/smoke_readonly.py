@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Private live PostgreSQL readonly behavioral proof.
+"""Private live PostgreSQL proof that reads run on an unrestricted connection.
 
 Run under quality_gates/provision_test_pg.py; the private manifest variable
 selects this smoke's independent database on the owned loopback cluster.
 No fixture returns 77; provisioned setup or body failures return nonzero.
-The original SQL behavior, read/write probes and dynamic OS-user assertions
-remain exercised. See quality_gates/private_postgres.md.
+USER ruling rul_4c99a30d removed the read-only connection characteristic and
+the read-leader guard: this proves a plain connection, the server reporting
+transaction_read_only off, and a data-modifying CTE through run_query
+committing. The dynamic OS-user assertions remain exercised. See quality_gates/private_postgres.md.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -44,7 +47,6 @@ _PORT = 0
 _USER = getpass.getuser()
 _SSLMODE = "disable"
 _PROBE = "epg_probe"
-_READ_ONLY_SQLSTATE = "25006"
 
 _passed = 0
 _failed: list[str] = []
@@ -65,7 +67,7 @@ def _configure_fixture() -> None:
     config = load_fixture("external_readonly")
     if config.user != _USER:
         raise FixtureIntegrityError("fixture user differs from the current OS user")
-    _HOST, _PORT, _SCRATCH_DB = config.host, config.port, config.database
+    _HOST, _PORT, _SCRATCH_DB = config.host, config.port, config.database  # pyright: ignore[reportConstantRedefinition] -- fixture endpoint bound once per run
 
 
 def _dsn() -> ExternalDsn:
@@ -107,22 +109,25 @@ def _teardown() -> None:
         pass
 
 
-def _sqlstate_of_write(conn: Any, sql: str) -> str | None:
-    """Attempt a write; return its SQLSTATE (rolling the txn back), or None if it slipped."""
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql)
-        conn.rollback()
-        return None
-    except Exception as exc:  # a real psycopg error carries .sqlstate
-        conn.rollback()
-        return getattr(exc, "sqlstate", None)
+def _passthrough_gate(path: str) -> str:
+    return path
+
+
+def _psql_scalar(sql: str) -> str | None:
+    result = subprocess.run(
+        [str(pg_binary("psql")), "-X", *load_fixture("external_readonly").endpoint_args(), "-d", _SCRATCH_DB, "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c", sql],
+        env=without_libpq(os.environ),
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def _run_live_checks() -> None:
     conn = connect(_dsn(), statement_timeout_ms=30_000, platform_pg_port=_PORT)
     try:
-        _assert("conn.read_only is True", conn.read_only is True)
+        _assert("conn.read_only is unset (None: no plugin-side restriction)", conn.read_only is None)
 
         # LIVE test_connection: the resolved host echoed back must equal the host
         # we actually connected with (F1 — Rev-A R-D2 "test_connection surfaces
@@ -132,7 +137,7 @@ def _run_live_checks() -> None:
         print(f"    observed test_connection host = {tc.get('host')!r} (connected with {_HOST!r})")
         _assert("test_connection returns a host field", "host" in tc)
         _assert("resolved host equals the connected host", tc.get("host") == _HOST, str(tc.get("host")))
-        _assert("test_connection read_only True", tc.get("read_only") is True)
+        _assert("test_connection reports the server's read_only False", tc.get("read_only") is False)
 
         with conn.cursor() as cur:
             cur.execute("SHOW transaction_read_only")
@@ -140,40 +145,49 @@ def _run_live_checks() -> None:
             show_val = row[0] if row else None
             cur.execute(f"SELECT count(*) FROM {_PROBE}")
             count_row = cur.fetchone()
-        conn.rollback()
-        print(f"    observed SHOW transaction_read_only = {show_val!r} (same txn as the SELECT)")
-        _assert("SHOW transaction_read_only == 'on' in the user query's txn", show_val == "on")
-
-        with conn.cursor() as cur:
             cur.execute("EXPLAIN SELECT 1")
             explained = cur.fetchall()
         conn.rollback()
+        print(f"    observed SHOW transaction_read_only = {show_val!r}")
+        _assert("SHOW transaction_read_only == 'off'", show_val == "off")
         _assert("EXPLAIN succeeds", len(explained) > 0)
         _assert("SELECT on the probe table returned the seeded rows", count_row is not None and count_row[0] == 2)
-
-        writes = (
-            "CREATE TEMP TABLE t_probe (a int)",
-            f"INSERT INTO {_PROBE} VALUES (99)",
-            f"UPDATE {_PROBE} SET id = 0",
-            f"DELETE FROM {_PROBE}",
-            "CREATE TABLE t_probe2 (a int)",
-            f"EXPLAIN ANALYZE INSERT INTO {_PROBE} VALUES (99)",
-        )
-        for sql in writes:
-            state = _sqlstate_of_write(conn, sql)
-            print(f"    observed SQLSTATE {state} for: {sql}")
-            _assert(f"write refused with 25006: {sql!r}", state == _READ_ONLY_SQLSTATE)
     finally:
         conn.close()
 
-    # First-statement-is-a-write on a FRESH connection: no write-capable window.
-    fresh = connect(_dsn(), statement_timeout_ms=30_000, platform_pg_port=_PORT)
-    try:
-        first_state = _sqlstate_of_write(fresh, "CREATE TABLE t_first (a int)")
-        print(f"    observed SQLSTATE {first_state} for the FIRST statement (a write) on a fresh conn")
-        _assert("first-statement write refused (no window)", first_state == _READ_ONLY_SQLSTATE)
-    finally:
-        fresh.close()
+    with tempfile.TemporaryDirectory(prefix="epg_unrestricted_") as workspace:
+        # A data-modifying CTE through run_query is NOT refused and COMMITS
+        # (rul_4c99a30d): visible from a separate psql connection afterwards.
+        cte = connect(_dsn(), statement_timeout_ms=30_000, platform_pg_port=_PORT)
+        try:
+            result = query_actions.run_query(
+                cte,
+                {
+                    "sql": f"WITH d AS (DELETE FROM {_PROBE} WHERE id = 2 RETURNING id) SELECT id FROM d",
+                    "output_tsv_path": f"{workspace}/deleted.tsv",
+                },
+                _passthrough_gate,
+            )
+        finally:
+            cte.close()
+        print(f"    observed run_query (data-modifying CTE) result = {result}")
+        _assert("run_query returned the deleted row", result.get("row_count") == 1)
+        _assert("the CTE's delete committed (separate connection)", _psql_scalar(f"SELECT count(*) FROM {_PROBE}") == "1")
+
+        # The FIRST statement on a fresh connection may write: no restricted window.
+        fresh = connect(_dsn(), statement_timeout_ms=30_000, platform_pg_port=_PORT)
+        try:
+            query_actions.run_query(
+                fresh,
+                {"sql": f"INSERT INTO {_PROBE} VALUES (99) RETURNING id", "output_tsv_path": f"{workspace}/inserted.tsv"},
+                _passthrough_gate,
+            )
+        finally:
+            fresh.close()
+        _assert(
+            "a first-statement write on a fresh connection committed",
+            _psql_scalar(f"SELECT count(*) FROM {_PROBE} WHERE id = 99") == "1",
+        )
 
 
 def _mid_run_fail(detail: str) -> int:
@@ -256,8 +270,8 @@ def _check_source_carries_no_operator_username() -> None:
 
 
 def main() -> int:
-    print("\nexternal_postgres_plugin LIVE read-only smoke")
-    print("=" * 44)
+    print("\nexternal_postgres_plugin LIVE unrestricted-connection smoke")
+    print("=" * 56)
     _check_user_is_dynamic_getuser()
     _check_source_carries_no_operator_username()
     if _failed:
@@ -281,7 +295,7 @@ def main() -> int:
     if _failed:
         print("FAILED:", _failed)
         return 1
-    print("All LIVE read-only checks passed.")
+    print("All LIVE unrestricted-connection checks passed.")
     print("PRIVATE_PG_BODY external_readonly")
     return 0
 

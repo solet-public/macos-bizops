@@ -42,12 +42,7 @@ from solet_manager.release_lock import SeedLock  # noqa: E402
 from solet_manager.stage_activation import initial_stage_probe_statuses  # noqa: E402
 from solet_manager.transaction import Transaction, canonical_sha256  # noqa: E402
 
-_CONTRACTS = (
-    Path(__file__).resolve().parents[2]
-    / "plugins"
-    / "github_midwife_plugin"
-    / "knowledge_base"
-)
+_CONTRACTS = Path(__file__).resolve().parents[2] / "plugins" / "github_midwife_plugin" / "knowledge_base"
 
 _OPERATION = "install_tmux"
 _STAGE = "preflight"
@@ -56,7 +51,7 @@ _CHECKS = 0
 
 def _check(condition: bool, message: str) -> None:
     global _CHECKS
-    _CHECKS += 1
+    _CHECKS += 1  # pyright: ignore[reportConstantRedefinition] -- Mutable smoke counter; preserve the fixture API.
     if not condition:
         raise AssertionError(f"red: {message}")
 
@@ -71,7 +66,6 @@ def _answers() -> dict[str, JsonValue]:
             "inference_model": "qwen",
             "coding_agents": ["codex"],
             "execution_topology": "solo",
-            "git_mutation_control": "single_session",
             "connector_configuration_timing": "configure_later",
             "autostart": "enabled",
             "session_sources": [],
@@ -149,17 +143,13 @@ def _assert_absent_operation_is_tolerated(bundle: ContractBundle) -> Transaction
     )
     pruned = attempted.bind_operations({})
     _check(
-        _OPERATION not in pruned.operation_stages
-        and len(pruned.operation_attempts) == 1,
+        _OPERATION not in pruned.operation_stages and len(pruned.operation_attempts) == 1,
         "prune did not leave a retained attempt for an unbound operation",
     )
     try:
         reloaded = Transaction.from_dict(pruned.to_dict())
     except StateError as error:
-        raise AssertionError(
-            f"red: a pruned operation's retained attempt was rejected as "
-            f"corruption -- {error}"
-        ) from error
+        raise AssertionError(f"red: a pruned operation's retained attempt was rejected as corruption -- {error}") from error
     _check(
         len(reloaded.operation_attempts) == 1,
         "the retained attempt did not survive the round trip",
@@ -171,9 +161,7 @@ def _assert_bound_mismatch_still_raises(bundle: ContractBundle) -> None:
     """The branch that must NOT widen: a bound operation filed under a wrong stage."""
 
     attempted = _attempted(bundle, CheckpointStatus.AWAITING_USER)
-    other_stage = next(
-        stage_id for stage_id in attempted.stages if stage_id != _STAGE
-    )
+    other_stage = next(stage_id for stage_id in attempted.stages if stage_id != _STAGE)
     corrupted = replace(
         attempted,
         operation_stages={_OPERATION: other_stage},
@@ -186,14 +174,10 @@ def _assert_bound_mismatch_still_raises(bundle: ContractBundle) -> None:
         # passes even with the mismatch check deleted outright.
         _check(
             "attempt stage mismatch" in str(error),
-            "a bound-operation stage mismatch was caught by some other "
-            f"validator, not by the attempt-stage check -- got: {error}",
+            f"a bound-operation stage mismatch was caught by some other validator, not by the attempt-stage check -- got: {error}",
         )
         return
-    raise AssertionError(
-        "red: an attempt filed under a stage its BOUND operation does not "
-        "belong to was accepted -- the tolerance widened past absent operations"
-    )
+    raise AssertionError("red: an attempt filed under a stage its BOUND operation does not belong to was accepted -- the tolerance widened past absent operations")
 
 
 def _assert_retained_attempts_do_not_feed_stage_status(pruned: Transaction) -> None:
@@ -214,13 +198,11 @@ def _assert_retained_attempts_do_not_feed_stage_status(pruned: Transaction) -> N
     )
     _check(
         derived[_STAGE] is not CheckpointStatus.AWAITING_USER,
-        "a pruned operation's retained attempt still pins its stage at "
-        "awaiting_user -- retained history is feeding stage-status derivation",
+        "a pruned operation's retained attempt still pins its stage at awaiting_user -- retained history is feeding stage-status derivation",
     )
     _check(
         derived == pruned.stages,
-        "the pruned journal's persisted stages disagree with their own "
-        "re-derivation",
+        "the pruned journal's persisted stages disagree with their own re-derivation",
     )
 
 

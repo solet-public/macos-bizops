@@ -1,7 +1,7 @@
 {
   "process_key": "service_interface::knowledge_service::delete_file",
   "display_name": "Delete Knowledge Base File",
-  "description": "Delete a file from a knowledge base. For git KBs: commits deletion to managed branch. Forgets associated chunks.",
+  "description": "Delete a file from a knowledge base. For git KBs: commits deletion to managed branch. Forgets associated chunks. Registered calls return a queued job_id/status receipt. Read that exact job with service_interface::job_service::get_job until terminal; job.result contains the complete operation result and job.error retains any failure. In-process calls return the complete result synchronously.",
   "embedding_description": "Remove a single file from a knowledge base and forget the chunks that were indexed from it. For git-backed KBs the deletion is committed to the managed branch. Use to permanently drop one document you no longer want stored or searchable in that KB.",
   "result_processor_customizations": {
     "action_label": "Knowledge base file deleted",

@@ -187,17 +187,20 @@ empty value must not silently kill wakes on a watch deployment.
 
 This section records what this plugin used to refuse and no longer does. It is
 a statement of removal, kept apart from everything the plugin provides today:
-none of the three behaviours below is armed, evaluated or checked by any hook
+none of the behaviours below is armed, evaluated or checked by any hook
 shipped here. The git-text gate (`git_controller_gate.py` and its policy
 modules) was removed in `0.9.0` by operator ruling `rul_e71e43be` (commit
-`91b8ace14`). Deleting the hook did not supply a mechanism for any of the three
+`91b8ace14`). Deleting the hook did not supply a mechanism for any of these
 bans; whatever is meant to take over git control is separate work and is not
 delivered by this plugin.
 
 | Retired behaviour | What the gate refused | Enforced today | Covering mechanism today |
 |---|---|---|---|
-| Git mutation ban | A mutating `git` command in a `Bash` tool call (commit, push, checkout, merge, rebase and the like), and an `Edit`/`Write`/`MultiEdit`/`NotebookEdit` of the repository's own `.git/`, from any session other than the one named in `GIT_CONTROLLER_NAME`. Armed only when that variable was exported; fail-open when unset. | No | None in this plugin. Git control among sessions sharing a directory is the repository's own responsibility (`rul_d8893e33`): name the one git-mutating role by convention and tell the operator that no hook enforces it (hydration runbook, Step 4a). |
+| Git mutation ban | A mutating `git` command in a `Bash` tool call (commit, push, checkout, merge, rebase and the like), and an `Edit`/`Write`/`MultiEdit`/`NotebookEdit` of the repository's own `.git/`, from any session other than the one named in `GIT_CONTROLLER_NAME`. Armed only when that variable was exported; fail-open when unset. | No | None in this plugin. Git control among sessions sharing a directory is the repository's own responsibility (`rul_d8893e33`); the platform names no controller role. The hydration runbook (Step 4a) tells the operator to keep each session's work in its own folder or coding-tool worktree and that no hook enforces this. |
 | Agent and Task spawn ban | The `Agent` tool, and `Task` under its former name, from any session other than the named controller, so that a peer could not spawn a subagent that mutates git. | No | None. `headless_tool_allowlist_gate.py` is a different control and not a replacement: it constrains only spawned headless workers whose spawning call supplied an explicit `allowed_tools` list, ships unarmed otherwise, and never applies to an interactive session. |
+| Bash-level `.git/` mutation block | A `Bash` command whose file-mutating command or redirect named the repository's own `.git/` directory, from any session other than the named controller. | No | None. |
+| Inline `git -c` and global-option bans | From any session other than the named controller: `git -c` setting `commit.gpgsign`, `core.hooksPath`, `gc.auto`, or an `alias.` whose value starts with `!`, and the global options `--git-dir` and `--work-tree`. | No | None. |
+| `--no-verify` ban and the operator-confirmation prefix | `--no-verify` on any git command from any session other than the named controller. The named controller could run `--no-verify`, a force-push, `reset --hard`, `clean -fd`, a rebase, a branch deletion or a path-discarding `checkout --` / `restore` only with a `GIT_CONTROLLER_OPERATOR_CONFIRMATION=<id>` prefix on that one git command. | No | None. No hook asks for, reads or checks that prefix. |
 | Git beside a shell evaluator word or an untokenisable construct | A `Bash` command naming `git` that the policy could not safely inspect, refused fail-closed. The origin repository's own copy of the gate (`64e9810fb`, never shipped) went further: for every role, the controller included, it refused `git` beside a shell evaluator word (`bash`, `sh`, `zsh`, `dash`, `ksh`, `fish`, `eval`, `source`, `exec`) or an unreadable shell construct (ANSI-C quoting, backslash-newline, here-string, process substitution, backtick), and `git` its tokeniser could not parse. | No | None. A command of this shape is no longer refused or flagged by any hook. |
 
 `GIT_CONTROLLER_NAME` is still rendered into the hydration launchers when an

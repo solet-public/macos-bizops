@@ -1,0 +1,2 @@
+# Marketo writes and diagnostics return a job handle in milliseconds and run their vendor calls in the plugin worker (Change chg_fabf151c).
+plugins/marketo_plugin/tests/born_async_verbs_smoke.py

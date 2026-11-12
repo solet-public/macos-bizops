@@ -38,11 +38,11 @@ def test_docs_landing_no_swap() -> None:
     f = Fixture()
     f.s.delta = "".join(f"M\0{p}\0" for p in ("docs/x", "quality_gates/x", "ananta/tests/x", "plugins/p/knowledge_base/x", ".claude/x", "workbench/x"))
     result = f.run()
-    assert result["decision"] == "skipped_nonproduction" and not writes(f), "DOCS_LANDING_NO_SWAP"
+    assert result["decision"] == "skipped_nonproduction" and not writes(f) and "notice" not in result and "REACHED_NOTICE" not in f.log, "DOCS_LANDING_NO_SWAP"
     f = Fixture()
     f.s.delta = ""
     result = f.run()
-    assert result["decision"] == "skipped_nonproduction" and not writes(f), "EMPTY_DELTA_LANDING_NO_SWAP"
+    assert result["decision"] == "skipped_nonproduction" and not writes(f) and "notice" not in result and "REACHED_NOTICE" not in f.log, "EMPTY_DELTA_LANDING_NO_SWAP"
     for path in ("ananta/src/x", "plugins/p/src/x", "profile/config/x"):
         assert f.m.production(path)
         assert path in f.m.changed_paths(f"R100\0{path}\0docs/x\0")
@@ -60,10 +60,89 @@ def test_production_deploy_recorded() -> None:
     assert recorded[-6:] == ["--agent-instance-id", "agi-fixture", "--actor-model", "fixture-model", "--actor-effort", "medium"]
 
 
-def test_deploy_notice_after_verified_record() -> None:
-    """The BASE red and ordering mutant must both reach a verified deployment.
+def test_bridge_jobs_are_awaited_at_the_shared_process_seam() -> None:
+    """Reach a verified deploy through the same CLI boundary as the seat.
 
-    Keep setup/readback checks before the named notice assertion so a broken
+    Both swap observations and manifest submissions require the second hop.
+    Checking every invocation also protects the synchronous readiness/notice
+    calls if their registration later changes to an admitted operation.
+    """
+    f = Fixture()
+    result = f.run()
+    assert result["decision"] == "deployed", f"ASYNC_SWAP_FINAL_RECORD: {result}"
+    calls = [call for call in f.log if isinstance(call, list) and call[0] == f.args.bridge and call[1] == "call"]
+    assert calls and all("--wait" in call for call in calls), "EVERY_PROCESS_CALL_REQUESTS_FINAL_RESULT"
+    assert writes(f) == ["REACHED_APPLY_COMMIT", "REACHED_RECORD"], "ASYNC_APPLY_NOT_REPLAYED"
+
+
+def test_finished_job_records_preserve_the_original_result() -> None:
+    """Assert the actual get_job record shape, then change one key's policy.
+
+    A future asynchronous readiness read must work through the same process()
+    decoder. No deployment-specific key wrapper should be needed for it.
+    """
+    f = Fixture()
+    assert f.run()["decision"] == "deployed", "JOB_RECORD_FIXTURE_REACHES_DEPLOYMENT"
+    assert {job["provider_name"] for job in f.jobs} == {"local_self_deployment_service", "lifecycle_management_service"}, "SWAP_AND_APPLY_JOB_RESULTS_DECODED"
+    assert all(job["status"] == "completed" and job["result"] for job in f.jobs), "FINISHED_JOBS_SUPPLY_ORIGINAL_ACTION_ENVELOPE"
+    f = Fixture()
+    f.s.async_keys = (*f.s.async_keys, f.m.PLUGINS)
+    assert f.run()["decision"] == "deployed", "PROCESS_SEAM_AWAITS_ANOTHER_KEY_WITHOUT_A_WRAPPER"
+
+
+def test_synchronous_bridge_results_are_unchanged() -> None:
+    """Keep the immediate outer-envelope contract for unselected keys.
+
+    The explicit process() assertion verifies its returned Row, so a decoder
+    that blindly strips an extra result/data layer cannot pass by coincidence.
+    """
+    f = Fixture()
+    f.s.async_keys = ()
+    assert f.run()["decision"] == "deployed" and not f.jobs, "SYNC_PROCESS_RESULT_UNCHANGED"
+    assert f.m.process(f.ports, f.args, f.m.PLUGINS, {}) == {"plugins": [{"lifecycle_managed": True, "status": "ready", "is_running": True}]}, "SYNC_DATA_NOT_UNWRAPPED_TWICE"
+
+
+def test_failed_bridge_job_is_an_advisory() -> None:
+    """Preserve CLI failure details through each existing decision path.
+
+    A failed swap read defers, a failed dry-run fails the run, and failed
+    readiness reads retry to their deadline. None may record a deployment.
+    The captured job record must retain its id and original worker error.
+    """
+    for key, decision in ((load().SWAP, "deferred_swap"), (load().APPLY, "failed"), (load().PLUGINS, "deferred_readiness")):
+        f = Fixture()
+        f.s.async_keys = (*f.s.async_keys, f.m.PLUGINS)
+        f.s.job_failure = key
+        result = f.run()
+        assert result["decision"] == decision and not f.s.recorded, "FAILED_JOB_NEVER_RECORDS_DEPLOYMENT"
+        detail = str(result)
+        assert "fixture job failed" in detail and "job-fixture-" in detail, "FAILED_JOB_ID_AND_ERROR_ARE_VISIBLE"
+
+
+def test_bridge_job_timeout_keeps_running_and_drain_retries() -> None:
+    """A timeout ends the wait and never cancels the admitted operation.
+
+    Before a swap it uses the existing deferral. During drain the existing
+    observation loop retries safely; the manifest submission still occurs
+    exactly once and the earlier processing job remains available to read.
+    """
+    f = Fixture()
+    f.s.job_timeouts = 1
+    result = f.run()
+    assert result["decision"] == "deferred_swap" and f.jobs[0]["status"] == "processing", "JOB_TIMEOUT_DEFERS_WITHOUT_CANCELLING"
+    assert "still running" in str(result["advisories"]) and "job-fixture-0" in str(result["advisories"]), "JOB_TIMEOUT_RETAINED_IN_NOTES"
+    f = Fixture()
+    f.s.job_timeouts, f.s.job_timeout_during_drain = 1, True
+    result = f.run()
+    assert result["decision"] == "deployed" and any(job["status"] == "processing" for job in f.jobs), "DRAIN_JOB_TIMEOUT_RETRIES_READ_WITHOUT_CANCELLING"
+    assert any(note.startswith("swap_read_retry") and "still running" in note for note in result["advisories"]), "DRAIN_JOB_TIMEOUT_IS_ADVISORY"
+    assert writes(f) == ["REACHED_APPLY_COMMIT", "REACHED_RECORD"], "JOB_TIMEOUT_NEVER_REPLAYS_APPLY"
+
+
+def test_deploy_notice_after_verified_record() -> None:
+    """Success is complete at verified record readback and sends no notice.
+
+    Keep setup/readback checks before the named no-notice assertion so a broken
     fixture cannot masquerade as proof that the production notice is absent.
     """
     f = Fixture()
@@ -71,73 +150,130 @@ def test_deploy_notice_after_verified_record() -> None:
     assert result["decision"] == "deployed" and "REACHED_RECORD" in f.log, "DEPLOY_NOTICE_FIXTURE_REACHED_RECORD"
     assert "REACHED_VERIFIED_RECORD" in f.log and result["measurement_id"] == "cme-fixture", "DEPLOY_NOTICE_FIXTURE_VERIFIED_READBACK"
     calls = [a for a in f.log if isinstance(a, list) and len(a) > 2 and a[2] == NOTICE]
-    assert len(calls) == 1, "DEPLOY_NOTICE_AFTER_VERIFIED_RECORD: exactly one notice"
-    assert f.log.index("REACHED_RECORD") < f.log.index("REACHED_VERIFIED_RECORD") < f.log.index(calls[0]), "DEPLOY_NOTICE_AFTER_VERIFIED_RECORD: ordering"
-    _assert_notice_identity(result, json.loads(calls[0][3]))
+    assert not calls and "notice" not in result, "DEPLOY_NOTICE_AFTER_VERIFIED_RECORD: success is silent"
 
 
-def _assert_notice_identity(result: dict[str, object], values: dict[str, object]) -> None:
-    """Bind the queued receipt to the exact solet and deployment observation."""
-    content = json.loads(str(values["content"]))
+def _assert_exception_notice(result: dict[str, object], log: list[object], expected_decision: str, expected_target: str | None = None) -> None:
+    """Bind one queued exception receipt to the terminal outcome identity."""
+    values, content = _exception_notice_payload(log)
     notice = result["notice"]
     assert isinstance(notice, dict), "DEPLOY_NOTICE_RECEIPT_MAPPING"
+    _assert_exception_content(values, content, expected_decision, expected_target)
+    _assert_exception_receipt(notice, content)
+
+
+def _exception_notice_payload(log: list[object]) -> tuple[dict[str, object], dict[str, object]]:
+    calls = [a for a in log if isinstance(a, list) and len(a) > 2 and a[2] == NOTICE]
+    assert len(calls) == 1, "EXCEPTION_NOTICE_EXACTLY_ONCE"
+    values = json.loads(calls[0][3])
+    content = json.loads(str(values["content"]))
+    return values, content
+
+
+def _assert_exception_content(values: dict[str, object], content: dict[str, object], expected_decision: str, expected_target: str | None) -> None:
     assert values["name"] == "Fixture-Solet-Main", "DEPLOY_NOTICE_SCOPED_RECIPIENT"
-    assert (content["target"], content["release"], content["measurement_id"], content["decision"]) == (TARGET, "rel-new", "cme-fixture", "deployed"), "DEPLOY_NOTICE_EXACT_IDENTITY"
-    assert notice["message_id"] == "arm-fixture" and notice["status"] == "queued", "DEPLOY_NOTICE_RECEIPT_RETAINED"
-    assert notice["notice_key"] == content["notice_key"] and "same deployment" in content["duplicate_semantics"], "DEPLOY_NOTICE_DUPLICATE_KEY"
+    assert content["decision"] == expected_decision, "EXCEPTION_NOTICE_DECISION"
+    assert content["outcome"] == expected_decision, "EXCEPTION_NOTICE_OUTCOME"
+    assert content["target"] == expected_target, "EXCEPTION_NOTICE_TARGET_NULLABILITY"
 
 
-def test_notice_failures_preserve_deployment() -> None:
-    """Transport and envelope failures are receipt uncertainty, never a redeploy.
+def _assert_exception_receipt(notice: dict[str, object], content: dict[str, object]) -> None:
+    assert notice["message_id"] == "arm-fixture", "DEPLOY_NOTICE_RECEIPT_MESSAGE_ID"
+    assert notice["status"] == "queued", "DEPLOY_NOTICE_RECEIPT_STATUS"
+    assert notice["notice_key"] == content["notice_key"], "DEPLOY_NOTICE_DUPLICATE_KEY"
+    assert "same terminal outcome" in str(content["duplicate_semantics"]), "DEPLOY_NOTICE_DUPLICATE_SEMANTICS"
 
-    Check both effects, because preserving the terminal decision alone could
-    hide an accidental second APPLY or deployed-observation write.
-    """
+
+def test_exception_notices_for_failure_and_holds() -> None:
+    """Failure, proof-red and deferred holds each attempt one exception notice."""
+    cases = (
+        (lambda state: setattr(state, "reject", True), "failed", None),
+        (lambda state: setattr(state, "proof_change", {"head": OLD}), "failed", None),
+        (lambda state: setattr(state, "occupied", True), "deferred_lock", None),
+        (lambda state: (setattr(state, "receipt", {"result": "running", "pid": 1}), setattr(state, "receipt_lock_held", True)), "deferred_gate", TARGET),
+        (lambda state: setattr(state, "plugins_never_ready", True), "deferred_readiness", TARGET),
+    )
+    for setup, decision, target in cases:
+        f = Fixture()
+        setup(f.s)
+        result = f.run()
+        assert result["decision"] == decision, f"EXCEPTION_NOTICE_REACHES_{decision}"
+        _assert_exception_notice(result, f.log, decision, target)
+
+    f = Fixture()
+    f.s.job_failure = f.m.SWAP
+    result = f.run()
+    assert result["decision"] == "deferred_swap", "EXCEPTION_NOTICE_REACHES_deferred_swap"
+    _assert_exception_notice(result, f.log, "deferred_swap", TARGET)
+
+
+def test_notice_failures_are_not_read_on_success() -> None:
+    """Success does not send, so transport failure cannot alter deployment."""
+
     replies = ["not JSON", "[]", envelope({}), envelope({"message_id": ""}), envelope({"message_id": 7}), json.dumps({"status": "completed", "result": {"data": []}}), json.dumps({"status": "completed", "result": {"success": False, "error": "role_unbound"}}), json.dumps({"status": "failed"})]
     for reply in replies:
         f = Fixture()
         f.s.notice_reply = reply
         result = f.run()
-        assert result["decision"] == "deployed" and result["measurement_id"] == "cme-fixture", "NOTICE_FAILURE_PRESERVES_DEPLOYMENT"
-        assert result["notice"]["status"] == "uncertain" and result["notice"]["message_id"] is None and result["advisories"], "NOTICE_FAILURE_DISCLOSED"
-        assert writes(f) == ["REACHED_APPLY_COMMIT", "REACHED_RECORD"] and f.log.count("REACHED_NOTICE") == 1, "NOTICE_FAILURE_NO_RETRY"
+        assert result["decision"] == "deployed" and result["measurement_id"] == "cme-fixture", "SUCCESS_PRESERVES_DEPLOYMENT"
+        assert "notice" not in result and f.log.count("REACHED_NOTICE") == 0, "SUCCESS_HAS_NO_NOTICE_TRANSPORT"
     f = Fixture()
     f.s.notice_timeout = True
     result = f.run()
-    assert result["decision"] == "deployed" and result["notice"]["status"] == "uncertain" and f.log.count("REACHED_NOTICE") == 1, "NOTICE_TIMEOUT_PRESERVES_DEPLOYMENT"
+    assert result["decision"] == "deployed" and "notice" not in result and f.log.count("REACHED_NOTICE") == 0, "NOTICE_TIMEOUT_NOT_READ_ON_SUCCESS"
+
+
+def test_exception_notice_transport_uncertainty_preserves_hold() -> None:
+    """Malformed, vacant and timed-out notice sends preserve the original hold."""
+    replies = ["not JSON", "[]", envelope({}), envelope({"message_id": ""}), envelope({"message_id": 7}), json.dumps({"status": "completed", "result": {"data": []}}), json.dumps({"status": "completed", "result": {"success": False, "error": "role_unbound"}}), json.dumps({"status": "failed"})]
+    for reply in replies:
+        f = Fixture()
+        f.s.reject = True
+        f.s.notice_reply = reply
+        result = f.run()
+        assert result["decision"] == "failed" and result["notice"]["status"] == "uncertain" and result["notice"]["message_id"] is None, "FAILED_NOTICE_UNCERTAINTY_PRESERVES_DECISION"
+        assert f.log.count("REACHED_NOTICE") == 1 and writes(f) == ["REACHED_APPLY_COMMIT"], "FAILED_NOTICE_NO_RETRY"
+    f = Fixture()
+    f.s.occupied = True
+    f.s.notice_timeout = True
+    result = f.run()
+    assert result["decision"] == "deferred_lock" and result["notice"]["status"] == "uncertain" and f.log.count("REACHED_NOTICE") == 1, "HOLD_NOTICE_TIMEOUT_PRESERVES_DECISION"
 
 
 def test_notice_identity_recurrence_and_reversal() -> None:
-    """Duplicate measurements reuse a key; a reversal gets its own identity.
+    """Verified success, recovery and reversal are all complete without notices.
 
     Early exits have no verified completion branch and must send nothing.
-    Already-recorded recovery may send once without repeating any deployment.
     """
     f = Fixture()
     first = f.run()
+    assert first["decision"] == "deployed" and "notice" not in first and f.log.count("REACHED_NOTICE") == 0, "SUCCESS_NO_NOTICE"
     for measurement in ("cme-fixture", "cme-reversal"):
         f = Fixture()
         f.s.serving, f.s.recorded, f.s.stale_first = TARGET, True, True
         f.s.measurement_id = measurement
         repeat = f.run()
-        assert repeat["decision"] == "already_recorded" and not writes(f) and f.log.count("REACHED_NOTICE") == 1, "VERIFIED_ALREADY_RECORDED_NOTICE"
-        assert (repeat["notice"]["notice_key"] == first["notice"]["notice_key"]) == (measurement == "cme-fixture"), "NOTICE_MEASUREMENT_IDENTITY"
-    _assert_reversal_notice(first["notice"]["notice_key"])
+        assert repeat["decision"] == "already_recorded" and not writes(f) and f.log.count("REACHED_NOTICE") == 0 and "notice" not in repeat, "VERIFIED_ALREADY_RECORDED_NO_NOTICE"
+    _assert_reversal_no_notice()
     for field, value in (("baseline", TARGET), ("occupied", True), ("stuck", True), ("reject", True), ("delta", "M\0docs/x\0"), ("plugins_never_ready", True)):
         f = Fixture()
         setattr(f.s, field, value)
         result = f.run()
-        assert result["decision"] not in ("deployed", "already_recorded") and "REACHED_NOTICE" not in f.log and "notice" not in result, "NO_UNVERIFIED_DEPLOY_NOTICE"
+        assert result["decision"] not in ("deployed", "already_recorded"), "NO_UNVERIFIED_DEPLOY_NOTICE_SETUP"
+        if result["decision"] in ("already_current", "skipped_nonproduction"):
+            assert "REACHED_NOTICE" not in f.log and "notice" not in result, "BENIGN_TERMINAL_NO_NOTICE"
+        else:
+            assert f.log.count("REACHED_NOTICE") == 1 and "notice" in result, "EXCEPTION_TERMINAL_ONE_NOTICE"
 
 
-def _assert_reversal_notice(prior_key: str) -> None:
-    """A later run can verify the opposite target with a new measurement key."""
+def _assert_reversal_no_notice() -> None:
+    """A later run verifies the opposite target with no completion notice."""
     f = Fixture()
     f.s.target, f.s.baseline, f.s.serving = OLD, TARGET, TARGET
     f.s.measurement_id = "cme-rollback"
     result = f.run()
     assert result["decision"] == "deployed" and result["target"] == OLD and result["measurement_id"] == "cme-rollback", "REVERSAL_VERIFIED_SEPARATELY"
-    assert result["notice"]["notice_key"] != prior_key and f.log.count("REACHED_NOTICE") == 1, "REVERSAL_DISTINCT_NOTICE"
+    assert "notice" not in result and f.log.count("REACHED_NOTICE") == 0, "REVERSAL_NO_NOTICE"
 
 
 def test_restart_recovery_after_apply_commit_timeout() -> None:
@@ -210,7 +346,8 @@ def test_tick_and_no_change() -> None:
     assert f.run()["decision"] == "deployed"
     f = Fixture()
     f.s.baseline = TARGET
-    assert f.run()["decision"] == "already_current" and not writes(f)
+    result = f.run()
+    assert result["decision"] == "already_current" and not writes(f) and "notice" not in result and "REACHED_NOTICE" not in f.log
 
 
 def test_busy_deferral_and_stale_receipt() -> None:
@@ -388,7 +525,7 @@ def cli_adapters(f: Fixture) -> None:
     with patch.dict(os.environ, SOLET_NAME="fixture-solet"), patch.object(f.m, "native_ports", return_value=f.ports), redirect_stdout(output):
         assert f.m.main(argv) == 0
     terminal = json.loads(output.getvalue().splitlines()[-1])
-    assert terminal["decision"] == "deployed" and terminal["notice"]["status"] == "uncertain", "NOTICE_FAILURE_TERMINAL_JSON_SUCCESS"
+    assert terminal["decision"] == "deployed" and "notice" not in terminal, "SUCCESS_TERMINAL_JSON_HAS_NO_NOTICE"
     with patch.object(f.m.subprocess, "run", return_value=SimpleNamespace(stdout="fixture")) as run:
         assert f.m.command(["fixture"]) == "fixture"
         assert run.call_args.kwargs["timeout"] == 30
@@ -398,8 +535,15 @@ def main() -> None:
     failures: list[AssertionError] = []
     for test in (
         test_command_available,
+        test_bridge_jobs_are_awaited_at_the_shared_process_seam,
+        test_finished_job_records_preserve_the_original_result,
+        test_synchronous_bridge_results_are_unchanged,
+        test_failed_bridge_job_is_an_advisory,
+        test_bridge_job_timeout_keeps_running_and_drain_retries,
         test_deploy_notice_after_verified_record,
-        test_notice_failures_preserve_deployment,
+        test_exception_notices_for_failure_and_holds,
+        test_notice_failures_are_not_read_on_success,
+        test_exception_notice_transport_uncertainty_preserves_hold,
         test_notice_identity_recurrence_and_reversal,
         test_restart_recovery_after_apply_commit_timeout,
         test_readiness_deadline_defers_then_next_run_records,

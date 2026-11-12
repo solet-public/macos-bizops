@@ -6,9 +6,10 @@ from typing import ClassVar
 
 from ananta.core.domain.types import ActionResult
 from ananta.core.services.call_context import CallContext
+from ananta.interfaces.credential_contracts import CredentialOperations
 
 
-class VaultServiceInterface(ABC):
+class VaultServiceInterface(CredentialOperations, ABC):
     """Secure credential storage. Encrypts at rest. Never exposes plaintext in logs/errors.
 
     Plugins implementing this interface should:
@@ -16,7 +17,7 @@ class VaultServiceInterface(ABC):
     2. Define supported_interface_versions property with version mapping
     3. Encrypt all secrets at rest using strong encryption (AES-256-GCM recommended)
     4. NEVER log or expose plaintext secret values
-    5. Return ActionResult TypedDict from all operations
+    5. Return ActionResult TypedDict from storage operations; use/metadata have typed outcomes
 
     W-VAULT-INTERFACE-EXTEND (P0 Tier 1, 2026-06-07): every method accepts
     `call_context: CallContext | None = None` as a keyword-only parameter.
@@ -59,7 +60,10 @@ class VaultServiceInterface(ABC):
         *,
         call_context: CallContext | None = None,
     ) -> ActionResult:
-        """Get decrypted secret value.
+        """Internal migration read for callers not yet using ``use``.
+
+        This method is not registered on the session process surface. New
+        consumers use the fixed operation or metadata projection instead.
 
         Args:
             key: The secret identifier

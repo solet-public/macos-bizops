@@ -1,0 +1,18 @@
+{
+  "process_key": "plugin::g_suite_plugin::sheets_spreadsheets_batch_update",
+  "display_name": "Sheets Spreadsheets Batch Update",
+  "description": "sheets.spreadsheets.batchUpdate: POST v4/spreadsheets/{spreadsheetId}:batchUpdate. Applies one or more updates to the spreadsheet. Each request is validated before being applied. If any request is not valid then the entire request will fail and nothing will be applied. Some requests have replies to give you some information about how they are applied. The replies will mirror the requests. For example, if you applied 4 updates and the 3rd one had a reply, then the response will have 2 empty replies, the actual reply, and another empty reply, in that order. Body: vendor BatchUpdateSpreadsheetRequest JSON, checked against the pinned discovery schema (each batchUpdate entry sets exactly one request kind). Runs as a background job; completion preserves the vendor response and names the selected account. key, access_token and oauth_token are refused: the connected account authenticates. Parameters use exact vendor names. See editors_api_coverage.md for scopes, bodies and lifecycle.",
+  "embedding_description": "Use Sheets Spreadsheets Batch Update to applies one or more updates to the spreadsheet in Google Sheets, as the selected connected Google account (POST v4/spreadsheets/{spreadsheetId}:batchUpdate). Send the vendor BatchUpdateSpreadsheetRequest body; it is checked against Google's schema. Returns Google's full response.",
+  "result_processor_customizations": {
+    "action_label": "Sheets Spreadsheets Batch Update queued",
+    "result_type": "g_suite_sheets_spreadsheets_batch_update_result",
+    "result_description": "Job queued; completion includes account, method, full vendor response and response headers.",
+    "presentation_guidance": "Show the account that answered and any reply objects in request order.",
+    "output_action_guidance": "Return one short message through the active IO plugin."
+  },
+  "error_processor_customizations": {
+    "action_context": "Sheets Spreadsheets Batch Update",
+    "error_interpretation": "gsuite.invalid_params names the argument or body field and the vendor rule it broke, including refused key/access_token/oauth_token; gsuite.unknown_account names connected accounts; gsuite.missing_scope requires reconnect; gsuite.auth_expired includes Testing-mode renewal guidance; gsuite.permission_denied, gsuite.not_found and gsuite.rate_limited preserve vendor messages.",
+    "recovery_guidance": "Correct the named vendor field, choose a connected account, or reconnect with start_interface and connect_account to approve missing scopes. Retry rate limits later."
+  }
+}

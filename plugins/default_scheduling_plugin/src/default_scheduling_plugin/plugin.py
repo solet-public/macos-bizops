@@ -30,6 +30,7 @@ from ananta.core.domain.types import ActionResult
 from ananta.core.plugins.decorators import service_lifecycle
 from ananta.core.plugins.plugin_base import ServicePlugin
 from ananta.core.plugins.plugin_contracts import ActionStatus
+from ananta.core.state.registered_job_operations import REGISTERED_JOB_RETURN_SCHEMA, registered_job_return_schema
 from ananta.error_handling import PluginError
 from ananta.interfaces.agent_messaging_service_interface import AgentMessagingServiceInterface, ScheduleTarget
 from ananta.interfaces.edge_process_provider import (
@@ -949,6 +950,7 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
     # knowledge_base/processes/execute_in_seconds.json — the builder merges them at startup,
     # overwriting any values set here in the decorator.
     @platform_process(
+        is_async=True,
         name="execute_in_seconds",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
@@ -983,60 +985,62 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
         },
         output_type="object",
         output_description="Scheduling result with job ID and execution time",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Delayed execution job creation result",
-            properties={
-                "schedule_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Unique identifier for the scheduled job",
-                ),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Confirmation message",
-                ),
-                "run_at": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="ISO timestamp when job will execute",
-                ),
-                "delay_seconds": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Delay in seconds before execution",
-                ),
-            },
-            examples=[
-                {
-                    "action_status": "COMPLETED",
-                    "timestamp": "2025-10-12T14:30:00Z",
-                    "data": {
-                        "schedule_id": "1001",
-                        "message": "Scheduled in 30s",
-                        "run_at": "2025-10-12T14:30:30Z",
-                        "delay_seconds": 30,
-                    },
-                    "actions": [],
-                    "error": None,
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Delayed execution job creation result",
+                properties={
+                    "schedule_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Unique identifier for the scheduled job",
+                    ),
+                    "message": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Confirmation message",
+                    ),
+                    "run_at": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="ISO timestamp when job will execute",
+                    ),
+                    "delay_seconds": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Delay in seconds before execution",
+                    ),
                 },
-                {
-                    "action_status": "COMPLETED",
-                    "timestamp": "2025-10-12T14:35:00Z",
-                    "data": {
-                        "schedule_id": "1002",
-                        "message": "Scheduled in 60s",
-                        "run_at": "2025-10-12T14:36:00Z",
-                        "delay_seconds": 60,
+                examples=[
+                    {
+                        "action_status": "COMPLETED",
+                        "timestamp": "2025-10-12T14:30:00Z",
+                        "data": {
+                            "schedule_id": "1001",
+                            "message": "Scheduled in 30s",
+                            "run_at": "2025-10-12T14:30:30Z",
+                            "delay_seconds": 30,
+                        },
+                        "actions": [],
+                        "error": None,
                     },
-                    "actions": [],
-                    "error": None,
-                },
-            ],
-            usage_patterns=[
-                "Schedule delayed actions",
-                "Implement timeouts and delays",
-            ],
-            chain_compatible_processes=[
-                "plugin::default_scheduling_plugin::get_scheduled_jobs",
-            ],
+                    {
+                        "action_status": "COMPLETED",
+                        "timestamp": "2025-10-12T14:35:00Z",
+                        "data": {
+                            "schedule_id": "1002",
+                            "message": "Scheduled in 60s",
+                            "run_at": "2025-10-12T14:36:00Z",
+                            "delay_seconds": 60,
+                        },
+                        "actions": [],
+                        "error": None,
+                    },
+                ],
+                usage_patterns=[
+                    "Schedule delayed actions",
+                    "Implement timeouts and delays",
+                ],
+                chain_compatible_processes=[
+                    "plugin::default_scheduling_plugin::get_scheduled_jobs",
+                ],
+            )
         ),
         chaining_guidance=[
             "Commonly chained with the active IO plugin's post_message to notify users after delays",
@@ -1948,7 +1952,38 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
     # Text fields (display_name, description, embedding_description) are defined in
     # knowledge_base/processes/get_schedules_by_tag.json — the builder merges them at startup,
     # overwriting any values set here in the decorator.
+    def admit_registered_operation(self, action_name: str, parameters: dict[str, Any], state: dict[str, Any]) -> dict[str, Any] | None:
+        """Owner hook for registered plugin/service entries; Python callers stay synchronous.
+
+        Registry, content, history and activation share the existing serial
+        worker. A public descriptor never serializes the volatile action body.
+        """
+        operations = {"get_schedules_by_tag": self.get_schedules_by_tag, "list_schedules": self.list_schedules, "execute_in_seconds": self.execute_in_seconds, "get_schedule_binding_history": self.get_schedule_binding_history, "recover_scheduled_action": self.recover_scheduled_action}
+        operation = operations.get(action_name)
+        if operation is None:
+            return None
+        if self.orchestrator_ref is None:
+            raise RuntimeError("Scheduler registry admission requires the runtime orchestrator")
+        health = self.orchestrator_ref.plugin_manager.get_plugin("platform_health_plugin")
+        submit = health.submit_scheduler_operation
+        context = dict(state)
+        prepare = context.pop("_registered_arguments", None)
+        registered = context.pop("_registered_operation", None)
+        if action_name in {"execute_in_seconds", "get_schedule_binding_history", "recover_scheduled_action"}:
+            descriptor = {"operation": action_name, "arguments": "volatile_action_body", "replay": "reconcile_only"}
+            prepare_body = cast(Callable[[], dict[str, Any]], prepare) if callable(prepare) else lambda: parameters
+            registered_body = cast(Callable[[dict[str, Any]], dict[str, Any]], registered) if callable(registered) else None
+
+            def body(_descriptor: dict[str, Any]) -> dict[str, Any]:
+                if registered_body is not None:
+                    return registered_body(_descriptor)
+                return operation(ScheduleFactory.extract_params(prepare_body()), context)
+
+            return submit(self, action_name, descriptor, context, body)
+        return submit(self, action_name, ScheduleFactory.extract_params(parameters), context, lambda values: operation(values, context))
+
     @platform_process(
+        is_async=True,
         name="get_schedules_by_tag",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
@@ -1960,75 +1995,28 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             ),
         },
         output_type="object",
-        output_description="Matching schedules with metadata",
+        output_description="Queued registry job; read the full matching schedules in job.result.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Schedules matching the tag",
+            description="Queued registry job; job.result retains the complete original response.",
             properties={
-                "complete": ParameterMetadata(type=ParameterType.BOOLEAN, description="Stable exhausted owner enumeration."),
-                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Incomplete enumeration or unavailable evidence."),
-                "checked_epochs": ParameterMetadata(type=ParameterType.OBJECT, description="Owner epochs checked before and after enumeration."),
-                "observation_token": ParameterMetadata(type=ParameterType.STRING, description="Identity of this observation."),
-                "tag": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Tag used for filtering",
-                ),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of matching schedules",
-                ),
-                "schedules": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="List of matching schedule objects",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, required=True),
+                "status": ParameterMetadata(type=ParameterType.STRING, required=True),
             },
         ),
     )
+    def get_schedules_by_tag_action(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return cast(dict[str, Any], self.admit_registered_operation("get_schedules_by_tag", params, state))
+
     def get_schedules_by_tag(
         self,
         params: dict[str, Any],
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        try:
-            p = ScheduleFactory.extract_params(params)
-
-            tag = p.get("tag", "")
-            if not tag:
-                raise PluginError(
-                    "tag required",
-                    SchedulerErrorCode.INVALID_PARAMETERS,
-                    plugin_name=PLUGIN_NAME,
-                    details={"missing_field": "tag"},
-                )
-
-            schedules = self._load_schedules()
-
-            matching = self._project_schedules(schedules, tag=tag)
-
-            return build_response(
-                ActionStatus.COMPLETED.value,
-                {
-                    "schedules": matching,
-                    **self._completeness(schedules),
-                    "count": len(matching),
-                    "tag": tag,
-                },
-            )
-
-        except Exception as e:
-            self.logger.error(f"Error listing schedules by tag: {e}")
-            return build_response(
-                ActionStatus.ERROR.value,
-                {},
-                {
-                    "type": "scheduling_error",
-                    "code": SchedulerErrorCode.EXECUTION_ERROR,
-                    "message": str(e),
-                    "plugin_name": PLUGIN_NAME,
-                },
-            )
+        return self._registry_response(params, by_tag=True)
 
     @platform_process(
+        is_async=True,
         name="list_schedules",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
@@ -2040,30 +2028,19 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
             ),
         },
         output_type="object",
-        output_description="All scheduled jobs with metadata",
+        output_description="Queued registry job; read all scheduled jobs in job.result.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Every scheduled job, optionally filtered by status",
+            description="Queued registry job; job.result retains the complete original response.",
             properties={
-                "complete": ParameterMetadata(type=ParameterType.BOOLEAN, description="Stable exhausted owner enumeration."),
-                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Incomplete enumeration or unavailable evidence."),
-                "checked_epochs": ParameterMetadata(type=ParameterType.OBJECT, description="Owner epochs checked before and after enumeration."),
-                "observation_token": ParameterMetadata(type=ParameterType.STRING, description="Identity of this observation."),
-                "count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of schedules returned",
-                ),
-                "schedules": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="List of schedule objects",
-                ),
-                "status_filter": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status filter applied, or null when unfiltered",
-                ),
+                "job_id": ParameterMetadata(type=ParameterType.STRING, required=True),
+                "status": ParameterMetadata(type=ParameterType.STRING, required=True),
             },
         ),
     )
+    def list_schedules_action(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return cast(dict[str, Any], self.admit_registered_operation("list_schedules", params, state))
+
     def list_schedules(
         self,
         params: dict[str, Any],
@@ -2076,36 +2053,23 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
         tag or id can find a schedule — e.g. to locate and clear a stale cron.
         Reads the same ``_load_schedules`` source; read-only, mutates nothing.
         """
+        return self._registry_response(params, by_tag=False)
+
+    def _registry_response(self, params: dict[str, Any], *, by_tag: bool) -> dict[str, Any]:
+        """Complete synchronous projection shared by dependencies and admitted jobs."""
         try:
-            p = ScheduleFactory.extract_params(params)
-            status_filter = p.get("status") or None
-
+            values = ScheduleFactory.extract_params(params)
+            field = "tag" if by_tag else "status_filter"
+            value = values.get("tag", "") if by_tag else values.get("status") or None
+            if by_tag and not value:
+                raise PluginError("tag required", SchedulerErrorCode.INVALID_PARAMETERS, plugin_name=PLUGIN_NAME, details={"missing_field": "tag"})
             schedules = self._load_schedules()
-
-            entries = self._project_schedules(schedules, status=status_filter)
-
-            return build_response(
-                ActionStatus.COMPLETED.value,
-                {
-                    "schedules": entries,
-                    **self._completeness(schedules),
-                    "count": len(entries),
-                    "status_filter": status_filter,
-                },
-            )
-
-        except Exception as e:
-            self.logger.error(f"Error listing schedules: {e}")
-            return build_response(
-                ActionStatus.ERROR.value,
-                {},
-                {
-                    "type": "scheduling_error",
-                    "code": SchedulerErrorCode.EXECUTION_ERROR,
-                    "message": str(e),
-                    "plugin_name": PLUGIN_NAME,
-                },
-            )
+            entries = self._project_schedules(schedules, tag=value if by_tag else None, status=None if by_tag else value)
+            return build_response(ActionStatus.COMPLETED.value, {"schedules": entries, **self._completeness(schedules), "count": len(entries), field: value})
+        except Exception as exc:
+            suffix = " by tag" if by_tag else ""
+            self.logger.error(f"Error listing schedules{suffix}: {exc}")
+            return build_response(ActionStatus.ERROR.value, {}, {"type": "scheduling_error", "code": SchedulerErrorCode.EXECUTION_ERROR, "message": str(exc), "plugin_name": PLUGIN_NAME})
 
     @platform_process(
         name="rebind_scheduled_action",
@@ -2147,6 +2111,8 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
 
     @platform_process(
         name="get_schedule_binding_history",
+        is_async=True,
+        return_value_schema=REGISTERED_JOB_RETURN_SCHEMA,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "schedule_id": ParameterMetadata(type=ParameterType.STRING, required=True),
@@ -2166,6 +2132,8 @@ class SchedulingPlugin(ServicePlugin, StateAwarePlugin, EdgeProcessProvider):
 
     @platform_process(
         name="recover_scheduled_action",
+        is_async=True,
+        return_value_schema=REGISTERED_JOB_RETURN_SCHEMA,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "schedule_id": ParameterMetadata(type=ParameterType.STRING, required=True),

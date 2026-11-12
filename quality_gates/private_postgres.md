@@ -12,11 +12,11 @@ new directory under existing runtime scratch. For example:
   --register quality_gates/private_postgres_smokes.txt
 ```
 
-The focused register has exactly nine consumers: two agent messaging,
-four ledger and three external PostgreSQL smokes. Each gets an independent
+The focused register has exactly ten consumers: two agent messaging,
+four ledger, three external PostgreSQL smokes and the fast-return census. Each gets an independent
 database inside one command-scoped cluster. Each successful body prints
 `PRIVATE_PG_BODY` with its fixture key. Successful provisioned acceptance is
-nine passed, zero skipped. This does not provision unrelated live smokes or
+ten passed, zero skipped. This does not provision unrelated live smokes or
 make a default full battery exercise every database case.
 
 The provisioner resolves initdb, pg_ctl, createdb and psql from fixed PostgreSQL
@@ -59,6 +59,22 @@ cluster or IPC is cleaned. Child execution defaults to a 900-second bound,
 configurable with --timeout; start and stop are bounded separately.
 
 Infrastructure tests are registered in the general smoke register and kept out
-of the nine-entry live register. Run them through a separate focused register
+of the ten-entry live register. Run them through a separate focused register
 with the same provisioner when physical database proof is needed. No profile,
 operator vault, dependency installation or production schema change is needed.
+
+The `fast_return_census` database also receives the installed `vector`
+extension through the provisioner's own `psql`. Its real service contexts use
+fresh `census_<n>` schemas, one shared schema manager, a scratch blob root and
+the real job manager. Inside the census guard, native libpq defaults are
+pinned to this manifest's TCP endpoint and database; password and service
+files are `/dev/null`. Python socket fakes do not intercept libpq's C sockets.
+The provisioned smoke checks empty connection info before connecting, runs a
+real state-backed handler through preparer discovery, and checks write custody
+and teardown. Its synthetic assertions still run without a manifest, followed
+by the explicit exit-77 private-body skip.
+
+For this census Unit, the native scoped check-in does not provision this
+fixture. Its skipped private body is unmeasured by that runner. Separate
+acceptance uses `provision_test_pg.py --exec` against the committed candidate;
+retain its exact command, exit code and output hash beside the native receipt.

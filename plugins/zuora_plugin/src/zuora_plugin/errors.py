@@ -14,6 +14,7 @@ object/query, not our tenant host.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import SplitResult, urlsplit
 
 import httpx
 
@@ -42,6 +43,29 @@ class ZuoraServiceError(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def vendor_object(response: httpx.Response) -> dict[str, Any]:
+    """Decode an object response without exposing a vendor parser exception."""
+    try:
+        payload: Any = response.json()
+    except Exception:
+        raise ZuoraServiceError(ERROR_API_ERROR, "Zuora returned an invalid JSON response.") from None
+    if not isinstance(payload, dict):
+        raise ZuoraServiceError(ERROR_API_ERROR, "Zuora returned a response without its expected object.")
+    return payload
+
+
+def vendor_url(value: str) -> SplitResult:
+    """Parse a vendor-issued URL, containing all URL/port parser faults."""
+    try:
+        if any(char in value for char in "\x00\r\n\t"):
+            raise ValueError("invalid URL control character")
+        parts = urlsplit(value)
+        _ = parts.port
+        return parts
+    except Exception:
+        raise ZuoraServiceError(ERROR_API_ERROR, "Zuora returned an invalid response URL.") from None
 
 
 def classify_zuora_response(response: httpx.Response, *, is_query: bool) -> tuple[str, str]:

@@ -31,6 +31,10 @@ class BlobStoragePluginProtocol(Protocol):
     by the BlobStorageService wrapper.
     """
 
+    def get_blob_store_root(self) -> Path | None:
+        """Physical shared root, excluding remote caches."""
+        ...
+
     def is_ready(self) -> bool:
         """Check if the plugin is ready for use."""
         ...
@@ -161,10 +165,7 @@ class BlobStorageService(BootstrappableServiceInterface, BlobStorageServiceInter
 
         return plugin
 
-
-    def _execute_blob_storage_action(
-        self, action_name: str, parameters: dict[str, object]
-    ) -> ActionResult:
+    def _execute_blob_storage_action(self, action_name: str, parameters: dict[str, object]) -> ActionResult:
         if self.bootstrap_mode:
             raise FrameworkError(
                 message=f"Cannot execute plugin action '{action_name}' in bootstrap mode",
@@ -245,9 +246,7 @@ class BlobStorageService(BootstrappableServiceInterface, BlobStorageServiceInter
             return cast(ErrorDetail, error_value)
         return None
 
-    def _build_action_error(
-        self, action_name: str, parameters: dict[str, object], error: Exception
-    ) -> ActionResult:
+    def _build_action_error(self, action_name: str, parameters: dict[str, object], error: Exception) -> ActionResult:
         """Build error ActionResult for failed action.
 
         Args:
@@ -296,9 +295,7 @@ class BlobStorageService(BootstrappableServiceInterface, BlobStorageServiceInter
                 severity=ErrorSeverity.ERROR,
             )
 
-    def _enrich_metadata(
-        self, metadata: dict[str, object], content: bytes, namespace: str
-    ) -> dict[str, object]:
+    def _enrich_metadata(self, metadata: dict[str, object], content: bytes, namespace: str) -> dict[str, object]:
         enriched = {**metadata}
 
         # Add standard fields
@@ -313,9 +310,7 @@ class BlobStorageService(BootstrappableServiceInterface, BlobStorageServiceInter
                 # Try to decode as text for preview
                 text_content = content.decode("utf-8", errors="ignore")
                 # Remove NUL bytes which are invalid in PostgreSQL TEXT columns
-                preview = (
-                    text_content[:50].replace("\n", " ").replace("\r", " ").replace("\x00", "")
-                )
+                preview = text_content[:50].replace("\n", " ").replace("\r", " ").replace("\x00", "")
                 enriched["preview"] = preview
             except Exception:
                 # For binary files, use size info
@@ -323,9 +318,7 @@ class BlobStorageService(BootstrappableServiceInterface, BlobStorageServiceInter
 
         return enriched
 
-    def store_blob(
-        self, namespace: str, content: bytes | str, metadata: dict[str, object]
-    ) -> ActionResult:
+    def store_blob(self, namespace: str, content: bytes | str, metadata: dict[str, object]) -> ActionResult:
         # Handle base64-encoded content (when called via action system)
         if isinstance(content, str):
             import base64
@@ -392,9 +385,7 @@ class BlobStorageService(BootstrappableServiceInterface, BlobStorageServiceInter
             )
         # Path validation happens in the plugin/provider so the proxy never reads bytes.
         plugin = self._ensure_ready()
-        result = plugin.store_blob_from_file(
-            namespace, file_path, filename, mime_type, metadata, artifact_type
-        )
+        result = plugin.store_blob_from_file(namespace, file_path, filename, mime_type, metadata, artifact_type)
         return self._convert_plugin_result(result)
 
     @staticmethod
@@ -424,9 +415,7 @@ class BlobStorageService(BootstrappableServiceInterface, BlobStorageServiceInter
         return path
 
     @staticmethod
-    def _resolve_ingestion_mime_type(
-        file_path: str, resolved_filename: str, mime_type: str | None
-    ) -> str:
+    def _resolve_ingestion_mime_type(file_path: str, resolved_filename: str, mime_type: str | None) -> str:
         import mimetypes
 
         if mime_type:
@@ -435,10 +424,7 @@ class BlobStorageService(BootstrappableServiceInterface, BlobStorageServiceInter
         if guessed:
             return guessed
         raise FrameworkError(
-            message=(
-                f"mime_type could not be inferred for {file_path!r}; "
-                "supply mime_type explicitly"
-            ),
+            message=(f"mime_type could not be inferred for {file_path!r}; supply mime_type explicitly"),
             error_code="blob_storage.mime_type_unknown",
             details={"file_path": file_path, "filename": resolved_filename},
             severity=ErrorSeverity.ERROR,
@@ -485,9 +471,7 @@ class BlobStorageService(BootstrappableServiceInterface, BlobStorageServiceInter
                         "metadata": metadata,
                         "blob_id": blob_id,
                         "namespace": blob_data.get("namespace", ""),
-                        "filename": metadata.get("filename")
-                        or metadata.get("original_name")
-                        or blob_id,
+                        "filename": metadata.get("filename") or metadata.get("original_name") or blob_id,
                     },
                     "actions": [],
                     "error": None,
@@ -513,9 +497,7 @@ class BlobStorageService(BootstrappableServiceInterface, BlobStorageServiceInter
                 }
         else:
             # Pass empty namespace to trigger cross-namespace search
-            return self._execute_blob_storage_action(
-                "retrieve_file", {"namespace": "", "blob_id": blob_id}
-            )
+            return self._execute_blob_storage_action("retrieve_file", {"namespace": "", "blob_id": blob_id})
 
     def retrieve_blob_by_name(self, filename: str) -> ActionResult:
         """Retrieve blob by filename - the LLM-facing interface.
@@ -602,37 +584,29 @@ class BlobStorageService(BootstrappableServiceInterface, BlobStorageServiceInter
 
             blob_id = str(blob_metadata.get("blob_id", ""))
             # Delegate to internal retrieve_blob
-            return self._execute_blob_storage_action(
-                "retrieve_file", {"namespace": "", "blob_id": blob_id}
-            )
+            return self._execute_blob_storage_action("retrieve_file", {"namespace": "", "blob_id": blob_id})
 
     def delete_blob(self, namespace: str, blob_id: str) -> ActionResult:
         self._validate_blob_id(blob_id)
 
-        return self._execute_blob_storage_action(
-            "delete_file", {"namespace": namespace, "blob_id": blob_id}
-        )
+        return self._execute_blob_storage_action("delete_file", {"namespace": namespace, "blob_id": blob_id})
 
     def search_blobs(self, namespace: str, metadata_filters: dict[str, object]) -> ActionResult:
-        return self._execute_blob_storage_action(
-            "search_files", {"namespace": namespace, "filters": metadata_filters}
-        )
+        return self._execute_blob_storage_action("search_files", {"namespace": namespace, "filters": metadata_filters})
 
     def get_blob_metadata(self, namespace: str, blob_id: str) -> ActionResult:
         self._validate_blob_id(blob_id)
 
-        return self._execute_blob_storage_action(
-            "get_metadata", {"namespace": namespace, "blob_id": blob_id}
-        )
+        return self._execute_blob_storage_action("get_metadata", {"namespace": namespace, "blob_id": blob_id})
 
-    def update_blob_metadata(
-        self, namespace: str, blob_id: str, metadata: dict[str, object]
-    ) -> ActionResult:
+    def update_blob_metadata(self, namespace: str, blob_id: str, metadata: dict[str, object]) -> ActionResult:
         self._validate_blob_id(blob_id)
 
-        return self._execute_blob_storage_action(
-            "update_metadata", {"namespace": namespace, "blob_id": blob_id, "metadata": metadata}
-        )
+        return self._execute_blob_storage_action("update_metadata", {"namespace": namespace, "blob_id": blob_id, "metadata": metadata})
+
+    def get_blob_store_root(self) -> Path | None:
+        """Return the active provider's shared root, never a reconstructed path."""
+        return None if self.bootstrap_mode else self._ensure_ready().get_blob_store_root()
 
     def resolve_blob_path(self, blob_url: str) -> str | None:
         """Resolve a blob URL or raw blob_id to a filesystem path via the active plugin.

@@ -12,9 +12,11 @@ tally — a per-record ``status: "skipped"``/``"failed"`` entry is normal data,
 not a plugin-level fault, because Marketo's overall ``success`` stays true for
 those calls. ``create_or_update_leads`` first refuses a whole batch that names
 any intended REST read-only field other than identifiers or documented
-default-read echoes, before calling the write endpoint. Only a ``success:
-false`` envelope (structural fault — bad batch shape, auth, access) raises
-after a write is attempted.
+default-read echoes, before calling the write endpoint; that refusal is a
+typed ``MarketoServiceError`` (``marketo.invalid_params``) so its field list
+survives the worker's failed-job update. Only a ``success: false`` envelope
+(structural fault — bad batch shape, auth, access) raises after a write is
+attempted.
 
 Business-data limits + data-export migration (2026-08-02 —
 workbench/2026-08-02_business_data_limits_and_spill_floor_design_coordinator_day.md,
@@ -81,8 +83,18 @@ single-vendor-call reads — split the same way, minus the pagination (their
 combined ``<verb>`` function survives unchanged as a synchronous
 ``execute_<verb>(client, prepare_<verb>(...))`` convenience wrapper —
 ``check_setup``'s read probes and any other direct in-process caller still
-call it exactly as before; only the plugin's own dispatch handlers for these
-seven verbs call prepare/execute separately.
+call it exactly as before; only the plugin's own dispatch handlers call
+prepare/execute separately.
+
+Born-async completion (2026-11-08, Change chg_fabf151c): the remaining
+writes and diagnostics split the same way — ``create_or_update_leads``,
+``delete_leads``, ``merge_leads``, ``trigger_campaign``,
+``add_leads_to_list``/``remove_leads_from_list`` (sharing
+``prepare_list_membership``) and ``check_setup``. Their ``prepare_<verb>``
+does parameter validation only; the read-only lead-field preflight and every
+check_setup probe are vendor calls, so they run in ``execute_<verb>`` in the
+worker. ``test_connection``'s worker step lives in the plugin because it
+re-resolves the address-book entry.
 """
 
 from __future__ import annotations
@@ -107,6 +119,7 @@ from .constants import (
     DEFAULT_LEAD_LOOKUP_FIELD,
     DEFAULT_ROW_LIMIT,
     ERROR_AUTH_FAILED,
+    ERROR_INVALID_PARAMS,
     ERROR_PARTITION_ACCESS_DENIED,
     ERROR_PERMISSION_DENIED,
     GET_LEADS_DEFAULT_FIELDS,
@@ -125,11 +138,11 @@ from .constants import (
     PARAM_ACKNOWLEDGE_OVERRIDE,
     PARAM_ROW_LIMIT,
 )
-from .errors import MarketoEnvelopeError, classify_marketo_envelope
+from .errors import MarketoEnvelopeError, MarketoServiceError, classify_marketo_envelope
 
 # path_gate(output_tsv_path) -> realpath-resolved path to write, or raises
-# ExportPathRefusedError. Injected by the plugin, which binds the operator's
-# export_allowed_roots config (export_containment.assert_export_path_allowed).
+# PathRefusedError. Injected by the plugin, which binds the operator's
+# registered path addresses config (ananta.file_locations.containment.assert_path_allowed).
 PathGate = Callable[[str], str]
 
 _ISO_8601_FRACTIONAL_SECONDS = re.compile(r"(T\d{2}:\d{2}:\d{2})\.\d+")
@@ -158,20 +171,13 @@ def _resolve_effective_limit(params: dict[str, Any], *, verb: str) -> int:
     override_present = override is True
     row_limit_present = row_limit is not None
     if override_present != row_limit_present:
-        raise ValueError(
-            f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be "
-            f"given together — got {PARAM_ACKNOWLEDGE_OVERRIDE}={override!r}, "
-            f"{PARAM_ROW_LIMIT}={row_limit!r}"
-        )
+        raise ValueError(f"{verb}: '{PARAM_ACKNOWLEDGE_OVERRIDE}' and '{PARAM_ROW_LIMIT}' must be given together")
     if not override_present:
         return DEFAULT_ROW_LIMIT
     if not isinstance(row_limit, int) or isinstance(row_limit, bool) or row_limit < 1:
         raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}' must be a positive integer")
     if row_limit > MARKETO_LIST_ROW_LIMIT_CAP:
-        raise ValueError(
-            f"{verb}: '{PARAM_ROW_LIMIT}'={row_limit} exceeds the hard cap of "
-            f"{MARKETO_LIST_ROW_LIMIT_CAP}; refusing rather than silently clamping"
-        )
+        raise ValueError(f"{verb}: '{PARAM_ROW_LIMIT}' exceeds the hard cap of {MARKETO_LIST_ROW_LIMIT_CAP}; refusing rather than silently clamping")
     return row_limit
 
 
@@ -451,48 +457,68 @@ def _mint_activity_paging_token(client: Any, since_datetime: str) -> str:
     )
     token = payload.get("nextPageToken")
     if not isinstance(token, str) or not token:
-        raise ValueError(
-            f"Marketo returned no nextPageToken for since_datetime={since_datetime!r} "
-            "(it must be ISO-8601, e.g. 2026-07-28T00:00:00-07:00)"
-        )
+        raise ValueError("Marketo returned no nextPageToken for the supplied since_datetime (it must be ISO-8601, e.g. 2026-07-28T00:00:00-07:00)")
     return token
 
 
-def create_or_update_leads(client: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Create/update leads after refusing intended REST read-only fields."""
+def prepare_create_or_update_leads(params: dict[str, Any]) -> dict[str, Any]:
+    """Validate the batch shape on the dispatch path — no vendor call.
+
+    The REST read-only preflight needs one lead-describe call, so it runs in
+    :func:`execute_create_or_update_leads`, in the worker, before the write.
+    """
     action = params.get("action") or DEFAULT_LEAD_ACTION
     if action not in LEAD_ACTIONS:
-        raise ValueError(f"'action' must be one of {sorted(LEAD_ACTIONS)}, got {action!r}")
+        raise ValueError(f"'action' must be one of {sorted(LEAD_ACTIONS)}")
     records = _require_lead_records(params)
     lookup_field = _optional_lookup_field(params)
+    return {"action": action, "records": records, "lookup_field": lookup_field}
+
+
+def execute_create_or_update_leads(client: Any, request: dict[str, Any]) -> dict[str, Any]:
+    """Refuse intended REST read-only fields, then create/update the prepared batch."""
+    records: list[dict[str, Any]] = request["records"]
+    lookup_field: str | None = request["lookup_field"]
     _refuse_read_only_lead_fields(
         client,
         records,
         lookup_field or DEFAULT_LEAD_LOOKUP_FIELD,
     )
-    body: dict[str, Any] = {"action": action, "input": records}
+    body: dict[str, Any] = {"action": request["action"], "input": records}
     if lookup_field is not None:
         body["lookupField"] = lookup_field
     payload = client.post_json("/rest/v1/leads.json", json=body)
     return _batch_envelope(payload)
 
 
-def delete_leads(client: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Delete up to MAX_BATCH_RECORDS leads by id."""
-    lead_ids = _require_list(params, "lead_ids", max_len=MAX_BATCH_RECORDS)
-    body = {"input": [{"id": lead_id} for lead_id in lead_ids]}
+def create_or_update_leads(client: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Synchronous prepare+execute convenience wrapper for direct in-process callers."""
+    return execute_create_or_update_leads(client, prepare_create_or_update_leads(params))
+
+
+def prepare_delete_leads(params: dict[str, Any]) -> dict[str, Any]:
+    """Validate the lead id batch on the dispatch path — no vendor call."""
+    return {"lead_ids": _require_list(params, "lead_ids", max_len=MAX_BATCH_RECORDS)}
+
+
+def execute_delete_leads(client: Any, request: dict[str, Any]) -> dict[str, Any]:
+    """Delete the prepared lead ids (up to MAX_BATCH_RECORDS)."""
+    body = {"input": [{"id": lead_id} for lead_id in request["lead_ids"]]}
     payload = client.post_json("/rest/v1/leads/delete.json", json=body)
     return _batch_envelope(payload)
 
 
-def merge_leads(client: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Merge up to 25 losing leads into one winning lead.
+def delete_leads(client: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Synchronous prepare+execute convenience wrapper for direct in-process callers."""
+    return execute_delete_leads(client, prepare_delete_leads(params))
+
+
+def prepare_merge_leads(params: dict[str, Any]) -> dict[str, Any]:
+    """Validate the merge on the dispatch path — no vendor call.
 
     ``merge_in_crm=True`` also merges the natively-synced CRM records — Marketo
     itself restricts a CRM merge to exactly ONE losing lead per call (not 25),
     so that cap is enforced here rather than left to a server-side 1080.
-    Read-only fields retain the winner's value even when it is empty; they are
-    not populated from a losing record under the general merge-precedence rule.
     """
     winning_lead_id = _require_str(params, "winning_lead_id")
     merge_in_crm = params.get("merge_in_crm")
@@ -500,11 +526,29 @@ def merge_leads(client: Any, params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("'merge_in_crm' must be a boolean if provided")
     cap = MAX_MERGE_LOSING_LEADS_CRM if merge_in_crm else MAX_MERGE_LOSING_LEADS
     losing_lead_ids = _require_list(params, "losing_lead_ids", max_len=cap)
-    query: dict[str, Any] = {"leadIds": ",".join(str(lead_id) for lead_id in losing_lead_ids)}
+    return {"winning_lead_id": winning_lead_id, "losing_lead_ids": losing_lead_ids, "merge_in_crm": merge_in_crm}
+
+
+def execute_merge_leads(client: Any, request: dict[str, Any]) -> dict[str, Any]:
+    """Merge the prepared losing leads into the winning lead.
+
+    Read-only fields retain the winner's value even when it is empty; they are
+    not populated from a losing record under the general merge-precedence rule.
+    """
+    merge_in_crm: bool | None = request["merge_in_crm"]
+    query: dict[str, Any] = {"leadIds": ",".join(str(lead_id) for lead_id in request["losing_lead_ids"])}
     if merge_in_crm is not None:
         query["mergeInCRM"] = "true" if merge_in_crm else "false"
-    payload = client.post_json(f"/rest/v1/leads/{winning_lead_id}/merge.json", params=query)
-    return {"success": bool(payload.get("success", True)), "request_id": payload.get("requestId")}
+    payload = client.post_json(f"/rest/v1/leads/{request['winning_lead_id']}/merge.json", params=query)
+    return {
+        "success": bool(payload.get("success", True)),
+        "request_id": payload.get("requestId"),
+    }
+
+
+def merge_leads(client: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Synchronous prepare+execute convenience wrapper for direct in-process callers."""
+    return execute_merge_leads(client, prepare_merge_leads(params))
 
 
 def prepare_list_campaigns(params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
@@ -563,19 +607,37 @@ def list_campaigns(client: Any, params: dict[str, Any], path_gate: PathGate) -> 
     return execute_list_campaigns(client, prepare_list_campaigns(params, path_gate))
 
 
-def trigger_campaign(client: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Trigger a campaign (Request Campaign) for up to MAX_TRIGGER_LEADS leads, with optional tokens."""
+def prepare_trigger_campaign(params: dict[str, Any]) -> dict[str, Any]:
+    """Validate the campaign request on the dispatch path — no vendor call.
+
+    A non-list or empty ``tokens`` value sends no token overrides, as before.
+    """
     campaign_id = _require_str(params, "campaign_id")
     lead_ids = _require_list(params, "lead_ids", max_len=MAX_TRIGGER_LEADS)
-    input_body: dict[str, Any] = {"leads": [{"id": lead_id} for lead_id in lead_ids]}
     tokens = params.get("tokens")
-    if isinstance(tokens, list) and tokens:
-        for token in tokens:
-            if not isinstance(token, dict) or "name" not in token or "value" not in token:
-                raise ValueError("every entry in 'tokens' must be an object with 'name' and 'value'")
-        input_body["tokens"] = tokens
-    payload = client.post_json(f"/rest/v1/campaigns/{campaign_id}/trigger.json", json={"input": input_body})
-    return {"success": bool(payload.get("success", True)), "request_id": payload.get("requestId")}
+    if not isinstance(tokens, list) or not tokens:
+        return {"campaign_id": campaign_id, "lead_ids": lead_ids, "tokens": None}
+    for token in tokens:
+        if not isinstance(token, dict) or "name" not in token or "value" not in token:
+            raise ValueError("every entry in 'tokens' must be an object with 'name' and 'value'")
+    return {"campaign_id": campaign_id, "lead_ids": lead_ids, "tokens": tokens}
+
+
+def execute_trigger_campaign(client: Any, request: dict[str, Any]) -> dict[str, Any]:
+    """Trigger a campaign (Request Campaign) for the prepared leads, with optional tokens."""
+    input_body: dict[str, Any] = {"leads": [{"id": lead_id} for lead_id in request["lead_ids"]]}
+    if request["tokens"] is not None:
+        input_body["tokens"] = request["tokens"]
+    payload = client.post_json(f"/rest/v1/campaigns/{request['campaign_id']}/trigger.json", json={"input": input_body})
+    return {
+        "success": bool(payload.get("success", True)),
+        "request_id": payload.get("requestId"),
+    }
+
+
+def trigger_campaign(client: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Synchronous prepare+execute convenience wrapper for direct in-process callers."""
+    return execute_trigger_campaign(client, prepare_trigger_campaign(params))
 
 
 def prepare_list_static_lists(params: dict[str, Any], path_gate: PathGate) -> dict[str, Any]:
@@ -626,22 +688,46 @@ def list_static_lists(client: Any, params: dict[str, Any], path_gate: PathGate) 
     return execute_list_static_lists(client, prepare_list_static_lists(params, path_gate))
 
 
+def prepare_list_membership(params: dict[str, Any]) -> dict[str, Any]:
+    """Validate a static-list membership change (add or remove) — no vendor call."""
+    return {
+        "list_id": _require_str(params, "list_id"),
+        "lead_ids": _require_list(params, "lead_ids", max_len=MAX_BATCH_RECORDS),
+    }
+
+
+def execute_add_leads_to_list(client: Any, request: dict[str, Any]) -> dict[str, Any]:
+    """Add the prepared leads (up to MAX_BATCH_RECORDS) to a static list by id."""
+    body = {"input": [{"id": lead_id} for lead_id in request["lead_ids"]]}
+    payload = client.post_json(f"/rest/v1/lists/{request['list_id']}/leads.json", json=body)
+    return _batch_envelope(payload)
+
+
 def add_leads_to_list(client: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Add up to MAX_BATCH_RECORDS leads to a static list by id."""
-    list_id = _require_str(params, "list_id")
-    lead_ids = _require_list(params, "lead_ids", max_len=MAX_BATCH_RECORDS)
-    body = {"input": [{"id": lead_id} for lead_id in lead_ids]}
-    payload = client.post_json(f"/rest/v1/lists/{list_id}/leads.json", json=body)
+    """Synchronous prepare+execute convenience wrapper for direct in-process callers."""
+    return execute_add_leads_to_list(client, prepare_list_membership(params))
+
+
+def execute_remove_leads_from_list(client: Any, request: dict[str, Any]) -> dict[str, Any]:
+    """Remove the prepared leads from a static list by id (DELETE-with-body)."""
+    body = {"input": [{"id": lead_id} for lead_id in request["lead_ids"]]}
+    payload = client.delete_json(f"/rest/v1/lists/{request['list_id']}/leads.json", json=body)
     return _batch_envelope(payload)
 
 
 def remove_leads_from_list(client: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Remove up to MAX_BATCH_RECORDS leads from a static list by id (DELETE-with-body)."""
-    list_id = _require_str(params, "list_id")
-    lead_ids = _require_list(params, "lead_ids", max_len=MAX_BATCH_RECORDS)
-    body = {"input": [{"id": lead_id} for lead_id in lead_ids]}
-    payload = client.delete_json(f"/rest/v1/lists/{list_id}/leads.json", json=body)
-    return _batch_envelope(payload)
+    """Synchronous prepare+execute convenience wrapper for direct in-process callers."""
+    return execute_remove_leads_from_list(client, prepare_list_membership(params))
+
+
+def prepare_check_setup(_params: dict[str, Any]) -> dict[str, Any]:
+    """No params to validate — every probe is a vendor call, so all of them run in the worker."""
+    return {}
+
+
+def execute_check_setup(client: Any, _request: dict[str, Any]) -> dict[str, Any]:
+    """Run :func:`check_setup` from the worker; the job request carries no parameters."""
+    return check_setup(client)
 
 
 def check_setup(client: Any) -> dict[str, Any]:
@@ -658,7 +744,7 @@ def check_setup(client: Any) -> dict[str, Any]:
     the whole setup is confirmed ready. The five data-export-migrated probes
     write to a throwaway tempfile via a passthrough gate, never the operator's
     real workspace — this is a permission probe, not an export, and must not
-    depend on export_allowed_roots being configured.
+    depend on registered path addresses being configured.
     """
     checks: list[dict[str, Any]] = []
     for verb, label, permission in CHECK_SETUP_PROBES:
@@ -678,11 +764,7 @@ def check_setup(client: Any) -> dict[str, Any]:
         "checks": checks,
         "writes_unverified": list(CHECK_SETUP_UNVERIFIED_WRITE_VERBS),
         "writes_unverified_note": (
-            "These verbs perform a write/execute action, so their Access API "
-            "permission cannot be probed without actually running them. A "
-            "missing permission surfaces as marketo.permission_denied on "
-            "first real use — re-run check_setup after fixing it to confirm "
-            "the reads still pass, then retry the write."
+            "These verbs perform a write/execute action, so their Access API permission cannot be probed without actually running them. A missing permission surfaces as marketo.permission_denied on first real use — re-run check_setup after fixing it to confirm the reads still pass, then retry the write."
         ),
     }
 
@@ -692,7 +774,7 @@ def _run_read_probe(client: Any, verb: str) -> None:
 
     The five TSV-writing verbs probe through a throwaway tempfile (cleaned up
     unconditionally) with a passthrough gate — this is a permission check, not
-    an export, so it must not touch the operator's real export_allowed_roots
+    an export, so it must not touch the operator's real registered path addresses
     workspace or depend on it being configured at all.
 
     get_leads/list_campaigns/list_static_lists explicitly force
@@ -744,31 +826,12 @@ def _permission_guidance(error_code: str, permission: str | None) -> str:
     """Human remediation text for one failed check_setup probe."""
     if error_code == ERROR_PERMISSION_DENIED:
         if permission is not None:
-            return (
-                f"Add '{permission}' under Admin > Users & Roles > Roles > "
-                "<the API role> > Access API, then re-run check_setup."
-            )
-        return (
-            "The Access API Role is missing a permission for this capability "
-            "(the exact checkbox is unconfirmed for this operation) — open "
-            "Admin > Users & Roles > Roles > <the API role> > Access API and "
-            "compare against what similar read verbs need, then re-run "
-            "check_setup."
-        )
+            return f"Add '{permission}' under Admin > Users & Roles > Roles > <the API role> > Access API, then re-run check_setup."
+        return "The Access API Role is missing a permission for this capability (the exact checkbox is unconfirmed for this operation) — open Admin > Users & Roles > Roles > <the API role> > Access API and compare against what similar read verbs need, then re-run check_setup."
     if error_code == ERROR_PARTITION_ACCESS_DENIED:
-        return (
-            "The API user isn't assigned to the workspace/partition this "
-            "request targets — check Admin > Users & Roles > Users (the "
-            "API-only user's partition assignment), NOT the Access API Role "
-            "permissions."
-        )
+        return "The API user isn't assigned to the workspace/partition this request targets — check Admin > Users & Roles > Users (the API-only user's partition assignment), NOT the Access API Role permissions."
     if error_code == ERROR_AUTH_FAILED:
-        return (
-            "The OAuth client_id/client_secret were rejected — verify the "
-            "LaunchPoint custom service's credentials in the marketo_instance "
-            "address-book entry; this is a credential problem, not a Role "
-            "permission gap."
-        )
+        return "The OAuth client_id/client_secret were rejected — verify the LaunchPoint custom service's credentials in the marketo_instance address-book entry; this is a credential problem, not a Role permission gap."
     return "Unexpected error — inspect error_message for detail."
 
 
@@ -880,10 +943,7 @@ def _gate_and_check_parent(path_gate: PathGate, output_tsv_path: str) -> str:
     resolved_path = path_gate(output_tsv_path)
     parent_dir = os.path.dirname(resolved_path)
     if not os.path.isdir(parent_dir):
-        raise ValueError(
-            f"the parent directory of output_tsv_path does not exist ({parent_dir}); "
-            "create it first — this verb writes one file, it does not create directories"
-        )
+        raise ValueError("the parent directory of output_tsv_path does not exist; create it first — this verb writes one file, it does not create directories")
     return resolved_path
 
 
@@ -987,13 +1047,12 @@ def _refuse_read_only_lead_fields(
                 offending_records.setdefault(field_name, []).append(record_number)
     if not offending_records:
         return
-    details = "; ".join(
-        f"{field_name} (records {', '.join(str(number) for number in offending_records[field_name])})"
-        for field_name in sorted(offending_records)
-    )
-    raise ValueError(
-        "Marketo REST read-only fields cannot be written: "
-        f"{details}. Remove every listed field and retry; no write was attempted."
+    details = "; ".join(f"{field_name} (records {', '.join(str(number) for number in offending_records[field_name])})" for field_name in sorted(offending_records))
+    # Typed rather than ValueError: this refusal runs in the worker, whose
+    # failed-job update replaces bare ValueError text with a generic message.
+    raise MarketoServiceError(
+        ERROR_INVALID_PARAMS,
+        f"Marketo REST read-only fields cannot be written: {details}. Remove every listed field and retry; no write was attempted.",
     )
 
 

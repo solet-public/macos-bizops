@@ -4,8 +4,11 @@ description: >
   (including delete), metadata describe, Bulk API 2.0 ingest and query jobs,
   REST composite resources, the Tooling API with anonymous Apex, Reports and
   Dashboards, REST resources (limits, external-id upsert and delete, paged
-  query and queryAll, explain, search), invocable actions, and a generic
-  authenticated request for every other endpoint. Executor: full CLI
+  query and queryAll, explain, search, relationship writes), invocable
+  actions, Metadata API deployments over the REST deployRequest resource,
+  Salesforce Files (ContentVersion upload, verified download and
+  ContentDocument delete), and a generic authenticated request for every
+  other REST endpoint. Executor: full CLI
   delegation — every verb shells out to the operator's `sf` CLI (operator-ratified 2026-07-14, replacing the
   sf-CLI session-borrow client factory, dead on current CLI releases because
   `sf org display --json` now redacts `accessToken` unconditionally). The
@@ -27,11 +30,15 @@ description: >
   boundary. Bulk API v2 ingest (insert/update/upsert/delete/hardDelete,
   submitted --async and polled), composite and sObject Collections deletes,
   Tooling record deletes, anonymous Apex, report and dashboard deletes,
-  external-id deletes and invocable-action invocation are all first-class.
-  Typed verbs for the Metadata API, Partner SOAP operations, Platform Event
-  subscription and ContentVersion files are later builds; until then
-  authenticated_request reaches those endpoints, and org-defined Apex REST
-  resources use it by design.
+  external-id deletes and invocable-action invocation, relationship deletes,
+  report instance deletes, metadata deployments with destructive changes and
+  ContentDocument deletes are all first-class. Org-defined Apex REST
+  resources use authenticated_request by design. SOAP-only calls (Partner
+  merge, convertLead, undelete, emptyRecycleBin; Metadata retrieve,
+  describeMetadata, listMetadata, readMetadata) take the access token in the
+  SOAP SessionHeader, which this CLI-delegated plugin never holds, and
+  Platform Event subscription needs a streaming transport; both are a later
+  build.
 optional: true
 
 implements:
@@ -53,30 +60,6 @@ config:
       Path to the sf CLI binary. The default resolves via PATH; deployments
       where the platform process's PATH does not carry the CLI (LaunchAgent)
       pin an absolute path — e.g. the standalone bundle's bin/sf.
-  export_allowed_roots:
-    type: list
-    required: false
-    default: []
-    description: >
-      Absolute workspace directories export_soql may write TSV files under
-      (realpath + commonpath containment, mirroring ledger_allowed_roots).
-      Empty by default = REFUSE-ALL: every export is refused until the operator
-      opts workspace roots in here (operator ruling 2026-07-15 — bulk query
-      data lands in the operator's own workspace, never context or platform
-      blob storage). Prefer the exact export directories over broad parents.
-      Also governs bulk_job_results' three CSV outputs (successful/failed/
-      unprocessed records) and each bulk_jobs query_results CSV page.
-  import_allowed_roots:
-    type: list
-    required: false
-    default: []
-    description: >
-      Absolute workspace directories bulk_ingest_submit may read ingest CSVs
-      from (realpath + commonpath containment, the read-side mirror of
-      export_allowed_roots). Empty by default = REFUSE-ALL: every Bulk API
-      v2 ingest job is refused until the operator opts workspace roots in
-      here. Prefer the exact ingest directories over broad parents.
-
 # Org binding lives in the address book entry "salesforce_org": two literal
 # fields, target_org (the sf CLI alias or username every verb is invoked
 # against) and instance_host (the pinned my-domain host that alias must

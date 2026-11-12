@@ -1,0 +1,3 @@
+# Advisory fast-return census integrity: real manifest/runtime enumeration and
+# synthetic timing/checkpoint fixtures. No plugin latency is a gate condition.
+quality_gates/tests/fast_return_census_smoke.py

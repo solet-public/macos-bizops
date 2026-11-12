@@ -11,6 +11,7 @@ from ananta.core.actions.action_metadata import (
 )
 from ananta.core.domain.types import ActionResult
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.registered_job_operations import registered_job_return_schema
 from ananta.core.tracking.blob_field_types import LiteralValue
 
 
@@ -19,6 +20,7 @@ class BlobStorageAPI(ABC):
 
     @service_interface_process(
         name="store_blob",
+        is_async=True,
         is_discoverable=True,
         provider="blob_storage_service",
         parameters={
@@ -38,38 +40,39 @@ class BlobStorageAPI(ABC):
                 type=ParameterType.OBJECT,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Storage result with blob_id",
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or error",
-                    required=False,
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Result data containing blob_id",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Store binary files (audio, images, documents)",
-                "Save generated content to blob storage",
-                "Persist large binary data with metadata",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Storage result with blob_id",
+                properties={
+                    "action_status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status: completed or error",
+                        required=False,
+                    ),
+                    "data": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Result data containing blob_id",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Store binary files (audio, images, documents)",
+                    "Save generated content to blob storage",
+                    "Persist large binary data with metadata",
+                ],
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
-    def store_blob(
-        self, namespace: str, content: bytes, metadata: dict[str, object]
-    ) -> ActionResult:
+    def store_blob(self, namespace: str, content: bytes, metadata: dict[str, object]) -> ActionResult:
         """Store blob with metadata."""
         ...
 
     @service_interface_process(
         name="store_blob_from_file",
+        is_async=True,
         is_discoverable=True,
         provider="blob_storage_service",
         parameters={
@@ -84,62 +87,52 @@ class BlobStorageAPI(ABC):
                 type=ParameterType.STRING,
             ),
             "filename": ParameterMetadata(
-                description=(
-                    "Display filename for blob metadata; "
-                    "defaults to the basename of file_path when omitted"
-                ),
+                description=("Display filename for blob metadata; defaults to the basename of file_path when omitted"),
                 required=False,
                 type=ParameterType.STRING,
                 default=None,
             ),
             "mime_type": ParameterMetadata(
-                description=(
-                    "MIME type for the blob; "
-                    "if omitted, inferred from the file extension via mimetypes.guess_type"
-                ),
+                description=("MIME type for the blob; if omitted, inferred from the file extension via mimetypes.guess_type"),
                 required=False,
                 type=ParameterType.STRING,
                 default=None,
             ),
             "metadata": ParameterMetadata(
-                description=(
-                    "Additional metadata key-value pairs "
-                    "(merged with auto-derived filename/mime_type/source_path/byte_count)"
-                ),
+                description=("Additional metadata key-value pairs (merged with auto-derived filename/mime_type/source_path/byte_count)"),
                 required=False,
                 type=ParameterType.OBJECT,
                 default={},
             ),
             "artifact_type": ParameterMetadata(
-                description=(
-                    "Semantic type tag (e.g. 'audio', 'image'); "
-                    "defaults to the MIME type's primary class when omitted"
-                ),
+                description=("Semantic type tag (e.g. 'audio', 'image'); defaults to the MIME type's primary class when omitted"),
                 required=False,
                 type=ParameterType.STRING,
                 default=None,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Storage result with blob_id",
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or error",
-                    required=False,
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Result data containing blob_id, namespace, metadata",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Ingest a finished render (FLAC, M4A, MP4) from disk",
-                "Move large binary artifacts into blob storage without round-tripping bytes",
-                "Stage cover art (JPEG, PNG) for downstream upload steps",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Storage result with blob_id",
+                properties={
+                    "action_status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status: completed or error",
+                        required=False,
+                    ),
+                    "data": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Result data containing blob_id, namespace, metadata",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Ingest a finished render (FLAC, M4A, MP4) from disk",
+                    "Move large binary artifacts into blob storage without round-tripping bytes",
+                    "Stage cover art (JPEG, PNG) for downstream upload steps",
+                ],
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -163,6 +156,7 @@ class BlobStorageAPI(ABC):
 
     @service_interface_process(
         name="retrieve_blob_by_name",
+        is_async=True,
         is_discoverable=True,
         provider="blob_storage_service",
         parameters={
@@ -172,26 +166,28 @@ class BlobStorageAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Retrieved blob with content and metadata",
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or error",
-                    required=False,
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Blob content and metadata",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Retrieve stored binary files",
-                "Load content by filename",
-                "Access blob metadata and content",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Retrieved blob with content and metadata",
+                properties={
+                    "action_status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status: completed or error",
+                        required=False,
+                    ),
+                    "data": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Blob content and metadata",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Retrieve stored binary files",
+                    "Load content by filename",
+                    "Access blob metadata and content",
+                ],
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             blob_fields={
@@ -213,9 +209,7 @@ class BlobStorageAPI(ABC):
         is_discoverable=True,
         provider="blob_storage_service",
         parameters={
-            "namespace": ParameterMetadata(
-                description="Namespace for data isolation", required=True, type=ParameterType.STRING
-            ),
+            "namespace": ParameterMetadata(description="Namespace for data isolation", required=True, type=ParameterType.STRING),
             "blob_id": ParameterMetadata(
                 description="Unique blob identifier to delete",
                 required=True,
@@ -231,9 +225,7 @@ class BlobStorageAPI(ABC):
                     description="Status: completed or error",
                     required=False,
                 ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="Deletion result", required=False
-                ),
+                "data": ParameterMetadata(type=ParameterType.OBJECT, description="Deletion result", required=False),
             },
             usage_patterns=[
                 "Delete temporary files",
@@ -253,9 +245,7 @@ class BlobStorageAPI(ABC):
         is_discoverable=True,
         provider="blob_storage_service",
         parameters={
-            "namespace": ParameterMetadata(
-                description="Namespace for data isolation", required=True, type=ParameterType.STRING
-            ),
+            "namespace": ParameterMetadata(description="Namespace for data isolation", required=True, type=ParameterType.STRING),
             "metadata_filters": ParameterMetadata(
                 description="Filter criteria for metadata search (key-value pairs)",
                 required=True,
@@ -295,12 +285,8 @@ class BlobStorageAPI(ABC):
         is_discoverable=True,
         provider="blob_storage_service",
         parameters={
-            "namespace": ParameterMetadata(
-                description="Namespace for data isolation", required=True, type=ParameterType.STRING
-            ),
-            "blob_id": ParameterMetadata(
-                description="Unique blob identifier", required=True, type=ParameterType.STRING
-            ),
+            "namespace": ParameterMetadata(description="Namespace for data isolation", required=True, type=ParameterType.STRING),
+            "blob_id": ParameterMetadata(description="Unique blob identifier", required=True, type=ParameterType.STRING),
         },
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
@@ -311,9 +297,7 @@ class BlobStorageAPI(ABC):
                     description="Status: completed or error",
                     required=False,
                 ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT, description="Blob metadata", required=False
-                ),
+                "data": ParameterMetadata(type=ParameterType.OBJECT, description="Blob metadata", required=False),
             },
             usage_patterns=[
                 "Check blob properties without downloading",
@@ -361,8 +345,7 @@ class BlobStorageAPI(ABC):
                 "Inspect specific file properties",
             ],
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
     @abstractmethod
     def file_command(self, command: str) -> ActionResult:

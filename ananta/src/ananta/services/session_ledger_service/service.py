@@ -728,6 +728,12 @@ class SessionLedgerService(
         *,
         source_id: str | None = None,
     ) -> dict[str, Any]:
+        """Run the complete push body for internal callers and the ledger owner.
+
+        ActionProcessor admits registered calls to the existing serial ledger
+        job owner; this synchronous method keeps the export caller's batch-id
+        and error contract. It never submits a nested job or replays a request.
+        """
         kind = IngestSourceKind(source_kind)
         result = self._importer.dispatch_pushed(
             source_kind=kind,
@@ -1759,6 +1765,22 @@ class SessionLedgerService(
 
         assert_operator_principal(call_context, "list_session_label_clears")
         return SessionLabelMaintenance(self._repository).history(session_id, limit, after_cleared_at, after_id)
+
+    def reclaim_orphan_event_text_blobs(
+        self,
+        confirm: bool = False,
+        *,
+        call_context: CallContext | None = None,
+    ) -> dict[str, Any]:
+        """Preview or reclaim old unreferenced event text; operator-only."""
+        from ananta.services.session_ledger_service.blob_reclaim import EventTextBlobReclaimer
+
+        assert_operator_principal(call_context, "reclaim_orphan_event_text_blobs")
+        blobs = self._blob_adapter.blob_storage_service
+        root = blobs.get_blob_store_root()
+        if root is None:
+            raise ValueError("event-text reclaim requires a shared filesystem blob store")
+        return EventTextBlobReclaimer(state=self._state_service, blobs=blobs, blob_root=root).run(confirm=confirm)
 
     def backfill_export_blob_identity(
         self,

@@ -15,6 +15,8 @@ if (( $# > 0 )); then
   shift
 fi
 
+# Capture the user's folder before entering the clone for project settings.
+export SOLET_LAUNCH_DIRECTORY="$PWD"
 cd {{CLONE_DIR_ZSH}} || exit 1
 
 codex_bin="${CODEX_BIN:-codex}"
@@ -41,7 +43,7 @@ export AGENT_ROLE="$role"
 export AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}"
 export AGENT_WAKE_CLI="{{SOLET_NAME}}"
 export FLEET_TRANSPORT="${{{SOLET_NAME}}_FLEET_TRANSPORT:-watch}"
-export GIT_CONTROLLER_NAME="{{GIT_CONTROLLER_NAME}}"
+unset GIT_CONTROLLER_NAME
 
 if [[ "$FLEET_TRANSPORT" == "watch" ]]; then
   if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then

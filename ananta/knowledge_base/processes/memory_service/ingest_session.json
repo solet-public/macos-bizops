@@ -1,12 +1,12 @@
 {
   "process_key": "service_interface::memory_service::ingest_session",
   "display_name": "Ingest Session",
-  "description": "Ingest a conversation transcript as episodic memories. Each conversation turn becomes a separate memory.",
+  "description": "Return a queued owned-job receipt (data.job_id and data.status). Read the exact id through job_service.get_job for the complete former response in job.result or the typed failure in job.error. Admission retains payload references locally; uncertain effects require reconciliation and must never be replayed automatically.\n\nIngest a conversation transcript as episodic memories. Each conversation turn becomes a separate memory.",
   "embedding_description": "",
   "result_processor_customizations": {
     "action_label": "Ingest Session",
     "result_type": "session_ingested",
-    "result_description": "Results of conversation transcript ingestion with memory IDs created",
+    "result_description": "The complete memory-operation response from the exact admitted job; the immediate response is a queued job receipt.",
     "presentation_guidance": "",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },
@@ -14,5 +14,6 @@
     "action_context": "Ingesting a conversation transcript as episodic memories",
     "error_interpretation": "ValidationError: transcript is empty or invalid format. EmbeddingError: failed to generate embeddings for conversation chunks. DatabaseError: failed to persist memories to storage.",
     "recovery_guidance": "For validation errors: ensure transcript contains valid conversation text. For embedding errors: verify embedding service is available. For database errors: verify state and vector storage are accessible."
-  }
+  },
+  "is_async": true
 }

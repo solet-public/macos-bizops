@@ -1,12 +1,12 @@
 {
   "process_key": "service_interface::memory_service::process_memorization_queue",
   "display_name": "Process Memorization Queue",
-  "description": "Process all due memorization reviews. Called by scheduler to reinforce memories via spaced repetition.",
+  "description": "Return a queued owned-job receipt (data.job_id and data.status). Read the exact id through job_service.get_job for the complete former response in job.result or the typed failure in job.error. Admission retains payload references locally; uncertain effects require reconciliation and must never be replayed automatically.\n\nProcess all due memorization reviews. Called by scheduler to reinforce memories via spaced repetition.",
   "embedding_description": "",
   "result_processor_customizations": {
     "action_label": "Process Memorization Queue",
     "result_type": "queue_processed",
-    "result_description": "Results of processing due memorization reviews with counts of processed and completed items",
+    "result_description": "The complete memory-operation response from the exact admitted job; the immediate response is a queued job receipt.",
     "presentation_guidance": "",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },
@@ -14,5 +14,6 @@
     "action_context": "Processing due spaced repetition reviews in the memorization queue",
     "error_interpretation": "DatabaseError: failed to query or update memorization records. StrengthUpdateError: failed to update memory strength values.",
     "recovery_guidance": "For database errors: verify state storage is accessible. For strength update errors: verify the memory records exist."
-  }
+  },
+  "is_async": true
 }

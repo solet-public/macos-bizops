@@ -45,9 +45,9 @@ _TASK_ID = ParameterMetadata(type=ParameterType.STRING, required=True, descripti
 _PROVIDER_ID = ParameterMetadata(type=ParameterType.STRING, required=True, description="Authentication provider id.")
 _PAGE = ParameterMetadata(type=ParameterType.INTEGER, required=False, description="Page number, from 1.")
 _DEFINITION = ParameterMetadata(type=ParameterType.OBJECT, required=False, description="An export document (workflow, tasks, linkages). Pass this or input_path.")
-_INPUT_PATH = ParameterMetadata(type=ParameterType.STRING, required=False, description="Absolute .json backup path under an export_allowed_roots entry. Pass this or definition.")
+_INPUT_PATH = ParameterMetadata(type=ParameterType.STRING, required=False, description="Absolute .json backup path under a registered path address. Pass this or definition.")
 _ACTIVATE = ParameterMetadata(type=ParameterType.BOOLEAN, required=False, description="Make the imported version active (Zuora default false).")
-_CREDENTIALS = ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Credential fields for the auth_type; secret values are redacted from every echo.")
+_CREDENTIALS = ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Credential fields for the auth_type.")
 _READ: Final[MergeErrorProcessorCustomizations] = MergeErrorProcessorCustomizations(retryable=True)
 _WRITE: Final[MergeErrorProcessorCustomizations] = MergeErrorProcessorCustomizations(retryable=False)
 _EDGE: Final[ProcessorPolicyCategory] = ProcessorPolicyCategory.EDGE
@@ -137,7 +137,7 @@ class WorkflowProcesses:
             **_headers("export_workflow"),
             "workflow_id": _WORKFLOW_ID,
             "version": ParameterMetadata(type=ParameterType.STRING, required=False, description="Version number or 'latest'; default is the active version."),
-            "output_path": ParameterMetadata(type=ParameterType.STRING, required=False, description="Absolute .json path under an export_allowed_roots entry."),
+            "output_path": ParameterMetadata(type=ParameterType.STRING, required=False, description="Absolute .json path under a registered path address."),
         },
         return_value_schema=QUEUED,
         error_processor_customizations=_READ,
@@ -348,7 +348,7 @@ class WorkflowProcesses:
             "name": ParameterMetadata(type=ParameterType.STRING, required=True, description="Display name."),
             "service_name": ParameterMetadata(type=ParameterType.STRING, required=True, description="Logical service identifier."),
             "auth_type": ParameterMetadata(type=ParameterType.STRING, required=True, description="basic_auth, oauth_1.0, oauth_2.0, NetsuiteTBA, hmac or s3."),
-            "credentials": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="Credential fields for the auth_type; secret values are redacted from every echo."),
+            "credentials": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="Credential fields for the auth_type."),
             "description": ParameterMetadata(type=ParameterType.STRING, required=False, description="Description."),
             "active": ParameterMetadata(type=ParameterType.BOOLEAN, required=False, description="Whether the provider is active."),
         },

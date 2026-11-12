@@ -16,6 +16,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from ananta.llm.session_ledger.schema import TABLE_SESSION
@@ -808,6 +810,10 @@ class StubBlobStorageService:
 
     blobs: list[StoredBlob] = field(default_factory=list)
     _next_id: int = 1
+    _root: TemporaryDirectory[str] = field(default_factory=TemporaryDirectory)
+
+    def get_blob_store_root(self) -> Path:
+        return Path(self._root.name)
 
     def store_blob(
         self,

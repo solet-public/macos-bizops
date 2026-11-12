@@ -1,0 +1,3 @@
+# Six measured actions: real queued execution, old results, failures and public service faces.
+plugins/agent_messaging_plugin/tests/async_actions_smoke.py
+plugins/macos_self_deployment_plugin/tests/async_actions_smoke.py

@@ -49,6 +49,7 @@ from ananta.core.actions.action_metadata import (
 )
 from ananta.core.domain.enums import ProcessorPolicyCategory
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.registered_job_operations import registered_job_return_schema
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ACT-R Memory Type Definitions
@@ -78,6 +79,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="get_recent_memory",
+        is_async=True,
         is_discoverable=False,
         provider="memory_service",
         parameters={
@@ -106,13 +108,15 @@ class MemoryServiceAPI(ABC):
                 default=None,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Recent memory with formatted history",
-            type=ParameterType.OBJECT,
-            properties={
-                "history": ParameterMetadata(type=ParameterType.STRING, description="Formatted conversation history"),
-                "event_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of events in history"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Recent memory with formatted history",
+                type=ParameterType.OBJECT,
+                properties={
+                    "history": ParameterMetadata(type=ParameterType.STRING, description="Formatted conversation history"),
+                    "event_count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of events in history"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -227,6 +231,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="get_recent_memory_structured",
+        is_async=True,
         is_discoverable=False,
         provider="memory_service",
         parameters={
@@ -255,16 +260,18 @@ class MemoryServiceAPI(ABC):
                 default=None,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Recent interaction events as structured records",
-            type=ParameterType.OBJECT,
-            properties={
-                "events": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=("Event records with session_id, event_type, content, and ISO timestamp"),
-                ),
-                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of events returned"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Recent interaction events as structured records",
+                type=ParameterType.OBJECT,
+                properties={
+                    "events": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("Event records with session_id, event_type, content, and ISO timestamp"),
+                    ),
+                    "count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of events returned"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -285,6 +292,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="remember",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -314,13 +322,15 @@ class MemoryServiceAPI(ABC):
                 default=True,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Result with memory_id",
-            type=ParameterType.OBJECT,
-            properties={
-                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="UUID of the created memory"),
-                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Result with memory_id",
+                type=ParameterType.OBJECT,
+                properties={
+                    "memory_id": ParameterMetadata(type=ParameterType.STRING, description="UUID of the created memory"),
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -338,6 +348,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="recall",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -377,16 +388,18 @@ class MemoryServiceAPI(ABC):
                 default=None,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="List of matching memories with scores",
-            type=ParameterType.OBJECT,
-            properties={
-                "memories": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="List of memory records with content, strength, and scores",
-                ),
-                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories returned"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="List of matching memories with scores",
+                type=ParameterType.OBJECT,
+                properties={
+                    "memories": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="List of memory records with content, strength, and scores",
+                    ),
+                    "count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories returned"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -405,17 +418,20 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="forget",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
             "memory_id": ParameterMetadata(description="ID of memory to archive", required=True, type=ParameterType.STRING),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Confirmation of archival",
-            type=ParameterType.OBJECT,
-            properties={
-                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Confirmation of archival",
+                type=ParameterType.OBJECT,
+                properties={
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -453,6 +469,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="memorize",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -469,14 +486,16 @@ class MemoryServiceAPI(ABC):
                 default=None,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Memorization confirmation with next review date",
-            type=ParameterType.OBJECT,
-            properties={
-                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the memory being memorized"),
-                "next_review_at": ParameterMetadata(type=ParameterType.STRING, description="ISO timestamp of next scheduled review"),
-                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Memorization confirmation with next review date",
+                type=ParameterType.OBJECT,
+                properties={
+                    "memory_id": ParameterMetadata(type=ParameterType.STRING, description="ID of the memory being memorized"),
+                    "next_review_at": ParameterMetadata(type=ParameterType.STRING, description="ISO timestamp of next scheduled review"),
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -487,6 +506,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="learn",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -520,18 +540,20 @@ class MemoryServiceAPI(ABC):
                 default=[],
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Ingestion results",
-            type=ParameterType.OBJECT,
-            properties={
-                "path": ParameterMetadata(type=ParameterType.STRING, description="Path that was ingested"),
-                "memories_created": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories created"),
-                "memorized": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of memories added to memorization queue",
-                ),
-                "message": ParameterMetadata(type=ParameterType.STRING, description="Summary message"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Ingestion results",
+                type=ParameterType.OBJECT,
+                properties={
+                    "path": ParameterMetadata(type=ParameterType.STRING, description="Path that was ingested"),
+                    "memories_created": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories created"),
+                    "memorized": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Number of memories added to memorization queue",
+                    ),
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Summary message"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -549,6 +571,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="ingest_session",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -566,17 +589,19 @@ class MemoryServiceAPI(ABC):
                 default=True,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Ingestion results",
-            type=ParameterType.OBJECT,
-            properties={
-                "transcript_session_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Session ID used for grouping the ingested memories (NOT the IO routing session)",
-                ),
-                "memories_created": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories created"),
-                "memory_ids": ParameterMetadata(type=ParameterType.LIST, description="List of created memory IDs"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Ingestion results",
+                type=ParameterType.OBJECT,
+                properties={
+                    "transcript_session_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Session ID used for grouping the ingested memories (NOT the IO routing session)",
+                    ),
+                    "memories_created": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories created"),
+                    "memory_ids": ParameterMetadata(type=ParameterType.LIST, description="List of created memory IDs"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -591,6 +616,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="delete_memories_by_tag",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -600,16 +626,18 @@ class MemoryServiceAPI(ABC):
                 type=ParameterType.STRING,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Deletion results",
-            type=ParameterType.OBJECT,
-            properties={
-                "action_status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Contains deleted_count",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Deletion results",
+                type=ParameterType.OBJECT,
+                properties={
+                    "action_status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
+                    "data": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Contains deleted_count",
+                    ),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -620,6 +648,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="delete_memories_by_ids",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -629,16 +658,18 @@ class MemoryServiceAPI(ABC):
                 type=ParameterType.LIST,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Deletion results",
-            type=ParameterType.OBJECT,
-            properties={
-                "action_status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Contains deleted_count",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Deletion results",
+                type=ParameterType.OBJECT,
+                properties={
+                    "action_status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
+                    "data": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Contains deleted_count",
+                    ),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -649,6 +680,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="get_memories_by_tag",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -664,16 +696,18 @@ class MemoryServiceAPI(ABC):
                 default=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Matching memories",
-            type=ParameterType.OBJECT,
-            properties={
-                "action_status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Contains memories list and count",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Matching memories",
+                type=ParameterType.OBJECT,
+                properties={
+                    "action_status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
+                    "data": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Contains memories list and count",
+                    ),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -740,20 +774,23 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="memorize_by_tag",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
             "tag": ParameterMetadata(description="Tag to match", required=True, type=ParameterType.STRING),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Batch memorization results",
-            type=ParameterType.OBJECT,
-            properties={
-                "tag": ParameterMetadata(type=ParameterType.STRING, description="Tag that was matched"),
-                "matching_memories": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories with this tag"),
-                "newly_memorizing": ParameterMetadata(type=ParameterType.INTEGER, description="Number newly added to queue"),
-                "already_memorizing": ParameterMetadata(type=ParameterType.INTEGER, description="Number already in queue"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Batch memorization results",
+                type=ParameterType.OBJECT,
+                properties={
+                    "tag": ParameterMetadata(type=ParameterType.STRING, description="Tag that was matched"),
+                    "matching_memories": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories with this tag"),
+                    "newly_memorizing": ParameterMetadata(type=ParameterType.INTEGER, description="Number newly added to queue"),
+                    "already_memorizing": ParameterMetadata(type=ParameterType.INTEGER, description="Number already in queue"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -789,6 +826,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="list_memorizing",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -799,14 +837,16 @@ class MemoryServiceAPI(ABC):
                 default=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="List of memorization records",
-            type=ParameterType.OBJECT,
-            properties={
-                "total": ParameterMetadata(type=ParameterType.INTEGER, description="Total in queue"),
-                "due_now": ParameterMetadata(type=ParameterType.INTEGER, description="Number due for review"),
-                "memorizations": ParameterMetadata(type=ParameterType.LIST, description="List of memorization records"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="List of memorization records",
+                type=ParameterType.OBJECT,
+                properties={
+                    "total": ParameterMetadata(type=ParameterType.INTEGER, description="Total in queue"),
+                    "due_now": ParameterMetadata(type=ParameterType.INTEGER, description="Number due for review"),
+                    "memorizations": ParameterMetadata(type=ParameterType.LIST, description="List of memorization records"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -817,17 +857,20 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="process_memorization_queue",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Processing results",
-            type=ParameterType.OBJECT,
-            properties={
-                "processed": ParameterMetadata(type=ParameterType.INTEGER, description="Number of reviews processed"),
-                "completed": ParameterMetadata(type=ParameterType.INTEGER, description="Number that completed memorization"),
-                "message": ParameterMetadata(type=ParameterType.STRING, description="Summary message"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Processing results",
+                type=ParameterType.OBJECT,
+                properties={
+                    "processed": ParameterMetadata(type=ParameterType.INTEGER, description="Number of reviews processed"),
+                    "completed": ParameterMetadata(type=ParameterType.INTEGER, description="Number that completed memorization"),
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Summary message"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -838,6 +881,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="consolidate",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -860,15 +904,17 @@ class MemoryServiceAPI(ABC):
                 default=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Consolidation results",
-            type=ParameterType.OBJECT,
-            properties={
-                "candidates_found": ParameterMetadata(type=ParameterType.INTEGER, description="Number of weak memories found"),
-                "clusters_formed": ParameterMetadata(type=ParameterType.INTEGER, description="Number of clusters for summarization"),
-                "consolidations": ParameterMetadata(type=ParameterType.LIST, description="List of consolidation actions taken"),
-                "dry_run": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether this was a dry run"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Consolidation results",
+                type=ParameterType.OBJECT,
+                properties={
+                    "candidates_found": ParameterMetadata(type=ParameterType.INTEGER, description="Number of weak memories found"),
+                    "clusters_formed": ParameterMetadata(type=ParameterType.INTEGER, description="Number of clusters for summarization"),
+                    "consolidations": ParameterMetadata(type=ParameterType.LIST, description="List of consolidation actions taken"),
+                    "dry_run": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether this was a dry run"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -879,19 +925,22 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="recompute_strengths",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Recomputation results",
-            type=ParameterType.OBJECT,
-            properties={
-                "total_memories": ParameterMetadata(type=ParameterType.INTEGER, description="Total memories processed"),
-                "updated": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of memories with updated strength",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Recomputation results",
+                type=ParameterType.OBJECT,
+                properties={
+                    "total_memories": ParameterMetadata(type=ParameterType.INTEGER, description="Total memories processed"),
+                    "updated": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Number of memories with updated strength",
+                    ),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -932,6 +981,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="process_memorization_queue_cron",
+        is_async=True,
         is_discoverable=False,  # cron-fired only; not model-discoverable
         provider="memory_service",
         # EDGE_SINK terminal-action shape — action_queue_poller short-circuits
@@ -941,14 +991,16 @@ class MemoryServiceAPI(ABC):
         # is required.
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Processing results",
-            type=ParameterType.OBJECT,
-            properties={
-                "processed": ParameterMetadata(type=ParameterType.INTEGER, description="Number of reviews processed"),
-                "completed": ParameterMetadata(type=ParameterType.INTEGER, description="Number that completed memorization"),
-                "message": ParameterMetadata(type=ParameterType.STRING, description="Summary message"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Processing results",
+                type=ParameterType.OBJECT,
+                properties={
+                    "processed": ParameterMetadata(type=ParameterType.INTEGER, description="Number of reviews processed"),
+                    "completed": ParameterMetadata(type=ParameterType.INTEGER, description="Number that completed memorization"),
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Summary message"),
+                },
+            )
         ),
         # No result_processor_customizations / error_processor_customizations
         # per the canonical EDGE_SINK contract.
@@ -965,6 +1017,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="consolidate_cron",
+        is_async=True,
         is_discoverable=False,  # cron-fired only; not model-discoverable
         provider="memory_service",
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
@@ -976,15 +1029,17 @@ class MemoryServiceAPI(ABC):
                 default=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Consolidation results",
-            type=ParameterType.OBJECT,
-            properties={
-                "candidates_found": ParameterMetadata(type=ParameterType.INTEGER, description="Number of weak memories found"),
-                "clusters_formed": ParameterMetadata(type=ParameterType.INTEGER, description="Number of clusters for summarization"),
-                "consolidations": ParameterMetadata(type=ParameterType.LIST, description="List of consolidation actions taken"),
-                "dry_run": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether this was a dry run"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Consolidation results",
+                type=ParameterType.OBJECT,
+                properties={
+                    "candidates_found": ParameterMetadata(type=ParameterType.INTEGER, description="Number of weak memories found"),
+                    "clusters_formed": ParameterMetadata(type=ParameterType.INTEGER, description="Number of clusters for summarization"),
+                    "consolidations": ParameterMetadata(type=ParameterType.LIST, description="List of consolidation actions taken"),
+                    "dry_run": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether this was a dry run"),
+                },
+            )
         ),
         # No result_processor_customizations / error_processor_customizations
         # per the canonical EDGE_SINK contract.
@@ -1001,20 +1056,23 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="recompute_strengths_cron",
+        is_async=True,
         is_discoverable=False,  # cron-fired only; not model-discoverable
         provider="memory_service",
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Recomputation results",
-            type=ParameterType.OBJECT,
-            properties={
-                "total_memories": ParameterMetadata(type=ParameterType.INTEGER, description="Total memories processed"),
-                "updated": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of memories with updated strength",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Recomputation results",
+                type=ParameterType.OBJECT,
+                properties={
+                    "total_memories": ParameterMetadata(type=ParameterType.INTEGER, description="Total memories processed"),
+                    "updated": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Number of memories with updated strength",
+                    ),
+                },
+            )
         ),
         # No result_processor_customizations / error_processor_customizations
         # per the canonical EDGE_SINK contract.
@@ -1062,24 +1120,27 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="memory_stats",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Long-term memory statistics",
-            type=ParameterType.OBJECT,
-            properties={
-                "total": ParameterMetadata(type=ParameterType.INTEGER, description="Total number of long-term memories"),
-                "by_type": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Counts by memory type (episodic, semantic_l1, semantic_l2)",
-                ),
-                "by_status": ParameterMetadata(type=ParameterType.OBJECT, description="Counts by status (active, archived)"),
-                "strength_distribution": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Counts by strength category (strong, medium, weak, very_weak)",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Long-term memory statistics",
+                type=ParameterType.OBJECT,
+                properties={
+                    "total": ParameterMetadata(type=ParameterType.INTEGER, description="Total number of long-term memories"),
+                    "by_type": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Counts by memory type (episodic, semantic_l1, semantic_l2)",
+                    ),
+                    "by_status": ParameterMetadata(type=ParameterType.OBJECT, description="Counts by status (active, archived)"),
+                    "strength_distribution": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Counts by strength category (strong, medium, weak, very_weak)",
+                    ),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -1115,6 +1176,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="list_memories",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -1144,14 +1206,16 @@ class MemoryServiceAPI(ABC):
                 default=20,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="List of memories",
-            type=ParameterType.OBJECT,
-            properties={
-                "memories": ParameterMetadata(type=ParameterType.LIST, description="List of memory records"),
-                "total": ParameterMetadata(type=ParameterType.INTEGER, description="Total matching memories"),
-                "showing": ParameterMetadata(type=ParameterType.INTEGER, description="Number shown"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="List of memories",
+                type=ParameterType.OBJECT,
+                properties={
+                    "memories": ParameterMetadata(type=ParameterType.LIST, description="List of memory records"),
+                    "total": ParameterMetadata(type=ParameterType.INTEGER, description="Total matching memories"),
+                    "showing": ParameterMetadata(type=ParameterType.INTEGER, description="Number shown"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -1220,6 +1284,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="import_memories",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -1231,14 +1296,16 @@ class MemoryServiceAPI(ABC):
                 default=True,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Import results",
-            type=ParameterType.OBJECT,
-            properties={
-                "imported": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories imported"),
-                "skipped": ParameterMetadata(type=ParameterType.INTEGER, description="Number skipped (already exist)"),
-                "total_in_file": ParameterMetadata(type=ParameterType.INTEGER, description="Total memories in file"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Import results",
+                type=ParameterType.OBJECT,
+                properties={
+                    "imported": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories imported"),
+                    "skipped": ParameterMetadata(type=ParameterType.INTEGER, description="Number skipped (already exist)"),
+                    "total_in_file": ParameterMetadata(type=ParameterType.INTEGER, description="Total memories in file"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -1249,6 +1316,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="cleanup_orphaned_vectors",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -1265,23 +1333,25 @@ class MemoryServiceAPI(ABC):
                 default=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Rebuild results",
-            type=ParameterType.OBJECT,
-            properties={
-                "dry_run": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="Whether this was a dry run (no mutation)",
-                ),
-                "cleared": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Vectors cleared from the namespace (would-be count under dry_run)",
-                ),
-                "reindexed": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Live memories reindexed (would-be count under dry_run)",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Rebuild results",
+                type=ParameterType.OBJECT,
+                properties={
+                    "dry_run": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="Whether this was a dry run (no mutation)",
+                    ),
+                    "cleared": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Vectors cleared from the namespace (would-be count under dry_run)",
+                    ),
+                    "reindexed": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Live memories reindexed (would-be count under dry_run)",
+                    ),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -1292,19 +1362,22 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="reindex_orphaned_vectors",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Reindexing results",
-            type=ParameterType.OBJECT,
-            properties={
-                "action_status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Contains reindex_count and message",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Reindexing results",
+                type=ParameterType.OBJECT,
+                properties={
+                    "action_status": ParameterMetadata(type=ParameterType.STRING, description="Operation status"),
+                    "data": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Contains reindex_count and message",
+                    ),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -1315,6 +1388,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="purge_memories",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -1324,15 +1398,17 @@ class MemoryServiceAPI(ABC):
                 type=ParameterType.BOOLEAN,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Purge operation results with counts of deleted items",
-            type=ParameterType.OBJECT,
-            properties={
-                "purged": ParameterMetadata(type=ParameterType.BOOLEAN, description="True if purge completed"),
-                "deleted_memories": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories deleted"),
-                "deleted_memorizations": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memorizations deleted"),
-                "deleted_vectors": ParameterMetadata(type=ParameterType.INTEGER, description="Number of vectors deleted"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Purge operation results with counts of deleted items",
+                type=ParameterType.OBJECT,
+                properties={
+                    "purged": ParameterMetadata(type=ParameterType.BOOLEAN, description="True if purge completed"),
+                    "deleted_memories": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memories deleted"),
+                    "deleted_memorizations": ParameterMetadata(type=ParameterType.INTEGER, description="Number of memorizations deleted"),
+                    "deleted_vectors": ParameterMetadata(type=ParameterType.INTEGER, description="Number of vectors deleted"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -1347,6 +1423,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="audit_pinned_notes",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -1363,22 +1440,24 @@ class MemoryServiceAPI(ABC):
                 default=None,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Audit results for pinned notes",
-            type=ParameterType.OBJECT,
-            properties={
-                "total_pinned": ParameterMetadata(type=ParameterType.INTEGER, description="Total number of pinned memories"),
-                "active": ParameterMetadata(type=ParameterType.INTEGER, description="Number actively being memorized"),
-                "completed": ParameterMetadata(type=ParameterType.INTEGER, description="Number that completed memorization"),
-                "weak_pins": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of pinned memories with low strength",
-                ),
-                "items": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="List of pinned memory details with strength and schedule",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Audit results for pinned notes",
+                type=ParameterType.OBJECT,
+                properties={
+                    "total_pinned": ParameterMetadata(type=ParameterType.INTEGER, description="Total number of pinned memories"),
+                    "active": ParameterMetadata(type=ParameterType.INTEGER, description="Number actively being memorized"),
+                    "completed": ParameterMetadata(type=ParameterType.INTEGER, description="Number that completed memorization"),
+                    "weak_pins": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Number of pinned memories with low strength",
+                    ),
+                    "items": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="List of pinned memory details with strength and schedule",
+                    ),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -1393,6 +1472,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="review_blocked_intents",
+        is_async=True,
         is_discoverable=True,
         provider="memory_service",
         parameters={
@@ -1409,24 +1489,26 @@ class MemoryServiceAPI(ABC):
                 default=-1.0,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Review results for blocked intents",
-            type=ParameterType.OBJECT,
-            properties={
-                "total_blocked": ParameterMetadata(type=ParameterType.INTEGER, description="Total blocked intent memories"),
-                "stale_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of stale blocked intents (old and weak)",
-                ),
-                "retry_candidates": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Blocked intents that may warrant retry via discovery",
-                ),
-                "still_valid": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Blocked intents that are still strong (recently accessed)",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Review results for blocked intents",
+                type=ParameterType.OBJECT,
+                properties={
+                    "total_blocked": ParameterMetadata(type=ParameterType.INTEGER, description="Total blocked intent memories"),
+                    "stale_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Number of stale blocked intents (old and weak)",
+                    ),
+                    "retry_candidates": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Blocked intents that may warrant retry via discovery",
+                    ),
+                    "still_valid": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Blocked intents that are still strong (recently accessed)",
+                    ),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )
@@ -1562,6 +1644,7 @@ class MemoryServiceAPI(ABC):
 
     @service_interface_process(
         name="store_compaction_summary",
+        is_async=True,
         is_discoverable=False,
         provider="memory_service",
         parameters={
@@ -1587,13 +1670,15 @@ class MemoryServiceAPI(ABC):
                 default=None,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Result with memory_id of stored summary",
-            type=ParameterType.OBJECT,
-            properties={
-                "memory_id": ParameterMetadata(type=ParameterType.STRING, description="UUID of the created summary memory"),
-                "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Result with memory_id of stored summary",
+                type=ParameterType.OBJECT,
+                properties={
+                    "memory_id": ParameterMetadata(type=ParameterType.STRING, description="UUID of the created summary memory"),
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Confirmation message"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )

@@ -115,9 +115,6 @@ from _step7_temp_retention import (
     _seed_key as _seed_key,
 )
 from _step7_temp_retention import (
-    _temp_housekeeping as _temp_housekeeping,
-)
-from _step7_temp_retention import (
     checks_by_id as checks_by_id,
 )
 from _step7_temp_retention import (
@@ -192,6 +189,8 @@ class Knobs:
     birth_failed_after_passphrase: bool = False
     legacy_root_manifest: bool = False
     connector_missing_export_root: bool = False
+    file_locations_old_shape: bool = False
+    clone_in_documents: bool = False
     operator_edits: bool = True
     tracked_edits: bool = True
     kb_addition: Literal["on_roster", "off_roster"] | None = None
@@ -350,7 +349,6 @@ def sealed_source(knobs: Knobs) -> tuple[Path, Release, Release, dict[str, bytes
             (staging / "releases.json").write_text(json.dumps(document, indent=2, sort_keys=True), encoding="utf-8")
 
         cached = _cached(name, build)
-        retention.prune_sources()
         scratch = Path(tempfile.mkdtemp(prefix="step7-source-"))
         atexit.register(shutil.rmtree, scratch, True)
         source = scratch / "source"
@@ -543,12 +541,39 @@ def _apply_operator_knobs(target: Path, knobs: Knobs) -> None:
         manifest = target / "root_manifest.yaml"
         manifest.write_text(manifest.read_text(encoding="utf-8").replace(f"solet_name: {NAME}", f"homunculus_name: {NAME}", 1), encoding="utf-8")
     if knobs.connector_missing_export_root:
-        # CH-45: one installed connector already answers the export root (the runbook's step 4a done once); the
-        # other six connectors lack it, so ``migration_export_root_containment`` propagates it to them.
+        # CH-45: one old connector holds an export root; the migration carries it into
+        # the address seed and leaves all seven connector configs byte-identical.
         exports = target.parent / "exports"
         exports.mkdir(exist_ok=True)
         config = target / "profile" / "config" / "plugins" / "jira_plugin.json"
         config.write_text(json.dumps({"export_allowed_roots": [str(exports)]}, indent=2) + "\n", encoding="utf-8")
+    if knobs.file_locations_old_shape:
+        _old_file_locations(target)
+
+
+def _old_file_locations(target: Path) -> None:
+    """An adopted solet with disagreeing, missing, relative and tree-overlapping roots."""
+    home = Path.home()
+    exports, other, inside = home / "legacy_exports", home / "other_exports", target / "legacy_exports"
+    for folder in (exports, other, inside):
+        folder.mkdir(parents=True, exist_ok=True)
+    (exports / "existing.tsv").write_bytes(b"existing\texport\n")
+    alias = home / "legacy_alias"
+    alias.symlink_to(exports, target_is_directory=True)
+    roots = {
+        "jira_plugin": {"export_allowed_roots": [str(exports)]},
+        "external_postgres_plugin": {"export_allowed_roots": [str(alias)]},
+        "snowflake_plugin": {"export_allowed_roots": [str(other), str(inside)]},
+        "salesforce_plugin": {"export_allowed_roots": [str(home / "missing_exports"), "relative/exports", ""], "import_allowed_roots": ["~/legacy_exports", "$FILE_LOCATIONS_OLD_ROOT"]},
+    }
+    config_dir = target / "profile/config/plugins"
+    for plugin in ("external_postgres_plugin", "snowflake_plugin", "salesforce_plugin", "jira_plugin", "g_suite_plugin", "zuora_plugin", "marketo_plugin"):
+        config = config_dir / f"{plugin}.json"
+        payload = json.loads(config.read_text()) if config.is_file() else {}
+        payload.pop("export_allowed_roots", None)
+        payload.pop("import_allowed_roots", None)
+        payload.update(roots.get(plugin, {}))
+        config.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 _GIT_METADATA_BYTES = {"gitattributes_untracked": "* text=auto\n", "gitattributes_tracked_edit": "* text=auto\n*.md text\n"}
@@ -871,7 +896,8 @@ DEFAULT_KNOBS = Knobs()
 def build_real_style(root: Path, *, host: FakeHost | None = None, knobs: Knobs = DEFAULT_KNOBS) -> RealStyleFixture:
     """Section 3: the real-style clone, HOME, host, stores and (per ``manager_state``) Manager state."""
     root.mkdir(parents=True, exist_ok=True)
-    target = root / "target"
+    target = root / "home/Documents" if knobs.clone_in_documents else root / "target"
+    target.parent.mkdir(parents=True, exist_ok=True)
     source, baseline, candidate, _files, contract = sealed_source(knobs)
     _clone(source, target, baseline)
     expected = _birth_shape(target, knobs)

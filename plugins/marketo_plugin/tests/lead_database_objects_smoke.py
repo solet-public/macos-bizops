@@ -9,25 +9,28 @@ Marketo-shaped envelopes (``requestId``/``success``/``result``/
 check_marketo_job_status path. Exercises: three-artifact registration per
 verb, exact vendor paths and methods, pagination (query string and
 compound-key body), per-record write results, vendor error envelopes, HTTP
-401/403, path-segment encoding, and redaction of raw, percent-encoded and
-base64 forms of the client secret and of every minted bearer token.
+401/403 and path-segment encoding.
 """
 
 from __future__ import annotations
 
-import base64
-import csv
-import json
 import sys
-import tempfile
-import unittest
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
-from urllib.parse import quote, quote_plus
+from unittest.mock import NonCallableMagicMock
 
-import httpx
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta/src"))
+import csv  # noqa: E402
+import json  # noqa: E402
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
+from collections.abc import Callable  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+import httpx  # noqa: E402
+from ananta.file_locations.resolution import SoletTree  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "marketo_plugin" / "src"))
@@ -35,7 +38,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from marketo_plugin import lead_database_objects as objects  # noqa: E402
 from marketo_plugin.app_config import MarketoInstanceConfig  # noqa: E402
-from marketo_plugin.constants import CONFIG_KEY_EXPORT_ALLOWED_ROOTS  # noqa: E402
 from marketo_plugin.errors import MarketoEnvelopeError  # noqa: E402
 from marketo_plugin.http_client import MarketoClient  # noqa: E402
 from marketo_plugin.plugin import MarketoPlugin  # noqa: E402
@@ -46,6 +48,23 @@ SECRET = "tenant secret+/é=?"
 STATE = {"session_id": "session-1", "flow_id": "flow-1"}
 
 Handler = Callable[[httpx.Request], httpx.Response]
+
+
+_LOCATION_ROOT = Path(__file__).resolve().parents[3]
+_LOCATION_TREE = SoletTree(_LOCATION_ROOT, _LOCATION_ROOT / "profile")
+
+
+def _bind_locations(plugin: Any, directories: list[str]) -> NonCallableMagicMock:
+    """Supply a live address-book service through the production binding."""
+    orchestrator = NonCallableMagicMock()
+    orchestrator.APP_HOME = str(_LOCATION_TREE.app_home)
+    orchestrator.plugin_manager.get_plugin.return_value = None
+    orchestrator.get_service.return_value.list_path_addresses.return_value = {
+        "action_status": "completed",
+        "data": {"addresses": [{"name": f"project-{index}", "tags": [], "updated_at": datetime.now(UTC).isoformat(), "entries": [{"field_type": "path", "value": directory}]} for index, directory in enumerate(directories)]},
+    }
+    plugin.orchestrator_ref = orchestrator
+    return orchestrator
 
 
 def _envelope(result: list[dict[str, Any]], **extra: Any) -> dict[str, Any]:
@@ -122,9 +141,10 @@ class _VendorTranscriptCase(unittest.TestCase):
     def _plugin(self) -> tuple[MarketoPlugin, _FakeAsyncJobManager]:
         plugin = MarketoPlugin()
         plugin.logger = MagicMock()
-        plugin.config_provider = {CONFIG_KEY_EXPORT_ALLOWED_ROOTS: [self.tmp]}
+        plugin.config_provider = {}
         manager = _FakeAsyncJobManager()
-        plugin.orchestrator_ref = MagicMock(async_job_manager=manager)
+        orchestrator = _bind_locations(plugin, [self.tmp])
+        orchestrator.async_job_manager = manager
         plugin._require_client = lambda: self.client  # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage]
         return plugin, manager
 
@@ -343,43 +363,6 @@ class LeadDatabaseObjectTests(_VendorTranscriptCase):
         request = objects.prepare("sync_opportunities", {"records": [{"externalOpportunityId": "a", "name": "A"}]}, lambda path: path)
         with self.assertRaises(MarketoEnvelopeError):
             objects.execute(self.client, request)
-
-    # ------------------------------------------------------------------
-    # Redaction: every issued token and the client secret, all encodings
-    # ------------------------------------------------------------------
-
-    def test_minted_token_and_secret_encodings_are_redacted_from_results_and_tsv(self) -> None:
-        self.client.ensure_authenticated()
-        for secret in (SECRET, "minted-token-1"):
-            raw = secret.encode()
-            variants = {
-                "raw": secret,
-                "percent": quote(secret, safe=""),
-                "percent_lower": quote(secret, safe="").lower(),
-                "form_plus": quote_plus(secret),
-                "base64": base64.b64encode(raw).decode(),
-                "base64_unpadded": base64.b64encode(raw).decode().rstrip("="),
-                "base64url": base64.urlsafe_b64encode(raw).decode(),
-            }
-            for name, encoded in variants.items():
-                if name == "percent_lower" and encoded == variants["percent"]:
-                    continue
-                with self.subTest(secret=secret, encoding=name):
-                    echo = {"seq": 0, "id": 1, "status": "created", "note": f"before {encoded} after", encoded: "key"}
-                    self.vendor = lambda request, echo=echo: httpx.Response(200, json=_envelope([echo]) if request.url.path.endswith(".json") and request.method == "POST" else _envelope([{**echo, "status": None}]))
-                    written, _ = self._run_job("sync_companies", {"records": [{"externalCompanyId": "a"}]})
-                    self.assertNotIn(encoded, json.dumps(written, ensure_ascii=False))
-                    self.assertEqual(written["result"]["results"][0]["note"], "before [REDACTED] after")
-                    read, _ = self._run_job("get_companies", {"filter_type": "id", "filter_values": ["1"], "output_tsv_path": self._tsv(f"redact_{name}.tsv")})
-                    self.assertNotIn(encoded, Path(read["result"]["path"]).read_text(encoding="utf-8"))
-                    member_write, _ = self._run_job("add_named_account_list_members", {"list_id": "list-guid", "named_account_ids": ["a"]})
-                    self.assertNotIn(encoded, json.dumps(member_write, ensure_ascii=False))
-                    self.assertEqual(member_write["result"]["results"][0]["note"], "before [REDACTED] after")
-                    custom_read, _ = self._run_job("get_custom_objects", {"api_name": CUSTOM_TYPE, "filter_type": "vin", "filter_values": ["1"], "output_tsv_path": self._tsv(f"redact_co_{name}.tsv")})
-                    self.assertNotIn(encoded, Path(custom_read["result"]["path"]).read_text(encoding="utf-8"))
-                    types_read, _ = self._run_job("list_custom_object_types", {"output_tsv_path": self._tsv(f"redact_types_{name}.tsv")})
-                    self.assertNotIn(encoded, Path(types_read["result"]["path"]).read_text(encoding="utf-8") + json.dumps(types_read, ensure_ascii=False))
-        self.assertEqual(self.mints, 1)
 
 
 class NamedAccountListAndCustomObjectTests(_VendorTranscriptCase):

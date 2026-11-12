@@ -11,6 +11,7 @@ from ananta.core.actions.action_metadata import (
 from ananta.core.domain.enums import ProcessorPolicyCategory
 from ananta.core.domain.types import ActionResult
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.async_job_manager import registered_job_return_schema
 from ananta.services.inference_service.prompts import load_prompt
 
 
@@ -18,19 +19,22 @@ class InferenceServiceAPI(ABC):
     """Public inference operations - AI-discoverable via vector search."""
 
     @service_interface_process(
+        is_async=True,
         name="qualify",
         provider="inference_service",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Bounded live-provider qualification result",
-            properties={
-                "provider": ParameterMetadata(type=ParameterType.STRING),
-                "model": ParameterMetadata(type=ParameterType.STRING),
-                "completed": ParameterMetadata(type=ParameterType.BOOLEAN),
-                "structured_result_valid": ParameterMetadata(type=ParameterType.BOOLEAN),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Bounded live-provider qualification result",
+                properties={
+                    "provider": ParameterMetadata(type=ParameterType.STRING),
+                    "model": ParameterMetadata(type=ParameterType.STRING),
+                    "completed": ParameterMetadata(type=ParameterType.BOOLEAN),
+                    "structured_result_valid": ParameterMetadata(type=ParameterType.BOOLEAN),
+                },
+            )
         ),
     )
     def qualify(
@@ -51,6 +55,7 @@ class InferenceServiceAPI(ABC):
         raise NotImplementedError("qualify is implemented by InferenceService")
 
     @service_interface_process(
+        is_async=True,
         name="process_error",
         provider="inference_service",
         processor_policy_category=ProcessorPolicyCategory.VERTEX,
@@ -66,25 +71,27 @@ class InferenceServiceAPI(ABC):
                 type=ParameterType.OBJECT,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Error analysis with recovery suggestions",
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or failed",
-                    required=False,
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Error analysis payload (analysis string + recovery_actions array)",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Analyze and recover from errors",
-                "Suggest corrective actions",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Error analysis with recovery suggestions",
+                properties={
+                    "action_status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status: completed or failed",
+                        required=False,
+                    ),
+                    "data": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Error analysis payload (analysis string + recovery_actions array)",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Analyze and recover from errors",
+                    "Suggest corrective actions",
+                ],
+            )
         ),
         is_inference_capable=True,
         work_count_impact=0,  # Inference is neutral
@@ -102,66 +109,66 @@ class InferenceServiceAPI(ABC):
                     # but let runtime policy resolve temperature/max_tokens.
                     "model": {},
                     "prompt": {
-                    "observation": {
-                        "process_key": "<<FAILED_PROCESS_KEY>>",
-                        "action_result": {
-                            "action_status": "error",
-                            "data": None,
-                            "error": "<<ERROR>>",
-                            "_completed_arguments": "<<ACTION_ARGUMENTS>>",
+                        "observation": {
+                            "process_key": "<<FAILED_PROCESS_KEY>>",
+                            "action_result": {
+                                "action_status": "error",
+                                "data": None,
+                                "error": "<<ERROR>>",
+                                "_completed_arguments": "<<ACTION_ARGUMENTS>>",
+                            },
                         },
-                    },
-                    "user": {
-                        "instructions": load_prompt("process_error_recovery.md"),
-                        "output_schema": {
-                            "$schema": "http://json-schema.org/draft-07/schema#",
-                            "type": "object",
-                            "required": ["reasoning", "actions"],
-                            "properties": {
-                                "reasoning": {
-                                    "type": "string",
-                                    "description": "Explain what went wrong and your recovery strategy",
-                                },
-                                "actions": {
-                                    "type": "array",
-                                    "minItems": 0,
-                                    "maxItems": 1,
-                                    "items": {
-                                        "type": "object",
-                                        "required": ["process", "reason", "arguments"],
-                                        "properties": {
-                                            "process": {
-                                                "type": "object",
-                                                "description": "Choose the best recovery action from available processes",
-                                                "required": [
-                                                    "provider_type",
-                                                    "provider",
-                                                    "function_name",
-                                                ],
-                                                "properties": {
-                                                    "provider_type": {
-                                                        "type": "string",
-                                                        "enum": ["plugin", "service_interface"],
+                        "user": {
+                            "instructions": load_prompt("process_error_recovery.md"),
+                            "output_schema": {
+                                "$schema": "http://json-schema.org/draft-07/schema#",
+                                "type": "object",
+                                "required": ["reasoning", "actions"],
+                                "properties": {
+                                    "reasoning": {
+                                        "type": "string",
+                                        "description": "Explain what went wrong and your recovery strategy",
+                                    },
+                                    "actions": {
+                                        "type": "array",
+                                        "minItems": 0,
+                                        "maxItems": 1,
+                                        "items": {
+                                            "type": "object",
+                                            "required": ["process", "reason", "arguments"],
+                                            "properties": {
+                                                "process": {
+                                                    "type": "object",
+                                                    "description": "Choose the best recovery action from available processes",
+                                                    "required": [
+                                                        "provider_type",
+                                                        "provider",
+                                                        "function_name",
+                                                    ],
+                                                    "properties": {
+                                                        "provider_type": {
+                                                            "type": "string",
+                                                            "enum": ["plugin", "service_interface"],
+                                                        },
+                                                        "provider": {"type": "string"},
+                                                        "function_name": {"type": "string"},
                                                     },
-                                                    "provider": {"type": "string"},
-                                                    "function_name": {"type": "string"},
+                                                    "additionalProperties": False,
                                                 },
-                                                "additionalProperties": False,
+                                                "reason": {"type": "string"},
+                                                "arguments": {"type": "object"},
                                             },
-                                            "reason": {"type": "string"},
-                                            "arguments": {"type": "object"},
                                         },
                                     },
                                 },
                             },
+                            "session_id": "<<SESSION_ID>>",
+                            "flow_input": "<<<:service_interface::flow_service::get_flow_input_for_presentation()>>>",
                         },
-                        "session_id": "<<SESSION_ID>>",
-                        "flow_input": "<<<:service_interface::flow_service::get_flow_input_for_presentation()>>>",
-                    },
                     },
                 },
             },
-        }
+        },
     )
     @abstractmethod
     def process_error(
@@ -173,6 +180,7 @@ class InferenceServiceAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="process_results",
         provider="inference_service",
         processor_policy_category=ProcessorPolicyCategory.VERTEX,
@@ -188,25 +196,27 @@ class InferenceServiceAPI(ABC):
                 type=ParameterType.OBJECT,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Formatted results for presentation",
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or failed",
-                    required=False,
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Formatted results payload (formatted_output string)",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Format results for user presentation",
-                "Convert raw data to readable output",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Formatted results for presentation",
+                properties={
+                    "action_status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status: completed or failed",
+                        required=False,
+                    ),
+                    "data": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Formatted results payload (formatted_output string)",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Format results for user presentation",
+                    "Convert raw data to readable output",
+                ],
+            )
         ),
         is_inference_capable=True,
         work_count_impact=0,  # Inference is neutral
@@ -224,59 +234,59 @@ class InferenceServiceAPI(ABC):
                     # but let runtime policy resolve temperature/max_tokens.
                     "model": {},
                     "prompt": {
-                    "observation": {
-                        "action_result": {
-                            "action_status": "completed",
-                            "data": "<<RESULT>>",
-                            "_completed_arguments": "<<ACTION_ARGUMENTS>>",
+                        "observation": {
+                            "action_result": {
+                                "action_status": "completed",
+                                "data": "<<RESULT>>",
+                                "_completed_arguments": "<<ACTION_ARGUMENTS>>",
+                            },
                         },
-                    },
-                    "user": {
-                        "instructions": [],
-                        "output_schema": {
-                            "$schema": "http://json-schema.org/draft-07/schema#",
-                            "type": "object",
-                            "required": ["actions"],
-                            "properties": {
-                                "actions": {
-                                    "type": "array",
-                                    "minItems": 0,
-                                    "maxItems": 1,
-                                    "items": {
-                                        "type": "object",
-                                        "required": ["process", "reason", "arguments"],
-                                        "properties": {
-                                            "process": {
-                                                "type": "object",
-                                                "required": [
-                                                    "provider_type",
-                                                    "provider",
-                                                    "function_name",
-                                                ],
-                                                "properties": {
-                                                    "provider_type": {
-                                                        "type": "string",
-                                                        "enum": ["plugin", "service_interface"],
+                        "user": {
+                            "instructions": [],
+                            "output_schema": {
+                                "$schema": "http://json-schema.org/draft-07/schema#",
+                                "type": "object",
+                                "required": ["actions"],
+                                "properties": {
+                                    "actions": {
+                                        "type": "array",
+                                        "minItems": 0,
+                                        "maxItems": 1,
+                                        "items": {
+                                            "type": "object",
+                                            "required": ["process", "reason", "arguments"],
+                                            "properties": {
+                                                "process": {
+                                                    "type": "object",
+                                                    "required": [
+                                                        "provider_type",
+                                                        "provider",
+                                                        "function_name",
+                                                    ],
+                                                    "properties": {
+                                                        "provider_type": {
+                                                            "type": "string",
+                                                            "enum": ["plugin", "service_interface"],
+                                                        },
+                                                        "provider": {"type": "string"},
+                                                        "function_name": {"type": "string"},
                                                     },
-                                                    "provider": {"type": "string"},
-                                                    "function_name": {"type": "string"},
+                                                    "additionalProperties": False,
                                                 },
-                                                "additionalProperties": False,
+                                                "reason": {"type": "string"},
+                                                "arguments": {"type": "object"},
                                             },
-                                            "reason": {"type": "string"},
-                                            "arguments": {"type": "object"},
                                         },
                                     },
                                 },
                             },
+                            "session_id": "<<SESSION_ID>>",
+                            "flow_input": "<<<:service_interface::flow_service::get_flow_input_for_presentation()>>>",
                         },
-                        "session_id": "<<SESSION_ID>>",
-                        "flow_input": "<<<:service_interface::flow_service::get_flow_input_for_presentation()>>>",
-                    },
                     },
                 },
             },
-        }
+        },
     )
     @abstractmethod
     def process_results(
@@ -288,6 +298,7 @@ class InferenceServiceAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="propose_name",
         provider="inference_service",
         processor_policy_category=ProcessorPolicyCategory.VERTEX,
@@ -303,25 +314,27 @@ class InferenceServiceAPI(ABC):
                 type=ParameterType.OBJECT,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Proposed name with confidence and flags",
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or failed",
-                    required=False,
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Name proposal: display_name, extension, confidence, flags",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Generate descriptive filename for vague requests",
-                "Propose names for generated audio, images, or other artifacts",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Proposed name with confidence and flags",
+                properties={
+                    "action_status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Status: completed or failed",
+                        required=False,
+                    ),
+                    "data": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Name proposal: display_name, extension, confidence, flags",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Generate descriptive filename for vague requests",
+                    "Propose names for generated audio, images, or other artifacts",
+                ],
+            )
         ),
         is_inference_capable=True,
         work_count_impact=0,
@@ -372,7 +385,7 @@ class InferenceServiceAPI(ABC):
                     },
                 },
             },
-        }
+        },
     )
     @abstractmethod
     def propose_name(

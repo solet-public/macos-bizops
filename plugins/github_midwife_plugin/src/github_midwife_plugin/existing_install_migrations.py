@@ -5,9 +5,11 @@
 key, and the ``HOMUNCULUS_*`` env keys inside ``~/.claude.json``'s MCP
 servers); its "refuses while Claude Code is running" rule is a ``BLOCKED``
 probe with the stable ``coding_agent_running`` reason.
-``existing::migration.export_root_containment`` propagates an
-already-chosen export root to connectors that lack it and is probe-only when
-no root was ever chosen.  ``existing::runtime.plugin_cache_refresh`` compares
+``existing::migration.export_root_containment`` carries every old connector
+root into the durable address seed before runtime starts, creates a safe
+Documents home, and leaves connector configs and existing exports untouched.
+The new boot loader completes registration by realpath, preserving live name
+collisions. ``existing::runtime.plugin_cache_refresh`` compares
 the installed Claude plugin cache copy's hooks against the shipped hooks; the
 refresh is settled only when that diff is empty, the tracked hook manifest is
 pinned to ``<clone>/.venv/bin/python3``, and the coordination receipt reads
@@ -33,8 +35,9 @@ from .coordination_hook_installation import hook_root_matches_expected
 from .coordination_marketplace import HOOK_MANIFEST, pin_action, pin_needed, receipt_action
 from .coordination_marketplace import register as register_marketplace
 from .coordination_marketplace import registration as marketplace_registration
-from .export_root_validation import BUSINESS_CONNECTOR_PLUGINS, CONFIG_KEY_EXPORT_ALLOWED_ROOTS, configure_export_root
-from .setup_adapter_contract import REPAIR_LIMIT, AdapterRequest, JsonObject, JsonValue, evidence, planned_action, result
+from .existing_install_file_locations import migrate_file_locations
+from .export_root_validation import BUSINESS_CONNECTOR_PLUGINS
+from .setup_adapter_contract import AdapterRequest, JsonObject, JsonValue, evidence, planned_action, result
 from .setup_adapter_runtime import CommandOutcome, Runtime, describe_outcome, executable_fallback_directories, resolve_executable
 from .setup_plugin_operations import _claude_receipt_is_current, _manifest_has_absolute_python, _patch_hook_manifest, _publish_claude_receipt, plugin_list_rows, plugin_row_visible, run_plugin_list
 from .target_reconciliation import PLIST_PARSE_ERRORS
@@ -47,11 +50,7 @@ _LEGACY_WAKE = 'AGENT_WAKE_CLI="homunculus"'
 _NEW_WAKE = 'AGENT_WAKE_CLI="solet-bridge"'
 _SHIPPED_HOOKS = Path("plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks")
 #: iss_646b54b6: the update never installs the Claude CLI (install consent, rul_e45fb5b3); it names the command.
-REPAIR_CLAUDE_CLI = (
-    "The Claude Code CLI (`claude`) is not on PATH or in {directories}, and the update never installs it. "
-    "Install it yourself: `brew install --cask claude-code`. Confirm `command -v claude` prints a path in the shell you run "
-    "solet-manager from, then run `solet-manager update {name} --dry-run` again."
-)
+REPAIR_CLAUDE_CLI = "The Claude Code CLI (`claude`) is not on PATH or in {directories}, and the update never installs it. Install it yourself: `brew install --cask claude-code`. Confirm `command -v claude` prints a path in the shell you run solet-manager from, then run `solet-manager update {name} --dry-run` again."
 
 
 # --- existing::migration.solet_rename --------------------------------------------
@@ -262,69 +261,21 @@ def _coding_agent_repair(running: bool | str) -> str:
 # --- existing::migration.export_root_containment ----------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class ExportRootFacts:
-    config_dir: Path
-    installed: tuple[str, ...]
-    distinct: tuple[str, ...]
-    missing: tuple[str, ...]
-    #: Each installed connector with the roots it holds, in ``installed`` order (iss_67d2597e).
-    roots: tuple[tuple[str, tuple[str, ...]], ...] = ()
-
-    @property
-    def chosen_root(self) -> str | None:
-        return next(iter(self.distinct)) if len(self.distinct) == 1 else None
-
-    def facts(self) -> dict[str, str | int | bool]:
-        configured = self.chosen_root or ("none" if not self.distinct else "ambiguous")
-        return {"configured_root": configured, "installed": len(self.installed), "missing": len(self.missing)}
-
-
 def migration_export_root_containment(request: AdapterRequest, runtime: Runtime) -> JsonObject:
-    """Runbook step 4a: propagate an already-chosen export root to connectors that lack it; probe-only when unset."""
-    del runtime
-    facts = _export_root_facts(request)
-    if not facts.distinct:
-        observed = facts.facts()
-        observed["operator_action_required"] = "configure the export root via the seed update runbook step 4a"
-        items = [facts_evidence("migration.export_root_containment", observed, verified=True)]
-        return result(request, status="applied" if request.phase == "apply" else "verified", evidence_items=items)
-    if len(facts.distinct) > 1:
-        return blocked(request, "export_root_ambiguous", _export_root_repair(request, facts))
-    items = [facts_evidence("migration.export_root_containment", facts.facts(), verified=not facts.missing)]
-    if request.phase == "probe":
-        actions = [planned_action(action_id=f"export_root.{plugin}", title=f"Propagate the export root to {plugin}", mutation_kind="file_write", target=str(facts.config_dir / f"{plugin}.json"), evidence_ref="migration.export_root_containment") for plugin in facts.missing]
-        return _pending_or_verified(request, items, not facts.missing, "Apply the export-root propagation.", actions)
-    if facts.missing and facts.chosen_root is not None:
-        configure_export_root(request.target, str(request.target / "profile"), facts.chosen_root, connector_plugins=facts.missing)
-    return result(request, status="applied", retry_safe=True, evidence_items=items)
+    """Keep the registered operation stable while its file migration stays cohesive."""
+    for plugin in BUSINESS_CONNECTOR_PLUGINS:
+        if (request.target / "plugins" / plugin).is_dir():
+            _validate_connector_text(request.target / "profile/config/plugins" / f"{plugin}.json")
+    return migrate_file_locations(request, runtime)
 
 
-def _export_root_facts(request: AdapterRequest) -> ExportRootFacts:
-    config_dir = request.target / "profile" / "config" / "plugins"
-    installed = tuple(plugin for plugin in BUSINESS_CONNECTOR_PLUGINS if (request.target / "plugins" / plugin).is_dir())
-    roots = {plugin: _connector_roots(config_dir / f"{plugin}.json") for plugin in installed}
-    distinct = tuple(sorted({root for values in roots.values() for root in values}))
-    missing = tuple(plugin for plugin, values in roots.items() if not values)
-    return ExportRootFacts(config_dir, installed, distinct, missing, tuple((plugin, tuple(values)) for plugin, values in roots.items()))
-
-
-def _export_root_repair(request: AdapterRequest, facts: ExportRootFacts) -> str:
-    """The refusal names every connector and the roots it holds; when that does not fit ``REPAIR_LIMIT`` each entry is ellipsized, never dropped."""
-    head = "Installed connectors disagree about the export root: "
-    tail = f". Edit export_allowed_roots in this clone's profile/config/plugins/<plugin>.json so every connector holds one root, then run solet-manager update {request.name} --dry-run again."
-    budget = REPAIR_LIMIT - len(head) - len(tail)
-    entries = [f"{plugin}={', '.join(values) or '(none)'}" for plugin, values in facts.roots]
-    if len("; ".join(entries)) > budget:
-        share = max(budget // len(entries) - 2, 2)
-        entries = [entry if len(entry) <= share else f"{entry[: share - 1]}…" for entry in entries]
-    return f"{head}{'; '.join(entries)}{tail}"
-
-
-def _connector_roots(config_path: Path) -> list[str]:
-    config = read_json(config_path) or {}
-    values = config.get(CONFIG_KEY_EXPORT_ALLOWED_ROOTS, [])
-    return [str(item) for item in cast(list[JsonValue], values)] if isinstance(values, list) else []
+def _validate_connector_text(config_path: Path) -> None:
+    """Keep the existing installed-connector non-text block before collecting roots."""
+    try:
+        read_text(config_path)
+    except OSError:
+        # Root collection reports unreadable files as advisory-only, with no roots.
+        pass
 
 
 # --- existing::runtime.plugin_cache_refresh -------------------------------------------------
@@ -391,7 +342,9 @@ def _settle_refusal(request: AdapterRequest, facts: CacheFacts, pin: bool | tupl
     if pin or facts.pinned:
         return None
     manifest = request.target / HOOK_MANIFEST
-    return blocked(request, "hook_interpreter_foreign", f"{manifest} binds its Python hooks to an interpreter other than {request.target / '.venv/bin/python3'}; the update never rewrites another interpreter's pin. Inspect `grep -n '\"command\"' {manifest}`, then run `solet-manager update {request.name} --dry-run` again.")
+    return blocked(
+        request, "hook_interpreter_foreign", f"{manifest} binds its Python hooks to an interpreter other than {request.target / '.venv/bin/python3'}; the update never rewrites another interpreter's pin. Inspect `grep -n '\"command\"' {manifest}`, then run `solet-manager update {request.name} --dry-run` again."
+    )
 
 
 def _settle_actions(request: AdapterRequest, facts: CacheFacts, pinning: bool, reinstall: bool) -> list[JsonObject]:

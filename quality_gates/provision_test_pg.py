@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one command with nine private PostgreSQL databases, then retire the run."""
+"""Run one command with ten private PostgreSQL databases, then retire the run."""
 
 from __future__ import annotations
 
@@ -145,10 +145,12 @@ class Cluster:
         options = f"-h 127.0.0.1 -p {self.port} -k '' -c max_connections=80 -c shared_buffers=16MB"
         self._tool("pg_ctl", ["-D", str(self.data), "-l", str(self.log), "-o", options, "-w", "-t", "25", "start"])
         self.postmaster = self._read_postmaster()
-        for database in database_mapping(self.nonce).values():
+        for key, database in database_mapping(self.nonce).items():
             if self._read_postmaster() != self.postmaster:
                 raise FixtureIntegrityError("postmaster identity changed before database creation")
             self._tool("createdb", ["-h", "127.0.0.1", "-p", str(self.port), "-U", self.user, "--maintenance-db=postgres", database])
+            if key == "fast_return_census":
+                self._tool("psql", ["-X", "-v", "ON_ERROR_STOP=1", "-h", "127.0.0.1", "-p", str(self.port), "-U", self.user, "-d", database, "-c", "CREATE EXTENSION IF NOT EXISTS vector"])
         return self._manifest()
 
     def _read_postmaster(self) -> tuple[str, str, str]:

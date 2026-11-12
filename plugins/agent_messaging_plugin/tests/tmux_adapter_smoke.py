@@ -490,7 +490,10 @@ def test_spawn_command_and_env_wiring() -> None:
             "an unspecified transport resolves to the charter's default 'watch' (fleet-watch-transport-migration phase 2 slice 1, 2026-08-06 -- non-MCP is now the fleet's PRIMARY transport, not 'mcp')",
         )
         pane_command = cmd[-1]
-        _check(pane_command.startswith("sh "), "the tag emit runs BEFORE exec (pane command prefix)")
+        _check(
+            pane_command.startswith("unset GIT_CONTROLLER_NAME; sh "),
+            "the stale setting is cleared before the tag emit and exec",
+        )
         _check("exec " in pane_command, "the pane command execs into claude after the emit")
         _check_presence_sidecar(pane_command)
         _check(
@@ -643,12 +646,8 @@ def test_spawn_refuses_a_declared_worktree_that_is_not_a_checkout() -> None:
         )
 
 
-def test_spawn_carries_designated_git_controller_name() -> None:
-    """A born, armed solet must pass its gate identity to tmux workers.
-
-    FAILING MUTATION: removing ``GIT_CONTROLLER_NAME`` from ``_env_pairs``
-    makes this records-only assertion fail before an unrestrained worker ships.
-    """
+def test_spawn_omits_retired_controller_name() -> None:
+    """A stale caller setting never becomes a worker environment override."""
     calls: list[list[str]] = []
     previous = os.environ.get("GIT_CONTROLLER_NAME")
     os.environ["GIT_CONTROLLER_NAME"] = "Git-Controller"
@@ -662,10 +661,8 @@ def test_spawn_carries_designated_git_controller_name() -> None:
         else:
             os.environ["GIT_CONTROLLER_NAME"] = previous
     new_session_call = next(call for call in calls if "new-session" in call)
-    _check(
-        "GIT_CONTROLLER_NAME=Git-Controller" in " ".join(new_session_call),
-        "an armed tmux worker receives the designated Git controller name",
-    )
+    assert not any(part.startswith("GIT_CONTROLLER_NAME=") for part in new_session_call), "a tmux worker never receives the retired Git controller setting"
+    assert "unset GIT_CONTROLLER_NAME;" in new_session_call[-1], "the worker clears a stale tmux-server setting before starting its watcher and coding agent"
 
 
 def test_spawn_exports_bash_shell() -> None:
@@ -2106,7 +2103,7 @@ def main() -> int:
     test_spawn_runs_in_the_provisioned_lane_worktree()
     test_spawn_without_a_worktree_keeps_the_drivers_default_cwd()
     test_spawn_refuses_a_declared_worktree_that_is_not_a_checkout()
-    test_spawn_carries_designated_git_controller_name()
+    test_spawn_omits_retired_controller_name()
     test_spawn_exports_bash_shell()
     test_spawn_local_name_drives_label_session_name_and_claude_name()
     test_spawn_without_local_name_keeps_lane_id_behaviour()

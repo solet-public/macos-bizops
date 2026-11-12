@@ -23,10 +23,10 @@ Recognized ``type`` values (from a real 2025-10-15 rollout):
 * ``world_state`` / ``token_usage_record`` — non-conversation records, skipped;
                         token_count remains the only rollout usage meter.
 
-Any other top-level ``type`` raises :class:`ValueError` (per spec §17.2
-acceptance: unrecognized payload type marks the batch
-``import_batch.error_kind='value_error'``). Any unrecognized
-``response_item.payload.type`` likewise raises.
+Unknown string line/item/content kinds advise and leave understood events
+intact. Malformed JSON and malformed known events still raise ValueError.
+Peer communication is retained as SYSTEM content; peer metadata is skipped.
+Tool discovery calls are retained as TOOL_CALL events.
 
 The pushed adapter receives chunks as ``{"external_session_id": str,
 "events": [<line-shaped dicts>]}`` JSON. The filesystem adapter walks
@@ -44,6 +44,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ananta.llm.session_ledger.session_failures import record_unknown_line
 from ananta.llm.session_ledger.types import (
     EventType,
     MessageRole,
@@ -97,7 +98,7 @@ def external_session_id_for(path: Path) -> str:
 # Per-file parsing
 # ───────────────────────────────────────────────────────────────────────────
 
-# Top-level `type` values we recognize. Anything else → ValueError.
+# Top-level `type` values we recognize. Unknown strings advise and continue.
 #
 # ``compacted`` is the context-compaction marker Codex started emitting after
 # 2026-01-14 — its ``payload.replacement_history`` carries the messages that
@@ -108,10 +109,10 @@ def external_session_id_for(path: Path) -> str:
 # ``compacted`` line to raise ValueError, the per-session try/except in
 # :class:`SessionLedgerImporter` silently skipped the session, and the
 # discovery cursor advanced regardless → 4.5 months of orphaned sessions.
-_RECOGNIZED_LINE_TYPES: frozenset[str] = frozenset({"session_meta", "response_item", "event_msg", "turn_context", "compacted", "world_state", "token_usage_record"})
-_SKIPPED_LINE_TYPES: frozenset[str] = frozenset({"event_msg", "turn_context", "compacted", "world_state", "token_usage_record"})
+_RECOGNIZED_LINE_TYPES: frozenset[str] = frozenset({"session_meta", "response_item", "event_msg", "turn_context", "compacted", "world_state", "token_usage_record", "inter_agent_communication_metadata", "inter_agent_communication"})
+_SKIPPED_LINE_TYPES: frozenset[str] = frozenset({"event_msg", "turn_context", "compacted", "world_state", "token_usage_record", "inter_agent_communication_metadata"})
 
-# `response_item.payload.type` we recognize. Anything else → ValueError.
+# `response_item.payload.type` we recognize. Unknown strings advise and continue.
 #
 # ``web_search_call`` is Codex's built-in web-search tool surface (added
 # after 2026-01-14 alongside ``compacted``). Unlike ``function_call`` the
@@ -129,6 +130,7 @@ _RECOGNIZED_ITEM_TYPES: frozenset[str] = frozenset(
         "custom_tool_call",
         "custom_tool_call_output",
         "web_search_call",
+        "tool_search_call",
     }
 )
 
@@ -178,7 +180,7 @@ def iter_events_from_path(
     ``line_offset >= start_line``. ``session_meta`` lines are skipped.
     ``turn_context`` supplies model context; token_count runtime messages
     yield usage events. Other runtime messages are skipped.
-    Unrecognized top-level or item types raise ``ValueError``.
+    Unknown string top-level/item types advise; malformed known records raise.
     """
     external_session_id = external_session_id_for(path)
     context = _ParseContext()
@@ -282,6 +284,8 @@ def normalize_raw(raw: RawSessionEvent) -> NormalizedSessionEvent:
         return _normalize_tool_result(raw)
     if item_type == "web_search_call":
         return _normalize_web_search_call(raw)
+    if item_type in {"tool_search_call", "inter_agent_communication"}:
+        return _normalize_discovery_or_peer(raw, item_type)
     raise ValueError(f"normalize_raw: unrecognized _codex_item_type {item_type!r} in payload")
 
 
@@ -401,25 +405,27 @@ def _line_to_raw_event(
 
     ``session_meta`` returns None (caller already consumed it via
     :func:`read_session_meta`). ``event_msg`` / ``turn_context`` return None
-    (known-noise). Unrecognized top-level ``type`` raises ValueError.
-    Unrecognized ``response_item.payload.type`` raises ValueError.
+    (known metadata). Unknown string kinds advise and allow later known lines.
     """
     top_type = obj.get("type")
     if not isinstance(top_type, str):
         raise ValueError(f"{source}:{line_no} line lacks string 'type'")
     if top_type not in _RECOGNIZED_LINE_TYPES:
-        raise ValueError(f"{source}:{line_no} unrecognized codex line type {top_type!r}")
+        record_unknown_line(top_type, external_session_id)
+        return None
     if top_type == "session_meta":
         return None
     if top_type in _SKIPPED_LINE_TYPES:
         return None
-    # top_type == "response_item"
+    # Peer payloads have no nested item type; their top-level kind identifies
+    # them. Keep the full payload rather than discarding cross-agent content.
     payload = _require_dict(obj, "payload", source, line_no)
-    item_type = payload.get("type")
+    item_type = top_type if top_type == "inter_agent_communication" else payload.get("type")
     if not isinstance(item_type, str):
         raise ValueError(f"{source}:{line_no} response_item.payload lacks string 'type'")
-    if item_type not in _RECOGNIZED_ITEM_TYPES:
-        raise ValueError(f"{source}:{line_no} unrecognized response_item.payload.type {item_type!r}")
+    if item_type not in _RECOGNIZED_ITEM_TYPES and item_type != "inter_agent_communication":
+        record_unknown_line(f"response_item.{item_type}", external_session_id)
+        return None
     timestamp_raw = obj.get("timestamp")
     if not isinstance(timestamp_raw, str):
         raise ValueError(f"{source}:{line_no} line lacks string 'timestamp'")
@@ -475,7 +481,29 @@ def _resolve_vendor_ids(
         return f"web_search:{timestamp_raw}:{line_no}", None
     if item_type == "token_count":
         return f"token_count:{timestamp_raw}:{line_no}", None
+    if item_type in {"tool_search_call", "inter_agent_communication"}:
+        return call_id or f"{item_type}:{timestamp_raw}:{line_no}", None
     return call_id, None
+
+
+def _normalize_discovery_or_peer(raw: RawSessionEvent, item_type: str) -> NormalizedSessionEvent:
+    """Preserve newly documented vendor records without inventing fields."""
+    peer = item_type == "inter_agent_communication"
+    payload = {key: value for key, value in raw.payload.items() if not key.startswith("_")}
+    content_json = {"subtype": item_type, **payload} if peer else {"tool_name": "tool_search", "tool_call_id": raw.vendor_event_id, "arguments": payload.get("arguments"), "status": payload.get("status")}
+    return NormalizedSessionEvent(
+        external_session_id=raw.external_session_id,
+        event_type=EventType.SYSTEM if peer else EventType.TOOL_CALL,
+        role=MessageRole.SYSTEM if peer else MessageRole.ASSISTANT,
+        content_text=_optional_str(payload.get("content")) if peer else None,
+        content_json=content_json,
+        event_at=raw.event_at,
+        vendor_event_id=raw.vendor_event_id,
+        vendor_parent_event_id=raw.vendor_parent_event_id,
+        attachment_blob_upload=None,
+        attachment_mime_type=None,
+        attachment_filename=None,
+    )
 
 
 def _normalize_message(raw: RawSessionEvent) -> NormalizedSessionEvent:
@@ -697,6 +725,7 @@ def _extract_text_parts(content_parts: list[object]) -> str:
             continue
         kind = part.get("type")
         if kind not in {"input_text", "output_text", "text"}:
+            record_unknown_line(f"content.{kind}")
             continue
         value = part.get("text")
         if isinstance(value, str):

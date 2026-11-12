@@ -1,0 +1,10 @@
+# Fragment of the gate-smoke register for the Google Docs, Sheets and Slides
+# build (frq_f6cb6658 / iss_3d1db44e, unt_2e796d0b). Hermetic unittest module:
+# the real google-api-python-client builds all 25 Docs v1, Sheets v4 and Slides
+# v1 requests over a recording httplib2 stand-in with vendor-shaped transcripts;
+# dispatch to completion runs through an in-memory job manager. No live Google,
+# no network, no background thread.
+plugins/g_suite_plugin/tests/smoke_editors_transcripts.py
+# Per-call credential ledger in the token store: additive hooks, unbound by
+# default with identical vault operations.
+plugins/g_suite_plugin/tests/smoke_token_store_ledger.py

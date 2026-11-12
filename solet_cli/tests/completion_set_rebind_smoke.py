@@ -47,12 +47,7 @@ from solet_manager.release_lock import SeedLock  # noqa: E402
 from solet_manager.stage_activation import initial_stage_probe_statuses  # noqa: E402
 from solet_manager.transaction import Transaction, canonical_sha256  # noqa: E402
 
-_CONTRACTS = (
-    Path(__file__).resolve().parents[2]
-    / "plugins"
-    / "github_midwife_plugin"
-    / "knowledge_base"
-)
+_CONTRACTS = Path(__file__).resolve().parents[2] / "plugins" / "github_midwife_plugin" / "knowledge_base"
 
 # Gated on `autostart`, which only exists as a follow-up under `custom`.
 _GATED_PROBE = "launchagent_running"
@@ -63,7 +58,7 @@ _CHECKS = 0
 
 def _check(condition: bool, message: str) -> None:
     global _CHECKS
-    _CHECKS += 1
+    _CHECKS += 1  # pyright: ignore[reportConstantRedefinition] -- Mutable smoke counter; preserve the fixture API.
     if not condition:
         raise AssertionError(f"red: {message}")
 
@@ -84,7 +79,6 @@ def _answers(
         "inference_model": "qwen",
         "coding_agents": ["codex"],
         "execution_topology": "solo",
-        "git_mutation_control": "single_session",
         "connector_configuration_timing": "configure_later",
         "session_sources": list(session_sources or []),
     }
@@ -162,8 +156,7 @@ def _assert_unresolved_is_retained(bundle: ContractBundle) -> None:
     )
     _check(
         _GATED_PROBE in unresolved,
-        f"{_GATED_PROBE} was dropped while its gating decision was merely "
-        "unresolved -- absent decision read as False",
+        f"{_GATED_PROBE} was dropped while its gating decision was merely unresolved -- absent decision read as False",
     )
 
 
@@ -176,8 +169,7 @@ def _assert_deselected_is_excluded(bundle: ContractBundle) -> None:
     )
     _check(
         _GATED_PROBE not in deselected,
-        f"{_GATED_PROBE} was retained under a profile that never offers "
-        "autostart -- a de-selected probe would block convergence forever",
+        f"{_GATED_PROBE} was retained under a profile that never offers autostart -- a de-selected probe would block convergence forever",
     )
 
 
@@ -244,23 +236,16 @@ def _assert_probe_runs_after_revision(bundle: ContractBundle, root: Path) -> Tra
     registry = AdapterRegistry(target=target, base_python=None)
     with patch(
         "solet_manager.completion_verifier.invoke_adapter",
-        side_effect=lambda _registry, *, runner, request: _verified_result(
-            request.request_id, request.operation_id
-        ),
+        side_effect=lambda _registry, *, runner, request: _verified_result(request.request_id, request.operation_id),
     ):
         final, checks = run_completion_probes(bundle, updated, registry, paths)
     ran = {str(check["id"]) for check in checks if isinstance(check, dict)}
     _check(
         _REVISED_PROBE in ran,
-        f"{_REVISED_PROBE} never RAN after its gating decision was revised -- "
-        "the completion set stayed frozen at create",
+        f"{_REVISED_PROBE} never RAN after its gating decision was revised -- the completion set stayed frozen at create",
     )
     _check(
-        any(
-            attempt.get("operation_id") == _REVISED_PROBE
-            and attempt.get("phase") == "completion_probe"
-            for attempt in final.operation_attempts
-        ),
+        any(attempt.get("operation_id") == _REVISED_PROBE and attempt.get("phase") == "completion_probe" for attempt in final.operation_attempts),
         f"{_REVISED_PROBE} produced no completion attempt record",
     )
     return final
@@ -288,9 +273,7 @@ def _assert_deselection_drops_a_bound_probe(bundle: ContractBundle, root: Path) 
         _REVISED_PROBE in created.completion,
         f"{_REVISED_PROBE} was not bound while its source was selected",
     )
-    revised = _answers(
-        setup_profile="custom", autostart="enabled", session_sources=[]
-    )
+    revised = _answers(setup_profile="custom", autostart="enabled", session_sources=[])
     updated = rebind_completion_probes(bundle, created.with_answers(revised), revised)
     _check(
         _REVISED_PROBE not in updated.completion,
@@ -338,14 +321,10 @@ def _assert_deselected_ran_probe_is_pruned(bundle: ContractBundle, root: Path) -
             # transaction non-convergent for reasons unrelated to the prune.
             # `status` is bound as a default so the closure captures this
             # iteration's value rather than the loop variable.
-            side_effect=lambda _registry, *, runner, request, status=status: (
-                _result_with(
-                    request.request_id,
-                    request.operation_id,
-                    status
-                    if request.operation_id == _REVISED_PROBE
-                    else CheckpointStatus.VERIFIED,  # noqa
-                )
+            side_effect=lambda _registry, *, runner, request, status=status: _result_with(
+                request.request_id,
+                request.operation_id,
+                status if request.operation_id == _REVISED_PROBE else CheckpointStatus.VERIFIED,  # noqa
             ),
         ):
             ran, _checks = run_completion_probes(bundle, created, registry, paths)
@@ -353,33 +332,25 @@ def _assert_deselected_ran_probe_is_pruned(bundle: ContractBundle, root: Path) -
             ran.completion.get(_REVISED_PROBE) is status,
             f"{_REVISED_PROBE} did not record its {label} result",
         )
-        revised = _answers(
-            setup_profile="custom", autostart="enabled", session_sources=[]
-        )
+        revised = _answers(setup_profile="custom", autostart="enabled", session_sources=[])
         pruned = rebind_completion_probes(bundle, ran.with_answers(revised), revised)
         _check(
             _REVISED_PROBE not in pruned.completion,
             f"a deselected {label} probe was retained in the completion set",
         )
         _check(
-            any(
-                attempt.get("operation_id") == _REVISED_PROBE
-                for attempt in pruned.operation_attempts
-            ),
-            f"pruning the {label} probe discarded its history; the prune must "
-            "drop the requirement, never the attempt record",
+            any(attempt.get("operation_id") == _REVISED_PROBE for attempt in pruned.operation_attempts),
+            f"pruning the {label} probe discarded its history; the prune must drop the requirement, never the attempt record",
         )
         reloaded = Transaction.from_dict(pruned.to_dict())
         _check(
             reloaded.completion == pruned.completion,
-            f"the journal pruned of a {label} probe failed "
-            "validate_transaction_state on reload",
+            f"the journal pruned of a {label} probe failed validate_transaction_state on reload",
         )
         if status is CheckpointStatus.FAILED:
             _check(
                 pruned.status is not TransactionStatus.FAILED,
-                "a deselected FAILED probe still blocks convergence -- the "
-                "1.41 residual is not closed",
+                "a deselected FAILED probe still blocks convergence -- the 1.41 residual is not closed",
             )
 
 
@@ -393,8 +364,7 @@ def _assert_rebind_keeps_derived_state_valid(final: Transaction) -> None:
 
     reloaded = Transaction.from_dict(final.to_dict())
     _check(
-        reloaded.completion == final.completion
-        and reloaded.status is final.status,
+        reloaded.completion == final.completion and reloaded.status is final.status,
         "a rebound journal did not survive its own derived-state validation",
     )
 

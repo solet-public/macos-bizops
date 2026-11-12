@@ -1,0 +1,2 @@
+# WF10: executable CLI adapter through the real maintenance dispatcher.
+# not shipped: deployment/scripts/tests/work_folder_parity_smoke.py requires the retired deployment/scripts/evidence_retention.py classifier and native register fixtures; no seed contains these operator scripts (fleet_tooling)

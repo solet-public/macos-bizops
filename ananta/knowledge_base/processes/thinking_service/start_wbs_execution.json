@@ -1,7 +1,7 @@
 {
   "process_key": "service_interface::thinking_service::start_wbs_execution",
   "display_name": "Start WBS Execution",
-  "description": "start — or resume after a disconnect — a pull-mode execution session on a Work Breakdown Structure: mark it in progress, ensure its work-product register exists, and report which steps are already durably executed.",
+  "description": "start — or resume after a disconnect — a pull-mode execution session on a Work Breakdown Structure: mark it in progress, ensure its work-product register exists, and report which steps are already durably executed. Returns a queued job receipt; retrieve its exact job_id with job_service.get_job for the complete original operation result or typed error.",
   "embedding_description": "Begin or resume driving a work breakdown structure in pull mode. Marks the WBS in progress, initializes the work-product register, and reports already-executed steps plus the next step so an agent session can pick up execution from wherever the previous driver stopped. Idempotent: calling again after a bridge death is the resume path.",
   "processor_policy_category": "edge",
   "result_processor_customizations": {
@@ -15,5 +15,6 @@
     "action_context": "Starting or resuming pull-mode execution of a Work Breakdown Structure. start_wbs_execution accepts {wbs_id}.",
     "error_interpretation": "NotFound: no WBS tracking row or document exists for this wbs_id. ValidationError: the WBS status does not permit execution (e.g. superseded or already completed), or the arguments do not conform to the schema.",
     "recovery_guidance": "NotFound: verify the wbs_id against the registered WBS documents. Status conflicts: a completed or superseded WBS is not executable — author or register a new WBS instead of re-running the old one."
-  }
+  },
+  "is_async": true
 }

@@ -89,26 +89,27 @@ version observation is recorded on retry without another swap. Unresolved or
 invalid proof yields failure without a success observation; use the repair verbs
 below when seat investigation establishes that rollback is needed.
 
-After `deployed` or `already_recorded` has verified the target, release and
-measurement readback, the external command attempts one advisory
+After `deployed`, `already_recorded`, `already_current` or
+`skipped_nonproduction`, the verified outcome is complete and the external
+command sends no Main notice. Success is read from the register's version
+current/history rows; exception storage is not model acceptance. A `failed` or
+`deferred_*` terminal outcome attempts one bounded advisory
 `peer_send_by_name` through its existing solet-scoped bridge to the solet's
-Main role (title-cased `SOLET_NAME` plus `-Main`). Ready plugins, drained swap and builder
-attestation precede that notice. The content carries the solet, target SHA,
-release id, measurement id, recorded decision and a stable `notice_key` derived
-from the solet and measurement id. Repeated keys identify the same deployment.
-Failed, deferred, skipped and `already_current` branches send no completion
-notice.
+Main role (title-cased `SOLET_NAME` plus `-Main`). The exception content carries
+the solet, outcome, trigger, and known target/release/measurement identities,
+leaving unavailable identities explicitly null, plus bounded native error and
+advisories. Its stable `notice_key` identifies the same terminal outcome.
 
-Read terminal JSON's `notice` alongside the deployment decision. `status=queued`
+Read terminal JSON's `notice` alongside a failure or hold decision. `status=queued`
 and its `message_id` mean queued delivery only, not model receipt or acceptance.
 A timeout, unavailable role, malformed/error reply or missing message id leaves
-`status=uncertain` and an explicit advisory while preserving the verified
-deployment result and successful exit. There is no automatic notice retry,
-second APPLY or duplicate deployed record. The seat reconciles the retained
-measurement and receipt before deciding on a new explicit attempt. Correction
-or reversal uses a separate verified deployment and measurement; prior records
-and receipts remain immutable. Stdout remains the outcome readback even when
-notice delivery is uncertain.
+`status=uncertain` and an explicit advisory while preserving the original
+failure/hold decision and exit behavior. There is no automatic notice retry,
+second APPLY or duplicate deployed record; uncertain effects require read
+reconciliation before a new explicit attempt. Correction or reversal uses a
+separate verified deployment and measurement, with old records and receipts
+immutable. Stdout remains the terminal outcome readback even when notice
+delivery is uncertain.
 
 - Bind step 2 and step 3 `new_manifest` to the LIVE manifest content unchanged for a pure code deploy; any plugin-set change makes this a different (manifest-change) procedure with binding-validation review.
 - Bind step 3 `expected_etag` ONLY from step 2's `current_etag` in the same run — never from a stale read.

@@ -1,14 +1,14 @@
 {
   "process_key": "plugin::openai_embeddings_plugin::list_models_action",
   "display_name": "List Embedding Models",
-  "description": "Read an OpenAI-compatible server's model catalogue; callers should list the solet's models through service_interface::embedding_service::list_models.",
-  "embedding_description": "Read the configured server's /models route and keep the embedder entries, those typed embedding, untyped, or with embed in the id, placing the configured default first when absent. Each carries a name, text input type and description, never a dimension or input limit. Not the solet's general model list.",
+  "description": "Read the configured server model catalogue. Returns immediately with job_id and status queued; work runs on the plugin worker.",
+  "embedding_description": "Queue the configured OpenAI-compatible server model catalogue request. Returns job_id and status queued; job.result carries the original response with embedding-model entries and the configured default. Retrieve service_interface::job_service::get_job until terminal; failures also retain job.error.",
   "result_processor_customizations": {
-    "action_label": "Embedding models listed",
-    "result_type": "models_listed",
-    "result_description": "Available models with keys: models (array of {name, dimension, max_input_length, input_types, description})",
+    "action_label": "Job queued",
+    "result_type": "job_receipt",
+    "result_description": "Queued job handle with job_id and status; the final response is stored in job.result.",
     "presentation_guidance": "",
-    "output_action_guidance": "Determine the appropriate next action based on the context and action result."
+    "output_action_guidance": "Retain this exact job_id. Schedule job_service::get_job while queued or processing; inspect terminal result or error before using the final data. Do not repeat a write because a poll is delayed."
   },
   "error_processor_customizations": {
     "action_context": "Lists available embedding models from the OpenAI-compatible API",

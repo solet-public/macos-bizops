@@ -24,6 +24,7 @@ from ananta.core.actions.action_metadata import (
     ReturnValueSchema,
 )
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.async_job_manager import registered_job_return_schema
 
 
 class SchedulingServiceAPI(ABC):
@@ -98,6 +99,7 @@ class SchedulingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="execute_in_seconds",
         is_discoverable=True,
         provider="scheduling_service",
@@ -136,25 +138,27 @@ class SchedulingServiceAPI(ABC):
             ),
             "state": _STATE_PARAM,
         },
-        return_value_schema=ReturnValueSchema(
-            description="Delayed execution schedule result.",
-            type=ParameterType.OBJECT,
-            properties={
-                "schedule_id": ParameterMetadata(type=ParameterType.STRING, description="Unique schedule identifier."),
-                "message": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Confirmation message describing the scheduled delay.",
-                ),
-                "run_at": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="ISO8601 timestamp when actions will run.",
-                ),
-            },
-            usage_patterns=[
-                "Pattern 6a async monitoring delays.",
-                "Timeout/retry orchestration.",
-                "Delayed notifications.",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Delayed execution schedule result.",
+                type=ParameterType.OBJECT,
+                properties={
+                    "schedule_id": ParameterMetadata(type=ParameterType.STRING, description="Unique schedule identifier."),
+                    "message": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Confirmation message describing the scheduled delay.",
+                    ),
+                    "run_at": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="ISO8601 timestamp when actions will run.",
+                    ),
+                },
+                usage_patterns=[
+                    "Pattern 6a async monitoring delays.",
+                    "Timeout/retry orchestration.",
+                    "Delayed notifications.",
+                ],
+            )
         ),
         is_enabled=True,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -236,6 +240,7 @@ class SchedulingServiceAPI(ABC):
     def clear_scheduled_actions_by_tag(self, tag: str, state: dict[str, Any] | None = None) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="get_schedules_by_tag",
         is_discoverable=True,
         provider="scheduling_service",
@@ -247,26 +252,28 @@ class SchedulingServiceAPI(ABC):
             ),
             "state": _STATE_PARAM,
         },
-        return_value_schema=ReturnValueSchema(
-            description="Matching schedules with metadata.",
-            type=ParameterType.OBJECT,
-            properties={
-                "complete": ParameterMetadata(type=ParameterType.BOOLEAN, description="Stable exhausted source enumeration; independent of filtering."),
-                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Incomplete enumeration and unavailable owner evidence."),
-                "checked_epochs": ParameterMetadata(type=ParameterType.OBJECT, description="Persistent and memory epochs before and after enumeration."),
-                "observation_token": ParameterMetadata(type=ParameterType.STRING, description="Identity of this list observation."),
-                "tag": ParameterMetadata(type=ParameterType.STRING, description="Tag used for filtering."),
-                "count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of matching schedules."),
-                "schedules": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="List of matching schedule objects.",
-                ),
-            },
-            usage_patterns=[
-                "Verify heartbeat schedule exists (heartbeat:global).",
-                "Detect duplicate schedules before cleanup.",
-                "Inspect per-job/per-session monitoring schedules.",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Matching schedules with metadata.",
+                type=ParameterType.OBJECT,
+                properties={
+                    "complete": ParameterMetadata(type=ParameterType.BOOLEAN, description="Stable exhausted source enumeration; independent of filtering."),
+                    "advisories": ParameterMetadata(type=ParameterType.LIST, description="Incomplete enumeration and unavailable owner evidence."),
+                    "checked_epochs": ParameterMetadata(type=ParameterType.OBJECT, description="Persistent and memory epochs before and after enumeration."),
+                    "observation_token": ParameterMetadata(type=ParameterType.STRING, description="Identity of this list observation."),
+                    "tag": ParameterMetadata(type=ParameterType.STRING, description="Tag used for filtering."),
+                    "count": ParameterMetadata(type=ParameterType.INTEGER, description="Number of matching schedules."),
+                    "schedules": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="List of matching schedule objects.",
+                    ),
+                },
+                usage_patterns=[
+                    "Verify heartbeat schedule exists (heartbeat:global).",
+                    "Detect duplicate schedules before cleanup.",
+                    "Inspect per-job/per-session monitoring schedules.",
+                ],
+            )
         ),
         is_enabled=True,
         error_processor_customizations=MergeErrorProcessorCustomizations(),
@@ -347,20 +354,23 @@ class SchedulingServiceAPI(ABC):
     ) -> dict[str, Any]: ...
 
     @service_interface_process(
+        is_async=True,
         name="list_schedules",
         is_discoverable=True,
         provider="scheduling_service",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Scheduling owner result",
-            properties={
-                "schedules": ParameterMetadata(type=ParameterType.LIST),
-                "count": ParameterMetadata(type=ParameterType.INTEGER),
-                "complete": ParameterMetadata(type=ParameterType.BOOLEAN),
-                "advisories": ParameterMetadata(type=ParameterType.LIST),
-                "checked_epochs": ParameterMetadata(type=ParameterType.OBJECT),
-                "observation_token": ParameterMetadata(type=ParameterType.STRING),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Scheduling owner result",
+                properties={
+                    "schedules": ParameterMetadata(type=ParameterType.LIST),
+                    "count": ParameterMetadata(type=ParameterType.INTEGER),
+                    "complete": ParameterMetadata(type=ParameterType.BOOLEAN),
+                    "advisories": ParameterMetadata(type=ParameterType.LIST),
+                    "checked_epochs": ParameterMetadata(type=ParameterType.OBJECT),
+                    "observation_token": ParameterMetadata(type=ParameterType.STRING),
+                },
+            )
         ),
         parameters={
             "status": ParameterMetadata(type=ParameterType.STRING, required=False),
@@ -404,10 +414,13 @@ class SchedulingServiceAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="get_schedule_binding_history",
         is_discoverable=True,
         provider="scheduling_service",
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Scheduling owner result", properties={"schedule_id": ParameterMetadata(type=ParameterType.STRING), "events": ParameterMetadata(type=ParameterType.LIST), "next_cursor": ParameterMetadata(type=ParameterType.LIST)}),
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(type=ParameterType.OBJECT, description="Scheduling owner result", properties={"schedule_id": ParameterMetadata(type=ParameterType.STRING), "events": ParameterMetadata(type=ParameterType.LIST), "next_cursor": ParameterMetadata(type=ParameterType.LIST)})
+        ),
         parameters={
             "schedule_id": ParameterMetadata(type=ParameterType.STRING, required=True),
             "limit": ParameterMetadata(type=ParameterType.INTEGER, required=False),
@@ -421,21 +434,24 @@ class SchedulingServiceAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="recover_scheduled_action",
         is_discoverable=True,
         provider="scheduling_service",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Scheduling owner result",
-            properties={
-                "schedule_id": ParameterMetadata(type=ParameterType.STRING),
-                "revision": ParameterMetadata(type=ParameterType.INTEGER),
-                "effective_revision": ParameterMetadata(type=ParameterType.INTEGER),
-                "status": ParameterMetadata(type=ParameterType.STRING),
-                "activation_status": ParameterMetadata(type=ParameterType.STRING),
-                "effective": ParameterMetadata(type=ParameterType.BOOLEAN),
-                "advisory": ParameterMetadata(type=ParameterType.STRING),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Scheduling owner result",
+                properties={
+                    "schedule_id": ParameterMetadata(type=ParameterType.STRING),
+                    "revision": ParameterMetadata(type=ParameterType.INTEGER),
+                    "effective_revision": ParameterMetadata(type=ParameterType.INTEGER),
+                    "status": ParameterMetadata(type=ParameterType.STRING),
+                    "activation_status": ParameterMetadata(type=ParameterType.STRING),
+                    "effective": ParameterMetadata(type=ParameterType.BOOLEAN),
+                    "advisory": ParameterMetadata(type=ParameterType.STRING),
+                },
+            )
         ),
         parameters={
             "schedule_id": ParameterMetadata(type=ParameterType.STRING, required=True),

@@ -1,13 +1,14 @@
 {
   "name": "test_purge_confirmed",
-  "description": "Verify that purge with confirmation flag permanently deletes all memories",
+  "description": "Verify that purge with confirmation flag permanently deletes all memories Submit returns a queued job receipt; the registered http_jobs_smoke asserts terminal result and error through JobService.",
   "process_key": "plugin::actr_memory_plugin::purge_memories_action",
   "arguments": {
     "params": {
       "confirm": true
     },
     "state": {
-      "session_id": "test-session-105"
+      "session_id": "test-session-105",
+      "flow_id": "test-flow-test_purge_confirmed"
     }
   },
   "timeout_seconds": 60

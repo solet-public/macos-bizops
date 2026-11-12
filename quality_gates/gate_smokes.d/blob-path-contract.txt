@@ -1,0 +1,1 @@
+plugins/default_blob_storage_plugin/tests/blob_path_contract_smoke.py

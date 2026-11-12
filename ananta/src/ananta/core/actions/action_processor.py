@@ -10,7 +10,8 @@ import dataclasses
 import json
 import logging
 import re
-from typing import TYPE_CHECKING, Any, Final, Protocol
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, overload
 
 from ananta.core.actions.action_factory import validate_process_arguments
 from ananta.core.domain.enums import ActionStatus
@@ -18,10 +19,13 @@ from ananta.core.domain.status import is_status_match
 from ananta.core.orchestration import placeholder_utils
 from ananta.core.plugins.plugin_manager import PluginManager
 from ananta.core.runtime.loop_invariant import record_handler_entry
-from ananta.core.services.call_context import CallContext
+from ananta.core.services.call_context import CallContext, VaultAccessDeniedError
+from ananta.core.state.async_job_manager import AsyncJobManager, OwnedOperation, RegisteredCompletion, registered_action_context
 from ananta.core.state.execution_token_context import action_execution_context
+from ananta.core.state.registered_job_operations import THINKING_REGISTERED_OPERATIONS
 from ananta.core.templates.template_functions import TemplateFunctionRegistry
 from ananta.error_handling import FrameworkError
+from ananta.services.job_service.service import JobService
 from ananta.services.state_service import StateService
 
 if TYPE_CHECKING:
@@ -56,17 +60,162 @@ _CALLER_IDENTITY_KEYS: Final[tuple[str, ...]] = (
     "caller_attribution_role",
 )
 
-# Raw bridge-delivery envelopes must stay byte-identical to their producer's
-# result. Keep these literals byte-identical to
+# Raw delivery envelopes must stay byte-identical to their producer's result.
+# Keep the bridge literals byte-identical to
 # agent_messaging_plugin.platform_surface._DELIVER_RESULT_PROCESS_KEY and
-# _DELIVER_ERROR_PROCESS_KEY. The opaque-relay smoke detects drift; core must
-# not import a plugin merely to perform a runtime cross-check.
+# _DELIVER_ERROR_PROCESS_KEY; the completion literal matches
+# job_completion_route.COMPLETION_DELIVERY_PROCESS_KEY. The opaque-relay smoke
+# detects drift; core must not import a plugin for a runtime cross-check.
 _OPAQUE_RELAY_PROCESS_KEYS: Final[frozenset[str]] = frozenset(
     {
         "plugin::agent_messaging_plugin::deliver_result",
         "plugin::agent_messaging_plugin::deliver_error",
+        "plugin::agent_messaging_plugin::deliver_job_completion",
     }
 )
+
+# The corrected Group1 cut names actual operations, never an is_async policy.
+# get_job stays a bounded point read. Ledger pushes share the same serial
+# owner FIFO as the selected ledger polls and repairs.
+_REGISTERED_JOB_OPERATIONS: Final[dict[str, frozenset[str]]] = {
+    "thinking_service": THINKING_REGISTERED_OPERATIONS,
+    "blob_storage_service": frozenset({"retrieve_blob_by_name", "store_blob", "store_blob_from_file"}),
+    "context_service": frozenset({"assemble_agent_context"}),
+    "discovery_service": frozenset({"get_service_health", "query_process_registry", "execute_embeddings_search"}),
+    "embedding_service": frozenset({"generate_embeddings"}),
+    "inference_service": frozenset({"qualify", "process_error", "process_results", "propose_name"}),
+    "memory_service": frozenset(
+        {
+            "audit_pinned_notes",
+            "cleanup_orphaned_vectors",
+            "consolidate",
+            "consolidate_cron",
+            "delete_memories_by_ids",
+            "delete_memories_by_tag",
+            "forget",
+            "get_memories_by_tag",
+            "get_recent_memory",
+            "get_recent_memory_structured",
+            "import_memories",
+            "ingest_session",
+            "learn",
+            "list_memories",
+            "list_memorizing",
+            "memorize",
+            "memorize_by_tag",
+            "memory_stats",
+            "process_memorization_queue",
+            "process_memorization_queue_cron",
+            "purge_memories",
+            "recall",
+            "recompute_strengths",
+            "recompute_strengths_cron",
+            "reindex_orphaned_vectors",
+            "remember",
+            "review_blocked_intents",
+            "store_compaction_summary",
+        }
+    ),
+    "job_service": frozenset({"get_latest_job", "list_unreached_job_completions", "detect_unresolved_completion_tokens", "sweep_stale_jobs"}),
+    "knowledge_service": frozenset({"archive_file", "browse", "create_file", "delete_file", "edit_file", "ingest", "install", "purge_orphaned_chunks", "read_file", "refresh_plugin_process", "refresh_plugin_processes", "search", "search_planning_references", "test_retrieval", "uninstall", "update"}),
+    "plugin_schema_service": frozenset({"install_plugin_schema", "update_plugin_schema", "uninstall_plugin_schema", "purge_plugin_schema"}),
+    "quality_service": frozenset(
+        {
+            "clear_smoke_proof",
+            "correct_smoke_proof",
+            "ensure_full_smoke_schedule",
+            "get_smoke_proof",
+            "get_smoke_proof_history",
+            "list_gates",
+            "list_smoke_proofs",
+            "predict_gate_smokes_merge",
+            "reinstate_smoke_proof",
+            "retire_smoke_proof",
+            "run_gate",
+            "run_selected_smokes",
+            "run_test",
+            "select_smokes",
+            "trigger_full_smoke_battery",
+            "verify_hash_manifest",
+        }
+    ),
+    "repo_service": frozenset({"git_diff", "git_status", "list_files", "propose_patch", "read_file", "search"}),
+    "lifecycle_management_service": frozenset({"apply_manifest", "install_plugin_from_path", "list_available_plugins", "reload_plugin_config", "reload_python_module", "set_plugin_enabled", "set_plugin_priority", "start_service_via_interface", "stop_service", "update_platform_config"}),
+    "state_service": frozenset({"count", "delete_records", "execute_sql", "read_state", "write_state"}),
+    # SoundCloud's bridge bootstrap consumes immediate exists/store/rotate
+    # outcomes and sealed export data. Keep those four synchronous.
+    # S1 removed session retrieve; it must never become a result-bearing job.
+    "vault_service": frozenset(
+        {
+            "delete",
+            "ensure_encryption_keypair",
+            "get_public_key",
+            "import_encrypted",
+            "list",
+            "oauth_client_list",
+            "qualify_keychain",
+            "qualify_round_trip",
+            "rename",
+            "status",
+            "store_from_env",
+            "store_from_file",
+            "store_from_keychain",
+            "store_from_kv_file",
+            "store_random",
+            "unlock",
+            "vault_create_recovery",
+            "vault_init",
+            "vault_rotate_passphrase",
+        }
+    ),
+    "vector_service": frozenset({"delete_vectors", "get_namespace_stats", "search_similar", "store_vectors"}),
+    "session_ledger_service": frozenset(
+        {
+            "census",
+            "corpus_counts",
+            "event_embedding_coverage",
+            "ingest_raw_chunk",
+            "list_active_sessions",
+            "list_canonical_contributors",
+            "list_sessions",
+            "list_sources",
+            "search_event_content",
+            "search_sessions",
+            "session_usage_totals",
+            "poll_source",
+            "backfill_event_external_ids",
+            "backfill_event_source_denormalization",
+            "backfill_export_blob_identity",
+            "reclaim_orphan_event_text_blobs",
+            "backfill_first_last_event_at_repair",
+            "backfill_orphan_running_batches_for_source",
+            "backfill_session_source_kinds",
+            "backfill_summary_embedding_vector_ids",
+            "embed_missing_event_content",
+            "lift_canonical_pointer_for_duplicate_sessions",
+            "lift_codex_stage1_summaries",
+            "push_session_summary_chunk",
+            "qualify_selected_sources",
+            "register_source",
+            "reset_ingest_state",
+            "reset_source_cursor",
+            "retire_duplicate_source",
+        }
+    ),
+}
+_REGISTERED_OWNER_ALIASES: Final[dict[str, frozenset[str]]] = {
+    "scheduling_service": frozenset({"get_schedules_by_tag", "list_schedules", "execute_in_seconds", "get_schedule_binding_history", "recover_scheduled_action"}),
+    "local_self_deployment_service": frozenset({"attest_runtime_code", "complete_swap", "cutover_release", "install_autostart", "rollback_release", "status_autostart", "swap_rollback", "swap_status", "uninstall_autostart"}),
+    "self_deployment_service": frozenset({"restart_with_manifest", "stop_self"}),
+}
+_DEFERRED_SCHEDULER_OPERATIONS: Final = frozenset({"execute_in_seconds", "get_schedule_binding_history", "recover_scheduled_action"})
+
+
+def _deferred_registered_action(provider_type: str, provider: str, method_name: str) -> bool:
+    """One finite entry predicate for raw-body owners."""
+    if provider_type == "service_interface" and provider in {"knowledge_service", "quality_service", "repo_service", "plugin_schema_service", "vault_service"}:
+        return method_name in _REGISTERED_JOB_OPERATIONS[provider]
+    return method_name in _DEFERRED_SCHEDULER_OPERATIONS and (provider_type, provider) in {("plugin", "default_scheduling_plugin"), ("service_interface", "scheduling_service")}
 
 
 class ActionRecorderProtocol(Protocol):
@@ -362,16 +511,10 @@ class ActionProcessor:
         try:
             provider_type, provider, method_name = self._parse_process_key(action.process_key)
 
-            arguments = self._prepare_arguments(action)
-            if arguments is None:
-                return {"success": False, "error": "Failed to parse action parameters"}
+            if provider_type == "service_interface" and provider == "thinking_service" and method_name in THINKING_REGISTERED_OPERATIONS:
+                return self._admit_thinking_action(method_name, action)
 
-            resolved = self._resolve_placeholders(arguments, action)
-            if isinstance(resolved, str):
-                return {"success": False, "error": resolved}
-            arguments = resolved
-
-            result = self._execute_by_provider_type(provider_type, provider, method_name, arguments, action)
+            result = self._execute_action_body(provider_type, provider, method_name, action)
 
             error_value = result.get("error")
             if error_value:
@@ -400,6 +543,31 @@ class ActionProcessor:
             logger.error(f"Error executing action {action.id}: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
 
+    def _admit_thinking_action(self, method_name: str, action: QueuedActionProtocol) -> dict[str, object]:
+        """Transfer the exclusive action body before decoding or preflight.
+
+        Only its bounded descriptor is durable. A lost process cannot replay
+        this volatile body: the existing stale-job reconciliation fails it.
+        Internal provider calls use the same owner FIFO without another job.
+        """
+        self._validate_process_registration(action.process_key)
+        manager = self._registered_job_manager()
+
+        def run(_descriptor: dict[str, object]) -> dict[str, object]:
+            arguments = self._prepare_arguments(action)
+            if arguments is None:
+                raise FrameworkError("Could not decode the owned Thinking action", error_code="thinking_service.invalid_owned_arguments")
+            arguments = self._resolve_placeholders(arguments, action)
+            result = self._execute_service_interface_action("thinking_service", method_name, arguments, action)
+            self._store_result_in_context(action, result)
+            return result
+
+        with action_execution_context(action.flow_token_id), registered_action_context(action.id, action.flow_id, action.session_id):
+            receipt = manager.submit_registered_operation("thinking_service", method_name, {"input_custody": "volatile_action", "action_id": action.id}, run)
+        # The receipt is not the operation's context value. Its complete final
+        # value is stored by the worker, avoiding a fast-worker overwrite race.
+        return {"success": not bool(receipt.get("error")), **receipt}
+
     def _parse_action_parameters(self, action: QueuedActionProtocol) -> dict[str, object]:
         """Parse JSON parameters from action."""
         try:
@@ -408,6 +576,47 @@ class ActionProcessor:
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON parameters: {e}")
             return {"error": f"Invalid JSON parameters: {e}"}
+
+    def _execute_action_body(self, provider_type: str, provider: str, method_name: str, action: QueuedActionProtocol) -> dict[str, object]:
+        if _deferred_registered_action(provider_type, provider, method_name):
+            if provider in {"knowledge_service", "vault_service"}:
+                return {"knowledge_service": self._admit_knowledge_action, "vault_service": self._admit_vault_action}[provider](method_name, action)
+            if provider in {"quality_service", "repo_service"}:
+                return self._admit_registered_dev_surface(provider, method_name, action)
+            if provider == "plugin_schema_service":
+                return self._admit_registered_schema(method_name, action)
+            return self._admit_deferred_scheduler(provider_type, provider, method_name, action)
+        if self._defers_owned_service_arguments(action.process_key):
+            with action_execution_context(action.flow_token_id):
+                return self._execute_by_provider_type(provider_type, provider, method_name, {}, action)
+        arguments = self._prepare_arguments(action)
+        if arguments is None:
+            return {"error": "Failed to parse action parameters"}
+        resolved = self._resolve_placeholders(arguments, action)
+        if isinstance(resolved, str):
+            return {"error": resolved}
+        with action_execution_context(action.flow_token_id):
+            return self._execute_by_provider_type(provider_type, provider, method_name, resolved, action)
+
+    def _admit_deferred_scheduler(self, provider_type: str, provider: str, method_name: str, action: QueuedActionProtocol) -> dict[str, object]:
+        """Transfer the exclusive action body before parsing or walking its payload.
+
+        The common entry predicate selects only this finite scheduler family.
+        The local closure is never reconstructed from the public request
+        descriptor after runtime loss.
+        """
+        self._validate_process_registration(action.process_key)
+
+        def prepare() -> dict[str, object]:
+            arguments = self._prepare_arguments(action)
+            if arguments is None:
+                raise FrameworkError("Failed to parse owned action parameters", error_code="action_processor.invalid_owned_arguments")
+            return self._resolve_placeholders(arguments, action)
+
+        owner = self._registered_alias_owner(provider) if provider_type == "service_interface" else self.plugin_manager.get_plugin(provider)
+        operation = self._prepare_registered_service(provider, method_name, {}, action, argument_preparer=prepare) if provider_type == "service_interface" else None
+        with action_execution_context(action.flow_token_id), registered_action_context(action.id, action.flow_id, action.session_id):
+            return self._admit_registered_owner(owner, method_name, {}, action, argument_preparer=prepare, operation=operation)
 
     def _apply_templates_if_needed(self, arguments: dict[str, object], action: QueuedActionProtocol) -> dict[str, object]:
         """Apply template resolution if template patterns are present.
@@ -440,12 +649,307 @@ class ActionProcessor:
         action: QueuedActionProtocol,
     ) -> dict[str, object]:
         """Execute action based on provider type."""
+        with registered_action_context(action.id, action.flow_id, action.session_id):
+            return self._execute_registered_provider(provider_type, provider, method_name, arguments, action)
+
+    def _execute_registered_provider(self, provider_type: str, provider: str, method_name: str, arguments: dict[str, object], action: QueuedActionProtocol) -> dict[str, object]:
+        if provider_type == "service_interface":
+            admitted = self._execute_selected_service(provider, method_name, arguments, action)
+            if admitted is not None:
+                return admitted
+        elif provider_type == "plugin" and provider == "postgres_state_management_plugin" and method_name == "execute_sql":
+            return self._admit_registered_owner(self.plugin_manager.get_plugin(provider), method_name, arguments, action)
         if provider_type == "plugin":
             return self._execute_plugin_action(provider, method_name, arguments, action)
-        elif provider_type == "service_interface":
+        if provider_type == "service_interface":
             return self._execute_service_interface_action(provider, method_name, arguments, action)
-        else:
-            return {"success": False, "error": f"Unsupported provider_type '{provider_type}'"}
+        return {"success": False, "error": f"Unsupported provider_type '{provider_type}'"}
+
+    def _execute_selected_service(self, provider: str, method_name: str, arguments: dict[str, object], action: QueuedActionProtocol) -> dict[str, object] | None:
+        """Apply the finite selection before any operation body is entered."""
+        if method_name in _REGISTERED_OWNER_ALIASES.get(provider, frozenset()):
+            self._validate_process_registration(action.process_key)
+            return self._admit_registered_owner(self._registered_alias_owner(provider), method_name, arguments, action)
+        if method_name in _REGISTERED_JOB_OPERATIONS.get(provider, frozenset()):
+            if provider in {"quality_service", "repo_service"}:
+                return self._admit_registered_dev_surface(provider, method_name, action)
+            if provider == "memory_service":
+                return self._admit_registered_memory(method_name, arguments, action)
+            return self._admit_registered_service(provider, method_name, arguments, action)
+        return None
+
+    def _admit_registered_dev_surface(self, provider: str, method_name: str, action: QueuedActionProtocol) -> dict[str, object]:
+        """Transfer the complete action-owned body before parsing or traversal.
+
+        Registry and trusted context capture are bounded. JSON decoding,
+        template/placeholder resolution, argument validation and all provider
+        preflight belong to the existing serial owner for this service. Its descriptor
+        cannot reconstruct a lost volatile body or authorize effect replay.
+        """
+        definition = self._validate_process_registration(action.process_key)
+        service = self._resolve_service(provider)
+        function_name = definition.get("function_name")
+        target = getattr(service, function_name, None) if isinstance(function_name, str) else None
+        if not callable(target):
+            raise FrameworkError(f"Registered target for {action.process_key} is not callable")
+        call_context = self._build_call_context(action)
+
+        def operation(_descriptor: dict[str, object]) -> dict[str, object]:
+            arguments = self._prepare_arguments(action)
+            if arguments is None:
+                raise FrameworkError(f"Failed to parse {provider} operation parameters")
+            arguments = self._resolve_placeholders(arguments, action)
+            schema = definition.get("parameters")
+            prepared = self._filter_and_inject_arguments(arguments, schema if isinstance(schema, dict) else {}, action, process_def=definition)
+            prepared["call_context"] = call_context
+            return self._invoke_standard_service_target(target, provider, method_name, prepared, action)
+
+        descriptor: dict[str, object] = {"body_storage": "owner_memory", "on_owner_loss": "reconcile_without_replay"}
+        with action_execution_context(action.flow_token_id), registered_action_context(action.id, action.flow_id, action.session_id):
+            return self._registered_job_manager().submit_registered_operation(provider, method_name, descriptor, operation)
+
+    def _admit_registered_schema(self, method_name: str, action: QueuedActionProtocol) -> dict[str, object]:
+        """One schema owner takes the complete volatile declaration before parsing.
+
+        Direct provider calls keep final results. Its reentrant lifecycle guard
+        also encloses synchronous startup/composition, without another job.
+        A descriptor cannot reconstruct a lost declaration or replay its DDL.
+        """
+
+        def prepare() -> dict[str, object]:
+            arguments = self._prepare_arguments(action)
+            if arguments is None:
+                raise FrameworkError("Failed to parse schema lifecycle parameters")
+            return self._resolve_placeholders(arguments, action)
+
+        body = self._prepare_registered_service("plugin_schema_service", method_name, {}, action, argument_preparer=prepare)
+
+        def operation(descriptor: dict[str, object]) -> dict[str, object]:
+            # Preserve the former outer service response, including its raw
+            # lifecycle fields, in the exact job's terminal result.
+            return {"success": True, "action_status": ActionStatus.COMPLETED.value, **body(descriptor)}
+
+        descriptor: dict[str, object] = {"arguments": "volatile_action_owned", "recovery": "reconcile_without_replay"}
+        with action_execution_context(action.flow_token_id), registered_action_context(action.id, action.flow_id, action.session_id):
+            return self._registered_job_manager().submit_registered_operation("plugin_schema_service", method_name, descriptor, operation)
+
+    def _registered_alias_owner(self, provider: str) -> object:
+        owner = self._resolve_service(provider)
+        if provider != "scheduling_service":
+            return owner
+        # Match the wrapper's cached provider and bounded readiness check.
+        ready_owner = getattr(owner, "_ensure_ready", None)
+        if not callable(ready_owner):
+            raise FrameworkError("SchedulingService has no bound-provider readiness seam")
+        return ready_owner()
+
+    def _admit_registered_service(self, provider: str, method_name: str, arguments: dict[str, object], action: QueuedActionProtocol) -> dict[str, object]:
+        self._validate_process_registration(action.process_key)
+        if provider in {"blob_storage_service", "embedding_service", "vector_service"}:
+            return self._admit_registered_service_body(provider, method_name, action)
+        if provider == "state_service" and method_name == "execute_sql":
+            assert self.state_service is not None
+            return self._admit_registered_owner(self.state_service._validate_state_plugin(), method_name, arguments, action)
+        manager = self._registered_job_manager()
+        operation = self._prepare_registered_service(provider, method_name, arguments, action)
+        if provider == "thinking_service":
+            return manager.submit_registered_operation(provider, method_name, {"input_custody": "volatile_arguments", "action_id": action.id}, lambda _descriptor: operation(arguments))
+        if provider in {"knowledge_service", "vault_service"}:
+            # This internal entry already owns prepared arguments. Transfer them
+            # to the closure, just as the public raw-action entry below does.
+            def vault_operation(_descriptor: dict[str, object]) -> dict[str, object]:
+                from ananta.services.vault_service.enforcement import public_vault_outcome
+
+                return public_vault_outcome(lambda: operation(arguments))
+
+            bodies: dict[str, OwnedOperation] = {"knowledge_service": lambda _descriptor: operation(arguments), "vault_service": vault_operation}
+            return manager.submit_registered_operation(provider, method_name, {"volatile_arguments": True}, bodies[provider])
+        if provider == "job_service" and method_name == "get_latest_job":
+            reader = self._resolve_service(provider)
+            if not isinstance(reader, JobService):
+                raise FrameworkError("Registered latest-job lookup requires JobService")
+            with reader.registered_read_frontier():
+                return manager.submit_registered_operation(provider, method_name, arguments, operation)
+        return manager.submit_registered_operation(provider, method_name, arguments, operation)
+
+    def _admit_registered_memory(self, method_name: str, arguments: dict[str, object], action: QueuedActionProtocol) -> dict[str, object]:
+        """Capture the memory wrapper and join its bound ACTR serial owner."""
+        operation = self._prepare_registered_service("memory_service", method_name, arguments, action)
+        service = self._resolve_service("memory_service")
+        bound_owner = getattr(service, "_get_backend", None)
+        if not callable(bound_owner):
+            raise FrameworkError("MemoryService has no bound-provider admission seam")
+        return self._admit_registered_owner(bound_owner(), method_name, arguments, action, operation=operation)
+
+    @staticmethod
+    def _defers_owned_service_arguments(process_key: str) -> bool:
+        """Transfer only the finite Blob, embedding and Vector selections unparsed."""
+        return process_key in {f"service_interface::{provider}::{name}" for provider in ("blob_storage_service", "embedding_service", "vector_service") for name in _REGISTERED_JOB_OPERATIONS[provider]}
+
+    def _admit_registered_service_body(self, provider: str, method_name: str, action: QueuedActionProtocol) -> dict[str, object]:
+        """Each family owner encloses preparation and its complete bound body.
+
+        The persisted descriptor is intentionally insufficient for replay. The
+        action-owned input lives only in this closure; runtime/worker loss must
+        be reconciled using the existing job, never resubmitted from a request.
+        Direct Python calls retain their original synchronous bodies, including
+        nested Blob compositions and CoreAI's token encoding/native generation.
+        """
+        definition = self._validate_process_registration(action.process_key)
+        service = self._resolve_service(provider)
+        function_name = definition.get("function_name")
+        target = getattr(service, function_name, None) if isinstance(function_name, str) else None
+        if not callable(target):
+            raise FrameworkError(f"Registered target for {action.process_key} is not callable")
+
+        def operation(_descriptor: dict[str, object]) -> dict[str, object]:
+            arguments = self._prepare_arguments(action)
+            if arguments is None:
+                raise FrameworkError("Failed to parse action parameters")
+            arguments = self._resolve_placeholders(arguments, action)
+            schema = definition.get("parameters")
+            prepared = self._filter_and_inject_arguments(arguments, schema if isinstance(schema, dict) else {}, action, process_def=definition)
+            return self._invoke_standard_service_target(target, provider, method_name, prepared, action)
+
+        descriptor: dict[str, object] = {"arguments": "volatile_action_owned", "recovery": "reconcile_without_replay"}
+        return self._registered_job_manager().submit_registered_operation(provider, method_name, descriptor, operation)
+
+    def _registered_job_manager(self) -> AsyncJobManager:
+        """The startup-owned manager, never a second persistence mechanism."""
+        manager = getattr(self.orchestrator, "async_job_manager", None)
+        if not isinstance(manager, AsyncJobManager):
+            raise FrameworkError("Registered operation requires the initialized AsyncJobManager")
+        return manager
+
+    def _admit_knowledge_action(self, method_name: str, action: QueuedActionProtocol) -> dict[str, object]:
+        """Admit the complete Knowledge body without parsing/copying its input.
+
+        The immutable action-owned string stays only in this process's worker
+        closure. The durable request is a bounded public descriptor, never a
+        replayable copy of potentially large document/query inputs. Process loss
+        requires reconciliation of the exact job and effects, not replay.
+        """
+        definition = self._validate_process_registration(action.process_key)
+        service = self._resolve_service("knowledge_service")
+        function_name = definition.get("function_name")
+        target = getattr(service, function_name, None) if isinstance(function_name, str) else None
+        if not callable(target):
+            raise FrameworkError(f"Registered target for {action.process_key} is not callable")
+        raw_parameters = action.parameters
+        schema = definition.get("parameters")
+
+        def operation(_descriptor: dict[str, object]) -> dict[str, object]:
+            arguments = json.loads(raw_parameters) if raw_parameters else {}
+            if not isinstance(arguments, dict):
+                raise FrameworkError("Knowledge action parameters must be an object")
+            prepared = self._apply_templates_if_needed(arguments, action)
+            prepared = self._resolve_placeholders(prepared, action)
+            injected = self._filter_and_inject_arguments(prepared, schema if isinstance(schema, dict) else {}, action, process_def=definition)
+            return self._invoke_standard_service_target(target, "knowledge_service", method_name, injected, action)
+
+        descriptor: dict[str, object] = {"volatile_arguments": True, "process_key": action.process_key}
+        with action_execution_context(action.flow_token_id), registered_action_context(action.id, action.flow_id, action.session_id):
+            return self._registered_job_manager().submit_registered_operation("knowledge_service", method_name, descriptor, operation)
+
+    def _admit_vault_action(self, method_name: str, action: QueuedActionProtocol) -> dict[str, object]:
+        """Transfer the action-owned input to one secret-free vault job.
+
+        Parsing, templates, validation and the complete provider operation run
+        in the existing owner. Neither raw inputs nor filled requests become
+        job payloads. A lost closure cannot be reconstructed or replayed.
+        """
+        from ananta.services.vault_service.enforcement import public_vault_outcome
+
+        definition = self._validate_process_registration(action.process_key)
+        service = self._resolve_service("vault_service")
+        function_name = definition.get("function_name")
+        target = getattr(service, function_name, None) if isinstance(function_name, str) else None
+        if not callable(target):
+            raise FrameworkError(f"Registered target for {action.process_key} is not callable")
+        raw_parameters = action.parameters
+        context = self._build_call_context(action)
+        schema = definition.get("parameters")
+
+        def invoke() -> dict[str, object]:
+            arguments = json.loads(raw_parameters) if raw_parameters else {}
+            if not isinstance(arguments, dict):
+                raise FrameworkError("Vault action parameters must be an object")
+            prepared = self._apply_templates_if_needed(arguments, action)
+            prepared = self._resolve_placeholders(prepared, action)
+            injected = self._filter_and_inject_arguments(prepared, schema if isinstance(schema, dict) else {}, action, process_def=definition)
+            if injected.get("call_context") != context:
+                raise VaultAccessDeniedError("Vault caller authority changed after admission")
+            return self._invoke_standard_service_target(target, "vault_service", method_name, injected, action)
+
+        descriptor: dict[str, object] = {"volatile_arguments": True, "process_key": action.process_key}
+        with action_execution_context(action.flow_token_id), registered_action_context(action.id, action.flow_id, action.session_id):
+            return self._registered_job_manager().submit_registered_operation("vault_service", method_name, descriptor, lambda _descriptor: public_vault_outcome(invoke))
+
+    def _prepare_registered_service(self, provider: str, method_name: str, arguments: dict[str, object], action: QueuedActionProtocol, *, argument_preparer: Callable[[], dict[str, object]] | None = None) -> OwnedOperation:
+        """Capture the actual callable and trusted injections before admission."""
+        definition = self._validate_process_registration(action.process_key)
+        service = self._resolve_service(provider)
+        function_name = definition.get("function_name")
+        target = getattr(service, function_name, None) if isinstance(function_name, str) else None
+        if not callable(target):
+            raise FrameworkError(f"Registered target for {action.process_key} is not callable")
+        if provider == "inference_service" and method_name in {"process_results", "process_error"}:
+            return lambda parameters: self._execute_vertex_inference(service, method_name, parameters, action, bound_method=target)
+        schema = definition.get("parameters")
+        if argument_preparer is not None:
+
+            def deferred(_descriptor: dict[str, object]) -> dict[str, object]:
+                prepared = self._filter_and_inject_arguments(argument_preparer(), schema if isinstance(schema, dict) else {}, action, process_def=definition)
+                state = prepared.get("state")
+                if isinstance(state, dict):
+                    state["call_context"] = self._build_call_context(action)
+                return self._invoke_standard_service_target(target, provider, method_name, prepared, action)
+
+            return deferred
+        prepared = self._filter_and_inject_arguments(arguments, schema if isinstance(schema, dict) else {}, action, process_def=definition)
+        injections = {key: value for key, value in prepared.items() if key not in arguments or key in {"state", "call_context"}}
+
+        return lambda parameters: self._invoke_standard_service_target(target, provider, method_name, {**parameters, **injections}, action)
+
+    def bind_registered_completion_handler(self, handler: RegisteredCompletion) -> None:
+        """The poller installs its existing result route before dispatch starts."""
+        manager = getattr(self.orchestrator, "async_job_manager", None)
+        if isinstance(manager, AsyncJobManager):
+            manager.set_registered_completion_handler(handler)
+
+    @overload
+    def _admit_registered_owner(self, owner: object, method_name: str, arguments: dict[str, object], action: QueuedActionProtocol, *, allow_unselected: Literal[False] = False, argument_preparer: Callable[[], dict[str, object]] | None = None, operation: OwnedOperation | None = None) -> dict[str, object]: ...
+
+    @overload
+    def _admit_registered_owner(self, owner: object, method_name: str, arguments: dict[str, object], action: QueuedActionProtocol, *, allow_unselected: Literal[True], argument_preparer: Callable[[], dict[str, object]] | None = None, operation: OwnedOperation | None = None) -> dict[str, object] | None: ...
+
+    def _admit_registered_owner(self, owner: object, method_name: str, arguments: dict[str, object], action: QueuedActionProtocol, *, allow_unselected: bool = False, argument_preparer: Callable[[], dict[str, object]] | None = None, operation: OwnedOperation | None = None) -> dict[str, object] | None:
+        """Use the bound owner hook; ordinary plugin keys may be unselected.
+
+        Required service aliases and SQL retain their fail-fast contract.
+        Optional plugin admission treats a missing hook or None as no selection,
+        then runs the existing plugin method with its unchanged call shape.
+        """
+        hook = getattr(owner, "admit_registered_operation", None)
+        if not callable(hook):
+            if allow_unselected:
+                return None
+            raise FrameworkError(f"Registered owner for {action.process_key} has no admission hook")
+        state: dict[str, object] = {"session_id": action.session_id, "flow_id": action.flow_id, "call_context": self._build_call_context(action)}
+        if action.context_id:
+            state["context_id"] = action.context_id
+        self._lift_inference_vertex_identity(state, action)
+        if argument_preparer is not None:
+            state["_registered_arguments"] = argument_preparer
+        if operation is not None:
+            state["_registered_operation"] = operation
+        hook_keywords = {"operation": operation} if action.process_key.startswith("service_interface::memory_service::") else {}
+        result = hook(method_name, arguments, state, **hook_keywords)
+        if result is None and allow_unselected:
+            return None
+        if not isinstance(result, dict):
+            raise FrameworkError(f"Registered owner did not admit selected operation {action.process_key}")
+        return result
 
     def _execute_plugin_action(
         self,
@@ -459,7 +963,9 @@ class ActionProcessor:
         if not plugin:
             return {"success": False, "error": f"Plugin '{provider}' not found"}
 
-        result = self._execute_plugin_method(plugin, method_name, arguments, action)
+        result: object = self._admit_registered_owner(plugin, method_name, arguments, action, allow_unselected=True)
+        if result is None:
+            result = self._execute_plugin_method(plugin, method_name, arguments, action)
 
         # ENFORCE PLUGIN CONTRACT: Plugins MUST return ActionResult structure
         # Required fields: action_status, data, actions, error, timestamp
@@ -519,6 +1025,8 @@ class ActionProcessor:
         method_name: str,
         arguments: dict[str, object],
         action: QueuedActionProtocol,
+        *,
+        bound_method: Callable[..., object] | None = None,
     ) -> dict[str, object]:
         """Execute VERTEX inference methods (process_error, process_results).
 
@@ -539,7 +1047,7 @@ class ActionProcessor:
         }
         if action.context_id:
             state_dict["context_id"] = action.context_id
-        method = getattr(service, method_name)
+        method = bound_method if bound_method is not None else getattr(service, method_name)
 
         # Inject action_name for process_error so the advancement guard
         # in advancement.py can skip plan advancement during error recovery.
@@ -846,6 +1354,10 @@ class ActionProcessor:
         method = getattr(service, function_name, None)
         if not callable(method):
             raise FrameworkError(f"Registered service target '{provider}.{function_name}' is not callable")
+        return self._invoke_standard_service_target(method, provider, method_name, filtered_args, action)
+
+    def _invoke_standard_service_target(self, method: Callable[..., object], provider: str, method_name: str, filtered_args: dict[str, object], action: QueuedActionProtocol) -> dict[str, object]:
+        """The same synchronous body serves internal calls and admitted workers."""
         with action_execution_context(action.flow_token_id):
             record_handler_entry(action.process_key, "handler")
             result = method(**filtered_args)

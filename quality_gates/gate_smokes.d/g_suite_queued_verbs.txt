@@ -1,0 +1,9 @@
+# g_suite_plugin born-async fix (unt_340f230e, prb_f6964132 / iss_59840e08,
+# 2026-11-08): test_connection, sheets_export, docs_export, slides_export,
+# start_interface and disconnect_account through ActionFactory and the real
+# ActionProcessor with 300 ms fake vendor transports. Each returns a job handle
+# in under 50 ms with no calling-thread transport use; the plugin's own worker
+# reproduces the pre-change inline outcomes recorded in
+# tests/fixtures/queued_verbs_base_results.json; invalid arguments still fail at
+# once without a job. Hermetic unittest module.
+plugins/g_suite_plugin/tests/smoke_queued_verbs.py

@@ -59,7 +59,7 @@ class _ParsedTask:
     task_id: str
     subject: str
     description: str
-    active_form: str
+    active_form: str | None
     status: str
     blocks: tuple[str, ...]
     blocked_by: tuple[str, ...]
@@ -77,8 +77,7 @@ def _coerce_str_list(value: object, field_name: str, file_path: Path) -> tuple[s
         return ()
     if not isinstance(value, list):
         raise ValueError(
-            f"claude_code tasks: {file_path}: field {field_name!r} must be a list, "
-            f"got {type(value).__name__}",
+            f"claude_code tasks: {file_path}: field {field_name!r} must be a list, got {type(value).__name__}",
         )
     return tuple(str(item) for item in value)
 
@@ -92,26 +91,19 @@ def _load_task_dict(path: Path) -> dict[str, object]:
     try:
         decoded = raw_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise ValueError(
-            f"claude_code tasks: non-UTF8 content in {path}: {exc}"
-        ) from exc
+        raise ValueError(f"claude_code tasks: non-UTF8 content in {path}: {exc}") from exc
     try:
         obj = json.loads(decoded)
     except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"claude_code tasks: malformed JSON in {path}: {exc}"
-        ) from exc
+        raise ValueError(f"claude_code tasks: malformed JSON in {path}: {exc}") from exc
     if not isinstance(obj, dict):
         raise ValueError(
-            f"claude_code tasks: {path}: top-level value is not a dict "
-            f"({type(obj).__name__})",
+            f"claude_code tasks: {path}: top-level value is not a dict ({type(obj).__name__})",
         )
     return obj
 
 
-def _require_str(
-    obj: dict[str, object], field: str, path: Path, *, non_empty: bool = False
-) -> str:
+def _require_str(obj: dict[str, object], field: str, path: Path, *, non_empty: bool = False) -> str:
     value = obj.get(field)
     if not isinstance(value, str) or (non_empty and not value):
         suffix = "non-empty " if non_empty else ""
@@ -131,7 +123,9 @@ def parse_task_file(path: Path) -> _ParsedTask:
     task_id = _require_str(obj, "id", path, non_empty=True)
     subject = _require_str(obj, "subject", path)
     description = _require_str(obj, "description", path)
-    active_form = _require_str(obj, "activeForm", path)
+    # Older/current task writers may omit spinner text. Preserve absence as
+    # JSON null; do not invent a subject-derived value or an empty string.
+    active_form = _require_str(obj, "activeForm", path) if "activeForm" in obj else None
     status = _require_str(obj, "status", path)
     blocks = _coerce_str_list(obj.get("blocks"), "blocks", path)
     blocked_by = _coerce_str_list(obj.get("blockedBy"), "blockedBy", path)

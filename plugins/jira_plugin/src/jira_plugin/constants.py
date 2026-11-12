@@ -7,8 +7,8 @@ else in the plugin.
 
 Auth model (operator-ratified 2026-07-09, umbrella design §7): Jira Cloud +
 HTTP basic-auth on a DEDICATED scoped Atlassian service account (account email +
-API token). No OAuth 3LO, no browser flow, no callback server — durable headless
-auth. The API token EXPIRES (Atlassian default 1yr, 1-365d configurable); the
+API token). Additional site bindings support API tokens and OAuth 2.0 (3LO);
+the original address-book token remains the legacy binding. The API token EXPIRES (Atlassian default 1yr, 1-365d configurable); the
 plugin is expiry-aware (``check_token_expiry``) and warns loudly rather than
 letting it lapse into a mystery 401. A personal-account token is a documented
 drop-in fallback (same transport, same entry shape).
@@ -29,8 +29,7 @@ def _solet_or_fail() -> str:
     name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "jira_plugin.constants: SOLET_NAME env var is required to "
-            "resolve the scoped api_token vault key.",
+            "jira_plugin.constants: SOLET_NAME env var is required to resolve the scoped api_token vault key.",
         )
     return name
 
@@ -73,19 +72,14 @@ DEFAULT_TOKEN_EXPIRY_WARN_DAYS: Final[int] = 14
 # get_declared_vault_keys (both return []). This plugin holds NO plugin-owned
 # runtime vault keys. Canonical convention: VAULT_AND_ADDRESS_BOOK.md
 # §"Pattern: Plugin Configuration via Address Book + Vault".
-VAULT_KEY_API_TOKEN: Final[str] = (
-    f"{_SOLET}.default_address_book_plugin.jira_api_token"
-)
+VAULT_KEY_API_TOKEN: Final[str] = f"{_SOLET}.default_address_book_plugin.jira_api_token"
 
 # ---------------------------------------------------------------------------
 # Address book entry — Jira site identity + credentials
 # ---------------------------------------------------------------------------
 ADDRESS_BOOK_ENTRY_NAME: Final[str] = "jira_site"
 ADDRESS_BOOK_ENTRY_TYPE: Final[str] = "api"
-ADDRESS_BOOK_ENTRY_DESCRIPTION: Final[str] = (
-    "Jira Cloud site identity + credentials (base_url, service-account email, "
-    "api_token vault-ref, token expires_at, scope_note) for jira_plugin."
-)
+ADDRESS_BOOK_ENTRY_DESCRIPTION: Final[str] = "Jira Cloud site identity + credentials (base_url, service-account email, api_token vault-ref, token expires_at, scope_note) for jira_plugin."
 ADDRESS_BOOK_FIELD_BASE_URL: Final[str] = "base_url"
 ADDRESS_BOOK_FIELD_EMAIL: Final[str] = "email"
 ADDRESS_BOOK_FIELD_API_TOKEN: Final[str] = "api_token"
@@ -173,3 +167,7 @@ RESULT_TYPE_TRANSITION_ISSUE: Final[str] = "jira_transition_issue_result"
 RESULT_TYPE_DOWNLOAD_ATTACHMENT: Final[str] = "jira_download_attachment_result"
 RESULT_TYPE_ADD_ATTACHMENT: Final[str] = "jira_add_attachment_result"
 RESULT_TYPE_TEST_CONNECTION: Final[str] = "jira_test_connection_result"
+
+# OAuth timing settings; plugin.yaml documents operator overrides.
+DEFAULT_OAUTH_STATE_TTL_SECONDS: Final[int] = 600
+DEFAULT_TOKEN_REFRESH_SKEW_SECONDS: Final[int] = 60

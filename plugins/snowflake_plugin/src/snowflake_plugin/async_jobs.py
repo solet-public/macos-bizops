@@ -39,8 +39,9 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from ananta.constants import CONTEXT_KEY_FLOW_ID, CONTEXT_KEY_SESSION_ID
+from ananta.file_locations.containment import job_location_session, location_session
 
-from . import completion_templates, query_actions, rest_client, rest_families
+from . import completion_templates, query_actions, rest_client, rest_families, stage_files
 from .constants import ERROR_API_ERROR, PLUGIN_NAME
 
 if TYPE_CHECKING:
@@ -71,10 +72,11 @@ ACTION_HANDLERS: dict[str, ActionHandler] = {
     "export_query": (query_actions.export_query, True),
     "run_statement": (query_actions.run_statement, True),
     "request": (rest_client.run_request, False),
+    "stage_files": (stage_files.run_stage_files, False),
     **{family: (partial(rest_families.run_family, family), False) for family in rest_families.FAMILIES},
 }
-# REST verbs resolve the account themselves and never open a SQL connection.
-REST_ACTIONS: frozenset[str] = frozenset({"request", *rest_families.FAMILIES})
+# These handlers own account resolution and their transport/connection.
+PLUGIN_ACTIONS: frozenset[str] = frozenset({"request", "stage_files", *rest_families.FAMILIES})
 
 
 def _validate_state_context(state: dict[str, Any]) -> tuple[str, str]:
@@ -169,7 +171,17 @@ def _drain_queued_jobs(plugin: SnowflakePlugin) -> None:
                 _process_job(plugin, async_job_manager, job_id, action_name)
 
 
-def _process_job(
+def _process_job(plugin: SnowflakePlugin, async_job_manager: Any, job_id: str, action_name: str) -> None:
+    """Bind only this job's originating session; absent metadata is advisory."""
+    try:
+        record = async_job_manager.get_job(job_id)
+    except Exception:
+        record = None
+    with location_session(job_location_session(record)):
+        _process_job_in_context(plugin, async_job_manager, job_id, action_name)
+
+
+def _process_job_in_context(
     plugin: SnowflakePlugin,
     async_job_manager: Any,
     job_id: str,
@@ -192,7 +204,7 @@ def _process_job(
         return
     params = payload_result.get("data", {}).get("payload", {})
     action_fn, needs_export_gate = ACTION_HANDLERS[action_name]
-    if action_name in REST_ACTIONS:
+    if action_name in PLUGIN_ACTIONS:
         outcome = action_fn(plugin, params)
     elif needs_export_gate:
         outcome = plugin._run_on_connection(

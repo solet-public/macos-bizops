@@ -6,8 +6,8 @@
   "result_processor_customizations": {
     "action_label": "Zuora invoice application parts listed",
     "result_type": "zuora_list_invoice_application_parts_result",
-    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body, redacted) and pagination {next_path, vendor, hint}; next_path is the tenant-relative nextPage link to fetch with the request verb, null when there is no further page.",
-    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically. Credential and payment-instrument values never appear; [REDACTED] marks where Zuora echoed one."
+    "result_description": "Queued job envelope. Completion carries operation, method, path, status, correlation_id and data (Zuora's response body as received) and pagination {next_path, vendor, hint}; next_path is the tenant-relative nextPage link to fetch with the request verb, null when there is no further page.",
+    "presentation_guidance": "Queued is not completion. On completion relay HTTP status, ids and states exactly as Zuora returned them; a write or delete may have changed vendor state, so do not replay it automatically."
   },
   "error_processor_customizations": {
     "action_context": "List the payments and credit memos applied to an invoice (GET /v1/invoices/{invoiceKey}/application-parts); Zuora documents no page parameter, so next_path names its nextPage link for the request verb.",

@@ -62,7 +62,7 @@ GET    /api/v1/bridge/{bridge_id}/events?after=N    (long-poll)
 POST   /api/v1/bridge/{bridge_id}/process/search
 POST   /api/v1/bridge/{bridge_id}/process/schema
 POST   /api/v1/bridge/{bridge_id}/process/call
-GET    /api/v1/bridge/{bridge_id}/process/result/{action_id}
+GET    /api/v1/bridge/{bridge_id}/process/result/{action_id}?follow_job=true  (optional)
 GET    /api/v1/bridge/{bridge_id}/download/{blob_id}
 
 # Peer messaging (agent → other live agents)
@@ -92,7 +92,14 @@ thread is a violation unless the exact handler is declared dispatch-only with
 a reason. `LOOP_INVARIANT_VIOLATION` logs its process key, kind, thread id and
 entry stack. The invocation continues; telemetry never refuses or throttles it.
 
-`handler_entries` exposes `{invocations, capacity, recent_entries, violations}`.
+`handler_entries` exposes `{invocations, capacity, recent_entries, violations, handler_wall_time}`.
+`handler_wall_time` is `{evicted_keys, by_process_key}`: for each plugin action
+process key, `count`, `total_s`, `max_s` and `last_s` of timed handler calls in
+seconds, including calls that raised. A synchronous handler's time is time it
+held the executing thread; an awaited handler's time includes its suspensions.
+At most `capacity` keys are kept; a new key beyond that evicts the
+least-recently-recorded key and increments `evicted_keys`. The measurement is
+advisory and never refuses, delays or changes a handler or its response.
 Each entry includes sequence, process key, kind (`handler` or `route`), executing
 thread id, `on_loop`, recording time (Unix seconds), dispatch-only reason or
 `null`, and a stack for violations. Worker invocations are retained too, with
@@ -276,12 +283,21 @@ POST /api/v1/bridge/{bridge_id}/process/schema
   resp: { "invocation_schema": { ... full JSON Schema ... } }
 
 POST /api/v1/bridge/{bridge_id}/process/call
-  body: { "process_key": "...", "arguments": { ... } }
+  body: { "process_key": "...", "arguments": { ... },
+          "bridge_wait_attached": true } # optional, defaults false
   resp: { "action_id": "act-..." }   # 202 Accepted; result via events
 
-GET  /api/v1/bridge/{bridge_id}/process/result/{action_id}
-  resp: { "status": "in_progress" | "completed" | "failed",
-          "payload": <structured result on completed/failed> }
+GET  /api/v1/bridge/{bridge_id}/process/result/{action_id}?follow_job=true
+  resp: { "status": <current status>, "result": <structured result>,
+          "error": <job failure when present>, "next_read": <read while running> }
+  # follow_job is optional and defaults to false. Finished jobs return their
+  # result or error; running jobs return their status and next_read. The CLI
+  # does not send follow_job and handles its own wait.
+
+POST /api/v1/bridge/{bridge_id}/job/{job_id}/waiter/release
+  body: {}
+  resp: { "job_id": "job-...", "released": true | false,
+          "bridge_wait_attached": false }
 
 GET  /api/v1/bridge/{bridge_id}/download/{blob_id}
   resp: streamed blob bytes with Content-Type and Content-Disposition
@@ -294,6 +310,34 @@ to the orchestrator and the structured result is bridged back via
 `...::deliver_error`), emitted on the channel as
 `bridge_delivery_result` / `bridge_delivery_error`. No inference
 runs unless the bridge-delivery contract itself is violated.
+
+The local CLI sends `bridge_wait_attached=true` before dispatch for default
+and explicit `--wait` calls, including piped output. The root job persists
+that intent and its originating flow/bridge/session before scheduling work.
+Its terminal outcome is read through `job_service.get_job`; both role pushes
+and fallback caller continuations are suppressed while the binding is attached.
+Registered children consult that root binding at completion time: only their
+caller-role message is suppressed, and internal continuations continue normally.
+They have no independent marker; the single root release restores their later
+notifications as well.
+Absent/false intent preserves existing routing, including `--no-wait` calls.
+
+Waiter release requires the originating open bridge and session. It changes
+only waiter metadata, retains attachment/release history, and is idempotent;
+it never cancels or replays the job. A suppressed terminal job routes after a
+successful first release. Foreign ownership returns
+`bridge.waiter_owner_mismatch` (403); unknown job returns
+`bridge.job_not_found` (404); a stale metadata compare-and-set returns
+`bridge.waiter_release_conflict` (409). The active job manager coordinates
+release with terminal routing. CLI timeout makes one release attempt and
+returns `job_wait_timeout` plus the durable job id; an uncertain release is an
+explicit advisory, with no automatic retry. Waiting calls also make one release
+attempt on SIGINT, SIGTERM, SIGHUP, SystemExit during waiting or output, and
+output failure, before closing the originating bridge. SIGKILL or host loss
+cannot run cleanup and may leave the waiter attached. At the cross-runtime
+timeout or SIGKILL/host-loss boundary, at most one root completion wake may be
+missed as an explicit advisory; the durable result remains redeemable through
+`get_job`. Reconcile that job before another submission.
 
 ## Peer messaging
 

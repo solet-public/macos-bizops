@@ -1,7 +1,7 @@
 {
   "process_key": "service_interface::knowledge_service::ingest",
   "display_name": "Ingest Knowledge Base",
-  "description": "Idempotently (re)ingest a knowledge base, or all of them with name='all'. Content-hash-gated: skips knowledge bases whose indexed content is already current and reindexes only stale or not-yet-installed ones. In 'all' mode, per-KB failures are collected and status becomes 'partial'; a single named KB fails loud. Unlike install (which always archives and recreates), ingest is the changed-only entry point used by provisioning and edit-then-reingest.",
+  "description": "Idempotently (re)ingest a knowledge base, or all of them with name='all'. Content-hash-gated: skips knowledge bases whose indexed content is already current and reindexes only stale or not-yet-installed ones. In 'all' mode, per-KB failures are collected and status becomes 'partial'; a single named KB fails loud. Unlike install (which always archives and recreates), ingest is the changed-only entry point used by provisioning and edit-then-reingest. Registered calls return a queued job_id/status receipt. Read that exact job with service_interface::job_service::get_job until terminal; job.result contains the complete operation result and job.error retains any failure. In-process calls return the complete result synchronously.",
   "embedding_description": "Idempotently refresh the knowledge index by reingesting only the knowledge bases whose content changed, skipping ones already current, optionally sweeping every knowledge base at once.",
   "result_processor_customizations": {
     "action_label": "Knowledge bases ingested",

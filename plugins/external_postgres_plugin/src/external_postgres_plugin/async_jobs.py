@@ -31,11 +31,20 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal
 
 from ananta.constants import CONTEXT_KEY_FLOW_ID, CONTEXT_KEY_SESSION_ID
+from ananta.file_locations.containment import job_location_session, location_session
 
-from . import completion_templates, query_actions
+from . import (
+    admin_actions,
+    client_tools,
+    completion_templates,
+    copy_actions,
+    query_actions,
+    script_actions,
+)
 from .constants import ERROR_API_ERROR, PLUGIN_NAME
 
 if TYPE_CHECKING:
@@ -45,17 +54,39 @@ logger = logging.getLogger(PLUGIN_NAME)
 
 POLL_INTERVAL_SECONDS = 2.0
 _JOB_LIST_LIMIT = 10
+_WITHHELD_FAILURE = "the job failed before its result could be checked; its output was withheld"
+_PAYLOAD_FAILURE = "could not load the job's request payload"
 
-# action_name -> (query_actions callable, needs_export_path_gate, read_only)
-ActionHandler = tuple[Callable[..., dict[str, Any]], bool, bool]
+
+@dataclass(frozen=True)
+class ActionHandler:
+    """How the worker runs one verb.
+
+    ``gate``: ``none``; ``tsv`` (the TSV export gate, ``output_tsv_path``); or
+    ``file`` (the general workspace file gate, any contained path).
+    ``target``: ``connection`` (an opened psycopg connection) or ``dsn`` (the
+    resolved, platform-guarded connection target, for the client programs).
+    """
+
+    fn: Callable[..., dict[str, Any]]
+    gate: Literal["none", "tsv", "file"] = "none"
+    target: Literal["connection", "dsn"] = "connection"
+
+
 ACTION_HANDLERS: dict[str, ActionHandler] = {
-    "list_schemas": (query_actions.list_schemas, False, True),
-    "list_tables": (query_actions.list_tables, False, True),
-    "describe_table": (query_actions.describe_table, False, True),
-    "test_connection": (query_actions.test_connection, False, True),
-    "run_query": (query_actions.run_query, True, True),
-    "export_query": (query_actions.export_query, True, True),
-    "run_statement": (query_actions.run_statement, True, False),
+    "list_schemas": ActionHandler(query_actions.list_schemas),
+    "list_tables": ActionHandler(query_actions.list_tables),
+    "describe_table": ActionHandler(query_actions.describe_table),
+    "test_connection": ActionHandler(query_actions.test_connection),
+    "run_query": ActionHandler(query_actions.run_query, gate="tsv"),
+    "export_query": ActionHandler(query_actions.export_query, gate="tsv"),
+    "run_statement": ActionHandler(query_actions.run_statement, gate="tsv"),
+    "run_script": ActionHandler(script_actions.run_script),
+    "copy": ActionHandler(copy_actions.run_copy, gate="file"),
+    "activity": ActionHandler(admin_actions.run_activity),
+    "statistics": ActionHandler(admin_actions.run_statistics),
+    "dump_database": ActionHandler(client_tools.dump_database, gate="file", target="dsn"),
+    "restore_database": ActionHandler(client_tools.restore_database, gate="file", target="dsn"),
 }
 
 
@@ -89,7 +120,10 @@ def ensure_worker_started(plugin: ExternalPostgresPlugin) -> None:
         if plugin._worker_thread is not None and plugin._worker_thread.is_alive():
             return
         thread = threading.Thread(
-            target=_worker_loop, args=(plugin,), name=f"{PLUGIN_NAME}-async-worker", daemon=True,
+            target=_worker_loop,
+            args=(plugin,),
+            name=f"{PLUGIN_NAME}-async-worker",
+            daemon=True,
         )
         plugin._worker_thread = thread
         thread.start()
@@ -151,38 +185,63 @@ def _drain_queued_jobs(plugin: ExternalPostgresPlugin) -> None:
                 _process_job(plugin, async_job_manager, job_id, action_name)
 
 
-def _process_job(
-    plugin: ExternalPostgresPlugin, async_job_manager: Any, job_id: str, action_name: str,
+def _process_job(plugin: ExternalPostgresPlugin, async_job_manager: Any, job_id: str, action_name: str) -> None:
+    """Bind only this job's originating session; absent metadata is advisory."""
+    try:
+        record = async_job_manager.get_job(job_id)
+    except Exception:
+        record = None
+    with location_session(job_location_session(record)):
+        _process_job_in_context(plugin, async_job_manager, job_id, action_name)
+
+
+def _process_job_in_context(
+    plugin: ExternalPostgresPlugin,
+    async_job_manager: Any,
+    job_id: str,
+    action_name: str,
 ) -> None:
     """Run one job's real I/O and complete it. Runs on the ONE worker thread only."""
     async_job_manager.update_job(job_id, {"status": "processing"})
     payload_result = async_job_manager.get_job_payload(job_id, "request")
     if payload_result.get("action_status") != "completed":
-        async_job_manager.update_job(
-            job_id,
-            {
-                "status": "error",
-                "error": {
-                    "code": ERROR_API_ERROR,
-                    "message": "could not load the job's request payload",
-                },
-            },
-        )
-        return
-    params = payload_result.get("data", {}).get("payload", {})
-    action_fn, needs_export_gate, read_only = ACTION_HANDLERS[action_name]
-    if needs_export_gate:
-        outcome = plugin._run_on_connection(
-            params,
-            lambda conn: action_fn(conn, params, plugin._export_path_gate),
-            action_name,
-            read_only=read_only,
-        )
+        logger.error("%s async worker: %s job %s: %s", PLUGIN_NAME, action_name, job_id, _PAYLOAD_FAILURE)
+        outcome = plugin._error(ERROR_API_ERROR, _PAYLOAD_FAILURE)
     else:
-        outcome = plugin._run_on_connection(
-            params, lambda conn: action_fn(conn, params), action_name, read_only=read_only,
-        )
+        params = payload_result.get("data", {}).get("payload", {})
+        try:
+            outcome = run_action(plugin, ACTION_HANDLERS[action_name], action_name, params)
+        except Exception:  # never leave a job 'processing'; its text could carry anything, so none is kept
+            logger.error("%s async worker: %s job %s failed before its result was checked", PLUGIN_NAME, action_name, job_id)
+            outcome = plugin._error(ERROR_API_ERROR, _WITHHELD_FAILURE)
     if outcome.get("action_status") == "completed":
         async_job_manager.update_job(job_id, {"status": "completed", "result": outcome.get("data", {})})
     else:
         async_job_manager.update_job(job_id, {"status": "error", "error": outcome.get("error", {})})
+
+
+def run_action(
+    plugin: ExternalPostgresPlugin,
+    handler: ActionHandler,
+    action_name: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Run one verb's real I/O through the plugin's typed-error envelope."""
+    gate: Any = {
+        "none": None,
+        "tsv": plugin._export_path_gate,
+        "file": plugin._file_path_gate,
+    }[handler.gate]
+    if handler.target == "dsn":
+        return plugin._run_with_dsn(
+            params,
+            lambda dsn: handler.fn(dsn, params, gate, plugin._tool_settings()),
+            action_name,
+        )
+    if gate is None:
+        return plugin._run_on_connection(params, lambda conn: handler.fn(conn, params), action_name)
+    return plugin._run_on_connection(
+        params,
+        lambda conn: handler.fn(conn, params, gate),
+        action_name,
+    )

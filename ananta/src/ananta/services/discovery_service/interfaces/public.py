@@ -16,6 +16,7 @@ from ananta.core.actions.action_metadata import (
 )
 from ananta.core.domain.enums import ProcessorPolicyCategory
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.async_job_manager import registered_job_return_schema
 
 
 class DiscoveryServiceAPI(ABC):
@@ -31,16 +32,13 @@ class DiscoveryServiceAPI(ABC):
     """
 
     @service_interface_process(
+        is_async=True,
         name="query_process_registry",
         work_count_impact=0,  # Non-terminal: flow must continue to use discovered process
         provider="discovery_service",
         parameters={
             "query": ParameterMetadata(
-                description=(
-                    "Natural language description of what needs to be accomplished. "
-                    "Examples: 'generate a sine tone', 'create image from text', "
-                    "'search knowledge base', 'schedule task for later'"
-                ),
+                description=("Natural language description of what needs to be accomplished. Examples: 'generate a sine tone', 'create image from text', 'search knowledge base', 'schedule task for later'"),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -51,60 +49,54 @@ class DiscoveryServiceAPI(ABC):
                 default=10,
             ),
             "state": ParameterMetadata(
-                description=(
-                    "Optional runtime state (e.g., flow_id, session_id) for correlation. "
-                    "This is automatically injected by ActionProcessor and is not required "
-                    "for discovery to run."
-                ),
+                description=("Optional runtime state (e.g., flow_id, session_id) for correlation. This is automatically injected by ActionProcessor and is not required for discovery to run."),
                 required=False,
                 type=ParameterType.OBJECT,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Discovery result with ranked list of matching processes (lightweight metadata for selection)",
-            type=ParameterType.OBJECT,
-            properties={
-                "process_keys": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Array of process key strings for reference",
-                    required=False,
-                ),
-                "process_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Total number of matching processes found",
-                    required=False,
-                ),
-                "processes": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=(
-                        "Process list with full schemas. Each entry has: process_key, provider_type, provider, "
-                        "function_name, description, and invocation_schema (full JSON Schema for constructing "
-                        "valid action arguments including all parameters, types, and validation constraints)."
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Discovery result with ranked list of matching processes (lightweight metadata for selection)",
+                type=ParameterType.OBJECT,
+                properties={
+                    "process_keys": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Array of process key strings for reference",
+                        required=False,
                     ),
-                    required=False,
-                ),
-                "query": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="The search query that was executed",
-                    required=False,
-                ),
-                "match_type": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Type of matching used (e.g., text_with_disambiguation, no_matches)",
-                    required=False,
-                ),
-                "timestamp": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="ISO timestamp when the search was performed",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Find appropriate tools for user tasks",
-                "Discover available capabilities",
-                "Use description to select the right process",
-                "Use invocation_schema to construct valid action arguments",
-            ],
+                    "process_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Total number of matching processes found",
+                        required=False,
+                    ),
+                    "processes": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description=("Process list with full schemas. Each entry has: process_key, provider_type, provider, function_name, description, and invocation_schema (full JSON Schema for constructing valid action arguments including all parameters, types, and validation constraints)."),
+                        required=False,
+                    ),
+                    "query": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="The search query that was executed",
+                        required=False,
+                    ),
+                    "match_type": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Type of matching used (e.g., text_with_disambiguation, no_matches)",
+                        required=False,
+                    ),
+                    "timestamp": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="ISO timestamp when the search was performed",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Find appropriate tools for user tasks",
+                    "Discover available capabilities",
+                    "Use description to select the right process",
+                    "Use invocation_schema to construct valid action arguments",
+                ],
+            )
         ),
         is_enabled=True,
         chaining_guidance=[
@@ -185,39 +177,42 @@ class DiscoveryServiceAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="get_service_health",
         provider="discovery_service",
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Platform statistics and service health metrics",
-            type=ParameterType.OBJECT,
-            properties={
-                "is_healthy": ParameterMetadata(
-                    type=ParameterType.BOOLEAN,
-                    description="Whether the discovery service is healthy",
-                    required=True,
-                ),
-                "total_processes": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Total number of processes registered in the process registry",
-                    required=True,
-                ),
-                "total_usage_records": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Total number of usage tracking records",
-                    required=True,
-                ),
-                "index_last_built": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="When the discovery index was last rebuilt",
-                    required=False,
-                ),
-            },
-            usage_patterns=[
-                "Answer 'how many processes are registered?'",
-                "Get platform capability statistics",
-                "Monitor system health",
-            ],
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Platform statistics and service health metrics",
+                type=ParameterType.OBJECT,
+                properties={
+                    "is_healthy": ParameterMetadata(
+                        type=ParameterType.BOOLEAN,
+                        description="Whether the discovery service is healthy",
+                        required=True,
+                    ),
+                    "total_processes": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Total number of processes registered in the process registry",
+                        required=True,
+                    ),
+                    "total_usage_records": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Total number of usage tracking records",
+                        required=True,
+                    ),
+                    "index_last_built": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="When the discovery index was last rebuilt",
+                        required=False,
+                    ),
+                },
+                usage_patterns=[
+                    "Answer 'how many processes are registered?'",
+                    "Get platform capability statistics",
+                    "Monitor system health",
+                ],
+            )
         ),
         is_enabled=True,
     )
@@ -231,6 +226,7 @@ class DiscoveryServiceAPI(ABC):
         ...
 
     @service_interface_process(
+        is_async=True,
         name="execute_embeddings_search",
         provider="discovery_service",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
@@ -252,21 +248,23 @@ class DiscoveryServiceAPI(ABC):
                 type=ParameterType.OBJECT,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Embeddings search results with matched processes",
-            properties={
-                "processes": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Matched processes with schemas",
-                    required=False,
-                ),
-                "process_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Number of matched processes",
-                    required=False,
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Embeddings search results with matched processes",
+                properties={
+                    "processes": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Matched processes with schemas",
+                        required=False,
+                    ),
+                    "process_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Number of matched processes",
+                        required=False,
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             # Structure-only schema - no oneOf enumeration of processes
@@ -314,9 +312,7 @@ class DiscoveryServiceAPI(ABC):
                 "additionalProperties": False,
             }
         ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     @abstractmethod
     def execute_embeddings_search(
@@ -346,11 +342,7 @@ class DiscoveryServiceAPI(ABC):
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "process_key": ParameterMetadata(
-                description=(
-                    "The fully-qualified process identifier. "
-                    "Format: 'provider_type::provider::function_name' "
-                    "(e.g., 'plugin::audio_processing_plugin::generate_tone')"
-                ),
+                description=("The fully-qualified process identifier. Format: 'provider_type::provider::function_name' (e.g., 'plugin::audio_processing_plugin::generate_tone')"),
                 required=True,
                 type=ParameterType.STRING,
             ),

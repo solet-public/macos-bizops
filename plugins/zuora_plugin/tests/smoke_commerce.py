@@ -13,27 +13,32 @@ Run: SOLET_NAME=<name> .venv/bin/python plugins/zuora_plugin/tests/smoke_commerc
 
 from __future__ import annotations
 
-import base64
-import json
 import sys
-import tempfile
-import unittest
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch
-from urllib.parse import parse_qs, quote
+from unittest.mock import NonCallableMagicMock
 
-import httpx
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta/src"))
+import json  # noqa: E402
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
+from collections.abc import Callable  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock, patch  # noqa: E402
+from urllib.parse import parse_qs  # noqa: E402
+
+import httpx  # noqa: E402
+from ananta.file_locations.resolution import SoletTree  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "zuora_plugin" / "src"))
 
 from ananta.core.plugins.action_discovery import discover_actions  # noqa: E402
 from ananta.core.process_registry.plugin_registration_validator import PluginRegistrationValidator  # noqa: E402
+from finish_support import finished  # noqa: E402  # pyright: ignore[reportMissingImports]
 from zuora_plugin import account_actions, async_jobs, billing_actions, data_query_actions, order_actions, typed_verbs  # noqa: E402
 from zuora_plugin.app_config import ZuoraTenantConfig  # noqa: E402
-from zuora_plugin.constants import REQUEST_REDACTION  # noqa: E402
 from zuora_plugin.errors import ZuoraServiceError  # noqa: E402
 from zuora_plugin.http_client import ZuoraClient  # noqa: E402
 from zuora_plugin.plugin import ZuoraPlugin  # noqa: E402
@@ -49,6 +54,23 @@ _OPS: dict[str, Operation] = {op.name: op for op in (*order_actions.ORDER_OPERAT
 _NEW_VERBS = {op.name for op in (*order_actions.ORDER_OPERATIONS, *order_actions.SUBSCRIPTION_OPERATIONS, *account_actions.ACCOUNT_OPERATIONS)}
 
 Handler = Callable[[httpx.Request], httpx.Response]
+
+
+_LOCATION_ROOT = Path(__file__).resolve().parents[3]
+_LOCATION_TREE = SoletTree(_LOCATION_ROOT, _LOCATION_ROOT / "profile")
+
+
+def _bind_locations(plugin: Any, directories: list[str]) -> NonCallableMagicMock:
+    """Supply a live address-book service through the production binding."""
+    orchestrator = NonCallableMagicMock()
+    orchestrator.APP_HOME = str(_LOCATION_TREE.app_home)
+    orchestrator.plugin_manager.get_plugin.return_value = None
+    orchestrator.get_service.return_value.list_path_addresses.return_value = {
+        "action_status": "completed",
+        "data": {"addresses": [{"name": f"project-{index}", "tags": [], "updated_at": datetime.now(UTC).isoformat(), "entries": [{"field_type": "path", "value": directory}]} for index, directory in enumerate(directories)]},
+    }
+    plugin.orchestrator_ref = orchestrator
+    return orchestrator
 
 
 def vendor_json(status: int, body: Any) -> httpx.Response:
@@ -116,7 +138,8 @@ class TenantCase(unittest.TestCase):
         self.addCleanup(self.workspace.cleanup)
         self.root = Path(self.workspace.name)
         self.plugin = ZuoraPlugin()
-        self.plugin.initialize({"export_allowed_roots": [str(self.root)]})
+        self.plugin.initialize({})
+        _bind_locations(self.plugin, [str(self.root)])
         self.token_mints = 0
         self.requests: list[httpx.Request] = []
 
@@ -144,6 +167,10 @@ class TenantCase(unittest.TestCase):
 
     def run_op(self, name: str, client: ZuoraClient, params: dict[str, Any]) -> dict[str, Any]:
         return execute(_OPS[name], client, params, self.gate)
+
+    def finish_op(self, name: str, client: ZuoraClient, params: dict[str, Any]) -> dict[str, Any]:
+        """The published envelope: the operation, then the plugin's one finish step."""
+        return finished(client, lambda c: self.run_op(name, c, params), params, name=name)
 
     def refuse(self, name: str, params: dict[str, Any]) -> None:
         """Dispatch and worker both refuse the input; no OAuth mint and no vendor request happen."""
@@ -427,38 +454,6 @@ class SubscriptionTests(TenantCase):
 
 
 class AccountTests(TenantCase):
-    def test_create_account_redacts_payment_instrument_in_every_form(self) -> None:
-        card, cvv, iban = "4111 1111 1111 1111", "737", "DE89370400440532013000"
-        forms: list[str] = []
-        for value in (card, cvv, iban):
-            forms.extend([value, quote(value, safe=""), base64.b64encode(value.encode()).decode(), base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")])
-        body = {
-            "name": "Acme Pty",
-            "currency": "USD",
-            "billToContact": {"firstName": "Grace", "lastName": "Hopper", "country": "United States", "state": "CA"},
-            "creditCard": {"cardType": "Visa", "cardNumber": card, "securityCode": cvv, "expirationMonth": "12", "expirationYear": "2030", "cardHolderInfo": {"cardHolderName": "Grace Hopper"}},
-            "paymentMethod": {"type": "SEPA", "IBAN": iban, "accountHolderInfo": {"accountHolderName": "Grace Hopper"}},
-        }
-        calls = iter(("ok", "refused"))
-
-        def vendor(req: httpx.Request) -> httpx.Response:
-            self.assertEqual(json.loads(req.content)["creditCard"]["cardNumber"], card)
-            if next(calls) == "ok":
-                return vendor_json(200, {"success": True, "accountId": "8a90e5e4acct0001", "accountNumber": "A00000102", "paymentMethodId": "8a90e5e4pm0001", "echo": " ".join(forms)})
-            return vendor_json(400, refusal(53100320, f"Card {forms[0]} declined; CVV {forms[5]} invalid; IBAN {forms[10]}"))
-
-        client = self.client(vendor)
-        with self.assertLogs("zuora_plugin", level="INFO") as audit:
-            created = self.run_op("create_account", client, {"body": body, "idempotency_key": "acct-acme-1"})
-            with self.assertRaises(ZuoraServiceError) as rejected:
-                self.run_op("create_account", client, {"body": body})
-        rendered = json.dumps(created) + str(rejected.exception) + " ".join(audit.output)
-        for form in forms:
-            self.assertNotIn(form, rendered)
-        self.assertIn(REQUEST_REDACTION, created["data"]["echo"])
-        self.assertEqual(created["data"]["accountNumber"], "A00000102")
-        self.assertEqual(self.requests[0].headers["Idempotency-Key"], "acct-acme-1")
-
     def test_customer_account_number_is_not_treated_as_a_secret(self) -> None:
         client = self.client(lambda _: vendor_json(200, {"success": True, "accountNumber": "A00000103", "accountId": "8a90e5e4acct0003"}))
         result = self.run_op("create_account", client, {"body": {"name": "Beta", "currency": "EUR", "billToContact": {"firstName": "B", "lastName": "C"}, "accountNumber": "A00000103"}})
@@ -518,31 +513,6 @@ class AccountTests(TenantCase):
 
 
 class CredentialAndDispatchTests(TenantCase):
-    def test_registered_credentials_redacted_raw_percent_and_base64(self) -> None:
-        encoders: tuple[Callable[[str], str], ...] = (
-            lambda value: value,
-            lambda value: quote(value, safe=""),
-            lambda value: base64.b64encode(value.encode()).decode(),
-            lambda value: base64.urlsafe_b64encode(value.encode()).decode().rstrip("="),
-        )
-        for encode in encoders:
-            echoed = [encode(secret) for secret in (_CLIENT_ID, _SECRET, _TOKEN)]
-            with self.subTest(sample=echoed[0]):
-                ok = self.client(lambda _, echoed=echoed: vendor_json(200, {"success": True, "order": {**order_record("O-1"), "description": " ".join(echoed)}}))
-                bad = self.client(lambda _, echoed=echoed: vendor_json(200, refusal(50000000, " ".join(echoed))))
-                success = self.run_op("get_order", ok, {"order_number": "O-1"})
-                with self.assertRaises(ZuoraServiceError) as raised:
-                    self.run_op("get_order", bad, {"order_number": "O-1"})
-                rendered = json.dumps(success) + str(raised.exception)
-                for value in echoed:
-                    self.assertNotIn(value, rendered)
-
-    def test_credential_values_is_public_and_tracks_the_minted_bearer(self) -> None:
-        client = self.client(lambda _: vendor_json(200, {"success": True}))
-        self.assertEqual(client.credential_values(), [_CLIENT_ID, _SECRET, ""])
-        self.run_op("delete_subscription", client, {"subscription_key": "A-S1"})
-        self.assertEqual(client.credential_values(), [_CLIENT_ID, _SECRET, _TOKEN])
-
     def test_expired_token_reminted_once_then_reported(self) -> None:
         statuses = iter((401, 200))
         recovering = self.client(lambda _: vendor_json(next(statuses), {"success": True, "basicInfo": {"accountNumber": "A1"}}))

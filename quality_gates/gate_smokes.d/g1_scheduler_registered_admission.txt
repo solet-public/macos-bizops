@@ -1,0 +1,2 @@
+# Real registered scheduler content, recovery and history admission.
+plugins/default_scheduling_plugin/tests/g1_scheduler_registered_admission_smoke.py

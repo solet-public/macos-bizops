@@ -49,7 +49,7 @@ class ContractTests(unittest.TestCase):
 
             def execute(entries: list[str]) -> dict[str, Any]:
                 calls.append(entries)
-                return {"exit_code": 0, "import_environment": {"state": "verified"}, "smoke_results": {smoke: {"verdict": "passed", "retried": False, "seconds": 0.01, "attempts": [{"output": "3 passed", "verdict": "passed"}]} for smoke in entries}}
+                return {"exit_code": 0, "import_environment": {"state": "verified"}, "smoke_results": {smoke: {"verdict": "passed", "seconds": 0.01, "attempts": [{"output": "3 passed", "verdict": "passed"}]} for smoke in entries}}
 
             with fixture.patches():
                 first = run_selected_smokes(fixture.root, fixture.request(), store=store, principal="fixture", executor=execute)
@@ -170,7 +170,7 @@ class ContractTests(unittest.TestCase):
             fixture = FrozenProofFixture(Path(directory))
             store = SmokePassStore(fixture.root / "proofs")
             attempts = [{"output": f"HARNESS-DEFECT: exit {run_smokes._HARNESS_DEFECT_EXIT_CODE} is a harness defect to file", "verdict": "not_run"}]
-            run = {"exit_code": 0, "import_environment": {"state": "verified"}, "smoke_results": {"suite/check_smoke.py": {"verdict": "not_run", "retried": False, "attempts": attempts}}}
+            run = {"exit_code": 0, "import_environment": {"state": "verified"}, "smoke_results": {"suite/check_smoke.py": {"verdict": "not_run", "attempts": attempts}}}
             observed: list[tuple[object, ...]] = []
             with fixture.patches():
                 # A run that lists the defect, then one whose list is unknown.
@@ -215,9 +215,9 @@ class ContractTests(unittest.TestCase):
         captured: list[dict[str, object]] = []
         started = time.monotonic()
 
-        def run_suite(entries: list[str], args: argparse.Namespace, _serial_only: frozenset[str], *, retry: bool, smoke_results: Any) -> tuple[list[str], list[str], list[str], list[str], float, list[dict[str, object]], list[str]]:
-            captured.append({"entries": entries, "args": dict(vars(args)), "retry": retry, "observations": type(smoke_results).__name__})
-            return [], [], [], [], time.monotonic() - started, [], []
+        def run_suite(entries: list[str], args: argparse.Namespace, _serial_only: frozenset[str], *, smoke_results: Any) -> tuple[list[str], list[str], list[str], list[str], float]:
+            captured.append({"entries": entries, "args": dict(vars(args)), "observations": type(smoke_results).__name__})
+            return [], [], [], [], time.monotonic() - started
 
         runner = SimpleNamespace(
             _DEFAULT_REGISTER=Path("register"),
@@ -235,11 +235,11 @@ class ContractTests(unittest.TestCase):
             _scratch_runtime=lambda: lambda _supervisor, _terminate: nullcontext(),
             _SmokeProcessSupervisor=lambda *_limits: object(),
             _terminate_process_group=run_smokes._terminate_process_group,
-            _run_suite_with_retry=run_suite,
+            _run_suite_with_environment=run_suite,
             _summarize=lambda *_counts, **_policy: 0,
         )
         result = execute_registered(["suite/check_smoke.py"], runner)
-        self.assertEqual(captured, [{"entries": ["suite/check_smoke.py"], "args": {"jobs": run_smokes._DEFAULT_JOBS, "fail_on_skip": False}, "retry": False, "observations": "SmokeObservations"}])
+        self.assertEqual(captured, [{"entries": ["suite/check_smoke.py"], "args": {"jobs": run_smokes._DEFAULT_JOBS, "fail_on_skip": False}, "observations": "SmokeObservations"}])
         self.assertEqual((result["status"], result["exit_code"]), ("completed", 0))
 
     def test_truncated_runner_output_is_partial_and_never_reused(self) -> None:

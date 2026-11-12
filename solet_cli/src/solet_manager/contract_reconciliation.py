@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import stat
 import uuid
 from copy import deepcopy
@@ -17,6 +18,7 @@ from .contract_reconciliation_receipts import (
     per_probe_migration_data,
     validate_per_probe_migrations,
 )
+from .contract_reconciliation_validation import retired_answer_data, validate_retired_answer_data, validate_retirement_declarations
 from .contracts import (
     ContractBundle,
     ContractReconciliation,
@@ -58,9 +60,8 @@ _RECEIPT_V1_KEYS = frozenset(
     }
 )
 _RECEIPT_V2_KEYS = _RECEIPT_V1_KEYS | {"per_probe_migrations"}
-_RECEIPT_FILE_KEYS = frozenset(
-    {"path", "mode", "before_sha256", "before_base64", "after_sha256", "after_base64"}
-)
+_RECEIPT_V3_KEYS = _RECEIPT_V2_KEYS | {"retired_answers"}
+_RECEIPT_FILE_KEYS = frozenset({"path", "mode", "before_sha256", "before_base64", "after_sha256", "after_base64"})
 
 
 @dataclass(frozen=True)
@@ -103,9 +104,7 @@ class ContractReconciliationManager:
             approved_fingerprint=approved_fingerprint,
             recover=lambda: recover_contract_reconciliation(self._paths, name),
             prepare=lambda: self._prepare(name),
-            preview_result=lambda prepared, recovered: _preview_result(
-                prepared, recovered=recovered
-            ),
+            preview_result=lambda prepared, recovered: _preview_result(prepared, recovered=recovered),
             approval_required=_approval_required,
             drift_result=_drift_result,
             apply=self._apply,
@@ -125,15 +124,15 @@ class ContractReconciliationManager:
         target = Path(record.target)
         _validate_pinned_identity(record, transaction, target)
         _validate_projection(transaction, target)
-        source_bundle, destination_bundle = _contract_bundles(
-            self._paths, record, transaction, target, self._contract_directory
-        )
+        source_bundle, destination_bundle = _contract_bundles(self._paths, record, transaction, target, self._contract_directory)
         reconciliation = _select_reconciliation(
             transaction,
             source_bundle,
             destination_bundle,
             self._manifest_path,
         )
+        original_transaction = transaction
+        validate_retirement_declarations(reconciliation, destination_bundle)
         transaction = _migrate_answer_values(transaction, reconciliation)
         _validate_destination_answers(transaction, destination_bundle)
         reconciled_transaction = reconcile_contract_stage_probe_state(
@@ -170,14 +169,12 @@ class ContractReconciliationManager:
                     }
                     for path, _, before, after in files
                 ],
-                "attempt_identity_mappings": _attempt_mapping_data(
-                    transaction, reconciled_transaction
-                ),
+                "attempt_identity_mappings": _attempt_mapping_data(transaction, reconciled_transaction),
             }
         )
         return _PreparedReconciliation(
             record=record,
-            original_transaction=transaction,
+            original_transaction=original_transaction,
             transaction=reconciled_transaction,
             reconciliation=reconciliation,
             destination_bundle=destination_bundle,
@@ -200,6 +197,7 @@ class ContractReconciliationManager:
         receipt_path = _receipt_path(self._paths, fresh.record.name)
         receipt = _receipt(fresh)
         atomic_write_json(receipt_path, receipt)
+        _archive_retirement_receipt(self._paths, fresh.record.name, receipt)
         for path, mode, before, after in fresh.files:
             if _sha256(path.read_bytes()) != _sha256(before):
                 raise StateConflictError(f"reconciliation target changed before promotion: {path}")
@@ -208,12 +206,11 @@ class ContractReconciliationManager:
         applied = dict(receipt)
         applied["state"] = "applied"
         atomic_write_json(receipt_path, applied)
+        history_path = _archive_retirement_receipt(self._paths, fresh.record.name, applied)
         return CommandResult(
             kind="contract_reconciliation",
             status="reconciled",
-            message=(
-                f"Reconciled persisted setup contract for {fresh.record.name!r}; run a fresh `solet create NAME --dry-run` before resuming."
-            ),
+            message=(f"Reconciled persisted setup contract for {fresh.record.name!r}; run a fresh `solet create NAME --dry-run` before resuming."),
             exit_code=ExitCode.OK,
             data={
                 "name": fresh.record.name,
@@ -221,6 +218,7 @@ class ContractReconciliationManager:
                 "flow_source_revision": fresh.transaction.flow_source_revision,
                 "flow_contract_digest": fresh.transaction.flow_contract_digest,
                 "approval_fingerprint_cleared": True,
+                "retirement_record": str(history_path) if history_path is not None else None,
                 "next_action": f"solet create {fresh.record.name} --dry-run",
             },
         )
@@ -243,27 +241,22 @@ def recover_contract_reconciliation(paths: ManagerPaths, name: str) -> bool:
         terminal = dict(raw)
         terminal["state"] = "applied"
         atomic_write_json(receipt_path, terminal)
+        _archive_retirement_receipt(paths, name, terminal)
         return True
     _require(
-        all(
-            value in {expected_before, expected_after}
-            for value, expected_before, expected_after in zip(current, before, after, strict=True)
-        ),
-        StateConflictError(
-            "reconciliation recovery found bytes outside its authenticated before/after set"
-        ),
+        all(value in {expected_before, expected_after} for value, expected_before, expected_after in zip(current, before, after, strict=True)),
+        StateConflictError("reconciliation recovery found bytes outside its authenticated before/after set"),
     )
     for path, mode, before_bytes, _ in files:
         atomic_replace_bytes(path, before_bytes, mode=mode)
     terminal = dict(raw)
     terminal["state"] = "recovered"
     atomic_write_json(receipt_path, terminal)
+    _archive_retirement_receipt(paths, name, terminal)
     return True
 
 
-def reconciliation_receipt_before_flow_source_revision(
-    paths: ManagerPaths, name: str
-) -> str | None:
+def reconciliation_receipt_before_flow_source_revision(paths: ManagerPaths, name: str) -> str | None:
     """Read the pre-reconciliation journal revision from one terminal receipt."""
 
     raw = load_json_object(_receipt_path(paths, name), missing_ok=True)
@@ -275,18 +268,9 @@ def reconciliation_receipt_before_flow_source_revision(
 
 
 def _validate_terminal_receipt_identity(raw: dict[str, JsonValue], name: str) -> None:
-    version = raw.get("schema_version")
-    expected_keys = _RECEIPT_V1_KEYS if version == 1 else _RECEIPT_V2_KEYS
+    state = _receipt_state(raw, name)
     _require(
-        version in {1, 2} and frozenset(raw) == expected_keys,
-        StateError("contract reconciliation receipt does not match its closed schema"),
-    )
-    _require(
-        raw.get("name") == name and isinstance(raw.get("target"), str),
-        StateError("contract reconciliation receipt identity is invalid"),
-    )
-    _require(
-        raw.get("state") in {"applied", "recovered"},
+        state in {"applied", "recovered"},
         StateConflictError("contract reconciliation receipt is not terminal"),
     )
 
@@ -357,13 +341,8 @@ def _contract_bundles(
     _require(
         working == destination_bundle.contract_digest,
         ContractError(
-            "moved setup contract is not the reconciliation destination: "
-            f"recorded={transaction.flow_contract_digest}, working_tree={working}, "
-            f"destination={destination_bundle.contract_digest}",
-            repair=(
-                "Restore the managed target's contract files to the updated release's committed bytes; "
-                "reconciliation moves the pin only to the contract the checkout carries."
-            ),
+            f"moved setup contract is not the reconciliation destination: recorded={transaction.flow_contract_digest}, working_tree={working}, destination={destination_bundle.contract_digest}",
+            repair=("Restore the managed target's contract files to the updated release's committed bytes; reconciliation moves the pin only to the contract the checkout carries."),
         ),
     )
     return _committed_source_bundle(paths, record, transaction, target), destination_bundle
@@ -378,9 +357,7 @@ def _working_contract_digest(target: Path) -> str | None:
         return None
 
 
-def _destination_bundle(
-    transaction: Transaction, development_directory: Path | None
-) -> ContractBundle:
+def _destination_bundle(transaction: Transaction, development_directory: Path | None) -> ContractBundle:
     return load_reconciliation_destination_bundle(
         source_revision=transaction.flow_source_revision,
         development_directory=development_directory,
@@ -397,9 +374,7 @@ def _committed_source_bundle(
 
     stage = paths.cache_dir / "contract-reconciliation-source" / record.name
     ensure_private_directory(stage)
-    for filename, value in committed_contract_files(
-        target, record.seed_commit, contract_filenames()
-    ).items():
+    for filename, value in committed_contract_files(target, record.seed_commit, contract_filenames()).items():
         atomic_replace_bytes(stage / filename, value, mode=0o600)
     return ContractBundle.load(
         source_revision=transaction.flow_source_revision,
@@ -446,9 +421,7 @@ def _validate_selected_flow_ids(
     )
 
 
-def _validate_pinned_identity(
-    record: InstanceRecord, transaction: Transaction, target: Path
-) -> None:
+def _validate_pinned_identity(record: InstanceRecord, transaction: Transaction, target: Path) -> None:
     _require(
         target.is_dir() and not target.is_symlink(),
         StateConflictError(f"managed target is not a real directory: {target}"),
@@ -460,13 +433,7 @@ def _validate_pinned_identity(
 
 
 def _identities_match(record: InstanceRecord, transaction: Transaction) -> bool:
-    return (
-        transaction.name == record.name
-        and transaction.target == record.target
-        and transaction.flow_id == record.flow_id
-        and transaction.flow_source_revision == record.flow_source_revision
-        and transaction.flow_contract_digest == record.flow_contract_digest
-    )
+    return transaction.name == record.name and transaction.target == record.target and transaction.flow_id == record.flow_id and transaction.flow_source_revision == record.flow_source_revision and transaction.flow_contract_digest == record.flow_contract_digest
 
 
 def _validate_projection(transaction: Transaction, target: Path) -> None:
@@ -490,9 +457,7 @@ def _validate_destination_answers(
     except (ContractError, StateError) as exc:
         raise StateConflictError(
             f"persisted normalized answers are incompatible with the destination contract: journal contract digest {transaction.flow_contract_digest}, destination contract digest {destination_bundle.contract_digest}; the destination contract moved while the journal stayed pinned: {exc}",
-            repair=(
-                "Declare an answer migration or a new decision for the destination contract; do not treat the journal as corrupt."
-            ),
+            repair=("Declare an answer migration or a new decision for the destination contract; do not treat the journal as corrupt."),
         ) from exc
 
 
@@ -502,7 +467,7 @@ def _migrate_answer_values(
 ) -> Transaction:
     """Apply only the answer rewrites declared by the selected bridge."""
 
-    if not reconciliation.answer_value_migrations:
+    if not (reconciliation.answer_value_migrations or reconciliation.retired_decision_ids or reconciliation.retired_public_input_ids):
         return transaction
     answers = deepcopy(transaction.answers)
     decisions = answers.get("decisions")
@@ -518,19 +483,52 @@ def _migrate_answer_values(
             continue
         if not isinstance(selected, list):
             continue
-        migrated = [
-            migration.to_value if item == migration.from_value else item
-            for item in selected
-        ]
+        migrated = [migration.to_value if item == migration.from_value else item for item in selected]
         if migrated != selected:
             decisions[migration.decision_id] = migrated
             changed = True
+    changed = _retire_listed_answers(answers, reconciliation) or changed
     if not changed:
         return transaction
     migrated = transaction.with_answers(answers)
     # The approval fingerprint includes replacement bytes; as with the other
     # reconciliation transitions, a lock-time re-preview must be stable.
     return replace(migrated, updated_at=transaction.updated_at)
+
+
+def _retire_listed_answers(answers: dict[str, JsonValue], reconciliation: ContractReconciliation) -> bool:
+    """Clear only metadata-listed ids; destination validation still checks every other id."""
+    changed = False
+    for section, ids in (
+        ("decisions", reconciliation.retired_decision_ids),
+        ("public_inputs", reconciliation.retired_public_input_ids),
+    ):
+        values = answers.get(section)
+        if isinstance(values, dict):
+            for key in ids:
+                if key in values:
+                    del values[key]
+                    changed = True
+    return changed
+
+
+def _archive_retirement_receipt(paths: ManagerPaths, name: str, receipt: dict[str, JsonValue]) -> Path | None:
+    """Keep each applied retirement and its backups after later reconciliations."""
+    if receipt.get("schema_version") != 3:
+        return None
+    history = paths.reconciliations_dir / f"{name}.history"
+    ensure_private_directory(history)
+    fingerprint = str(receipt["preview_fingerprint"])
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint) is None:
+        raise StateError("retirement receipt fingerprint is invalid")
+    state = str(receipt["state"])
+    path = history / f"{fingerprint.removeprefix('sha256:')}.{state}.json"
+    if path.exists():
+        if load_json_object(path) != receipt:
+            raise StateConflictError("retirement history differs for the same reconciliation fingerprint")
+    else:
+        atomic_write_json(path, receipt)
+    return path
 
 
 def _validate_destination_answer_schema_requirements(
@@ -569,16 +567,12 @@ def _replacement_files(
     transaction_path = paths.transaction_path(record.name)
     files.append(_replacement_json_file(transaction_path, reconciled_transaction.to_dict()))
     registry_raw = load_json_object(paths.registry_path)
-    _require(
-        registry_raw is not None, StateConflictError("registry disappeared during reconciliation")
-    )
+    _require(registry_raw is not None, StateConflictError("registry disappeared during reconciliation"))
     assert registry_raw is not None
     registry_payload = _registry_payload(registry_raw, record, updated_record)
     files.append(_replacement_json_file(paths.registry_path, registry_payload))
     projection = Path(record.target) / ".solet" / "install-state.json"
-    files.append(
-        _replacement_json_file(projection, target_install_state_projection(reconciled_transaction))
-    )
+    files.append(_replacement_json_file(projection, target_install_state_projection(reconciled_transaction)))
     return tuple(files)
 
 
@@ -588,22 +582,16 @@ def _replacement_file(target: Path, source: Path) -> tuple[Path, int, bytes, byt
         before = target.read_bytes()
         after = source.read_bytes()
     except OSError as exc:
-        raise StateConflictError(
-            f"required reconciliation file is unavailable: {target}: {exc}"
-        ) from exc
+        raise StateConflictError(f"required reconciliation file is unavailable: {target}: {exc}") from exc
     return target, mode, before, after
 
 
-def _replacement_json_file(
-    path: Path, value: dict[str, JsonValue]
-) -> tuple[Path, int, bytes, bytes]:
+def _replacement_json_file(path: Path, value: dict[str, JsonValue]) -> tuple[Path, int, bytes, bytes]:
     try:
         mode = stat.S_IMODE(path.stat().st_mode)
         before = path.read_bytes()
     except OSError as exc:
-        raise StateConflictError(
-            f"required reconciliation state file is unavailable: {path}: {exc}"
-        ) from exc
+        raise StateConflictError(f"required reconciliation state file is unavailable: {path}: {exc}") from exc
     return path, mode, before, _json_bytes(value)
 
 
@@ -638,8 +626,10 @@ def _stage_destination_bundle(bundle: ContractBundle, staging_root: Path) -> Non
 
 
 def _receipt(prepared: _PreparedReconciliation) -> dict[str, JsonValue]:
+    retired = retired_answer_data(prepared.original_transaction.answers, prepared.reconciliation)
     return {
-        "schema_version": 2,
+        "schema_version": 3 if retired else 2,
+        **({"retired_answers": retired} if retired else {}),
         "name": prepared.record.name,
         "target": prepared.record.target,
         "migration_id": prepared.reconciliation.migration_id,
@@ -668,9 +658,7 @@ def _receipt(prepared: _PreparedReconciliation) -> dict[str, JsonValue]:
     }
 
 
-def _parse_receipt(
-    raw: dict[str, JsonValue], name: str
-) -> tuple[tuple[tuple[Path, int, bytes, bytes], ...], str]:
+def _parse_receipt(raw: dict[str, JsonValue], name: str) -> tuple[tuple[tuple[Path, int, bytes, bytes], ...], str]:
     state = _receipt_state(raw, name)
     entries = raw.get("files")
     _require(
@@ -690,9 +678,13 @@ def _receipt_state(raw: dict[str, JsonValue], name: str) -> str:
     version = raw.get("schema_version")
     if version == 1:
         expected_keys = _RECEIPT_V1_KEYS
-    elif version == 2:
-        expected_keys = _RECEIPT_V2_KEYS
+    elif version in {2, 3}:
+        expected_keys = _RECEIPT_V3_KEYS if version == 3 else _RECEIPT_V2_KEYS
         validate_per_probe_migrations(raw.get("per_probe_migrations"))
+        if version == 3:
+            validate_retired_answer_data(raw.get("retired_answers"))
+            if re.fullmatch(r"sha256:[0-9a-f]{64}", str(raw.get("preview_fingerprint"))) is None:
+                raise StateError("retirement receipt fingerprint is invalid")
     else:
         raise StateError("contract reconciliation receipt version is unsupported")
     _require(
@@ -731,22 +723,14 @@ def _receipt_file_fields(value: JsonValue) -> tuple[str, int, str, str, JsonValu
     before = value.get("before_base64")
     after = value.get("after_base64")
     _require(
-        isinstance(path, str)
-        and Path(path).is_absolute()
-        and not isinstance(mode, bool)
-        and isinstance(mode, int),
+        isinstance(path, str) and Path(path).is_absolute() and not isinstance(mode, bool) and isinstance(mode, int),
         StateError("contract reconciliation receipt file identity is invalid"),
     )
     _require(
         isinstance(before, str) and isinstance(after, str),
         StateError("contract reconciliation receipt bytes are invalid"),
     )
-    assert (
-        isinstance(path, str)
-        and isinstance(mode, int)
-        and isinstance(before, str)
-        and isinstance(after, str)
-    )
+    assert isinstance(path, str) and isinstance(mode, int) and isinstance(before, str) and isinstance(after, str)
     return path, mode, before, after, value.get("before_sha256"), value.get("after_sha256")
 
 
@@ -771,9 +755,7 @@ def _preview_result(prepared: _PreparedReconciliation, *, recovered: bool) -> Co
     return CommandResult(
         kind="contract_reconciliation_preview",
         status="preview_ready",
-        message=(
-            f"Preview contract reconciliation {prepared.reconciliation.migration_id!r} for {prepared.record.name!r}."
-        ),
+        message=(f"Preview contract reconciliation {prepared.reconciliation.migration_id!r} for {prepared.record.name!r}."),
         exit_code=ExitCode.OK,
         data={
             "name": prepared.record.name,
@@ -781,15 +763,12 @@ def _preview_result(prepared: _PreparedReconciliation, *, recovered: bool) -> Co
             "migration_id": prepared.reconciliation.migration_id,
             "source": _identity_data(prepared.record),
             "destination": _identity_data(prepared.transaction),
-            "destination_contract_resolution": (
-                prepared.destination_bundle.resolution.to_identity_dict()
-            ),
-            "contract_files": [
-                str(path) for path, _, _, _ in prepared.files[: len(contract_filenames())]
-            ],
+            "destination_contract_resolution": (prepared.destination_bundle.resolution.to_identity_dict()),
+            "contract_files": [str(path) for path, _, _, _ in prepared.files[: len(contract_filenames())]],
             "approval_fingerprint": prepared.fingerprint,
             "recovery_performed": recovered,
             "dry_run_writes": 0,
+            "retired_answers": retired_answer_data(prepared.original_transaction.answers, prepared.reconciliation),
         },
     )
 
@@ -798,9 +777,7 @@ def _approval_required(preview: CommandResult) -> CommandResult:
     return CommandResult(
         kind="contract_reconciliation_preview",
         status="awaiting_user",
-        message=(
-            "Exact reconciliation preview rendered; pass --yes with its fingerprint to apply it."
-        ),
+        message=("Exact reconciliation preview rendered; pass --yes with its fingerprint to apply it."),
         exit_code=ExitCode.HUMAN_ACTION,
         error_kind="approval_required",
         repair="Review this result, then rerun with --yes and --approval-fingerprint.",

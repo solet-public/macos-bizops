@@ -8,7 +8,7 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:client-deployment, consumer_profile:both
 
-Embedding Description: Agent-facing runbook for applying a newer seed release to an ALREADY-LIVE seed-born solet without losing its state, now led by the Solet Manager path — install the Manager from its Homebrew tap, classify the clone with `solet-manager inspect`, enroll it once with `solet-manager import`, then for every release run `solet-manager update --dry-run` to read the preview (which lists the genesis-written files and untracked genesis paths it will preserve, the exact fast-forward, the dependency, migration, hydration and lifecycle operations it will perform) and `--yes --approval-fingerprint` to apply it through the final doctor and promotion, with `solet-manager doctor` as the read-only oracle and `solet-manager reconcile` as the one answer to a terminal update — including the exact refusal vocabulary (`history_diverged`, `tracked_overlap_present`, `staged_changes_present`, `tracked_shape_changed`, `executed_code_modified`, `git_metadata_present`, `host_requirement_missing`, `claude_cli_missing`, `source_identity_unproven`, and, after `source_advanced`, `source_transition_incomplete` with its per-path sub-cases and its named identity facts) and what each exit code means, the six steps that stay manual and why (the target `AGENTS.md`/`CLAUDE.md` hydration block and launchers, the first-time export-root answer, quitting Claude Code before the rename migration can rewrite `~/.claude.json`, relaunching open clients and re-arming watchers, adding a release-added plugin to the profile manifest, connector three-read and feedback-item checks), how an adopter learns a new re-mint exists (the formula upgrade plus the GitHub release subscription, re-pointed when the seed moves homes), and the legacy manual procedure retained verbatim as recovery for clones the Manager classifies as not importable (diverged history, development checkout) or for an instance the operator chooses to repair by hand.
+Embedding Description: Agent-facing runbook for applying a newer seed release to an ALREADY-LIVE seed-born solet without losing its state, now led by the Solet Manager path — install the Manager from its Homebrew tap, classify the clone with `solet-manager inspect`, enroll it once with `solet-manager import`, then for every release run `solet-manager update --dry-run` to read the preview (which lists the genesis-written files and untracked genesis paths it will preserve, the exact fast-forward, the dependency, migration, hydration and lifecycle operations it will perform) and `--yes --approval-fingerprint` to apply it through the final doctor and promotion, with `solet-manager doctor` as the read-only oracle and `solet-manager reconcile` as the one answer to a terminal update — including the exact refusal vocabulary (`history_diverged`, `tracked_overlap_present`, `staged_changes_present`, `tracked_shape_changed`, `executed_code_modified`, `git_metadata_present`, `host_requirement_missing`, `claude_cli_missing`, `source_identity_unproven`, and, after `source_advanced`, `source_transition_incomplete` with its per-path sub-cases and its named identity facts) and what each exit code means, the six steps that stay manual and why (the target `AGENTS.md`/`CLAUDE.md` hydration block and launchers, saved export folders and the Documents home, quitting Claude Code before the rename migration can rewrite `~/.claude.json`, relaunching open clients and re-arming watchers, adding a release-added plugin to the profile manifest, connector three-read and feedback-item checks), how an adopter learns a new re-mint exists (the formula upgrade plus the GitHub release subscription, re-pointed when the seed moves homes), and the legacy manual procedure retained verbatim as recovery for clones the Manager classifies as not importable (diverged history, development checkout) or for an instance the operator chooses to repair by hand.
 
 > **Status (2026-09-19, existing-solet import/update Step 7):** the Manager
 > path (Part A) is the update procedure. The manual procedure this document
@@ -154,7 +154,7 @@ the `solet-manager` command. `solet inspect` is a different, active probe.
 **A pre-Manager plain clone (a `git clone` of the seed, not `solet create`), r64.**
 The Manager proves a plain clone only at a seed commit it lists: the
 channel's own release, or a stable seed in its reviewed anchor table (every
-`supported_predecessors` row, r43 `8207c151` through r71 `50383f0b`).
+`supported_predecessors` row, r43 `8207c151` through r72 `d7b0fcc9`).
 `git -C <clone> rev-parse HEAD` tells you which case you have:
 
 1. HEAD is a listed seed commit: run the six commands below unchanged.
@@ -374,7 +374,6 @@ these cases:
 | `marketplace_path_outside_clone` | the clone's `.claude-plugin` directory or its marketplace file is a symlink | replace the symlink with a real directory, then preview again |
 | `marketplace_registry_unreadable` | `~/.claude/plugins/known_marketplaces.json` is not a readable UTF-8 JSON object | inspect `claude plugin marketplace list`, repair the file, then preview again |
 | `claude_plugin_list_failed` | `claude plugin list --json` exited non-zero, timed out, or printed no JSON list (the repair quotes its exit code and stderr) | run it yourself, fix what it reports, then preview again |
-| `export_root_ambiguous` | installed business connectors hold different `export_allowed_roots`; the repair lists each connector with the roots it holds (`none` held prints `(none)`; a long listing is shortened with `…`, never dropped) | edit `export_allowed_roots` in `profile/config/plugins/<plugin>.json` until every connector holds the one root you choose, then preview again (Step 4a) |
 | `hook_manifest_invalid` | the tracked coordination-hook manifest is not readable hook JSON | inspect `git diff -- <manifest>`, then preview again |
 | `hook_interpreter_foreign` | the tracked coordination-hook manifest has no bare `python3` hook, but its Python hooks run an interpreter other than `<clone>/.venv/bin/python3` | inspect `grep -n '"command"' <manifest>` and `git diff -- <manifest>`, then preview again |
 
@@ -457,9 +456,9 @@ the healthy state, not an error.
   reports the same state as `colour_outside_launchagent`.
   `service_offline_before_transition` now means the service is really
   offline, or its LaunchAgent job is not loaded.
-- Step 4a export root → `migration_export_root_containment` propagates an
-  already-configured root to newly installed connectors (first-time answer:
-  Part B).
+- Step 4a saved locations → `migration_export_root_containment` keeps every
+  old export folder as an address and creates the solet's Documents home.
+  Different folders are all kept; connector configs are left unchanged.
 - Plugin transitions (r52, iss_6d26db73) → `migration_plugin_transition`
   applies the release's declared plugin replacements
   (`plugins/github_midwife_plugin/knowledge_base/plugin_transitions.json`) to a solet whose profile still
@@ -481,16 +480,23 @@ the healthy state, not an error.
   as it is, and the manual step in Part C Step 5 is how to bring the fix into
   it. A missing skill is not created.
   The fleet launcher is refreshed **above the line `# One function per role
-  the operator chose in Step 4a.` only** (r58). Your role functions, your
-  `GIT_CONTROLLER_NAME` choice and everything from that line down stay
-  byte-for-byte. The update replaces the launcher section only when it is
-  byte-identical to a render of the r56 template with your own
-  `GIT_CONTROLLER_NAME` value, and it backs the file up first. A section you
-  edited, or one from any other release, is not overwritten and does not stop
-  the update: the preview lists it with `state: unknown_origin` (or
-  `locally_modified`) and `action: none`, and the manual steps in Part C
-  Step 5 are how to bring the change into it. A clone with no fleet file is
-  left without one. Because `client/` sits inside the clone and existing
+  the operator chose in Step 4a.` only** (r58). Your role functions and
+  everything from that marker down stay byte-for-byte. Released launcher
+  sections are refreshed with a backup. Edited sections remain in place.
+  A separate removal-only action clears complete `GIT_CONTROLLER_NAME`
+  assignment lines from each installed Claude, Codex and fleet launcher and
+  from `client/<name>.zsh`. The Manager backs up the original before each
+  write; every other byte and the file mode stay unchanged. No controller
+  value is carried forward and a repeated removal writes nothing. Doctor
+  verifies that the retired assignment is absent; it does not claim the
+  preserved file is a current template render. A clone with no fleet file is
+  left without one. For a persisted create journal still pinned to the old
+  setup contract, use `solet reconcile-contract <name> --dry-run`, then approve
+  that exact fingerprint. Release metadata explicitly retires only
+  `git_mutation_control` and `git_controller_name`; the reconciliation record
+  retains their prior values and complete before-images in private history.
+  An unlisted unknown decision or input remains an error.
+  Because `client/` sits inside the clone and existing
   clones do not ignore it, the preview also lists an action that adds `client/`
   to the clone's `.git/info/exclude`, a local file Git never commits; it is a
   marked block, backed up like the rest, and the files already in `client/`
@@ -698,12 +704,10 @@ is given with the step so the next release can close it deliberately.
    it can refresh the fleet launcher. Part C Step 5 also gives the exact
    steps for a hand-edited feedback skill and for a fleet launcher the
    update left alone.
-2. **The first-time export/workspace root answer** (Part C Step 4a). No CLI
-   carrier for the answer exists; `migration_export_root_containment`
-   only reports `operator_action_required` while no root is configured,
-   propagates once one is, and blocks with `export_root_ambiguous` when
-   connectors hold different roots (the repair names each connector and its
-   roots).
+2. **Choosing another saved folder, if wanted** (Part C Step 4a). The update
+   keeps old export folders and supplies a Documents home automatically.
+   To choose another folder, say "save exports in `<folder>`". There is no
+   first-time workspace question to answer before the update can proceed.
 3. **Quitting Claude Code before `migration_solet_rename` can rewrite
    `~/.claude.json`.** The Manager never kills a process; doctor section 11
    `stale_target_processes` names the pid. The `--scan-stale` review of Part
@@ -992,49 +996,56 @@ wait for startup to finish before ANY query: `wc -l <newest log> && sleep 5 && w
 log>` until the two counts match. Startup is also when changed knowledge bases re-ingest
 automatically (content-hash comparison) — no manual re-ingest step exists or is needed.
 
-## Step 4a — configure the export/workspace root (required if this release adds business-connector containment)
+## Step 4a — existing adopters: keep your saved folders
 
-**Do this before any business-connector use, on ANY already-hydrated install.** A release
-that adds or extends business-connector containment (export-root validation, per the
-architect ruling on business-connector data boundaries, filed in this checkout's
-`workbench/` directory under that date; §3) flips every covered connector's default from
-"works" to "refuses until a workspace root is configured" the moment this update lands —
-an already-hydrated clone never goes through the hydration runbook's export-root prompt
-again on its own, so this step is the only thing that closes that gap for an EXISTING
-install. Skipping it does not mean a smaller safety margin; it means every covered
-business-connector read fails loud on first use post-update, for an operator who was never
-told why. The release notes say when a given update actually touches this (not every
-release does); when they do, treat this step as a prerequisite, not a recommendation.
+Every existing solet receives this migration when it updates, including one
+that never chose an export folder. You do not need to pick one before updating.
 
-If a workspace root was already configured (an earlier hydration or a previous run of this
-step), this step is a no-op check, not a re-ask — skip straight to verification below.
-Otherwise, ask the operator in plain words: "Where do you keep the folders you work in day
-to day — the parent directory, not any one project?" (a `~/Workspace`-style directory:
-stable, singular, covers every future job folder). Then call the real validator rather than
-hand-rolling the check — it rejects a root that is, contains, or is contained by `app_home`
-(naming which direction failed), and otherwise persists the root into every business-connector
-plugin actually installed in this clone, additively and idempotently:
+Your solet keeps its own files in a folder in your Documents folder named after
+it. Large exports go into `Exports.nosync` inside it so iCloud does not copy
+them. Every export folder you set up before is kept as a saved location,
+including Salesforce import folders. Different connectors can have different
+folders: all of them are kept. Existing exports stay where they are, and
+nothing is moved or deleted. The old connector settings are left byte for byte
+as they were so an older release still works if you roll back.
 
-```bash
-<clone>/.venv/bin/python3 -c "
-from pathlib import Path
-from github_midwife_plugin.export_root_validation import configure_export_root
-written = configure_export_root(Path('<clone>'), '<clone>/profile', '<operator's answer>')
-print(written)
-"
-```
+Read the saved-location notes in the update preview. A missing old folder is
+kept and named in a note. A relative or blank setting is reported and left
+untouched. If an old export folder was inside the solet's installation folder,
+the solet keeps a record of it and suggests its new `Exports.nosync` folder.
+It never uses the installation folder as a saved destination. If the solet
+itself was installed directly in Documents, its files folder goes into
+`~/Library/Application Support/<name>/Files` instead, and the note names it.
 
-Verify: the printed dict names every connector plugin that got the new root, and is never
-empty on a clone that ships at least one business-connector plugin — an empty result means
-none of the connector plugin directories were found under `<clone>/plugins/`, which is worth
-a second look, not a silent pass.
+On a Mac, if a note says the solet cannot create its Documents folder, open
+System Settings → Privacy & Security → Files and Folders (or Full Disk Access)
+and allow the launching binary named in the note. The saved locations are
+still kept, and the solet keeps working while you grant access.
 
-If `solet-manager update <name> --dry-run` later refuses `export_root_ambiguous`,
-connectors disagree. The repair lists every installed connector with the roots
-it holds (`salesforce_plugin=/a, /b; jira_plugin=/a`; a connector holding none
-prints `(none)`). Edit `export_allowed_roots` in
-`profile/config/plugins/<plugin>.json` until every connector holds the one root
-you chose, then run the preview again.
+To choose a place for a project, say "save reports for Acme in
+~/Clients/Acme/Reports". For large exports, say "save exports in `<folder>`".
+To check, ask "where will you save this?". Start sessions from your project
+folder to have files saved there. Refresh older regular Claude/Codex launchers
+using hydration Step 2; the update currently refreshes the known fleet
+launcher section, while regular launchers remain a manual Step 5 refresh.
+
+**Verification and recovery for the agent driving the update.** The existing
+`migration_export_root_containment` operation runs before runtime starts. It
+writes `<app_home>/config/plugins/default_address_book_plugin/entries.json`
+atomically as the durable pending record, with one migrated address per root
+realpath and source-connector tags. It keeps existing entries and user edits.
+The new runtime's boot loader completes registration by path; if a live
+address already has a proposed name for a different folder, both folders are
+kept and the new name is reported. A second update and boot add nothing.
+
+If the update stops after creating folders, rerun it to finish the saved
+locations. If it stops after writing the pending record, the next new-runtime
+start completes registration; an interrupted boot resumes on the next start.
+Rolling back leaves the old connector settings usable. A later forward update
+uses the same pending record and finishes anything still missing. Do not
+delete it or change connector settings to make their roots agree. If a
+pre-existing pending record has invalid JSON or tags, correct that record
+before retrying: the migration preserves it rather than overwriting it.
 
 ## Step 5 — re-run the hydration steps the release changed
 
@@ -1117,13 +1128,11 @@ holds two things: the launcher functions from the template, and the role
 functions you (or the operator) wrote below the line `# One function per role
 the operator chose in Step 4a.` Replace the first and keep the second.
 
-1. Read the file's `GIT_CONTROLLER_NAME="..."` line. The quoted value is the
-   operator's Step 4a choice. No such line means a solo deployment.
-2. Copy the file to `<clone>/client/<name>-fleet.zsh.pre-r57-<YYYYMMDD>`.
+1. Setup no longer asks for or records a controller role. Any old controller
+   assignment is retired, rather than copied into the new launcher.
+2. Copy the file to `<clone>/client/<name>-fleet.zsh.pre-refresh-<YYYYMMDD>`.
 3. Render `<clone>/plugins/github_midwife_plugin/knowledge_base/hydration_templates/fleet_functions.zsh.template`
-   in memory: replace every `{{SOLET_NAME}}` with `<name>`; replace
-   `{{GIT_CONTROLLER_NAME}}` with the value from step 1, or, for a solo
-   deployment, delete the whole line `  GIT_CONTROLLER_NAME="{{GIT_CONTROLLER_NAME}}" \`.
+   in memory: replace every `{{SOLET_NAME}}` with `<name>`.
 4. In the existing file, replace everything above the line `# One function
    per role the operator chose in Step 4a.` with the same region of the
    render, and leave that line and everything below it untouched.
@@ -1932,9 +1941,8 @@ still get the 500-record default and override; they simply keep returning result
 rather than exporting to a file. This is a design choice stated in this release's own migration
 record, not an inconsistency to work around.
 
-If this update reaches an already-hydrated install, **Step 4a above is the action this
-change requires** — an unconfigured workspace root means every affected connector read fails
-loud on first use post-update. See
+For an already-hydrated install, **Step 4a above explains how the update keeps
+your old export folders and adds the solet's Documents home**. See
 `plugins/github_midwife_plugin/knowledge_base/01_hydration_runbook.md`, "What this
 solet ingests and embeds," for what happens to results once they do reach a session.
 
@@ -1971,3 +1979,16 @@ solet ingests and embeds," for what happens to results once they do reach a sess
   needs no copy of the note.
 - `RELEASE_NOTES.md` at the repo root — the full changelog for every
   release, including the ones summarized above.
+
+
+## Where your solet saves files
+
+Your solet keeps its own files in a folder in your Documents folder named after it, and large exports go into the `Exports.nosync` folder inside it so iCloud does not copy them. When you start a session from a project folder, files you ask for without naming a place are saved in that project folder. To set a place for a project, say "save `<kind of file>` for `<project>` in `<folder>`", for example "save reports for Acme in ~/Clients/Acme/Reports". To check, ask "where will you save this?". Your solet never saves into its own installation folder; if you start it from there, it saves to its Documents folder and tells you.
+
+**Where your solet saves files.** After this update your solet has a home folder in your Documents folder, named after it, and saves exports into `Exports.nosync` inside it. Every export folder you set up before is kept as a saved location, so your existing exports stay where they are and keep working, and nothing is moved or deleted. If an old export folder was inside the solet's own installation folder, your solet now tells you and suggests the new home folder instead. On a Mac, if you see a note about Files and Folders access, allow it in System Settings → Privacy & Security; your solet keeps working in the meantime. Start sessions from your project folder to have files saved there.
+
+Refresh an old launcher through hydration step 2 to capture the project folder. Existing saved folders remain readable; nothing is moved or deleted. An old export folder inside the installation is retained for reference and the solet suggests its home instead. If Documents overlaps the installation, the home uses the application-support folder and names it in an advisory.
+
+On macOS, a denied protected-folder write reports Files and Folders access in System Settings → Privacy & Security, naming the launching binary. Missing access is an advisory; the next usable location is tried. Record a `grant_status` entry on the `solet_home` address as `granted`, `missing` or `unknown`, with the UTC date and checking process in its description. The public `address_book_service` verbs `resolve`, `add_entry`, `update_entry` and `delete_entry` read, set, correct and clear it; do not append duplicate status entries. A Terminal or validation-interpreter check does not establish a LaunchAgent grant. Record `unknown` until the process that writes the file has been checked.
+
+Windows uses the Documents known folder, including redirection to OneDrive; OneDrive does not honor `.nosync`, so its sync advisory offers another saved location for large exports. Linux uses XDG Documents settings and then `~/Documents`. Both return unproven status; Linux installation and launch remain on hold.

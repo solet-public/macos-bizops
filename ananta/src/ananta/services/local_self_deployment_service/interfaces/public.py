@@ -14,6 +14,7 @@ from ananta.core.actions.action_metadata import (
 )
 from ananta.core.domain.enums import ProcessorPolicyCategory
 from ananta.core.services.service_interface_decorator import service_interface_process
+from ananta.core.state.async_job_manager import registered_job_return_schema
 from ananta.interfaces.lifecycle_result_types import AutostartResult, RestartResult
 
 PROVIDER = "local_self_deployment_service"
@@ -44,15 +45,12 @@ _ROLLBACK_RELEASE_REASON_PARAM = ParameterMetadata(
     type=ParameterType.STRING,
 )
 _ROLLBACK_RELEASE_EXPECTED_ETAG_PARAM = ParameterMetadata(
-    description="Manifest ETag CAS lock asserted by the operator (see "
-    "lifecycle_interfaces_design §13.2).",
+    description="Manifest ETag CAS lock asserted by the operator (see lifecycle_interfaces_design §13.2).",
     required=True,
     type=ParameterType.STRING,
 )
 _ROLLBACK_RELEASE_EXPECTED_CURRENT_RELEASE_PARAM = ParameterMetadata(
-    description="Concurrency CAS: the rel-<id> the caller observed as the live "
-    "'current' release. A mismatch against ReleaseManager.current_release "
-    "returns FAILED(stale_current_release) before any spawn.",
+    description="Concurrency CAS: the rel-<id> the caller observed as the live 'current' release. A mismatch against ReleaseManager.current_release returns FAILED(stale_current_release) before any spawn.",
     required=True,
     type=ParameterType.STRING,
 )
@@ -95,7 +93,6 @@ _VERIFICATION_MODULES_PARAM = ParameterMetadata(
     required=True,
     type=ParameterType.LIST,
 )
-
 
 
 def _complete_swap_return_schema() -> ReturnValueSchema:
@@ -190,8 +187,7 @@ def _rollback_release_return_schema() -> ReturnValueSchema:
         properties={
             "status": ParameterMetadata(
                 type=ParameterType.STRING,
-                description="Terminal RestartStatus: queued / failed / "
-                "needs_intervention.",
+                description="Terminal RestartStatus: queued / failed / needs_intervention.",
             ),
             "restart_action_id": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -200,13 +196,13 @@ def _rollback_release_return_schema() -> ReturnValueSchema:
             "message": ParameterMetadata(type=ParameterType.STRING, description="Detail."),
             "reason": ParameterMetadata(type=ParameterType.STRING, description="Echoed reason."),
             "expected_etag": ParameterMetadata(
-                type=ParameterType.STRING, description="Echoed ETag CAS lock.",
+                type=ParameterType.STRING,
+                description="Echoed ETag CAS lock.",
             ),
             "dry_run": ParameterMetadata(type=ParameterType.BOOLEAN, description="Echo of dry_run."),
             "reason_code": ParameterMetadata(
                 type=ParameterType.STRING,
-                description="Machine-readable cause (e.g. no_previous, "
-                "rollback_target_unbootable).",
+                description="Machine-readable cause (e.g. no_previous, rollback_target_unbootable).",
             ),
         },
     )
@@ -234,6 +230,7 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
     """AI-discoverable local self-deployment extension surface."""
 
     @service_interface_process(
+        is_async=True,
         name="attest_runtime_code",
         provider=PROVIDER,
         is_discoverable=True,
@@ -241,7 +238,7 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
             "reconciliation_id": _RECONCILIATION_ID_PARAM,
             "verification_modules": _VERIFICATION_MODULES_PARAM,
         },
-        return_value_schema=_runtime_attestation_return_schema(),
+        return_value_schema=registered_job_return_schema(_runtime_attestation_return_schema()),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(
             result_type="local_runtime_code_attestation",
@@ -258,6 +255,7 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
         """Attest the router-served immutable release and loaded modules."""
 
     @service_interface_process(
+        is_async=True,
         name="cutover_release",
         provider=PROVIDER,
         is_discoverable=True,
@@ -266,7 +264,7 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
             **_CUTOVER_EXPECT_PARAMS,
             "dry_run": _CUTOVER_DRY_RUN_PARAM,
         },
-        return_value_schema=_cutover_release_return_schema(),
+        return_value_schema=registered_job_return_schema(_cutover_release_return_schema()),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(
             result_type="local_reconciliation_cutover",
@@ -289,6 +287,7 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
         """Cut over to a candidate built from reconciliation-approved bytes."""
 
     @service_interface_process(
+        is_async=True,
         name="complete_swap",
         provider=PROVIDER,
         is_discoverable=False,
@@ -297,7 +296,7 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
             "prior_instance_id": _PRIOR_INSTANCE_ID_PARAM,
             "prior_color": _PRIOR_COLOR_PARAM,
         },
-        return_value_schema=_complete_swap_return_schema(),
+        return_value_schema=registered_job_return_schema(_complete_swap_return_schema()),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         is_long_running=True,
         result_processor_customizations=MergeResultProcessorCustomizations(
@@ -315,11 +314,12 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
         """Finish a local blue-green swap from the new active color."""
 
     @service_interface_process(
+        is_async=True,
         name="swap_status",
         provider=PROVIDER,
         is_discoverable=True,
         parameters={},
-        return_value_schema=_swap_status_return_schema(),
+        return_value_schema=registered_job_return_schema(_swap_status_return_schema()),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(
             result_type="local_blue_green_swap_status",
@@ -331,11 +331,12 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
         """Read router state plus plugin-local swap state."""
 
     @service_interface_process(
+        is_async=True,
         name="swap_rollback",
         provider=PROVIDER,
         is_discoverable=True,
         parameters={"reason": _ROLLBACK_REASON_PARAM},
-        return_value_schema=_swap_rollback_return_schema(),
+        return_value_schema=registered_job_return_schema(_swap_rollback_return_schema()),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(
             result_type="local_blue_green_swap_rollback_result",
@@ -347,6 +348,7 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
         """Rollback to the previous color during the drain window."""
 
     @service_interface_process(
+        is_async=True,
         name="rollback_release",
         provider=PROVIDER,
         is_discoverable=True,
@@ -355,7 +357,7 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
             "expected_etag": _ROLLBACK_RELEASE_EXPECTED_ETAG_PARAM,
             "expected_current_release": _ROLLBACK_RELEASE_EXPECTED_CURRENT_RELEASE_PARAM,
         },
-        return_value_schema=_rollback_release_return_schema(),
+        return_value_schema=registered_job_return_schema(_rollback_release_return_schema()),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         is_long_running=True,
         result_processor_customizations=MergeResultProcessorCustomizations(
@@ -365,7 +367,11 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
     )
     @abstractmethod
     def rollback_release(
-        self, *, reason: str, expected_etag: str, expected_current_release: str,
+        self,
+        *,
+        reason: str,
+        expected_etag: str,
+        expected_current_release: str,
     ) -> RestartResult:
         """Durably roll back to the prior materialized release (escape hatch).
 
@@ -380,11 +386,12 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
         """
 
     @service_interface_process(
+        is_async=True,
         name="install_autostart",
         provider=PROVIDER,
         is_discoverable=True,
         parameters={"dry_run": _AUTOSTART_DRY_RUN_PARAM},
-        return_value_schema=_autostart_return_schema(),
+        return_value_schema=registered_job_return_schema(_autostart_return_schema()),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(
             result_type="macos_self_deployment_autostart_install_result",
@@ -396,11 +403,12 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
         """Install and load the per-solet LaunchAgent."""
 
     @service_interface_process(
+        is_async=True,
         name="uninstall_autostart",
         provider=PROVIDER,
         is_discoverable=True,
         parameters={"dry_run": _AUTOSTART_DRY_RUN_PARAM},
-        return_value_schema=_autostart_return_schema(),
+        return_value_schema=registered_job_return_schema(_autostart_return_schema()),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(
             result_type="macos_self_deployment_autostart_uninstall_result",
@@ -412,11 +420,12 @@ class LocalSelfDeploymentServicePublicAPI(ABC):
         """Unload and remove the per-solet LaunchAgent."""
 
     @service_interface_process(
+        is_async=True,
         name="status_autostart",
         provider=PROVIDER,
         is_discoverable=True,
         parameters={},
-        return_value_schema=_autostart_return_schema(),
+        return_value_schema=registered_job_return_schema(_autostart_return_schema()),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(
             result_type="macos_self_deployment_autostart_status_result",

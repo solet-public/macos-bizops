@@ -38,7 +38,7 @@
 # (1) STATE PLUGIN SOURCE — postgres_state_management_plugin (local)
 # ===========================================================================
 # W2-1 (2026-09-03): former whole-file exemptions enumerated from current imports.
-D1.1::plugins/external_postgres_plugin/src/external_postgres_plugin/connection.py::29::psycopg  # owner: 2026-09-03-W2-1-sweep reason: pre-existing entry from the 2026-09-03 W2-1 sweep; migrated to mandatory schema, original per-entry justification not recovered, see iss_9b0ad3d5 expires: 2027-03-20
+D1.1::plugins/external_postgres_plugin/src/external_postgres_plugin/connection.py::22::psycopg  # owner: 2026-09-03-W2-1-sweep reason: pre-existing entry from the 2026-09-03 W2-1 sweep (line re-anchored 29->22 by unt_07816179 when the posture docstring shrank); migrated to mandatory schema, original per-entry justification not recovered, see iss_9b0ad3d5 expires: 2027-03-20
 D1.1::plugins/pgvector_service_plugin/src/pgvector_service_plugin/postgres_backend/vector/provider.py::17::psycopg  # owner: 2026-09-03-W2-1-sweep reason: pre-existing entry from the 2026-09-03 W2-1 sweep; migrated to mandatory schema, original per-entry justification not recovered, see iss_9b0ad3d5 expires: 2027-03-20
 D1.1::plugins/pgvector_service_plugin/src/pgvector_service_plugin/postgres_backend/vector/provider.py::20::psycopg  # owner: 2026-09-03-W2-1-sweep reason: pre-existing entry from the 2026-09-03 W2-1 sweep; migrated to mandatory schema, original per-entry justification not recovered, see iss_9b0ad3d5 expires: 2027-03-20
 D1.1::plugins/pgvector_service_plugin/src/pgvector_service_plugin/postgres_backend/vector/provider.py::21::psycopg  # owner: 2026-09-03-W2-1-sweep reason: pre-existing entry from the 2026-09-03 W2-1 sweep; migrated to mandatory schema, original per-entry justification not recovered, see iss_9b0ad3d5 expires: 2027-03-20
@@ -116,7 +116,7 @@ D1.1::plugins/rds_postgres_state_management_plugin/src/rds_postgres_state_manage
 
 # rds_pgvector_service_plugin postgres_backend — removed by W-VECTOR-CLOUD (Tier 6)
 
-# external_postgres_plugin — the "super Datagrip" read-only connector to FOREIGN
+# external_postgres_plugin — the "super Datagrip" connector to FOREIGN
 # Postgres DBs (operator-ratified RATIFY-1, 2026-07-09). psycopg targets external_pg::*
 # address-book DSNs only; assert_foreign_target refuses the platform's own instance
 # (role-independent host+port+dbname) — red-first smoke_containment.py. NOT owner-exempt.

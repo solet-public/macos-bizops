@@ -1,18 +1,18 @@
 {
   "process_key": "service_interface::plugin_schema_service::purge_plugin_schema",
   "display_name": "Purge Plugin Schema",
-  "description": "Destructive — drops every platform-owned table for the namespace and deletes the ownership rows. Refuses against an active namespace unless force=True is passed. Refuses to touch any table not recorded in ownership for this namespace.",
-  "embedding_description": "Permanently drop all tables and ownership rows for a plugin namespace. Safe-by-default: refuses against active namespaces unless force=True. After uninstall_plugin_schema marks a namespace inactive, purge is the verb that actually removes the data.",
+  "description": "Registered calls admit one schema-lifecycle job and return its job_id/status before declaration parsing or lifecycle effects. Destructive \u2014 drops every platform-owned table for the namespace and deletes the ownership rows. Refuses against an active namespace unless force=True is passed. Refuses to touch any table not recorded in ownership for this namespace.",
+  "embedding_description": "Queue the complete schema lifecycle operation and read its exact job for the final outcome. Permanently drop all tables and ownership rows for a plugin namespace. Safe-by-default: refuses against active namespaces unless force=True. After uninstall_plugin_schema marks a namespace inactive, purge is the verb that actually removes the data.",
   "result_processor_customizations": {
-    "action_label": "Plugin schema purged",
-    "result_type": "plugin_schema_purged",
-    "result_description": "Lifecycle outcome with status (purged | not_installed), namespace, tables dropped, and the force flag value.",
-    "presentation_guidance": "",
-    "output_action_guidance": "Determine the appropriate next action based on the context and action result."
+    "action_label": "Schema lifecycle job queued",
+    "result_type": "plugin_schema_job_queued",
+    "result_description": "Queued ActionResult receipt with data.job_id and data.status; the exact job.result retains the complete original lifecycle response and job.error its typed failure.",
+    "presentation_guidance": "Admission confirms the job was persisted, not that the schema changed. Read service_interface::job_service::get_job by this exact id until terminal before using lifecycle status, tables or force results.",
+    "output_action_guidance": "Poll the exact job id. Preserve the existing force and ownership premises. Reconcile an uncertain outcome or lost volatile declaration without replaying schema effects."
   },
   "error_processor_customizations": {
     "action_context": "Drops platform-owned tables and ownership rows for the namespace in one transaction.",
-    "error_interpretation": "ValueError: namespace is active and force=False. Postgres errors propagate from the transactional apply (failure rolls back atomically — no partial drop).",
-    "recovery_guidance": "For 'refused — active': call uninstall_plugin_schema first to mark the namespace inactive, then call purge again. Or pass force=True if the data loss is intentional. For Postgres errors: confirm postgres_state_management_plugin is healthy; the transaction rolled back, no tables were dropped."
+    "error_interpretation": "ValueError: namespace is active and force=False. Postgres errors propagate from the transactional apply (failure rolls back atomically \u2014 no partial drop).",
+    "recovery_guidance": "For 'refused \u2014 active': call uninstall_plugin_schema first to mark the namespace inactive, then call purge again. Or pass force=True if the data loss is intentional. For Postgres errors: confirm postgres_state_management_plugin is healthy; the transaction rolled back, no tables were dropped."
   }
 }

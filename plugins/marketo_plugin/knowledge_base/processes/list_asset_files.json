@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::marketo_plugin::list_asset_files",
+  "display_name": "Marketo: List Asset Files",
+  "description": "Marketo list asset files through the typed Files API, including images. Dispatches a platform job; poll check_marketo_job_status for the vendor envelope on writes or metadata TSV on reads. Upload parts carry filename, content_type and content_base64; vendor Assets RBAC and workspace access apply.",
+  "embedding_description": "Marketo list asset files through the typed Files API, including images. Dispatches a platform job; poll check_marketo_job_status for the vendor envelope on writes or metadata TSV on reads. Upload parts carry filename, content_type and content_base64; vendor Assets RBAC and workspace access apply.",
+  "result_processor_customizations": {
+    "action_label": "Marketo: List Asset Files job dispatched",
+    "result_type": "marketo_list_asset_files_result",
+    "result_description": "Queued platform job_id and status; poll check_marketo_job_status for the vendor response. Vendor bulk completion is separate.",
+    "presentation_guidance": "Preserve vendor ids, status, warnings/errors and continuation hints. Bulk downloads include body_base64 and content_range; file metadata reads produce a workspace TSV."
+  },
+  "error_processor_customizations": {
+    "action_context": "Marketo list asset files through the typed Files API, including images. Dispatches a platform job; poll check_marketo_job_status for the vendor envelope on writes or metadata TSV on reads. Upload parts carry filename, content_type and content_base64; vendor Assets RBAC and workspace access apply.",
+    "error_interpretation": "marketo.invalid_params: correct the documented input. marketo.permission_denied/auth_failed: credential or vendor RBAC refused. marketo.validation_failed: vendor rejected the operation.",
+    "recovery_guidance": "Read back before retrying uncertain writes. Vendor RBAC controls access. No confirmation prompt, invented endpoint, local role restriction or automatic mutation retry."
+  }
+}

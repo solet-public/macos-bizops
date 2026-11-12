@@ -1,12 +1,12 @@
 {
   "process_key": "service_interface::vault_service::rename",
   "display_name": "Rename Secret",
-  "description": "Rename a secret server-side without exposing plaintext. Reads value+metadata under old_key, writes under new_key, deletes old_key. Use instead of retrieve+store+delete when the plaintext must not cross the process boundary (e.g., MCP / coding-agent contexts).",
-  "embedding_description": "Vault: rename a secret server-side without exposing plaintext. Moves credential / password / OAuth client_secret / API key / refresh/bearer token from one vault key to another, preserving value + version/tags/metadata. Plaintext never leaves the vault — callers see only key identifiers. Use instead of retrieve+store+delete when round trip would leak plaintext into agent transcript / MCP log.",
+  "description": "Returns an owned vault job receipt (job_id/status); read the exact job with job_service.get_job for its public terminal outcome. Rename a secret server-side without exposing plaintext. Reads value+metadata under old_key, writes under new_key, deletes old_key. Use instead of retrieve+store+delete when the plaintext must not cross the process boundary (e.g., MCP / coding-agent contexts).",
+  "embedding_description": "Vault: rename a secret server-side without exposing plaintext. Moves credential / password / OAuth client_secret / API key / refresh/bearer token from one vault key to another, preserving value + version/tags/metadata. Plaintext never leaves the vault — callers see only key identifiers. Use instead of retrieve+store+delete when round trip would leak plaintext into agent transcript / MCP log. Registered execution returns job_id/status; the complete public outcome is in job.result. Secret operands remain volatile and failures are sanitized; uncertain effects require reconciliation, never automatic replay.",
   "result_processor_customizations": {
     "action_label": "Secret renamed",
     "result_type": "secret_renamed",
-    "result_description": "Confirmation that secret was renamed from old_key to new_key. Contains old_key, new_key, and message (status). NEVER contains secret values.",
+    "result_description": "Queued vault job receipt. Completed public outcome: Confirmation that secret was renamed from old_key to new_key. Contains old_key, new_key, and message (status). NEVER contains secret values.",
     "presentation_guidance": "",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },

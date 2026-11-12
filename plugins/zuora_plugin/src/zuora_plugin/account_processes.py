@@ -2,8 +2,7 @@
 
 Same contract as ``order_processes``: EDGE, deferred completion, one vendor
 operation from ``account_actions.ACCOUNT_OPERATIONS`` per job, vendor RBAC the
-only boundary. Card, bank-account and wallet values in a create body are
-redacted from every echo.
+only boundary. Results are returned as received.
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ class AccountProcesses:
     @platform_process(
         name="create_account",
         display_name="Zuora: Create Account",
-        description="Create a customer account (POST /v1/accounts), optionally with contacts, a payment method and a first subscription. body needs name, currency and billToContact; card and bank values are redacted from every echo." + QUEUED_NOTE,
+        description="Create a customer account (POST /v1/accounts), optionally with contacts, a payment method and a first subscription. body needs name, currency and billToContact." + QUEUED_NOTE,
         processor_policy_category=EDGE,
         parameters={"body": body("The account document: name, currency, billToContact (required), soldToContact, billCycleDay, paymentTerm, creditCard or paymentMethod, subscription, custom fields and the rest."), **IDEMPOTENT_HEADER_PARAMS},
         return_value_schema=QUEUED,

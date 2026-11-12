@@ -1,14 +1,14 @@
 {
   "process_key": "plugin::openai_embeddings_plugin::generate_embeddings_action",
   "display_name": "Generate Embeddings",
-  "description": "Embed text by posting the whole list to an OpenAI-compatible server such as LM Studio; callers should use the solet's bound service, service_interface::embedding_service::generate_embeddings.",
-  "embedding_description": "Post the whole list of strings in one request to an LM Studio-style server, with an optional model name; text input only. Returns the vectors in input order (sorted by the server's index), their length and the model name the server reports. A provider-specific path, not the general route; callers should use the solet's bound service.",
+  "description": "Generate vector embeddings from text. Returns immediately with job_id and status queued; work runs on the plugin worker.",
+  "embedding_description": "Queue text embeddings using the configured OpenAI-compatible server and optional model. Returns job_id and status queued before HTTP runs. Retrieve service_interface::job_service::get_job until terminal; job.result contains the original embeddings, dimension and model response, and failures also retain job.error.",
   "result_processor_customizations": {
-    "action_label": "Embeddings generated",
-    "result_type": "embeddings_generated",
-    "result_description": "Vector embeddings with keys: embeddings (list of float arrays), dimension (int), model (string)",
+    "action_label": "Job queued",
+    "result_type": "job_receipt",
+    "result_description": "Queued job handle with job_id and status; the final response is stored in job.result.",
     "presentation_guidance": "",
-    "output_action_guidance": "Determine the appropriate next action based on the context and action result."
+    "output_action_guidance": "Retain this exact job_id. Schedule job_service::get_job while queued or processing; inspect terminal result or error before using the final data. Do not repeat a write because a poll is delayed."
   },
   "error_processor_customizations": {
     "action_context": "Generates vector embeddings from text using OpenAI-compatible API",

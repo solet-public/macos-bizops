@@ -267,6 +267,9 @@ class BridgeSessionState:
     # REGISTERED binding, so an unresolvable key degrades to the system
     # sentinel rather than promoting an unverifiable claim.
     caller_agent_session_id: str = ""
+    # File locations A2: capture and provenance live only for this bridge.
+    # Close/reopen discards/replaces them; never copy them into flow metadata.
+    launch_directory: dict[str, str] | None = None
     # M5 §14.4: OAuth client_id that opened this bridge. Empty string
     # for legacy stdio bridges that never carried a bearer. Set at
     # bridge-establishment time from the validated BearerClaim.
@@ -339,7 +342,10 @@ class BridgeSessionState:
             return event
 
     def events_after(
-        self, after: int, *, limit: int | None = EVENTS_AFTER_PAGE_LIMIT,
+        self,
+        after: int,
+        *,
+        limit: int | None = EVENTS_AFTER_PAGE_LIMIT,
     ) -> tuple[list[QueuedEvent], list[QueuedEvent]]:
         """Return ``(acked, pending)`` for a client cursor.
 
@@ -361,9 +367,7 @@ class BridgeSessionState:
         """
         with self._events_lock:
             acked = [e for e in self.pending_events if e.cursor <= after]
-            self.pending_events = [
-                e for e in self.pending_events if e.cursor > after
-            ]
+            self.pending_events = [e for e in self.pending_events if e.cursor > after]
             pending = list(self.pending_events)
             if limit is not None:
                 pending = pending[:limit]

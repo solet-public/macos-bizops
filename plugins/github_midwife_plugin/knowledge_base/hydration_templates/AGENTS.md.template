@@ -200,4 +200,16 @@ that generated this file, live in the knowledge base — search "genesis
 bootstrap ladder" or "hydration operator environment setup" via Step Zero
 above.
 
+## Where your solet saves files
+
+Your solet keeps its own files in a folder in your Documents folder named after it, and large exports go into the `Exports.nosync` folder inside it so iCloud does not copy them. When you start a session from a project folder, files you ask for without naming a place are saved in that project folder. To set a place for a project, say "save `<kind of file>` for `<project>` in `<folder>`", for example "save reports for Acme in ~/Clients/Acme/Reports". To check, ask "where will you save this?". Your solet never saves into its own installation folder; if you start it from there, it saves to its Documents folder and tells you.
+
+**Where your solet saves files.** After this update your solet has a home folder in your Documents folder, named after it, and saves exports into `Exports.nosync` inside it. Every export folder you set up before is kept as a saved location, so your existing exports stay where they are and keep working, and nothing is moved or deleted. If an old export folder was inside the solet's own installation folder, your solet now tells you and suggests the new home folder instead. On a Mac, if you see a note about Files and Folders access, allow it in System Settings → Privacy & Security; your solet keeps working in the meantime. Start sessions from your project folder to have files saved there.
+
+Refresh an old launcher through hydration step 2 to capture the project folder. Existing saved folders remain readable; nothing is moved or deleted. An old export folder inside the installation is retained for reference and the solet suggests its home instead. If Documents overlaps the installation, the home uses the application-support folder and names it in an advisory.
+
+On macOS, a denied protected-folder write reports Files and Folders access in System Settings → Privacy & Security, naming the launching binary. Missing access is an advisory; the next usable location is tried. Record a `grant_status` entry on the `solet_home` address as `granted`, `missing` or `unknown`, with the UTC date and checking process in its description. The public `address_book_service` verbs `resolve`, `add_entry`, `update_entry` and `delete_entry` read, set, correct and clear it; do not append duplicate status entries. A Terminal or validation-interpreter check does not establish a LaunchAgent grant. Record `unknown` until the process that writes the file has been checked.
+
+Windows uses the Documents known folder, including redirection to OneDrive; OneDrive does not honor `.nosync`, so its sync advisory offers another saved location for large exports. Linux uses XDG Documents settings and then `~/Documents`. Both return unproven status; Linux installation and launch remain on hold.
+
 <!-- END SOLET HYDRATION -->

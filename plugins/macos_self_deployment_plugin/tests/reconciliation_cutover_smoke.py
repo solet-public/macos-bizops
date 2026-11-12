@@ -18,9 +18,13 @@ reach the executor and the outcome at all.
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import types
 from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
 _ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_ROOT / "ananta" / "src"))
@@ -52,7 +56,7 @@ _OTHER = "sha256:" + "c" * 64
 
 
 def _observation(**overrides: object) -> TargetRuntimeObservation:
-    fields = {
+    fields: dict[str, object] = {
         "current_release_id": "rel-1",
         "active_instance_id": "inst-1",
         "active_pid": 701,
@@ -144,9 +148,7 @@ def _happy_path_checks() -> list[tuple[bool, str]]:
         (call["expected_etag"] == "etag-1", "manifest etag CAS is handed to the swap layer"),
         (call["dry_run"] is False, "default run is not a dry run"),
         (
-            provenance.reconciliation_id == "rec_smoke1"
-            and provenance.source_surface_sha256 == _SOURCE
-            and provenance.release_surface_sha256 == _RELEASE,
+            provenance.reconciliation_id == "rec_smoke1" and provenance.source_surface_sha256 == _SOURCE and provenance.release_surface_sha256 == _RELEASE,
             "provenance carries reconciliation id + both observed surface digests",
         ),
         (outcome.prior_release_id == "rel-1", "prior release captured pre-swap"),
@@ -205,17 +207,17 @@ class _MemoryJournal:
         self.intent_ids: list[str] = []
         self.terminal_ids: list[str] = []
 
-    def terminal_outcome(self, _: str) -> CutoverOutcome | None:
+    def terminal_outcome(self, reconciliation_id: str) -> CutoverOutcome | None:
         return self._terminal
 
-    def active_attempt(self, _: str) -> bool:
+    def active_attempt(self, reconciliation_id: str) -> bool:
         return self._active
 
     def record_intent(self, reconciliation_id: str) -> None:
         self.intent_ids.append(reconciliation_id)
         self._active = True
 
-    def resume_active(self, _: str) -> CutoverOutcome | None:
+    def resume_active(self, reconciliation_id: str) -> CutoverOutcome | None:
         return self._resumable
 
     def record_terminal(self, reconciliation_id: str, outcome: CutoverOutcome) -> None:
@@ -281,9 +283,7 @@ def _journal_replay_checks() -> list[tuple[bool, str]]:
 
     return [
         (
-            len(executor.calls) == 1
-            and journal.intent_ids == ["rec_smoke1"]
-            and journal.terminal_ids == ["rec_smoke1"],
+            len(executor.calls) == 1 and journal.intent_ids == ["rec_smoke1"] and journal.terminal_ids == ["rec_smoke1"],
             "fresh cutover records durable intent before one shared executor call",
         ),
         (
@@ -299,9 +299,7 @@ def _journal_replay_checks() -> list[tuple[bool, str]]:
             "apply during a durable active attempt refuses before a second candidate",
         ),
         (
-            resumed_active.resumed
-            and not active_executor.calls
-            and active_journal.terminal_ids == ["rec_smoke1"],
+            resumed_active.resumed and not active_executor.calls and active_journal.terminal_ids == ["rec_smoke1"],
             "recover resumes the durable active attempt without a second candidate",
         ),
         (
@@ -546,8 +544,7 @@ def _target_local_factory_checks() -> list[tuple[bool, str]]:
             "target-local factory forwards T1 start token to the shared executor",
         ),
         (
-            call["poller_gate"] == "unreachable_from_target_local"
-            and call["set_active_targets"] == (),
+            call["poller_gate"] == "unreachable_from_target_local" and call["set_active_targets"] == (),
             "target-local entry cannot quiesce the old process poller",
         ),
         (
@@ -605,31 +602,71 @@ def _action_refusal_checks() -> list[tuple[bool, str]]:
     plugin = MacosSelfDeploymentPlugin()
     empty = plugin.cutover_release_action({}, {})
     partial = plugin.cutover_release_action(
-        {"reconciliation_id": "rec_x", "expected_manifest_etag": "e"}, {},
+        {"reconciliation_id": "rec_x", "expected_manifest_etag": "e"},
+        {},
     )
     return [
-        (empty.get("error_code") == "missing_args" or "missing_args" in str(empty),
-         "an empty call is refused as missing_args, not attempted"),
-        (partial.get("error_code") == "missing_args" or "missing_args" in str(partial),
-         "a partially-specified call is refused as missing_args"),
+        (empty.get("error_code") == "missing_args" or "missing_args" in str(empty), "an empty call is refused as missing_args, not attempted"),
+        (partial.get("error_code") == "missing_args" or "missing_args" in str(partial), "a partially-specified call is refused as missing_args"),
     ]
 
 
+def _target_attestation_job_checks() -> None:
+    """Exercise target-local CLI invocation and decoding before any cutover."""
+    from macos_self_deployment_plugin import target_local_cutover as factory
+
+    data = {"current_release_id": "rel-final"}
+    job: dict[str, Any] = {"id": "job-attest", "status": "completed", "error": None, "result": {"action_status": "completed", "data": data, "error": None}}
+
+    def run(argv: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        receipt = {"status": "success", "result": {"data": {"job_id": "job-attest", "status": "queued"}}}
+        return subprocess.CompletedProcess(argv, 0, json.dumps(job if "--wait" in argv else receipt), "")
+
+    with patch.object(factory, "_target_bridge", return_value=Path("/fixture/bridge")), patch.object(factory.subprocess, "run", side_effect=run):
+        assert factory._attest_runtime(Path("/fixture"), "smoke") == data, "target attestation must await final data, not admission"
+        for status in ("error", "cancelled", "processing"):
+            job["status"] = status
+            try:
+                factory._attest_runtime(Path("/fixture"), "smoke")
+            except factory.TargetLocalConstructionError:
+                continue
+            raise AssertionError(f"noncompleted target attestation accepted: {status}")
+        job.update(status="completed", error={"message": "worker failed"})
+        try:
+            factory._attest_runtime(Path("/fixture"), "smoke")
+        except factory.TargetLocalConstructionError:
+            pass
+        else:
+            raise AssertionError("failed target attestation accepted")
+    with patch.object(factory, "_target_bridge", return_value=Path("/fixture/bridge")), patch.object(factory.subprocess, "run", side_effect=subprocess.TimeoutExpired("bridge", 1)):
+        try:
+            factory._attest_runtime(Path("/fixture"), "smoke")
+        except factory.TargetLocalConstructionError:
+            pass
+        else:
+            raise AssertionError("timed-out target attestation accepted")
+    direct = subprocess.CompletedProcess([], 0, json.dumps({"status": "success", "result": {"data": data}}), "")
+    assert factory._attestation_data(direct) == data, "synchronous target envelope decoding is unchanged"
+
+
 def main() -> int:
+    _target_attestation_job_checks()
     checks = [_capability_gate_check()]
     prior_module, prior_attribute = _install_test_capability()
     try:
-        checks.extend([
-            *_stale_leg_checks(),
-            *_happy_path_checks(),
-            *_dry_run_checks(),
-            *_journal_replay_checks(),
-            *_validation_checks(),
-            *_attestation_derivation_checks(),
-            *_target_local_factory_checks(),
-            *_process_surface_checks(),
-            *_action_refusal_checks(),
-        ])
+        checks.extend(
+            [
+                *_stale_leg_checks(),
+                *_happy_path_checks(),
+                *_dry_run_checks(),
+                *_journal_replay_checks(),
+                *_validation_checks(),
+                *_attestation_derivation_checks(),
+                *_target_local_factory_checks(),
+                *_process_surface_checks(),
+                *_action_refusal_checks(),
+            ]
+        )
     finally:
         _remove_test_capability(prior_module, prior_attribute)
     for passed, label in checks:

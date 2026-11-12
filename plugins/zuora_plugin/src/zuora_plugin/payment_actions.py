@@ -24,9 +24,8 @@ cancel (terminal for external payments) and delete (a cancelled payment).
 Payment history is the vendor's: every write is one vendor call that Zuora
 records; nothing here replays a write.
 
-Every card number, security code, bank account number, IBAN, gateway token,
-wallet token and encrypted payment token a caller sends is redacted from
-vendor echoes, errors and audit lines.
+No audit line is built from a request body, so a payment instrument a caller
+sends never reaches a log line.
 """
 
 from __future__ import annotations
@@ -39,9 +38,7 @@ from .commerce_fields import (
     PAGE_FIELDS,
     V1_HEADERS,
     WALLET_HEADERS,
-    instrument_secrets,
     page_check,
-    payment_secrets,
     vendor_body,
 )
 from .typed_operations import Field, Operation
@@ -76,19 +73,18 @@ PAYMENT_LIST_FIELDS: Final[dict[str, Field]] = {
 }
 
 PAYMENT_METHOD_OPERATIONS: Final[tuple[Operation, ...]] = (
-    Operation("create_payment_method", "POST", "/v1/payment-methods", header_fields=IDEMPOTENT_HEADERS, body=vendor_body(), secrets=instrument_secrets, envelope=True),
+    Operation("create_payment_method", "POST", "/v1/payment-methods", header_fields=IDEMPOTENT_HEADERS, body=vendor_body(), envelope=True),
     Operation(
         "decrypt_payment_method",
         "POST",
         "/v1/payment-methods/decryption",
         header_fields=IDEMPOTENT_HEADERS,
         body=vendor_body("integrationType", "merchantID", "paymentToken"),
-        secrets=instrument_secrets,
         envelope=True,
     ),
     Operation("delete_payment_method", "DELETE", _PM, path_fields=PAYMENT_METHOD_ID, header_fields=V1_HEADERS, envelope=True),
     Operation("get_payment_method", "GET", _PM, path_fields=PAYMENT_METHOD_ID, header_fields=V1_HEADERS, envelope=True),
-    Operation("update_payment_method", "PUT", _PM, path_fields=PAYMENT_METHOD_ID, header_fields=V1_HEADERS, body=vendor_body(), secrets=instrument_secrets, envelope=True),
+    Operation("update_payment_method", "PUT", _PM, path_fields=PAYMENT_METHOD_ID, header_fields=V1_HEADERS, body=vendor_body(), envelope=True),
     Operation(
         "verify_payment_method",
         "PUT",
@@ -96,7 +92,6 @@ PAYMENT_METHOD_OPERATIONS: Final[tuple[Operation, ...]] = (
         path_fields=PAYMENT_METHOD_ID,
         header_fields=ASYNC_JOB_HEADERS,
         body=vendor_body(optional=True),
-        secrets=instrument_secrets,
         envelope=True,
     ),
     Operation("scrub_payment_method", "PUT", _PM + "/scrub", path_fields=PAYMENT_METHOD_ID, header_fields=V1_HEADERS, envelope=True),
@@ -117,7 +112,6 @@ PAYMENT_METHOD_OPERATIONS: Final[tuple[Operation, ...]] = (
         path_fields=PAYMENT_METHOD_ID,
         header_fields=IDEMPOTENT_HEADERS,
         body=vendor_body("consentAgreementSrc", "status", "type"),
-        secrets=instrument_secrets,
         envelope=True,
     ),
     Operation("cancel_stored_credential_profile", "POST", _PM + "/profiles/{profile_number}/cancel", path_fields=PROFILE, header_fields=IDEMPOTENT_HEADERS, envelope=True),
@@ -154,8 +148,6 @@ PAYMENT_METHOD_OPERATIONS: Final[tuple[Operation, ...]] = (
         "/web-payments/sessions",
         header_fields=WALLET_HEADERS,
         body=vendor_body("amount", "currency", "processPayment"),
-        secrets=payment_secrets,
-        revealed_keys=frozenset({"token"}),
     ),
 )
 
@@ -167,7 +159,6 @@ PAYMENT_OPERATIONS: Final[tuple[Operation, ...]] = (
         "/v1/payments",
         header_fields=IDEMPOTENT_HEADERS,
         body=vendor_body("amount", "currency", "type"),
-        secrets=payment_secrets,
         envelope=True,
     ),
     Operation("update_payment", "PUT", _PAYMENT, path_fields=PAYMENT_KEY, header_fields=V1_HEADERS, body=vendor_body(), envelope=True),

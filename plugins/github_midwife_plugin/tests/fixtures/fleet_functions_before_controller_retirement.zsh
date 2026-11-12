@@ -1,0 +1,170 @@
+# {{SOLET_NAME}}-fleet.zsh — OPTIONAL multi-role session functions.
+# Sourced by the deployment's client/{{SOLET_NAME}}.zsh ONLY if the operator
+# accepted the Step 4a fleet-coordination offer in the hydration runbook.
+# Lives in the deployment directory, same as the single-session launcher, so it arrives
+# via `git pull`, never another ~/.zshrc replacement.
+#
+# The Step 2 single-session launcher (claude-{{SOLET_NAME}}) skips permission
+# prompts by default; set SOLET_PERMISSION_PROMPTS=1 there to get them back.
+# The functions below are for running SEVERAL concurrent named sessions, which
+# is a different thing from permission posture — they add --remote-control so a
+# coordinator session can drive workers. Their own
+# {{SOLET_NAME}}_FLEET_SKIP_PERMISSIONS knob is kept for compatibility and is
+# redundant with the launcher default.
+# The functions below are for an operator who has explicitly chosen to run
+# SEVERAL concurrent named sessions against {{SOLET_NAME}} (a
+# coordinator-style fleet) and has been walked through what
+# --dangerously-skip-permissions and --remote-control actually do. Do not
+# render this file, and do not add its `source` line to
+# {{SOLET_NAME}}.zsh, without that conversation having happened.
+
+# One shared launcher, parameterized by role. Differences from the Step 2
+# single-session launcher:
+#   --remote-control "$role"   makes this session addressable by Claude
+#                               Code's remote-control feature from another
+#                               session (what lets a coordinator session
+#                               drive/monitor worker sessions). Claude Code
+#                               feature, no MCP involved.
+#   --dangerously-skip-permissions
+#                               opt-in, separately gated below. Skips the
+#                               tool-approval prompt on every action. This
+#                               is what makes multiple concurrently-running
+#                               sessions practical without an operator
+#                               babysitting each one's confirmations, but it
+#                               removes the per-action safety boundary. Set
+#                               {{SOLET_NAME}}_FLEET_SKIP_PERMISSIONS=1
+#                               in the environment (or edit the line below)
+#                               only after you understand that tradeoff.
+#
+# Peer messaging, role binding, AND idle wake need NO flag here on the
+# default transport: each session's SessionStart hook invokes the rename
+# skill, which arms the `{{SOLET_NAME}} watch` registered-presence
+# watcher (register + claim + receive, zero MCP), and the user-scope Stop
+# hook runs `{{SOLET_NAME}} wake`, which turns deliveries into session
+# turns on any provider.
+#
+# {{SOLET_NAME}}_FLEET_TRANSPORT declares the fleet-coordination
+# transport for launched sessions ("watch" default | "mcp"), exported to
+# each session as FLEET_TRANSPORT, which the rename skill and
+# the user-scope Stop hook read. "mcp" is only meaningful where the
+# operator explicitly wired the optional MCP bridge (`claude mcp add`,
+# hydration's explicit-request-only step) — declared-mcp with no bridge
+# attached fails loudly in the rename skill by design; nothing silently
+# falls back. The MCP wake half is the separate development-channel flag
+# ({{SOLET_NAME}}_FLEET_MCP_CHANNELS=1 adds
+# --dangerously-load-development-channels server:{{SOLET_NAME}});
+# it needs BOTH halves to function: this flag AND the registered MCP
+# server — the flag alone is inert. It also requires Anthropic-direct auth
+# (DELIVER_IMMEDIATELY channels are unavailable on Bedrock), so on a
+# machine whose policy blocks MCP there is NO provider setting under which
+# it works. The hydration wizard's MCP path sets both variables together.
+# Defaults are watch + channels OFF; do not suggest MCP unprompted.
+#
+# GIT_CONTROLLER_NAME records the operator's chosen git-controller role.
+# Hydration renders that choice, launcher refresh preserves it, and managed
+# workers inherit it. The coordination-hooks git gate was removed in 0.9.0;
+# this variable does not enforce Git permissions. Git control is the
+# repository's responsibility. A single-session deployment may omit the line.
+# Keep the recorded choice identical here and in claude-{{SOLET_NAME}}.
+# tmux self-hosting. Every fleet session runs inside a tmux session named
+# exactly its role. Headless sessions are not supported: the solet drives and
+# wakes a session through its tmux pane, so a session started in a bare
+# terminal tab cannot be reached. Contract of _tmux_host_for_{{SOLET_NAME}}:
+#   - not inside tmux, or inside some OTHER tmux session: create a detached
+#     session named <role>, run this same launcher inside it, then attach
+#     (switch-client when nested). Attach is a child, not an exec, so
+#     detaching (C-b d) returns to the shell and the session keeps running.
+#     Returns 2: the caller must NOT exec claude here.
+#   - inside the tmux session named <role>: this IS the inner invocation.
+#     Returns 0: the caller execs claude in the pane.
+#   - a session named <role> already exists: attach to it (switch-client when
+#     nested) instead of starting a second copy. Returns 2. To replace the
+#     running session use the restart variant below.
+#   - tmux missing: refuse loudly (return 1). No bare-terminal fallback.
+# The {{SOLET_NAME}}_FLEET_* knobs below are forwarded into the new pane with
+# tmux -e, so a knob exported in the launching shell reaches the session even
+# when a tmux server is already running with a different environment.
+_tmux_host_for_{{SOLET_NAME}}() {
+  local host="$1"        # tmux session name == role
+  local inner_cmd="$2"   # zsh command line to run inside the new pane
+  local tmux_bin
+  tmux_bin="$(command -v tmux)" || {
+    echo "[launcher] REFUSED: tmux is not installed; every fleet session must run in tmux. Install it (brew install tmux) and retry." >&2
+    return 1
+  }
+  if [[ -n "$TMUX" ]] && [[ "$("$tmux_bin" display-message -p '#S' 2>/dev/null)" == "$host" ]]; then
+    return 0
+  fi
+  if ! "$tmux_bin" has-session -t "=$host" 2>/dev/null; then
+    local -a env_flags
+    local knob
+    for knob in {{SOLET_NAME}}_FLEET_SKIP_PERMISSIONS {{SOLET_NAME}}_FLEET_MCP_CHANNELS {{SOLET_NAME}}_FLEET_TRANSPORT; do
+      [[ -n "${(P)knob}" ]] && env_flags+=(-e "$knob=${(P)knob}")
+    done
+    "$tmux_bin" new-session -d -s "$host" -c "$PWD" "${env_flags[@]}" "zsh -ic ${(q)inner_cmd}" || return 1
+    echo "[launcher] tmux session '$host' created; attaching (detach with C-b d, the session keeps running)"
+  else
+    echo "[launcher] tmux session '$host' already exists; attaching"
+  fi
+  if [[ -n "$TMUX" ]]; then
+    "$tmux_bin" switch-client -t "=$host"
+  else
+    "$tmux_bin" attach-session -t "=$host"
+  fi
+  return 2
+}
+
+_claude_for_{{SOLET_NAME}}() {
+  local role="$1"
+  local model="$2"    # optional CLI model alias; empty = settings.json default
+  local effort="$3"   # optional effort level; empty = settings.json default
+
+  # Re-enter THIS function inside the role's tmux session with the same three
+  # args, positionally quoted so an empty arg stays an empty arg.
+  _tmux_host_for_{{SOLET_NAME}} "$role" \
+    "_claude_for_{{SOLET_NAME}} ${(q)role} ${(q)model} ${(q)effort}"
+  case $? in
+    0) ;;
+    2) return 0 ;;
+    *) return 1 ;;
+  esac
+
+  typeset -a extra_flags
+  [[ -n "$model" ]]  && extra_flags+=(--model "$model")
+  [[ -n "$effort" ]] && extra_flags+=(--effort "$effort")
+  [[ "${{{SOLET_NAME}}_FLEET_SKIP_PERMISSIONS:-0}" == "1" ]] && extra_flags+=(--dangerously-skip-permissions)
+  [[ "${{{SOLET_NAME}}_FLEET_MCP_CHANNELS:-0}" == "1" ]] && extra_flags+=(--dangerously-load-development-channels server:{{SOLET_NAME}})
+
+  SOLET_NAME="{{SOLET_NAME}}" \
+  FLEET_TRANSPORT="${{{SOLET_NAME}}_FLEET_TRANSPORT:-watch}" \
+  AGENT_SESSION_LABEL="$role" \
+  AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \
+  AGENT_WAKE_CLI="{{SOLET_NAME}}" \
+  GIT_CONTROLLER_NAME="{{GIT_CONTROLLER_NAME}}" \
+  exec claude \
+      --name "$role" \
+      --remote-control "$role" \
+      "${extra_flags[@]}"
+}
+
+# One function per role the operator chose in Step 4a. This is the ONE
+# canonical example (a single "Coordinator" role) -- duplicate this pattern
+# per role, substituting the function name and the role label. Role names
+# are the operator's choice; do not invent additional ones unasked.
+#
+# claude-{{SOLET_NAME}}-coordinator() { _claude_for_{{SOLET_NAME}} Coordinator }
+#
+# Each role function creates (or attaches to) the tmux session named for the
+# role, so `claude-{{SOLET_NAME}}-coordinator` from any terminal tab is safe to
+# repeat. Attach later with: tmux attach -t =Coordinator   (list: tmux ls).
+#
+# Restart variant (kill any running session under this role label and its
+# tmux session first, then launch fresh in a new tmux session):
+#
+# claude-{{SOLET_NAME}}-restart-coordinator() {
+#   local pids
+#   pids="$(pgrep -f "claude .*--name Coordinator( |\$)" 2>/dev/null)"
+#   [[ -n "$pids" ]] && echo "$pids" | xargs kill 2>/dev/null && sleep 1
+#   tmux kill-session -t =Coordinator 2>/dev/null
+#   _claude_for_{{SOLET_NAME}} Coordinator
+# }

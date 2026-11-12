@@ -1,0 +1,7 @@
+# One stdlib recovery engine; frozen hook adapters are separate Units.
+plugins/github_midwife_plugin/tests/discard_command_corpus_smoke.py
+plugins/github_midwife_plugin/tests/working_tree_recovery_smoke.py
+plugins/github_midwife_plugin/tests/recovery_refs_smoke.py
+plugins/github_midwife_plugin/tests/recovery_lifecycle_smoke.py
+plugins/github_midwife_plugin/tests/recovery_capture_smoke.py
+plugins/github_midwife_plugin/tests/recovery_runtime_smoke.py

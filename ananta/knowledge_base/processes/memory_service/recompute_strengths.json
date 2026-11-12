@@ -1,12 +1,12 @@
 {
   "process_key": "service_interface::memory_service::recompute_strengths",
   "display_name": "Recompute Strengths",
-  "description": "Recalculate ACT-R activation strength for all active memories. Called periodically to update cached strength values.",
+  "description": "Return a queued owned-job receipt (data.job_id and data.status). Read the exact id through job_service.get_job for the complete former response in job.result or the typed failure in job.error. Admission retains payload references locally; uncertain effects require reconciliation and must never be replayed automatically.\n\nRecalculate ACT-R activation strength for all active memories. Called periodically to update cached strength values.",
   "embedding_description": "",
   "result_processor_customizations": {
     "action_label": "Recompute Strengths",
     "result_type": "strength_recomputed",
-    "result_description": "Results of recomputing ACT-R activation strength for all active memories",
+    "result_description": "The complete memory-operation response from the exact admitted job; the immediate response is a queued job receipt.",
     "presentation_guidance": "",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },
@@ -14,5 +14,6 @@
     "action_context": "Recalculating ACT-R activation strength for all active memories",
     "error_interpretation": "DatabaseError: failed to query or update memory strength values.",
     "recovery_guidance": "For database errors: verify state storage is accessible."
-  }
+  },
+  "is_async": true
 }

@@ -21,6 +21,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
 import agent_messaging_plugin.lane_worktrees as lane_worktrees  # noqa: E402
+from agent_messaging_plugin.custody_store import PacketWriter  # noqa: E402
 from agent_messaging_plugin.lane_worktrees import (  # noqa: E402
     DirtyStaleWorktreeSkippedWarning,
     LaneWorktree,
@@ -376,7 +377,7 @@ def _assert_build_output_allowlist(root: Path, environment: dict[str, str]) -> i
     Red mutation: remove ``build`` from the declared allowlist.  The fixture then
     becomes non-disposable and names ``build/`` as its refused residue.
     """
-    repo, lane = _lane_at_base(root, environment, "lane-build-output")
+    _repo, lane = _lane_at_base(root, environment, "lane-build-output")
     for directory, filename in (
         ("build/bdist.macosx-26.0-arm64", "placeholder"),
         ("build/lib", "package.py"),
@@ -899,7 +900,7 @@ def _race(first: dict[str, Any], environment: dict[str, str]) -> list[Any]:
         "disposition": engine.DISPOSITION_PRESERVED,
         "rationale": "raced",
         "environment": environment,
-        "writer": engine.PacketWriter(rename=rename),
+        "writer": PacketWriter(rename=rename),
     }
     results: list[Any] = []
     threads = [threading.Thread(target=lambda: results.append(engine.capture_lane_custody(context, **request))) for _ in range(2)]
@@ -976,7 +977,7 @@ def test_stale_or_changing_lane_refused(root: Path, environment: dict[str, str])
         os.fsync(descriptor)
 
     stale = _capture_response(repo, "lane-stale", environment, expected_fingerprint="0" * 64)
-    changed = _capture_response(repo, "lane-stale", environment, writer=engine.PacketWriter(fsync=fsync))
+    changed = _capture_response(repo, "lane-stale", environment, writer=PacketWriter(fsync=fsync))
     published = _published_packets(_custody_store(repo, "agi-lane-stale", environment))
     outcome = (stale["code"], changed["code"], bool(changed["result"].staging), published, late.read_bytes())
     assert outcome == ("custody_fingerprint_stale", "custody_inventory_changed", True, [], b"arrived mid-capture\n"), outcome
@@ -999,7 +1000,7 @@ def test_injected_failures(root: Path, environment: dict[str, str]) -> int:
         def fail(*arguments: Any, step: str = step, **options: Any) -> Any:
             raise OSError(errno.EIO, f"injected {step} failure")
 
-        response = _capture_response(repo, "lane-failure", environment, writer=engine.PacketWriter(**{step: fail}))
+        response = _capture_response(repo, "lane-failure", environment, writer=PacketWriter(**{step: fail}))
         result = response["result"]
         staging = store.parents[2] / result.staging
         outcome = (response["code"], result.packet, _published_packets(store), staging.name.startswith(".staging-"), staging.is_dir(), (_tree_state(lane.path), _index_file(lane, environment)) == before)

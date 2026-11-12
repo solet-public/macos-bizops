@@ -1,0 +1,2 @@
+# Thinking shared registered owner, full outcomes and bounded poller receipts.
+plugins/default_thinking_plugin/tests/g1_thinking_registered_admission_smoke.py

@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Literal
 
 # The typed family verbs (typed_families.py) share one result instruction.
-_TYPED_FAMILIES = frozenset({"composite", "tooling", "bulk_jobs", "reports", "dashboards", "rest_resources", "actions"})
+_TYPED_FAMILIES = frozenset({"composite", "tooling", "bulk_jobs", "reports", "dashboards", "rest_resources", "actions", "metadata", "content_files"})
 
 
 def _instructions(action_name: str, outcome: Literal["result", "error"]) -> list[str]:
@@ -22,12 +22,12 @@ def _instructions(action_name: str, outcome: Literal["result", "error"]) -> list
         if action_name == "authenticated_request":
             return [
                 "A Salesforce authenticated request finished. Report job_payload.status, headers and body faithfully; HTTP 4xx/5xx are vendor failures even though the transport completed.",
-                "The request may have changed vendor state. Do not retry automatically or infer success from a queue receipt. Credential values are redacted; preserve pagination hints and Retry-After.",
+                "The request may have changed vendor state. Do not retry automatically or infer success from a queue receipt. Preserve pagination hints and Retry-After.",
             ]
         if action_name in _TYPED_FAMILIES:
             return [
                 f"A Salesforce {action_name} operation finished. Report job_payload.operation, status, error_code, failures and body faithfully; HTTP 4xx/5xx and any failures count are vendor failures even though the transport completed.",
-                "The operation may have changed vendor state, including deletes. Do not retry automatically or infer success from a queue receipt. Credential values are redacted. Relay pagination (next_records_url, next_query_locator, next_locator) as the next call to make; it is never followed automatically. pagination.report_all_data false means the vendor returned only its first report detail rows: narrow the run with filters (run_filtered) or export the rows through SOQL or Bulk.",
+                "The operation may have changed vendor state, including deletes. Do not retry automatically or infer success from a queue receipt. Relay pagination (next_records_url, next_query_locator, next_locator, result_locators) as the next call to make; it is never followed automatically. A deployment's failures count its component and test errors; poll deploy_status until deployResult.status is Succeeded, SucceededPartial, Failed or Canceled. apex_compile_results failures count the classes and triggers that failed to compile (status PARTIAL_FAILURE). A download names output_path, bytes_written and md5, and integrity_advisory when the vendor size or checksum was unreadable. pagination.report_all_data false means the vendor returned only its first report detail rows: narrow the run with filters (run_filtered) or export the rows through SOQL or Bulk.",
             ]
         return [
             f"A salesforce_plugin '{action_name}' job completed successfully.",

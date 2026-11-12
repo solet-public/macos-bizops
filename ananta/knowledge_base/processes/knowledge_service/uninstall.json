@@ -1,7 +1,7 @@
 {
   "process_key": "service_interface::knowledge_service::uninstall",
   "display_name": "Uninstall Knowledge Base",
-  "description": "Archive all indexed chunks and remove the install record. With remove_files=True, also deletes git-cloned directories (never local/symlinked). Does NOT delete address book entries — source registry is independent.",
+  "description": "Archive all indexed chunks and remove the install record. With remove_files=True, also deletes git-cloned directories (never local/symlinked). Does NOT delete address book entries — source registry is independent. Registered calls return a queued job_id/status receipt. Read that exact job with service_interface::job_service::get_job until terminal; job.result contains the complete operation result and job.error retains any failure. In-process calls return the complete result synchronously.",
   "embedding_description": "Remove an installed knowledge base from the index: archive all of its chunks and drop its install record so it stops appearing in listings and search. With remove_files it also deletes a git-cloned working directory, but never a local or symlinked source. Leaves the address-book source entry intact. Use to retire or tear down a knowledge base you no longer want indexed.",
   "result_processor_customizations": {
     "action_label": "Knowledge base uninstalled",

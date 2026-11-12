@@ -1,9 +1,12 @@
 """Own short battery scratch and stop registered sessions before executor wait.
 
 The 40-byte resolved-root budget reserves 64 bytes of macOS socket space.
+An isolated/deep HOME selects private platform scratch; if no short parent is
+available, the best available root remains usable with a socket-budget advisory.
 Uncertain allocation/removal is advisory; only old, demonstrably dead owners
 are swept. SIGKILL recovery occurs on a later start, never synchronously.
 """
+
 from __future__ import annotations
 
 import json
@@ -23,6 +26,7 @@ from pathlib import Path
 from types import FrameType, TracebackType
 from typing import Protocol, cast
 
+from ananta.work_folders import WorkFolder, process_binding, register_work_folder
 from contention_signal import holder_pid_is_alive
 
 
@@ -39,6 +43,25 @@ _SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 def _parent() -> Path:
     return (Path.home() / ".ananta" / "s").resolve()
+
+
+def _short_parents() -> tuple[Path, ...]:
+    """Keep the operator's real HOME out of isolated verifier environments."""
+    base = Path("/Users/Shared") if sys.platform == "darwin" else Path(tempfile.gettempdir())
+    return (base / f".s{os.getuid()}",)
+
+
+def _within_budget(parent: Path) -> bool:
+    return len(os.fsencode(parent.resolve() / "b-abcdefgh")) <= 40
+
+
+def _private_parent(parent: Path) -> Path:
+    """Accept only our private directory, never a shared or redirected owner."""
+    parent.mkdir(mode=0o700, exist_ok=True)
+    info = parent.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise OSError(f"private scratch parent owner/mode mismatch: {parent}")
+    return parent.resolve()
 
 
 def _identity(path: Path) -> tuple[int, int]:
@@ -101,6 +124,7 @@ class BatteryRuntime:
         self._handlers: dict[int, signal.Handlers | Callable[[int, FrameType | None], object] | None] = {}
         self._warned = False
         self._aborting = False
+        self._work_folder: WorkFolder | None = None
 
     def advisory(self, error: object) -> None:
         if not self._warned:
@@ -164,16 +188,16 @@ class BatteryRuntime:
     def _allocate(self) -> None:
         try:
             parent = _parent()
-            if len(os.fsencode(parent / "b-abcdefgh")) > 40 or parent.is_relative_to("/private/tmp") or parent.is_relative_to("/tmp"):
-                self.advisory(f"resolved parent exceeds scratch budget: {parent}")
-                return
+            if not _within_budget(parent) or parent.is_relative_to("/private/tmp") or parent.is_relative_to("/tmp"):
+                parent = self._select_parent(parent)
             parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             for candidate in parent.iterdir():
                 if re.fullmatch(r"b-[a-z0-9_]{8}", candidate.name):
                     self._sweep_one(candidate)
             self.root = Path(tempfile.mkdtemp(prefix="b-", dir=parent)).resolve()
+            self._work_folder = register_work_folder(self.root, purpose="smoke_battery", bound=process_binding())
             if len(os.fsencode(self.root)) > 40:
-                raise OSError(f"resolved root exceeds 40 bytes: {self.root}")
+                self.advisory(f"resolved root exceeds 40 bytes; socket headroom is reduced: {self.root}")
             record = {"schema": 1, "pid": os.getpid(), "uid": os.getuid(), "start_time_ns": time.time_ns()}
             with (self.root / ".owner.json").open("x", encoding="utf-8") as handle:
                 json.dump(record, handle)
@@ -181,8 +205,26 @@ class BatteryRuntime:
             self.advisory(exc)
             self.close_root()
 
+    def _select_parent(self, preferred: Path) -> Path:
+        failures: list[str] = []
+        for candidate in _short_parents():
+            try:
+                if not _within_budget(candidate):
+                    raise OSError(f"resolved parent exceeds scratch budget: {candidate}")
+                selected = _private_parent(candidate)
+            except OSError as exc:
+                failures.append(str(exc))
+                continue
+            print(f"ADVISORY run_smokes scratch parent {preferred} cannot provide short isolated scratch; using private platform parent {selected}", file=sys.stderr)
+            return selected
+        self.advisory(f"no short private parent available; using best available parent {preferred}; socket headroom may be reduced; {'; '.join(failures)}")
+        return preferred
+
     def close_root(self) -> None:
         if self.root is not None:
+            if self._work_folder is not None:
+                self._work_folder.close()
+                self._work_folder = None
             self._remove(self.root)
             self.root = None
 

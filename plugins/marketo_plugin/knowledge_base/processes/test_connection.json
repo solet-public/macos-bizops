@@ -1,16 +1,18 @@
 {
   "process_key": "plugin::marketo_plugin::test_connection",
   "display_name": "Marketo: Test Connection",
-  "description": "Verify the configured Marketo credentials by minting an OAuth bearer token against the identity endpoint. Returns ok, base_url, client_id.",
+  "description": "Dispatch an async job that re-reads the marketo_instance address-book entry and mints an OAuth bearer token against the identity endpoint, and return {job_id, status} in milliseconds; poll check_marketo_job_status(job_id) for the finished ok, base_url, client_id.",
   "embedding_description": "Verify ONLY that Marketo credentials are reachable — mint a bearer token against the configured instance, confirming the marketo_instance address-book entry is complete and the client_id/client_secret are valid. Does NOT check what the API user's Role can actually DO; for that, run check_setup instead. Diagnostic only, no marketing data touched.",
   "result_processor_customizations": {
-    "action_label": "Marketo connection verified",
+    "action_label": "Marketo connection test job dispatched",
     "result_type": "marketo_test_connection_result",
-    "result_description": "Dict with ok (bool), base_url, client_id."
+    "result_description": "Dict with job_id (pass to check_marketo_job_status) and status 'queued'. The completed job result is a dict with ok (bool), base_url, client_id.",
+    "presentation_guidance": "A queued job is not a verified connection: give the job_id and poll check_marketo_job_status. Report the connection as verified only once the job completed with ok=true, naming the base_url and client_id it checked.",
+    "output_action_guidance": "Never say the credentials work from THIS verb's response -- it carries only the job handle; an address-book or credential fault surfaces only in check_marketo_job_status's error field."
   },
   "error_processor_customizations": {
-    "action_context": "Verify the configured Marketo instance is reachable.",
-    "error_interpretation": "marketo.not_configured: no marketo_instance address-book entry registered yet. marketo.auth_failed: the OAuth client_id/client_secret were rejected.",
-    "recovery_guidance": "marketo.not_configured: register the marketo_instance address-book entry (see hydration_guidance.md). marketo.auth_failed: ask the operator to check the LaunchPoint custom service's client_id/client_secret."
+    "action_context": "Dispatch a background job that verifies the configured Marketo instance is reachable.",
+    "error_interpretation": "Refused at dispatch with no job created: marketo.invalid_params when session_id/flow_id are missing from the calling context. Reported later in check_marketo_job_status's error field: marketo.not_configured: no marketo_instance address-book entry registered yet, or it lacks base_url/client_id/client_secret (the message says which). marketo.auth_failed: the OAuth client_id/client_secret were rejected.",
+    "recovery_guidance": "marketo.not_configured: register the marketo_instance address-book entry (see hydration_guidance.md); the error message carries an example registration. marketo.auth_failed: ask the operator to check the LaunchPoint custom service's client_id/client_secret."
   }
 }

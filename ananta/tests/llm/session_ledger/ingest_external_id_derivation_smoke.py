@@ -28,7 +28,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 
-from ananta.llm.session_ledger.importer import (  # noqa: E402
+from ananta.llm.session_ledger.importer_persistence import (  # noqa: E402
     _event_external_id,
     _OrdinalCounter,
 )
@@ -96,8 +96,13 @@ def test_derivation_deterministic_and_prefixed() -> None:
 
 def test_vendor_present_verbatim() -> None:
     out = derive_event_external_id(
-        vendor_event_id="vev-123", session_id="s1", event_type="MESSAGE",
-        role="user", content_key="x", event_at=_DT, ordinal=0,
+        vendor_event_id="vev-123",
+        session_id="s1",
+        event_type="MESSAGE",
+        role="user",
+        content_key="x",
+        event_at=_DT,
+        ordinal=0,
     )
     _check(out == "vev-123", "vendor-present → vendor_event_id verbatim (no hash)")
 
@@ -107,8 +112,7 @@ def test_event_at_canonicalization_matches_live_and_backfill() -> None:
     naive = _derive(ordinal=0, event_at=datetime(2026, 6, 1, 12, 0, 0))
     _check(
         aware == naive,
-        "tz-aware-UTC and naive-UTC at the SAME instant derive the SAME id "
-        "(live importer ↔ DB-naive backfill agree)",
+        "tz-aware-UTC and naive-UTC at the SAME instant derive the SAME id (live importer ↔ DB-naive backfill agree)",
     )
 
 
@@ -137,8 +141,7 @@ def test_vendor_present_does_not_consume_an_ordinal() -> None:
     _check(a == _derive(ordinal=0), "the first null-vendor event is ordinal 0")
     _check(
         b == _derive(ordinal=1),
-        "the vendor-present event did NOT consume an ordinal → next null-vendor is ordinal 1 "
-        "(the null-vendor-only counting contract the slice-2 backfill must match)",
+        "the vendor-present event did NOT consume an ordinal → next null-vendor is ordinal 1 (the null-vendor-only counting contract the slice-2 backfill must match)",
     )
 
 
@@ -156,8 +159,7 @@ def test_oversized_offloaded_event_is_content_addressed() -> None:
     second = _event_external_id(normalized=ev, session_id="s1", ordinals={})
     _check(
         first == second,
-        "an oversized null-vendor event derives a STABLE id across re-ingest "
-        "(content-addressed — independent of the per-offload random blob_id)",
+        "an oversized null-vendor event derives a STABLE id across re-ingest (content-addressed — independent of the per-offload random blob_id)",
     )
     _check(
         first == _derive(ordinal=0, content_key=oversized),

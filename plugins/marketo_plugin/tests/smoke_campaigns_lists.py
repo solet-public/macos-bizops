@@ -79,7 +79,9 @@ def _read_tsv(path: str) -> list[dict[str, str]]:
 def test_list_campaigns() -> None:
     client = _fake_client(get_json={"success": True, "result": [{"id": 1, "name": "Welcome Series"}]})
     result = marketing_actions.list_campaigns(
-        client, {"names": ["Welcome Series"], "output_tsv_path": _tmp_tsv_path()}, _passthrough_gate,
+        client,
+        {"names": ["Welcome Series"], "output_tsv_path": _tmp_tsv_path()},
+        _passthrough_gate,
     )
     rows = _read_tsv(result["path"])
     _assert("campaign records carried", rows[0]["name"] == "Welcome Series")
@@ -89,9 +91,7 @@ def test_list_campaigns() -> None:
 
 def test_trigger_campaign() -> None:
     client = _fake_client(post_json={"success": True, "requestId": "req-1"})
-    result = marketing_actions.trigger_campaign(
-        client, {"campaign_id": "42", "lead_ids": [1, 2], "tokens": [{"name": "{{my.token}}", "value": "x"}]}
-    )
+    result = marketing_actions.trigger_campaign(client, {"campaign_id": "42", "lead_ids": [1, 2], "tokens": [{"name": "{{my.token}}", "value": "x"}]})
     _assert("trigger success carried", result["success"] is True)
     _assert("trigger request_id carried", result["request_id"] == "req-1")
 
@@ -113,7 +113,9 @@ def test_trigger_campaign() -> None:
 def test_list_static_lists() -> None:
     client = _fake_client(get_json={"success": True, "result": [{"id": 9, "name": "VIP"}]})
     result = marketing_actions.list_static_lists(
-        client, {"names": ["VIP"], "output_tsv_path": _tmp_tsv_path()}, _passthrough_gate,
+        client,
+        {"names": ["VIP"], "output_tsv_path": _tmp_tsv_path()},
+        _passthrough_gate,
     )
     rows = _read_tsv(result["path"])
     _assert("static list records carried", rows[0]["name"] == "VIP")

@@ -1,0 +1,8 @@
+# g_suite_plugin Gmail build 2 (unt_b17433ce, frq_f6cb6658, 2026-11-07): all 47
+# settings and push verbs (watch/stop, settings get/update, filters, forwarding
+# addresses, delegates, send-as, S/MIME, client-side encryption) checked against
+# the bundled Gmail v1 discovery document and run through the REAL
+# google-api-python-client over a recording httplib2 stand-in; account contract,
+# consumer-tier refusal, scope hints, results as received and the three
+# registration artifacts through the plugin. Hermetic.
+plugins/g_suite_plugin/tests/smoke_gmail_settings.py

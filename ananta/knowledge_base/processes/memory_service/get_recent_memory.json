@@ -1,12 +1,12 @@
 {
   "process_key": "service_interface::memory_service::get_recent_memory",
   "display_name": "Get Recent Memory",
-  "description": "Retrieve recent interaction history formatted for LLM context. Returns chronological conversation history across all I/O interfaces (console, JSON-RPC, Telegram, etc.). Memories are global - session_id is an optional filter, not required.",
+  "description": "Return a queued owned-job receipt (data.job_id and data.status). Read the exact id through job_service.get_job for the complete former response in job.result or the typed failure in job.error. Admission retains payload references locally; uncertain effects require reconciliation and must never be replayed automatically.\n\nRetrieve recent interaction history formatted for LLM context. Returns chronological conversation history across all I/O interfaces (console, JSON-RPC, Telegram, etc.). Memories are global - session_id is an optional filter, not required.",
   "embedding_description": "",
   "result_processor_customizations": {
     "action_label": "Get Recent Memory",
     "result_type": "recent_memory",
-    "result_description": "Formatted conversation history with event count",
+    "result_description": "The complete memory-operation response from the exact admitted job; the immediate response is a queued job receipt.",
     "presentation_guidance": "",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },
@@ -14,5 +14,6 @@
     "action_context": "Retrieving recent conversation history",
     "error_interpretation": "DatabaseError: failed to query conversation events from storage.",
     "recovery_guidance": "For database errors: verify state storage is accessible and running."
-  }
+  },
+  "is_async": true
 }

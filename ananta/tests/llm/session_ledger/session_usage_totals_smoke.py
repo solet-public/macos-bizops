@@ -30,7 +30,7 @@ for package in ("agent_messaging_plugin", "postgres_state_management_plugin", "c
     sys.path.insert(0, str(ROOT / "plugins" / package / "src"))
 from ananta.core.actions.action_factory import ActionFactory  # noqa: E402
 from ananta.llm.session_ledger.blob_adapter import SessionLedgerBlobAdapter  # noqa: E402
-from ananta.llm.session_ledger.importer import SessionLedgerImporter  # noqa: E402
+from ananta.llm.session_ledger.importer import LedgerPollError, SessionLedgerImporter  # noqa: E402
 from ananta.llm.session_ledger.registry import SessionSourceRegistry  # noqa: E402
 from ananta.llm.session_ledger.repository import SessionLedgerRepository  # noqa: E402
 from ananta.llm.session_ledger.schema import NAMESPACE, TABLE_EVENT, TABLE_SESSION, TABLE_SOURCE, get_session_ledger_schema  # noqa: E402
@@ -344,7 +344,7 @@ class Rollout:
     def __init__(self, f: Fixture, *, failed_prefix: bool) -> None:
         """Start with four events persisted by the unchanged real importer.
 
-        An unknown synthetic record reproduces a per-session parser failure:
+        A malformed known record reproduces a per-session parser failure:
         the prefix commits, its event cursor does not, and discovery advances.
         A successful prefix instead supplies the append case's saved offset.
         The legacy discovery cursor is then advanced beyond this old stem.
@@ -358,9 +358,14 @@ class Rollout:
         self.source = f.repo.insert_source(source_kind=IngestSourceKind.CODEX_LOCAL, root_uri=str(root), account_label=None)
         self.header = json.dumps({"type": "session_meta", "timestamp": NOW.isoformat(), "payload": {"id": self.uuid, "cwd": "/synthetic"}})
         self.prefix = [json.dumps({"type": "response_item", "timestamp": NOW.isoformat(), "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": f"synthetic {i}"}]}}) for i in range(4)]
-        self.write([self.header, *self.prefix, *([json.dumps({"type": "fixture_unknown"})] if failed_prefix else [])])
+        self.write([self.header, *self.prefix, *([json.dumps({"timestamp": NOW.isoformat(), "type": "response_item", "payload": {"type": "message", "content": []}})] if failed_prefix else [])])
         self.restart()
-        self.importer.poll_source(self.source)
+        try:
+            self.importer.poll_source(self.source)
+        except LedgerPollError:
+            assert failed_prefix, "only the deliberately malformed prefix may fail"
+        else:
+            assert not failed_prefix, "malformed known record must report a failed batch"
         rows = f.repo._query_ordered(TABLE_SESSION, filters={"source_id": self.source}, order_by=[["created_at", "asc"], ["id", "asc"]], limit=100)
         assert len(rows) == 1 and rows[0]["event_count"] == 4, "recovery fixture must start with four real prefix events"
         self.session = str(rows[0]["id"])
@@ -684,7 +689,7 @@ def check_claude_unknown(f: Fixture) -> None:
     r.append([json.dumps(known[0]), unknown, json.dumps(known[1]), unknown])
     report = r.importer.poll_source(r.source)
     check(report.events_persisted == 2 and report.batches_failed == 0, "CLAUDE_SUFFIX_PERSISTS_WITHOUT_FAILURE")
-    check(report.unknown_line_advisories == (UnknownLineAdvisory(r.source, r.path.stem, "synthetic-unknown-line-type", 2),), "CLAUDE_EXACT_PHYSICAL_UNKNOWN_COUNT")
+    check(report.unknown_line_advisories == (UnknownLineAdvisory(r.source, r.path.stem, "synthetic-unknown-line-type", 1),), "CLAUDE_ONE_ADVISORY_PER_SESSION_PARSER")
     total = one(f, r.path.stem, vendor="claude_code")
     check(total["usage_event_count"] == 2 and total["by_model"]["model-a"]["input_tokens"] == 6 and total["by_model"]["model-a"]["output_tokens"] == 20, "CLAUDE_SUFFIX_EXACT_USAGE_IDENTITY")
     check(r.cursor() is not None and r.cursor()["byte_offset"] == r.path.stat().st_size, "CLAUDE_TRAILING_UNKNOWN_COMPLETE_CURSOR")  # pyright: ignore[reportOptionalSubscript]
@@ -696,11 +701,9 @@ def check_claude_unknown(f: Fixture) -> None:
 
 def check_claude_reread(f: Fixture, r: ClaudeUnknownRollout, unknown: str, sessions: list[dict[str, Any]], snapshot: list[dict[str, object]], total: dict[str, Any]) -> None:
     """An eligible append resumes after unknown input without repeating usage."""
-    from ananta.llm.session_ledger.types import UnknownLineAdvisory
-
     r.append([unknown])
     tail = r.importer.poll_source(r.source)
-    check(tail.events_persisted == 0 and tail.unknown_line_advisories == (UnknownLineAdvisory(r.source, r.path.stem, "synthetic-unknown-line-type", 1),) and r.cursor()["byte_offset"] == r.path.stat().st_size, "CLAUDE_UNKNOWN_ONLY_TAIL_ADVANCES")  # pyright: ignore[reportOptionalSubscript]
+    check(tail.events_persisted == 0 and tail.unknown_line_advisories == () and r.cursor()["byte_offset"] == r.path.stat().st_size, "CLAUDE_UNKNOWN_ONLY_TAIL_ADVANCES")  # pyright: ignore[reportOptionalSubscript]
     r.append([json.dumps({"type": "summary"})])
     reread = r.importer.poll_source(r.source)
     check(reread.sessions_seen == 1 and reread.events_persisted == 0 and reread.unknown_line_advisories == () and reread.batches_failed == 0, "CLAUDE_ELIGIBLE_REREAD_IDEMPOTENT")
@@ -715,7 +718,7 @@ def check_claude_unknown_only(f: Fixture) -> None:
     r.append([json.dumps({"type": "future-marker"}), json.dumps({"type": "future-marker"})])
     report = r.importer.poll_source(r.source)
     check(report.events_persisted == 0 and report.batches_failed == 0 and r.sessions() == [], "CLAUDE_UNKNOWN_ONLY_NO_FABRICATED_ROWS")
-    check(report.unknown_line_advisories == (UnknownLineAdvisory(r.source, r.path.stem, "future-marker", 2),), "CLAUDE_UNKNOWN_ONLY_GROUP")
+    check(report.unknown_line_advisories == (UnknownLineAdvisory(r.source, r.path.stem, "future-marker", 1),), "CLAUDE_UNKNOWN_ONLY_GROUP")
     check(r.cursor() is not None and r.cursor()["byte_offset"] == r.path.stat().st_size, "CLAUDE_ALL_UNKNOWN_CURSOR")  # pyright: ignore[reportOptionalSubscript]
 
 

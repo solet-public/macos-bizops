@@ -1,12 +1,12 @@
 {
   "process_key": "service_interface::vault_service::store_from_kv_file",
   "display_name": "Store Secret From Key-Value File",
-  "description": "Read a single named field from a key-value file (.env, JSON, or YAML) and store its value (encrypted at rest). Format auto-detected by file extension; explicit format argument overrides. Useful for ingesting one credential out of a shared config file without exposing the rest.",
-  "embedding_description": "Store secret from named field in a .env / JSON / YAML file. Extract API key from dotenv. Pluck one credential out of shared config. Agent supplies absolute path + field name + vault key; the solet parses, extracts only that field, encrypts, persists. Format auto-detects by extension; explicit override allowed. Top-level scalars only. Variants: store_from_env/file/keychain.",
+  "description": "Returns an owned vault job receipt (job_id/status); read the exact job with job_service.get_job for its public terminal outcome. Read a single named field from a key-value file (.env, JSON, or YAML) and store its value (encrypted at rest). Format auto-detected by file extension; explicit format argument overrides. Useful for ingesting one credential out of a shared config file without exposing the rest.",
+  "embedding_description": "Store secret from named field in a .env / JSON / YAML file. Extract API key from dotenv. Pluck one credential out of shared config. Agent supplies absolute path + field name + vault key; the solet parses, extracts only that field, encrypts, persists. Format auto-detects by extension; explicit override allowed. Top-level scalars only. Variants: store_from_env/file/keychain. Registered execution returns job_id/status; the complete public outcome is in job.result. Secret operands remain volatile and failures are sanitized; uncertain effects require reconciliation, never automatic replay.",
   "result_processor_customizations": {
     "action_label": "Secret stored from KV file",
     "result_type": "secret_stored",
-    "result_description": "Confirmation that the named field was extracted, encrypted, and stored. Contains key (vault identifier), version, and message. NEVER contains the secret value.",
+    "result_description": "Queued vault job receipt. Completed public outcome: Confirmation that the named field was extracted, encrypted, and stored. Contains key (vault identifier), version, and message. NEVER contains the secret value.",
     "presentation_guidance": "",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },

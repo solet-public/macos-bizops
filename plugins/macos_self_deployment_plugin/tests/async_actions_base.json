@@ -1,0 +1,119 @@
+{
+  "base_commit": "a0c1d06dba9e525ba89143146b73fc19ce1d14c5",
+  "outputs": {
+    "macos_self_deployment_plugin.swap_rollback.error": {
+      "action_status": "error",
+      "actions": [],
+      "data": {},
+      "error": {
+        "code": "failed",
+        "details": {},
+        "message": "fixture transport failure"
+      },
+      "timestamp": "<time>"
+    },
+    "macos_self_deployment_plugin.swap_rollback.success": {
+      "action_status": "completed",
+      "actions": [],
+      "data": {
+        "reason": "fixture",
+        "rolled_back_to": "blue",
+        "status": "rolled_back"
+      },
+      "error": null,
+      "timestamp": "<time>"
+    },
+    "macos_self_deployment_plugin.swap_status.error": {
+      "action_status": "error",
+      "actions": [],
+      "data": {},
+      "error": {
+        "code": "failed",
+        "details": {},
+        "message": "fixture transport failure"
+      },
+      "timestamp": "<time>"
+    },
+    "macos_self_deployment_plugin.swap_status.success": {
+      "action_status": "completed",
+      "actions": [],
+      "data": {
+        "router_status": {
+          "active_color": "green",
+          "active_instance_id": "green-instance",
+          "colors": [],
+          "drain_entries": []
+        },
+        "self_color": "",
+        "self_instance_id": "",
+        "swap_in_progress": false
+      },
+      "error": null,
+      "timestamp": "<time>"
+    }
+  },
+  "public_service": {
+    "swap_rollback": {
+      "reason": "fixture",
+      "rolled_back_to": "blue",
+      "status": "rolled_back"
+    },
+    "swap_status": {
+      "router_status": {
+        "active_color": "green",
+        "active_instance_id": "green-instance",
+        "colors": [],
+        "drain_entries": []
+      },
+      "self_color": "",
+      "self_instance_id": "",
+      "swap_in_progress": false
+    }
+  },
+  "owner_service_aliases": [
+    [
+      "local_self_deployment_service",
+      "attest_runtime_code"
+    ],
+    [
+      "local_self_deployment_service",
+      "complete_swap"
+    ],
+    [
+      "local_self_deployment_service",
+      "cutover_release"
+    ],
+    [
+      "local_self_deployment_service",
+      "install_autostart"
+    ],
+    [
+      "local_self_deployment_service",
+      "rollback_release"
+    ],
+    [
+      "local_self_deployment_service",
+      "status_autostart"
+    ],
+    [
+      "local_self_deployment_service",
+      "swap_rollback"
+    ],
+    [
+      "local_self_deployment_service",
+      "swap_status"
+    ],
+    [
+      "local_self_deployment_service",
+      "uninstall_autostart"
+    ],
+    [
+      "self_deployment_service",
+      "restart_with_manifest"
+    ],
+    [
+      "self_deployment_service",
+      "stop_self"
+    ]
+  ]
+}

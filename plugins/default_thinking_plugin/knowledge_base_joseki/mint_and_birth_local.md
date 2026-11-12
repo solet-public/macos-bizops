@@ -29,6 +29,7 @@ EMBEDDING_DESCRIPTION: Mint a seed and birth a live local solet in one local pla
 
 [ ] 1. Assemble a clean seed bundle into the target folder
     a) Assemble a clean seed bundle from the committed ref into the target folder (plugin::seed_factory_plugin::assemble_seed)
+    b) Retain `data.job_id` and schedule `service_interface::job_service::get_job` with that exact id. While queued or processing, schedule another read; proceed only from a terminal successful job. Read the assembled `bundle_path` and `manifest_hash` from `job.result.data`, never from the dispatch receipt. On error or cancellation inspect `job.error` and stop the dependent steps; do not resubmit assembly merely because a read is pending.
 
 [ ] 2. Birth the seed folder into a live solet, provisioning the venv explicitly
     a) Birth the assembled seed folder in existing-clone mode with provision_venv=True (plugin::github_midwife_plugin::birth_solet)
@@ -40,7 +41,7 @@ EMBEDDING_DESCRIPTION: Mint a seed and birth a live local solet in one local pla
 ## Binding Guidance
 
 - Bind step 1 `bundle_name` XOR `plugins` (exactly one), `ref` (default `HEAD`), and `output_dir` to the target folder that step 2 will birth.
-- Bind step 2 `environment_config.target` to step 1's returned `bundle_path` (the same folder), `name` to the newborn's chosen solet name, `profile_template` to the boot profile, and `provision_venv` to **True** — this is the §7 birth variant that builds the source-only seed folder's `.venv` explicitly and unconditionally before genesis. Omitting it (default False) would fail loud downstream because an assembled seed folder ships without a `.venv`.
+- Bind step 2 `environment_config.target` to step 1's terminal `job.result.data.bundle_path` (the same folder), `name` to the newborn's chosen solet name, `profile_template` to the boot profile, and `provision_venv` to **True** — this is the §7 birth variant that builds the source-only seed folder's `.venv` explicitly and unconditionally before genesis. Omitting it (default False) would fail loud downstream because an assembled seed folder ships without a `.venv`.
 
 ## Coherence Obligations
 

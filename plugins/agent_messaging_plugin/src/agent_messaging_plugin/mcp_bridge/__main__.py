@@ -202,8 +202,7 @@ TOOLS: Final[list[Tool]] = [
             "(service_interface::knowledge_service::search), memory "
             "recall (service_interface::memory_service::recall), plugin "
             "tools (plugin::<plugin>::<function>), everything.  Returns "
-            "action_id + flow_id immediately; the result arrives as a "
-            "bridge_delivery_result channel notification — do not poll.  "
+            "action_id + flow_id immediately; a client that shows channel notifications receives the result as a bridge_delivery_result notification; a client that does not calls process_result with that action_id until status is completed or an error status.  "
             "Use process_search first if you don't know the process_key "
             "and process_schema to confirm the argument shape."
         ),
@@ -220,7 +219,9 @@ TOOLS: Final[list[Tool]] = [
     ),
     Tool(
         name="process_result",
-        description=("Snapshot read of an action_id's current observable state (status, error_message, latest stored raw result row if any). This is for diagnostics -- completion is delivered via channel notifications, not by polling here."),
+        description=(
+            "Read an action_id's current state (status, error_message, result). When the call was admitted as a job this follows the job: result is the finished job's result, error its failure, and while the job runs status is the job's status and next_read names this same call. A client without channel notifications reads its result here after process_call."
+        ),
         inputSchema={
             "type": "object",
             "properties": {

@@ -18,11 +18,8 @@ reference version 2026-11-06):
   ``body`` and forwards it unchanged: every documented field is accepted. The
   documented required top-level fields are checked before any vendor call.
 * Payment instruments. An account (or an order's new account) may embed a
-  card, bank account or wallet token. Those values are secret material:
-  :func:`payment_secrets` hands them to the redactor so a vendor echo, error
-  or audit line never carries them. A payment-method body *is* an
-  instrument, so :func:`instrument_secrets` treats its top level as one
-  (there ``accountNumber`` is a bank account number, not a customer account).
+  card, bank account or wallet token; it is forwarded unchanged, and no audit
+  line is built from a request body.
 """
 
 from __future__ import annotations
@@ -73,13 +70,6 @@ ORDER_LIST_FIELDS: Final[dict[str, Field]] = {
     "status": Field("status", "text"),
 }
 
-# Keys whose values are payment-instrument secrets anywhere in a request body.
-_PAYMENT_SECRET_KEYS: Final[frozenset[str]] = frozenset({"cardnumber", "securitycode", "cardsecuritycode", "bankaccountnumber", "iban", "applepaymentdata", "googlepaymenttoken", "amazonpaytoken", "paymenttoken"})
-# Keys that are payment secrets only inside a payment-method or credit-card object
-# (``accountNumber`` is otherwise the customer account number, which is not secret).
-_INSTRUMENT_SECRET_KEYS: Final[frozenset[str]] = frozenset({"accountnumber", "tokenid", "secondtokenid", "thirdtokenid", "baid", "preapprovalkey"})
-_INSTRUMENT_CONTAINERS: Final[frozenset[str]] = frozenset({"paymentmethod", "creditcard"})
-
 
 def page_check(params: dict[str, Any]) -> None:
     """Refuse ``page`` without ``page_size``, as Zuora documents for its page-numbered lists."""
@@ -120,32 +110,3 @@ def vendor_body(*required: str, optional: bool = False) -> BodyBuilder:
         return document
 
     return build
-
-
-def payment_secrets(params: dict[str, Any]) -> list[str]:
-    """Card, bank-account and wallet-token values inside ``body``, for redaction."""
-    return _instrument_values(params.get("body"), inside=False)
-
-
-def instrument_secrets(params: dict[str, Any]) -> list[str]:
-    """Secret values in a payment-method ``body``, whose top level is itself the instrument."""
-    return _instrument_values(params.get("body"), inside=True)
-
-
-def _instrument_values(value: Any, *, inside: bool) -> list[str]:
-    """Walk a JSON-shaped value; ``inside`` is true below a payment-method or credit-card object."""
-    if isinstance(value, list):
-        return [secret for item in value for secret in _instrument_values(item, inside=inside)]
-    if not isinstance(value, dict):
-        return []
-    return [secret for key, item in value.items() for secret in _entry_values(str(key).lower(), item, inside=inside)]
-
-
-def _entry_values(folded: str, item: Any, *, inside: bool) -> list[str]:
-    if isinstance(item, str):
-        return [item] if item and _is_instrument_key(folded, inside=inside) else []
-    return _instrument_values(item, inside=inside or folded in _INSTRUMENT_CONTAINERS)
-
-
-def _is_instrument_key(folded: str, *, inside: bool) -> bool:
-    return folded in _PAYMENT_SECRET_KEYS or (inside and folded in _INSTRUMENT_SECRET_KEYS)

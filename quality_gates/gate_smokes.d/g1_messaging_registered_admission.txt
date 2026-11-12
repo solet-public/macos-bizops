@@ -1,0 +1,2 @@
+# Shared delivery owner; peer_list remains synchronous for shipped hook callers.
+plugins/agent_messaging_plugin/tests/g1_messaging_registered_admission_smoke.py

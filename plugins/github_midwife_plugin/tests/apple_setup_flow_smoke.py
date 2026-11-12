@@ -54,7 +54,7 @@ class FakeWorld:
     ) -> CommandOutcome:
         del timeout_seconds, cwd, extra_env, input_text, output_limit
         self.calls.append(argv)
-        if len(argv) == 4 and argv[1] == "call":
+        if len(argv) == 5 and argv[1] == "call":
             assert argv[2] in self.process_outcomes, f"unreviewed process: {argv[2]}"
             return self.process_outcomes[argv[2]]
         values: dict[tuple[str, ...], str] = {
@@ -173,14 +173,20 @@ def _embedding_flow_gate(flow: dict[str, Any]) -> None:
     assert "coreai_embedding_request_succeeds" in coreai["verification_probe_refs"]
     assert "embedding_request_succeeds" not in coreai["verification_probe_refs"]
     for selected, expected in (("coreai", True), ("lm_studio", False)):
-        assert condition_matches(
-            flow["probes"]["coreai_embedding_request_succeeds"]["required_when"],
-            {"embeddings_implementation": selected},
-        ) is expected
-        assert condition_matches(
-            flow["probes"]["embedding_request_succeeds"]["required_when"],
-            {"embeddings_implementation": selected},
-        ) is not expected
+        assert (
+            condition_matches(
+                flow["probes"]["coreai_embedding_request_succeeds"]["required_when"],
+                {"embeddings_implementation": selected},
+            )
+            is expected
+        )
+        assert (
+            condition_matches(
+                flow["probes"]["embedding_request_succeeds"]["required_when"],
+                {"embeddings_implementation": selected},
+            )
+            is not expected
+        )
 
 
 def _launchagent_ordering(flow: dict[str, Any]) -> None:
@@ -191,9 +197,7 @@ def _launchagent_ordering(flow: dict[str, Any]) -> None:
     models = stages["models"]["operation_refs"]
     assert models.index("configure_coreai_embeddings") < models.index("install_launchagent")
     coreai = flow["operations"]["configure_coreai_embeddings"]
-    assert coreai["required_when"] == {
-        "decision_ref": "embeddings_implementation", "operator": "equals", "value": "coreai"
-    }
+    assert coreai["required_when"] == {"decision_ref": "embeddings_implementation", "operator": "equals", "value": "coreai"}
     assert coreai["idempotency"]["precondition_probe_refs"] == ["coreai_asset_verified"]
     launchagent = flow["operations"]["install_launchagent"]
     assert "required_when" not in launchagent
@@ -206,28 +210,37 @@ def _launchagent_ordering(flow: dict[str, Any]) -> None:
 
 def _selected_plan_branches(kb: Path) -> None:
     bundle = ContractBundle.load(source_revision="a" * 40, directory=kb)
-    selected = selected_operation_ids(bundle, {
-        "setup_profile": "macos-bizops",
-        "embeddings_implementation": "coreai",
-        "inference_implementation": "apple_foundation_models",
-    })
+    selected = selected_operation_ids(
+        bundle,
+        {
+            "setup_profile": "macos-bizops",
+            "embeddings_implementation": "coreai",
+            "inference_implementation": "apple_foundation_models",
+        },
+    )
     assert {"configure_coreai_embeddings", "configure_apple_inference"} <= selected
     assert not any("lm_studio" in item for item in selected)
-    legacy = selected_operation_ids(bundle, {
-        "setup_profile": "custom",
-        "embeddings_implementation": "lm_studio",
-        "inference_implementation": "lm_studio",
-    })
+    legacy = selected_operation_ids(
+        bundle,
+        {
+            "setup_profile": "custom",
+            "embeddings_implementation": "lm_studio",
+            "inference_implementation": "lm_studio",
+        },
+    )
     assert {"configure_lm_studio_embeddings", "configure_lm_studio_inference"} <= legacy
     assert "configure_coreai_embeddings" not in legacy
     assert "configure_apple_inference" not in legacy
     for embeddings in ("coreai", "lm_studio"):
-        autostarted = selected_operation_ids(bundle, {
-            "setup_profile": "custom",
-            "embeddings_implementation": embeddings,
-            "inference_implementation": "lm_studio",
-            "autostart": "enabled",
-        })
+        autostarted = selected_operation_ids(
+            bundle,
+            {
+                "setup_profile": "custom",
+                "embeddings_implementation": embeddings,
+                "inference_implementation": "lm_studio",
+                "autostart": "enabled",
+            },
+        )
         assert {"run_genesis", "install_launchagent"} <= autostarted, embeddings
         assert ("configure_coreai_embeddings" in autostarted) is (embeddings == "coreai")
 
@@ -337,29 +350,27 @@ def _embedding_behavior(target: Path, world: FakeWorld) -> None:
     config.write_text(apple.coreai_config_text(target), encoding="utf-8")
     binding = target / "profile/config/service_bindings.json"
     binding.write_text(json.dumps({"embedding_service": "coreai_embeddings_plugin"}))
-    failed = _apple_probe(target, world, manifest_digest, {
-        "success": False, "action_status": "error", "error": {"code": "runtime_failed"}
-    })
+    failed = _apple_probe(target, world, manifest_digest, {"success": False, "action_status": "error", "error": {"code": "runtime_failed"}})
     assert _status(failed) == "blocked", "real inference failure must block metadata-green control"
     vector = [0.0] * 768
-    passed = _apple_probe(target, world, manifest_digest, {
-        "success": True,
-        "action_status": "completed",
-        "error": None,
-        "data": {"result": {"embeddings": [vector], "dimension": 768, "model": model}},
-    })
+    passed = _apple_probe(
+        target,
+        world,
+        manifest_digest,
+        {
+            "success": True,
+            "action_status": "completed",
+            "error": None,
+            "data": {"result": {"embeddings": [vector], "dimension": 768, "model": model}},
+        },
+    )
     assert _status(passed) == "verified", "one finite selected-provider vector qualifies"
-    vector_calls = [call for call in world.calls if len(call) == 4 and call[1] == "call" and call[2] == vector_key]
+    vector_calls = [call for call in world.calls if len(call) == 5 and call[1] == "call" and call[2] == vector_key]
     assert vector_calls
-    assert json.loads(vector_calls[-1][3]) == {
-        "inputs": ["Apple embedding readiness probe"], "model": model, "input_type": "text"
-    }
+    assert json.loads(vector_calls[-1][3]) == {"inputs": ["Apple embedding readiness probe"], "model": model, "input_type": "text"}
     _invalid_embedding_vectors(target, world, manifest_digest, vector, model)
     binding.write_text(json.dumps({"embedding_service": "openai_embeddings_plugin"}))
-    assert _status(_apple_probe(target, world, manifest_digest, {
-        "success": True, "action_status": "completed", "error": None,
-        "data": {"result": {"embeddings": [vector], "dimension": 768, "model": model}}
-    })) == "blocked"
+    assert _status(_apple_probe(target, world, manifest_digest, {"success": True, "action_status": "completed", "error": None, "data": {"result": {"embeddings": [vector], "dimension": 768, "model": model}}})) == "blocked"
 
 
 def _metadata_red_control(target: Path, world: FakeWorld) -> None:
@@ -367,43 +378,50 @@ def _metadata_red_control(target: Path, world: FakeWorld) -> None:
 
     metadata_key = "service_interface::embedding_service::get_embedding_dimension"
     model = "nomic-ai/nomic-embed-text-v1.5"
-    world.process_outcomes[metadata_key] = _process_result({
-        "success": True,
-        "action_status": "completed",
-        "error": None,
-        "data": {"result": {"dimension": 768, "model": model}},
-    })
-    metadata = doctor._generic_process(
-        _request(target, "service_interface::embedding_service.get_embedding_dimension"), world
+    world.process_outcomes[metadata_key] = _process_result(
+        {
+            "success": True,
+            "action_status": "completed",
+            "error": None,
+            "data": {"result": {"dimension": 768, "model": model}},
+        }
     )
+    metadata = doctor._generic_process(_request(target, "service_interface::embedding_service.get_embedding_dimension"), world)
     assert _status(metadata) == "verified", "red control: static metadata is green"
 
 
 def _apple_probe(target: Path, world: FakeWorld, manifest_digest: str, value: dict[str, object]) -> JsonObject:
     world.process_outcomes["service_interface::embedding_service::generate_embeddings"] = _process_result(value)
     with patch.object(apple, "_ASSET_MANIFEST_SHA256", manifest_digest):
-        return setup_adapter.dispatch_request(
-            _request(target, "setup::apple.embedding_request_succeeds"), world
+        return setup_adapter.dispatch_request(_request(target, "setup::apple.embedding_request_succeeds"), world)
+
+
+def _invalid_embedding_vectors(target: Path, world: FakeWorld, manifest_digest: str, vector: list[float], model: str) -> None:
+    for invalid in ([], [vector[:-1]], [vector, vector], [[float("nan")] * 768], [[float("inf")] * 768], [[True] * 768]):
+        malformed = _apple_probe(
+            target,
+            world,
+            manifest_digest,
+            {
+                "success": True,
+                "action_status": "completed",
+                "error": None,
+                "data": {"result": {"embeddings": invalid, "dimension": 768, "model": model}},
+            },
         )
-
-
-def _invalid_embedding_vectors(
-    target: Path, world: FakeWorld, manifest_digest: str, vector: list[float], model: str
-) -> None:
-    for invalid in ([], [vector[:-1]], [vector, vector], [[float("nan")] * 768],
-                    [[float("inf")] * 768], [[True] * 768]):
-        malformed = _apple_probe(target, world, manifest_digest, {
-            "success": True,
-            "action_status": "completed",
-            "error": None,
-            "data": {"result": {"embeddings": invalid, "dimension": 768, "model": model}},
-        })
         assert _status(malformed) == "blocked", f"malformed vector passed: {invalid[:1]}"
     for dimension, returned_model in ((767, model), (768, "wrong-model")):
-        mismatch = _apple_probe(target, world, manifest_digest, {
-            "success": True, "action_status": "completed", "error": None,
-            "data": {"result": {"embeddings": [vector], "dimension": dimension, "model": returned_model}},
-        })
+        mismatch = _apple_probe(
+            target,
+            world,
+            manifest_digest,
+            {
+                "success": True,
+                "action_status": "completed",
+                "error": None,
+                "data": {"result": {"embeddings": [vector], "dimension": dimension, "model": returned_model}},
+            },
+        )
         assert _status(mismatch) == "blocked"
 
 
@@ -421,10 +439,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as directory:
         target = Path(directory)
         _embedding_behavior(target, FakeWorld(target))
-    print(
-        "apple_setup_flow_smoke: Apple vector behavior, flow gates, asset/config, VM warning, "
-        "Core AI LaunchAgent flow ordering, and LM Studio isolation pass"
-    )
+    print("apple_setup_flow_smoke: Apple vector behavior, flow gates, asset/config, VM warning, Core AI LaunchAgent flow ordering, and LM Studio isolation pass")
 
 
 if __name__ == "__main__":

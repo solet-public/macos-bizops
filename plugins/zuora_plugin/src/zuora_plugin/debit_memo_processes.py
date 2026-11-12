@@ -2,7 +2,7 @@
 
 Same contract as ``payment_processes``: EDGE, deferred completion, one vendor
 operation from ``billing_document_actions`` per job, vendor RBAC the only
-boundary. Payment-instrument values in a collect body are redacted.
+boundary.
 """
 
 from __future__ import annotations
@@ -194,7 +194,7 @@ class DebitMemoProcesses:
     @platform_process(
         name="collect_debit_memo",
         display_name="Zuora: Collect Debit Memo",
-        description="Collect a posted debit memo (POST /v1/debit-memos/{debitMemoKey}/collect): apply unapplied credit memos and payments oldest-first-largest-first, then process a payment for any open balance; payment values are redacted." + QUEUED_NOTE,
+        description="Collect a posted debit memo (POST /v1/debit-memos/{debitMemoKey}/collect): apply unapplied credit memos and payments oldest-first-largest-first, then process a payment for any open balance." + QUEUED_NOTE,
         processor_policy_category=EDGE,
         parameters={"debit_memo_key": DEBIT_MEMO_KEY, "body": optional_body("applyCredit, applicationOrder (CreditMemo, UnappliedPayment), collect, payment (paymentMethodId, gatewayId, ...)."), **IDEMPOTENT_HEADER_PARAMS},
         return_value_schema=QUEUED,
@@ -272,7 +272,7 @@ class DebitMemoProcesses:
     @platform_process(
         name="upload_debit_memo_file",
         display_name="Zuora: Upload Debit Memo File",
-        description="Upload an externally generated PDF to a Draft or Posted debit memo (POST /v1/debit-memos/{debitMemoKey}/files, multipart/form-data) from input_path under export_allowed_roots." + QUEUED_NOTE,
+        description="Upload an externally generated PDF to a Draft or Posted debit memo (POST /v1/debit-memos/{debitMemoKey}/files, multipart/form-data) from input_path under registered path addresses." + QUEUED_NOTE,
         processor_policy_category=EDGE,
         parameters={"debit_memo_key": DEBIT_MEMO_KEY, "input_path": PDF_INPUT, **IDEMPOTENT_HEADER_PARAMS},
         return_value_schema=QUEUED,

@@ -794,6 +794,12 @@ def _uninstall_orphaned_plugin_kbs(
 # ---------------------------------------------------------------------------
 
 
+def _clone_resolved_source(url: str, directory: Path, name: str, token_reference: str | None, address_book_service: Any) -> None:
+    """Only a name-resolved source may consume its stored credential."""
+    token = resolve_git_token(name, address_book_service) if token_reference else None
+    git_clone(url, directory, token)
+
+
 def install_kb(
     name: str,
     source: str | None,
@@ -827,10 +833,10 @@ def install_kb(
     """
     kb_dir = kb_root / name
 
-    url, token, indexing_config = resolve_source(name, source, kb_root, address_book_service)
+    url, token_reference, indexing_config = resolve_source(name, source, kb_root, address_book_service)
 
     if url and not kb_dir.exists():
-        git_clone(url, kb_dir, token)
+        _clone_resolved_source(url, kb_dir, name, token_reference, address_book_service)
 
     if not kb_dir.exists():
         raise FileNotFoundError(f"Knowledge base directory not found: {kb_dir}")
@@ -1045,25 +1051,13 @@ def update_kb(
     call cannot join the state transaction); the narrow orphan window is a
     regenerable index, swept via the operator-fired ``purge_orphaned_chunks`` verb.
 
-    SERIALIZATION (no advisory lock — D3/kb GAP-6, 2026-06-21): the per-KB
-    ``pg_advisory_xact_lock(hashtext(name)::bigint)`` that previously guarded
-    these transactions (W5.P §4.5) was removed as REDUNDANT. The only caller is
-    the ``update`` service-interface EDGE verb — synchronous, non-self-completing
-    (``is_async`` is not even a ``service_interface_process`` field, so the
-    registry blueprint defaults it False) — which the single-threaded
-    ActionQueuePoller dispatches one-at-a-time (``_poll_once`` awaits each
-    ``execute_action`` inline). Two concurrent ``update(same_name)`` calls
-    therefore cannot overlap, and serial dispatch is strictly stronger than the
-    lock (which was transaction-scoped and released between the two txns
-    anyway — it never gave whole-operation atomicity). TRIPWIRE — this holds
-    ONLY while: (a) ``update`` (and the sibling ``edit_file`` / ``create_file``
-    / ``delete_file`` that share ``reindex_file``'s locked shape) stay
-    ``is_async=False`` / non-self-completing; (b) a single active-color poller
-    dispatches them; and (c) every in-process caller of these KB write verbs
-    (e.g. ``default_thinking_plugin.create_file``, itself poller-serialized)
-    stays poller-serialized. A future ``is_async`` flip, a second concurrent
-    dispatcher, or a direct call from an async/threaded/non-poller context
-    re-surfaces the need for the per-KB advisory lock.
+    SERIALIZATION: the bound provider encloses the whole operation in its
+    reentrant activity guard. Registered jobs share one existing serial owner
+    worker; synchronous Thinking/service calls and startup hydration enter the
+    same provider guard and retain final results. Nested provider composition
+    stays on the calling thread. Chunk replacement and its install-record write
+    therefore remain together even after the registered action returns a job.
+    This is a local provider-instance guarantee, not a cross-process lock.
     """
     record = get_install_record(name, state_service)
     if record is None:

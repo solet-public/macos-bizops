@@ -12,8 +12,8 @@ This smoke pins the fix through the real act-time entrypoint
 (``ActionProcessor._execute_service_interface_action``) over registry entries built from the
 live decorator metadata, with fake bound providers behind a REAL ``EventOrchestrator`` + ``ServiceBindings`` binding table:
 
-  A. Declaration: both verbs discoverable, keyed on the service name (a ``ServiceName``, never a provider plugin), the schema names all five contract
-     fields, and each KB JSON carries an in-bound ``embedding_description``.
+  A. Declaration: both verbs discoverable, keyed on the service name (a ``ServiceName``, never a provider plugin), generation declares a job receipt,
+     metadata declares the five contract fields, and each KB JSON has an in-bound ``embedding_description``.
   B. Routing follows the binding: two different fake providers give two different model ids and
      dimensions through the same process key; the verb's own answer never comes from a constant.
   C. Model and dimension accompany every result, success or batch, through dispatch.
@@ -22,6 +22,8 @@ live decorator metadata, with fake bound providers behind a REAL ``EventOrchestr
      refused loudly with an error, never truncated and never answered by another provider; every
      result, success or refusal, carries action_status, data, actions, error and timestamp.
 
+This smoke calls the synchronous target dispatcher directly to pin provider
+results. The separate registered-admission smoke covers the outer queued route.
 Project policy: no pytest.  Offline -- no live solet / Core AI assets / Postgres.
 Exits 0 on success, 1 on first-failed-check aggregate.
 
@@ -83,7 +85,10 @@ class _FakeProvider(EmbeddingServiceInterface):
         self._max_batch = max_batch
 
     def generate_embeddings(
-        self, inputs: list[str], model: str | None = None, input_type: str = "text",
+        self,
+        inputs: list[str],
+        model: str | None = None,
+        input_type: str = "text",
     ) -> ActionResult:
         if len(inputs) > self._max_batch:
             return _refusal(f"{self.model}: batch over {self._max_batch}")
@@ -116,7 +121,10 @@ def _refusal(message: str) -> ActionResult:
         "timestamp": "2026-10-01T00:00:00+00:00",
     }
     return {
-        "action_status": "error", "data": {}, "actions": [], "timestamp": "2026-10-01T00:00:00+00:00",
+        "action_status": "error",
+        "data": {},
+        "actions": [],
+        "timestamp": "2026-10-01T00:00:00+00:00",
         "error": error,
     }
 
@@ -173,8 +181,13 @@ def _processor(bindings: dict[str, str], plugins: dict[str, object]) -> ActionPr
 
 def _dispatch(processor: ActionProcessor, verb: str, arguments: dict[str, object]) -> dict[str, Any]:
     action = _DispatchAction(
-        id="ae-embed-smoke", process_key=f"service_interface::{_SERVICE}::{verb}", parameters="{}",
-        notes="", created_at="2026-10-01T00:00:00+00:00", session_id="sess-smoke", flow_id="flow-smoke",
+        id="ae-embed-smoke",
+        process_key=f"service_interface::{_SERVICE}::{verb}",
+        parameters="{}",
+        notes="",
+        created_at="2026-10-01T00:00:00+00:00",
+        session_id="sess-smoke",
+        flow_id="flow-smoke",
     )
     return dict(processor._execute_service_interface_action(_SERVICE, verb, arguments, action))  # noqa: SLF001
 
@@ -222,9 +235,10 @@ def _pin_declaration(checker: Checker) -> None:
             f"A2: {verb} is keyed on the service name {_SERVICE}, a ServiceName, never a provider plugin ({key})",
         )
         properties = process["return_value_schema"]["properties"]
+        expected = {"job_id", "status"} if verb == "generate_embeddings" else set(_CONTRACT_FIELDS)
         checker.check(
-            set(properties) == set(_CONTRACT_FIELDS),
-            f"A3: {verb} return schema names exactly the five contract fields (got {sorted(properties)})",
+            set(properties) == expected,
+            f"A3: {verb} declares its registered receipt or synchronous metadata fields (got {sorted(properties)})",
         )
         text = json.loads((_JSON_DIR / f"{verb}.json").read_text())["embedding_description"]
         low, high = _EMBEDDING_DESCRIPTION_BOUNDS
@@ -256,8 +270,7 @@ def _pin_bound_provider(checker: Checker, bound: str, plugins: dict[str, object]
     embedded = _call(checker, f"B1 [{bound}]", processor, "generate_embeddings", {"inputs": ["one", "three"]})
     payload = _payload(embedded)
     checker.check(
-        isinstance(provider, _FakeProvider)
-        and payload.get("model") == provider.model and payload.get("dimension") == provider.dimension,
+        isinstance(provider, _FakeProvider) and payload.get("model") == provider.model and payload.get("dimension") == provider.dimension,
         f"B1: bound to {bound}, generate_embeddings returns that provider's model and dimension",
     )
     vectors = payload.get("embeddings", [])
@@ -269,8 +282,7 @@ def _pin_bound_provider(checker: Checker, bound: str, plugins: dict[str, object]
     probed = _call(checker, f"C3 [{bound}]", processor, "get_embedding_dimension", {})
     answer = _payload(probed)
     checker.check(
-        (answer.get("model"), answer.get("dimension")) == (payload.get("model"), payload.get("dimension")) and bool(answer)
-        and _has_contract(probed),
+        (answer.get("model"), answer.get("dimension")) == (payload.get("model"), payload.get("dimension")) and bool(answer) and _has_contract(probed),
         f"C3: {bound}: get_embedding_dimension agrees with the embed result without embedding",
     )
     return payload.get("model"), payload.get("dimension")
@@ -292,8 +304,7 @@ def _pin_passthrough_refusal(checker: Checker, plugins: dict[str, object]) -> No
     """Case B3: a bound provider's own over-limit refusal reaches the caller whole."""
     refused = _call(checker, "B3", _processor({_SERVICE: "provider_a"}, plugins), "generate_embeddings", {"inputs": ["x"] * 5})
     checker.check(
-        refused.get("action_status") == "error" and refused.get("error") is not None and refused.get("data") == {}
-        and _has_contract(refused),
+        refused.get("action_status") == "error" and refused.get("error") is not None and refused.get("data") == {} and _has_contract(refused),
         "B3: a provider's over-limit refusal passes through dispatch as an error with the contract fields",
     )
 
@@ -371,8 +382,7 @@ def _pin_real_refusals(checker: Checker, processor: ActionProcessor, runtime: _F
     for label, arguments in refusals.items():
         refused = _call(checker, f"D4 [{label}]", processor, "generate_embeddings", arguments)
         checker.check(
-            refused.get("action_status") == "error" and refused.get("error") is not None and refused.get("data") == {}
-            and _has_contract(refused),
+            refused.get("action_status") == "error" and refused.get("error") is not None and refused.get("data") == {} and _has_contract(refused),
             f"D4: {label} is refused with an error and all five contract fields, no vectors",
         )
     checker.check(runtime.generated[batches_before:] == [], "D5: no refused call embedded a partial batch")

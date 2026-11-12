@@ -5,13 +5,17 @@ Cloud site — issues, JQL search, comments, workflow transitions, and attachmen
 It is Lane C of the Enterprise Connector Suite and forks the shape of the
 `g_suite_plugin` reference vertical (sync `(params, state)` verbs over pure action
 modules, an injected blob writer/loader, a `_run` error classifier, per-verb EDGE
-definitions). It uses the pycontribs `jira` client library.
+definitions). Legacy verbs use pycontribs `jira`; the new typed v3/Agile families use a pinned
+vendor operation inventory and the standard-library JSON transport. See
+[vendor API coverage](vendor_api_coverage.md) for current coverage and later builds.
 
 ## Posture at a glance
 
-- **Auth: headless HTTP basic-auth on a dedicated scoped Atlassian service
-  account** — account email + API token. No OAuth 3LO, no browser consent, no
-  callback server. Durable non-interactive credentials resolved at call time.
+- **Auth: API tokens and Atlassian OAuth 2.0 (3LO), with multiple sites.**
+  The original address-book entry remains `site=legacy`. Bind additional sites
+  with `sites`; consent and rotating refresh use `oauth`. Every verb accepts
+  optional `site`, uses the configured default when omitted, and names the site
+  in queued and completed results. Unknown aliases return `jira.unknown_site`.
 - **Full read/write including `delete_issue`.** Jira ticket deletion is an
   acceptable-loss class (unlike database destruction), so v1 ships the complete
   CRUD surface. Destructive verbs take an explicit target (the issue key is
@@ -39,13 +43,14 @@ The plugin resolves one address-book entry named `jira_site` via
 | `expires_at` | literal (ISO-8601) | the token's expiry, e.g. `2027-01-15T00:00:00Z` |
 | `scope_note` | literal | the fixed-at-creation scope, for operator reference |
 
-The `api_token` secret lives in the **address-book resolver's** vault namespace
-(`default_address_book_plugin`), never the plugin's own — so the resolver reads
-it under its own identity and the plugin never touches a raw vault key. The
-plugin declares no vault keys (`get_required_vault_keys` and
-`get_declared_vault_keys` both return `[]`) because it holds no plugin-owned
-runtime secrets. `expires_at` is validated as ISO-8601 at config-load: a
-malformed value fails loudly there, not at first connect.
+The legacy `api_token` is chain-consumed in the address-book resolver's vault
+namespace. Additional bindings copy each resolved token into its own plugin
+vault envelope; OAuth grants also use per-site envelopes. No key is required
+at readiness, and runtime key patterns are declared by the plugin.
+`expires_at` is validated as ISO-8601 at config-load. API-token base_url may be
+the site origin or Atlassian's `https://api.atlassian.com/ex/jira/{cloudId}`
+gateway for scoped tokens. OAuth consent uses the site origin and verifies the
+gateway cloud ID from accessible resources.
 
 ### Service account vs personal account
 
@@ -123,7 +128,7 @@ verbatim: *"We have no PII in Jira - just company internal accounts. Don't
 worry at all about PII in Jira."* An earlier revision of this section (still
 visible in git history) had `jql_search`/`list_comments` always writing to a
 caller-supplied `output_tsv_path` via a workspace-root containment gate
-(`export_containment.py`). That gate, the `ExportPathRefusedError` it raised,
+(the shared file-location guard). That gate, the `ExportPathRefusedError` it raised,
 and the `jira.export_path_refused` error code are all **deleted**, not
 retained as dead code — jira is g_suite-class: results return **inline**,
 never to a file
@@ -164,3 +169,72 @@ validation purposes are not the mass-exposure risk this migration targets
 - **Delivery is INERT** until the operator installs the plugin
   (`pip install -e plugins/jira_plugin`) into the shared virtualenv and provisions
   the service account + token. The smokes are hermetic and run without a live Jira.
+
+
+## Multi-site and OAuth lifecycles
+
+`sites(operation=list)` returns the current `version`, default and bound sites.
+To add or correct an API-token binding, register a separate address-book entry
+with the same five fields as `jira_site`, using its own vaulted token, then call
+`sites(operation=bind_api_token, site="team", entry_name="jira_team",
+expected_version=<current>, set_default=true)`. Credentials are copied into a
+per-site plugin-owned vault envelope; later address-book changes take effect
+only after an explicit rebind. The legacy entry stays available independently.
+
+Use `set_default` with `site=legacy` to clear an additional default. Rebind an
+existing alias to correct/rotate its credentials. `disconnect` removes the local
+binding and its current/retired credential envelopes and pending consent;
+Atlassian token/grant revocation remains the vendor account's operation. If a
+vault deletion fails after unbinding, the result reports the failure and the
+index exposes `credential_cleanup_pending`; repeat disconnect at the new
+version to finish cleanup. A failed index write never publishes new credentials
+over an existing binding. `sites(operation=history)` reads append-only,
+non-secret binding events; vault-native auditing separately records secret
+stores, rotations and deletes. Historical secret values are never returned.
+Stale expected versions fail before a binding changes. Writes are serialized
+within the one plugin instance; the vault does not offer a cross-process CAS.
+
+For OAuth, use a registered Atlassian 3LO application. Its address-book entry
+(default `jira_oauth_app`) contains literal `client_id`, registered
+`redirect_uri`, space-separated `scopes` including `offline_access`, and a
+vault-referenced `client_secret`. Call `oauth(operation=begin, site="team",
+base_url="https://your-team.atlassian.net")`, follow the returned consent URL,
+and capture the authorization code at the registered redirect into a
+plugin-owned `<solet>.jira_plugin.oauth_code...` vault key agent-blind. Complete
+with `site`, `state`, `code_vault_key`, current `expected_version`, and optional
+`set_default`. The plugin verifies state/ten-minute expiry and the grant's
+accessible resources before storing credentials. It uses the granted cloud ID
+at `api.atlassian.com/ex/jira/{cloudId}` and persists both rotating access and
+refresh tokens. No local callback listener or setup-flow change is introduced.
+`status` reads pending consent; `cancel` clears it; `begin` corrects/replaces it.
+A consumed or expired state cannot complete again. Auth failures require fresh
+consent or credential correction, without exposing vendor response secrets.
+
+## Typed planning families
+
+`projects`, `boards`, `sprints`, `backlog`, `agile_issues`, `versions`, and
+`worklogs` select a vendor `operation` and take `path`, `query`, `body`, optional
+`body_json` (for arbitrary JSON property values), `headers`, and `site`.
+The inventory enumerates every operation in those seven vendor groups, including
+writes, deletes, project archive/restore, sprint start/close, property set/clear,
+version release/undo, and worklog correction/removal. Vendor-owned objects use
+vendor permissions/concurrency/history; no invented local version is sent.
+
+For example, `sprints` createSprint takes body name/originBoardId and optional
+goal/startDate/endDate; moveIssuesToSprintAndRank takes path sprintId and body
+issues plus rankBeforeIssue/rankAfterIssue/rankCustomFieldId. Rank independently
+with `agile_issues` rankIssues. Log time with `worklogs` addWorklog and release a
+version with `versions` updateVersion, body released=true. V3 rich-text fields
+use the vendor Atlassian Document Format. All documented optional query/body
+fields are forwarded, and responses retain native pagination metadata.
+`next_query` gives another page's query; queued acceptance is not vendor success.
+Use the per-family process articles for operation names and the pinned request
+inventory for required path/query/body fields. Writes are never retried blindly.
+
+Queued jobs for additional sites pin the binding identity. A subsequent rebind
+returns `jira.binding_changed` before any vendor request; inspect the target
+and submit intentionally again. Changing only the default does not retarget
+already queued work. The credential envelope can refresh in place without
+changing the binding identity. This is a target-integrity check: a stable
+binding is the pass condition, the running plugin preserves it until an
+explicit rebind/disconnect, and the queue/rebind transcript tests both paths.

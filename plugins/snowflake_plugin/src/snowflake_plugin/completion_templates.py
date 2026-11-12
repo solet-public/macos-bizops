@@ -21,6 +21,12 @@ _REST_FAMILY_ACTIONS = frozenset(FAMILIES)
 
 
 def _instructions(action_name: str, outcome: Literal["result", "error"]) -> list[str]:
+    if action_name == "stage_files" and outcome == "result":
+        return [
+            "The Snowflake stage_files job finished. Inspect every vendor file status: job completion does not mean every file transferred or loaded. SKIPPED means not overwritten.",
+            "Relay metadata and paths. COPY INTO rows (including validation business rows) are in the named TSV; never inline file contents. LIST/REMOVE/COPY FILES return complete file metadata, with no truncation.",
+            "Transfers, REMOVE and COPY may have partial effects on failure. Never silently retry or claim rollback. PUT with OVERWRITE corrects a file; REMOVE retires it, and a later PUT recreates it.",
+        ]
     if action_name == "request" and outcome == "result":
         return [
             "The Snowflake REST request completed; vendor state may have changed.",

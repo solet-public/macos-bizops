@@ -2,7 +2,7 @@
 """Query-verb + classification smoke tests for external_postgres_plugin.
 
 Hermetic — a faked psycopg connection/cursor, no live Postgres (the live
-read-only proof is smoke_readonly.py; the live write-capability proof is
+unrestricted-read proof is smoke_readonly.py; the live write proof is
 smoke_write.py). Red-first: every check asserts REAL behavior in
 query_actions / connection.classify_pg_error / the EDGE parity.
 
@@ -10,7 +10,8 @@ Exercises:
   1. run_query — writes a TSV handle (path/columns/row_count/truncated), never
      rows/records inline (override-friction default/override behavior is
      smoke_data_export.py's job, not duplicated here)
-  2. run_query — refuses a two-statement string and a write leader (guard)
+  2. run_query — refuses a two-statement string (shape), but NOT a write
+     leader: a data-modifying CTE runs and commits (rul_4c99a30d)
   3. run_statement — no-result-set statement commits and returns rowcount
      inline; a RETURNING statement routes through the same always-TSV path as
      run_query and commits; a RETURNING statement WITHOUT output_tsv_path
@@ -91,7 +92,6 @@ def _fake_conn(columns: list[str] | None, rows: list[tuple[Any, ...]]) -> tuple[
     return conn, cur
 
 
-
 class _FakeDriverError(Exception):
     def __init__(self, sqlstate: str, message: str, primary: str | None = None) -> None:
         super().__init__(message)
@@ -109,7 +109,9 @@ def test_run_query_writes_tsv() -> None:
     with tempfile.TemporaryDirectory(prefix="epg_shape_") as workspace:
         out_path = str(Path(workspace) / "out.tsv")
         result = query_actions.run_query(
-            conn, {"sql": "SELECT id, name FROM t", "output_tsv_path": out_path}, _passthrough_gate,
+            conn,
+            {"sql": "SELECT id, name FROM t", "output_tsv_path": out_path},
+            _passthrough_gate,
         )
         _assert("handle columns carried", result["columns"] == ["id", "name"])
         _assert("handle row_count", result["row_count"] == 2)
@@ -143,25 +145,32 @@ def test_run_query_guard() -> None:
         two = False
         try:
             query_actions.run_query(
-                conn, {"sql": "SELECT 1; DELETE FROM t", "output_tsv_path": out_path}, _passthrough_gate,
+                conn,
+                {"sql": "SELECT 1; DELETE FROM t", "output_tsv_path": out_path},
+                _passthrough_gate,
             )
         except StatementGuardError:
             two = True
         _assert("two-statement run_query refused", two)
-        write = False
-        try:
-            query_actions.run_query(
-                conn, {"sql": "DELETE FROM t", "output_tsv_path": out_path}, _passthrough_gate,
-            )
-        except StatementGuardError:
-            write = True
-        _assert("write-leader run_query refused", write)
+        # rul_4c99a30d: no leader refusal — a data-modifying CTE runs and COMMITS
+        # after its rows are written (the role's GRANTs are the only boundary).
+        cte_conn, cte_cur = _fake_conn(["id"], [(7,)])
+        result = query_actions.run_query(
+            cte_conn,
+            {"sql": "WITH d AS (DELETE FROM t RETURNING id) SELECT id FROM d", "output_tsv_path": out_path},
+            _passthrough_gate,
+        )
+        _assert("write-leader run_query is NOT refused", result["row_count"] == 1)
+        _assert("the statement reached the server", cte_cur.execute.call_count == 1)
+        _assert("run_query committed after writing the TSV", cte_conn.commit.call_count == 1)
 
 
 def test_run_statement_no_result_set_commits_inline() -> None:
-    conn, cur = _fake_conn(None, [])
+    conn, _cur = _fake_conn(None, [])
     result = query_actions.run_statement(
-        conn, {"sql": "UPDATE t SET x = 1"}, _passthrough_gate,
+        conn,
+        {"sql": "UPDATE t SET x = 1"},
+        _passthrough_gate,
     )
     _assert("no-result-set has_result_set False", result["has_result_set"] is False)
     _assert("no-result-set carries rowcount", "rowcount" in result)
@@ -192,7 +201,9 @@ def test_run_statement_returning_without_path_rolls_back() -> None:
     raised = False
     try:
         query_actions.run_statement(
-            conn, {"sql": "INSERT INTO t (v) VALUES (1) RETURNING id"}, _passthrough_gate,
+            conn,
+            {"sql": "INSERT INTO t (v) VALUES (1) RETURNING id"},
+            _passthrough_gate,
         )
     except ValueError:
         raised = True
@@ -206,7 +217,9 @@ def test_run_statement_single_statement_guard_only() -> None:
     two = False
     try:
         query_actions.run_statement(
-            conn, {"sql": "UPDATE t SET x = 1; UPDATE t SET x = 2"}, _passthrough_gate,
+            conn,
+            {"sql": "UPDATE t SET x = 1; UPDATE t SET x = 2"},
+            _passthrough_gate,
         )
     except StatementGuardError:
         two = True
@@ -344,13 +357,11 @@ def test_edge_parity() -> None:
     actions = discover_actions(plugin)
     raised = None
     try:
-        PluginRegistrationValidator().validate_edge_process_provider(
-            "external_postgres_plugin", plugin, actions
-        )
+        PluginRegistrationValidator().validate_edge_process_provider("external_postgres_plugin", plugin, actions)
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 8 verbs discovered", len(actions) == 8)
+    _assert("all 14 verbs discovered", len(actions) == 14, str(len(actions)))
 
 
 def main() -> int:

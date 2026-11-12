@@ -152,6 +152,7 @@ from .caller_provenance import (
 )
 from .choreography_verbs import (
     ACTION_GENERATE_CURATION_REPORT,
+    ACTION_RECONCILE_LEDGER_TMUX,
     ACTION_RESTART_SESSION,
     ACTION_ROTATE_SESSION,
     JOB_STATUS_COMPLETED,
@@ -163,6 +164,7 @@ from .choreography_verbs import (
     RestartSessionDispatchRequest,
     RotateSessionDispatchRequest,
     dispatch_generate_curation_report,
+    dispatch_reconcile_ledger_tmux,
     dispatch_restart_session,
     dispatch_rotate_session,
 )
@@ -339,6 +341,7 @@ from .model_capability_verbs import (
 from .model_catalog_policy import read_catalog_configuration, set_catalog_configuration
 from .model_cell_enablement import read_model_cell_policy, set_model_cells_enabled
 from .model_dispatch_policy import DispatchPolicyError
+from .operation_jobs import JOB_RETURN_SCHEMA, AsyncJobs, RegisteredOperations
 from .operator_session_liveness_reconciliation import (
     reconcile_operator_session_liveness as lifecycle_reconcile_operator_session_liveness,
 )
@@ -1145,12 +1148,7 @@ _ALLOWANCE_READING_PROPERTIES: dict[str, ParameterMetadata] = {
 }
 
 
-class AgentMessagingPlugin(
-    ServicePlugin,
-    IOInterfacePlugin,
-    EdgeProcessProvider,
-    AgentMessagingServiceInterface,
-):
+class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugin, EdgeProcessProvider, AgentMessagingServiceInterface):
     """Consolidated bridge plugin (IO + bridge + agent messaging).
 
     Implements ``AgentMessagingServiceInterface`` by delegating to an
@@ -1266,6 +1264,7 @@ class AgentMessagingPlugin(
         # push-injection for it), not pushed at boot. Single dedicated worker
         # thread preserves choreography ordering. Restart additionally shares
         # the durable reservation with public launch adapters.
+        self._operation_jobs = AsyncJobs()
         self._async_job_manager: AsyncJobManager | None = None
         self._launch_jobs = SessionLaunchJobs()
         self._choreography_stop_event: threading.Event = threading.Event()
@@ -1495,6 +1494,7 @@ class AgentMessagingPlugin(
             f"{PROVIDER_PLUGIN_NAME}.{ACTION_ROTATE_SESSION}",
             f"{PROVIDER_PLUGIN_NAME}.{ACTION_RESTART_SESSION}",
             f"{PROVIDER_PLUGIN_NAME}.{ACTION_GENERATE_CURATION_REPORT}",
+            f"{PROVIDER_PLUGIN_NAME}.{ACTION_RECONCILE_LEDGER_TMUX}",
         ):
             if self._choreography_stop_event.is_set():
                 return
@@ -1616,6 +1616,8 @@ class AgentMessagingPlugin(
         try:
             if provider_name.endswith(f".{ACTION_ROTATE_SESSION}"):
                 self._run_rotate_session_job(job_id, request_data, job_manager, state_service)
+            elif provider_name.endswith(f".{ACTION_RECONCILE_LEDGER_TMUX}"):
+                self._run_reconcile_ledger_tmux_job(job_id, job_manager)
             elif provider_name.endswith(f".{ACTION_GENERATE_CURATION_REPORT}"):
                 self._run_generate_curation_report_job(job_id, request_data, job_manager)
             else:
@@ -2325,7 +2327,9 @@ class AgentMessagingPlugin(
             ),
             "reconcile_ledger_tmux": EdgeProcessDefinition(
                 name="reconcile_ledger_tmux",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                    result_description="Queued job_id and status; poll check_choreography_job_status for the former report envelope.",
+                ),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
@@ -2963,6 +2967,7 @@ class AgentMessagingPlugin(
     # ------------------------------------------------------------------
 
     @platform_process(
+        is_async=True,
         name="send_peer_message",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -3210,6 +3215,7 @@ class AgentMessagingPlugin(
 
     @platform_process(
         name="deliver_job_completion",
+        is_async=True,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "name": ParameterMetadata(
@@ -3240,24 +3246,7 @@ class AgentMessagingPlugin(
         },
         output_type="object",
         output_description=("Delivery outcome plus whether the job's completion_reach was upgraded to role_inbox_delivered."),
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="deliver_job_completion delivery + stamp result",
-            properties={
-                "thread_id": ParameterMetadata(type=ParameterType.STRING),
-                "message_id": ParameterMetadata(type=ParameterType.STRING),
-                "delivery": ParameterMetadata(type=ParameterType.STRING),
-                "drive_on_delivery": ParameterMetadata(type=ParameterType.STRING),
-                "resolved_agent_id": ParameterMetadata(type=ParameterType.STRING),
-                "resolved_agent_instance_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                ),
-                "resolved_session_label": ParameterMetadata(
-                    type=ParameterType.STRING,
-                ),
-                "reach_stamped": ParameterMetadata(type=ParameterType.BOOLEAN),
-            },
-        ),
+        return_value_schema=JOB_RETURN_SCHEMA,
     )
     def deliver_job_completion(
         self,
@@ -4173,6 +4162,7 @@ class AgentMessagingPlugin(
         }
 
     @platform_process(
+        is_async=True,
         name="report_managed_dispatch",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -4288,6 +4278,7 @@ class AgentMessagingPlugin(
         return _success_result(data=result)
 
     @platform_process(
+        is_async=True,
         name="managed_dispatch_status",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -4502,6 +4493,7 @@ class AgentMessagingPlugin(
         return _success_result(data=result)
 
     @platform_process(
+        is_async=True,
         name="retire_role",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -5327,6 +5319,7 @@ class AgentMessagingPlugin(
         return _success_result(data=row)
 
     @platform_process(
+        is_async=True,
         name="reconcile_operator_session_liveness",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -5391,27 +5384,56 @@ class AgentMessagingPlugin(
         name="reconcile_ledger_tmux",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
+        is_async=True,
         output_type="object",
-        output_description="Read-only timestamped ledger/tmux metadata and coverage; no work or uptake conclusion.",
+        output_description="Queued metadata observation; poll check_choreography_job_status.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Derived advisory metadata report, recomputed on every call.",
+            description="Job handle; the terminal result contains the former report envelope.",
             properties={
-                "observations": ParameterMetadata(type=ParameterType.LIST),
-                "advisories": ParameterMetadata(type=ParameterType.LIST),
-                "complete": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "job_id": ParameterMetadata(type=ParameterType.STRING),
+                "status": ParameterMetadata(type=ParameterType.STRING),
             },
         ),
     )
     def reconcile_ledger_tmux(
         self,
-        params: dict[str, Any],  # noqa: ARG002
-        state: dict[str, Any],  # noqa: ARG002
+        params: dict[str, Any],
+        state: dict[str, Any],
     ) -> dict[str, Any]:
-        """Observe metadata only under existing bridge process authorization."""
+        """Enqueue metadata collection under existing process authorization."""
+        job_manager = self._try_acquire_async_job_manager()
+        if job_manager is None:
+            return _failure_result(code="async_job_manager_unavailable", message="AsyncJobManager is not available on this solet.")
+        try:
+            receipt = dispatch_reconcile_ledger_tmux(job_manager, state)
+        except VerbError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=receipt)
+
+    def _reconcile_ledger_tmux(self) -> dict[str, Any]:
+        """The former synchronous result, executed only by the worker."""
         return _success_result(data=collect_ledger_tmux_report(self._get_state_service()))
 
+    def _run_reconcile_ledger_tmux_job(self, job_id: str, job_manager: AsyncJobManager) -> None:
+        from ananta.core.plugins.action_execution import _create_error_response
+
+        marked = job_manager.update_job(job_id, {"status": JOB_STATUS_PROCESSING})
+        if marked.get("action_status") != "completed":
+            raise RuntimeError("Could not mark reconciliation job processing")
+        try:
+            outcome = self._reconcile_ledger_tmux()
+        except Exception as exc:
+            outcome = _create_error_response(exc)
+        failed = bool(outcome.get("error")) or outcome.get("action_status") == JOB_STATUS_ERROR
+        updates: dict[str, Any] = {"status": JOB_STATUS_ERROR if failed else JOB_STATUS_COMPLETED, "result": outcome}
+        if failed:
+            error = outcome.get("error")
+            updates["error"] = error if isinstance(error, dict) else outcome
+        job_manager.update_job(job_id, updates)
+
     @platform_process(
+        is_async=True,
         name="clear_session",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -5475,6 +5497,7 @@ class AgentMessagingPlugin(
         return _success_result(data=result)
 
     @platform_process(
+        is_async=True,
         name="compact_session",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -5514,6 +5537,7 @@ class AgentMessagingPlugin(
         return _success_result(data=result)
 
     @platform_process(
+        is_async=True,
         name="drive_session",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -5645,6 +5669,7 @@ class AgentMessagingPlugin(
         return _success_result(data=result)
 
     @platform_process(
+        is_async=True,
         name="preserve_lane_evidence",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -5677,6 +5702,7 @@ class AgentMessagingPlugin(
         return _success_result(data=result)
 
     @platform_process(
+        is_async=True,
         name="read_lane_evidence",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -5703,6 +5729,7 @@ class AgentMessagingPlugin(
         return _success_result(data=result)
 
     @platform_process(
+        is_async=True,
         name="retire_session",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -7271,6 +7298,7 @@ class AgentMessagingPlugin(
         return _success_result(data=result)
 
     @platform_process(
+        is_async=True,
         name="seed_model_capability_catalog",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -7282,19 +7310,14 @@ class AgentMessagingPlugin(
         },
         output_type="object",
         output_description=("iss_48ea8171 -- write the declarative model_capability_seed.v1.json into the catalog as pending_crosscheck cells. A seed never accepts a cell and never touches one a real refresh run already accepted, so it is safe to run at every start-up."),
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="seed_model_capability_catalog outcome",
-            properties={
-                "freshness_window": ParameterMetadata(type=ParameterType.OBJECT, description="Resolved hours (null when unknown), exact integer cell_hours or null, request/policy/observed_catalog/unknown source, policy_revision_id and advisories; read on each call."),
-                "run_id": ParameterMetadata(type=ParameterType.STRING, description="The model_capability_refresh_run row (trigger=seed)."),
-                "seed_version": ParameterMetadata(type=ParameterType.STRING),
-                "cells_seeded": ParameterMetadata(type=ParameterType.INTEGER, description="Cells written or rewritten as pending_crosscheck."),
-                "accepted_cells_preserved": ParameterMetadata(type=ParameterType.LIST, description="model@effort of cells left untouched because a real run accepted them."),
-            },
-        ),
+        return_value_schema=JOB_RETURN_SCHEMA,
     )
-    def seed_model_capability_catalog(
+    def seed_model_capability_catalog(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Persist a job; job_service.get_job returns the complete original outcome."""
+        request = dict(params.get("parameters", params))
+        return self._operation_jobs.submit(self, "seed_model_capability_catalog", request, state, lambda values: self.seed_model_capability_catalog_sync(values, state))
+
+    def seed_model_capability_catalog_sync(
         self,
         params: dict[str, Any],
         state: dict[str, Any],  # noqa: ARG002
@@ -7449,6 +7472,7 @@ class AgentMessagingPlugin(
         return _success_result(data=result)
 
     @platform_process(
+        is_async=True,
         name="set_model_cells_enabled",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -7604,6 +7628,7 @@ class AgentMessagingPlugin(
         return _success_result(data=result, actions=None if refresh_request is None else [refresh_request])
 
     @platform_process(
+        is_async=True,
         name="sweep_fleet_stall",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -7629,28 +7654,14 @@ class AgentMessagingPlugin(
             "and the verdict 'unmeasured', never a manufactured stall. Every completed run publishes "
             "itself, so read_fleet_stall_sweep_status can tell when the sweep has stopped running."
         ),
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="One sweep's verdict and the facts it was computed from.",
-            properties={
-                "verdict": ParameterMetadata(type=ParameterType.STRING, description="stalled | not_stalled | unmeasured (a read did not complete; see advisories)."),
-                "trigger": ParameterMetadata(type=ParameterType.STRING, description="manual | cron, as given."),
-                "completed_at": ParameterMetadata(type=ParameterType.STRING, description="When this run completed (UTC ISO-8601)."),
-                "window_seconds": ParameterMetadata(type=ParameterType.INTEGER, description="The window the produced-work read covered."),
-                "window_since": ParameterMetadata(type=ParameterType.STRING, description="The --since instant used for every produced-work read."),
-                "ready_and_owned_count": ParameterMetadata(type=ParameterType.INTEGER, description="Units whose coverage is active-owned: live, owned and unexpired."),
-                "produced_count": ParameterMetadata(type=ParameterType.INTEGER, description="Register artifacts the owning actors produced inside the window."),
-                "owning_actors": ParameterMetadata(type=ParameterType.LIST, description="Distinct actors that own the ready work; the produced-work read is keyed on exactly these."),
-                "session_count": ParameterMetadata(type=ParameterType.INTEGER, description="Non-terminal managed sessions of every runtime. Reported, never part of the predicate."),
-                "runtime_counts": ParameterMetadata(type=ParameterType.DICT, description="Per agent_runtime session count, so a reader can see which runtimes the fleet is made of."),
-                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Every read that did not complete, named. Non-empty means the verdict is 'unmeasured'."),
-                "ready_and_owned": ParameterMetadata(type=ParameterType.LIST, description="Per Unit: unit_id, unit_key, owning actor and state."),
-                "produced": ParameterMetadata(type=ParameterType.LIST, description="Per artifact: actor, event_kind, event_id, occurred_at and unit_id."),
-                "sessions": ParameterMetadata(type=ParameterType.LIST, description="Per session: agent_instance_id, agent_session_id, agent_runtime, lifecycle_state and local_name."),
-            },
-        ),
+        return_value_schema=JOB_RETURN_SCHEMA,
     )
-    def sweep_fleet_stall(
+    def sweep_fleet_stall(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Persist a job; job_service.get_job returns the complete original outcome."""
+        request = dict(params.get("parameters", params))
+        return self._operation_jobs.submit(self, "sweep_fleet_stall", request, state, lambda values: self.sweep_fleet_stall_sync(values, state))
+
+    def sweep_fleet_stall_sync(
         self,
         params: dict[str, Any],
         state: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
@@ -7675,25 +7686,22 @@ class AgentMessagingPlugin(
     # Literal ``name=``: the whole-tree gate resolves a cron target's
     # processor_policy_category from the literal decorator name.
     @platform_process(
+        is_async=True,
         name="sweep_fleet_stall_cron",
         is_discoverable=False,
         context_handling=ContextHandling.NONE,
         parameters={},
         output_type="object",
         output_description="One scheduled fleet-stall sweep fire, reporting its own verdict.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Cron fire outcome: the verdict this fire computed, or the advisory that stopped it.",
-            properties={
-                "verdict": ParameterMetadata(type=ParameterType.STRING, description="stalled | not_stalled | unmeasured."),
-                "ready_and_owned_count": ParameterMetadata(type=ParameterType.INTEGER, description="Units that were ready and owned on this fire."),
-                "produced_count": ParameterMetadata(type=ParameterType.INTEGER, description="Register artifacts produced inside the window."),
-                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Every read that did not complete, named."),
-            },
-        ),
+        return_value_schema=JOB_RETURN_SCHEMA,
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
     )
-    def sweep_fleet_stall_cron(
+    def sweep_fleet_stall_cron(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Persist a job; job_service.get_job returns the complete original outcome."""
+        request = dict(params.get("parameters", params))
+        return self._operation_jobs.submit(self, "sweep_fleet_stall_cron", request, state, lambda values: self.sweep_fleet_stall_cron_sync(values, state))
+
+    def sweep_fleet_stall_cron_sync(
         self,
         params: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
         state: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
@@ -7852,6 +7860,7 @@ class AgentMessagingPlugin(
             return _failure_result(code="schedule_ensure_failed", message=str(exc))
 
     @platform_process(
+        is_async=True,
         name="refresh_model_capability_catalog",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -7875,44 +7884,14 @@ class AgentMessagingPlugin(
             "move a cell to accepted -- seed_model_capability_catalog never does. A source that "
             "fails to fetch is named in sources_failed, never silently dropped."
         ),
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="refresh_model_capability_catalog outcome",
-            properties={
-                "freshness_window": ParameterMetadata(type=ParameterType.OBJECT, description="Resolved hours (null when unknown), exact integer cell_hours or null, request/policy/observed_catalog/unknown source, policy_revision_id and advisories; read on each call."),
-                "run_id": ParameterMetadata(type=ParameterType.STRING, description="The model_capability_refresh_run row this call wrote."),
-                "trigger": ParameterMetadata(type=ParameterType.STRING),
-                "readings_gathered": ParameterMetadata(type=ParameterType.INTEGER, description="Total readings gathered across every source."),
-                "sources_ok": ParameterMetadata(type=ParameterType.LIST, description="source_ids that fetched cleanly."),
-                "sources_failed": ParameterMetadata(type=ParameterType.LIST, description="source_id: reason for every fetch that failed."),
-                "cells_accepted": ParameterMetadata(type=ParameterType.INTEGER, description="Cells this run created or renewed as accepted."),
-                "cells_conflicted": ParameterMetadata(type=ParameterType.INTEGER, description="Cells whose 2 sources disagreed beyond tolerance."),
-                "cells_unchanged": ParameterMetadata(type=ParameterType.INTEGER, description="Cells that had a reading this run and were left as they were (an unconfirmed single source, a held manual value, a withdrawn cell)."),
-                "cells_created": ParameterMetadata(type=ParameterType.INTEGER, description="New cells this run created."),
-                "created": ParameterMetadata(type=ParameterType.LIST, description="runtime/model@effort of each cell created."),
-                "creation_capped": ParameterMetadata(type=ParameterType.BOOLEAN, description="True when the per-run creation cap is what held new cells back."),
-                "creation_suspended": ParameterMetadata(type=ParameterType.BOOLEAN, description="True when the live-row ceiling is what held new cells back."),
-                "deferred": ParameterMetadata(type=ParameterType.LIST, description="New cells waiting for a creation slot; the next run takes them."),
-                "awaiting_second_source": ParameterMetadata(type=ParameterType.LIST, description="New cells whose launch id was derived from a leaderboard name and whose detail page has not agreed yet; each is tried again next run."),
-                "withdrawn_left": ParameterMetadata(type=ParameterType.LIST, description="Withdrawn cells this run recorded readings for and left withdrawn."),
-                "unrenewable_stale": ParameterMetadata(type=ParameterType.LIST, description="Harness-listed models the leaderboard no longer scores: kept accepted with their last score, never withdrawn for that reason."),
-                "alias_candidates": ParameterMetadata(type=ParameterType.LIST, description="Leaderboard names and launch ids that look alike but were not joined."),
-                "harness": ParameterMetadata(type=ParameterType.DICT, description="Per runtime: harness list status, source, detail, client version, fetched_at, models offered and advisories."),
-                "unmapped_creators": ParameterMetadata(type=ParameterType.LIST, description="Leaderboard creators with no runtime, with their row counts."),
-                "efforts_outside_vocabulary": ParameterMetadata(type=ParameterType.DICT, description="Per model, harness efforts outside the effort ladder; none became a cell."),
-                "listed_not_launchable": ParameterMetadata(type=ParameterType.LIST, description="Leaderboard rows no harness model can launch."),
-                "creator_label_unmatched": ParameterMetadata(type=ParameterType.LIST, description="Runtimes whose creator label matched no row of a page that otherwise parsed."),
-                "single_source_unconfirmed": ParameterMetadata(type=ParameterType.LIST, description="Cells whose lone reading moved past tolerance of the prior value; the prior was kept."),
-                "manual_conflicts": ParameterMetadata(type=ParameterType.LIST, description="Manual cells the live pages disagree with; the manual value stays served."),
-                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Every loud notice this run raised, including the harness pass's."),
-                "harness_clock_started": ParameterMetadata(type=ParameterType.LIST, description="Cells whose model a current harness list does not list: the absence clock started or restarted."),
-                "harness_clock_cleared": ParameterMetadata(type=ParameterType.LIST, description="Cells whose model the harness lists again: the absence clock was cleared."),
-                "auto_withdrawn": ParameterMetadata(type=ParameterType.LIST, description="Cells withdrawn because the absence clock ran one staleness window (reversible)."),
-                "auto_reinstated": ParameterMetadata(type=ParameterType.LIST, description="Cells this refresh had withdrawn that were reinstated because the harness lists the model again."),
-            },
-        ),
+        return_value_schema=JOB_RETURN_SCHEMA,
     )
-    def refresh_model_capability_catalog(
+    def refresh_model_capability_catalog(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Persist a job; job_service.get_job returns the complete original outcome."""
+        request = dict(params.get("parameters", params))
+        return self._operation_jobs.submit(self, "refresh_model_capability_catalog", request, state, lambda values: self.refresh_model_capability_catalog_sync(values, state))
+
+    def refresh_model_capability_catalog_sync(
         self,
         params: dict[str, Any],
         state: dict[str, Any],  # noqa: ARG002
@@ -9042,6 +9021,7 @@ class AgentMessagingPlugin(
         )
 
     @platform_process(
+        is_async=True,
         name="peer_inbox",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -10091,6 +10071,7 @@ class AgentMessagingPlugin(
         )
 
     @platform_process(
+        is_async=True,
         name="set_autonomic_slot",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -10737,6 +10718,7 @@ class AgentMessagingPlugin(
         return peer_registry
 
     @platform_process(
+        is_async=True,
         name="start_interface",
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         parameters={},
@@ -11054,6 +11036,7 @@ class AgentMessagingPlugin(
 
     @platform_process(
         name="deliver_result",
+        is_async=True,
         context_handling=ContextHandling.SESSION_AWARE,
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         parameters={
@@ -11075,16 +11058,7 @@ class AgentMessagingPlugin(
         },
         output_type="object",
         output_description="Delivery confirmation.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.DICT,
-            description="Contains delivery confirmation.",
-            properties={
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=("'queued' when appended, or 'dropped_bridge_gone' when the originating bridge has already closed."),
-                ),
-            },
-        ),
+        return_value_schema=JOB_RETURN_SCHEMA,
         requires_result_processor=False,
     )
     def deliver_result(
@@ -11101,6 +11075,7 @@ class AgentMessagingPlugin(
 
     @platform_process(
         name="deliver_error",
+        is_async=True,
         context_handling=ContextHandling.SESSION_AWARE,
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         parameters={
@@ -11122,16 +11097,7 @@ class AgentMessagingPlugin(
         },
         output_type="object",
         output_description="Delivery confirmation.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.DICT,
-            description="Contains delivery confirmation.",
-            properties={
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="'queued' on success.",
-                ),
-            },
-        ),
+        return_value_schema=JOB_RETURN_SCHEMA,
         requires_result_processor=False,
     )
     def deliver_error(
@@ -11303,6 +11269,7 @@ class AgentMessagingPlugin(
             plugin_manager=getattr(orchestrator, "plugin_manager", None),
             export_policy=export_policy,
             max_message_chars=bridge_config.max_message_chars,
+            async_job_manager=orchestrator.async_job_manager,
         )
 
     @staticmethod

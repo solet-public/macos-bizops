@@ -1,12 +1,12 @@
 {
   "process_key": "service_interface::memory_service::audit_pinned_notes",
   "display_name": "Audit Pinned Notes",
-  "description": "Audit memories in the memorization queue (pinned notes). Shows all memorized items with their strength, review schedule, and content preview. Use this to identify stale or no-longer-needed pinned memories.",
+  "description": "Return a queued owned-job receipt (data.job_id and data.status). Read the exact id through job_service.get_job for the complete former response in job.result or the typed failure in job.error. Admission retains payload references locally; uncertain effects require reconciliation and must never be replayed automatically.\n\nAudit memories in the memorization queue (pinned notes). Shows all memorized items with their strength, review schedule, and content preview. Use this to identify stale or no-longer-needed pinned memories.",
   "embedding_description": "",
   "result_processor_customizations": {
     "action_label": "Audit Pinned Notes",
     "result_type": "pinned_notes_audit",
-    "result_description": "Audit of memories in the memorization queue with strength and schedule info",
+    "result_description": "The complete memory-operation response from the exact admitted job; the immediate response is a queued job receipt.",
     "presentation_guidance": "",
     "output_action_guidance": "Determine the appropriate next action based on the context and action result."
   },
@@ -14,5 +14,6 @@
     "action_context": "Auditing pinned notes in the memorization queue",
     "error_interpretation": "DatabaseError: failed to query memorization records.",
     "recovery_guidance": "Verify state storage is accessible."
-  }
+  },
+  "is_async": true
 }

@@ -14,29 +14,35 @@ Run: SOLET_NAME=<name> .venv/bin/python plugins/zuora_plugin/tests/smoke_payment
 
 from __future__ import annotations
 
-import base64
-import json
 import sys
-import tempfile
-import unittest
-from collections.abc import Callable
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch
-from urllib.parse import parse_qs, quote
+from unittest.mock import NonCallableMagicMock
 
-import httpx
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta/src"))
+import base64  # noqa: E402
+import json  # noqa: E402
+import tempfile  # noqa: E402
+import unittest  # noqa: E402
+from collections.abc import Callable  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock, patch  # noqa: E402
+from urllib.parse import parse_qs, quote  # noqa: E402
+
+import httpx  # noqa: E402
+from ananta.file_locations.containment import PathRefusedError  # noqa: E402
+from ananta.file_locations.resolution import SoletTree  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "zuora_plugin" / "src"))
 
 from ananta.core.plugins.action_discovery import discover_actions  # noqa: E402
 from ananta.core.process_registry.plugin_registration_validator import PluginRegistrationValidator  # noqa: E402
+from finish_support import finished  # noqa: E402  # pyright: ignore[reportMissingImports]
 from zuora_plugin import async_jobs, custom_object_actions, data_query_actions, payment_actions, typed_verbs, workflow_actions  # noqa: E402
 from zuora_plugin.app_config import ZuoraTenantConfig  # noqa: E402
-from zuora_plugin.constants import REQUEST_REDACTION  # noqa: E402
 from zuora_plugin.errors import ZuoraServiceError  # noqa: E402
-from zuora_plugin.export_containment import ExportPathRefusedError  # noqa: E402
 from zuora_plugin.http_client import ZuoraClient  # noqa: E402
 from zuora_plugin.plugin import ZuoraPlugin  # noqa: E402
 from zuora_plugin.typed_operations import Operation, PathGate, execute  # noqa: E402
@@ -63,6 +69,23 @@ _RECORD_ID = "258d65b2-7bc6-4142-88bc-5184931af493"
 _JOB_ID = "a3b2c1d0-1111-4e2f-9a8b-7c6d5e4f3a21"
 
 Handler = Callable[[httpx.Request], httpx.Response]
+
+
+_LOCATION_ROOT = Path(__file__).resolve().parents[3]
+_LOCATION_TREE = SoletTree(_LOCATION_ROOT, _LOCATION_ROOT / "profile")
+
+
+def _bind_locations(plugin: Any, directories: list[str]) -> NonCallableMagicMock:
+    """Supply a live address-book service through the production binding."""
+    orchestrator = NonCallableMagicMock()
+    orchestrator.APP_HOME = str(_LOCATION_TREE.app_home)
+    orchestrator.plugin_manager.get_plugin.return_value = None
+    orchestrator.get_service.return_value.list_path_addresses.return_value = {
+        "action_status": "completed",
+        "data": {"addresses": [{"name": f"project-{index}", "tags": [], "updated_at": datetime.now(UTC).isoformat(), "entries": [{"field_type": "path", "value": directory}]} for index, directory in enumerate(directories)]},
+    }
+    plugin.orchestrator_ref = orchestrator
+    return orchestrator
 
 
 def vendor_json(status: int, body: Any) -> httpx.Response:
@@ -112,7 +135,8 @@ class TenantCase(unittest.TestCase):
         self.addCleanup(self.workspace.cleanup)
         self.root = Path(self.workspace.name)
         self.plugin = ZuoraPlugin()
-        self.plugin.initialize({"export_allowed_roots": [str(self.root)]})
+        self.plugin.initialize({})
+        _bind_locations(self.plugin, [str(self.root)])
         self.token_mints = 0
         self.requests: list[httpx.Request] = []
 
@@ -141,6 +165,10 @@ class TenantCase(unittest.TestCase):
     def run_op(self, name: str, client: ZuoraClient, params: dict[str, Any]) -> dict[str, Any]:
         return execute(_OPS[name], client, params, self.gate)
 
+    def finish_op(self, name: str, client: ZuoraClient, params: dict[str, Any]) -> dict[str, Any]:
+        """The published envelope: the operation, then the plugin's one finish step."""
+        return finished(client, lambda c: self.run_op(name, c, params), params, name=name)
+
     def refuse(self, name: str, params: dict[str, Any]) -> None:
         """Dispatch and worker both refuse the input; no OAuth mint and no vendor request happen."""
         before = (self.token_mints, len(self.requests))
@@ -167,7 +195,7 @@ class RegistrationTests(unittest.TestCase):
         PluginRegistrationValidator().validate_edge_process_provider("zuora_plugin", plugin, list(actions.values()))
         edges = plugin.get_edge_process_definitions()
         self.assertEqual((len(_PAYMENT_OPS), len(_OBJECT_OPS)), (32, 20))
-        self.assertEqual(len(actions), 227)
+        self.assertEqual(len(actions), 255)
         for name in sorted(_OPS):
             with self.subTest(verb=name):
                 self.assertIn(name, actions)
@@ -198,57 +226,6 @@ class RegistrationTests(unittest.TestCase):
 
 
 class PaymentMethodTests(TenantCase):
-    def test_create_redacts_card_bank_and_token_values_in_every_form(self) -> None:
-        card, cvv, bank, token = "4111111111111111", "737", "000123456789", "gw-tok-5f6e7d8c"
-        forms = every_encoding(card, cvv, bank, token)
-        body = {
-            "type": "CreditCard",
-            "accountKey": "A00000101",
-            "cardNumber": card,
-            "securityCode": cvv,
-            "expirationMonth": 12,
-            "expirationYear": 2030,
-            "cardHolderInfo": {"cardHolderName": "Grace Hopper", "country": "United States"},
-            "accountNumber": bank,
-            "tokens": {"tokenId": token, "gatewayType": "Adyen"},
-        }
-        calls = iter(("ok", "refused"))
-
-        def vendor(req: httpx.Request) -> httpx.Response:
-            self.assertEqual((req.method, req.url.path), ("POST", "/v1/payment-methods"))
-            self.assertEqual(json.loads(req.content)["cardNumber"], card)
-            if next(calls) == "ok":
-                return vendor_json(200, {"success": True, "id": _PM_ID, "echo": " ".join(forms)})
-            return vendor_json(400, refusal(53000020, f"Card {forms[0]} declined; CVV {forms[5]}; account {forms[9]}; token {forms[14]}"))
-
-        client = self.client(vendor)
-        with self.assertLogs("zuora_plugin", level="INFO") as audit:
-            created = self.run_op("create_payment_method", client, {"body": body, "idempotency_key": "pm-acme-1"})
-            with self.assertRaises(ZuoraServiceError) as rejected:
-                self.run_op("create_payment_method", client, {"body": body})
-        rendered = json.dumps(created) + str(rejected.exception) + " ".join(audit.output)
-        for form in forms:
-            self.assertNotIn(form, rendered)
-        self.assertIn(REQUEST_REDACTION, created["data"]["echo"])
-        self.assertEqual(created["data"]["id"], _PM_ID)
-        self.assertEqual(self.requests[0].headers["Idempotency-Key"], "pm-acme-1")
-        self.assertEqual(rejected.exception.code, "zuora.validation_failed")
-
-    def test_encrypted_wallet_token_and_profile_security_code_redacted(self) -> None:
-        wallet, cvc = "eyJ2ZXJzaW9uIjoiRUNfdjEiLCJkYXRhIjoiZml4dHVyZSJ9", "4321"
-
-        def vendor(req: httpx.Request) -> httpx.Response:
-            sent = json.loads(req.content)
-            return vendor_json(200, {"success": True, "paymentMethodId": _PM_ID, "echo": f"{sent.get('paymentToken', '')} {sent.get('cardSecurityCode', '')}"})
-
-        client = self.client(vendor)
-        decrypted = self.run_op("decrypt_payment_method", client, {"body": {"integrationType": "ApplePay", "merchantID": "merchant.com.example", "paymentToken": wallet, "processPayment": False}})
-        profile = self.run_op("create_stored_credential_profile", client, {"payment_method_id": _PM_ID, "body": {"consentAgreementSrc": "External", "status": "Agreed", "type": "Recurring", "cardSecurityCode": cvc}})
-        self.assertNotIn(wallet, json.dumps(decrypted))
-        self.assertNotIn(cvc, json.dumps(profile))
-        self.refuse("decrypt_payment_method", {"body": {"integrationType": "ApplePay", "merchantID": "m"}})
-        self.refuse("create_stored_credential_profile", {"payment_method_id": _PM_ID, "body": {"status": "Agreed", "type": "Recurring"}})
-
     def test_read_correct_verify_scrub_and_delete_lifecycle(self) -> None:
         seen: list[tuple[str, str, Any]] = []
 
@@ -329,13 +306,13 @@ class PaymentMethodTests(TenantCase):
             return vendor_json(200, {"success": True})
 
         client = self.client(vendor)
-        listed = self.run_op("list_wallet_domains", client, {"wallet_type": "ApplePay", "domain_name": "shop.example.com", "zuora_track_id": "wallet-1"})
+        listed = self.finish_op("list_wallet_domains", client, {"wallet_type": "ApplePay", "domain_name": "shop.example.com", "zuora_track_id": "wallet-1"})["data"]
         self.assertEqual(listed["data"]["domains"][0]["walletType"], "ApplePay")
         self.run_op("register_wallet_domain", client, {"body": {"domainName": "shop.example.com", "walletType": "GooglePay"}})
         self.run_op("unregister_wallet_domain", client, {"domain_id": "402881a38924ff1001892502da090021"})
-        session = self.run_op("create_payment_session", client, {"body": {"amount": 25.0, "currency": "USD", "processPayment": False, "accountId": "8a90acct"}})
+        session = self.finish_op("create_payment_session", client, {"body": {"amount": 25.0, "currency": "USD", "processPayment": False, "accountId": "8a90acct"}})["data"]
         self.assertEqual(session["data"]["token"], "session-token-fixture")
-        self.assertEqual(session["data"]["echo"], f"{REQUEST_REDACTION} {REQUEST_REDACTION}")
+        self.assertEqual(session["data"]["echo"], f"{_SECRET} {_TOKEN}")
         self.assertEqual(self.requests[2].method, "DELETE")
         self.refuse("list_wallet_domains", {"domain_name": "shop.example.com"})
         self.refuse("register_wallet_domain", {"body": {"domainName": "shop.example.com"}})
@@ -583,7 +560,7 @@ class BulkJobTests(TenantCase):
         (self.root / "empty.csv").write_bytes(b"")
         client = self.client(lambda _: self.fail("no vendor request expected"))
         for path in (outside.name, str(self.root / "rows.txt"), str(self.root / "empty.csv"), str(self.root / "missing.csv")):
-            with self.subTest(path=path), self.assertRaises((ValueError, ExportPathRefusedError)):
+            with self.subTest(path=path), self.assertRaises((ValueError, PathRefusedError)):
                 self.run_op("upload_custom_object_job_file", client, {"job_id": _JOB_ID, "input_path": path})
         with self.assertRaises(ValueError):
             typed_verbs.validate_typed("upload_custom_object_job_file", {"job_id": _JOB_ID})
@@ -695,24 +672,6 @@ class Build3FollowUpHeaderTests(TenantCase):
 
 
 class CredentialAndDispatchTests(TenantCase):
-    def test_registered_credentials_redacted_raw_percent_and_base64(self) -> None:
-        echoed = every_encoding(_CLIENT_ID, _SECRET, _TOKEN)
-        for name, params in (
-            ("query_objects", {"object": "accounts"}),
-            ("get_custom_object_record", {"object": "vehicle", "record_id": _RECORD_ID}),
-            ("get_payment", {"payment_key": "P-1"}),
-        ):
-            with self.subTest(verb=name):
-                ok = self.client(lambda _: vendor_json(200, {"data": [{"name": " ".join(echoed)}], "make__c": " ".join(echoed), "comment": " ".join(echoed)}))
-                bad = self.client(lambda _: vendor_json(400, refusal(50000000, " ".join(echoed))))
-                with self.assertLogs("zuora_plugin", level="INFO") as audit:
-                    success = self.run_op(name, ok, params)
-                    with self.assertRaises(ZuoraServiceError) as raised:
-                        self.run_op(name, bad, params)
-                rendered = json.dumps(success) + str(raised.exception) + " ".join(audit.output)
-                for value in echoed:
-                    self.assertNotIn(value, rendered)
-
     def test_expired_token_reminted_once_then_reported(self) -> None:
         statuses = iter((401, 200))
         recovering = self.client(lambda _: vendor_json(next(statuses), {"data": []}))

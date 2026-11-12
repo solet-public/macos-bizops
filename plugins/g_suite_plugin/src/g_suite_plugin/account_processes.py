@@ -3,7 +3,8 @@
 list_accounts, set_default_account and disconnect_account manage the connected
 Google accounts (contract in :mod:`accounts`). They read and write only the
 local vault, except disconnect_account, which also revokes the account's grant
-at Google.
+at Google: it checks the account at once and runs the revoke and the vault
+deletion in the plugin's job worker (``_disconnect_now``).
 """
 
 from __future__ import annotations
@@ -23,12 +24,12 @@ from ananta.core.actions.action_metadata import (
 from ananta.core.domain.enums import ProcessorPolicyCategory
 
 from .accounts import AccountStore
+from .completion_templates import queued_handle_schema
 from .constants import ERROR_INVALID_PARAMS
 from .errors import classify_exception
 from .oauth.oauth_client import GoogleTokens, revoke_token
 from .oauth.service_factory import probe_account
 from .oauth.token_store import TokenStore, TokenStoreError
-from .redaction import redact, redact_text
 
 ACCOUNT_PARAM = ParameterMetadata(
     type=ParameterType.STRING,
@@ -53,7 +54,7 @@ def account_selector(params: dict[str, Any]) -> str | None:
 
 
 class VerbFailureError(Exception):
-    """A classified, redacted verb failure (code + message)."""
+    """A classified verb failure (code + message)."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -73,8 +74,8 @@ class AccountProcesses:
     def _probe_store(store: TokenStore) -> tuple[str, str]:
         return probe_account(store.get_access_token())
 
-    def _call_as_account(self, verb: str, params: dict[str, Any], produce: Callable[[], dict[str, Any]]) -> dict[str, Any]:
-        """Resolve the account, run ``produce`` as it, name it in the result and redact secrets."""
+    def _call_as_account[Result](self, verb: str, params: dict[str, Any], produce: Callable[[], Result]) -> Result:
+        """Bind account metadata to the vendor result, returned as received; a non-mapping result is returned unchanged."""
         accounts = self._require_accounts()
         resolved = accounts.resolve(account_selector(params), self._probe_store)
         email = resolved.record.email
@@ -82,16 +83,18 @@ class AccountProcesses:
         token = ACTIVE_ACCOUNT.set(email)
         try:
             data = produce()
-        except Exception as exc:  # noqa: BLE001 — classified and redacted, then re-raised typed
+        except Exception as exc:  # noqa: BLE001 — classified, then re-raised typed
             code, message = classify_exception(exc, verb, store.credential_facts()["granted_scopes"])
-            raise VerbFailureError(code, redact_text(message, store.issued_secrets())) from exc
+            raise VerbFailureError(code, message) from exc
         finally:
             ACTIVE_ACCOUNT.reset(token)
-        shaped = cast(dict[str, Any], redact(data, store.issued_secrets()))
+        if not isinstance(data, dict):
+            return data
+        shaped = dict(cast(dict[str, Any], data))
         shaped["account"] = email
         if resolved.note:
             shaped["account_note"] = resolved.note
-        return shaped
+        return cast(Result, shaped)
 
     def _complete_connect(self, state: str, tokens: GoogleTokens) -> str:
         """OAuth callback completion: store tokens under the account they belong to.
@@ -120,6 +123,9 @@ class AccountProcesses:
         raise NotImplementedError
 
     def _error(self, code: str, message: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def _dispatch_deferred(self, params: dict[str, Any], state: dict[str, Any], verb: str) -> dict[str, Any]:
         raise NotImplementedError
 
     @platform_process(
@@ -177,13 +183,15 @@ class AccountProcesses:
     @platform_process(
         name="disconnect_account",
         display_name="Google Workspace: Disconnect Account",
-        description=("Disconnect one Google account: revoke its grant at Google and delete only that account's credentials from the vault. Other connected accounts are untouched; if it was the default, the next account becomes the default."),
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={"account": _REQUIRED_ACCOUNT},
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="{account, revoke_status, credentials_deleted, new_default}.",
+        description=(
+            "Disconnect one Google account: revoke its grant at Google and delete only that account's credentials from the vault. Other connected accounts are untouched; if it was the default, the next account becomes the default. "
+            "Runs as a background job: a missing or unknown account is refused at once; otherwise this returns a job_id immediately and the outcome arrives when the job completes."
         ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        is_async=True,
+        is_long_running=True,
+        parameters={"account": _REQUIRED_ACCOUNT},
+        return_value_schema=queued_handle_schema("{account, revoke_status, credentials_deleted, new_default}"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         context_handling=ContextHandling.NONE,
     )
@@ -191,25 +199,29 @@ class AccountProcesses:
         selector = params.get("account")
         if not isinstance(selector, str) or not selector:
             return self._error(ERROR_INVALID_PARAMS, "'account' is required: an email or alias from list_accounts")
-        accounts = self._require_accounts()
         try:
-            records = accounts.records()
-            target = next((r for r in records if selector.strip().lower() in (r.email, r.alias.lower())), None)
-            revoke_status = "not_attempted"
-            if target is not None:
-                refresh_value, _ = accounts.token_store(target.email).read_raw_pair()
-                revoke_status = _revoke(refresh_value)
-            removed, new_default = accounts.remove(selector)
+            self._require_accounts().select(selector)
         except TokenStoreError as exc:
             return self._error(exc.code, str(exc))
-        return self._success(
-            {
-                "account": removed.email,
-                "revoke_status": revoke_status,
-                "credentials_deleted": True,
-                "new_default": new_default.email if new_default else "",
-            }
-        )
+        return self._dispatch_deferred(params, state, "disconnect_account")
+
+    def _disconnect_now(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Worker side of disconnect_account: revoke at Google (best effort), then delete only this account's credentials."""
+        selector = str(params["account"])
+        accounts = self._require_accounts()
+        records = accounts.records()
+        target = next((r for r in records if selector.strip().lower() in (r.email, r.alias.lower())), None)
+        revoke_status = "not_attempted"
+        if target is not None:
+            refresh_value, _ = accounts.token_store(target.email).read_raw_pair()
+            revoke_status = _revoke(refresh_value)
+        removed, new_default = accounts.remove(selector)
+        return {
+            "account": removed.email,
+            "revoke_status": revoke_status,
+            "credentials_deleted": True,
+            "new_default": new_default.email if new_default else "",
+        }
 
 
 def _revoke(refresh_value: str | None) -> str:

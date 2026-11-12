@@ -60,10 +60,19 @@ _ALLOWED_PUBLIC_INPUTS: dict[str, frozenset[str]] = {
     # The existing-install flow's closed handler rows (design section 3.2); the
     # create flow never reaches them and they never reach a genesis handler.
     **EXISTING_ALLOWED_PUBLIC_INPUTS,
-    "hydration::shell.install": frozenset({"git_controller_name", "selected_coding_agents"}),
+    "hydration::shell.install": frozenset({"execution_topology", "selected_coding_agents"}),
     "hydration::shell.probe_path": frozenset({"selected_coding_agents"}),
     "service_interface::embedding_service.get_embedding_dimension": (READINESS_PUBLIC_INPUT_KEYS),
-    "genesis::solet.run": frozenset({"solet_name", "clone_directory", "setup_profile", "autostart", "selected_coding_agents", *IMPLEMENTATION_DECISIONS}),
+    "genesis::solet.run": frozenset(
+        {
+            "solet_name",
+            "clone_directory",
+            "setup_profile",
+            "autostart",
+            "selected_coding_agents",
+            *IMPLEMENTATION_DECISIONS,
+        }
+    ),
     # The llama.cpp service and model callables serve only the roles those decisions selected.
     **dict.fromkeys(
         (

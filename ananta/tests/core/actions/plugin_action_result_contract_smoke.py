@@ -37,7 +37,8 @@ import ast
 import asyncio
 import os
 import sys
-from collections.abc import Callable
+import tempfile
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -54,14 +55,8 @@ REQUIRED_FIELDS = ("action_status", "data", "actions", "error", "timestamp")
 
 # Sites the source audit finds but which are not plugin results (value = why).
 _NOT_A_PLUGIN_RESULT: dict[str, str] = {
-    "audio_processing_plugin/sweep.py::_invoke_inner": (
-        "the sweep's own per-combination record; never returned from a verb"
-    ),
-    "actr_memory_plugin/backend.py::*": (
-        "memory-service API results (MemoryServiceInterface), reached through the "
-        "service-interface path that requires only a dict; the plugin's own "
-        "@platform_process verbs wrap them with _build_response"
-    ),
+    "audio_processing_plugin/sweep.py::_invoke_inner": ("the sweep's own per-combination record; never returned from a verb"),
+    "actr_memory_plugin/backend.py::*": ("memory-service API results (MemoryServiceInterface), reached through the service-interface path that requires only a dict; the plugin's own @platform_process verbs wrap them with _build_response"),
 }
 
 _passed = 0
@@ -112,10 +107,10 @@ class _Action:
     source_plugin = None
 
 
-def _dispatch(plugin: object, verb: str, params: dict[str, object] | None = None) -> dict[str, object]:
+def _dispatch(plugin: object, verb: str, params: Mapping[str, object] | None = None) -> dict[str, object]:
     """Run ``plugin.<verb>`` through ``ActionProcessor._execute_plugin_action``."""
     processor = ActionProcessor(plugin_manager=_PluginManager(plugin))  # type: ignore[arg-type]
-    return processor._execute_plugin_action("contract_smoke", verb, params or {}, _Action())  # type: ignore[arg-type]
+    return processor._execute_plugin_action("contract_smoke", verb, dict(params or {}), _Action())  # type: ignore[arg-type]
 
 
 class _Adapter:
@@ -129,7 +124,7 @@ class _Adapter:
         return self._produce()
 
 
-def _accepted(label: str, plugin: object, verb: str, params: dict[str, object] | None = None) -> None:
+def _accepted(label: str, plugin: object, verb: str, params: Mapping[str, object] | None = None) -> None:
     """The real validator accepts the result and every required field is present."""
     try:
         result = _dispatch(plugin, verb, params)
@@ -198,9 +193,11 @@ class _BedrockRuntime:
 class _BedrockControl:
     @staticmethod
     def list_foundation_models(**_kwargs: object) -> dict[str, object]:
-        return {"modelSummaries": [
-            {"modelId": "m", "modelName": "M", "outputModalities": ["EMBEDDING"]},
-        ]}
+        return {
+            "modelSummaries": [
+                {"modelId": "m", "modelName": "M", "outputModalities": ["EMBEDDING"]},
+            ]
+        }
 
 
 def test_titanv2_embeddings() -> None:
@@ -368,14 +365,16 @@ def test_lifecycle_hooks() -> None:
 # capability bundles for macos-bizops, macos_free_minimal and macos_samantha). The audit must
 # reach each one, so an audit that finds nothing, or misses a plugin directory, goes red in
 # every profile instead of passing on an empty population.
-_ANCHORS: frozenset[str] = frozenset({
-    "openai_embeddings_plugin/response_builders.py::success_result",
-    "openai_embeddings_plugin/response_builders.py::error_result",
-    "postgres_state_management_plugin/result_helpers.py::create_success_result",
-    "postgres_state_management_plugin/result_helpers.py::create_error_result",
-    "coreai_embeddings_plugin/contracts.py::result",
-    "coreai_embeddings_plugin/contracts.py::failure",
-})
+_ANCHORS: frozenset[str] = frozenset(
+    {
+        "openai_embeddings_plugin/response_builders.py::success_result",
+        "openai_embeddings_plugin/response_builders.py::error_result",
+        "postgres_state_management_plugin/result_helpers.py::create_success_result",
+        "postgres_state_management_plugin/result_helpers.py::create_error_result",
+        "coreai_embeddings_plugin/contracts.py::result",
+        "coreai_embeddings_plugin/contracts.py::failure",
+    }
+)
 
 
 def _literal_values(node: ast.Dict) -> dict[str, ast.expr] | None:
@@ -385,10 +384,7 @@ def _literal_values(node: ast.Dict) -> dict[str, ast.expr] | None:
     """
     if any(key is None for key in node.keys):
         return None
-    return {
-        k.value: v for k, v in zip(node.keys, node.values, strict=True)
-        if isinstance(k, ast.Constant) and isinstance(k.value, str)
-    }
+    return {k.value: v for k, v in zip(node.keys, node.values, strict=True) if isinstance(k, ast.Constant) and isinstance(k.value, str)}
 
 
 def _result_literals(tree: ast.Module) -> list[tuple[ast.AST, dict[str, ast.expr], str]]:
@@ -422,26 +418,51 @@ def _wrong_type(values: dict[str, ast.expr]) -> list[str]:
     """Fields whose literal value the validator rejects: ``data`` must be a dict, ``actions`` a list."""
     wrong: list[str] = []
     data = values.get("data")
-    if data is not None and (
-        isinstance(data, ast.List | ast.Tuple | ast.Set | ast.Constant)
-    ):
+    if data is not None and (isinstance(data, ast.List | ast.Tuple | ast.Set | ast.Constant)):
         wrong.append("data is not a dict")
     actions = values.get("actions")
-    if actions is not None and (
-        isinstance(actions, ast.Dict | ast.Tuple | ast.Set | ast.Constant)
-    ):
+    if actions is not None and (isinstance(actions, ast.Dict | ast.Tuple | ast.Set | ast.Constant)):
         wrong.append("actions is not a list")
     return wrong
+
+
+_BUNDLED_VENV_PREFIX = ".venv"
+
+
+def _audit_paths(plugins_root: Path) -> list[Path]:
+    """Plugin source files the audit reads: no tests, no bundled virtualenv."""
+    paths: list[Path] = []
+    for path in sorted(plugins_root.glob("*/src/**/*.py")):
+        parts = path.relative_to(plugins_root).parts
+        if "tests" in parts or any(part.startswith(_BUNDLED_VENV_PREFIX) for part in parts):
+            continue
+        paths.append(path)
+    return paths
+
+
+def test_source_audit_skips_bundled_venv() -> None:
+    with tempfile.TemporaryDirectory(prefix="contract-smoke-audit-") as directory:
+        source = Path(directory) / "plugins" / "demo_plugin" / "src"
+        kept = source / "demo_plugin" / "verbs.py"
+        test_file = source / "demo_plugin" / "tests" / "verbs_smoke.py"
+        vendored = source / ".venv_demo" / "lib" / "vendored.py"
+        for path in (kept, test_file, vendored):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        kept.write_text("VALUE = 1\n", encoding="utf-8")
+        test_file.write_text("VALUE = 2\n", encoding="utf-8")
+        vendored.write_bytes(b"\xa4\n")
+        _check(
+            _audit_paths(Path(directory) / "plugins") == [kept],
+            "the audit reads plugin source only: tests and a bundled virtualenv are skipped",
+        )
 
 
 def test_source_audit() -> None:
     sites = 0
     offenders: list[str] = []
     seen: set[str] = set()
-    for path in sorted((REPO_ROOT / "plugins").glob("*/src/**/*.py")):
-        if "tests" in path.parts:
-            continue
-        tree = ast.parse(path.read_text())
+    for path in _audit_paths(REPO_ROOT / "plugins"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         rel_plugin = path.relative_to(REPO_ROOT / "plugins")
         short = f"{rel_plugin.parts[0]}/{path.name}"
         for node, values, function in _result_literals(tree):
@@ -473,6 +494,7 @@ def main() -> int:
     test_coreai_embeddings()
     test_thinking_planning_submit()
     test_lifecycle_hooks()
+    test_source_audit_skips_bundled_venv()
     test_source_audit()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     return 1 if _failed else 0

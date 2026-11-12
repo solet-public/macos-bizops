@@ -2,7 +2,7 @@
 
 Same contract as ``payment_processes``: EDGE, deferred completion, one vendor
 operation from ``billing_document_actions`` per job, vendor RBAC the only
-boundary. Refund payment-instrument values are redacted from every echo.
+boundary.
 """
 
 from __future__ import annotations
@@ -259,7 +259,7 @@ class CreditMemoProcesses:
     @platform_process(
         name="refund_credit_memo",
         display_name="Zuora: Refund Credit Memo",
-        description="Refund the unapplied part of a posted credit memo to the customer (POST /v1/credit-memos/{creditMemoKey}/refund), electronically or externally; body needs totalAmount and type. Payment-instrument values are redacted." + QUEUED_NOTE,
+        description="Refund the unapplied part of a posted credit memo to the customer (POST /v1/credit-memos/{creditMemoKey}/refund), electronically or externally; body needs totalAmount and type." + QUEUED_NOTE,
         processor_policy_category=EDGE,
         parameters={"credit_memo_key": CREDIT_MEMO_KEY, "body": body("totalAmount and type (required: Electronic or External), methodType, paymentMethodId, gatewayId, refundDate, items, reasonCode, referenceId, comment and the rest."), **IDEMPOTENT_HEADER_PARAMS},
         return_value_schema=QUEUED,
@@ -337,7 +337,7 @@ class CreditMemoProcesses:
     @platform_process(
         name="upload_credit_memo_file",
         display_name="Zuora: Upload Credit Memo File",
-        description="Upload an externally generated PDF to a Draft or Posted credit memo (POST /v1/credit-memos/{creditMemoKey}/files, multipart/form-data) from input_path under export_allowed_roots." + QUEUED_NOTE,
+        description="Upload an externally generated PDF to a Draft or Posted credit memo (POST /v1/credit-memos/{creditMemoKey}/files, multipart/form-data) from input_path under registered path addresses." + QUEUED_NOTE,
         processor_policy_category=EDGE,
         parameters={"credit_memo_key": CREDIT_MEMO_KEY, "input_path": PDF_INPUT, **IDEMPOTENT_HEADER_PARAMS},
         return_value_schema=QUEUED,

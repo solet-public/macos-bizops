@@ -114,7 +114,6 @@ MARKETO_RATE_WINDOW_MAX_CALLS: Final[int] = 90
 # docstring for the full shape.
 # ---------------------------------------------------------------------------
 TSV_SUFFIX: Final[str] = ".tsv"
-CONFIG_KEY_EXPORT_ALLOWED_ROOTS: Final[str] = "export_allowed_roots"
 # Vendor per-call ceiling shared by get_leads/get_activities/list_campaigns/
 # list_static_lists — VENDOR-IMPOSED, citation: design doc §3 census,
 # "Get Lead Activities / list-style reads return 300/page server-side."
@@ -305,6 +304,20 @@ CHECK_SETUP_UNVERIFIED_WRITE_VERBS: Final[tuple[str, ...]] = (
     "delete_asset_folder",
     "set_asset_token",
     "delete_asset_token",
+    "create_asset_file",
+    "update_asset_file_content",
+    "import_leads",
+    "import_custom_objects",
+    "import_program_members",
+    "create_bulk_lead_extract",
+    "enqueue_bulk_lead_extract",
+    "cancel_bulk_lead_extract",
+    "create_bulk_activity_extract",
+    "enqueue_bulk_activity_extract",
+    "cancel_bulk_activity_extract",
+    "create_bulk_program_member_extract",
+    "enqueue_bulk_program_member_extract",
+    "cancel_bulk_program_member_extract",
 )
 
 # ---------------------------------------------------------------------------
@@ -340,7 +353,4 @@ PARAM_JOB_ID: Final[str] = "job_id"
 # Generic authenticated request. No method allowlist: vendor RBAC decides.
 RESULT_TYPE_REQUEST: Final[str] = "marketo_request_result"
 REQUEST_REDACTION: Final[str] = "[REDACTED]"
-REQUEST_SECRET_KEYS: Final[frozenset[str]] = frozenset(
-    {"access_token", "refresh_token", "client_secret", "authorization", "password"},
-)
 REQUEST_VERB_LABEL: Final[str] = "authenticated request (may change vendor state)"

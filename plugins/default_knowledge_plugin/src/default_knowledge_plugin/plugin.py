@@ -23,10 +23,12 @@ Implementation is decomposed across sibling modules:
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Concatenate, Protocol, cast
 
 from ananta.core.domain.enums import ActionStatus, ErrorSeverity
 from ananta.core.domain.types import ActionResult, ErrorDetail
@@ -138,6 +140,9 @@ class DefaultKnowledgePlugin(
         self._embedding_service: Any = None
         self._address_book_service: Any = None
         self._kb_root: Path | None = None
+        # Registered workers, synchronous callers and startup share the complete
+        # provider operation, including both sides of chunk/record replacement.
+        self._activity_lock = threading.RLock()
         # Single-slot background executor for audit_retrieval_corpus_cron
         # (B-M6 fast-return-contract fix). See _search_plugin_mixin.py.
         self._kb_audit_executor = BoundedSummaryExecutor(name="kb-retrieval-audit")
@@ -255,3 +260,26 @@ class DefaultKnowledgePlugin(
         self._services_started = False
         logger.debug(f"{PLUGIN_NAME}: services stopped")
         return _lifecycle_completed()
+
+
+def _serialized_activity[**P, T](operation: Callable[Concatenate[DefaultKnowledgePlugin, P], T]) -> Callable[Concatenate[DefaultKnowledgePlugin, P], T]:
+    """One reentrant provider seam, preserving each synchronous signature/result.
+
+    Composition such as test_retrieval -> search stays on the current thread.
+    Knowledge's synchronous memory dependency must never call back from a
+    different worker into this owner while the current body is waiting on it.
+    """
+
+    @wraps(operation)
+    def run(plugin: DefaultKnowledgePlugin, *args: P.args, **kwargs: P.kwargs) -> T:
+        with plugin._activity_lock:
+            return operation(plugin, *args, **kwargs)
+
+    return run
+
+
+# Bind the shared adapter once; no per-verb worker or per-verb wrapper body.
+# list_installed and the existing audit admissions remain bounded controls.
+_SERIAL_KNOWLEDGE_ACTIVITIES = frozenset({"archive_file", "browse", "create_file", "delete_file", "edit_file", "ingest", "install", "purge_orphaned_chunks", "read_file", "refresh_plugin_process", "refresh_plugin_processes", "search", "search_planning_references", "test_retrieval", "uninstall", "update"})
+for _activity_name in _SERIAL_KNOWLEDGE_ACTIVITIES:
+    setattr(DefaultKnowledgePlugin, _activity_name, _serialized_activity(cast(Callable[..., Any], getattr(DefaultKnowledgePlugin, _activity_name))))

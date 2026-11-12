@@ -26,16 +26,14 @@ Lifecycle (vendor-defined, Invoice Settlement where Zuora says so):
   written off. Void is not delete: cancel, reverse and write-off keep the
   document; delete removes it.
 
-Every write is one vendor call; nothing here replays a write. Payment
-instrument values in a refund or collect body are redacted like the
-Payments family's.
+Every write is one vendor call; nothing here replays a write.
 """
 
 from __future__ import annotations
 
 from typing import Any, Final
 
-from .commerce_fields import IDEMPOTENT_HEADERS, PAGE_FIELDS, V1_HEADERS, page_check, payment_secrets, vendor_body
+from .commerce_fields import IDEMPOTENT_HEADERS, PAGE_FIELDS, V1_HEADERS, page_check, vendor_body
 from .typed_operations import BodyBuilder, Field, Operation, PathGate, QueryCheck, RawBody, multipart_file
 
 # The three pdf-status routes document Zuora-Track-Id, Zuora-Entity-Ids and Zuora-Version only.
@@ -238,7 +236,7 @@ CREDIT_MEMO_OPERATIONS: Final[tuple[Operation, ...]] = (
     _write("unapply_credit_memo_async", "PUT", _CM + "/unapply-async", CREDIT_MEMO_KEY, vendor_body()),
     _read("get_credit_memo_apply_async_job", "/v1/credit-memos/apply-async-jobs/{apply_async_job_id}", {"apply_async_job_id": Field("apply_async_job_id", "str_id", required=True)}),
     _read("get_credit_memo_unapply_async_job", "/v1/credit-memos/unapply-async-jobs/{unapply_async_job_id}", {"unapply_async_job_id": Field("unapply_async_job_id", "str_id", required=True)}),
-    _write("refund_credit_memo", "POST", _CM + "/refund", CREDIT_MEMO_KEY, vendor_body("totalAmount", "type"), idempotent=True, secrets=payment_secrets),
+    _write("refund_credit_memo", "POST", _CM + "/refund", CREDIT_MEMO_KEY, vendor_body("totalAmount", "type"), idempotent=True),
     _write("reverse_credit_memo", "PUT", _CM + "/reverse", CREDIT_MEMO_KEY, vendor_body(optional=True)),
     _write("write_off_credit_memo", "PUT", "/v1/credit-memos/{credit_memo_id}/write-off", CREDIT_MEMO_ID, vendor_body(optional=True)),
     _write("email_credit_memo", "POST", _CM + "/emails", CREDIT_MEMO_KEY, vendor_body(optional=True), idempotent=True),
@@ -267,7 +265,7 @@ DEBIT_MEMO_OPERATIONS: Final[tuple[Operation, ...]] = (
     _write("post_debit_memo", "PUT", _DM + "/post", DEBIT_MEMO_KEY),
     _write("unpost_debit_memo", "PUT", _DM + "/unpost", DEBIT_MEMO_KEY),
     _write("cancel_debit_memo", "PUT", _DM + "/cancel", DEBIT_MEMO_KEY),
-    _write("collect_debit_memo", "POST", _DM + "/collect", DEBIT_MEMO_KEY, vendor_body(optional=True), idempotent=True, secrets=payment_secrets),
+    _write("collect_debit_memo", "POST", _DM + "/collect", DEBIT_MEMO_KEY, vendor_body(optional=True), idempotent=True),
     _write("write_off_debit_memo", "PUT", _DM + "/write-off", DEBIT_MEMO_KEY, vendor_body(optional=True)),
     _write("email_debit_memo", "POST", _DM + "/emails", DEBIT_MEMO_KEY, vendor_body(optional=True), idempotent=True),
     _write("generate_debit_memo_pdf", "POST", _DM + "/pdfs", DEBIT_MEMO_KEY, idempotent=True),

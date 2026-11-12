@@ -2,18 +2,13 @@
 
 Single source of truth for every magic value: the connection registry
 address-book shape, the platform-DB containment markers (§8.4), session
-hardening knobs, the Datagrip-parity read-leader set (belt), result caps,
-error codes, and result types.
+hardening knobs, result caps, error codes, and result types.
 
-Posture (operator-ratified rev-D/rev-F for the READ verbs; reversed for write
-by operator ruling 2026-08-09 + Amendment 1 — "vendor RBAC is the control
-plane"): every read verb is READ-ONLY, HARD via the psycopg3 connection
-read-only characteristic (``conn.read_only = True``, connection.py); the
-read-leader guard + single-statement parser are belts, read-verb-only. The
-write verb (``run_statement``) opens with ``read_only=False`` and performs NO
-plugin-side access control — what it can do is decided entirely by the
-registered credential's own server-side Postgres GRANTs. See knowledge_base/
-01_external_postgres_overview.md for the full posture + containment invariants.
+Posture (USER ruling rul_4c99a30d, 2026-11-06, after the operator's 2026-08-09
+reversal + Amendment 1): the registered credential's own server-side Postgres
+GRANTs are the only boundary. No verb opens a read-only connection and no verb
+refuses a statement by its leading keyword. See knowledge_base/
+01_external_postgres_overview.md and vendor_api_coverage.md.
 
 This is a "super Datagrip" over FOREIGN Postgres databases the operator
 registers as ``external_pg::<name>`` address-book entries — never the platform's
@@ -35,8 +30,7 @@ def _solet_or_fail() -> str:
     name = os.environ.get("SOLET_NAME", "").strip()
     if not name:
         raise RuntimeError(
-            "external_postgres_plugin.constants: SOLET_NAME env var is "
-            "required to resolve scoped vault keys.",
+            "external_postgres_plugin.constants: SOLET_NAME env var is required to resolve scoped vault keys.",
         )
     return name
 
@@ -95,9 +89,7 @@ PLATFORM_DBNAME: Final[str] = _SOLET
 # host both canonicalize to "" via connection._normalize_host, so "" in this
 # set matches every unix-socket spelling.
 SOCKET_HOST_SENTINEL: Final[str] = ""
-PLATFORM_HOSTS: Final[frozenset[str]] = frozenset(
-    {"localhost", "127.0.0.1", "::1", SOCKET_HOST_SENTINEL}
-)
+PLATFORM_HOSTS: Final[frozenset[str]] = frozenset({"localhost", "127.0.0.1", "::1", SOCKET_HOST_SENTINEL})
 # The platform's own Postgres port. Read from THIS plugin's own config
 # (plugin.yaml ``platform_pg_port``) at readiness and injected into the guard;
 # NEVER read from the state plugin's config (that coupling is what the design
@@ -111,17 +103,6 @@ CONFIG_KEY_PLATFORM_PG_PORT: Final[str] = "platform_pg_port"
 CONNECT_TIMEOUT_SECONDS: Final[int] = 10
 STATEMENT_TIMEOUT_MS_DEFAULT: Final[int] = 30_000
 CONFIG_KEY_STATEMENT_TIMEOUT_MS: Final[str] = "statement_timeout_ms"
-
-# ---------------------------------------------------------------------------
-# Read-leader guard (belt — the LOAD-BEARING write-stopper is conn.read_only).
-# The full Datagrip read/introspection family (rev-D addendum b): blocking
-# EXPLAIN/SHOW in a Datagrip replacement is a workflow-breaker, and
-# ``EXPLAIN ANALYZE <write>`` is safe because the read-only session refuses the
-# write at SQLSTATE 25006 regardless.
-# ---------------------------------------------------------------------------
-READ_LEADERS: Final[frozenset[str]] = frozenset(
-    {"SELECT", "WITH", "EXPLAIN", "SHOW", "VALUES", "TABLE"}
-)
 
 # ---------------------------------------------------------------------------
 # Result caps (business-data limits + data-export migration, 2026-08-02 —
@@ -154,7 +135,6 @@ PARAM_ROW_LIMIT: Final[str] = "row_limit"
 # realpath+commonpath containment under the operator-configured roots.
 # ---------------------------------------------------------------------------
 TSV_SUFFIX: Final[str] = ".tsv"
-CONFIG_KEY_EXPORT_ALLOWED_ROOTS: Final[str] = "export_allowed_roots"
 
 # ---------------------------------------------------------------------------
 # Error codes — external_pg.* surfaced to callers; the *_NOT_AVAILABLE codes
@@ -169,7 +149,11 @@ ERROR_PLATFORM_DB_REFUSED: Final[str] = "external_pg.platform_db_refused"
 ERROR_INVALID_PARAMS: Final[str] = "external_pg.invalid_params"
 ERROR_AUTH_FAILED: Final[str] = "external_pg.auth_failed"
 ERROR_PERMISSION_DENIED: Final[str] = "external_pg.permission_denied"
-ERROR_READ_ONLY_VIOLATION: Final[str] = "external_pg.read_only_violation"
+ERROR_READ_ONLY_TRANSACTION: Final[str] = "external_pg.read_only_sql_transaction"
+ERROR_SCRIPT_STATEMENT_FAILED: Final[str] = "external_pg.script_statement_failed"
+ERROR_CLIENT_TOOL_MISSING: Final[str] = "external_pg.client_tool_missing"
+ERROR_CLIENT_TOOL_FAILED: Final[str] = "external_pg.client_tool_failed"
+ERROR_PLAIN_SQL_RESTORE_REFUSED: Final[str] = "external_pg.plain_sql_restore_refused"
 ERROR_QUERY_FAILED: Final[str] = "external_pg.query_failed"
 ERROR_TIMEOUT: Final[str] = "external_pg.timeout"
 ERROR_API_ERROR: Final[str] = "external_pg.api_error"
@@ -182,19 +166,13 @@ ERROR_EXPORT_PATH_REFUSED: Final[str] = "external_pg.export_path_refused"
 # message per code and NEVER embed str(exc). Query-syntax classes may keep
 # driver detail (it describes the caller's own SQL, not our topology).
 # ---------------------------------------------------------------------------
-GENERIC_MESSAGE_AUTH_FAILED: Final[str] = (
-    "authentication failed for the requested connection"
-)
-GENERIC_MESSAGE_PERMISSION_DENIED: Final[str] = (
-    "the connection's role lacks permission for this operation"
-)
-GENERIC_MESSAGE_CONNECTION_FAILED: Final[str] = (
-    "could not connect to the requested database"
-)
+GENERIC_MESSAGE_AUTH_FAILED: Final[str] = "authentication failed for the requested connection"
+GENERIC_MESSAGE_PERMISSION_DENIED: Final[str] = "the connection's role lacks permission for this operation"
+GENERIC_MESSAGE_CONNECTION_FAILED: Final[str] = "could not connect to the requested database"
 GENERIC_MESSAGE_TIMEOUT: Final[str] = "the query exceeded the statement timeout"
-GENERIC_MESSAGE_READ_ONLY: Final[str] = (
-    "this connection is read-only; write and DDL statements are refused"
-)
+# SQLSTATE 25006 is the SERVER's own refusal (a hot standby, or a role whose
+# default_transaction_read_only is on) — never a plugin-side setting.
+GENERIC_MESSAGE_READ_ONLY_TRANSACTION: Final[str] = "the server refused the write: the transaction is read-only on the server (a hot standby, or the role's default_transaction_read_only setting)"
 
 # ---------------------------------------------------------------------------
 # Result types
@@ -207,3 +185,32 @@ RESULT_TYPE_LIST_TABLES: Final[str] = "external_postgres_list_tables_result"
 RESULT_TYPE_DESCRIBE_TABLE: Final[str] = "external_postgres_describe_table_result"
 RESULT_TYPE_EXPORT_QUERY: Final[str] = "external_postgres_export_query_result"
 RESULT_TYPE_TEST_CONNECTION: Final[str] = "external_postgres_test_connection_result"
+RESULT_TYPE_RUN_SCRIPT: Final[str] = "external_postgres_run_script_result"
+RESULT_TYPE_COPY: Final[str] = "external_postgres_copy_result"
+RESULT_TYPE_DUMP_DATABASE: Final[str] = "external_postgres_dump_database_result"
+RESULT_TYPE_RESTORE_DATABASE: Final[str] = "external_postgres_restore_database_result"
+RESULT_TYPE_ACTIVITY: Final[str] = "external_postgres_activity_result"
+RESULT_TYPE_STATISTICS: Final[str] = "external_postgres_statistics_result"
+
+# ---------------------------------------------------------------------------
+# Build-1 families (vendor_api_coverage.md): paging for the admin readers and
+# the client programs (pg_dump / pg_restore) dump and restore run.
+# ---------------------------------------------------------------------------
+LIST_LIMIT_DEFAULT: Final[int] = 100
+LIST_LIMIT_MAX: Final[int] = 1000
+CONFIG_KEY_CLIENT_BIN_DIR: Final[str] = "client_bin_dir"
+CONFIG_KEY_CLIENT_TOOL_TIMEOUT_SECONDS: Final[str] = "client_tool_timeout_seconds"
+CLIENT_TOOL_TIMEOUT_SECONDS_DEFAULT: Final[int] = 3600
+# Searched after client_bin_dir and PATH, newest major first (pg_dump must be
+# at least the server's major version).
+CLIENT_BIN_FALLBACK_DIRS: Final[tuple[str, ...]] = (
+    "/opt/homebrew/opt/postgresql@18/bin",
+    "/opt/homebrew/opt/postgresql@17/bin",
+    "/opt/homebrew/opt/postgresql@16/bin",
+    "/usr/local/opt/postgresql@17/bin",
+    "/usr/lib/postgresql/18/bin",
+    "/usr/lib/postgresql/17/bin",
+    "/usr/lib/postgresql/16/bin",
+)
+# Error text from a client program is cut to this many trailing characters.
+CLIENT_TOOL_STDERR_TAIL_CHARS: Final[int] = 2000

@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import base64
-import logging
-import re
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 
-from .constants import REQUEST_REDACTION, REQUEST_SECRET_KEYS
+from .constants import REQUEST_REDACTION
+from .multipart import prepare_files
 
 if TYPE_CHECKING:
     from .http_client import MarketoClient
@@ -56,6 +54,9 @@ def prepare_request(params: dict[str, Any]) -> dict[str, Any]:
     path = required_string(params, "path")
     method = required_string(params, "method")
     validate_path(path)
+    files = prepare_files(params.get("multipart_files"))
+    if params.get("json_body") is not None and (params.get("form_body") is not None or files is not None):
+        raise ValueError("use json_body or form_body/multipart_files, not both")
     return {
         "method": method,
         "path": path,
@@ -63,6 +64,7 @@ def prepare_request(params: dict[str, Any]) -> dict[str, Any]:
         "json_body": params.get("json_body"),
         "form_body": params.get("form_body"),
         "headers": prepare_headers(params.get("headers")),
+        "multipart_files": files,
     }
 
 
@@ -90,82 +92,28 @@ def first_error_code(body: Any) -> str:
     return str(errors[0].get("code", ""))
 
 
-def response_data(response: httpx.Response, body: Any, secrets: tuple[str, ...], correlation_id: str) -> dict[str, Any]:
-    safe_body = redact_value(body, secrets)
+def response_data(response: httpx.Response, body: Any, correlation_id: str) -> dict[str, Any]:
+    """The response as received: status, body, selected headers and control keys."""
     result = {
         "status": response.status_code,
-        "body": safe_body,
+        "body": body,
         "correlation_id": correlation_id,
-        "retry_after": redact_value(response.headers.get("Retry-After"), secrets),
+        "retry_after": response.headers.get("Retry-After"),
+        "content_range": response.headers.get("Content-Range"),
     }
-    if isinstance(safe_body, dict):
-        result.update({key: safe_body[key] for key in ("nextPageToken", "success", "errors") if key in safe_body})
+    if isinstance(body, dict):
+        result.update({key: body[key] for key in ("nextPageToken", "success", "errors") if key in body})
+    else:
+        # Preserve download bytes, including a Range cutting a UTF-8 character.
+        result["body_base64"] = base64.b64encode(response.content).decode()
     return result
 
 
-def _percent_byte_pattern(value: int) -> str:
-    """Match either hex case and percent escaping introduced by URL serialization."""
-    digits = f"{value:02x}"
-    return "%(?:25)*" + "".join(f"[{digit.lower()}{digit.upper()}]" if digit.isalpha() else digit for digit in digits)
-
-
-def _encoded_character_pattern(character: str) -> str:
-    """Keep literal case significant while allowing mixed raw/percent/form encoding."""
-    alternatives = [re.escape(character), "".join(_percent_byte_pattern(value) for value in character.encode())]
-    if character == " ":
-        alternatives.extend([r"\+", _percent_byte_pattern(ord("+"))])
-    return "(?:" + "|".join(alternatives) + ")"
-
-
-@lru_cache
-def _credential_pattern(secret: str) -> re.Pattern[str]:
-    """Cover UTF-8 URL/form encodings and padded/unpadded standard/URL-safe base64."""
-    encoded = secret.encode()
-    standard = base64.b64encode(encoded).decode()
-    urlsafe = base64.urlsafe_b64encode(encoded).decode()
-    variants = {secret, standard, standard.rstrip("="), urlsafe, urlsafe.rstrip("=")}
-    patterns = ["".join(_encoded_character_pattern(character) for character in variant) for variant in sorted(variants, key=lambda value: (-len(value), value))]
-    return re.compile("|".join(patterns))
-
-
-def _redact_text(value: str, secrets: tuple[str, ...]) -> str:
-    for secret in sorted(set(secrets), key=len, reverse=True):
-        if secret:
-            value = _credential_pattern(secret).sub(REQUEST_REDACTION, value)
-    return value
-
-
-def redact_value(value: Any, secrets: tuple[str, ...]) -> Any:
-    """Preserve vendor data except credential fields and encoded credential values."""
-    if isinstance(value, dict):
-        return {_redact_text(str(key), secrets): REQUEST_REDACTION if str(key).lower() in REQUEST_SECRET_KEYS else redact_value(item, secrets) for key, item in value.items()}
-    if isinstance(value, list):
-        return [redact_value(item, secrets) for item in value]
-    if isinstance(value, str):
-        return _redact_text(value, secrets)
-    return value
-
-
-def audit_path(path: str, secrets: tuple[str, ...]) -> str:
-    """Redact ALL query values, including when query parameters are embedded in path."""
+def audit_path(path: str) -> str:
+    """The path with every query value omitted, including query parameters embedded in the path."""
     parsed = urlsplit(path)
     query = urlencode([(key, REQUEST_REDACTION) for key, _ in parse_qsl(parsed.query, keep_blank_values=True)])
-    return str(redact_value(parsed.path + ("?" + query if query else ""), secrets))
-
-
-class CredentialLogFilter(logging.Filter):
-    """HTTPX logs identity URLs; redact this client's secret before handlers see them."""
-
-    def __init__(self, secret: str) -> None:
-        super().__init__()
-        self.secrets: tuple[str, ...] = (secret,)
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.args, tuple):
-            record.args = tuple(value.copy_with(query=urlencode([(key, REQUEST_REDACTION) for key, _ in value.params.multi_items()]).encode()) if isinstance(value, httpx.URL) else value for value in record.args)
-        record.msg = redact_value(record.getMessage(), self.secrets)
-        record.args = ()
-        return True
+    return parsed.path + ("?" + query if query else "")
 
 
 def execute_request(client: MarketoClient, request: dict[str, Any]) -> dict[str, Any]:
@@ -177,4 +125,5 @@ def execute_request(client: MarketoClient, request: dict[str, Any]) -> dict[str,
         json_body=request.get("json_body"),
         form_body=request.get("form_body"),
         headers=request.get("headers"),
+        multipart_files=request.get("multipart_files"),
     )

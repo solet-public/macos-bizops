@@ -15,7 +15,6 @@ from ananta.core.actions.action_metadata import (
     MergeResultProcessorCustomizations,
     ParameterMetadata,
     ParameterType,
-    ReturnValueSchema,
     platform_process,
 )
 from ananta.core.domain.enums import ProcessorPolicyCategory
@@ -24,6 +23,7 @@ from ananta.core.plugins.plugin_base import PluginBase
 from ananta.interfaces.edge_process_provider import EdgeProcessDefinition, EdgeProcessProvider
 from ananta.interfaces.embedding_service_interface import EmbeddingServiceInterface, TokenBudget
 
+from .async_jobs import JOB_RETURN_SCHEMA, AsyncJobs
 from .constants import ADDRESS_BOOK_ENTRY_NAME, PLUGIN_NAME, EntryField, ErrorCode
 from .response_builders import error_result, success_result
 from .server_tokenizer import parse_max_input_tokens, server_token_budget
@@ -73,6 +73,7 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
         self._qualification_thread: threading.Thread | None = None
         self._qualification_lock = threading.Lock()
         self.qualification_status: dict[str, str] = {"state": "not_started"}
+        self._jobs = AsyncJobs()
 
     @property
     def service_interfaces(self) -> tuple[type, ...]:
@@ -149,33 +150,16 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
         response_data, api_error = self._call_embeddings_api(url, payload)
         if api_error is not None:
             error = api_error.get("error")
-            message = (
-                error.get("message", "unknown embedding API error")
-                if isinstance(error, dict)
-                else str(error)
-            )
-            raise RuntimeError(
-                f"{self.name}: configured embedding model '{self._default_model}' "
-                f"failed startup qualification: {message}"
-            )
+            message = error.get("message", "unknown embedding API error") if isinstance(error, dict) else str(error)
+            raise RuntimeError(f"{self.name}: configured embedding model '{self._default_model}' failed startup qualification: {message}")
         if response_data is None:
-            raise RuntimeError(
-                f"{self.name}: configured embedding model '{self._default_model}' "
-                "returned no response during startup qualification"
-            )
+            raise RuntimeError(f"{self.name}: configured embedding model '{self._default_model}' returned no response during startup qualification")
 
         result = self._parse_embeddings_response(response_data, self._default_model)
         if result.get("action_status") != "completed":
             error = result.get("error")
-            message = (
-                error.get("message", "invalid embedding response")
-                if isinstance(error, dict)
-                else str(error)
-            )
-            raise RuntimeError(
-                f"{self.name}: configured embedding model '{self._default_model}' "
-                f"failed startup qualification: {message}"
-            )
+            message = error.get("message", "invalid embedding response") if isinstance(error, dict) else str(error)
+            raise RuntimeError(f"{self.name}: configured embedding model '{self._default_model}' failed startup qualification: {message}")
 
     def _load_config_from_address_book(self) -> None:
         """Load configuration from address book entry.
@@ -192,10 +176,7 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
         if result.get("action_status") != "completed":
             error = result.get("error", {})
             msg = error.get("message", "Unknown error") if isinstance(error, dict) else str(error)
-            raise RuntimeError(
-                f"{self.name}: Address book entry '{ADDRESS_BOOK_ENTRY_NAME}' not found. "
-                f"Create the entry before starting the solet. Error: {msg}"
-            )
+            raise RuntimeError(f"{self.name}: Address book entry '{ADDRESS_BOOK_ENTRY_NAME}' not found. Create the entry before starting the solet. Error: {msg}")
 
         data = result.get("data", {})
         if not isinstance(data, dict):
@@ -228,13 +209,9 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
     def _validate_required_config(self) -> None:
         """Validate required configuration fields are present."""
         if not self._base_url:
-            raise RuntimeError(
-                f"{self.name}: Missing 'base_url' in address book entry '{ADDRESS_BOOK_ENTRY_NAME}'"
-            )
+            raise RuntimeError(f"{self.name}: Missing 'base_url' in address book entry '{ADDRESS_BOOK_ENTRY_NAME}'")
         if not self._default_model:
-            raise RuntimeError(
-                f"{self.name}: Missing 'model' in address book entry '{ADDRESS_BOOK_ENTRY_NAME}'"
-            )
+            raise RuntimeError(f"{self.name}: Missing 'model' in address book entry '{ADDRESS_BOOK_ENTRY_NAME}'")
         self.input_token_budget()
 
     def _get_headers(self) -> dict[str, str]:
@@ -261,8 +238,11 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
         if self._max_input_tokens is None:
             return None
         return server_token_budget(
-            self.name, self._base_url, self._max_input_tokens,
-            timeout_seconds=self._timeout_seconds, headers=self._get_headers(),
+            self.name,
+            self._base_url,
+            self._max_input_tokens,
+            timeout_seconds=self._timeout_seconds,
+            headers=self._get_headers(),
         )
 
     def generate_embeddings(
@@ -331,9 +311,7 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
                 )
         return None
 
-    def _call_embeddings_api(
-        self, url: str, payload: dict[str, Any]
-    ) -> tuple[dict[str, Any] | None, ActionResult | None]:
+    def _call_embeddings_api(self, url: str, payload: dict[str, Any]) -> tuple[dict[str, Any] | None, ActionResult | None]:
         """Call embeddings API. Returns (response_data, None) or (None, error_result)."""
         try:
             with httpx.Client(timeout=self._timeout_seconds) as client:
@@ -359,9 +337,7 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
                 {"url": url},
             )
 
-    def _parse_embeddings_response(
-        self, response_data: dict[str, Any], resolved_model: str
-    ) -> ActionResult:
+    def _parse_embeddings_response(self, response_data: dict[str, Any], resolved_model: str) -> ActionResult:
         """Parse embeddings API response into ActionResult."""
         data_list = response_data.get("data", [])
         if not isinstance(data_list, list) or not data_list:
@@ -387,9 +363,7 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
         dimension = len(embeddings[0]) if embeddings else 0
         returned_model = response_data.get("model", resolved_model)
 
-        return success_result(
-            {"embeddings": embeddings, "dimension": dimension, "model": returned_model}
-        )
+        return success_result({"embeddings": embeddings, "dimension": dimension, "model": returned_model})
 
     def get_default_dimensions(self) -> int:
         """Return the default model's output dimension (synchronous, no probe).
@@ -561,10 +535,7 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
         return {
             "$schema": "http://json-schema.org/draft-07/schema#",
             "title": "OpenAI Embeddings Plugin",
-            "description": (
-                "Configuration for OpenAI-compatible embedding service "
-                "(works with LM Studio, Ollama, OpenAI API)"
-            ),
+            "description": ("Configuration for OpenAI-compatible embedding service (works with LM Studio, Ollama, OpenAI API)"),
             "type": "object",
             "required": ["base_url", "model"],
             "properties": {
@@ -600,10 +571,7 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
                 "api_key": {
                     "type": "string",
                     "title": "API Key",
-                    "description": (
-                        "API key for authentication (required for OpenAI, "
-                        "optional for local providers like LM Studio)"
-                    ),
+                    "description": ("API key for authentication (required for OpenAI, optional for local providers like LM Studio)"),
                     "x-secret": True,
                     "x-group": "security",
                     "x-order": 1,
@@ -621,10 +589,7 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
                 "max_input_tokens": {
                     "type": "integer",
                     "title": "Input Token Budget",
-                    "description": (
-                        "Per-input token ceiling of a llama.cpp server; inputs are "
-                        "counted with the server's /tokenize and split to fit"
-                    ),
+                    "description": ("Per-input token ceiling of a llama.cpp server; inputs are counted with the server's /tokenize and split to fit"),
                     "minimum": 1,
                     "x-group": "advanced",
                     "x-order": 2,
@@ -662,41 +627,26 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
             ),
         },
         output_type="object",
-        output_description="Vector embeddings with metadata",
+        output_description="Queued job receipt; job.result contains embeddings with metadata",
+        is_async=True,
+        is_long_running=True,
         is_inference_capable=True,
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Vector embeddings with metadata",
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or error",
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Embeddings payload (embeddings array + dimension)",
-                ),
-            },
-            usage_patterns=[
-                "Generate embeddings for semantic search",
-                "Create vector representations of text",
-            ],
-        ),
+        return_value_schema=JOB_RETURN_SCHEMA,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     def generate_embeddings_action(
         self,
         params: dict[str, Any],
         state: dict[str, Any],
     ) -> ActionResult:
-        """Generate vector embeddings from text (platform process entry point)."""
+        """Queue the HTTP operation, preserving generate_embeddings for providers."""
         inputs = params.get("inputs", [])
-        model = params.get("model")
         input_type = params.get("input_type", "text")
-        return self.generate_embeddings(inputs, model, input_type)
+        validation_error = self._validate_embedding_inputs(inputs, input_type)
+        if validation_error:
+            return validation_error
+        return cast(ActionResult, self._jobs.submit(self, "generate_embeddings_action", params, state, lambda request: dict(self.generate_embeddings(request["inputs"], request.get("model"), request.get("input_type", "text")))))
 
     # Text fields (display_name, description, embedding_description) are defined
     # in knowledge_base/processes/get_embedding_dimension_action.json — the builder
@@ -711,38 +661,22 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
             ),
         },
         output_type="object",
-        output_description="Embedding dimension for model",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Embedding dimension for model",
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or error",
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Model dimension payload (dimension integer)",
-                ),
-            },
-            usage_patterns=[
-                "Check embedding dimensions before storing vectors",
-                "Validate vector sizes for compatibility",
-            ],
-        ),
+        output_description="Queued job receipt; job.result contains model dimension",
+        return_value_schema=JOB_RETURN_SCHEMA,
+        is_async=True,
+        is_long_running=True,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     def get_embedding_dimension_action(
         self,
         params: dict[str, Any],
         state: dict[str, Any],
     ) -> ActionResult:
-        """Get embedding vector dimension (platform process entry point)."""
-        model = params.get("model")
-        return self.get_embedding_dimension(model)
+        """Queue a dimension probe, preserving the synchronous provider method."""
+        if not self._initialized:
+            return error_result(ErrorCode.NOT_INITIALIZED, "Plugin not initialized. Call prepare_for_readiness() first.")
+        return cast(ActionResult, self._jobs.submit(self, "get_embedding_dimension_action", params, state, lambda request: dict(self.get_embedding_dimension(request.get("model")))))
 
     # Text fields (display_name, description, embedding_description) are defined in
     # knowledge_base/processes/list_models_action.json — the builder merges them at startup,
@@ -751,37 +685,22 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
         name="list_models_action",
         parameters={},
         output_type="object",
-        output_description="List of available embedding models",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="List of available embedding models",
-            properties={
-                "action_status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Status: completed or error",
-                ),
-                "data": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Available models payload (models array with metadata)",
-                ),
-            },
-            usage_patterns=[
-                "Discover available embedding models",
-                "Choose appropriate model for task",
-            ],
-        ),
+        output_description="Queued job receipt; job.result contains available models",
+        return_value_schema=JOB_RETURN_SCHEMA,
+        is_async=True,
+        is_long_running=True,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        error_processor_customizations=MergeErrorProcessorCustomizations(
-            retryable=True
-        )
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )
     def list_models_action(
         self,
         params: dict[str, Any],
         state: dict[str, Any],
     ) -> ActionResult:
-        """List available embedding models (platform process entry point)."""
-        return self.list_models()
+        """Queue model discovery, preserving list_models for library callers."""
+        if not self._initialized:
+            return error_result(ErrorCode.NOT_INITIALIZED, "Plugin not initialized. Call prepare_for_readiness() first.")
+        return cast(ActionResult, self._jobs.submit(self, "list_models_action", params, state, lambda _request: dict(self.list_models())))
 
     # =========================================================================
     # EdgeProcessProvider Implementation
@@ -796,26 +715,17 @@ class OpenAIEmbeddingsPlugin(PluginBase, EmbeddingServiceInterface, EdgeProcessP
         return {
             "generate_embeddings_action": EdgeProcessDefinition(
                 name="generate_embeddings_action",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             "get_embedding_dimension_action": EdgeProcessDefinition(
                 name="get_embedding_dimension_action",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             "list_models_action": EdgeProcessDefinition(
                 name="list_models_action",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True
-                ),
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
         }

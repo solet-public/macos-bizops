@@ -36,20 +36,44 @@ Exits 0 on success, 1 on first failure.
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import NonCallableMagicMock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ananta/src"))
+import tempfile  # noqa: E402
+from datetime import UTC, datetime  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+from ananta.file_locations.resolution import SoletTree  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "marketo_plugin" / "src"))
 
-from marketo_plugin.constants import CONFIG_KEY_EXPORT_ALLOWED_ROOTS, PLUGIN_NAME  # noqa: E402
+from marketo_plugin.constants import PLUGIN_NAME  # noqa: E402
 from marketo_plugin.plugin import MarketoPlugin  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
 _TMP_DIR = tempfile.mkdtemp(prefix="marketo_smoke_async_dispatch_")
+
+
+_LOCATION_ROOT = Path(__file__).resolve().parents[3]
+_LOCATION_TREE = SoletTree(_LOCATION_ROOT, _LOCATION_ROOT / "profile")
+
+
+def _bind_locations(plugin: Any, directories: list[str]) -> NonCallableMagicMock:
+    """Supply a live address-book service through the production binding."""
+    orchestrator = NonCallableMagicMock()
+    orchestrator.APP_HOME = str(_LOCATION_TREE.app_home)
+    orchestrator.plugin_manager.get_plugin.return_value = None
+    orchestrator.get_service.return_value.list_path_addresses.return_value = {
+        "action_status": "completed",
+        "data": {"addresses": [{"name": f"project-{index}", "tags": [], "updated_at": datetime.now(UTC).isoformat(), "entries": [{"field_type": "path", "value": directory}]} for index, directory in enumerate(directories)]},
+    }
+    plugin.orchestrator_ref = orchestrator
+    return orchestrator
 
 
 def _assert(label: str, cond: bool, msg: str = "") -> None:
@@ -143,9 +167,9 @@ class _FakeAsyncJobManager:
 def _plugin_with_fake_manager() -> tuple[MarketoPlugin, _FakeAsyncJobManager]:
     plugin = MarketoPlugin()
     plugin.logger = MagicMock()
-    plugin.config_provider = {CONFIG_KEY_EXPORT_ALLOWED_ROOTS: [_TMP_DIR]}
+    plugin.config_provider = {}
     manager = _FakeAsyncJobManager()
-    orchestrator = MagicMock()
+    orchestrator = _bind_locations(plugin, [_TMP_DIR])
     orchestrator.async_job_manager = manager
     plugin.orchestrator_ref = orchestrator
     return plugin, manager
@@ -249,7 +273,7 @@ def test_worker_processes_queued_job_to_completion() -> None:
     _assert("worker completed the job", job["status"] == "completed", str(job))
     result_payload = manager._payloads[(job_id, "result")]
     _assert("completed job result carries row_count", result_payload["row_count"] == 2, str(result_payload))
-    _assert("completed job result carries a path", isinstance(result_payload["path"], str) and result_payload["path"])
+    _assert("completed job result carries a path", isinstance(result_payload["path"], str) and bool(result_payload["path"]))
 
 
 def test_worker_processes_single_call_verb_to_completion() -> None:

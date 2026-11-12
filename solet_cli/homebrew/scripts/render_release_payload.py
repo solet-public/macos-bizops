@@ -106,15 +106,9 @@ def main() -> int:
         "SEED_ARCHIVE_SHA256": metadata["release_archive_sha256"],
         "SEED_PROFILE": metadata["seed_profile"],
         "SEED_CHANNEL_ID": metadata["seed_channel_id"],
-        "SEED_PROVENANCE": json.dumps(
-            metadata["seed_provenance"], separators=(",", ":"), sort_keys=True
-        ),
-        "EXISTING_INSTALL_CONTRACT": json.dumps(
-            metadata["existing_install_contract"], separators=(",", ":"), sort_keys=True
-        ),
-        "ALLOWED_REPOSITORY_MIGRATIONS": json.dumps(
-            metadata["allowed_repository_migrations"], separators=(",", ":"), sort_keys=True
-        ),
+        "SEED_PROVENANCE": json.dumps(metadata["seed_provenance"], separators=(",", ":"), sort_keys=True),
+        "EXISTING_INSTALL_CONTRACT": json.dumps(metadata["existing_install_contract"], separators=(",", ":"), sort_keys=True),
+        "ALLOWED_REPOSITORY_MIGRATIONS": json.dumps(metadata["allowed_repository_migrations"], separators=(",", ":"), sort_keys=True),
         # iss_18c47206: the consumption-side pairing gate
         # (`solet_manager.release_identity_gate`) reads its manifest from the
         # KEG (`sys.prefix/share/solet/release_manifest.json`), never from a
@@ -136,9 +130,7 @@ def main() -> int:
     # at manager-source-commit time (iss_42749563: that would need the wheel's
     # own bytes to already contain a hash of a lock that itself hashes the
     # wheel, which no release could ever satisfy).
-    substitutions["EXISTING_INSTALL_SEED_LOCK_SHA256"] = hashlib.sha256(
-        lock_destination.read_bytes()
-    ).hexdigest()
+    substitutions["EXISTING_INSTALL_SEED_LOCK_SHA256"] = hashlib.sha256(lock_destination.read_bytes()).hexdigest()
     _render(
         root / "Formula" / "solet.rb.template",
         args.output_root / "Formula" / "solet.rb",
@@ -150,14 +142,7 @@ def main() -> int:
     # the profile-derived directory the manager resolves.
     _render(
         root / "seed.lock.json.template",
-        (
-            args.output_root
-            / "solet_cli"
-            / "homebrew"
-            / "seeds"
-            / _require_string(metadata, "seed_profile")
-            / "seed.lock.json"
-        ),
+        (args.output_root / "solet_cli" / "homebrew" / "seeds" / _require_string(metadata, "seed_profile") / "seed.lock.json"),
         substitutions,
     )
     _verify_existing_install_seed_lock_catalog(args.output_root, lock_destination)
@@ -173,14 +158,9 @@ def _verify_existing_install_seed_lock_catalog(output_root: Path, lock_destinati
     formula_text = (output_root / "Formula" / "solet.rb").read_text(encoding="utf-8")
     match = re.search(r'"seed_lock_sha256":\s*"([0-9a-f]{64})"', formula_text)
     if match is None:
-        raise SystemExit(
-            "rendered Formula is missing the existing-install seed lock catalog entry"
-        )
+        raise SystemExit("rendered Formula is missing the existing-install seed lock catalog entry")
     if match.group(1) != expected:
-        raise SystemExit(
-            f"rendered Formula's existing-install catalog seed_lock_sha256 {match.group(1)!r} "
-            f"does not match sha256 of the rendered seed.lock.json {expected!r}"
-        )
+        raise SystemExit(f"rendered Formula's existing-install catalog seed_lock_sha256 {match.group(1)!r} does not match sha256 of the rendered seed.lock.json {expected!r}")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -276,13 +256,7 @@ def _require_install_source(raw: dict[str, object]) -> None:
 
 def _require_local_payload_url(value: str) -> None:
     parsed = urlsplit(value)
-    if (
-        parsed.scheme != "file"
-        or parsed.netloc
-        or not parsed.path.startswith("/")
-        or parsed.query
-        or parsed.fragment
-    ):
+    if parsed.scheme != "file" or parsed.netloc or not parsed.path.startswith("/") or parsed.query or parsed.fragment:
         raise SystemExit("dev manager_url must be an absolute, unambiguous file:// payload URL")
 
 
@@ -290,10 +264,7 @@ def _require_manager_release_url(value: str) -> None:
     parsed = _parse_github_url(value, "manager_url")
     parts = parsed.path.split("/")
     if len(parts) != 7 or parts[3:5] != ["releases", "download"]:
-        raise SystemExit(
-            "manager_url must be a GitHub uploaded release asset at "
-            "/<owner>/<repo>/releases/download/<tag>/<versioned-asset>"
-        )
+        raise SystemExit("manager_url must be a GitHub uploaded release asset at /<owner>/<repo>/releases/download/<tag>/<versioned-asset>")
     owner, repository_name, url_tag, asset = parts[1], parts[2], parts[5], parts[6]
     _require_repository_parts(owner, repository_name, "manager_url")
     if _TAG.fullmatch(url_tag) is None or _is_moving_name(url_tag):
@@ -308,16 +279,7 @@ def _parse_github_url(value: str, label: str) -> SplitResult:
         port = parsed.port
     except ValueError as exc:
         raise SystemExit(f"{label} is not a valid URL: {exc}") from exc
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname is None
-        or parsed.hostname.casefold() != "github.com"
-        or parsed.username is not None
-        or parsed.password is not None
-        or port is not None
-        or parsed.query
-        or parsed.fragment
-    ):
+    if parsed.scheme != "https" or parsed.hostname is None or parsed.hostname.casefold() != "github.com" or parsed.username is not None or parsed.password is not None or port is not None or parsed.query or parsed.fragment:
         raise SystemExit(f"{label} must be an unambiguous GitHub HTTPS URL")
     return parsed
 
@@ -346,12 +308,8 @@ def _require_int(raw: dict[str, object], key: str) -> None:
 
 def _require_v3_descriptor(raw: dict[str, object]) -> None:
     _require_provenance_descriptor(_object(raw["seed_provenance"], "seed_provenance"))
-    _require_existing_install_contract(
-        _object(raw["existing_install_contract"], "existing_install_contract")
-    )
-    _require_repository_migrations(
-        raw["allowed_repository_migrations"], _require_string(raw, "seed_repository")
-    )
+    _require_existing_install_contract(_object(raw["existing_install_contract"], "existing_install_contract"))
+    _require_repository_migrations(raw["allowed_repository_migrations"], _require_string(raw, "seed_repository"))
 
 
 def _object(value: object, label: str) -> dict[str, object]:
@@ -439,11 +397,12 @@ def _require_pattern(raw: dict[str, object], key: str, pattern: re.Pattern[str])
 
 def _render(template_path: Path, destination: Path, substitutions: dict[str, object]) -> None:
     template = template_path.read_text(encoding="utf-8")
+    markers = re.findall(r"\{\{([A-Z0-9_]+)\}\}", template)
+    if any(marker not in substitutions for marker in markers):
+        raise SystemExit(f"unresolved release marker in {template_path}")
     rendered = template
     for key, value in substitutions.items():
         rendered = rendered.replace("{{" + key + "}}", str(value))
-    if "{{" in rendered or "}}" in rendered:
-        raise SystemExit(f"unresolved release marker in {template_path}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(rendered, encoding="utf-8")
 

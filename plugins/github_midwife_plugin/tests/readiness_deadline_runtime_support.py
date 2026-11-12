@@ -29,8 +29,8 @@ class VirtualClock:
 @dataclass(slots=True)
 class ForeignHealthState:
     targets: tuple[Path, Path]
-    vectors: tuple[tuple[str, str], tuple[str, str]]
-    by_vector: dict[tuple[str, str], Path]
+    vectors: tuple[tuple[str, str], ...]
+    by_vector: dict[tuple[str, ...], Path]
     observations: list[JsonObject] = field(default_factory=list)
     calls: int = 0
 
@@ -78,7 +78,7 @@ class VirtualRuntime:
     ) -> CommandOutcome:
         del input_text, output_limit
         health = (str(self.target / ".venv/bin/solet-bridge"), "health")
-        process = (str(self.target / ".venv/bin/solet-bridge"), "call", _PROCESS_KEY, "{}")
+        process = (str(self.target / ".venv/bin/solet-bridge"), "call", _PROCESS_KEY, "{}", "--wait")
         now = self.clock.monotonic()
         if argv in self.foreign.vectors:
             return self._run_foreign_health(argv, cwd, extra_env, now)
@@ -108,9 +108,7 @@ class VirtualRuntime:
                 "redirected": redirected,
             }
         )
-        self.trace.append(
-            f"foreign-health:{foreign.name}:healthy@{now:.3f}:redirected={redirected}"
-        )
+        self.trace.append(f"foreign-health:{foreign.name}:healthy@{now:.3f}:redirected={redirected}")
         return _health("healthy")
 
     def _target_redirected(

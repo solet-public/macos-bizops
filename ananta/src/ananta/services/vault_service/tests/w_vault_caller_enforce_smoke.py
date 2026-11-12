@@ -88,15 +88,16 @@ def _smoke_01_registry_metadata_requires_call_context() -> None:
     scanner = ServiceInterfaceScanner(InvocationSchemaGenerator())
     processes: dict[str, object] = {}
     scanner._scan_class_methods(VaultServiceAPI, processes)  # noqa: SLF001
-    process_key = "service_interface::vault_service::retrieve"
+    removed_retrieve = "service_interface::vault_service::retrieve"  # wint:negative-fixture
+    _check(removed_retrieve not in processes, "plaintext retrieve is absent from the session registry")
+    process_key = "service_interface::vault_service::exists"
     entry = processes.get(process_key)
     if not isinstance(entry, dict):
         _check(False, f"{process_key} missing from scanner output")
         return
     _check(
         entry.get("requires_call_context") is True,
-        f"{process_key} carries requires_call_context=True after scan "
-        f"(actual: {entry.get('requires_call_context')!r})",
+        f"{process_key} carries requires_call_context=True after scan (actual: {entry.get('requires_call_context')!r})",
     )
     # Also verify a sample of OTHER vault verbs carry the flag — guards
     # against an accidental single-method opt-in.
@@ -211,13 +212,16 @@ def _smoke_03_sc_b_cross_plugin_denial_both_surfaces() -> None:
     _expect_raises(
         "direct: plugin_A reading plugin_B's key",
         VaultAccessDeniedError,
-        plugin.retrieve, "example.plugin_B.token", call_context=ctx,
+        plugin.retrieve,
+        "example.plugin_B.token",
+        call_context=ctx,
     )
     proxy = VaultServiceProxy(plugin, "plugin_A")
     _expect_raises(
         "proxy: plugin_A reading plugin_B's key",
         VaultAccessDeniedError,
-        proxy.retrieve, "example.plugin_B.token",
+        proxy.retrieve,
+        "example.plugin_B.token",
     )
 
 
@@ -251,7 +255,9 @@ def _smoke_05_plugin_principal_calling_operator_only() -> None:
     _expect_raises(
         "plugin-principal calling unlock",
         VaultAccessDeniedError,
-        plugin.unlock, "test", call_context=plugin_ctx,
+        plugin.unlock,
+        "test",
+        call_context=plugin_ctx,
     )
 
 
@@ -266,14 +272,16 @@ def _smoke_06_get_public_key_operator_only() -> None:
     _expect_raises(
         "plugin-principal calling get_public_key",
         VaultAccessDeniedError,
-        plugin.get_public_key, call_context=plugin_ctx,
+        plugin.get_public_key,
+        call_context=plugin_ctx,
     )
     # External caller → denied.
     ext_ctx = CallContext.for_external("client_X")
     _expect_raises(
         "external-principal calling get_public_key",
         VaultAccessDeniedError,
-        plugin.get_public_key, call_context=ext_ctx,
+        plugin.get_public_key,
+        call_context=ext_ctx,
     )
     # The operator-positive case isn't unit-testable on this stubbed
     # plugin (the impl reaches into substrate). It's covered by the
@@ -300,7 +308,9 @@ def _smoke_07_external_bridge_principal_kind() -> None:
     _expect_raises(
         "external calling 'example.plugin_A.token'",
         VaultAccessDeniedError,
-        plugin.retrieve, "example.plugin_A.token", call_context=ctx,
+        plugin.retrieve,
+        "example.plugin_A.token",
+        call_context=ctx,
     )
 
 
@@ -327,9 +337,7 @@ def _smoke_08_operator_mcp_principal_stamping() -> None:
     ctx = ActionProcessor._build_call_context(fake_self, action_no_plugin)  # type: ignore[arg-type]
     _check(
         ctx.principal_kind == "operator" and ctx.calling_plugin is None,
-        f"direct operator MCP defaults to for_operator() "
-        f"(actual: principal_kind={ctx.principal_kind!r}, "
-        f"calling_plugin={ctx.calling_plugin!r})",
+        f"direct operator MCP defaults to for_operator() (actual: principal_kind={ctx.principal_kind!r}, calling_plugin={ctx.calling_plugin!r})",
     )
 
     class _FakeActionFromPlugin:
@@ -341,8 +349,7 @@ def _smoke_08_operator_mcp_principal_stamping() -> None:
     ctx2 = ActionProcessor._build_call_context(fake_self, action_with_plugin)  # type: ignore[arg-type]
     _check(
         ctx2.principal_kind == "plugin" and ctx2.calling_plugin == "plugin_X",
-        f"queued action with source_plugin stamps for_plugin "
-        f"(actual: {ctx2.principal_kind!r}, calling_plugin={ctx2.calling_plugin!r})",
+        f"queued action with source_plugin stamps for_plugin (actual: {ctx2.principal_kind!r}, calling_plugin={ctx2.calling_plugin!r})",
     )
 
 
@@ -355,7 +362,9 @@ def _smoke_09_missing_call_context() -> None:
     _expect_raises(
         "retrieve(key, call_context=None)",
         VaultAccessDeniedError,
-        plugin.retrieve, "example.plugin_A.token", call_context=None,
+        plugin.retrieve,
+        "example.plugin_A.token",
+        call_context=None,
     )
 
 
@@ -369,14 +378,18 @@ def _smoke_10_malformed_key() -> None:
     _expect_raises(
         "retrieve('only_two.parts') from plugin-principal",
         VaultKeyMalformedError,
-        plugin.retrieve, "only_two.parts", call_context=ctx,
+        plugin.retrieve,
+        "only_two.parts",
+        call_context=ctx,
     )
     # Helper-direct check too — defense against the decorator-stack
     # accidentally swallowing it.
     _expect_raises(
         "enforce_namespace('a.b', plugin-ctx) direct",
         VaultKeyMalformedError,
-        enforce_namespace, "a.b", ctx,
+        enforce_namespace,
+        "a.b",
+        ctx,
     )
 
 
@@ -395,19 +408,15 @@ def _smoke_11_removed_plugin_process_surface() -> None:
         repo_root / "plugins" / "secrets_manager_vault_plugin" / "knowledge_base" / "processes",
     ]
     for target in targets:
-        json_count = (
-            len(list(target.glob("*.json"))) if target.exists() else 0
-        )
+        json_count = len(list(target.glob("*.json"))) if target.exists() else 0
         _check(
             json_count == 0,
             f"{target.relative_to(repo_root)}: {json_count} JSON files left (expected 0)",
         )
     # Source-grep: zero @platform_process decorators in either plugin.py
     for plugin_path in [
-        repo_root / "plugins" / "macos_vault_plugin" / "src"
-        / "macos_vault_plugin" / "plugin.py",
-        repo_root / "plugins" / "secrets_manager_vault_plugin" / "src"
-        / "secrets_manager_vault_plugin" / "plugin.py",
+        repo_root / "plugins" / "macos_vault_plugin" / "src" / "macos_vault_plugin" / "plugin.py",
+        repo_root / "plugins" / "secrets_manager_vault_plugin" / "src" / "secrets_manager_vault_plugin" / "plugin.py",
     ]:
         # ROSTER INTERSECTION. The plugin roster here is hardcoded, but which
         # plugins ship is resolved PER CAPABILITY BUNDLE:
@@ -424,10 +433,7 @@ def _smoke_11_removed_plugin_process_surface() -> None:
             print(f"  SKIP    {plugin_path.relative_to(repo_root)}: plugin not in this profile's set")
             continue
         source = plugin_path.read_text(encoding="utf-8")
-        count = sum(
-            1 for line in source.splitlines()
-            if line.startswith("    @platform_process(")
-        )
+        count = sum(1 for line in source.splitlines() if line.startswith("    @platform_process("))
         _check(
             count == 0,
             f"{plugin_path.relative_to(repo_root)}: {count} @platform_process decorators left (expected 0)",
@@ -444,7 +450,9 @@ def _smoke_12_compat_mode_dropped() -> None:
     _expect_raises(
         "retrieve('legacy_flat_name') from plugin-principal",
         VaultKeyMalformedError,
-        plugin.retrieve, "legacy_flat_name", call_context=ctx,
+        plugin.retrieve,
+        "legacy_flat_name",
+        call_context=ctx,
     )
 
 
@@ -456,13 +464,11 @@ def _smoke_13_lockstep_parity() -> None:
     repo_root = Path(__file__).resolve().parents[6]
     for plugin_path, label in [
         (
-            repo_root / "plugins" / "macos_vault_plugin" / "src"
-            / "macos_vault_plugin" / "plugin.py",
+            repo_root / "plugins" / "macos_vault_plugin" / "src" / "macos_vault_plugin" / "plugin.py",
             "macos_vault_plugin",
         ),
         (
-            repo_root / "plugins" / "secrets_manager_vault_plugin" / "src"
-            / "secrets_manager_vault_plugin" / "plugin.py",
+            repo_root / "plugins" / "secrets_manager_vault_plugin" / "src" / "secrets_manager_vault_plugin" / "plugin.py",
             "secrets_manager_vault_plugin",
         ),
     ]:
@@ -477,7 +483,7 @@ def _smoke_13_lockstep_parity() -> None:
             if line.strip() != "@requires_operator_principal":
                 continue
             # Find the next `    def <name>(` line.
-            for follow in lines[idx + 1: idx + 6]:
+            for follow in lines[idx + 1 : idx + 6]:
                 stripped = follow.lstrip()
                 if stripped.startswith("def "):
                     name = stripped.split("def ", 1)[1].split("(", 1)[0].strip()
@@ -487,8 +493,7 @@ def _smoke_13_lockstep_parity() -> None:
         expected = set(OPERATOR_ONLY_METHODS)
         _check(
             decorated == expected,
-            f"{label}: decorated set ({sorted(decorated)}) == OPERATOR_ONLY_METHODS "
-            f"({sorted(expected)})",
+            f"{label}: decorated set ({sorted(decorated)}) == OPERATOR_ONLY_METHODS ({sorted(expected)})",
         )
 
     # Pass-through behavior: the decorator forwards args + return value
